@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import re
+import secrets
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,30 +44,118 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def main() -> int:
-    if not EXE.is_file():
-        subprocess.run(
-            ["cargo", "build", "-q", "-p", "kettle"],
-            cwd=ROOT,
-            check=True,
-        )
+def expected_git_identity() -> str:
+    """Return the exact identity the just-built development binary must report."""
+    sha = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout
+    return sha + ("+dirty" if dirty else "")
 
-    with tempfile.TemporaryDirectory(prefix="kettle-cli-smoke-") as temporary:
-        scratch = Path(temporary)
+
+@contextlib.contextmanager
+def private_scratch() -> object:
+    """Create a scratch root whose Windows ACL passes Kettle's trust policy."""
+    if os.name != "nt":
+        # Ubuntu's ordinary per-user-group default is 002. Exercise that state
+        # even on hosts whose login umask is more restrictive: every private
+        # directory below must name 0700 explicitly rather than succeeding by
+        # ambient policy. This script is single-threaded, so changing the
+        # process-wide umask cannot race another creator.
+        previous_umask = os.umask(0o002)
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="kettle-cli-smoke-"
+            ) as temporary:
+                yield Path(temporary)
+        finally:
+            os.umask(previous_umask)
+        return
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    system_root = os.environ.get("SYSTEMROOT")
+    if not local_app_data or not system_root:
+        raise RuntimeError("Windows CLI smoke requires LOCALAPPDATA and SYSTEMROOT")
+    scratch = Path(local_app_data) / f"kettle-cli-smoke-{secrets.token_hex(16)}"
+    powershell = (
+        Path(system_root)
+        / "System32"
+        / "WindowsPowerShell"
+        / "v1.0"
+        / "powershell.exe"
+    )
+    created = subprocess.run(
+        [
+            str(powershell),
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "New-Item -ItemType Directory -Path $env:KETTLE_CLI_SCRATCH_PATH "
+            "-ErrorAction Stop | Out-Null",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "KETTLE_CLI_SCRATCH_PATH": str(scratch)},
+    )
+    if created.returncode != 0:
+        raise RuntimeError(
+            f"could not create private Windows CLI scratch: {created.stderr.strip()}"
+        )
+    try:
+        yield scratch
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def main() -> int:
+    # A previous checkout's binary is worse than no binary: every assertion can
+    # pass while measuring code other than the tree named in `--version`.
+    identity = expected_git_identity()
+    subprocess.run(
+        ["cargo", "build", "--locked", "-q", "-p", "kettle"],
+        cwd=ROOT,
+        check=True,
+    )
+
+    # Python's Windows `mkdir(0o700)` emits an OWNER RIGHTS ACE that Kettle
+    # deliberately does not treat as an explicit user identity. The helper uses
+    # the native shell's inherited per-user AppData DACL instead.
+    with private_scratch() as scratch:
         environment = os.environ.copy()
-        environment["XDG_CONFIG_HOME"] = str(scratch / "xdg-config")
+        xdg_config = scratch / "xdg-config"
+        if os.name != "nt":
+            xdg_config.mkdir(mode=0o700)
+        environment["XDG_CONFIG_HOME"] = str(xdg_config)
 
         version = run("--version", environment=environment)
         print(version, end="")
+        match = re.search(
+            r"^kettle [0-9]+\.[0-9]+\.[0-9]+ "
+            r"\(([0-9a-f]{12}(?:\+dirty)?)\)",
+            version,
+            re.MULTILINE,
+        )
+        require(match is not None, "--version is missing the version and Git identity")
+        assert match is not None
         require(
-            re.search(
-                r"^kettle [0-9]+\.[0-9]+\.[0-9]+ "
-                r"\([0-9a-f]+(?:\+dirty)?\)",
-                version,
-                re.MULTILINE,
-            )
-            is not None,
-            "--version is missing the version and Git identity",
+            match.group(1) == identity,
+            f"--version identified {match.group(1)}, expected checkout {identity}",
         )
 
         help_text = run("--help", environment=environment)
@@ -112,6 +203,8 @@ def main() -> int:
                 "--print-default-config returned too little data")
         config_path = scratch / "k.cfg"
         config_path.write_text(default_config, encoding="utf-8", newline="\n")
+        if os.name != "nt":
+            config_path.chmod(0o600)
         require(
             re.search(
                 r"^status: +OK",
@@ -129,8 +222,21 @@ def main() -> int:
             / "profiles"
             / "cibad.config"
         )
-        profile_path.parent.mkdir(parents=True)
+        if os.name == "nt":
+            # Preserve the inherited per-user AppData ACL. Passing 0700 to
+            # Python on Windows can synthesize an OWNER RIGHTS ACE, which is
+            # intentionally outside Kettle's explicit-principal trust policy.
+            profile_path.parent.mkdir(parents=True)
+        else:
+            profile_path.parent.mkdir(parents=True, mode=0o700)
+            # `parents=True` applies `mode` only to the leaf on current Python,
+            # and an older Kettle may already have created part of this
+            # invocation-owned chain. Normalize the whole private fixture.
+            for directory in (xdg_config / "kettle", profile_path.parent):
+                directory.chmod(0o700)
         profile_path.write_text("font-size = not_a_number\n", encoding="ascii")
+        if os.name != "nt":
+            profile_path.chmod(0o600)
         bad_profile = subprocess.run(
             [str(EXE), "--profile", "cibad", "--check-config"],
             cwd=ROOT,
@@ -144,8 +250,11 @@ def main() -> int:
         )
         require(bad_profile.returncode != 0,
                 "malformed --profile config unexpectedly succeeded")
-        require("font-size" in bad_profile.stdout,
-                "malformed --profile output omitted the field diagnostic")
+        require(
+            "font-size" in bad_profile.stdout,
+            "malformed --profile output omitted the field diagnostic: "
+            f"{bad_profile.stdout!r}",
+        )
 
         for shell in ("bash", "zsh", "fish", "powershell"):
             integration = run("--shell-integration", shell, environment=environment)

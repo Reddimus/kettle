@@ -48,6 +48,12 @@ ignore = [
   # (scripts/check-ttf-parser-scope.sh verifies the graph). Remove
   # this once glyphon ships a compatible fontdb-free stack.
   "RUSTSEC-2026-0192",
+  # RUSTSEC-2026-0253 is an unsoundness warning in `lru 0.16.4`'s
+  # `LruCache::pop()`. The only product consumer is glyphon 0.12.0, whose
+  # Copy key cannot panic on drop and which never calls that method. The
+  # version and inverse path are pinned by scripts/check-lru-scope.py; remove
+  # this exception when glyphon accepts lru >=0.18.2, then close #207.
+  "RUSTSEC-2026-0253",
 ]
 # Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
 # here while it reached kettle via `image → rav1e → paste` (AVIF

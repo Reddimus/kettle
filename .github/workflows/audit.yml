@@ -20,6 +20,9 @@ on:
       - "**/Cargo.lock"
       - "scripts/check-ttf-parser-scope.sh"
       - "scripts/check-ttf-parser-scope.py"
+      - "scripts/check-lru-scope.sh"
+      - "scripts/check-lru-scope.py"
+      - "scripts/test-lru-scope.py"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
@@ -27,6 +30,9 @@ on:
       - "**/Cargo.lock"
       - "scripts/check-ttf-parser-scope.sh"
       - "scripts/check-ttf-parser-scope.py"
+      - "scripts/check-lru-scope.sh"
+      - "scripts/check-lru-scope.py"
+      - "scripts/test-lru-scope.py"
       - ".github/workflows/audit.yml"
   schedule:
     # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
@@ -56,10 +62,12 @@ jobs:
           toolchain: stable
       - name: Guard scoped ttf-parser exception
         run: ./scripts/check-ttf-parser-scope.sh
+      - name: Guard scoped lru advisory
+        run: ./scripts/check-lru-scope.sh
       - name: Install cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked
-      - name: Audit product graph with scoped ttf-parser exception
-        run: cargo audit --ignore RUSTSEC-2026-0192
+      - name: Audit product graph with scoped upstream exceptions
+        run: cargo audit --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
       - name: Audit vendor validation graph without product exceptions
         run: cargo audit --file vendor/Cargo.lock
 
@@ -94,6 +102,9 @@ jobs:
       - name: Guard scoped ttf-parser exception
         if: matrix.workspace.name == 'product'
         run: ./scripts/check-ttf-parser-scope.sh
+      - name: Guard scoped lru advisory
+        if: matrix.workspace.name == 'product'
+        run: ./scripts/check-lru-scope.sh
       - name: Install cargo-audit enforcement CLI
         run: cargo install cargo-audit --version 0.22.1 --locked
       # Official RustSec action. Vendors `cargo-audit`, runs against the
@@ -111,12 +122,18 @@ jobs:
       # which adds no ttf-parser edge — the scope guard above proves it on
       # every run. Remove this ignore once glyphon publishes a compatible
       # stack without `fontdb`/`ttf-parser`.
-      - name: Audit product graph with scoped ttf-parser exception
+      #
+      # RUSTSEC-2026-0253 affects `LruCache::pop()` in lru 0.16.4. Glyphon
+      # 0.12.0 is the sole consumer; its Copy key cannot panic on drop and it
+      # never calls that method. The second scope guard pins both versions and
+      # the complete inverse path. Remove this ignore when glyphon accepts
+      # lru >=0.18.2, then close #207.
+      - name: Audit product graph with scoped upstream exceptions
         if: matrix.workspace.name == 'product'
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ignore: RUSTSEC-2026-0192
+          ignore: RUSTSEC-2026-0192,RUSTSEC-2026-0253
           working-directory: ${{ matrix.workspace.path }}
       - name: Audit vendor validation graph without product exceptions
         if: matrix.workspace.name == 'vendor-validation'
@@ -129,7 +146,7 @@ jobs:
       # result so the daily advisory window can turn this workflow red.
       - name: Enforce product audit result
         if: matrix.workspace.name == 'product'
-        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0192
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
       - name: Enforce vendor validation audit result
         if: matrix.workspace.name == 'vendor-validation'
         run: cargo audit --deny warnings --file vendor/Cargo.lock

@@ -39,6 +39,7 @@ mod gpu_diagnostics;
 mod input;
 mod lua;
 mod mux;
+mod notifications;
 mod paste_image;
 mod runtime_diagnostics;
 mod search_input;
@@ -67,6 +68,7 @@ mod dev_record;
 
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
+pub use notifications::{flush_desktop_notifications, queue_desktop_notification};
 
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]

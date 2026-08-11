@@ -182,11 +182,17 @@ def mark_first_zip_entry_encrypted(path: Path) -> None:
 
 class PackageManifestTests(unittest.TestCase):
     def package(self, root: Path) -> None:
-        (root / "shell-integration").mkdir()
+        shell_integration = root / "shell-integration"
+        shell_integration.mkdir()
+        # This fixture models the installed package, whose directory modes are
+        # explicit. Ubuntu commonly runs tests with umask 0002; leaving this to
+        # the ambient umask creates 0775 and makes the security validator
+        # correctly reject the fixture itself.
+        shell_integration.chmod(0o755)
         binary = root / "kettle"
         binary.write_bytes(b"binary\n")
         binary.chmod(0o755)
-        script = root / "shell-integration" / "kettle.sh"
+        script = shell_integration / "kettle.sh"
         script.write_bytes(b"prompt\n")
         script.chmod(0o644)
 

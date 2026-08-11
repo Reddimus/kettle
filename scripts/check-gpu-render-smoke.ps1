@@ -16,6 +16,33 @@ if ($env:RUNNER_TEMP) {
 $outputRoot = Join-Path $scratchRoot 'kettle-gpu-render-smoke'
 [void][IO.Directory]::CreateDirectory($outputRoot)
 
+# Parallels Desktop 26.4.1's Windows ARM WDDM driver faults inside a headless
+# wgpu device request. Select WARP only for that exact guest: physical Windows
+# ARM machines and hosted Windows x64 runners keep hardware-first coverage.
+$commonArgs = @()
+$manufacturer = ''
+try {
+    $manufacturer = (Get-ItemProperty `
+        -LiteralPath 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' `
+        -Name SystemManufacturer).SystemManufacturer
+} catch {
+    # An unreadable BIOS key is not evidence that this is the affected VM.
+}
+$isParallelsArm =
+    [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq `
+        [Runtime.InteropServices.Architecture]::Arm64 -and
+    $manufacturer -like 'Parallels*'
+if ($isParallelsArm) {
+    $configPath = Join-Path $outputRoot 'parallels-arm-software.toml'
+    [IO.File]::WriteAllText(
+        $configPath,
+        "gpu-force-software = true`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+    $commonArgs = @('--config', $configPath)
+    Write-Output 'Parallels Windows ARM detected; GPU smoke is using DX12/WARP.'
+}
+
 function Assert-Png {
     param([string] $Path, [long] $MinimumSize, [string] $Label)
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -28,7 +55,7 @@ function Assert-Png {
     Write-Output "$Label OK ($($bytes.Length) bytes)"
 }
 
-$gpuInfo = (& $binary --gpu-info | Out-String)
+$gpuInfo = (& $binary @commonArgs --gpu-info | Out-String)
 if ($LASTEXITCODE -ne 0) {
     throw "--gpu-info exited $LASTEXITCODE"
 }
@@ -44,20 +71,18 @@ foreach ($pattern in @(
 }
 
 $menuPng = Join-Path $outputRoot 'kettle-menu.png'
-$process = Start-Process -FilePath $binary `
-    -ArgumentList '--screenshot-menu', $menuPng `
-    -Wait -PassThru -NoNewWindow
-if ($process.ExitCode -ne 0) {
-    throw "--screenshot-menu exited $($process.ExitCode)"
+$menuArgs = @($commonArgs + @('--screenshot-menu', $menuPng))
+& $binary @menuArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "--screenshot-menu exited $LASTEXITCODE"
 }
 Assert-Png -Path $menuPng -MinimumSize 40000 -Label 'screenshot-menu'
 
 $shotPng = Join-Path $outputRoot 'kettle-ci.png'
-$process = Start-Process -FilePath $binary `
-    -ArgumentList '--screenshot', $shotPng `
-    -Wait -PassThru -NoNewWindow
-if ($process.ExitCode -ne 0) {
-    throw "--screenshot exited $($process.ExitCode)"
+$shotArgs = @($commonArgs + @('--screenshot', $shotPng))
+& $binary @shotArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "--screenshot exited $LASTEXITCODE"
 }
 Assert-Png -Path $shotPng -MinimumSize 10000 -Label 'screenshot'
 Write-Output 'gpu-render-smoke PASSED (gpu-info + screenshot-menu + screenshot)'

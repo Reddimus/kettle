@@ -576,6 +576,43 @@ $env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
 just agent-tui-wsl-smoke
 ```
 
+The selected distro must be WSL 2 with a kernel that supports pidfds and a
+Python 3 build exposing both `os.pidfd_open` and
+`signal.pidfd_send_signal`. The recipe runs a real decoy plus
+spawn-during-cleanup preflight before it creates the Neovim sandbox; if either
+API or the kernel support is missing, it stops with an explicit prerequisite
+error instead of falling back to reusable numeric PIDs. Use `wsl --update` for
+the WSL kernel; upgrade Python separately through the selected distribution's
+package manager or release upgrade until both APIs are present. The normal
+helper self-test compiles the fully assembled preflight program and the child
+program embedded inside it as a string, so malformed generated Python fails on
+every host before this Windows-only recipe is run.
+Each acquired pidfd is closed even when another target cannot be signalled. An
+unreadable same-user environment fails the drain closed, rather than letting an
+unknown process look absent, and the sandbox is removed only after the
+exact-environment process set has stayed empty. The prerequisite fixture
+likewise reaps both direct children independently; it removes its tree only
+after its own final drain succeeds.
+The normal in-pane completion command only publishes a release marker; it
+never deletes the sandbox while a detached configured-editor daemon may still
+be using it. The host performs the drain and deletion after Kettle exits.
+
+Native Windows uses the same drain-before-delete invariant without inspecting
+reusable process IDs. Immediately before the sandboxed editor phase, the host
+opens an unpredictable named kill-on-close Job Object before it creates the
+sandbox and registers cleanup as soon as the tree exists. The exact PowerShell
+pane assigns its own current-process handle. Every later Neovim/plugin descendant
+inherits membership even after detaching from ConPTY or the shell. Post-exit
+cleanup terminates the Job, waits until its accounting reports zero active
+processes, closes the Job, and only then removes the private sandbox. The native
+regression also holds a file without delete sharing and requires Windows itself
+to refuse a real pre-drain tree deletion. Cleanup rejects both symlinks and
+Windows directory junctions before restoring owner permissions or walking an
+entry; a native junction regression proves an external read-only target remains
+unchanged. Named-Job
+self-assignment, accounting, or retained-Job failures all fail the smoke closed
+and leave the tree in place.
+
 This builds the exact current checkout Windows executable reported by Cargo,
 launches `wsl.exe` with deterministic non-rc Bash, strips Windows
 `/mnt/<drive>` entries from the target `PATH`, and rejects or reports any tool
@@ -589,7 +626,11 @@ distro. It copies only regular files from the config plus existing
 retained so lazy.nvim recognizes the pinned checkout, but Git object databases
 are excluded because they are not Neovim runtime; cycles, special files, more
 than 100,000 entries or 64 levels, a runtime file over 256 MiB, and an aggregate
-over 2 GiB are rejected. It then redirects `HOME`,
+over 2 GiB are rejected. Directory entries are counted before being retained
+for deterministic hashing, so one huge directory cannot allocate past that
+limit. Typed directory and file paths are hashed too, so empty-directory
+changes cannot hide behind unchanged file and byte counts. It then redirects
+`HOME`,
 `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
 that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
 the same isolation; the directory is removed at the end.

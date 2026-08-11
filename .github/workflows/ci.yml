@@ -520,14 +520,26 @@ jobs:
             || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
           echo "screenshot OK ($size bytes)"
       - name: CLI smoke (all OSes)
+        # This block deliberately uses one POSIX contract on every matrix leg.
+        # GitHub's Windows default is PowerShell, which cannot parse `if [ ... ]`;
+        # select the Git-for-Windows Bash that hosted runners provide.
+        shell: bash
         run: |
+          # First run the shared cross-platform contract. It always performs a
+          # locked rebuild and requires the binary's exact 12-character
+          # Git/dirty identity, so a stale artifact cannot satisfy this step.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python scripts/check-cli-smoke.py
+          else
+            python3 scripts/check-cli-smoke.py
+          fi
           if [ "$RUNNER_OS" = "Windows" ]; then
             KETTLE_CI_BIN="./target/debug/kettle.exe"
           else
             KETTLE_CI_BIN="./target/debug/kettle"
           fi
           if [ ! -x "$KETTLE_CI_BIN" ]; then
-            cargo build -q -p kettle
+            cargo build --locked -q -p kettle
           fi
           # --version exercises the build.rs git-SHA
           # capture. On a CI checkout (clean tip) we expect
@@ -713,7 +725,6 @@ jobs:
           # invariant across all three OSes.
           "$KETTLE_CI_BIN" --config /tmp/k.cfg --config-path \
             | grep -qE 'k\.cfg$'
-        shell: bash
 
   perf-self-tests:
     name: performance self-tests (${{ matrix.name }})

@@ -9,28 +9,34 @@ It intentionally uses only Python stdlib plus `kettle ctl`.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import errno
+import hashlib
+import io
 import json
 import math
 import os
 import platform
 import plistlib
+import posixpath
 import queue
 import re
 import secrets
 import shlex
 import shutil
+import signal
+import subprocess
 import stat
 import struct
-import subprocess
 import sys
 import tempfile
 import threading
 import time
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import IO, Callable, ClassVar, Dict, List, Optional, Set, Tuple
 
 
 NVIM_SNAPSHOT_MAX_ENTRIES = 100_000
@@ -41,12 +47,82 @@ NVIM_SNAPSHOT_TAR_OVERHEAD_BYTES = (
     NVIM_SNAPSHOT_MAX_ENTRIES * 1024 + 1024 * 1024
 )
 COPY_CHUNK_BYTES = 1024 * 1024
+PROVENANCE_MAX_ENTRIES = 100_000
+PROVENANCE_MAX_BYTES = 2 * 1024 * 1024 * 1024
+PROVENANCE_MAX_FILE_BYTES = 256 * 1024 * 1024
+PROVENANCE_MAX_PATH_LIST_BYTES = 16 * 1024 * 1024
+PROVENANCE_TIMEOUT_S = 120.0
+PROVENANCE_WORKER_ARG = "--internal-repository-provenance-worker"
+PROVENANCE_SABOTAGE_WORKER_ARG = "--internal-repository-provenance-timeout-probe"
+PROVENANCE_ANCHOR_PROBE_ARG = "--internal-repository-anchor-probe"
+PTY_TRACKER_MAX_BYTES = 64 * 1024
+PTY_TRACKER_MAX_RECORDS = 4096
+PTY_TRACKER_MAX_PID = (1 << 31) - 1
+PTY_TRACKER_SCAN_TIMEOUT_S = 2.0
+PTY_TRACKER_FINALIZE_TIMEOUT_S = 5.0
+PTY_PROCESS_LIST_MAX_BYTES = 8 * 1024 * 1024
+HIDDEN_WINDOW_SCREENSHOT_MESSAGE = (
+    "target window is minimized, hidden, or not yet shown; "
+    "restore it before capturing"
+)
 SPLIT_TITLEBAR_COLOR_HEX = {
     "transmit": "#1a7f37",
     "receive": "#0969da",
     "inactive": "#6e7781",
     "grid": "#101010",
 }
+
+
+def is_parallels_windows_arm(
+    system: str, architecture: str, manufacturer: str
+) -> bool:
+    """Whether the host matches the one known-broken headless WDDM path."""
+    return (
+        system == "Windows"
+        and architecture.lower() in ("arm64", "aarch64")
+        and manufacturer.lower().startswith("parallels")
+    )
+
+
+def parallels_windows_arm_requires_software_gpu() -> bool:
+    """Detect Parallels Windows ARM without widening the workaround's scope."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"HARDWARE\DESCRIPTION\System\BIOS",
+        ) as key:
+            manufacturer = str(winreg.QueryValueEx(key, "SystemManufacturer")[0])
+    except (ImportError, OSError):
+        # An unavailable BIOS record is not evidence that this is the affected
+        # VM. Physical ARM machines must retain hardware-first coverage.
+        return False
+    return is_parallels_windows_arm(
+        platform.system(), platform.machine(), manufacturer
+    )
+
+
+def is_optional_remote_windows_screenshot_error(
+    system: str,
+    environment: Dict[str, str],
+    *,
+    stdout: str,
+    stderr: str,
+) -> bool:
+    """Match only the one non-visual Windows SSH state the smoke permits."""
+    if system != "Windows" or not any(
+        environment.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT")
+    ):
+        return False
+    expected = (
+        "kettle ctl: server error [busy]: "
+        + HIDDEN_WINDOW_SCREENSHOT_MESSAGE
+        + "\n"
+    )
+    return stdout == "" and stderr == expected
 
 
 @dataclass
@@ -80,6 +156,50 @@ class SnapshotCopyBudget:
         self.bytes += size
 
 
+@dataclass
+class RepositoryProvenanceBudget:
+    max_entries: int = PROVENANCE_MAX_ENTRIES
+    max_scan_entries: int = PROVENANCE_MAX_ENTRIES * 2
+    max_bytes: int = PROVENANCE_MAX_BYTES
+    max_file_bytes: int = PROVENANCE_MAX_FILE_BYTES
+    timeout_s: float = PROVENANCE_TIMEOUT_S
+    entries: int = 0
+    bytes: int = 0
+    started: float = field(default_factory=time.monotonic)
+
+    def remaining(self) -> float:
+        remaining = self.timeout_s - (time.monotonic() - self.started)
+        if remaining <= 0:
+            raise RuntimeError("repository provenance exceeded its time limit")
+        return remaining
+
+    def add_bytes(self, amount: int, source: object) -> None:
+        if amount < 0 or self.bytes + amount > self.max_bytes:
+            raise RuntimeError(
+                "repository provenance exceeds the "
+                f"{self.max_bytes} aggregate byte limit at {source}"
+            )
+        self.bytes += amount
+        self.remaining()
+
+    def add_file_entry(self, path: Path) -> None:
+        self.entries += 1
+        if self.entries > self.max_entries:
+            raise RuntimeError(
+                "repository provenance exceeds the "
+                f"{self.max_entries} file limit at {path}"
+            )
+
+    def add_file(self, path: Path, size: int) -> None:
+        self.add_file_entry(path)
+        if size < 0 or size > self.max_file_bytes:
+            raise RuntimeError(
+                "repository provenance file exceeds the "
+                f"{self.max_file_bytes} byte limit: {path} ({size} bytes)"
+            )
+        self.add_bytes(size, path)
+
+
 def run(
     argv: List[str],
     *,
@@ -100,12 +220,953 @@ def run(
     )
 
 
-def path_is_link(path: Path) -> bool:
-    """Recognize symlinks and Windows junctions without following them."""
-    is_junction = getattr(path, "is_junction", None)
-    return path.is_symlink() or (
-        callable(is_junction) and bool(is_junction())
+def remaining_before(deadline: float, action: str, *, cap: float) -> float:
+    """Return a positive per-operation timeout within one absolute deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(f"timed out while {action}")
+    return min(cap, remaining)
+
+
+def terminate_owned_process_group(
+    process: subprocess.Popen, *, grace_s: float = 0.5
+) -> None:
+    """Terminate one Unix process group created by this helper.
+
+    The group is established by ``start_new_session=True`` before Kettle starts.
+    portable-pty deliberately creates a second session for each shell, so this
+    helper owns only the outer application group; PTY jobs are handled by
+    ``terminate_owned_pty_session`` first.
+    """
+    if os.name == "nt":
+        raise RuntimeError("Unix process-group cleanup is unavailable on Windows")
+    group = process.pid
+    # Do not call poll/wait between the two signals. Even if the leader exits
+    # on TERM, retaining its zombie keeps the PID/process-group id unavailable
+    # for reuse until the final wait below.
+    if process.returncode is None:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            # Darwin reports EPERM when the session contains only exited,
+            # unsignalable zombies. No unrelated process can join this new
+            # session, so that state is equivalent to an empty live group.
+            pass
+        time.sleep(grace_s)
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.wait(timeout=max(1.0, grace_s))
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(
+            f"owned process-group leader {process.pid} did not exit"
+        ) from error
+
+
+@dataclass
+class StableProcessHandle:
+    """A signal target whose identity cannot be redirected by PID reuse.
+
+    Linux pidfds and Darwin audit tokens both name a process instance rather
+    than a number in the process table. The live-smoke cleanup deliberately
+    refuses the ordinary numeric fallback: failure cleanup is exactly where a
+    stale PID must not become a signal to an unrelated developer process.
+    """
+
+    pid: int
+    identity: Tuple[int, ...]
+    pidfd: Optional[int] = None
+    audit_token: Optional[Tuple[int, ...]] = None
+
+    @classmethod
+    def open(cls, pid: int) -> "StableProcessHandle":
+        if pid <= 1:
+            raise RuntimeError(f"refusing unsafe process id {pid}")
+        system = platform.system()
+        if system == "Linux":
+            if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+                raise RuntimeError("native Linux cleanup requires Python pidfd support")
+            stat_path = Path(f"/proc/{pid}/stat")
+            before = stat_path.read_text(encoding="ascii")
+            pidfd = os.pidfd_open(pid, 0)
+            try:
+                after = stat_path.read_text(encoding="ascii")
+
+                def start_time(value: str) -> int:
+                    # Field 2 (`comm`) is parenthesized and may contain spaces.
+                    # The remainder begins at field 3, making starttime field 22
+                    # index 19 after the final close parenthesis.
+                    fields = value.rsplit(")", 1)[1].split()
+                    if len(fields) < 20:
+                        raise ValueError("short /proc stat record")
+                    return int(fields[19])
+
+                before_start = start_time(before)
+                after_start = start_time(after)
+            except BaseException:
+                os.close(pidfd)
+                raise
+            if before_start != after_start:
+                os.close(pidfd)
+                raise ProcessLookupError(pid)
+            return cls(pid=pid, identity=(pid, after_start), pidfd=pidfd)
+        if system == "Darwin":
+            import ctypes
+
+            library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+            task_self = ctypes.c_uint.in_dll(library, "mach_task_self_").value
+            library.task_name_for_pid.argtypes = [
+                ctypes.c_uint,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            library.task_name_for_pid.restype = ctypes.c_int
+            library.task_info.argtypes = [
+                ctypes.c_uint,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_uint),
+            ]
+            library.task_info.restype = ctypes.c_int
+            library.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
+            library.mach_port_deallocate.restype = ctypes.c_int
+            port = ctypes.c_uint()
+            result = library.task_name_for_pid(task_self, pid, ctypes.byref(port))
+            if result != 0:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    raise ProcessLookupError(pid) from None
+                except PermissionError as error:
+                    raise RuntimeError(
+                        f"could not prove whether Darwin process {pid} vanished"
+                    ) from error
+                raise RuntimeError(
+                    f"could not retain Darwin task name for {pid}: kern_return={result}"
+                )
+            token = (ctypes.c_uint32 * 8)()
+            count = ctypes.c_uint(8)
+            # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a reused PID.
+            result = library.task_info(port.value, 15, token, ctypes.byref(count))
+            library.mach_port_deallocate(task_self, port.value)
+            if result != 0:
+                raise RuntimeError(f"could not retain Darwin audit token for {pid}")
+            identity = tuple(int(value) for value in token)
+            return cls(pid=pid, identity=identity, audit_token=identity)
+        raise RuntimeError(
+            f"identity-stable Unix cleanup is unsupported on {system or os.name}"
+        )
+
+    def signal(self, signal_number: int) -> bool:
+        """Signal this exact process, returning false only when it is gone."""
+        try:
+            if self.pidfd is not None:
+                signal.pidfd_send_signal(self.pidfd, signal_number)
+                return True
+            if self.audit_token is not None:
+                import ctypes
+
+                library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+                library.proc_signal_with_audittoken.argtypes = [
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.c_int,
+                ]
+                library.proc_signal_with_audittoken.restype = ctypes.c_int
+                token = (ctypes.c_uint32 * 8)(*self.audit_token)
+                if library.proc_signal_with_audittoken(token, signal_number) == 0:
+                    return True
+                error = ctypes.get_errno()
+                if error == getattr(os, "ESRCH", 3):
+                    return False
+                raise OSError(error, os.strerror(error))
+        except ProcessLookupError:
+            return False
+        raise RuntimeError(f"process {self.pid} has no stable signal handle")
+
+    def matches_current(self) -> bool:
+        """Whether the numeric PID still denotes the retained identity.
+
+        False proves that the retained instance is no longer at this PID, either
+        because the PID vanished or because it was reused. Permission, parser,
+        and platform errors are uncertainty, not absence. A caller that also
+        owns an append-only numeric record must reopen and independently classify
+        the replacement in the same pass rather than silently forgetting it.
+        """
+        try:
+            current = StableProcessHandle.open(self.pid)
+        except ProcessLookupError:
+            return False
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ESRCH):
+                return False
+            raise RuntimeError(
+                f"could not verify retained process {self.pid}: {error}"
+            ) from error
+        except (RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                f"could not verify retained process {self.pid}: {error}"
+            ) from error
+        try:
+            return current.identity == self.identity
+        finally:
+            current.close()
+
+    def close(self) -> None:
+        if self.pidfd is not None:
+            os.close(self.pidfd)
+            self.pidfd = None
+
+
+def _is_process_disappearance(error: BaseException) -> bool:
+    """Whether ``error`` proves a sampled numeric PID no longer exists."""
+    return isinstance(error, ProcessLookupError) or (
+        isinstance(error, OSError) and error.errno in (errno.ENOENT, errno.ESRCH)
     )
+
+
+def _open_stable_process_if_present(
+    pid: int, description: str
+) -> Optional[StableProcessHandle]:
+    """Open ``pid`` or skip only an error that proves it disappeared."""
+    try:
+        return StableProcessHandle.open(pid)
+    except OSError as error:
+        if _is_process_disappearance(error):
+            return None
+        raise RuntimeError(f"could not retain {description} {pid}: {error}") from error
+
+
+def _linux_process_parent(pid: int) -> int:
+    """Read one Linux parent id without being confused by spaces in comm."""
+    value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = value.rsplit(")", 1)[1].split()
+    if len(fields) < 2:
+        raise RuntimeError(f"short /proc stat record for {pid}")
+    return int(fields[1])
+
+
+@dataclass
+class LinuxSubreaperScope:
+    """Make escaped Kettle descendants remain owned by this test process.
+
+    A plugin can call ``setsid`` and later outlive Neovim and Kettle. Process
+    groups and a one-time ancestry snapshot cannot contain that transition.
+    Linux's child-subreaper contract moves each resulting orphan to this
+    process instead of PID 1; a stable-handle baseline then distinguishes the
+    already-running Kettle child from newly adopted descendants without ever
+    trusting a reusable numeric PID.
+    """
+
+    baseline: Set[Tuple[int, ...]]
+    closed: bool = False
+
+    # PR_SET_CHILD_SUBREAPER is process-global. Scopes can overlap when a test
+    # creates more than one disposable editor tree, so only the last close may
+    # restore the state observed by the first acquire. The lock also makes a
+    # failed verification/restore atomic with respect to another acquisition.
+    _state_lock: ClassVar[threading.RLock] = threading.RLock()
+    _active_scopes: ClassVar[int] = 0
+    _original_state: ClassVar[Optional[int]] = None
+
+    @staticmethod
+    def _library() -> object:
+        import ctypes
+
+        library = ctypes.CDLL(None, use_errno=True)
+        library.prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        library.prctl.restype = ctypes.c_int
+        return library
+
+    @classmethod
+    def _get(cls) -> int:
+        import ctypes
+
+        library = cls._library()
+        current = ctypes.c_int()
+        result = library.prctl(
+            37, ctypes.addressof(current), 0, 0, 0
+        )  # PR_GET_CHILD_SUBREAPER
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return int(current.value)
+
+    @classmethod
+    def _set(cls, value: int) -> None:
+        import ctypes
+
+        library = cls._library()
+        result = library.prctl(36, value, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+
+    @classmethod
+    def acquire(cls) -> "LinuxSubreaperScope":
+        if platform.system() != "Linux":
+            raise RuntimeError("child-subreaper containment is Linux-only")
+        with cls._state_lock:
+            first = cls._active_scopes == 0
+            previous = cls._get()
+            if not first and previous != 1:
+                raise RuntimeError(
+                    "Linux child-subreaper state changed while a scope was active"
+                )
+            if first:
+                cls._original_state = previous
+            changed = first and previous == 0
+            acquired: List[StableProcessHandle] = []
+            try:
+                if changed:
+                    cls._set(1)
+                if cls._get() != 1:
+                    raise RuntimeError("Linux refused child-subreaper containment")
+
+                result = run(["ps", "-axo", "pid=,ppid=,uid="], timeout=5)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"could not inventory subreaper children: {result.stderr}"
+                    )
+                baseline: Set[Tuple[int, ...]] = set()
+                owner = os.getpid()
+                uid = os.getuid()
+                for line in result.stdout.splitlines():
+                    fields = line.strip().split()
+                    if len(fields) != 3:
+                        continue
+                    try:
+                        pid, parent, process_uid = map(int, fields)
+                    except ValueError:
+                        continue
+                    if parent != owner or process_uid != uid:
+                        continue
+                    handle = _open_stable_process_if_present(
+                        pid, "existing subreaper child"
+                    )
+                    if handle is None:
+                        continue
+                    acquired.append(handle)
+                    if (
+                        handle.matches_current()
+                        and _linux_process_parent(pid) == owner
+                    ):
+                        baseline.add(handle.identity)
+                close_errors = _close_stable_process_handles(acquired)
+                acquired.clear()
+                if close_errors:
+                    raise RuntimeError(
+                        "could not close subreaper baseline handles: "
+                        + "; ".join(str(error) for error in close_errors)
+                    )
+                cls._active_scopes += 1
+                return cls(baseline=baseline)
+            except BaseException as error:
+                close_errors = _close_stable_process_handles(acquired)
+                restore_error: Optional[BaseException] = None
+                if first:
+                    original = cls._original_state
+                    try:
+                        if original is not None:
+                            cls._set(original)
+                            if cls._get() != original:
+                                raise RuntimeError(
+                                    "Linux refused to restore child-subreaper state"
+                                )
+                    except BaseException as caught:
+                        restore_error = caught
+                    finally:
+                        cls._original_state = None
+                details = [*close_errors]
+                if restore_error is not None:
+                    details.append(restore_error)
+                if details:
+                    raise RuntimeError(
+                        f"{error}; subreaper rollback failures: "
+                        + "; ".join(str(item) for item in details)
+                    ) from error
+                raise
+
+    def was_present_at_acquire(self, handle: StableProcessHandle) -> bool:
+        """Compare process instances, not reusable numeric PIDs."""
+        return handle.identity in self.baseline
+
+    def adopted_roots(
+        self,
+        parents: Dict[int, int],
+        owned: Set[int],
+        *,
+        deadline: Optional[float] = None,
+    ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+        """Retain new direct children through identity and parent rechecks."""
+        if self.closed:
+            raise RuntimeError("Linux subreaper scope is already closed")
+        roots: Dict[Tuple[int, ...], StableProcessHandle] = {}
+        acquired: List[StableProcessHandle] = []
+        owner = os.getpid()
+        try:
+            for pid in owned:
+                if deadline is not None:
+                    remaining_before(deadline, "retaining adopted children", cap=5)
+                if parents.get(pid) != owner:
+                    continue
+                handle = _open_stable_process_if_present(
+                    pid, "adopted subreaper child"
+                )
+                if handle is None:
+                    continue
+                acquired.append(handle)
+                if (
+                    not handle.matches_current()
+                    or _linux_process_parent(pid) != owner
+                    or self.was_present_at_acquire(handle)
+                ):
+                    continue
+                if (
+                    _process_state(handle, deadline=deadline) or ""
+                ).startswith("Z"):
+                    # Adopted children are ours to reap as well as signal. A
+                    # zombie otherwise remains a direct child forever and
+                    # makes the quiet scan rediscover the same dead instance.
+                    with contextlib.suppress(ChildProcessError, ProcessLookupError):
+                        os.waitpid(pid, os.WNOHANG)
+                    continue
+                roots[handle.identity] = handle
+
+            root_handles = {id(handle) for handle in roots.values()}
+            rejected = [handle for handle in acquired if id(handle) not in root_handles]
+            close_errors = _close_stable_process_handles(rejected)
+            if close_errors:
+                # The returned roots have not transferred to the caller yet.
+                close_errors.extend(_close_stable_process_handles(roots))
+                acquired.clear()
+                roots.clear()
+                raise RuntimeError(
+                    "could not close rejected subreaper handles: "
+                    + "; ".join(str(error) for error in close_errors)
+                )
+            return roots
+        except BaseException:
+            _close_stable_process_handles(acquired)
+            raise
+
+    def close(self) -> None:
+        with type(self)._state_lock:
+            if self.closed:
+                return
+            if type(self)._active_scopes <= 0:
+                raise RuntimeError("Linux subreaper scope count underflow")
+            if type(self)._active_scopes > 1:
+                type(self)._active_scopes -= 1
+                self.closed = True
+                return
+
+            original = type(self)._original_state
+            if original is None:
+                raise RuntimeError("Linux subreaper original state is missing")
+            # Do not mark this scope closed until both the mutation and its
+            # verification succeed. A transient failure can then be retried by
+            # the caller instead of permanently stranding process-global state.
+            try:
+                type(self)._set(original)
+                if type(self)._get() != original:
+                    raise RuntimeError(
+                        "Linux refused to restore child-subreaper state"
+                    )
+            except BaseException as error:
+                if original == 0:
+                    try:
+                        # Keep the still-active scope's contract intact until a
+                        # later close retries the restoration.
+                        type(self)._set(1)
+                    except BaseException as recovery_error:
+                        raise RuntimeError(
+                            f"{error}; could not re-enable child-subreaper state: "
+                            f"{recovery_error}"
+                        ) from error
+                raise
+            type(self)._active_scopes = 0
+            type(self)._original_state = None
+            self.closed = True
+
+
+def _close_stable_process_handles(
+    handles: object,
+) -> List[BaseException]:
+    """Close every handle even when one close operation itself fails."""
+    errors: List[BaseException] = []
+    values = handles.values() if isinstance(handles, dict) else handles
+    for handle in values:
+        try:
+            handle.close()
+        except BaseException as error:
+            errors.append(error)
+    return errors
+
+
+def _process_state(
+    handle: StableProcessHandle, *, deadline: Optional[float] = None
+) -> Optional[str]:
+    """Read state, then prove the sampled PID still names ``handle``."""
+    timeout = (
+        remaining_before(deadline, "reading retained process state", cap=2)
+        if deadline is not None
+        else 2
+    )
+    sampled = run(["ps", "-o", "stat=", "-p", str(handle.pid)], timeout=timeout)
+    if sampled.returncode != 0 or not sampled.stdout.strip():
+        return None
+    if not handle.matches_current():
+        return None
+    return sampled.stdout.strip()
+
+
+def _session_process_handles(
+    anchor: StableProcessHandle, session_id: int
+) -> Dict[Tuple[int, ...], StableProcessHandle]:
+    """Open stable handles for every current member of one anchored session."""
+    if not anchor.matches_current() or os.getsid(anchor.pid) != session_id:
+        raise RuntimeError(f"PTY session {session_id} lost its retained anchor")
+    listed = run(["ps", "-axo", "pid="], timeout=5)
+    if listed.returncode != 0:
+        raise RuntimeError(f"could not enumerate PTY session: {listed.stderr}")
+    handles: Dict[Tuple[int, ...], StableProcessHandle] = {}
+    for field in listed.stdout.split():
+        try:
+            pid = int(field)
+        except ValueError:
+            continue
+        try:
+            if os.getsid(pid) != session_id:
+                continue
+        except ProcessLookupError:
+            continue
+        except OSError as error:
+            close_errors = _close_stable_process_handles(handles)
+            detail = (
+                "; retained-handle close failures: "
+                + "; ".join(str(item) for item in close_errors)
+                if close_errors
+                else ""
+            )
+            raise RuntimeError(
+                f"could not inspect PTY session member {pid}: {error}{detail}"
+            ) from error
+        try:
+            handle = StableProcessHandle.open(pid)
+        except (ProcessLookupError, OSError, RuntimeError) as error:
+            try:
+                still_member = os.getsid(pid) == session_id
+            except ProcessLookupError:
+                still_member = False
+            if still_member:
+                close_errors = _close_stable_process_handles(handles)
+                detail = (
+                    "; retained-handle close failures: "
+                    + "; ".join(str(item) for item in close_errors)
+                    if close_errors
+                    else ""
+                )
+                raise RuntimeError(
+                    f"could not retain PTY session member {pid}: {error}{detail}"
+                ) from error
+            continue
+        try:
+            current_member = os.getsid(pid) == session_id and handle.matches_current()
+        except ProcessLookupError:
+            current_member = False
+        except (OSError, RuntimeError, ValueError) as error:
+            close_errors = _close_stable_process_handles([handle, *handles.values()])
+            detail = (
+                "; stable-handle close failures: "
+                + "; ".join(str(item) for item in close_errors)
+                if close_errors
+                else ""
+            )
+            raise RuntimeError(
+                f"could not recheck PTY session member {pid}: {error}{detail}"
+            ) from error
+        if not current_member:
+            close_errors = _close_stable_process_handles([handle])
+            if close_errors:
+                retained_errors = _close_stable_process_handles(handles)
+                raise RuntimeError(
+                    f"could not close stale PTY session member {pid}: "
+                    + "; ".join(
+                        str(item) for item in [*close_errors, *retained_errors]
+                    )
+                )
+            continue
+        handles[handle.identity] = handle
+    if anchor.identity not in handles:
+        close_errors = _close_stable_process_handles(handles)
+        detail = (
+            "; stable-handle close failures: "
+            + "; ".join(str(item) for item in close_errors)
+            if close_errors
+            else ""
+        )
+        raise RuntimeError(
+            f"PTY session {session_id} lost its retained anchor{detail}"
+        )
+    return handles
+
+
+def terminate_owned_pty_session(
+    anchor: StableProcessHandle, *, grace_s: float = 0.5
+) -> None:
+    """Stop every job in a portable-pty session before Kettle exits.
+
+    Interactive shells put foreground jobs in new process groups, so killing
+    either Kettle's outer group or the shell's group alone misses Neovim and
+    plugin descendants. Stop all groups while the shell leader still anchors
+    the session, then terminate non-shell jobs before killing the leader last.
+    """
+    if os.name == "nt":
+        raise RuntimeError("PTY-session cleanup is unavailable on Windows")
+
+    session_leader = anchor.pid
+    if not anchor.matches_current() or os.getsid(session_leader) != session_leader:
+        raise RuntimeError(f"PTY session {session_leader} lost its retained anchor")
+
+    # Stop the anchor first, then every member through an identity-stable handle.
+    # Re-scan until no newly discovered member remains and every retained live
+    # process is observed stopped. A running process never gets to fork after a
+    # scan that cleanup calls stable.
+    retained: Dict[Tuple[int, ...], StableProcessHandle] = {
+        anchor.identity: anchor
+    }
+    cleanup_error: Optional[BaseException] = None
+    try:
+        if not anchor.signal(signal.SIGSTOP):
+            raise RuntimeError(f"PTY session {session_leader} anchor exited")
+        for _attempt in range(8):
+            scanned = _session_process_handles(anchor, session_leader)
+            new_handles: List[StableProcessHandle] = []
+            duplicate_handles: List[StableProcessHandle] = []
+            for identity, handle in scanned.items():
+                if identity in retained:
+                    duplicate_handles.append(handle)
+                    continue
+                # Transfer every acquired handle into the finalizer-owned set
+                # before any close or signal. If either operation raises, later
+                # members of this same scan must still be killed and closed.
+                retained[identity] = handle
+                new_handles.append(handle)
+            duplicate_close_errors: List[BaseException] = []
+            for handle in duplicate_handles:
+                try:
+                    handle.close()
+                except BaseException as error:
+                    duplicate_close_errors.append(error)
+            if duplicate_close_errors:
+                raise RuntimeError(
+                    "could not close duplicate PTY process handles: "
+                    + "; ".join(str(error) for error in duplicate_close_errors)
+                )
+            for handle in new_handles:
+                handle.signal(signal.SIGSTOP)
+            all_stopped = True
+            for handle in retained.values():
+                state = _process_state(handle)
+                if state is not None and not state.startswith(("T", "Z")):
+                    all_stopped = False
+            if not new_handles and all_stopped:
+                break
+            time.sleep(0.02)
+        else:
+            raise RuntimeError(f"PTY session {session_leader} did not quiesce")
+    except BaseException as error:
+        cleanup_error = error
+    finally:
+        # Even a failed enumeration has already stopped at least the anchor.
+        # Never abandon those processes in T state: kill every retained instance
+        # and the wrapper anchor before surfacing the original error.
+        kill_errors: List[BaseException] = []
+        for identity, handle in retained.items():
+            if identity == anchor.identity:
+                continue
+            try:
+                handle.signal(signal.SIGKILL)
+            except BaseException as error:
+                kill_errors.append(error)
+        try:
+            anchor.signal(signal.SIGKILL)
+        except BaseException as error:
+            kill_errors.append(error)
+        for identity, handle in retained.items():
+            if identity != anchor.identity:
+                try:
+                    handle.close()
+                except BaseException as error:
+                    kill_errors.append(error)
+    del grace_s
+    if cleanup_error is not None:
+        if kill_errors:
+            raise RuntimeError(
+                f"{cleanup_error}; forced PTY cleanup also failed: "
+                + "; ".join(str(error) for error in kill_errors)
+            ) from cleanup_error
+        raise cleanup_error
+    if kill_errors:
+        raise RuntimeError(
+            "forced PTY cleanup failed: "
+            + "; ".join(str(error) for error in kill_errors)
+        )
+
+
+def process_exited_without_reaping(process: subprocess.Popen) -> bool:
+    """Observe a Unix child exit while preserving its PID/group anchor."""
+    if os.name == "nt":
+        return process.poll() is not None
+    if process.returncode is not None:
+        return True
+    result = os.waitid(
+        os.P_PID,
+        process.pid,
+        os.WEXITED | os.WNOHANG | os.WNOWAIT,
+    )
+    return result is not None
+
+
+def native_visible_window_ids(pid: int) -> Set[int]:
+    """Return OS-owned visible top-level windows for one process.
+
+    Control-protocol inventories describe Kettle's logical map. This independent
+    inventory is what proves a removed ``WindowState`` did not leave a mapped
+    native window behind.
+    """
+    system = platform.system()
+    if system == "Windows":
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetClassNameW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPWSTR,
+            ctypes.c_int,
+        ]
+        user32.GetClassNameW.restype = ctypes.c_int
+        found: Set[int] = set()
+
+        @callback_type
+        def collect(window: int, _parameter: int) -> bool:
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+            if owner.value == pid and user32.IsWindowVisible(window):
+                class_name = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(window, class_name, len(class_name))
+                # winit creates one visible 16x16 message target per event
+                # loop on Windows. It owns no user surface but EnumWindows and
+                # IsWindowVisible both include it, so counting it makes one
+                # real Kettle window look like two. Match the framework's
+                # explicit class instead of using a size/title heuristic that
+                # could hide a legitimate tiny or untitled Kettle window.
+                if class_name.value != "Winit Thread Event Target":
+                    found.add(int(window))
+            return True
+
+        if not user32.EnumWindows(collect, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return found
+
+    if system == "Darwin":
+        import ctypes
+
+        core_graphics = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+        )
+        core_foundation = ctypes.CDLL(
+            "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+        )
+        core_graphics.CGWindowListCopyWindowInfo.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        core_graphics.CGWindowListCopyWindowInfo.restype = ctypes.c_void_p
+        core_foundation.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+        core_foundation.CFArrayGetCount.restype = ctypes.c_long
+        core_foundation.CFArrayGetValueAtIndex.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+        ]
+        core_foundation.CFArrayGetValueAtIndex.restype = ctypes.c_void_p
+        core_foundation.CFDictionaryGetValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        core_foundation.CFDictionaryGetValue.restype = ctypes.c_void_p
+        core_foundation.CFNumberGetValue.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.c_void_p,
+        ]
+        core_foundation.CFNumberGetValue.restype = ctypes.c_bool
+        core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+
+        def cg_key(name: str) -> ctypes.c_void_p:
+            return ctypes.c_void_p.in_dll(core_graphics, name)
+
+        owner_key = cg_key("kCGWindowOwnerPID")
+        number_key = cg_key("kCGWindowNumber")
+        layer_key = cg_key("kCGWindowLayer")
+
+        def number(dictionary: int, key: ctypes.c_void_p) -> Optional[int]:
+            value = core_foundation.CFDictionaryGetValue(dictionary, key)
+            if not value:
+                return None
+            output = ctypes.c_longlong()
+            # kCFNumberSInt64Type = 4.
+            if not core_foundation.CFNumberGetValue(value, 4, ctypes.byref(output)):
+                return None
+            return int(output.value)
+
+        # On-screen + excluding desktop elements. Layer zero is an ordinary
+        # application window rather than a tooltip/menu owned by the process.
+        windows = core_graphics.CGWindowListCopyWindowInfo((1 << 0) | (1 << 4), 0)
+        if not windows:
+            raise RuntimeError("CGWindowListCopyWindowInfo returned no inventory")
+        found = set()
+        try:
+            for index in range(core_foundation.CFArrayGetCount(windows)):
+                item = core_foundation.CFArrayGetValueAtIndex(windows, index)
+                if number(item, owner_key) == pid and number(item, layer_key) == 0:
+                    window_number = number(item, number_key)
+                    if window_number is not None:
+                        found.add(window_number)
+        finally:
+            core_foundation.CFRelease(windows)
+        return found
+
+    if system == "Linux":
+        xdotool = shutil.which("xdotool")
+        if xdotool is None:
+            raise RuntimeError(
+                "window-close-isolation requires xdotool for an independent "
+                "native X11 window inventory"
+            )
+        result = run(
+            [xdotool, "search", "--onlyvisible", "--pid", str(pid)],
+            timeout=5,
+        )
+        if result.returncode == 1 and not result.stdout.strip():
+            return set()
+        if result.returncode != 0:
+            raise RuntimeError(
+                "xdotool could not enumerate native Kettle windows: "
+                f"rc={result.returncode} stderr={result.stderr.strip()!r}"
+            )
+        try:
+            return {int(line) for line in result.stdout.splitlines() if line.strip()}
+        except ValueError as error:
+            raise RuntimeError(
+                f"xdotool returned malformed window ids: {result.stdout!r}"
+            ) from error
+
+    raise RuntimeError(f"native window inventory is unsupported on {system}")
+
+
+def wait_for_native_window_ids(
+    pid: int,
+    accept: Callable[[Set[int]], bool],
+    *,
+    label: str,
+    timeout_s: float = 8.0,
+) -> Set[int]:
+    deadline = time.monotonic() + timeout_s
+    observed: Set[int] = set()
+    while time.monotonic() < deadline:
+        observed = native_visible_window_ids(pid)
+        if accept(observed):
+            return observed
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"timed out waiting for {label}; native window ids were {sorted(observed)}"
+    )
+
+
+@dataclass
+class NvimSidebarWaitState:
+    """Pure state machine behind the LazyVCS marker/pager wait."""
+
+    marker: str
+    quiet_s: float
+    stable_key: Optional[Tuple[str, str, str, int]] = None
+    stable_since: Optional[float] = None
+    pager_key: Optional[Tuple[str, str]] = None
+    pager_dismissed_at: Optional[float] = None
+
+    def observe(
+        self,
+        visible: str,
+        snapshot: str,
+        cursor: object,
+        history_size: int,
+        now: float,
+    ) -> Tuple[bool, bool]:
+        """Return ``(ready, dismiss_pager)`` for one screen observation."""
+        prompt = "Press ENTER or type command to continue" in visible
+        pager_key = (snapshot, visible)
+        dismiss = prompt and (
+            pager_key != self.pager_key
+            or self.pager_dismissed_at is None
+            or now - self.pager_dismissed_at >= 0.5
+        )
+        if dismiss:
+            self.pager_dismissed_at = now
+        self.pager_key = pager_key if prompt else None
+        key = (snapshot, visible, json.dumps(cursor, sort_keys=True), history_size)
+        if self.marker not in visible or prompt:
+            self.stable_key = None
+            self.stable_since = None
+            return False, dismiss
+        if key != self.stable_key:
+            self.stable_key = key
+            self.stable_since = now
+            return self.quiet_s <= 0, dismiss
+        if self.stable_since is None:
+            self.stable_since = now
+        return now - self.stable_since >= self.quiet_s, dismiss
+
+
+def path_is_link(path: Path) -> bool:
+    """Recognize symlinks and Windows reparse points without following them.
+
+    ``Path.is_junction`` exists only on Python 3.12+, while the live-smoke
+    helper has no such interpreter floor. Windows exposes the reparse bit on
+    ``lstat`` metadata on every supported Python, so cleanup remains fail-closed
+    on older runners too.
+    """
+    if path.is_symlink():
+        return True
+    if platform.system() == "Windows":
+        try:
+            attributes = int(getattr(os.lstat(path), "st_file_attributes"))
+        except FileNotFoundError:
+            return False
+        return bool(
+            attributes & int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+        )
+    is_junction = getattr(path, "is_junction", None)
+    return callable(is_junction) and bool(is_junction())
 
 
 def assert_no_reparse_ancestry(path: Path) -> None:
@@ -133,6 +1194,321 @@ def windows_system_executable(*relative_parts: str) -> str:
     fallback_path = Path(fallback)
     assert_no_reparse_ancestry(fallback_path)
     return str(fallback_path.resolve())
+
+
+class WindowsKillJob:
+    """Contain one worker tree in a kill-on-close Windows Job Object."""
+
+    def __init__(self, *, named: bool = False) -> None:
+        if platform.system() != "Windows":
+            raise RuntimeError("Windows Job Objects are unavailable on this platform")
+        import ctypes
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount",
+                "WriteOperationCount",
+                "OtherOperationCount",
+                "ReadTransferCount",
+                "WriteTransferCount",
+                "OtherTransferCount",
+            )]
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class BasicAccounting(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        name = f"Local\\KettleSmoke-{secrets.token_hex(16)}" if named else None
+        ctypes.set_last_error(0)
+        job = kernel32.CreateJobObjectW(None, name)
+        if not job:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if name is not None and ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(job)
+            raise RuntimeError("an unpredictable Windows Job Object name collided")
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            error = ctypes.WinError(ctypes.get_last_error())
+            kernel32.CloseHandle(job)
+            raise error
+        self._ctypes = ctypes
+        self._kernel32 = kernel32
+        self._job = job
+        self._name = name
+        self._basic_accounting_type = BasicAccounting
+        self._dword_type = wintypes.DWORD
+
+    def assign(self, process: subprocess.Popen) -> None:
+        raw_process = getattr(process, "_handle", None)
+        if raw_process is None or not self._kernel32.AssignProcessToJobObject(
+            self._job, raw_process
+        ):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def powershell_assign_current_process_command(self) -> str:
+        """Build an in-pane assignment with no reusable numeric PID handoff."""
+        if self._name is None:
+            raise RuntimeError("PowerShell self-assignment requires a named Job Object")
+        source = """using System;
+using System.Runtime.InteropServices;
+public static class KettleSmokeNativeJob {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+  public static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll")]
+  public static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool CloseHandle(IntPtr handle);
+}"""
+        source_one_line = " ".join(source.splitlines())
+        return (
+            "if (-not ('KettleSmokeNativeJob' -as [type])) { "
+            f"Add-Type -TypeDefinition {shell_quote(source_one_line, windows=True)} "
+            "-ErrorAction Stop; }; "
+            "$KettleSmokeJob=[KettleSmokeNativeJob]::OpenJobObject(1,$false,"
+            f"{shell_quote(self._name, windows=True)}); "
+            "if ($KettleSmokeJob -eq [IntPtr]::Zero) { "
+            "throw [ComponentModel.Win32Exception]::new("
+            "[Runtime.InteropServices.Marshal]::GetLastWin32Error()); }; "
+            "try { if (-not [KettleSmokeNativeJob]::AssignProcessToJobObject("
+            "$KettleSmokeJob,[KettleSmokeNativeJob]::GetCurrentProcess())) { "
+            "throw [ComponentModel.Win32Exception]::new("
+            "[Runtime.InteropServices.Marshal]::GetLastWin32Error()); } } "
+            "finally { if (-not [KettleSmokeNativeJob]::CloseHandle("
+            "$KettleSmokeJob)) { throw [ComponentModel.Win32Exception]::new("
+            "[Runtime.InteropServices.Marshal]::GetLastWin32Error()); } }"
+        )
+
+    def active_processes(self) -> int:
+        if self._job is None:
+            raise RuntimeError("Windows Job Object is already closed")
+        accounting = self._basic_accounting_type()
+        returned = self._dword_type()
+        if not self._kernel32.QueryInformationJobObject(
+            self._job,
+            1,  # JobObjectBasicAccountingInformation
+            self._ctypes.byref(accounting),
+            self._ctypes.sizeof(accounting),
+            self._ctypes.byref(returned),
+        ):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        return int(accounting.ActiveProcesses)
+
+    def terminate(self) -> None:
+        if self._job is not None and not self._kernel32.TerminateJobObject(
+            self._job, 1
+        ):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def wait_empty(self, timeout_s: float = 5.0) -> None:
+        """Wait for the Job's kernel object to signal that every process exited."""
+        if self._job is None:
+            raise RuntimeError("Windows Job Object is already closed")
+        timeout_ms = max(0, min(round(timeout_s * 1000), 0xFFFFFFFE))
+        result = self._kernel32.WaitForSingleObject(self._job, timeout_ms)
+        if result == 0:  # WAIT_OBJECT_0
+            active = self.active_processes()
+            if active != 0:
+                raise RuntimeError(
+                    "Windows Job was signaled while it still contained "
+                    f"{active} process(es)"
+                )
+            return
+        if result == 0x00000102:  # WAIT_TIMEOUT
+            raise RuntimeError(
+                "Windows Job still contains "
+                f"{self.active_processes()} process(es) after {timeout_s:g}s"
+            )
+        if result == 0xFFFFFFFF:  # WAIT_FAILED
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+        raise RuntimeError(f"unexpected Windows Job wait result: 0x{result:08x}")
+
+    def close(self) -> None:
+        if self._job is None:
+            return
+        job = self._job
+        self._job = None
+        if not self._kernel32.CloseHandle(job):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+
+def _terminate_windows_job(job: WindowsKillJob) -> None:
+    """Terminate and close a Job Object, reporting every cleanup failure."""
+    errors: List[BaseException] = []
+    try:
+        job.terminate()
+    except BaseException as error:
+        errors.append(error)
+    if not errors:
+        try:
+            # TerminateJobObject requests asynchronous termination. Deletion may
+            # begin only after accounting proves every process has actually left.
+            job.wait_empty()
+        except BaseException as error:
+            errors.append(error)
+    try:
+        # KILL_ON_JOB_CLOSE is an independent fail-closed stop path.
+        job.close()
+    except BaseException as error:
+        errors.append(error)
+    if errors:
+        raise RuntimeError(
+            "Windows Job cleanup failed: " + "; ".join(str(error) for error in errors)
+        )
+
+
+def _drain_then_remove(
+    drain: Callable[[], None], remove: Callable[[], None]
+) -> None:
+    """Enforce the sandbox lifecycle: descendants drain before deletion."""
+    drain()
+    remove()
+
+
+def _remove_tree_by_fd(root: Path) -> None:
+    """Remove one Unix tree without re-resolving a checked ancestor.
+
+    Every recursive open is relative to a retained directory descriptor and
+    rejects links. Permission restoration uses ``fchmod`` only after the opened
+    inode matches the no-follow observation; unlink/rmdir likewise operate
+    relative to the held parent. A same-user process can race names, but no
+    mutation occurs until the intended directory object is bound to an fd.
+
+    A directory without enough permission to be opened is retained and cleanup
+    fails closed. That is preferable to a path-based chmod: Python does not
+    provide portable no-follow ``chmod(dir_fd=...)`` support on every Unix, and
+    mutating a name before opening it lets a replacement receive the chmod.
+    """
+    if os.name == "nt":
+        raise RuntimeError("descriptor-relative tree removal is Unix-only")
+    try:
+        expected_root = root.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(expected_root.st_mode) or not stat.S_ISDIR(expected_root.st_mode):
+        raise RuntimeError(f"sandbox root is not a plain directory: {root}")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open(root.parent, flags)
+    root_fd: Optional[int] = None
+
+    def remove_contents(directory_fd: int, display: Path) -> None:
+        with os.scandir(directory_fd) as scanned:
+            entries = list(scanned)
+        for entry in entries:
+            entry_path = display / entry.name
+            before = entry.stat(follow_symlinks=False)
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (
+                        before.st_dev,
+                        before.st_ino,
+                    ):
+                        raise RuntimeError(
+                            f"sandbox directory changed while opening: {entry_path}"
+                        )
+                    os.fchmod(child_fd, stat.S_IRWXU)
+                    remove_contents(child_fd, entry_path)
+                    # POSIX permits removing an empty directory while it is
+                    # open. Keep the descriptor until the name is gone so no
+                    # replacement can receive a later operation through it.
+                    os.rmdir(entry.name, dir_fd=directory_fd)
+                finally:
+                    os.close(child_fd)
+            else:
+                # unlink never follows a symlink, FIFO, socket, or device.
+                os.unlink(entry.name, dir_fd=directory_fd)
+
+    try:
+        root_fd = os.open(root.name, flags, dir_fd=parent_fd)
+        opened_root = os.fstat(root_fd)
+        if (opened_root.st_dev, opened_root.st_ino) != (
+            expected_root.st_dev,
+            expected_root.st_ino,
+        ):
+            raise RuntimeError(f"sandbox root changed while opening: {root}")
+        os.fchmod(root_fd, stat.S_IRWXU)
+        remove_contents(root_fd, root)
+        os.rmdir(root.name, dir_fd=parent_fd)
+    finally:
+        if root_fd is not None:
+            os.close(root_fd)
+        os.close(parent_fd)
+
+
+class RepositoryWorkerTimeout(RuntimeError):
+    """A hard provenance timeout whose detached reaper remains observable."""
+
+    def __init__(self, message: str, reaped: threading.Event) -> None:
+        super().__init__(message)
+        self.reaped = reaped
 
 
 def windows_current_user_sid() -> str:
@@ -363,6 +1739,7 @@ def resolve_release_kettle() -> str:
         [
             "cargo",
             "build",
+            "--locked",
             "--release",
             "-p",
             "kettle",
@@ -396,6 +1773,1131 @@ def resolve_release_kettle() -> str:
         file=sys.stderr,
     )
     return str(executable)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stream_git_output(
+    repository: Path,
+    args: List[str],
+    budget: RepositoryProvenanceBudget,
+    consume: Callable[[bytes], None],
+) -> None:
+    """Stream one Git query through a single aggregate time/byte budget."""
+    process = subprocess.Popen(
+        [
+            "git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(repository),
+            *args,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    errors: List[BaseException] = []
+    stderr = bytearray()
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        try:
+            while chunk := process.stdout.read(COPY_CHUNK_BYTES):
+                budget.add_bytes(len(chunk), f"git {' '.join(args)}")
+                consume(chunk)
+        except BaseException as error:
+            errors.append(error)
+            process.kill()
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        while chunk := process.stderr.read(4096):
+            # Retain only a bounded diagnostic tail while continuing to drain.
+            stderr.extend(chunk)
+            if len(stderr) > 16 * 1024:
+                del stderr[: len(stderr) - 16 * 1024]
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=budget.remaining())
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        process.wait(timeout=5)
+        raise RuntimeError(
+            f"git {' '.join(args)} exceeded the repository provenance time limit"
+        ) from error
+    finally:
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+    if stdout_thread.is_alive() or stderr_thread.is_alive():
+        raise RuntimeError(f"git {' '.join(args)} output reader did not finish")
+    if errors:
+        raise RuntimeError(str(errors[0])) from errors[0]
+    if returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} failed while recording provenance: "
+            + bytes(stderr).decode("utf-8", "replace")[-2000:]
+        )
+
+
+@contextlib.contextmanager
+def held_repository_directory(repository: Path, relative: Path):
+    """Hold one repository directory chain without following links.
+
+    Unix resolves each component relative to an already-open directory. Windows
+    retains no-delete-share handles for every component and rejects reparse
+    points, so later leaf lookup cannot be redirected through a junction.
+    """
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError(f"unsafe repository directory: {relative}")
+    parts = tuple(part for part in relative.parts if part not in ("", "."))
+    if platform.system() == "Windows":
+        import ctypes
+        from ctypes import wintypes
+
+        class FileAttributeTagInfo(ctypes.Structure):
+            _fields_ = [
+                ("file_attributes", wintypes.DWORD),
+                ("reparse_tag", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.GetFileInformationByHandleEx.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        invalid = wintypes.HANDLE(-1).value
+        handles: List[object] = []
+        current = repository
+        try:
+            for part in (None, *parts):
+                if part is not None:
+                    current /= part
+                handle = kernel32.CreateFileW(
+                    str(current),
+                    0x0080,  # FILE_READ_ATTRIBUTES
+                    0x0001 | 0x0002,  # share read/write, deliberately not delete
+                    None,
+                    3,  # OPEN_EXISTING
+                    0x02000000 | 0x00200000,  # BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+                    None,
+                )
+                if handle == invalid:
+                    raise OSError(
+                        ctypes.get_last_error(),
+                        f"cannot hold repository directory {current}",
+                    )
+                handles.append(handle)
+                info = FileAttributeTagInfo()
+                if not kernel32.GetFileInformationByHandleEx(
+                    handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+                ):
+                    raise OSError(
+                        ctypes.get_last_error(),
+                        f"cannot inspect repository directory {current}",
+                    )
+                if info.file_attributes & 0x0400:  # FILE_ATTRIBUTE_REPARSE_POINT
+                    raise RuntimeError(
+                        f"repository provenance rejects a linked directory: {current}"
+                    )
+            yield None, current
+        finally:
+            for handle in reversed(handles):
+                kernel32.CloseHandle(handle)
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: List[int] = []
+    try:
+        descriptor = os.open(repository, flags)
+        descriptors.append(descriptor)
+        for part in parts:
+            descriptor = os.open(part, flags, dir_fd=descriptor)
+            descriptors.append(descriptor)
+        yield descriptor, repository.joinpath(*parts)
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def repository_file_digest(
+    repository: Path, relative: Path, budget: RepositoryProvenanceBudget
+) -> Tuple[int, bytes]:
+    """Hash one untracked regular file through a retained directory chain."""
+    path = repository / relative
+    parent = relative.parent
+    name = relative.name
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    digest = hashlib.sha256()
+    read_bytes = 0
+    with held_repository_directory(repository, parent) as (parent_fd, _parent_path):
+        if parent_fd is None:
+            before = path.lstat()
+            if path_is_link(path):
+                raise RuntimeError(
+                    f"repository provenance rejects a special file: {path}"
+                )
+            fd = os.open(path, flags)
+        else:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            fd = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            if not stat.S_ISREG(before.st_mode):
+                raise RuntimeError(
+                    f"repository provenance rejects a special file: {path}"
+                )
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+                before.st_dev,
+                before.st_ino,
+            ):
+                raise RuntimeError(f"repository file changed while opening: {path}")
+            # The retained handle is the stability boundary.  On NTFS,
+            # ``lstat`` and the immediately following ``fstat`` can report
+            # different ``st_ctime_ns`` values for an untouched file.  The
+            # pathname snapshot still prevents an object substitution between
+            # discovery and open; using the handle on both sides of the read
+            # catches any mutation while hashing without that Windows false
+            # positive.
+            budget.add_file(path, opened.st_size)
+            while chunk := os.read(fd, COPY_CHUNK_BYTES):
+                read_bytes += len(chunk)
+                if read_bytes > opened.st_size:
+                    raise RuntimeError(f"repository file grew while hashing: {path}")
+                digest.update(chunk)
+                budget.remaining()
+            after = os.fstat(fd)
+        finally:
+            os.close(fd)
+    stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    changed = [
+        name
+        for name in stable
+        if getattr(opened, name) != getattr(after, name)
+    ]
+    if read_bytes != opened.st_size:
+        changed.append("bytes_read")
+    if changed:
+        raise RuntimeError(
+            f"repository file changed while hashing ({', '.join(changed)}): {path}"
+        )
+    return read_bytes, digest.digest()
+
+
+def _repository_source_identity_impl(
+    repository: Path, budget: Optional[RepositoryProvenanceBudget] = None
+) -> Dict[str, object]:
+    """Fingerprint source under one bounded streaming budget."""
+    digest = hashlib.sha256()
+    active_budget = budget or RepositoryProvenanceBudget()
+    def git_path_list(args: List[str]) -> bytearray:
+        output = bytearray()
+
+        def collect_paths(chunk: bytes) -> None:
+            if len(output) + len(chunk) > PROVENANCE_MAX_PATH_LIST_BYTES:
+                raise RuntimeError(
+                    "repository provenance exceeds the "
+                    f"{PROVENANCE_MAX_PATH_LIST_BYTES} byte pathname limit"
+                )
+            output.extend(chunk)
+
+        stream_git_output(repository, args, active_budget, collect_paths)
+        if output and output[-1] != 0:
+            raise RuntimeError(
+                f"git returned a truncated pathname list for {' '.join(args)}"
+            )
+        return output
+
+    # Status is provenance too: it distinguishes clean from dirty trees and is
+    # compared before/after the live run. Keep it inside this contained worker
+    # instead of running a second, capturing `git status` in the parent. The
+    # NUL form has no quoting ambiguity; each record and rename companion
+    # consumes the same traversal cap used by the filesystem walk.
+    status_digest = hashlib.sha256()
+    status_bytes = 0
+    status_entries = 0
+    status_last_byte: Optional[int] = None
+
+    def consume_status(chunk: bytes) -> None:
+        nonlocal status_bytes, status_entries, status_last_byte
+        status_bytes += len(chunk)
+        if status_bytes > PROVENANCE_MAX_PATH_LIST_BYTES:
+            raise RuntimeError(
+                "repository provenance exceeds the "
+                f"{PROVENANCE_MAX_PATH_LIST_BYTES} byte status limit"
+            )
+        status_entries += chunk.count(b"\0")
+        if status_entries > active_budget.max_scan_entries:
+            raise RuntimeError(
+                "repository provenance exceeds the "
+                f"{active_budget.max_scan_entries} status-entry limit"
+            )
+        status_digest.update(chunk)
+        if chunk:
+            status_last_byte = chunk[-1]
+
+    stream_git_output(
+        repository,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        active_budget,
+        consume_status,
+    )
+    if status_bytes and status_last_byte != 0:
+        raise RuntimeError("git returned a truncated repository status")
+
+    tracked = git_path_list(["ls-files", "-z", "--cached"])
+    tracked_paths: Set[bytes] = set()
+    for raw_path in tracked.split(b"\0"):
+        if raw_path and bytes(raw_path) not in tracked_paths:
+            tracked_path = bytes(raw_path)
+            tracked_paths.add(tracked_path)
+            active_budget.add_file_entry(Path(os.fsdecode(tracked_path)))
+
+    queries = (
+        [
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+        ],
+        [
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--",
+        ],
+    )
+    for args in queries:
+        encoded = "\0".join(args).encode("utf-8")
+        digest.update(b"git-diff\0" + len(encoded).to_bytes(8, "big") + encoded)
+        stream_git_output(repository, list(args), active_budget, digest.update)
+
+    # Porcelain names alone do not notice edits to an already-untracked file.
+    # The NUL list has its own memory cap; file bodies are opened and streamed
+    # one at a time, rejecting links/devices/FIFOs rather than blocking on them.
+
+    ignored = git_path_list(
+        [
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ]
+    )
+    ignored_paths = {
+        os.fsdecode(bytes(path)).replace(os.sep, "/").rstrip("/")
+        for path in ignored.split(b"\0")
+        if path
+    }
+
+    # Git intentionally omits FIFOs/devices/sockets from `ls-files --others`.
+    # Walk the non-ignored tree under the same file/time bound so such an entry
+    # is rejected rather than silently absent from the identity.
+    scanned = 0
+    pending = [Path()]
+    while pending:
+        relative_dir = pending.pop()
+        with held_repository_directory(repository, relative_dir) as (
+            directory_fd,
+            current_path,
+        ):
+            scan_target: object = directory_fd if directory_fd is not None else current_path
+            with os.scandir(scan_target) as entries:
+                for entry in entries:
+                    active_budget.remaining()
+                    scanned += 1
+                    if scanned > active_budget.max_scan_entries:
+                        raise RuntimeError(
+                            "repository provenance exceeds the "
+                            f"{active_budget.max_scan_entries} worktree-entry scan limit"
+                        )
+                    relative_path = relative_dir / entry.name
+                    relative = relative_path.as_posix()
+                    if relative == ".git" or relative.rstrip("/") in ignored_paths:
+                        continue
+                    candidate = repository / relative_path
+                    linked = entry.is_symlink()
+                    if platform.system() == "Windows":
+                        linked = linked or path_is_link(candidate)
+                    if linked:
+                        raise RuntimeError(
+                            f"repository provenance rejects a linked entry: {candidate}"
+                        )
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError as error:
+                        raise RuntimeError(
+                            f"cannot inspect repository entry {candidate}: {error}"
+                        ) from error
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(relative_path)
+                    elif not stat.S_ISREG(info.st_mode):
+                        raise RuntimeError(
+                            f"repository provenance rejects a special file: {candidate}"
+                        )
+
+    untracked = git_path_list(
+        ["ls-files", "-z", "--others", "--exclude-standard"],
+    )
+    for raw_path in untracked.split(b"\0"):
+        if not raw_path:
+            continue
+        raw_path = bytes(raw_path)
+        relative = Path(os.fsdecode(raw_path))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError(f"git returned an unsafe untracked path: {relative}")
+        size, file_digest = repository_file_digest(
+            repository, relative, active_budget
+        )
+        digest.update(b"untracked\0")
+        digest.update(len(raw_path).to_bytes(8, "big"))
+        digest.update(raw_path)
+        digest.update(size.to_bytes(8, "big"))
+        digest.update(file_digest)
+    return {
+        "source_state_sha256": digest.hexdigest(),
+        "git_dirty": status_entries > 0,
+        "git_status_sha256": status_digest.hexdigest(),
+        "git_status_entries": status_entries,
+    }
+
+
+def _repository_provenance_worker(argv: List[str]) -> int:
+    """Run the filesystem pass in a process the caller can time out hard."""
+    if len(argv) != 2:
+        print("repository provenance worker expects a path and budget", file=sys.stderr)
+        return 2
+    try:
+        limits = json.loads(argv[1])
+        budget = RepositoryProvenanceBudget(
+            max_entries=int(limits["max_entries"]),
+            max_scan_entries=int(limits["max_scan_entries"]),
+            max_bytes=int(limits["max_bytes"]),
+            max_file_bytes=int(limits["max_file_bytes"]),
+            timeout_s=float(limits["timeout_s"]),
+        )
+        identity = _repository_source_identity_impl(Path(argv[0]), budget)
+    except BaseException as error:
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(identity, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def _repository_provenance_timeout_probe(argv: List[str]) -> int:
+    """Test-only worker that creates a descendant and never exits itself."""
+    if len(argv) != 1:
+        print("repository provenance timeout probe expects a pid record", file=sys.stderr)
+        return 2
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+    )
+    record = Path(argv[0])
+    staged = record.with_name(f".{record.name}.{os.getpid()}.tmp")
+    staged.write_text(f"{os.getpid()} {child.pid}\n", encoding="ascii")
+    os.replace(staged, record)
+    while True:
+        time.sleep(60)
+
+
+def _start_unix_repository_group_anchor() -> Optional[int]:
+    """Keep an internal worker's private process-group id owned until cleanup.
+
+    ``Popen.communicate`` reaps a completed worker before the parent can kill
+    ordinary helpers which inherited its process group.  Without a remaining
+    member the numeric PGID can be reused in that interval, turning ``killpg``
+    into a signal to an unrelated process.  This silent child closes every
+    controller pipe and remains in the group until the controller kills it, so
+    the kernel cannot recycle the PGID after the worker leader is reaped.
+    """
+    if os.name == "nt":
+        return None
+    previous_hangup = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    anchor = os.fork()
+    if anchor != 0:
+        signal.signal(signal.SIGHUP, previous_hangup)
+        return anchor
+    # The group leader exits after publishing its result. Ignore the orphaned
+    # session's hangup so this anchor lives exactly until the controller's
+    # SIGKILL; otherwise the PGID becomes reusable before cleanup begins.
+    for descriptor in (0, 1, 2):
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+    while True:
+        signal.pause()
+
+
+def _eventually_reap_process(
+    process: subprocess.Popen, reaped: threading.Event
+) -> None:
+    """Reap a worker asynchronously after its containing tree was killed."""
+    did_reap = False
+    try:
+        try:
+            # Resume a timed-out communicate so its Windows pipe-reader
+            # threads finish as well as the process handle itself.
+            process.communicate()
+        except (OSError, ValueError):
+            process.wait()
+        did_reap = True
+    except BaseException:
+        # The event is an ownership proof used by timeout tests and callers.
+        # Signalling it after both reap paths failed would turn a leaked process
+        # handle into a passing cleanup assertion. The daemon reaper cannot make
+        # this exceptional object safe, so leave the event unset and let the
+        # observer report the failed transfer.
+        pass
+    finally:
+        _close_repository_worker_streams(process)
+        if did_reap:
+            reaped.set()
+
+
+def _close_repository_worker_streams(process: subprocess.Popen) -> None:
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+
+def _stop_repository_worker(
+    worker: subprocess.Popen,
+    job: Optional[WindowsKillJob],
+    *,
+    terminate_job: bool = True,
+) -> Tuple[List[BaseException], threading.Event]:
+    """Kill the entire worker tree without adding a second blocking deadline."""
+    errors: List[BaseException] = []
+    if job is not None:
+        if terminate_job:
+            try:
+                job.terminate()
+            except BaseException as error:
+                errors.append(error)
+        try:
+            # KILL_ON_JOB_CLOSE is a second fail-closed termination path.
+            job.close()
+        except BaseException as error:
+            errors.append(error)
+    else:
+        try:
+            os.killpg(worker.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except BaseException as error:
+            errors.append(error)
+            with contextlib.suppress(OSError):
+                worker.kill()
+    if worker.stdin is not None:
+        with contextlib.suppress(OSError, ValueError):
+            worker.stdin.close()
+    reaped = threading.Event()
+    if worker.returncode is not None:
+        # `communicate`/`wait` already reaped a completed worker. On Unix the
+        # internal worker's still-live group anchor keeps this PGID unavailable
+        # for reuse until the kill above. Ownership transfer must not add a
+        # fresh timeout after the caller's absolute deadline.
+        _close_repository_worker_streams(worker)
+        reaped.set()
+    else:
+        threading.Thread(
+            target=_eventually_reap_process,
+            args=(worker, reaped),
+            name="kettle-provenance-reaper",
+            daemon=True,
+        ).start()
+    return errors, reaped
+
+
+def _run_repository_worker(argv: List[str], timeout_s: float) -> Tuple[int, str, str]:
+    """Launch, contain, handshake, and bound one provenance worker tree."""
+    deadline = time.monotonic() + timeout_s
+    launched: "queue.Queue[Tuple[Optional[subprocess.Popen], Optional[WindowsKillJob], Optional[BaseException]]]" = queue.Queue(maxsize=1)
+    abandoned = threading.Event()
+    accepted = threading.Event()
+
+    def launch() -> None:
+        worker: Optional[subprocess.Popen] = None
+        job: Optional[WindowsKillJob] = None
+        try:
+            if os.name == "nt":
+                job = WindowsKillJob()
+            worker = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                start_new_session=os.name != "nt",
+            )
+            if job is not None:
+                # The worker blocks on stdin until assignment succeeds, so it
+                # cannot create Git/timeout-probe descendants outside the job.
+                job.assign(worker)
+            launched.put((worker, job, None))
+            while not accepted.wait(0.01):
+                if abandoned.is_set():
+                    _stop_repository_worker(worker, job)
+                    return
+        except BaseException as error:
+            if worker is not None:
+                _stop_repository_worker(worker, job)
+            elif job is not None:
+                with contextlib.suppress(BaseException):
+                    job.close()
+            launched.put((None, None, error))
+
+    threading.Thread(
+        target=launch,
+        name="kettle-provenance-launcher",
+        daemon=True,
+    ).start()
+    try:
+        worker, job, launch_error = launched.get(
+            timeout=max(0.0, deadline - time.monotonic())
+        )
+    except queue.Empty as error:
+        abandoned.set()
+        raise RuntimeError(
+            "repository provenance exceeded its hard time limit during launch"
+        ) from error
+    accepted.set()
+    if launch_error is not None:
+        raise RuntimeError(
+            f"repository provenance worker could not start: {launch_error}"
+        ) from launch_error
+    assert worker is not None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        abandoned.set()
+        cleanup_errors, reaped = _stop_repository_worker(worker, job)
+        detail = (
+            ": " + "; ".join(str(error) for error in cleanup_errors)
+            if cleanup_errors
+            else ""
+        )
+        raise RepositoryWorkerTimeout(
+            "repository provenance exceeded its hard time limit during launch"
+            + detail,
+            reaped,
+        )
+    try:
+        stdout, stderr = worker.communicate(input="1", timeout=remaining)
+    except subprocess.TimeoutExpired as error:
+        cleanup_errors, reaped = _stop_repository_worker(worker, job)
+        detail = (
+            ": " + "; ".join(str(item) for item in cleanup_errors)
+            if cleanup_errors
+            else ""
+        )
+        raise RepositoryWorkerTimeout(
+            "repository provenance exceeded its hard time limit" + detail,
+            reaped,
+        ) from error
+    except BaseException as error:
+        cleanup_errors, _reaped = _stop_repository_worker(worker, job)
+        detail = (
+            ": " + "; ".join(str(item) for item in cleanup_errors)
+            if cleanup_errors
+            else ""
+        )
+        raise RuntimeError(
+            f"repository provenance worker communication failed: {error}{detail}"
+        ) from error
+    assert worker.returncode is not None
+    # A Git operation may have launched a helper which outlives the worker.
+    # User-configured fsmonitor processes are disabled at launch. Closing the
+    # Windows Job kills the remaining tree; on Unix, kill the private process
+    # group after every completed result, including nonzero results. POSIX
+    # cannot contain a deliberately detached `setsid` descendant, so this is a
+    # cleanup boundary for ordinary inherited-group helpers, not a sandbox.
+    cleanup_errors, reaped = _stop_repository_worker(worker, job)
+    if cleanup_errors:
+        raise RuntimeError(
+            "repository provenance worker cleanup failed: "
+            + "; ".join(str(item) for item in cleanup_errors)
+        )
+    if not reaped.is_set():
+        raise RuntimeError("completed repository provenance worker was not reaped")
+    return worker.returncode, stdout, stderr
+
+
+def _internal_repository_worker_argv(
+    worker_arg: str, *arguments: object
+) -> List[str]:
+    """Start an internal worker without importing user-controlled Python code.
+
+    Windows cannot assign a process to a Job Object until after process
+    creation.  ``-I -S`` closes the only Python-level pre-assignment execution
+    paths: environment/user-site configuration, ``sitecustomize``, and ``.pth``
+    files.  The worker then blocks on the explicit stdin handshake before it
+    can launch Git or a timeout-probe descendant.
+    """
+    return [
+        sys.executable,
+        "-I",
+        "-S",
+        str(Path(__file__).resolve()),
+        worker_arg,
+        *(str(argument) for argument in arguments),
+    ]
+
+
+def isolated_python_shebang() -> str:
+    """Shebang for an internal script with no user Python startup hooks."""
+    interpreter = shlex.join([str(Path(sys.executable).resolve()), "-I", "-S"])
+    return f"#!/usr/bin/env -S {interpreter}"
+
+
+def repository_source_identity(
+    repository: Path, budget: Optional[RepositoryProvenanceBudget] = None
+) -> Dict[str, object]:
+    """Fingerprint source and status under one contained absolute deadline."""
+    active_budget = budget or RepositoryProvenanceBudget()
+    limits = {
+        "max_entries": active_budget.max_entries,
+        "max_scan_entries": active_budget.max_scan_entries,
+        "max_bytes": active_budget.max_bytes,
+        "max_file_bytes": active_budget.max_file_bytes,
+        "timeout_s": active_budget.timeout_s,
+    }
+    returncode, stdout, stderr = _run_repository_worker(
+        _internal_repository_worker_argv(
+            PROVENANCE_WORKER_ARG,
+            repository,
+            json.dumps(limits, separators=(",", ":")),
+        ),
+        active_budget.remaining(),
+    )
+    # The first stderr line carries the worker's typed error. A successful,
+    # fully typed identity is the only zero-status output accepted below.
+    if returncode != 0:
+        raise RuntimeError(
+            "repository provenance worker failed: " + stderr.strip()[-4000:]
+        )
+    try:
+        identity = json.loads(stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "repository provenance worker returned invalid JSON: "
+            f"{stdout.strip()!r}"
+        ) from error
+    if not isinstance(identity, dict):
+        raise RuntimeError("repository provenance worker returned a non-object")
+    expected = {
+        "source_state_sha256": str,
+        "git_dirty": bool,
+        "git_status_sha256": str,
+        "git_status_entries": int,
+    }
+    for field_name, field_type in expected.items():
+        if not isinstance(identity.get(field_name), field_type):
+            raise RuntimeError(
+                f"repository provenance worker returned an invalid {field_name}"
+            )
+    for digest_field in ("source_state_sha256", "git_status_sha256"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(identity[digest_field])) is None:
+            raise RuntimeError(
+                "repository provenance worker returned an invalid "
+                f"{digest_field}: {identity[digest_field]!r}"
+            )
+    if int(identity["git_status_entries"]) < 0:
+        raise RuntimeError(
+            "repository provenance worker returned a negative status entry count"
+        )
+    return identity
+
+
+def repository_source_sha256(
+    repository: Path, budget: Optional[RepositoryProvenanceBudget] = None
+) -> str:
+    """Return the bounded source digest from the contained identity worker."""
+    return str(repository_source_identity(repository, budget)["source_state_sha256"])
+
+
+def _regular_file_digest(
+    path: Path, budget: SnapshotCopyBudget, *, count_entry: bool = True
+) -> Tuple[int, str]:
+    """Hash one stable regular file without following a link at the leaf."""
+    before = path.lstat()
+    if path_is_link(path) or not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"identity only accepts a regular file: {path}")
+    if count_entry:
+        budget.add_entry(path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    digest = hashlib.sha256()
+    read_bytes = 0
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"identity opened a non-regular file: {path}")
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError(f"identity path changed while opening: {path}")
+        budget.add_file(path, opened.st_size)
+        while chunk := os.read(fd, COPY_CHUNK_BYTES):
+            read_bytes += len(chunk)
+            if read_bytes > opened.st_size:
+                raise RuntimeError(f"identity file grew while hashing: {path}")
+            digest.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if read_bytes != opened.st_size or any(
+        getattr(opened, field) != getattr(after, field) for field in stable_fields
+    ):
+        raise RuntimeError(f"identity file changed while hashing: {path}")
+    return read_bytes, digest.hexdigest()
+
+
+def _regular_file_digest_at(
+    parent_fd: int,
+    name: str,
+    display_path: Path,
+    before: os.stat_result,
+    budget: SnapshotCopyBudget,
+) -> Tuple[int, str]:
+    """Hash a file relative to a retained parent directory descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=parent_fd)
+    digest = hashlib.sha256()
+    read_bytes = 0
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"identity opened a non-regular file: {display_path}")
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError(f"identity path changed while opening: {display_path}")
+        budget.add_file(display_path, opened.st_size)
+        while chunk := os.read(fd, COPY_CHUNK_BYTES):
+            read_bytes += len(chunk)
+            if read_bytes > opened.st_size:
+                raise RuntimeError(f"identity file grew while hashing: {display_path}")
+            digest.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if read_bytes != opened.st_size or any(
+        getattr(opened, field) != getattr(after, field) for field in fields
+    ):
+        raise RuntimeError(f"identity file changed while hashing: {display_path}")
+    return read_bytes, digest.hexdigest()
+
+
+def regular_file_identity(path: Path) -> Dict[str, object]:
+    """Identify exact executable bytes under the snapshot's regular-file limits."""
+    resolved = path.resolve(strict=True)
+    size, digest = _regular_file_digest(resolved, SnapshotCopyBudget())
+    return {
+        "path": str(resolved),
+        "bytes": size,
+        "sha256": digest,
+    }
+
+
+def read_bounded_regular_text(path: Path, *, max_bytes: int = 4096) -> str:
+    """Read a small stable regular file without following its final component."""
+    before = path.lstat()
+    if (
+        path_is_link(path)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > max_bytes
+    ):
+        raise RuntimeError(f"expected a small regular identity record: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev,
+            opened.st_ino,
+        ) != (before.st_dev, before.st_ino):
+            raise RuntimeError(f"identity record changed while opening: {path}")
+        data = os.read(fd, max_bytes + 1)
+        if len(data) > max_bytes or os.read(fd, 1):
+            raise RuntimeError(f"identity record exceeds {max_bytes} bytes: {path}")
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(opened, field) != getattr(after, field) for field in fields):
+        raise RuntimeError(f"identity record changed while reading: {path}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError(f"identity record is not UTF-8: {path}") from error
+
+
+def _bounded_sorted_directory_entries(
+    directory: Path,
+    budget: SnapshotCopyBudget,
+    scan_factory: Optional[Callable[[Path], object]] = None,
+) -> List[os.DirEntry]:
+    """Retain no more directory entries than the budget permits."""
+    entries: List[os.DirEntry] = []
+    scanner = scan_factory or os.scandir
+    with scanner(directory) as scanned:  # type: ignore[attr-defined]
+        for entry in scanned:  # type: ignore[union-attr]
+            budget.add_entry(Path(entry.path))
+            entries.append(entry)
+    entries.sort(key=lambda entry: entry.name)
+    return entries
+
+
+def regular_tree_identity(
+    root: Path, budget: Optional[SnapshotCopyBudget] = None
+) -> Dict[str, object]:
+    """Hash a bounded regular tree without following links or special files."""
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        return {"path": str(root), "present": False}
+    if path_is_link(root) or not stat.S_ISDIR(root_stat.st_mode):
+        raise RuntimeError(f"identity root is not a plain directory: {root}")
+
+    active_budget = budget or SnapshotCopyBudget()
+    active_budget.add_entry(root)
+    digest = hashlib.sha256()
+    files = 0
+
+    def record_entry(kind: bytes, relative_path: Path, content: bytes = b"") -> None:
+        relative = relative_path.as_posix().encode("utf-8")
+        digest.update(kind)
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(content)
+
+    def walk_by_path(directory: Path, relative_dir: Path, depth: int) -> None:
+        nonlocal files
+        if depth > active_budget.max_depth:
+            raise RuntimeError(
+                f"Neovim snapshot exceeds the {active_budget.max_depth} "
+                f"depth limit at {directory}"
+            )
+        before = directory.lstat()
+        if path_is_link(directory) or not stat.S_ISDIR(before.st_mode):
+            raise RuntimeError(f"identity encountered a linked directory: {directory}")
+        # Count before retaining. A single enormous directory can hold at most
+        # the remaining permitted entries in memory, rather than being fully
+        # materialized before the limit is checked.
+        entries = _bounded_sorted_directory_entries(directory, active_budget)
+        for entry in entries:
+            path = Path(entry.path)
+            relative_path = relative_dir / entry.name
+            entry_stat = entry.stat(follow_symlinks=False)
+            if path_is_link(path):
+                raise RuntimeError(f"identity rejects a symlink or junction: {path}")
+            if stat.S_ISDIR(entry_stat.st_mode):
+                record_entry(b"d", relative_path)
+                walk_by_path(path, relative_path, depth + 1)
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise RuntimeError(f"identity rejects a non-regular entry: {path}")
+            file_size, file_digest = _regular_file_digest(
+                path, active_budget, count_entry=False
+            )
+            record_entry(b"f", relative_path, bytes.fromhex(file_digest))
+            files += 1
+        after = directory.lstat()
+        fields = ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in fields):
+            raise RuntimeError(f"identity directory changed while hashing: {directory}")
+
+    def walk_by_fd(
+        directory_fd: int, directory: Path, relative_dir: Path, depth: int
+    ) -> None:
+        nonlocal files
+        if depth > active_budget.max_depth:
+            raise RuntimeError(
+                f"Neovim snapshot exceeds the {active_budget.max_depth} "
+                f"depth limit at {directory}"
+            )
+        before = os.fstat(directory_fd)
+        entries: List[os.DirEntry] = []
+        with os.scandir(directory_fd) as scanned:
+            for entry in scanned:
+                active_budget.add_entry(directory / entry.name)
+                entries.append(entry)
+        entries.sort(key=lambda entry: entry.name)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        for entry in entries:
+            display_path = directory / entry.name
+            relative_path = relative_dir / entry.name
+            entry_stat = entry.stat(follow_symlinks=False)
+            if stat.S_ISLNK(entry_stat.st_mode):
+                raise RuntimeError(
+                    f"identity rejects a symlink or junction: {display_path}"
+                )
+            if stat.S_ISDIR(entry_stat.st_mode):
+                child_fd = os.open(
+                    entry.name, directory_flags, dir_fd=directory_fd
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if (opened.st_dev, opened.st_ino) != (
+                        entry_stat.st_dev,
+                        entry_stat.st_ino,
+                    ):
+                        raise RuntimeError(
+                            f"identity directory changed while opening: {display_path}"
+                        )
+                    record_entry(b"d", relative_path)
+                    walk_by_fd(child_fd, display_path, relative_path, depth + 1)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(entry_stat.st_mode):
+                raise RuntimeError(
+                    f"identity rejects a non-regular entry: {display_path}"
+                )
+            _file_size, file_digest = _regular_file_digest_at(
+                directory_fd,
+                entry.name,
+                display_path,
+                entry_stat,
+                active_budget,
+            )
+            record_entry(b"f", relative_path, bytes.fromhex(file_digest))
+            files += 1
+        after = os.fstat(directory_fd)
+        fields = ("st_dev", "st_ino", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in fields):
+            raise RuntimeError(f"identity directory changed while hashing: {directory}")
+
+    if os.name == "nt":
+        # Windows has no Python dir_fd/openat surface. Snapshot roots are still
+        # reparse-checked at every level; native Windows process containment is
+        # provided by the retained kill-on-close Job. Unix uses the stronger
+        # descriptor-relative walk below because detached daemons can escape a
+        # process group there.
+        walk_by_path(root, Path(), 0)
+    else:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(root, directory_flags)
+        try:
+            opened_root = os.fstat(root_fd)
+            if (opened_root.st_dev, opened_root.st_ino) != (
+                root_stat.st_dev,
+                root_stat.st_ino,
+            ):
+                raise RuntimeError(f"identity root changed while opening: {root}")
+            walk_by_fd(root_fd, root, Path(), 0)
+        finally:
+            os.close(root_fd)
+    return {
+        "path": str(root),
+        "present": True,
+        "files": files,
+        "bytes": active_budget.bytes,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def agent_tui_provenance(
+    kettle: str, shell_target: "AgentShellTarget"
+) -> Dict[str, object]:
+    """Record enough identity to tie ignored live artifacts to one build."""
+    executable = Path(kettle)
+    if not executable.is_file():
+        resolved = shutil.which(kettle)
+        if resolved is None:
+            raise RuntimeError(
+                f"cannot resolve kettle executable for provenance: {kettle}"
+            )
+        executable = Path(resolved)
+    executable = executable.resolve()
+    version = run([str(executable), "--version"], timeout=10)
+    script = Path(__file__).resolve()
+    repository = script.parent.parent
+    commit = run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], timeout=10
+    )
+    repository_identity = repository_source_identity(repository)
+    nvim_status, nvim_path = shell_target.command_resolution("nvim")
+    nvim_version = (
+        shell_target.run_command(["nvim", "--version"], timeout=15)
+        if nvim_status == "available"
+        else None
+    )
+    nvim_file = (
+        shell_target.nvim_file_identity(nvim_path)
+        if nvim_status == "available" and nvim_path is not None
+        else None
+    )
+    return {
+        "executable": str(executable),
+        "executable_sha256": sha256_file(executable),
+        "version": version.stdout.strip() if version.returncode == 0 else None,
+        "version_stderr": (
+            version.stderr.strip() if version.returncode != 0 else None
+        ),
+        "harness": str(script),
+        "harness_sha256": sha256_file(script),
+        "git_commit": commit.stdout.strip() if commit.returncode == 0 else None,
+        "git_dirty": repository_identity["git_dirty"],
+        "git_status_sha256": repository_identity["git_status_sha256"],
+        "git_status_entries": repository_identity["git_status_entries"],
+        "source_state_sha256": repository_identity["source_state_sha256"],
+        "target": {
+            "mode": shell_target.mode,
+            "wsl_distro": shell_target.wsl_distro,
+            "nvim_path": nvim_path,
+            "nvim_file": nvim_file,
+            "nvim_version": (
+                nvim_version.stdout.splitlines()[0]
+                if nvim_version is not None
+                and nvim_version.returncode == 0
+                and nvim_version.stdout.splitlines()
+                else None
+            ),
+            "nvim_config_source": shell_target.nvim_config_source(),
+            "nvim_data_source": shell_target.nvim_data_source(),
+        },
+    }
 
 
 def require_cmd(cmd: str) -> None:
@@ -945,6 +3447,12 @@ class AgentShellTarget:
         # feed it `export`, shell functions, and POSIX loops.
         return ["-e", "bash", "--noprofile", "--norc"]
 
+    def target_join(self, base: str, *parts: str) -> str:
+        """Join paths using the target shell, not the Python host, syntax."""
+        if self.powershell:
+            return str(Path(base).joinpath(*parts))
+        return posixpath.join(base, *parts)
+
     def host_argv(self, argv: List[str]) -> List[str]:
         if self.mode == "wsl":
             return [*self.wsl_base_argv(), "--exec", *argv]
@@ -1188,6 +3696,7 @@ class AgentShellTarget:
     def create_nvim_sandbox_host(self) -> str:
         """Create an unpredictable owner-private sandbox on the target host."""
         if self.mode == "wsl":
+            self.require_wsl_pidfd_cleanup()
             cp = run(
                 self.host_argv(
                     [
@@ -1560,6 +4069,297 @@ class AgentShellTarget:
 
         self.assert_snapshot_has_no_links(root)
 
+    def nvim_snapshot_identity(self, sandbox_path: str) -> Dict[str, object]:
+        """Identify the LazyVCS files the configured Neovim probe will load."""
+        if self.mode != "wsl":
+            root = self.validate_native_sandbox_path(sandbox_path)
+            return regular_tree_identity(
+                root / "data" / "nvim" / "lazy" / "lazyvcs.nvim"
+            )
+        self.validate_wsl_sandbox_path(sandbox_path)
+        plugin = posixpath.join(
+            sandbox_path, "data", "nvim", "lazy", "lazyvcs.nvim"
+        )
+        result = self.run_command(
+            ["python3", "-c", self.bounded_identity_code(), "tree", plugin],
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"could not identify WSL LazyVCS snapshot: {result.stderr}"
+            )
+        return json.loads(result.stdout)
+
+    def nvim_file_identity(self, path: str) -> Dict[str, object]:
+        """Identify the exact target-side Neovim executable bytes."""
+        if self.mode != "wsl":
+            return regular_file_identity(Path(path))
+        result = self.run_command(
+            ["python3", "-c", self.bounded_identity_code(), "file", path],
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"could not identify WSL Neovim executable: {result.stderr}"
+            )
+        return json.loads(result.stdout)
+
+    def lazyvcs_loaded_source_identity(
+        self, sandbox_path: str
+    ) -> Dict[str, object]:
+        """Prove LazyVCS loaded a module from the copied plugin snapshot."""
+        if self.mode != "wsl":
+            root = self.validate_native_sandbox_path(sandbox_path)
+            plugin_root = (
+                root / "data" / "nvim" / "lazy" / "lazyvcs.nvim"
+            ).resolve(strict=True)
+            record = root / "run" / "lazyvcs-loaded-source"
+            lines = read_bounded_regular_text(record).splitlines()
+            if len(lines) != 1 or not lines[0]:
+                raise RuntimeError(f"invalid LazyVCS module record: {record}")
+            source = Path(lines[0]).resolve(strict=True)
+            try:
+                relative = source.relative_to(plugin_root)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"LazyVCS loaded outside its snapshot: {source}"
+                ) from error
+            return {
+                "plugin_root": str(plugin_root),
+                "module_source": str(source),
+                "module_relative": relative.as_posix(),
+                "module_file": regular_file_identity(source),
+            }
+
+        self.validate_wsl_sandbox_path(sandbox_path)
+        code = """\
+import json,os,stat,sys
+root=sys.argv[1]
+record=os.path.join(root,'run','lazyvcs-loaded-source')
+before=os.lstat(record)
+if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid LazyVCS module record')
+fd=os.open(record,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+try:
+  opened=os.fstat(fd)
+  if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('LazyVCS module record changed while opening')
+  data=os.read(fd,4097)
+  if len(data)>4096 or os.read(fd,1): raise RuntimeError('LazyVCS module record is too large')
+  after=os.fstat(fd)
+finally: os.close(fd)
+stable=('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
+if any(getattr(opened,x)!=getattr(after,x) for x in stable): raise RuntimeError('LazyVCS module record changed while reading')
+lines=data.decode().splitlines()
+if len(lines)!=1 or not lines[0]: raise RuntimeError('invalid LazyVCS module record contents')
+plugin=os.path.realpath(os.path.join(root,'data','nvim','lazy','lazyvcs.nvim'))
+source=os.path.realpath(lines[0])
+if os.path.commonpath((plugin,source))!=plugin or source==plugin: raise RuntimeError(f'LazyVCS loaded outside its snapshot: {source}')
+print(json.dumps({'plugin_root':plugin,'module_source':source,'module_relative':os.path.relpath(source,plugin).replace(os.sep,'/')}))
+"""
+        located = self.run_command(
+            ["python3", "-c", code, sandbox_path], timeout=30
+        )
+        if located.returncode != 0:
+            raise RuntimeError(
+                f"could not validate the loaded WSL LazyVCS module: {located.stderr}"
+            )
+        result = json.loads(located.stdout)
+        result["module_file"] = self.nvim_file_identity(
+            str(result["module_source"])
+        )
+        return result
+
+    @staticmethod
+    def sandbox_marker_wait_code() -> str:
+        """Target-side stable-file wait used by the WSL Neovim probe."""
+        return """\
+import os,stat,sys,time
+root,name,expected,timeout=sys.argv[1:5]
+path=os.path.join(root,'run',name)
+deadline=time.monotonic()+float(timeout)
+while time.monotonic()<deadline:
+  try: before=os.lstat(path)
+  except FileNotFoundError:
+    time.sleep(0.05); continue
+  if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode) or before.st_size>4096: raise RuntimeError('invalid sandbox marker')
+  fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+  try:
+    opened=os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError('sandbox marker changed while opening')
+    data=os.read(fd,4097)
+    if len(data)>4096 or os.read(fd,1): raise RuntimeError('sandbox marker is too large')
+    after=os.fstat(fd)
+  finally: os.close(fd)
+  stable=('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
+  if any(getattr(opened,x)!=getattr(after,x) for x in stable): raise RuntimeError('sandbox marker changed while reading')
+  if data.decode('utf-8')!=expected+'\\n': raise RuntimeError('unexpected sandbox marker contents')
+  print('SANDBOX_MARKER_OK'); raise SystemExit(0)
+raise RuntimeError('timed out waiting for sandbox marker')
+"""
+
+    def wait_for_nvim_sandbox_marker(
+        self,
+        sandbox_path: str,
+        name: str,
+        expected: str,
+        *,
+        timeout_s: float = 10.0,
+    ) -> None:
+        """Wait for an exact regular marker without following runtime links."""
+        if re.fullmatch(r"[a-z0-9-]+", name) is None:
+            raise ValueError(f"invalid Neovim sandbox marker name: {name!r}")
+        if re.fullmatch(r"[A-Z0-9_]+", expected) is None:
+            raise ValueError("invalid Neovim sandbox marker contents")
+        if self.mode == "wsl":
+            self.validate_wsl_sandbox_path(sandbox_path)
+            waited = self.run_command(
+                [
+                    "python3",
+                    "-I",
+                    "-S",
+                    "-c",
+                    self.sandbox_marker_wait_code(),
+                    sandbox_path,
+                    name,
+                    expected,
+                    str(timeout_s),
+                ],
+                timeout=timeout_s + 5.0,
+            )
+            if waited.returncode != 0 or waited.stdout.strip() != "SANDBOX_MARKER_OK":
+                raise RuntimeError(
+                    "configured Neovim readiness marker failed: "
+                    f"stdout={waited.stdout!r} stderr={waited.stderr!r}"
+                )
+            return
+
+        root = self.validate_native_sandbox_path(sandbox_path)
+        marker = root / "run" / name
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                value = read_bounded_regular_text(marker)
+            except FileNotFoundError:
+                time.sleep(0.05)
+                continue
+            if value != expected + os.linesep:
+                raise RuntimeError(
+                    f"unexpected configured Neovim readiness marker: {marker}"
+                )
+            return
+        raise RuntimeError(
+            f"timed out waiting for configured Neovim readiness marker: {marker}"
+        )
+
+    @staticmethod
+    def bounded_identity_code() -> str:
+        """Python run inside WSL for the same bounded, no-follow identity."""
+        return f"""\
+import hashlib,json,os,stat,sys
+kind,root=sys.argv[1:3]
+MAX_ENTRIES={NVIM_SNAPSHOT_MAX_ENTRIES}
+MAX_BYTES={NVIM_SNAPSHOT_MAX_BYTES}
+MAX_FILE={NVIM_SNAPSHOT_MAX_FILE_BYTES}
+MAX_DEPTH={NVIM_SNAPSHOT_MAX_DEPTH}
+entries=0
+total=0
+files=0
+tree_hash=hashlib.sha256()
+def record_entry(kind,relative,content=b''):
+  encoded=relative.replace(os.sep,'/').encode()
+  tree_hash.update(kind); tree_hash.update(len(encoded).to_bytes(8,'big')); tree_hash.update(encoded); tree_hash.update(content)
+def add_entry(path):
+  global entries
+  entries+=1
+  if entries>MAX_ENTRIES: raise RuntimeError(f'identity exceeds entry limit at {{path}}')
+def bounded_children(directory):
+  children=[]
+  with os.scandir(directory) as scan:
+    for entry in scan:
+      add_entry(entry.path); children.append(entry)
+  children.sort(key=lambda e:e.name)
+  return children
+def file_digest(path,count_entry=True):
+  global total
+  before=os.lstat(path)
+  if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode): raise RuntimeError(f'identity only accepts a regular file: {{path}}')
+  if count_entry: add_entry(path)
+  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)
+  fd=os.open(path,flags)
+  h=hashlib.sha256(); read_bytes=0
+  try:
+    opened=os.fstat(fd)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev,opened.st_ino)!=(before.st_dev,before.st_ino): raise RuntimeError(f'identity path changed while opening: {{path}}')
+    if opened.st_size<0 or opened.st_size>MAX_FILE: raise RuntimeError(f'identity file exceeds per-file limit: {{path}}')
+    if total+opened.st_size>MAX_BYTES: raise RuntimeError(f'identity exceeds aggregate byte limit at {{path}}')
+    total+=opened.st_size
+    while True:
+      chunk=os.read(fd,1048576)
+      if not chunk: break
+      read_bytes+=len(chunk)
+      if read_bytes>opened.st_size: raise RuntimeError(f'identity file grew while hashing: {{path}}')
+      h.update(chunk)
+    after=os.fstat(fd)
+  finally:
+    os.close(fd)
+  stable=('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns')
+  if read_bytes!=opened.st_size or any(getattr(opened,x)!=getattr(after,x) for x in stable): raise RuntimeError(f'identity file changed while hashing: {{path}}')
+  return read_bytes,h.digest(),h.hexdigest()
+def walk(directory,relative,depth):
+  global files
+  if depth>MAX_DEPTH: raise RuntimeError(f'identity exceeds depth limit at {{directory}}')
+  before=os.lstat(directory)
+  if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode): raise RuntimeError(f'identity encountered a linked directory: {{directory}}')
+  children=bounded_children(directory)
+  for entry in children:
+    path=entry.path; rel=os.path.join(relative,entry.name)
+    info=entry.stat(follow_symlinks=False)
+    if stat.S_ISLNK(info.st_mode): raise RuntimeError(f'identity rejects a symlink: {{path}}')
+    if stat.S_ISDIR(info.st_mode):
+      record_entry(b'd',rel)
+      walk(path,rel,depth+1)
+    elif stat.S_ISREG(info.st_mode):
+      size,digest,_=file_digest(path,False)
+      record_entry(b'f',rel,digest)
+      files+=1
+    else: raise RuntimeError(f'identity rejects a non-regular entry: {{path}}')
+  after=os.lstat(directory)
+  stable=('st_dev','st_ino','st_mtime_ns','st_ctime_ns')
+  if any(getattr(before,x)!=getattr(after,x) for x in stable): raise RuntimeError(f'identity directory changed while hashing: {{directory}}')
+if kind=='tree':
+  try: root_stat=os.lstat(root)
+  except FileNotFoundError:
+    print(json.dumps({{'path':root,'present':False}})); raise SystemExit(0)
+  if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode): raise RuntimeError(f'identity root is not a plain directory: {{root}}')
+  add_entry(root); walk(root,'',0)
+  result={{'path':root,'present':True,'files':files,'bytes':total,'sha256':tree_hash.hexdigest()}}
+elif kind=='file':
+  size,_raw,digest=file_digest(root)
+  result={{'path':root,'bytes':size,'sha256':digest}}
+elif kind=='entry-cap-probe':
+  class ProbeEntry:
+    path='probe-entry'
+    name='probe-entry'
+  class ProbeScan:
+    def __enter__(self): return self
+    def __exit__(self,*_args): return False
+    def __iter__(self): return self
+    def __next__(self):
+      if getattr(self,'seen',False): raise AssertionError('entry iterator consumed beyond cap')
+      self.seen=True; return ProbeEntry()
+  real_scandir=os.scandir
+  entries=MAX_ENTRIES
+  try:
+    os.scandir=lambda _path: ProbeScan()
+    bounded_children(root)
+  except RuntimeError as error:
+    if 'entry limit' not in str(error): raise
+    result={{'pre_materialization_cap':True}}
+  finally:
+    os.scandir=real_scandir
+else: raise RuntimeError(f'unknown identity kind: {{kind}}')
+print(json.dumps(result,sort_keys=True))
+"""
+
     def nvim_sandbox_setup_command(
         self, marker: str, *, sandbox_path: str
     ) -> str:
@@ -1582,6 +4382,8 @@ class AgentShellTarget:
                 "$env:XDG_STATE_HOME=Join-Path $KettleSmokeRoot 'state'; "
                 "$env:XDG_CACHE_HOME=Join-Path $KettleSmokeRoot 'cache'; "
                 "$env:XDG_RUNTIME_DIR=Join-Path $KettleSmokeRoot 'run'; "
+                "$env:KETTLE_SMOKE_ROOT=$KettleSmokeRoot; "
+                "$env:LANG='C'; $env:LC_ALL='C'; "
                 "Write-Output ("
                 f"{shell_quote(marker_left, windows=True)} + "
                 f"{shell_quote(marker_right, windows=True)})"
@@ -1640,7 +4442,8 @@ class AgentShellTarget:
             'XDG_DATA_HOME="$KETTLE_SMOKE_ROOT/data" '
             'XDG_STATE_HOME="$KETTLE_SMOKE_ROOT/state" '
             'XDG_CACHE_HOME="$KETTLE_SMOKE_ROOT/cache"; '
-            'export XDG_RUNTIME_DIR="$KETTLE_SMOKE_ROOT/run"; '
+            'export XDG_RUNTIME_DIR="$KETTLE_SMOKE_ROOT/run" '
+            'KETTLE_SMOKE_ROOT LANG=C LC_ALL=C; '
             "printf '%s%s\\n' "
             f"{shlex.quote(marker_left)} {shlex.quote(marker_right)}; "
         )
@@ -1661,20 +4464,22 @@ class AgentShellTarget:
             + "else unset KETTLE_SMOKE_SETUP_STATUS; false; fi"
         )
 
-    def nvim_sandbox_cleanup_command(self, marker: str) -> str:
+    def nvim_sandbox_release_command(self, marker: str) -> str:
+        """Mark pane work complete without deleting a still-live sandbox.
+
+        Host-side post-exit cleanup first drains exact-environment editor
+        daemons through identity-stable handles and only then removes the tree.
+        Deleting it from the pane would race a detached plugin helper that can
+        still hold or recreate paths beneath it.
+        """
         marker_left, marker_right = split_marker(marker)
         if self.powershell:
             return (
-                "if ($KettleSmokeRoot -and "
-                "(Test-Path -LiteralPath $KettleSmokeRoot -PathType Container)) { "
-                "Remove-Item -LiteralPath $KettleSmokeRoot -Recurse -Force; }; "
                 "Write-Output ("
                 f"{shell_quote(marker_left, windows=True)} + "
                 f"{shell_quote(marker_right, windows=True)})"
             )
         return (
-            'if [ -n "${KETTLE_SMOKE_ROOT:-}" ] && '
-            '[ -d "$KETTLE_SMOKE_ROOT" ]; then rm -rf -- "$KETTLE_SMOKE_ROOT"; fi; '
             "printf '%s%s\\n' "
             f"{shlex.quote(marker_left)} {shlex.quote(marker_right)}"
         )
@@ -1686,6 +4491,224 @@ class AgentShellTarget:
         ):
             raise ValueError(f"refusing unsafe WSL sandbox path: {sandbox_path}")
 
+    @staticmethod
+    def wsl_pidfd_cleanup_code() -> str:
+        """Python run inside WSL to drain exact-env processes by pidfd."""
+        return (
+            "import glob,os,select,signal,sys,time\n"
+            "root,scope=sys.argv[1:3]\n"
+            "needle=('XDG_CONFIG_HOME='+root+'/config').encode()\n"
+            "MAX_ENV=4*1024*1024\n"
+            "def alive(fd):\n"
+            "  poll=select.poll(); poll.register(fd,select.POLLIN); return not poll.poll(0)\n"
+            "def scan():\n"
+            "  targets=[]\n"
+            "  try:\n"
+            "    if scope=='pidfile':\n"
+            "      record=root+'/run/nvim.pid'\n"
+            "      try:\n"
+            "        flags=os.O_RDONLY|os.O_NONBLOCK|getattr(os,'O_NOFOLLOW',0)\n"
+            "        fd=os.open(record,flags)\n"
+            "        try:\n"
+            "          meta=os.fstat(fd)\n"
+            "          if not __import__('stat').S_ISREG(meta.st_mode) or meta.st_uid!=os.geteuid() or meta.st_nlink!=1 or meta.st_size>64: raise ValueError('unsafe pid record')\n"
+            "          raw=os.read(fd,65).strip()\n"
+            "        finally: os.close(fd)\n"
+            "        if not raw.isascii() or not raw.isdigit(): raise ValueError('invalid pid')\n"
+            "        pids=[int(raw)]\n"
+            "      except FileNotFoundError: pids=[]\n"
+            "    elif scope=='all':\n"
+            "      pids=[]\n"
+            "      for path in glob.glob('/proc/[0-9]*/environ'):\n"
+            "        try:\n"
+            "          if os.stat(os.path.dirname(path)).st_uid==os.geteuid(): pids.append(int(path.split('/')[2]))\n"
+            "        except FileNotFoundError: pass\n"
+            "    else: raise RuntimeError('unknown cleanup scope: '+scope)\n"
+            "    for pid in pids:\n"
+            "      envpath=f'/proc/{pid}/environ'; fd=None\n"
+            "      try:\n"
+            "        fd=os.pidfd_open(pid,0)\n"
+            "        if not alive(fd): continue\n"
+            "        with open(envpath,'rb') as stream: data=stream.read(MAX_ENV+1)\n"
+            "        if len(data)>MAX_ENV: raise RuntimeError(f'oversized environment for pid {pid}')\n"
+            "        if alive(fd) and needle in data.split(b'\\0'):\n"
+            "          targets.append((pid,fd)); fd=None\n"
+            "      except (FileNotFoundError,ProcessLookupError): pass\n"
+            "      finally:\n"
+            "        if fd is not None:\n"
+            "          try: os.close(fd)\n"
+            "          except OSError: pass\n"
+            "  except BaseException:\n"
+            "    for _pid,fd in targets:\n"
+            "      try: os.close(fd)\n"
+            "      except OSError: pass\n"
+            "    raise\n"
+            "  return targets\n"
+            "overall=time.monotonic()+8.0; quiet=None\n"
+            "while time.monotonic()<overall:\n"
+            "  targets=scan()\n"
+            "  if not targets:\n"
+            "    if quiet is None: quiet=time.monotonic()\n"
+            "    if time.monotonic()-quiet>=0.3: raise SystemExit(0)\n"
+            "    time.sleep(0.05); continue\n"
+            "  quiet=None\n"
+            "  errors=[]\n"
+            "  try:\n"
+            "    for pid,fd in targets:\n"
+            "      try: signal.pidfd_send_signal(fd,signal.SIGTERM)\n"
+            "      except ProcessLookupError: pass\n"
+            "      except BaseException as error: errors.append(f'TERM {pid}: {error}')\n"
+            "    term_deadline=time.monotonic()+0.5\n"
+            "    while time.monotonic()<term_deadline and any(alive(f) for _,f in targets): time.sleep(0.05)\n"
+            "    for pid,fd in targets:\n"
+            "      if alive(fd):\n"
+            "        try: signal.pidfd_send_signal(fd,signal.SIGKILL)\n"
+            "        except ProcessLookupError: pass\n"
+            "        except BaseException as error: errors.append(f'KILL {pid}: {error}')\n"
+            "  finally:\n"
+            "    for pid,fd in targets:\n"
+            "      try: os.close(fd)\n"
+            "      except BaseException as error: errors.append(f'close {pid}: {error}')\n"
+            "  if errors: raise RuntimeError('; '.join(errors))\n"
+            "raise SystemExit('sandbox process set did not quiesce')\n"
+        )
+
+    def require_wsl_pidfd_cleanup(self) -> None:
+        """Probe pidfd support and exercise decoy plus spawn-during-drain."""
+        if self.mode != "wsl":
+            return
+        probe = self.run_command(
+            [
+                "python3",
+                "-c",
+                (
+                    "import os,signal; "
+                    "assert hasattr(os,'pidfd_open'); "
+                    "assert hasattr(signal,'pidfd_send_signal'); "
+                    "fd=os.pidfd_open(os.getpid(),0); os.close(fd)"
+                ),
+            ],
+            timeout=15,
+        )
+        if probe.returncode != 0:
+            raise RuntimeError(
+                "selected WSL distro needs Python 3 with pidfd_open and "
+                f"pidfd_send_signal support: {probe.stderr.strip()}"
+            )
+        token = secrets.token_hex(8)
+        fixture = f"/tmp/kettle-pidfd-selftest-{token}"
+        decoy_root = f"{fixture}-decoy"
+        spawn_code = (
+            "import os,signal,subprocess,time\n"
+            "root=os.environ['KETTLE_PIDFD_ROOT']\n"
+            "def stop(_sig,_frame):\n"
+            "  child=subprocess.Popen(['/bin/sleep','60'],env=os.environ.copy())\n"
+            "  open(root+'/child','w').write(str(child.pid))\n"
+            "  raise SystemExit(0)\n"
+            "signal.signal(signal.SIGTERM,stop)\n"
+            "while True: time.sleep(1)\n"
+        )
+        # This program is passed through as a string literal in the assembled
+        # exercise below, so compiling only that outer program does not parse
+        # the child. Compile both generated programs on every host; ordinary CI
+        # then catches a broken WSL fixture before a Windows runner needs WSL.
+        compile(spawn_code, "<wsl-pidfd-spawn>", "exec")
+        exercise_code = f"""\
+import glob,os,select,shutil,signal,subprocess,sys,time
+root,decoy_root=sys.argv[1:3]
+cleanup_code={self.wsl_pidfd_cleanup_code()!r}
+spawn_code={spawn_code!r}
+os.mkdir(root,0o700)
+target_env=os.environ.copy(); target_env['XDG_CONFIG_HOME']=root+'/config'; target_env['KETTLE_PIDFD_ROOT']=root
+decoy_env=os.environ.copy(); decoy_env['XDG_CONFIG_HOME']=decoy_root+'/config'
+target=None; decoy=None; nondumpable=None; target_fd=None; decoy_fd=None; nondumpable_fd=None
+def alive(fd):
+  if fd is None: return False
+  poll=select.poll(); poll.register(fd,select.POLLIN); return not poll.poll(0)
+def exact_env_fds():
+  found=[]; needle=('XDG_CONFIG_HOME='+root+'/config').encode()
+  for envpath in glob.glob('/proc/[0-9]*/environ'):
+    fd=None
+    try:
+      pid=int(envpath.split('/')[2])
+      if os.stat(os.path.dirname(envpath)).st_uid!=os.geteuid(): continue
+      fd=os.pidfd_open(pid,0)
+      if not alive(fd): os.close(fd); continue
+      with open(envpath,'rb') as stream: data=stream.read(4*1024*1024+1)
+      if len(data)>4*1024*1024: raise RuntimeError('oversized fixture environment')
+      env=data.split(b'\\0')
+      if alive(fd) and needle in env: found.append(fd); fd=None
+    except (FileNotFoundError,ProcessLookupError): pass
+    finally:
+      if fd is not None: os.close(fd)
+  return found
+try:
+  target=subprocess.Popen([sys.executable,'-c',spawn_code],env=target_env)
+  target_fd=os.pidfd_open(target.pid,0)
+  decoy=subprocess.Popen(['/bin/sleep','60'],env=decoy_env)
+  decoy_fd=os.pidfd_open(decoy.pid,0)
+  time.sleep(0.1)
+  cleaned=subprocess.run([sys.executable,'-c',cleanup_code,root,'all'],capture_output=True,text=True,timeout=15)
+  if cleaned.returncode!=0: raise RuntimeError(f'cleanup failed: {{cleaned.stderr}}')
+  target.wait(timeout=3)
+  if alive(target_fd): raise RuntimeError('target pidfd stayed live after reap')
+  if not alive(decoy_fd): raise RuntimeError('decoy was killed')
+  if not os.path.isfile(root+'/child'): raise RuntimeError('TERM handler did not spawn its child')
+  remaining=exact_env_fds()
+  try:
+    if remaining: raise RuntimeError('exact-env descendant survived cleanup')
+  finally:
+    for fd in remaining: os.close(fd)
+  nondumpable_code="import ctypes,time; ctypes.CDLL(None).prctl(4,0,0,0,0); time.sleep(60)"
+  nondumpable=subprocess.Popen([sys.executable,'-c',nondumpable_code],env=target_env)
+  nondumpable_fd=os.pidfd_open(nondumpable.pid,0)
+  time.sleep(0.1)
+  refused=subprocess.run([sys.executable,'-c',cleanup_code,root,'all'],capture_output=True,text=True,timeout=15)
+  if refused.returncode==0: raise RuntimeError('unreadable same-user process was declared drained')
+  if not alive(nondumpable_fd): raise RuntimeError('unreadable process was signalled without an exact match')
+  if not os.path.isdir(root): raise RuntimeError('sandbox disappeared after a failed drain')
+finally:
+  cleanup_errors=[]
+  for name,process,fd in (('target',target,target_fd),('decoy',decoy,decoy_fd),('nondumpable',nondumpable,nondumpable_fd)):
+    try:
+      if process is not None and process.poll() is None:
+        if fd is not None:
+          try: signal.pidfd_send_signal(fd,signal.SIGKILL)
+          except ProcessLookupError: pass
+          except BaseException as error: cleanup_errors.append(f'{{name}} pidfd kill: {{error}}')
+        if process.poll() is None: process.kill()
+        process.wait(timeout=3)
+    except BaseException as error: cleanup_errors.append(f'{{name}} reap: {{error}}')
+    finally:
+      if fd is not None:
+        try: os.close(fd)
+        except BaseException as error: cleanup_errors.append(f'{{name}} close: {{error}}')
+
+  drained=False
+  try:
+    final_cleanup=subprocess.run([sys.executable,'-c',cleanup_code,root,'all'],capture_output=True,text=True,timeout=15)
+    if final_cleanup.returncode!=0: cleanup_errors.append('final drain: '+final_cleanup.stderr)
+    else: drained=True
+  except BaseException as error: cleanup_errors.append(f'final drain: {{error}}')
+  if drained:
+    try: shutil.rmtree(root)
+    except FileNotFoundError: pass
+    except BaseException as error: cleanup_errors.append(f'rmtree: {{error}}')
+  if cleanup_errors: raise RuntimeError('; '.join(cleanup_errors))
+"""
+        # Compile the exact assembled preflight, not only its component
+        # snippets. A tab in this f-string once made every Windows/WSL smoke
+        # fail before the capability fixture could start while host CI passed.
+        compile(exercise_code, "<wsl-pidfd-exercise>", "exec")
+        exercised = self.run_command(
+            ["python3", "-c", exercise_code, fixture, decoy_root], timeout=30
+        )
+        if exercised.returncode != 0:
+            raise RuntimeError(
+                "WSL pidfd cleanup failed its decoy/spawn-race self-test: "
+                f"stdout={exercised.stdout!r} stderr={exercised.stderr!r}"
+            )
+
     def terminate_nvim_sandbox_host(self, sandbox_path: str) -> None:
         """Terminate only Neovim processes using this WSL smoke sandbox."""
         if self.mode != "wsl":
@@ -1693,26 +4716,11 @@ class AgentShellTarget:
         self.validate_wsl_sandbox_path(sandbox_path)
         cp = self.run_command(
             [
-                "bash",
-                "--noprofile",
-                "--norc",
+                "python3",
                 "-c",
-                (
-                    'pids=""; '
-                    'for envfile in /proc/[0-9]*/environ; do '
-                    '[ -r "$envfile" ] || continue; '
-                    'pid=${envfile#/proc/}; pid=${pid%/environ}; '
-                    '[ "$(cat "/proc/$pid/comm" 2>/dev/null)" = nvim ] '
-                    '|| continue; '
-                    'if tr "\\0" "\\n" <"$envfile" 2>/dev/null '
-                    '| grep -Fqx "XDG_CONFIG_HOME=$1/config"; then '
-                    'pids="$pids $pid"; fi; done; '
-                    '[ -z "$pids" ] || kill -TERM $pids 2>/dev/null || true; '
-                    'sleep 1; '
-                    '[ -z "$pids" ] || kill -KILL $pids 2>/dev/null || true'
-                ),
-                "kettle-nvim-stop",
+                self.wsl_pidfd_cleanup_code(),
                 sandbox_path,
+                "pidfile",
             ],
             timeout=15,
         )
@@ -1721,84 +4729,1276 @@ class AgentShellTarget:
                 f"failed to stop WSL Neovim in {sandbox_path}: {cp.stderr}"
             )
 
-    def cleanup_nvim_sandbox_host(self, sandbox_path: str) -> None:
-        """Best-effort cleanup after Kettle exits, including failed smokes."""
+    def cleanup_nvim_sandbox_host(
+        self,
+        sandbox_path: str,
+        *,
+        windows_job: Optional[WindowsKillJob] = None,
+        linux_subreaper: Optional[LinuxSubreaperScope] = None,
+    ) -> None:
+        """Drain sandbox descendants, then remove the disposable tree."""
         if self.mode == "wsl":
             self.validate_wsl_sandbox_path(sandbox_path)
-            cp = self.run_command(
+            stopped = self.run_command(
+                [
+                    "python3",
+                    "-c",
+                    self.wsl_pidfd_cleanup_code(),
+                    sandbox_path,
+                    "all",
+                ],
+                timeout=15,
+            )
+            if stopped.returncode != 0:
+                raise RuntimeError(
+                    "failed to stop WSL Neovim sandbox "
+                    f"{sandbox_path}: {stopped.stderr}"
+                )
+            removed = self.run_command(
                 [
                     "bash",
                     "--noprofile",
                     "--norc",
                     "-c",
-                    (
-                        'pids=""; '
-                        'for envfile in /proc/[0-9]*/environ; do '
-                        '[ -r "$envfile" ] || continue; '
-                        'if tr "\\0" "\\n" <"$envfile" 2>/dev/null '
-                        '| grep -Fqx "XDG_CONFIG_HOME=$1/config"; then '
-                        'pid=${envfile#/proc/}; pid=${pid%/environ}; '
-                        'pids="$pids $pid"; fi; done; '
-                        'if [ -n "$pids" ]; then kill -TERM $pids 2>/dev/null || true; '
-                        'sleep 1; kill -KILL $pids 2>/dev/null || true; fi; '
-                        'for attempt in 1 2 3 4 5; do '
-                        'rm -rf -- "$1" 2>/dev/null || true; '
-                        '[ ! -e "$1" ] && exit 0; sleep 1; done; exit 1'
-                    ),
+                    'rm -rf -- "$1" && [ ! -e "$1" ]',
                     "kettle-cleanup",
                     sandbox_path,
                 ],
                 timeout=120,
             )
-            if cp.returncode != 0:
+            if removed.returncode != 0:
                 raise RuntimeError(
-                    f"failed to remove WSL Neovim sandbox {sandbox_path}: {cp.stderr}"
+                    "failed to remove WSL Neovim sandbox "
+                    f"{sandbox_path}: {removed.stderr}"
                 )
             return
 
         root = self.validate_native_sandbox_path(sandbox_path)
-        if not root.exists():
-            return
+        if os.name == "nt" and windows_job is None:
+            raise RuntimeError(
+                "native Windows Neovim cleanup requires its retained Job Object"
+            )
 
-        def make_tree_removable(directory: Path) -> None:
+        def make_windows_tree_removable(directory: Path) -> None:
             """Restore owner access without following runtime-created links."""
             directory.chmod(stat.S_IRWXU)
             with os.scandir(directory) as entries:
                 for entry in entries:
-                    if entry.is_symlink():
+                    entry_path = Path(entry.path)
+                    if entry.is_symlink() or self.path_is_link(entry_path):
+                        # Descendants have already drained and the sandbox root
+                        # is owner-private. Remove the link object itself; never
+                        # recurse into or chmod its target. Configured Neovim
+                        # legitimately creates links such as mason/bin tools at
+                        # runtime, so refusing them leaks the whole sandbox.
+                        if entry.is_symlink():
+                            entry_path.unlink()
+                        else:
+                            # Windows junctions carry the reparse bit but
+                            # DirEntry.is_symlink() is false. RemoveDirectoryW
+                            # (via rmdir) deletes the junction, not its target.
+                            entry_path.rmdir()
                         continue
                     entry_mode = entry.stat(follow_symlinks=False).st_mode
-                    entry_path = Path(entry.path)
                     if stat.S_ISDIR(entry_mode):
-                        make_tree_removable(entry_path)
+                        make_windows_tree_removable(entry_path)
                     else:
                         entry_path.chmod(stat.S_IWRITE | stat.S_IREAD)
 
-        last_error: Optional[OSError] = None
-        for _attempt in range(5):
-            root = self.validate_native_sandbox_path(sandbox_path)
-            if not root.exists():
-                return
+        def remove_tree() -> None:
+            nonlocal root
+            last_error: Optional[OSError] = None
+            for _attempt in range(5):
+                root = self.validate_native_sandbox_path(sandbox_path)
+                if not root.exists():
+                    return
+                try:
+                    if os.name == "nt":
+                        # The retained Job has reached zero active processes,
+                        # so no sandbox process can race these Windows path
+                        # operations. Reparse points are still removed as leaf
+                        # objects rather than followed.
+                        make_windows_tree_removable(root)
+                        shutil.rmtree(root)
+                    else:
+                        _remove_tree_by_fd(root)
+                    return
+                except OSError as error:
+                    last_error = error
+                    time.sleep(0.2)
+            raise RuntimeError(
+                f"failed to remove native Neovim sandbox {root}: {last_error}"
+            )
+
+        if os.name == "nt":
+            assert windows_job is not None
+            drain = lambda: _terminate_windows_job(windows_job)
+        else:
+            if windows_job is not None:
+                raise RuntimeError("a Windows Job Object was supplied on a Unix host")
+            drain = lambda: self.terminate_native_nvim_sandbox_processes(
+                root, linux_subreaper=linux_subreaper
+            )
+        _drain_then_remove(drain, remove_tree)
+
+    @staticmethod
+    def _darwin_process_environment(pid: int) -> Optional[Set[bytes]]:
+        """Read one process's real NUL-delimited environment with sysctl."""
+        import ctypes
+
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        library.sysctl.argtypes = [
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
+        library.sysctl.restype = ctypes.c_int
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+        size = ctypes.c_size_t()
+        if library.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            error = ctypes.get_errno()
+            if error in (getattr(os, "ESRCH", 3), getattr(os, "EINVAL", 22)):
+                return None
+            raise OSError(error, os.strerror(error), pid)
+        if size.value < ctypes.sizeof(ctypes.c_int) or size.value > 4 * 1024 * 1024:
+            raise RuntimeError(
+                f"invalid Darwin process-environment size for {pid}: {size.value}"
+            )
+        buffer = (ctypes.c_ubyte * size.value)()
+        if library.sysctl(mib, 3, buffer, ctypes.byref(size), None, 0) != 0:
+            error = ctypes.get_errno()
+            if error in (getattr(os, "ESRCH", 3), getattr(os, "EINVAL", 22)):
+                return None
+            raise OSError(error, os.strerror(error), pid)
+        data = bytes(buffer[: size.value])
+        argc = struct.unpack_from("=i", data)[0]
+        if argc < 0 or argc > 1_000_000:
+            raise RuntimeError(f"invalid Darwin process argc for {pid}: {argc}")
+        cursor = ctypes.sizeof(ctypes.c_int)
+
+        def skip_string(offset: int) -> int:
+            end = data.find(b"\0", offset)
+            if end < 0:
+                raise RuntimeError(f"truncated Darwin process arguments for {pid}")
+            return end + 1
+
+        cursor = skip_string(cursor)  # executable path
+        while cursor < len(data) and data[cursor] == 0:
+            cursor += 1
+        for _ in range(argc):
+            cursor = skip_string(cursor)
+        while cursor < len(data) and data[cursor] == 0:
+            cursor += 1
+        environment: Set[bytes] = set()
+        for value in data[cursor:].split(b"\0"):
+            if value:
+                environment.add(value)
+        return environment
+
+    @classmethod
+    def _native_process_environment(
+        cls,
+        pid: int,
+        *,
+        protected_candidates: Optional[Set[int]] = None,
+    ) -> Optional[Set[bytes]]:
+        """Read only the process environment, never argv rendered by ``ps``."""
+        if platform.system() == "Linux":
+            process = Path(f"/proc/{pid}")
             try:
-                make_tree_removable(root)
-                shutil.rmtree(root)
-                return
-            except OSError as error:
-                last_error = error
-                time.sleep(0.2)
+                if process.stat().st_uid != os.getuid():
+                    return set()
+                with (process / "environ").open("rb") as stream:
+                    data = stream.read(4 * 1024 * 1024 + 1)
+            except (FileNotFoundError, ProcessLookupError):
+                return None
+            except PermissionError as error:
+                # Exact environment membership is the only ownership proof for
+                # a daemon that deliberately escaped the PTY session. Linux's
+                # child-subreaper scope provides the second, independent
+                # relationship used by cleanup; this primitive still defaults
+                # to fail-closed when a caller has no such scope.
+                #
+                # Do not apply that uncertainty to every same-user process:
+                # hosted runners and desktop sessions contain unrelated
+                # nondumpable services, and one such service would otherwise
+                # disable every smoke before Neovim even starts. A readable
+                # exact-marker match is still found regardless of ancestry.
+                if (
+                    protected_candidates is not None
+                    and pid not in protected_candidates
+                ):
+                    return set()
+                raise RuntimeError(
+                    f"could not inspect same-user process environment {pid}"
+                ) from error
+            if len(data) > 4 * 1024 * 1024:
+                raise RuntimeError(f"oversized process environment for {pid}")
+            return {value for value in data.split(b"\0") if value}
+        if platform.system() == "Darwin":
+            return cls._darwin_process_environment(pid)
         raise RuntimeError(
-            f"failed to remove native Neovim sandbox {root}: {last_error}"
+            f"exact process-environment inspection is unsupported on {platform.system()}"
+        )
+
+    @staticmethod
+    def _native_process_snapshot(
+        *, deadline: Optional[float] = None
+    ) -> Tuple[Dict[int, int], Set[int]]:
+        timeout = (
+            remaining_before(deadline, "inventorying sandbox processes", cap=5)
+            if deadline is not None
+            else 5
+        )
+        result = run(["ps", "-axo", "pid=,ppid=,uid="], timeout=timeout)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"could not audit Neovim sandbox processes: {result.stderr}"
+            )
+        owner = os.getuid()
+        parents: Dict[int, int] = {}
+        owned: Set[int] = set()
+        for line in result.stdout.splitlines():
+            fields = line.strip().split()
+            if len(fields) != 3:
+                continue
+            try:
+                pid, parent, uid = map(int, fields)
+            except ValueError:
+                continue
+            if uid == owner:
+                parents[pid] = parent
+                owned.add(pid)
+        return parents, owned
+
+    @classmethod
+    def native_nvim_sandbox_processes(
+        cls,
+        root: Path,
+        *,
+        owned: Optional[Set[int]] = None,
+        deadline: Optional[float] = None,
+        retained_by_pid: Optional[Dict[int, StableProcessHandle]] = None,
+    ) -> Set[int]:
+        """Find same-user processes carrying both exact sandbox variables."""
+        if os.name == "nt":
+            return set()
+        if owned is None:
+            _parents, owned = cls._native_process_snapshot(deadline=deadline)
+        needles = {
+            os.fsencode(f"KETTLE_SMOKE_ROOT={root}"),
+            os.fsencode(f"XDG_CONFIG_HOME={root / 'config'}"),
+        }
+        matches: Set[int] = set()
+        for pid in owned:
+            if deadline is not None:
+                remaining_before(deadline, "inspecting sandbox environments", cap=5)
+            retained = (retained_by_pid or {}).get(pid)
+            if retained is not None and retained.matches_current():
+                # SIGSTOP can make Darwin's process-environment sysctl return
+                # EIO. This exact instance is already held and will be killed;
+                # only a reused numeric PID needs fresh environment proof.
+                continue
+            environment = cls._native_process_environment(
+                pid,
+                # Linux containment below proves unreadable descendants by
+                # parentage. Unrelated protected desktop/runner services are
+                # not ownership evidence and must not disable every smoke.
+                protected_candidates=set(),
+            )
+            if environment is not None and needles.issubset(environment):
+                matches.add(pid)
+        return matches
+
+    @classmethod
+    def native_nvim_sandbox_handles(
+        cls,
+        root: Path,
+        *,
+        owned: Optional[Set[int]] = None,
+        deadline: Optional[float] = None,
+        retained_by_pid: Optional[Dict[int, StableProcessHandle]] = None,
+    ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+        """Retain exact-env matches without carrying a numeric PID forward."""
+        handles: Dict[Tuple[int, ...], StableProcessHandle] = {}
+        needles = {
+            os.fsencode(f"KETTLE_SMOKE_ROOT={root}"),
+            os.fsencode(f"XDG_CONFIG_HOME={root / 'config'}"),
+        }
+        for pid in cls.native_nvim_sandbox_processes(
+            root,
+            owned=owned,
+            deadline=deadline,
+            retained_by_pid=retained_by_pid,
+        ):
+            if deadline is not None:
+                remaining_before(deadline, "retaining sandbox processes", cap=5)
+            try:
+                handle = StableProcessHandle.open(pid)
+            except (OSError, RuntimeError) as error:
+                # A disappearing candidate is benign. A still-matching process
+                # for which no identity-stable handle could be acquired is not:
+                # treating it as absent would allow the quiet scan to remove a
+                # sandbox that process is still using.
+                environment = cls._native_process_environment(pid)
+                if environment is not None and needles.issubset(environment):
+                    close_errors = _close_stable_process_handles(handles)
+                    detail = (
+                        "; retained-handle close failures: "
+                        + "; ".join(str(item) for item in close_errors)
+                        if close_errors
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"could not retain matching sandbox process {pid}: {error}"
+                        + detail
+                    ) from error
+                continue
+            # Re-read the environment after acquiring the handle, then prove
+            # the PID still denotes that handle. This binds the match to the
+            # process instance signalled below, even across immediate PID reuse.
+            try:
+                environment = cls._native_process_environment(pid)
+                current_match = (
+                    environment is not None
+                    and needles.issubset(environment)
+                    and handle.matches_current()
+                )
+            except BaseException as error:
+                close_errors = _close_stable_process_handles(
+                    [handle, *handles.values()]
+                )
+                if close_errors:
+                    raise RuntimeError(
+                        f"{error}; stable-handle close failures: "
+                        + "; ".join(str(item) for item in close_errors)
+                    ) from error
+                raise
+            if not current_match:
+                close_errors = _close_stable_process_handles([handle])
+                if close_errors:
+                    raise RuntimeError(
+                        "could not close a stale sandbox process handle: "
+                        + "; ".join(str(item) for item in close_errors)
+                    )
+                continue
+            handles[handle.identity] = handle
+        return handles
+
+    @classmethod
+    def terminate_native_nvim_sandbox_processes(
+        cls,
+        root: Path,
+        *,
+        linux_subreaper: Optional[LinuxSubreaperScope] = None,
+    ) -> None:
+        """Freeze and drain escaped editor daemons before sandbox removal.
+
+        Exact environment matches cover Darwin and ordinary Linux daemons. On
+        Linux, a child-subreaper scope additionally turns every orphan escaped
+        from Kettle into a new direct child of this harness. Those roots are
+        retained by process-instance identity, stopped first, and repeatedly
+        walked until neither they nor an exact match can fork a missed child.
+        """
+        if platform.system() == "Linux" and linux_subreaper is None:
+            raise RuntimeError("Linux Neovim cleanup requires its subreaper scope")
+        deadline = time.monotonic() + 8.0
+        quiet_since: Optional[float] = None
+        last_observed: Set[int] = set()
+        while time.monotonic() < deadline:
+            retained: Dict[Tuple[int, ...], StableProcessHandle] = {}
+            # Every handle acquired in this pass transfers here before any
+            # signal or duplicate close. The finalizer therefore reaches the
+            # complete batch even when an identity check or signal fails.
+            owned_handles: List[StableProcessHandle] = []
+            freeze_error: Optional[BaseException] = None
+            try:
+                for _attempt in range(8):
+                    remaining_before(deadline, "draining sandbox processes", cap=8)
+                    parents, owned = cls._native_process_snapshot(deadline=deadline)
+                    scanned = cls.native_nvim_sandbox_handles(
+                        root,
+                        owned=owned,
+                        deadline=deadline,
+                        retained_by_pid={
+                            handle.pid: handle for handle in retained.values()
+                        },
+                    )
+                    owned_handles.extend(scanned.values())
+                    batches = [scanned]
+                    if linux_subreaper is not None:
+                        adopted = linux_subreaper.adopted_roots(
+                            parents, owned, deadline=deadline
+                        )
+                        owned_handles.extend(adopted.values())
+                        batches.append(adopted)
+
+                    added = 0
+                    new_handles: List[
+                        Tuple[Tuple[int, ...], StableProcessHandle]
+                    ] = []
+                    for batch in batches:
+                        for identity, handle in batch.items():
+                            if identity in retained:
+                                continue
+                            retained[identity] = handle
+                            added += 1
+                            new_handles.append((identity, handle))
+
+                    anchor_pids = {handle.pid for handle in retained.values()}
+                    children: Dict[int, List[int]] = {}
+                    for pid, parent in parents.items():
+                        children.setdefault(parent, []).append(pid)
+                    descendants: Set[int] = set()
+                    pending = list(anchor_pids)
+                    while pending:
+                        parent = pending.pop()
+                        for pid in children.get(parent, []):
+                            if pid not in descendants:
+                                descendants.add(pid)
+                                pending.append(pid)
+                    for pid in descendants:
+                        remaining_before(
+                            deadline, "retaining sandbox descendants", cap=8
+                        )
+                        handle = _open_stable_process_if_present(
+                            pid, "sandbox descendant"
+                        )
+                        if handle is None:
+                            continue
+                        owned_handles.append(handle)
+                        if not handle.matches_current():
+                            continue
+                        if platform.system() == "Linux":
+                            current_parent = _linux_process_parent(pid)
+                            if current_parent not in anchor_pids | descendants:
+                                continue
+                        if handle.identity not in retained:
+                            retained[handle.identity] = handle
+                            added += 1
+                            new_handles.append((handle.identity, handle))
+
+                    last_observed = {handle.pid for handle in retained.values()}
+                    # The complete exact/adopted/descendant batch is now owned.
+                    # A process that vanished through its stable handle stays in
+                    # that batch for one final close; any reparented child is a
+                    # new subreaper root on the next scan.
+                    for _identity, handle in new_handles:
+                        handle.signal(signal.SIGSTOP)
+                    all_stopped = all(
+                        (state := _process_state(handle, deadline=deadline)) is None
+                        or state.startswith(("T", "Z"))
+                        for handle in retained.values()
+                    )
+                    if not retained or (added == 0 and all_stopped):
+                        break
+                    time.sleep(
+                        min(
+                            0.02,
+                            remaining_before(
+                                deadline, "waiting for sandbox processes to stop", cap=0.02
+                            ),
+                        )
+                    )
+                else:
+                    raise RuntimeError("Neovim sandbox process tree did not quiesce")
+            except BaseException as error:
+                freeze_error = error
+
+            if not retained and freeze_error is None:
+                close_errors = _close_stable_process_handles(owned_handles)
+                if close_errors:
+                    raise RuntimeError(
+                        "native Neovim sandbox handle close failed: "
+                        + "; ".join(str(error) for error in close_errors)
+                    )
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                if time.monotonic() - quiet_since >= 0.3:
+                    return
+                time.sleep(
+                    min(
+                        0.05,
+                        remaining_before(
+                            deadline, "confirming an empty sandbox process tree", cap=0.05
+                        ),
+                    )
+                )
+                continue
+            quiet_since = None
+            errors: List[BaseException] = []
+            try:
+                # Never resume a stopped TERM handler: it could fork the exact
+                # late child this stable enumeration exists to prevent.
+                for handle in retained.values():
+                    try:
+                        handle.signal(signal.SIGKILL)
+                    except BaseException as error:
+                        errors.append(error)
+            finally:
+                for handle in owned_handles:
+                    try:
+                        handle.close()
+                    except BaseException as error:
+                        errors.append(error)
+            if freeze_error is not None:
+                errors.insert(0, freeze_error)
+            if errors:
+                raise RuntimeError(
+                    "native Neovim sandbox cleanup failed: "
+                    + "; ".join(str(error) for error in errors)
+                )
+        raise RuntimeError(
+            "Neovim sandbox processes did not quiesce within 8 seconds for "
+            f"{root}: last observed {sorted(last_observed)}"
         )
 
 
+def _create_owned_nvim_sandbox(
+    shell_target: AgentShellTarget,
+    register_cleanup: Callable[[Callable[[], None]], None],
+    job_factory: Callable[..., WindowsKillJob] = WindowsKillJob,
+) -> Tuple[str, Optional[WindowsKillJob]]:
+    """Acquire containment before creating a sandbox and immediately own both."""
+    windows_job: Optional[WindowsKillJob] = None
+    linux_subreaper: Optional[LinuxSubreaperScope] = None
+    if shell_target.powershell:
+        # Job construction is the containment precondition.  Creating the
+        # sandbox first stranded it whenever CreateJobObject/limit setup failed.
+        windows_job = job_factory(named=True)
+    elif shell_target.mode == "native" and platform.system() == "Linux":
+        # Acquire orphan adoption before Neovim or a configured plugin starts.
+        # The current direct-child baseline contains Kettle itself; anything
+        # newly adopted after Kettle exits is therefore still harness-owned.
+        linux_subreaper = LinuxSubreaperScope.acquire()
+    try:
+        sandbox_path = shell_target.create_nvim_sandbox_host()
+    except BaseException as error:
+        rollback_errors: List[BaseException] = []
+        if windows_job is not None:
+            try:
+                windows_job.close()
+            except BaseException as rollback_error:
+                rollback_errors.append(rollback_error)
+        if linux_subreaper is not None:
+            try:
+                linux_subreaper.close()
+            except BaseException as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            raise RuntimeError(
+                f"{error}; Neovim containment rollback failures: "
+                + "; ".join(str(item) for item in rollback_errors)
+            ) from error
+        raise
+
+    def cleanup(
+        path: str = sandbox_path,
+        job: Optional[WindowsKillJob] = windows_job,
+        subreaper: Optional[LinuxSubreaperScope] = linux_subreaper,
+    ) -> None:
+        try:
+            shell_target.cleanup_nvim_sandbox_host(
+                path,
+                windows_job=job,
+                linux_subreaper=subreaper,
+            )
+        finally:
+            if subreaper is not None:
+                subreaper.close()
+    try:
+        register_cleanup(cleanup)
+    except BaseException as error:
+        try:
+            cleanup()
+        except BaseException as cleanup_error:
+            raise RuntimeError(
+                "could not register Neovim sandbox cleanup and immediate "
+                f"cleanup also failed: {cleanup_error}"
+            ) from error
+        raise
+    return sandbox_path, windows_job
+
+
 class LiveKettle:
-    def __init__(self, kettle: str, cfg: Path, log: Path, extra_args: Optional[List[str]] = None):
+    def __init__(
+        self,
+        kettle: str,
+        cfg: Path,
+        log: Path,
+        extra_args: Optional[List[str]] = None,
+        extra_env: Optional[Dict[str, Optional[str]]] = None,
+    ):
         self.kettle = kettle
         self.cfg = cfg
         self.log = log
         self.extra_args = extra_args or []
+        self.extra_env = extra_env or {}
         self.proc: Optional[subprocess.Popen] = None
+        self._tracker_owner_pid: Optional[int] = None
         self._post_exit_cleanup: List[Callable[[], None]] = []
+        self._pty_sessions: Set[int] = set()
+        self._tracker_sessions: Dict[int, StableProcessHandle] = {}
+        self._pty_sessions_by_pane: Dict[int, int] = {}
+        self._pty_session_file: Optional[Path] = None
+        self._pty_session_fd: Optional[int] = None
+
+    def _close_pty_session_file(self) -> None:
+        fd, self._pty_session_fd = self._pty_session_fd, None
+        if fd is not None:
+            os.close(fd)
+
+    def _prepare_unix_pty_tracker(
+        self, argv: List[str]
+    ) -> Tuple[List[str], Optional[Dict[str, str]]]:
+        """Make the PTY child report its session before running its payload."""
+        if os.name == "nt":
+            return argv, None
+
+        env = os.environ.copy()
+        real_shell = env.get("SHELL") or "/bin/sh"
+        root = Path(tempfile.mkdtemp(prefix="kettle-live-ui-shell-"))
+        # Context-manager entry can fail after this point, before __enter__ has
+        # a chance to return.  Transfer ownership immediately so the startup
+        # failure path removes the directory even when chmod/write/chmod fails.
+        self.add_post_exit_cleanup(lambda path=root: shutil.rmtree(path))
+        root.chmod(0o700)
+        shell_name = Path(real_shell).name
+        if re.fullmatch(r"[A-Za-z0-9._+-]+", shell_name) is None:
+            shell_name = "sh"
+        # Keep the original basename so Kettle's shell-integration selection
+        # still recognizes zsh/bash/fish; only the path is a wrapper.
+        wrapper = root / shell_name
+        sessions = root / "sessions"
+        wrapper.write_text(
+            isolated_python_shebang()
+            + """
+import contextlib
+import os
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+os.umask(0o077)
+sessions = os.environ.pop("KETTLE_SMOKE_PTY_SESSIONS")
+real_shell = os.environ.pop("KETTLE_SMOKE_REAL_SHELL")
+reject_tcsetpgrp = os.environ.pop("KETTLE_SMOKE_TEST_REJECT_TCSETPGRP", None)
+os.environ["SHELL"] = real_shell
+
+flags = os.O_WRONLY | os.O_APPEND
+for name in ("O_CLOEXEC", "O_NOFOLLOW"):
+    flags |= getattr(os, name, 0)
+tracker_fd = os.open(sessions, flags)
+try:
+    metadata = os.fstat(tracker_fd)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_nlink != 1
+        or metadata.st_mode & 0o077
+    ):
+        raise RuntimeError("unsafe PTY session ownership record")
+    record = f"{os.getpid()}\\n".encode("ascii")
+    if os.write(tracker_fd, record) != len(record):
+        raise RuntimeError("short write to PTY session ownership record")
+finally:
+    os.close(tracker_fd)
+
+arguments = sys.argv[1:]
+if arguments and not arguments[0].startswith("-"):
+    target = arguments
+else:
+    target = [real_shell, *arguments]
+
+# portable-pty made this wrapper the session leader. Keep that exact process
+# alive after the payload shell exits so failure cleanup always retains a
+# stable session anchor. The child owns the foreground process group, preserving
+# ordinary shell job control and the basename-based integration decision Kettle
+# made before launching us.
+for name in ("SIGTTOU", "SIGTTIN", "SIGTSTP"):
+    if hasattr(signal, name):
+        signal.signal(getattr(signal, name), signal.SIG_IGN)
+handoff_read, handoff_write = os.pipe()
+child = os.fork()
+if child == 0:
+    os.close(handoff_write)
+    os.setpgid(0, 0)
+    # Do not let the payload touch the controlling terminal until the session
+    # leader has made this process group foreground.  Letting both processes
+    # race tcsetpgrp allowed the child, after restoring SIGTTOU, to stop itself
+    # forever as a background group.
+    while True:
+        try:
+            if os.read(handoff_read, 1) == b"1":
+                break
+            raise RuntimeError("PTY foreground handoff closed before completion")
+        except InterruptedError:
+            continue
+    os.close(handoff_read)
+    for name in ("SIGTTOU", "SIGTTIN", "SIGTSTP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), signal.SIG_DFL)
+    os.execvp(target[0], target)
+
+os.close(handoff_read)
+try:
+    os.setpgid(child, child)
+except (ChildProcessError, PermissionError) as error:
+    try:
+        if os.getpgid(child) != child:
+            raise error
+    except ProcessLookupError:
+        raise error
+
+# `isatty` only says fd 0 refers to a terminal device. A process started with
+# `setsid` can inherit such a descriptor without owning that terminal; in that
+# case `tcsetpgrp` fails with ENOTTY. Portable-pty normally gives this wrapper
+# a real controlling terminal, but treating an unowned tty like redirected
+# input keeps explicit-command and diagnostic launches usable without weakening
+# the synchronized handoff when job control actually exists.
+controls_stdin = False
+if os.isatty(0):
+    try:
+        os.tcgetpgrp(0)
+        controls_stdin = True
+    except OSError:
+        pass
+try:
+    if controls_stdin:
+        if reject_tcsetpgrp == "1":
+            raise OSError("intentional PTY foreground handoff failure")
+        os.tcsetpgrp(0, child)
+except BaseException:
+    try:
+        os.close(handoff_write)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child, signal.SIGKILL)
+        while True:
+            try:
+                os.waitpid(child, 0)
+                break
+            except InterruptedError:
+                continue
+    raise
+else:
+    try:
+        os.write(handoff_write, b"1")
+    finally:
+        os.close(handoff_write)
+while True:
+    try:
+        waited, status = os.waitpid(child, 0)
+        if waited == child:
+            break
+    except InterruptedError:
+        continue
+if controls_stdin:
+    try:
+        os.tcsetpgrp(0, os.getpgrp())
+    except OSError:
+        pass
+payload_signal = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
+payload_status = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+session = os.getsid(0)
+while True:
+    # Preserve ordinary shell/explicit-command completion. The wrapper remains
+    # only while a same-session background process still needs an identity-stable
+    # cleanup anchor, then returns the payload's real status.
+    members = subprocess.Popen(
+        ["ps", "-axo", "pid="],
+        text=True,
+        encoding="ascii",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    output, _ = members.communicate()
+    alive = members.returncode != 0
+    if members.returncode == 0:
+        for line in output.splitlines():
+            fields = line.split()
+            if len(fields) == 1:
+                try:
+                    candidate = int(fields[0])
+                    if candidate not in (os.getpid(), members.pid) and os.getsid(candidate) == session:
+                        alive = True
+                        break
+                except (ProcessLookupError, ValueError):
+                    continue
+    if not alive:
+        if payload_signal is not None:
+            try:
+                signal.signal(payload_signal, signal.SIG_DFL)
+            except (OSError, RuntimeError, ValueError):
+                pass
+            os.kill(os.getpid(), payload_signal)
+            os._exit(128 + payload_signal)
+        raise SystemExit(payload_status)
+    time.sleep(0.05)
+""",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        for name in ("O_CLOEXEC", "O_NOFOLLOW"):
+            flags |= getattr(os, name, 0)
+        self._pty_session_fd = os.open(sessions, flags, 0o600)
+        self.add_post_exit_cleanup(self._close_pty_session_file)
+        self._pty_session_file = sessions
+
+        if Path(real_shell).resolve() == wrapper.resolve():
+            real_shell = "/bin/sh"
+        env["KETTLE_SMOKE_PTY_SESSIONS"] = str(sessions)
+        env["KETTLE_SMOKE_REAL_SHELL"] = real_shell
+
+        tracked = list(argv)
+        try:
+            execute_at = tracked.index("-e")
+        except ValueError:
+            # portable-pty's default program honors SHELL. The wrapper then
+            # execs the original shell with the same login/integration args.
+            env["SHELL"] = str(wrapper)
+        else:
+            if execute_at + 1 >= len(tracked):
+                raise ValueError("live-ui -e requires a command to track")
+            # Explicit commands bypass SHELL; put the same reporting wrapper in
+            # front of that command without changing its argv.
+            tracked.insert(execute_at + 1, str(wrapper))
+        return tracked, env
+
+    def _open_owned_tracker_session(
+        self, session: int, *, deadline: Optional[float] = None
+    ) -> Optional[StableProcessHandle]:
+        """Retain a direct PTY child through an identity-stable OS handle."""
+        if self._tracker_owner_pid is None or session <= 1:
+            return None
+        if deadline is None:
+            deadline = time.monotonic() + PTY_TRACKER_SCAN_TIMEOUT_S
+
+        def is_live_owned_session() -> bool:
+            def process_still_exists() -> bool:
+                try:
+                    # Signal 0 performs no state change; it only distinguishes
+                    # a vanished PID from an uncertain ownership probe.
+                    os.kill(session, 0)
+                    return True
+                except ProcessLookupError:
+                    return False
+                except PermissionError as error:
+                    raise RuntimeError(
+                        f"permission denied while probing PTY session {session}"
+                    ) from error
+
+            if not process_still_exists():
+                return False
+            parent = run(
+                ["ps", "-o", "ppid=", "-p", str(session)],
+                timeout=remaining_before(
+                    deadline,
+                    f"inspecting PTY session {session}",
+                    cap=2.0,
+                ),
+            )
+            if parent.returncode != 0:
+                if not process_still_exists():
+                    return False
+                raise RuntimeError(
+                    f"could not inspect live PTY session {session}: "
+                    f"rc={parent.returncode} stderr={parent.stderr.strip()!r}"
+                )
+            try:
+                parent_pid = int(parent.stdout.strip())
+            except ValueError as error:
+                if not process_still_exists():
+                    return False
+                raise RuntimeError(
+                    f"malformed parent record for live PTY session {session}: "
+                    f"{parent.stdout!r}"
+                ) from error
+            try:
+                leader = os.getsid(session) == session
+            except ProcessLookupError:
+                return False
+            except OSError as error:
+                raise RuntimeError(
+                    f"could not inspect session identity for {session}: {error}"
+                ) from error
+            return parent_pid == self._tracker_owner_pid and leader
+
+        for attempt in range(3):
+            remaining_before(
+                deadline,
+                f"retaining PTY session {session}",
+                cap=PTY_TRACKER_SCAN_TIMEOUT_S,
+            )
+            handle: Optional[StableProcessHandle] = None
+            try:
+                handle = StableProcessHandle.open(session)
+            except (OSError, RuntimeError) as error:
+                # A stale append-only record is benign. A live wrapper that is
+                # still our direct child is not: silently omitting it leaves a
+                # PTY session outside Kettle's outer process group with no safe
+                # signal target. The numeric check decides only whether to fail;
+                # it is never retained or used to signal the process.
+                try:
+                    still_owned = is_live_owned_session()
+                except (
+                    OSError,
+                    RuntimeError,
+                    subprocess.TimeoutExpired,
+                ) as check_error:
+                    raise RuntimeError(
+                        f"could not retain or verify reported PTY session {session}: "
+                        f"{error}; ownership check: {check_error}"
+                    ) from error
+                if still_owned:
+                    raise RuntimeError(
+                        f"could not retain live owned PTY session {session}: {error}"
+                    ) from error
+                return None
+            try:
+                owned = is_live_owned_session()
+                same_identity = handle.matches_current() if owned else True
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                handle.close()
+                raise RuntimeError(
+                    f"could not verify retained PTY session {session}: {error}"
+                ) from error
+            if not owned:
+                handle.close()
+                return None
+            if same_identity:
+                return handle
+
+            # The append-only record may now name a new direct child after PID
+            # reuse. The retained old instance is safe to close, but the numeric
+            # record is not safe to forget: reopen and re-run the independent
+            # parent/session checks in this same pass.
+            handle.close()
+            if attempt == 2:
+                raise RuntimeError(
+                    f"PTY session {session} changed identity repeatedly while retaining it"
+                )
+        raise AssertionError("unreachable")
+
+    def _remember_tracker_sessions(self, *, deadline: Optional[float] = None) -> None:
+        """Retain every safely owned PTY session reported by the wrapper."""
+        if self._pty_session_file is None or self._pty_session_fd is None:
+            return
+        if deadline is None:
+            deadline = time.monotonic() + PTY_TRACKER_SCAN_TIMEOUT_S
+        try:
+            held = os.fstat(self._pty_session_fd)
+            named = os.lstat(self._pty_session_file)
+            if (
+                not stat.S_ISREG(held.st_mode)
+                or held.st_uid != os.geteuid()
+                or held.st_nlink != 1
+                or held.st_mode & 0o077
+                or (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino)
+            ):
+                raise RuntimeError("ownership record is not the retained private file")
+            if held.st_size > PTY_TRACKER_MAX_BYTES:
+                raise RuntimeError(
+                    f"ownership record exceeds {PTY_TRACKER_MAX_BYTES} bytes"
+                )
+            data = os.pread(
+                self._pty_session_fd, PTY_TRACKER_MAX_BYTES + 1, 0
+            )
+            if len(data) > PTY_TRACKER_MAX_BYTES:
+                raise RuntimeError(
+                    f"ownership record exceeds {PTY_TRACKER_MAX_BYTES} bytes"
+                )
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(
+                f"could not read PTY session ownership record {self._pty_session_file}: {error}"
+            ) from error
+
+        records = data.split(b"\n")
+        errors: List[str] = []
+        if records[-1] == b"":
+            records.pop()
+        elif records:
+            errors.append("ownership record ends with an incomplete line")
+            records.pop()
+        if len(records) > PTY_TRACKER_MAX_RECORDS:
+            raise RuntimeError(
+                "PTY session ownership record contains more than "
+                f"{PTY_TRACKER_MAX_RECORDS} records"
+            )
+        max_pid_digits = len(str(PTY_TRACKER_MAX_PID))
+        seen_records: Set[int] = set()
+        for line_number, line in enumerate(records, 1):
+            if (
+                not line
+                or len(line) > max_pid_digits
+                or line[:1] == b"0"
+                or not line.isdigit()
+            ):
+                errors.append(
+                    f"invalid PTY session ownership record at line {line_number}: "
+                    f"{line[:80]!r}"
+                )
+                continue
+            session = int(line)
+            if session <= 1:
+                errors.append(
+                    f"PTY session ownership record at line {line_number} is not "
+                    f"a valid child PID: {session}"
+                )
+                continue
+            if session > PTY_TRACKER_MAX_PID:
+                errors.append(
+                    f"PTY session ownership record at line {line_number} exceeds "
+                    f"the pid_t limit: {session}"
+                )
+                continue
+            if session in seen_records or session in self._tracker_sessions:
+                continue
+            seen_records.add(session)
+            if time.monotonic() >= deadline:
+                errors.append("PTY session ownership scan exceeded its time limit")
+                break
+            try:
+                handle = self._open_owned_tracker_session(
+                    session, deadline=deadline
+                )
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(
+                    f"could not retain reported PTY session {session}: {error}"
+                )
+                continue
+            if handle is not None:
+                # Publish immediately. If a later verification becomes
+                # uncertain, startup cleanup still owns this exact handle.
+                self._tracker_sessions[session] = handle
+                self._pty_sessions.add(session)
+
+        # Stable handles make PID reuse harmless, but an exited wrapper can no
+        # longer anchor its session. The wrapper deliberately outlives its
+        # payload, so dropping one here is an explicit cleanup failure rather
+        # than the ordinary shell-exit path that used to strand descendants.
+        for session, handle in list(self._tracker_sessions.items()):
+            if time.monotonic() >= deadline:
+                errors.append("PTY session revalidation exceeded its time limit")
+                break
+            try:
+                if not handle.matches_current():
+                    replacement = self._open_owned_tracker_session(
+                        session, deadline=deadline
+                    )
+                    if replacement is None:
+                        handle.close()
+                        del self._tracker_sessions[session]
+                        self._pty_sessions.discard(session)
+                    else:
+                        # Publish the replacement before releasing the stale handle;
+                        # cleanup always owns one exact identity even if close fails.
+                        self._tracker_sessions[session] = replacement
+                        self._pty_sessions.add(session)
+                        handle.close()
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(f"could not revalidate PTY session {session}: {error}")
+        self._pty_sessions.update(self._tracker_sessions)
+        if errors:
+            shown = errors[:8]
+            if len(errors) > len(shown):
+                shown.append(f"and {len(errors) - len(shown)} more error(s)")
+            raise RuntimeError("; ".join(shown))
+
+    def _remember_direct_child_sessions(self, *, deadline: float) -> None:
+        """Retain escaped session leaders after Kettle can no longer spawn."""
+        if self._tracker_owner_pid is None:
+            return
+        listed = run(
+            ["ps", "-axo", "pid=,ppid="],
+            timeout=remaining_before(
+                deadline,
+                "listing Kettle's direct children",
+                cap=2.0,
+            ),
+        )
+        if listed.returncode != 0:
+            raise RuntimeError(
+                "could not list Kettle's direct children: "
+                f"rc={listed.returncode} stderr={listed.stderr.strip()!r}"
+            )
+        if len(listed.stdout.encode("utf-8")) > PTY_PROCESS_LIST_MAX_BYTES:
+            raise RuntimeError(
+                f"process inventory exceeds {PTY_PROCESS_LIST_MAX_BYTES} bytes"
+            )
+        errors: List[str] = []
+        candidates: Set[int] = set()
+        for line_number, line in enumerate(listed.stdout.splitlines(), 1):
+            fields = line.split()
+            if len(fields) != 2:
+                errors.append(
+                    f"malformed process inventory at line {line_number}: {line[:80]!r}"
+                )
+                continue
+            try:
+                pid, parent = (int(field) for field in fields)
+            except ValueError:
+                errors.append(
+                    f"malformed process inventory at line {line_number}: {line[:80]!r}"
+                )
+                continue
+            if parent == self._tracker_owner_pid and 1 < pid <= PTY_TRACKER_MAX_PID:
+                candidates.add(pid)
+
+        for session in sorted(candidates):
+            if session in self._tracker_sessions:
+                continue
+            if time.monotonic() >= deadline:
+                errors.append("direct-child session scan exceeded its time limit")
+                break
+            try:
+                if os.getsid(session) != session:
+                    # A child still in Kettle's outer group was frozen with it
+                    # and cannot escape before that complete group is killed.
+                    continue
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                errors.append(
+                    f"could not inspect direct child session {session}: {error}"
+                )
+                continue
+            try:
+                handle = self._open_owned_tracker_session(
+                    session, deadline=deadline
+                )
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+                errors.append(
+                    f"could not retain direct child session {session}: {error}"
+                )
+                continue
+            if handle is not None:
+                self._tracker_sessions[session] = handle
+                self._pty_sessions.add(session)
+
+        if errors:
+            shown = errors[:8]
+            if len(errors) > len(shown):
+                shown.append(f"and {len(errors) - len(shown)} more error(s)")
+            raise RuntimeError("; ".join(shown))
+
+    def _freeze_outer_process_group(self) -> None:
+        """Stop Kettle from creating another detached PTY before final drain."""
+        if self.proc is None or self.proc.returncode is not None:
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGSTOP)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            if process_exited_without_reaping(self.proc):
+                return
+            raise
+
+    def _finalize_tracker_sessions(self, *, deadline: float) -> None:
+        """Close the append race after Kettle's spawning group is frozen."""
+        errors: List[BaseException] = []
+        try:
+            self._freeze_outer_process_group()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            self._remember_tracker_sessions(
+                deadline=min(
+                    deadline, time.monotonic() + PTY_TRACKER_SCAN_TIMEOUT_S
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+        try:
+            self._remember_direct_child_sessions(deadline=deadline)
+        except BaseException as error:
+            errors.append(error)
+        # A directly retained wrapper may have been between setsid and its
+        # single append. Re-read once after that scan; Kettle remains stopped,
+        # so no new PTY can begin after this point.
+        try:
+            self._remember_tracker_sessions(
+                deadline=min(
+                    deadline, time.monotonic() + PTY_TRACKER_SCAN_TIMEOUT_S
+                )
+            )
+        except BaseException as error:
+            errors.append(error)
+        if errors:
+            raise RuntimeError(
+                "final PTY tracker drain failed: "
+                + "; ".join(str(error) for error in errors)
+            )
+
+    def wait_for_tracker_sessions(self, minimum: int, timeout_s: float = 5.0) -> None:
+        """Wait until every newly requested Unix PTY has a stable owner.
+
+        A control action returning only proves Kettle accepted it; the PTY
+        wrapper may not have run far enough to append its session yet. Tests
+        that are about an unexpected Kettle exit must not trigger that exit
+        until the wrapper's identity-stable cleanup handle is retained.
+        """
+        if os.name == "nt":
+            raise RuntimeError("PTY session tracker waits are Unix-only")
+        if self.proc is None:
+            raise RuntimeError("Kettle is not running")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self._remember_tracker_sessions()
+            if len(self._tracker_sessions) >= minimum:
+                return
+            if process_exited_without_reaping(self.proc):
+                raise RuntimeError(
+                    "Kettle exited before its PTY session wrapper was retained"
+                )
+            time.sleep(0.02)
+        raise RuntimeError(
+            "timed out retaining PTY session wrapper(s): "
+            f"expected at least {minimum}, got {len(self._tracker_sessions)}"
+        )
+
+    def _run_post_exit_cleanups(self) -> List[BaseException]:
+        cleanup_errors: List[BaseException] = []
+        cleanups, self._post_exit_cleanup = self._post_exit_cleanup, []
+        for cleanup in reversed(cleanups):
+            try:
+                cleanup()
+            except BaseException as error:
+                cleanup_errors.append(error)
+                print(
+                    f"live-ui smoke: post-exit cleanup failed: {error}",
+                    file=sys.stderr,
+                )
+        return cleanup_errors
+
+    def _cleanup_failed_startup(self) -> List[BaseException]:
+        """Release every owner acquired before ``__enter__`` can return."""
+        errors: List[BaseException] = []
+        try:
+            self._terminate_process()
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            errors.extend(self._run_post_exit_cleanups())
+        return errors
+
+    def _control_pty_inventory(self, *, timeout: float) -> Optional[str]:
+        """Return a pane inventory without letting a wedged ctl block cleanup."""
+        try:
+            probe = self.ctl(
+                "list_panes", raw=True, allow_fail=True, timeout=timeout
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return probe.stdout if probe.returncode == 0 else None
 
     def __enter__(self) -> "LiveKettle":
         # Machine-local escape hatch. Every scenario writes its own minimal
@@ -1809,54 +6009,211 @@ class LiveKettle:
         # comes up (an 0xC0000005 with an empty log). Appending extra config
         # here lets such a machine run the live smokes without hardcoding one
         # developer's hardware into the repo. Unset in CI, so it is a no-op.
+        config_additions: List[str] = []
+        if parallels_windows_arm_requires_software_gpu():
+            # Parallels Desktop 26.4.1's ARM WDDM adapter faults inside a
+            # headless wgpu device request before Kettle can create its control
+            # server. This is the same exact-machine exception as the native
+            # GPU smoke: DX12/WARP still exercises the complete render path,
+            # while physical Windows ARM and hosted Windows x64 stay
+            # hardware-first. Keep the environment override last so a
+            # developer can deliberately retest a repaired Parallels driver.
+            config_additions.append("gpu-force-software = true")
+            print(
+                "live-ui smoke: Parallels Windows ARM detected; using DX12/WARP."
+            )
         extra_cfg = os.environ.get("KETTLE_SMOKE_EXTRA_CONFIG", "").strip()
         if extra_cfg:
+            config_additions.append(extra_cfg.replace("\\n", "\n").strip())
+        if config_additions:
             with self.cfg.open("a", encoding="utf-8") as fh:
-                fh.write("\n" + extra_cfg.replace("\\n", "\n").strip() + "\n")
+                fh.write("\n" + "\n".join(config_additions) + "\n")
         log_f = self.log.open("wb")
-        self.proc = subprocess.Popen(
-            [self.kettle, "--config", str(self.cfg), "--agent-server", "full", *self.extra_args],
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-        )
-        log_f.close()
+        try:
+            argv, launch_env = self._prepare_unix_pty_tracker(
+                [
+                    self.kettle,
+                    "--config",
+                    str(self.cfg),
+                    "--agent-server",
+                    "full",
+                    *self.extra_args,
+                ]
+            )
+            if self.extra_env:
+                if launch_env is None:
+                    launch_env = os.environ.copy()
+                for name, value in self.extra_env.items():
+                    if value is None:
+                        launch_env.pop(name, None)
+                    else:
+                        launch_env[name] = value
+            self.proc = subprocess.Popen(
+                argv,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                # Own Kettle's outer session from process creation. portable-pty's
+                # shell sessions are separate and are inventoried through ctl,
+                # frozen, and terminated before this outer group in cleanup.
+                start_new_session=os.name != "nt",
+                env=launch_env,
+            )
+            self._tracker_owner_pid = self.proc.pid
+        except BaseException:
+            cleanup_errors = self._cleanup_failed_startup()
+            if cleanup_errors:
+                print(
+                    "live-ui smoke: launch cleanup failed: "
+                    + "; ".join(str(error) for error in cleanup_errors),
+                    file=sys.stderr,
+                )
+            raise
+        finally:
+            log_f.close()
+        return self._finish_startup()
+
+    def _finish_startup(self) -> "LiveKettle":
+        """Route every post-launch probe failure through owned cleanup."""
+        try:
+            return self._await_control_server()
+        except BaseException as error:
+            cleanup_errors = self._cleanup_failed_startup()
+            if isinstance(error, (KeyboardInterrupt, GeneratorExit, SystemExit)):
+                if cleanup_errors:
+                    print(
+                        "live-ui smoke: interrupted startup cleanup failed: "
+                        + "; ".join(str(item) for item in cleanup_errors),
+                        file=sys.stderr,
+                    )
+                raise
+            message = f"live-ui smoke: startup probe failed: {error}"
+            if cleanup_errors:
+                message += "\ncleanup errors: " + "; ".join(
+                    str(item) for item in cleanup_errors
+                )
+            raise SystemExit(message) from error
+
+    def _await_control_server(self) -> "LiveKettle":
+        """Complete startup after launch; the caller owns failure cleanup."""
+        assert self.proc is not None
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise SystemExit(
+            self._remember_tracker_sessions()
+            if process_exited_without_reaping(self.proc):
+                raise RuntimeError(
                     "live-ui smoke: kettle exited before control server came up\n"
                     + self.log.read_text(errors="replace")
                 )
-            probe = self.ctl("list_panes", raw=True, allow_fail=True)
-            if probe.returncode == 0:
+            inventory = self._control_pty_inventory(
+                timeout=max(0.1, min(1.0, deadline - time.monotonic()))
+            )
+            if inventory is not None:
+                self._remember_pty_sessions(inventory)
                 return self
             time.sleep(0.1)
-        raise SystemExit("live-ui smoke: timed out waiting for control server")
+        raise RuntimeError("live-ui smoke: timed out waiting for control server")
+
+    def _terminate_process(self) -> None:
+        if self.proc is None:
+            return
+        if os.name == "nt":
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
+        else:
+            session_errors: List[BaseException] = []
+            cleanup_deadline = time.monotonic() + PTY_TRACKER_FINALIZE_TIMEOUT_S
+            try:
+                # Refresh while the control server and PTY leaders are alive,
+                # but never let a wedged control client skip process cleanup.
+                try:
+                    self._remember_tracker_sessions()
+                except Exception as error:
+                    session_errors.append(error)
+                inventory = self._control_pty_inventory(timeout=1)
+                if inventory is not None:
+                    self._remember_pty_sessions(inventory)
+            finally:
+                try:
+                    self._finalize_tracker_sessions(deadline=cleanup_deadline)
+                except Exception as error:
+                    session_errors.append(error)
+                for session in sorted(self._pty_sessions):
+                    try:
+                        anchor = self._tracker_sessions.get(session)
+                        if anchor is None:
+                            raise RuntimeError(
+                                f"PTY session {session} has no stable tracker handle"
+                            )
+                        terminate_owned_pty_session(anchor)
+                    except Exception as error:
+                        session_errors.append(error)
+                session_errors.extend(
+                    _close_stable_process_handles(self._tracker_sessions)
+                )
+                self._tracker_sessions.clear()
+                try:
+                    terminate_owned_process_group(self.proc)
+                except Exception as error:
+                    session_errors.append(error)
+            if session_errors:
+                raise RuntimeError(
+                    "live-ui smoke: PTY-session cleanup failed: "
+                    + "; ".join(str(error) for error in session_errors)
+                )
+
+    def _remember_pty_sessions(self, payload: str) -> None:
+        """Record pane sessions without erasing a transiently unavailable pid."""
+        try:
+            result = json.loads(payload)
+        except json.JSONDecodeError:
+            return
+        sessions_by_pane: Dict[int, int] = {}
+        unresolved = False
+        for pane in result.get("panes", []):
+            if not isinstance(pane, dict):
+                continue
+            pane_id = pane.get("id")
+            if not isinstance(pane_id, int):
+                continue
+            child_pid = pane.get("child_pid")
+            # Control output is useful for pane association, not ownership.
+            # Only the independent wrapper record can introduce a session,
+            # after its direct-parent check and stable handle acquisition.
+            if isinstance(child_pid, int) and child_pid in self._tracker_sessions:
+                sessions_by_pane[pane_id] = child_pid
+            elif pane_id in self._pty_sessions_by_pane:
+                sessions_by_pane[pane_id] = self._pty_sessions_by_pane[pane_id]
+            else:
+                unresolved = True
+        sessions = set(sessions_by_pane.values())
+        sessions.update(self._tracker_sessions)
+        if unresolved:
+            # On the first inventory the wrapper is the only independent
+            # source for a contended child lock. Do not throw that anchor away.
+            sessions.update(self._pty_sessions)
+        self._pty_sessions_by_pane = sessions_by_pane
+        self._pty_sessions = sessions
 
     def __exit__(
         self, exc_type: object, _exc_value: object, _traceback: object
     ) -> None:
-        if self.proc is not None and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=5)
-        cleanup_errors: List[Exception] = []
-        for cleanup in reversed(self._post_exit_cleanup):
-            try:
-                cleanup()
-            except Exception as error:
-                cleanup_errors.append(error)
-                print(
-                    f"live-ui smoke: post-exit cleanup failed: {error}",
-                    file=sys.stderr,
-                )
-        if cleanup_errors and exc_type is None:
+        errors: List[Exception] = []
+        try:
+            self._terminate_process()
+        except Exception as error:
+            errors.append(error)
+            print(f"live-ui smoke: process cleanup failed: {error}", file=sys.stderr)
+        finally:
+            errors.extend(self._run_post_exit_cleanups())
+        if errors and exc_type is None:
             raise RuntimeError(
-                "live-ui smoke: post-exit cleanup failed: "
-                + "; ".join(str(error) for error in cleanup_errors)
+                "live-ui smoke: cleanup failed: "
+                + "; ".join(str(error) for error in errors)
             )
 
     def add_post_exit_cleanup(self, cleanup: Callable[[], None]) -> None:
@@ -1917,6 +6274,38 @@ class LiveKettle:
     def screenshot(self, path: Path) -> None:
         self.ctl("screenshot", params={"full_window": True, "path": str(path)}, timeout=12)
 
+    def screenshot_if_visible(self, path: Path) -> bool:
+        """Capture an optional diagnostic without weakening visual scenarios.
+
+        The touchpad scenario proves scroll behavior through the control-plane
+        grid state; its PNGs are supporting artifacts, not assertions. A
+        Windows GUI started from an SSH session can be fully alive yet unmapped
+        on the interactive desktop, in which case Kettle intentionally refuses
+        capture. Only that precise state is optional. All renderer, transport,
+        and filesystem errors still fail the smoke.
+        """
+        result = self.ctl(
+            "screenshot",
+            params={"full_window": True, "path": str(path)},
+            raw=True,
+            timeout=12,
+            allow_fail=True,
+        )
+        if result.returncode == 0:
+            return True
+        if is_optional_remote_windows_screenshot_error(
+            platform.system(),
+            dict(os.environ),
+            stdout=result.stdout,
+            stderr=result.stderr,
+        ):
+            print(
+                "live-ui smoke: optional touchpad screenshot skipped because "
+                "the remote Windows window is not mapped"
+            )
+            return False
+        raise SystemExit(f"kettle ctl screenshot failed:\n{result.stderr}\n{result.stdout}")
+
     def wait_for_text(self, text: str, timeout_ms: int = 8000, quiet_ms: int = 200) -> None:
         result = json.loads(
             self.ctl(
@@ -1928,6 +6317,57 @@ class LiveKettle:
         )
         if not result.get("matched"):
             raise SystemExit(f"live-ui smoke: timed out waiting for {text!r}: {result}")
+
+    def wait_for_nvim_sidebar_evidence(
+        self,
+        repo_name: str,
+        fixture_token: str,
+        timeout_ms: int = 120000,
+        quiet_ms: int = 500,
+    ) -> Tuple[Dict[str, object], Dict[str, object]]:
+        """Wait for stable LazyVCS/editor cells, dismissing Neovim's pager.
+
+        A configured plugin loaded by LazyVCS may emit an unrelated warning.
+        Neovim covers the whole grid with its hit-enter prompt until one Enter
+        is received, hiding the sidebar even though it rendered successfully.
+        Polling also lets the explicit failure message surface immediately.
+        Readiness itself is the cell-grid contract rather than a token written
+        into the plugin-owned sidebar buffer, which LazyVCS may refresh later.
+        """
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        state = NvimSidebarWaitState(repo_name, quiet_ms / 1000.0)
+        last_screen: Dict[str, object] = {}
+        last_missing: List[str] = ["no observation"]
+        while time.monotonic() < deadline:
+            last_screen = self.json_ctl("read_screen")
+            visible = str(last_screen.get("text", ""))
+            if "KETTLE_LAZYVCS_SIDEBAR_ABSENT" in visible:
+                raise SystemExit(
+                    "agent-tui smoke: LazyVCS sidebar did not render:\n" + visible
+                )
+            ready, dismiss = state.observe(
+                visible,
+                str(last_screen.get("snapshot", "")),
+                last_screen.get("cursor"),
+                int(last_screen.get("history_size", 0)),
+                time.monotonic(),
+            )
+            if dismiss:
+                self.ctl("send_keys", params={"keys": ["enter"]})
+            if ready:
+                cells = self.read_cells()
+                last_missing = lazyvcs_screen_evidence(
+                    cells,
+                    repo_name=repo_name,
+                    fixture_token=fixture_token,
+                )
+                if not last_missing:
+                    return cells, last_screen
+            time.sleep(0.1)
+        raise SystemExit(
+            "live-ui smoke: timed out waiting for stable LazyVCS evidence "
+            f"for {repo_name!r}: missing={last_missing} screen={last_screen}"
+        )
 
 
 class EventStream:
@@ -2776,10 +7216,17 @@ def live_transition_screenshot_path(out: Path, label: str) -> Path:
     return out / f"{label}-transition.png"
 
 
-def capture_live_state(live: LiveKettle, out: Path, label: str) -> Dict[str, object]:
-    cells = live.read_cells()
+def capture_live_state(
+    live: LiveKettle,
+    out: Path,
+    label: str,
+    *,
+    cells: Optional[Dict[str, object]] = None,
+    screen: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    cells = cells if cells is not None else live.read_cells()
     (out / f"{label}.cells.json").write_text(json.dumps(cells, indent=2) + "\n")
-    screen = live.json_ctl("read_screen")
+    screen = screen if screen is not None else live.json_ctl("read_screen")
     (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
     shot = live_state_screenshot_path(out, label)
     live.screenshot(shot)
@@ -2952,16 +7399,20 @@ def codex_cursor_fixture_command(
 
 
 def notification_command(title: str, body: str, marker: str) -> str:
+    marker_left, marker_right = split_marker(marker)
     if platform.system() == "Windows":
         return (
             "$esc=[char]27; $bel=[char]7; "
             f"[Console]::Write($esc + ']777;notify;' + {shell_quote(title)} + ';' + {shell_quote(body)} + $bel); "
-            f"Write-Output {shell_quote(marker)}"
+            "Write-Output ("
+            f"{shell_quote(marker_left, windows=True)} + "
+            f"{shell_quote(marker_right, windows=True)})"
         )
     return (
         "printf '\\033]777;notify;%s;%s\\007' "
         f"{shell_quote(title)} {shell_quote(body)}; "
-        f"printf '%s\\n' {shell_quote(marker)}"
+        "printf '%s%s\\n' "
+        f"{shell_quote(marker_left)} {shell_quote(marker_right)}"
     )
 
 
@@ -2997,19 +7448,24 @@ def cwd_title_command(
     from a single host OS.
     """
     use_windows = platform.system() == "Windows" if windows is None else windows
+    marker_left, marker_right = split_marker(marker)
     if use_windows:
         return (
             f"Set-Location {shell_quote(expected_path)}; "
             "$esc=[char]27; $bel=[char]7; "
             "[Console]::Write($esc + ']9;9;\"' + $PWD.Path + '\"' + $bel + $esc + ']2;' + "
             f"{shell_quote(title)} + $bel); "
-            f"Write-Output {shell_quote(marker)}; "
+            "Write-Output ("
+            f"{shell_quote(marker_left, windows=True)} + "
+            f"{shell_quote(marker_right, windows=True)}); "
             f"Start-Sleep -Seconds {sleep_seconds}"
         )
     return (
         f"cd {shell_quote(expected_path)}; "
         f"printf '\\033]7;file://localhost%s\\007\\033]2;{title}\\007"
-        f"{marker}\\n' \"$PWD\"; sleep {sleep_seconds}"
+        "%s%s\\n' \"$PWD\" "
+        f"{shell_quote(marker_left)} {shell_quote(marker_right)}; "
+        f"sleep {sleep_seconds}"
     )
 
 
@@ -3127,7 +7583,104 @@ def agent_output_contains_marker(
     return False
 
 
+def process_pid_is_running(pid: int) -> bool:
+    """Whether a test PID still names a non-zombie process on this platform."""
+    if platform.system() == "Windows":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x00000102
+        finally:
+            kernel32.CloseHandle(handle)
+    sampled = run(["ps", "-o", "stat=", "-p", str(pid)], timeout=2)
+    state = sampled.stdout.strip()
+    return sampled.returncode == 0 and bool(state) and not state.startswith("Z")
+
+
 def live_helper_selftest() -> None:
+    assert is_parallels_windows_arm("Windows", "ARM64", "Parallels International GmbH")
+    assert is_parallels_windows_arm("Windows", "aarch64", "Parallels")
+    assert not is_parallels_windows_arm("Windows", "AMD64", "Parallels")
+    assert not is_parallels_windows_arm("Windows", "ARM64", "Microsoft Corporation")
+    assert not is_parallels_windows_arm("Linux", "aarch64", "Parallels")
+
+    hidden_error = (
+        "kettle ctl: server error [busy]: " + HIDDEN_WINDOW_SCREENSHOT_MESSAGE + "\n"
+    )
+    assert is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CONNECTION": "192.0.2.1 50000 192.0.2.2 22"},
+        stdout="",
+        stderr=hidden_error,
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows", {}, stdout="", stderr=hidden_error
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Linux",
+        {"SSH_CONNECTION": "192.0.2.1 50000 192.0.2.2 22"},
+        stdout="",
+        stderr=hidden_error,
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CLIENT": "192.0.2.1 50000 22"},
+        stdout="",
+        stderr=hidden_error.replace("[busy]", "[internal]"),
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CLIENT": "192.0.2.1 50000 22"},
+        stdout="",
+        stderr=hidden_error.replace("restore it", "try to restore it"),
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CLIENT": "192.0.2.1 50000 22"},
+        stdout='{"error":"unrelated"}\n',
+        stderr=hidden_error,
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CLIENT": "192.0.2.1 50000 22"},
+        stdout="",
+        stderr="\n" + hidden_error,
+    )
+    assert not is_optional_remote_windows_screenshot_error(
+        "Windows",
+        {"SSH_CLIENT": "192.0.2.1 50000 22"},
+        stdout="",
+        stderr=hidden_error + "\n",
+    )
+
+    class Pre312WindowsPath:
+        def is_symlink(self) -> bool:
+            return False
+
+    class ReparseMetadata:
+        st_file_attributes = 0x400
+
+    original_platform_system = platform.system
+    original_lstat = os.lstat
+    platform.system = lambda: "Windows"  # type: ignore[assignment]
+    os.lstat = lambda _path: ReparseMetadata()  # type: ignore[assignment]
+    try:
+        assert path_is_link(Pre312WindowsPath())  # type: ignore[arg-type]
+    finally:
+        os.lstat = original_lstat  # type: ignore[assignment]
+        platform.system = original_platform_system  # type: ignore[assignment]
+
     black = bytes([0, 0, 0, 255] * 2)
     changed_top = bytes([255, 0, 0, 255, 0, 0, 0, 255])
     changed_bottom = bytes([0, 0, 0, 255, 0, 255, 0, 255])
@@ -3167,12 +7720,662 @@ def live_helper_selftest() -> None:
     ) is True
     assert macos_session_locked(b"not a plist") is None
 
+    # Windows Job assignment necessarily happens after CreateProcess.  Prove
+    # the internal-worker argv prevents Python startup hooks from executing in
+    # that interval; a plain interpreter is the discriminating negative control.
+    with tempfile.TemporaryDirectory(prefix="kettle-python-startup-") as fixture:
+        startup_root = Path(fixture)
+        startup_marker = startup_root / "sitecustomize-ran"
+        (startup_root / "sitecustomize.py").write_text(
+            "import os,pathlib\n"
+            "pathlib.Path(os.environ['KETTLE_SITE_MARKER']).write_text('ran')\n",
+            encoding="utf-8",
+        )
+        startup_env = os.environ.copy()
+        startup_env["PYTHONPATH"] = str(startup_root)
+        startup_env["KETTLE_SITE_MARKER"] = str(startup_marker)
+        plain_start = subprocess.run(
+            [sys.executable, "-c", "pass"],
+            env=startup_env,
+            timeout=10,
+            check=False,
+        )
+        assert plain_start.returncode == 0
+        assert startup_marker.is_file(), (
+            "the startup-hook negative control did not execute sitecustomize"
+        )
+        startup_marker.unlink()
+        isolated_start = subprocess.run(
+            _internal_repository_worker_argv("--help"),
+            env=startup_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        assert isolated_start.returncode == 0
+        assert not startup_marker.exists(), (
+            "an internal provenance worker executed user Python startup code"
+        )
+
     artifact_root = Path("artifacts")
     state_shot = live_state_screenshot_path(artifact_root, "search-open")
     transition_shot = live_transition_screenshot_path(artifact_root, "search-open")
     assert state_shot == artifact_root / "search-open.png"
     assert transition_shot == artifact_root / "search-open-transition.png"
     assert state_shot != transition_shot
+
+    # Provenance must notice content changes even when porcelain reports the
+    # same already-dirty pathname before and after the mutation.
+    with tempfile.TemporaryDirectory(prefix="kettle-provenance-") as fixture:
+        repository = Path(fixture)
+        assert run(["git", "init", "-q", str(repository)]).returncode == 0
+        tracked = repository / "tracked.txt"
+        tracked.write_text("base\n", encoding="utf-8")
+        attributes = repository / ".gitattributes"
+        attributes.write_text("tracked.txt diff=must-not-run\n", encoding="utf-8")
+        assert run(
+            ["git", "-C", str(repository), "add", "tracked.txt", ".gitattributes"]
+        ).returncode == 0
+        assert run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "config",
+                "diff.must-not-run.textconv",
+                "kettle-smoke-textconv-must-not-run",
+            ]
+        ).returncode == 0
+        if os.name != "nt":
+            # A completed leader is reaped by communicate. The internal anchor
+            # must still reserve the private PGID until cleanup, or this numeric
+            # kill target can be redirected by immediate PID/PGID reuse. Signal
+            # the exact anchor with HUP while its leader is still blocked, too:
+            # removing the inherited HUP ignore must make this test fail safely
+            # while the live leader still reserves the group.
+            with tempfile.TemporaryDirectory(
+                prefix="kettle-provenance-anchor-"
+            ) as anchor_fixture:
+                anchor_record = Path(anchor_fixture) / "anchor-pid"
+                anchored_worker = subprocess.Popen(
+                    _internal_repository_worker_argv(
+                        PROVENANCE_ANCHOR_PROBE_ARG, anchor_record
+                    ),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                anchor_handle: Optional[StableProcessHandle] = None
+                anchor_errors: List[BaseException] = []
+                anchor_reaped = threading.Event()
+                try:
+                    anchor_deadline = time.monotonic() + 5
+                    while (
+                        time.monotonic() < anchor_deadline
+                        and not anchor_record.is_file()
+                    ):
+                        if anchored_worker.poll() is not None:
+                            break
+                        time.sleep(0.01)
+                    assert anchor_record.is_file(), (
+                        "the internal provenance worker did not publish its group anchor"
+                    )
+                    anchor_pid = int(anchor_record.read_text(encoding="ascii"))
+                    anchor_handle = StableProcessHandle.open(anchor_pid)
+                    assert anchor_handle.signal(signal.SIGHUP)
+                    time.sleep(0.05)
+                    assert anchor_handle.matches_current(), (
+                        "the internal provenance group anchor did not survive leader HUP"
+                    )
+                    anchor_stdout, anchor_stderr = anchored_worker.communicate(
+                        input="1", timeout=5
+                    )
+                    assert anchored_worker.returncode == 0, anchor_stderr
+                    assert anchor_stdout == ""
+                    os.killpg(anchored_worker.pid, 0)
+                finally:
+                    anchor_errors, anchor_reaped = _stop_repository_worker(
+                        anchored_worker, None
+                    )
+                    if anchor_handle is not None:
+                        anchor_handle.close()
+            assert not anchor_errors and anchor_reaped.is_set()
+            group_gone_deadline = time.monotonic() + 3
+            while True:
+                try:
+                    os.killpg(anchored_worker.pid, 0)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    # Darwin reports EPERM while the killed orphan is a zombie
+                    # waiting for launchd to reap it; the PGID is still reserved
+                    # and cannot target a live unrelated process in that state.
+                    pass
+                if time.monotonic() >= group_gone_deadline:
+                    raise AssertionError(
+                        "the internal provenance group anchor survived cleanup"
+                    )
+                time.sleep(0.02)
+        tracked.write_text("dirty one\n", encoding="utf-8")
+        first = repository_source_sha256(repository)
+        tracked.write_text("dirty two\n", encoding="utf-8")
+        second = repository_source_sha256(repository)
+        assert first != second, "an edit within an already-dirty file was invisible"
+        try:
+            repository_source_sha256(
+                repository,
+                RepositoryProvenanceBudget(max_entries=1),
+            )
+        except RuntimeError as error:
+            assert "file limit" in str(error)
+        else:
+            raise AssertionError(
+                "tracked/index files did not consume the global provenance file limit"
+            )
+        untracked = repository / "untracked.txt"
+        untracked.write_text("one\n", encoding="utf-8")
+        dirty_identity = repository_source_identity(repository)
+        assert dirty_identity["git_dirty"] is True
+        assert int(dirty_identity["git_status_entries"]) > 0
+        assert re.fullmatch(
+            r"[0-9a-f]{64}", str(dirty_identity["git_status_sha256"])
+        )
+        first = repository_source_sha256(repository)
+        untracked.write_text("two\n", encoding="utf-8")
+        second = repository_source_sha256(repository)
+        assert first != second, "an edit within an untracked file was invisible"
+        try:
+            repository_source_sha256(
+                repository,
+                RepositoryProvenanceBudget(max_entries=0),
+            )
+        except RuntimeError as error:
+            assert "file limit" in str(error)
+        else:
+            raise AssertionError("repository provenance file limit was not enforced")
+        try:
+            repository_source_sha256(
+                repository,
+                RepositoryProvenanceBudget(max_bytes=1),
+            )
+        except RuntimeError as error:
+            assert "aggregate byte limit" in str(error)
+        else:
+            raise AssertionError("repository provenance byte limit was not enforced")
+        real_open = os.open
+        real_close = os.close
+        opened_fds: Set[int] = set()
+
+        def tracking_open(*args: object, **kwargs: object) -> int:
+            fd = real_open(*args, **kwargs)  # type: ignore[arg-type]
+            opened_fds.add(fd)
+            return fd
+
+        def tracking_close(fd: int) -> None:
+            real_close(fd)
+            opened_fds.discard(fd)
+
+        os.open = tracking_open  # type: ignore[assignment]
+        os.close = tracking_close  # type: ignore[assignment]
+        try:
+            try:
+                repository_file_digest(
+                    repository,
+                    Path("untracked.txt"),
+                    RepositoryProvenanceBudget(max_bytes=0),
+                )
+            except RuntimeError as error:
+                assert "aggregate byte limit" in str(error)
+            else:
+                raise AssertionError("the direct provenance byte limit did not fire")
+        finally:
+            os.open = real_open  # type: ignore[assignment]
+            os.close = real_close  # type: ignore[assignment]
+        assert not opened_fds, (
+            "a rejected untracked file leaked descriptors: "
+            f"{sorted(opened_fds)}"
+        )
+        started = time.monotonic()
+        try:
+            repository_source_sha256(
+                repository,
+                RepositoryProvenanceBudget(timeout_s=0.001),
+            )
+        except RuntimeError as error:
+            assert "time limit" in str(error)
+        else:
+            raise AssertionError("the parent-side provenance deadline did not fire")
+        assert time.monotonic() - started < 2.0, (
+            "repository provenance exceeded its parent-enforced timeout"
+        )
+        timeout_record = repository / "timeout-probe-pids"
+        started = time.monotonic()
+        timeout_failure: Optional[RepositoryWorkerTimeout] = None
+        try:
+            _run_repository_worker(
+                _internal_repository_worker_argv(
+                    PROVENANCE_SABOTAGE_WORKER_ARG,
+                    timeout_record,
+                ),
+                2.0,
+            )
+        except RepositoryWorkerTimeout as error:
+            timeout_failure = error
+            assert "hard time limit" in str(error)
+        else:
+            raise AssertionError("a blocked worker tree escaped its hard deadline")
+        assert time.monotonic() - started < 2.5, (
+            "blocked provenance cleanup added an unbounded teardown wait"
+        )
+        assert timeout_record.is_file(), (
+            "the timeout probe never reached its blocked worker/child state"
+        )
+        timeout_pids = [
+            int(value) for value in timeout_record.read_text(encoding="ascii").split()
+        ]
+        assert len(timeout_pids) == 2
+        tree_deadline = time.monotonic() + 3.0
+        while time.monotonic() < tree_deadline and any(
+            process_pid_is_running(pid) for pid in timeout_pids
+        ):
+            time.sleep(0.05)
+        assert not [pid for pid in timeout_pids if process_pid_is_running(pid)], (
+            "the timed-out provenance worker or its descendant survived"
+        )
+        assert timeout_failure is not None and timeout_failure.reaped.wait(3), (
+            "the detached provenance owner did not finish reaping the worker"
+        )
+
+        if os.name == "nt":
+            close_only_record = repository / "close-only-probe-pids"
+            close_only_worker = subprocess.Popen(
+                _internal_repository_worker_argv(
+                    PROVENANCE_SABOTAGE_WORKER_ARG,
+                    close_only_record,
+                ),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            close_only_job = WindowsKillJob()
+            close_only_job.assign(close_only_worker)
+            assert close_only_worker.stdin is not None
+            close_only_worker.stdin.write("1")
+            close_only_worker.stdin.flush()
+            close_only_deadline = time.monotonic() + 3
+            while (
+                time.monotonic() < close_only_deadline
+                and (
+                    not close_only_record.is_file()
+                    or not close_only_record.read_text(encoding="ascii").endswith("\n")
+                )
+            ):
+                time.sleep(0.05)
+            assert close_only_record.is_file(), (
+                "the Job close-only probe never reached its child state"
+            )
+            close_only_pids = [
+                int(value)
+                for value in close_only_record.read_text(encoding="ascii").split()
+            ]
+            assert len(close_only_pids) == 2, (
+                "the Job close-only probe did not record both worker and child"
+            )
+            close_errors, close_reaped = _stop_repository_worker(
+                close_only_worker, close_only_job, terminate_job=False
+            )
+            assert not close_errors, close_errors
+            assert close_reaped.wait(3), (
+                "KILL_ON_JOB_CLOSE did not let the close-only worker reap"
+            )
+            assert not [
+                pid for pid in close_only_pids if process_pid_is_running(pid)
+            ], "the Job close-only worker or child survived"
+
+            # The configured-editor path must prove the exact in-pane process
+            # can self-assign without a reusable ctl PID, and that deletion does
+            # not begin until Job accounting reaches zero. Hold one sandbox file
+            # without delete sharing so a premature rmtree is a real Windows
+            # failure rather than an abstract callback-order assertion.
+            native_job_target = AgentShellTarget(mode="native")
+            native_job = WindowsKillJob(named=True)
+            native_job_root = Path(native_job_target.create_nvim_sandbox_host())
+            held_file = native_job_root / "held-by-contained-powershell"
+            held_file.write_text("fixture\n", encoding="utf-8")
+            ready_file = native_job_root / "job-self-assignment-ready"
+            powershell = windows_system_executable(
+                "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+            )
+            native_job_process = subprocess.Popen(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    native_job.powershell_assign_current_process_command()
+                    + "; $KettleSmokeHeld=[IO.File]::Open("
+                    + shell_quote(str(held_file), windows=True)
+                    + ",[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,"
+                    + "[IO.FileShare]::None); [IO.File]::WriteAllText("
+                    + shell_quote(str(ready_file), windows=True)
+                    + ",'ready'); Start-Sleep -Seconds 60",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            ready_deadline = time.monotonic() + 15
+            while (
+                time.monotonic() < ready_deadline
+                and not ready_file.is_file()
+                and native_job_process.poll() is None
+            ):
+                time.sleep(0.02)
+            if not ready_file.is_file():
+                native_job_process.kill()
+                stdout, stderr = native_job_process.communicate(timeout=3)
+                raise AssertionError(
+                    "PowerShell did not self-assign to the named Job: "
+                    f"stdout={stdout!r} stderr={stderr!r}"
+                )
+            assert native_job.active_processes() >= 1
+            real_wait_empty = native_job.wait_empty
+            real_rmtree = shutil.rmtree
+            drain_finished: List[bool] = []
+
+            # Exercise Windows deletion itself, not just callback order.  The
+            # contained process deliberately opened this file without delete
+            # sharing, so a pre-drain tree removal must be refused by the OS.
+            try:
+                real_rmtree(native_job_root)
+            except OSError:
+                pass
+            else:
+                raise AssertionError(
+                    "Windows removed a sandbox before its contained Job drained"
+                )
+            assert native_job_root.exists() and held_file.exists(), (
+                "the pre-drain deletion probe did not retain the locked sandbox"
+            )
+
+            def record_real_job_drain(timeout_s: float = 5.0) -> None:
+                real_wait_empty(timeout_s)
+                native_job_process.poll()
+                assert native_job_process.returncode is not None, (
+                    "Job accounting reached zero before its contained process exited"
+                )
+                drain_finished.append(True)
+
+            def reject_premature_sandbox_remove(path: object, *args: object, **kwargs: object) -> None:
+                assert drain_finished == [True], (
+                    "sandbox removal began before the real Windows Job drained"
+                )
+                real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+            native_job.wait_empty = record_real_job_drain  # type: ignore[method-assign]
+            shutil.rmtree = reject_premature_sandbox_remove  # type: ignore[assignment]
+            try:
+                native_job_target.cleanup_nvim_sandbox_host(
+                    str(native_job_root), windows_job=native_job
+                )
+                native_job_process.wait(timeout=3)
+            finally:
+                shutil.rmtree = real_rmtree
+                if native_job_process.returncode is None:
+                    native_job_process.kill()
+                    native_job_process.wait(timeout=3)
+                if native_job_root.exists():
+                    real_rmtree(native_job_root)
+            assert not native_job_root.exists()
+
+            # Junctions are a separate Windows reparse type: DirEntry.is_symlink
+            # is false for them. Cleanup must remove the junction itself without
+            # walking it or clearing read-only bits on its external target.
+            junction_job: Optional[WindowsKillJob] = None
+            junction_root: Optional[Path] = None
+            junction_target: Optional[Path] = None
+            external_file: Optional[Path] = None
+            junction: Optional[Path] = None
+            try:
+                junction_job = WindowsKillJob(named=True)
+                junction_root = Path(
+                    native_job_target.create_nvim_sandbox_host()
+                )
+                junction_target = Path(
+                    native_job_target.create_nvim_sandbox_host()
+                )
+                external_file = junction_target / "must-stay-read-only"
+                external_file.write_text("external\n", encoding="utf-8")
+                external_file.chmod(stat.S_IREAD)
+                junction = junction_root / "external-junction"
+                linked = subprocess.run(
+                    [
+                        windows_system_executable("System32", "cmd.exe"),
+                        "/d",
+                        "/c",
+                        "mklink",
+                        "/J",
+                        str(junction),
+                        str(junction_target),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                assert linked.returncode == 0, (linked.stdout, linked.stderr)
+                assert native_job_target.path_is_link(junction)
+                native_job_target.cleanup_nvim_sandbox_host(
+                    str(junction_root), windows_job=junction_job
+                )
+                assert not junction_root.exists()
+                assert external_file.exists()
+                assert external_file.stat().st_mode & stat.S_IWRITE == 0, (
+                    "sandbox cleanup changed permissions through a junction"
+                )
+            finally:
+                if junction_job is not None:
+                    with contextlib.suppress(BaseException):
+                        junction_job.close()
+                if junction is not None and native_job_target.path_is_link(junction):
+                    junction.rmdir()
+                if external_file is not None and external_file.exists():
+                    external_file.chmod(stat.S_IWRITE | stat.S_IREAD)
+                if junction_root is not None and junction_root.exists():
+                    real_rmtree(junction_root)
+                if junction_target is not None and junction_target.exists():
+                    real_rmtree(junction_target)
+
+        if os.name != "nt":
+            real_popen = subprocess.Popen
+            real_killpg = os.killpg
+            communication_actions: List[str] = []
+
+            class BrokenCommunicationWorker:
+                pid = 987654321
+                returncode = None
+
+                def __init__(self, *_args: object, **_kwargs: object) -> None:
+                    self.stdin = io.StringIO()
+                    self.stdout = io.StringIO()
+                    self.stderr = io.StringIO()
+                    self.communications = 0
+
+                def communicate(
+                    self, input: Optional[str] = None, timeout: Optional[float] = None
+                ) -> Tuple[str, str]:
+                    del input, timeout
+                    self.communications += 1
+                    if self.communications == 1:
+                        raise OSError("intentional communicate failure")
+                    self.returncode = -9
+                    communication_actions.append("reaped")
+                    return "", ""
+
+                def wait(self, timeout: Optional[float] = None) -> int:
+                    del timeout
+                    self.returncode = -9
+                    communication_actions.append("waited")
+                    return -9
+
+                def kill(self) -> None:
+                    communication_actions.append("killed")
+
+            broken_worker: Optional[BrokenCommunicationWorker] = None
+
+            def broken_popen(*args: object, **kwargs: object) -> BrokenCommunicationWorker:
+                nonlocal broken_worker
+                broken_worker = BrokenCommunicationWorker(*args, **kwargs)
+                return broken_worker
+
+            subprocess.Popen = broken_popen  # type: ignore[assignment]
+            os.killpg = lambda pid, sig: communication_actions.append(  # type: ignore[assignment]
+                f"killpg:{pid}:{sig}"
+            )
+            try:
+                try:
+                    _run_repository_worker(["unused"], 2.0)
+                except RuntimeError as error:
+                    assert "intentional communicate failure" in str(error)
+                else:
+                    raise AssertionError(
+                        "an unexpected worker communication error was discarded"
+                    )
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and "reaped" not in communication_actions:
+                    time.sleep(0.01)
+                assert communication_actions[0].startswith("killpg:"), (
+                    "a communication failure did not terminate the worker group"
+                )
+                assert "reaped" in communication_actions, (
+                    "a communication failure did not transfer ownership to the reaper"
+                )
+            finally:
+                subprocess.Popen = real_popen  # type: ignore[assignment]
+                os.killpg = real_killpg  # type: ignore[assignment]
+
+            class UnreapableWorker:
+                stdin = None
+                stdout = None
+                stderr = None
+
+                def communicate(self) -> Tuple[str, str]:
+                    raise OSError("intentional reap failure")
+
+                def wait(self) -> int:
+                    raise OSError("intentional wait failure")
+
+            false_reaped = threading.Event()
+            _eventually_reap_process(  # type: ignore[arg-type]
+                UnreapableWorker(), false_reaped
+            )
+            assert not false_reaped.is_set(), (
+                "the reaper reported success after both wait paths failed"
+            )
+
+            completed_failure_record = repository / "completed-failure-child"
+            completed_failure_code = (
+                "import pathlib,subprocess,sys; "
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "'import time; time.sleep(60)'], stdin=subprocess.DEVNULL, "
+                "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii'); "
+                "raise SystemExit(7)"
+            )
+            returncode, _stdout, _stderr = _run_repository_worker(
+                [sys.executable, "-c", completed_failure_code, str(completed_failure_record)],
+                3.0,
+            )
+            assert returncode == 7
+            completed_failure_pid = int(
+                completed_failure_record.read_text(encoding="ascii")
+            )
+            completed_failure_deadline = time.monotonic() + 3
+            while (
+                time.monotonic() < completed_failure_deadline
+                and process_pid_is_running(completed_failure_pid)
+            ):
+                time.sleep(0.05)
+            assert not process_pid_is_running(completed_failure_pid), (
+                "a descendant of a completed nonzero worker escaped containment"
+            )
+
+        real_stream_git_output = globals()["stream_git_output"]
+        status_consumed_past_limit = False
+
+        def status_entry_sentinel(
+            _repository: Path,
+            args: List[str],
+            _budget: RepositoryProvenanceBudget,
+            consume: Callable[[bytes], None],
+        ) -> None:
+            nonlocal status_consumed_past_limit
+            assert args[:2] == ["status", "--porcelain=v1"]
+            consume(b"?? first\0")
+            status_consumed_past_limit = True
+            raise AssertionError("status output was consumed past its entry cap")
+
+        globals()["stream_git_output"] = status_entry_sentinel
+        try:
+            try:
+                _repository_source_identity_impl(
+                    repository,
+                    RepositoryProvenanceBudget(max_scan_entries=0),
+                )
+            except RuntimeError as error:
+                assert "status-entry limit" in str(error)
+            else:
+                raise AssertionError("the streaming status entry cap did not fire")
+        finally:
+            globals()["stream_git_output"] = real_stream_git_output
+        assert not status_consumed_past_limit, (
+            "status traversal continued after crossing its record cap"
+        )
+        try:
+            repository_source_sha256(
+                repository,
+                RepositoryProvenanceBudget(max_scan_entries=0),
+            )
+        except RuntimeError as error:
+            assert "status-entry limit" in str(error)
+        else:
+            raise AssertionError(
+                "repository status entry limit was not enforced while streaming"
+            )
+        link = repository / "linked-directory"
+        try:
+            link.symlink_to(repository, target_is_directory=True)
+        except (NotImplementedError, OSError):
+            pass
+        else:
+            try:
+                repository_source_sha256(repository)
+            except RuntimeError as error:
+                assert "linked entry" in str(error)
+            else:
+                raise AssertionError(
+                    "repository provenance must reject a linked directory"
+                )
+            finally:
+                link.unlink()
+        if hasattr(os, "mkfifo"):
+            fifo = repository / "untracked-fifo"
+            os.mkfifo(fifo)
+            try:
+                try:
+                    repository_source_sha256(repository)
+                except RuntimeError as error:
+                    assert "special file" in str(error)
+                else:
+                    raise AssertionError(
+                        "repository provenance must reject an untracked FIFO"
+                    )
+            finally:
+                fifo.unlink()
 
     def titlebar_fixture_geometry(title_at_bottom: bool) -> Dict[str, object]:
         bar_y = 120.0 if title_at_bottom else 20.0
@@ -3521,18 +8724,27 @@ def live_helper_selftest() -> None:
     assert "]9;9;" in win_cwd_command
     assert "]2;" in win_cwd_command
     assert "file://" not in win_cwd_command
-    assert (
-        f"Write-Output {shell_quote(cwd_marker, windows=True)}"
-        in win_cwd_command
-    )
+    cwd_marker_left, cwd_marker_right = split_marker(cwd_marker)
+    assert cwd_marker not in win_cwd_command
+    assert shell_quote(cwd_marker_left, windows=True) in win_cwd_command
+    assert shell_quote(cwd_marker_right, windows=True) in win_cwd_command
     assert "Start-Sleep -Seconds 5" in win_cwd_command
     # POSIX: unchanged `cd` + `printf` OSC 7 shape.
     assert "printf" in posix_cwd_command
     assert "file://localhost" in posix_cwd_command
     assert "Set-Location" not in posix_cwd_command
     assert "[Console]::Write" not in posix_cwd_command
-    assert f"{cwd_marker}\\n" in posix_cwd_command
+    assert cwd_marker not in posix_cwd_command
+    assert shell_quote(cwd_marker_left) in posix_cwd_command
+    assert shell_quote(cwd_marker_right) in posix_cwd_command
     assert "sleep 5" in posix_cwd_command
+
+    notification_marker = "KETTLE_NOTIFICATION_COMPLETE"
+    notification = notification_command("title", "body", notification_marker)
+    notification_left, notification_right = split_marker(notification_marker)
+    assert notification_marker not in notification
+    assert shell_quote(notification_left) in notification
+    assert shell_quote(notification_right) in notification
 
     # The host OS and target shell dialect are separate decisions. In
     # particular, Windows Kettle -> WSL must construct POSIX commands and must
@@ -3632,6 +8844,7 @@ def live_helper_selftest() -> None:
     )
     assert "printf" in wsl_marker_command
     assert "Write-Output" not in wsl_marker_command
+    assert "KETTLE_WSL_MARKER" not in wsl_marker_command
     assert "sed -n" in first_lines_command(
         "claude --print --help", windows=wsl_target.powershell
     )
@@ -3676,6 +8889,7 @@ def live_helper_selftest() -> None:
     assert 'HOME="$KETTLE_SMOKE_ROOT/home"' in wsl_sandbox
     assert 'XDG_CONFIG_HOME="$KETTLE_SMOKE_ROOT/config"' in wsl_sandbox
     assert 'XDG_DATA_HOME="$KETTLE_SMOKE_ROOT/data"' in wsl_sandbox
+    assert "KETTLE_SMOKE_ROOT LANG=C LC_ALL=C" in wsl_sandbox
     assert ".bashrc" not in wsl_sandbox
     assert ".zshrc" not in wsl_sandbox
     assert sandbox_marker not in wsl_sandbox
@@ -3690,8 +8904,9 @@ def live_helper_selftest() -> None:
     assert 'KETTLE_NVIM_SOURCE="$HOME"/.config/nvim' in tilde_sandbox
     assert 'KETTLE_NVIM_DATA_SOURCE="$HOME"/.local/share/nvim' in tilde_sandbox
     cleanup_marker = "KETTLE_NVIM_SANDBOX_CLEAN"
-    cleanup_command = wsl_target.nvim_sandbox_cleanup_command(cleanup_marker)
-    assert "rm -rf --" in cleanup_command
+    cleanup_command = wsl_target.nvim_sandbox_release_command(cleanup_marker)
+    assert "rm -rf --" not in cleanup_command
+    assert "Remove-Item" not in cleanup_command
     assert cleanup_marker not in cleanup_command
     try:
         wsl_target.cleanup_nvim_sandbox_host("/tmp/not-a-kettle-sandbox")
@@ -3705,6 +8920,81 @@ def live_helper_selftest() -> None:
         pass
     else:
         raise AssertionError("unsafe WSL process target must be rejected")
+    wsl_cleanup_code = wsl_target.wsl_pidfd_cleanup_code()
+    compile(wsl_cleanup_code, "<wsl-pidfd-cleanup>", "exec")
+    assert "pidfd_open" in wsl_cleanup_code
+    assert "pidfd_send_signal" in wsl_cleanup_code
+    assert "XDG_CONFIG_HOME=" in wsl_cleanup_code
+    assert "scope=='pidfile'" in wsl_cleanup_code
+    assert "/comm" not in wsl_cleanup_code
+    assert "kill -TERM" not in wsl_cleanup_code
+    if platform.system() == "Linux":
+        import socket
+
+        with tempfile.TemporaryDirectory(
+            prefix="kettle-wsl-pid-record-"
+        ) as temporary:
+            fixture_root = Path(temporary)
+            run_root = fixture_root / "run"
+            run_root.mkdir()
+            record = run_root / "nvim.pid"
+
+            def require_rejected_record(kind: str) -> None:
+                started = time.monotonic()
+                rejected = subprocess.run(
+                    [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+                assert rejected.returncode != 0, (
+                    f"a {kind} WSL PID record was accepted: {rejected.stdout!r}"
+                )
+                assert time.monotonic() - started < 2, (
+                    f"a {kind} WSL PID record blocked before rejection"
+                )
+
+            os.mkfifo(record, 0o600)
+            require_rejected_record("FIFO")
+            record.unlink()
+
+            target = fixture_root / "target.pid"
+            target.write_text(f"{os.getpid()}\n", encoding="ascii")
+            record.symlink_to(target)
+            require_rejected_record("symlink")
+            record.unlink()
+
+            endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                endpoint.bind(str(record))
+                require_rejected_record("Unix socket")
+            finally:
+                endpoint.close()
+                record.unlink(missing_ok=True)
+    compile(wsl_target.bounded_identity_code(), "<wsl-bounded-identity>", "exec")
+
+    class CompileOnlyWslTarget(AgentShellTarget):
+        def __init__(self) -> None:
+            super().__init__(mode="wsl", wsl_distro="CompileFixture")
+            self.calls = 0
+
+        def run_command(
+            self, argv: List[str], *, timeout: float
+        ) -> subprocess.CompletedProcess:
+            self.calls += 1
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+    compile_only_wsl = CompileOnlyWslTarget()
+    compile_only_wsl.require_wsl_pidfd_cleanup()
+    assert compile_only_wsl.calls == 2, (
+        "the assembled WSL pidfd exercise was not reached after its API probe"
+    )
+    compile(
+        AgentShellTarget.sandbox_marker_wait_code(),
+        "<wsl-sandbox-marker-wait>",
+        "exec",
+    )
 
     # Native snapshots are created with an unpredictable tempfile name and
     # dereference both a symlinked config root and nested file links when the
@@ -3739,17 +9029,60 @@ def live_helper_selftest() -> None:
         (data_source / "lazy" / "fixture" / "plugin.lua").write_text(
             "-- plugin fixture\n", encoding="utf-8"
         )
+        lazyvcs_module = (
+            data_source
+            / "lazy"
+            / "lazyvcs.nvim"
+            / "lua"
+            / "lazyvcs"
+            / "source_control"
+            / "native.lua"
+        )
+        lazyvcs_module.parent.mkdir(parents=True)
+        lazyvcs_module.write_text("return {}\n", encoding="utf-8")
         snapshot_target = AgentShellTarget(
             mode="native",
             astro_config=str(config_source),
             nvim_data=str(data_source),
         )
+        snapshot_subreaper = (
+            LinuxSubreaperScope.acquire()
+            if platform.system() == "Linux"
+            else None
+        )
         native_sandbox_path = snapshot_target.create_nvim_sandbox_host()
+        snapshot_cleanup_job = WindowsKillJob() if os.name == "nt" else None
+        runtime_link_created = False
         try:
             snapshot_target.prepare_nvim_sandbox_host(native_sandbox_path)
             native_root = Path(native_sandbox_path)
             assert native_root.name.startswith("kettle-agent-tui-")
             assert (native_root / "config" / "nvim" / "init.lua").is_file()
+            ready_record = native_root / "run" / "selftest-ready"
+            ready_record.write_text("SELFTEST_READY\n", encoding="ascii")
+            snapshot_target.wait_for_nvim_sandbox_marker(
+                native_sandbox_path,
+                "selftest-ready",
+                "SELFTEST_READY",
+                timeout_s=0.1,
+            )
+            linked_ready = native_root / "run" / "linked-ready"
+            try:
+                linked_ready.symlink_to(external)
+            except (NotImplementedError, OSError):
+                pass
+            else:
+                try:
+                    snapshot_target.wait_for_nvim_sandbox_marker(
+                        native_sandbox_path,
+                        "linked-ready",
+                        "SELFTEST_READY",
+                        timeout_s=0.1,
+                    )
+                except RuntimeError as error:
+                    assert "small regular identity record" in str(error)
+                else:
+                    raise AssertionError("a linked readiness marker was accepted")
             assert (
                 native_root
                 / "data"
@@ -3758,6 +9091,40 @@ def live_helper_selftest() -> None:
                 / "fixture"
                 / "plugin.lua"
             ).is_file()
+            copied_lazyvcs_module = (
+                native_root
+                / "data"
+                / "nvim"
+                / "lazy"
+                / "lazyvcs.nvim"
+                / "lua"
+                / "lazyvcs"
+                / "source_control"
+                / "native.lua"
+            )
+            (native_root / "run" / "lazyvcs-loaded-source").write_text(
+                str(copied_lazyvcs_module) + "\n", encoding="utf-8"
+            )
+            loaded_identity = snapshot_target.lazyvcs_loaded_source_identity(
+                native_sandbox_path
+            )
+            assert loaded_identity["module_relative"] == (
+                "lua/lazyvcs/source_control/native.lua"
+            )
+            assert loaded_identity["module_file"]["sha256"]
+            (native_root / "run" / "lazyvcs-loaded-source").write_text(
+                str(external) + "\n", encoding="utf-8"
+            )
+            try:
+                snapshot_target.lazyvcs_loaded_source_identity(
+                    native_sandbox_path
+                )
+            except RuntimeError as error:
+                assert "outside its snapshot" in str(error)
+            else:
+                raise AssertionError(
+                    "a LazyVCS module outside the copied tree must be rejected"
+                )
             if root_link_created:
                 assert not snapshot_target.path_is_link(
                     native_root / "config" / "nvim"
@@ -3785,9 +9152,2028 @@ def live_helper_selftest() -> None:
                 readonly_cleanup_fixture.chmod(stat.S_IREAD)
             else:
                 readonly_cleanup_dir.chmod(stat.S_IREAD | stat.S_IWRITE)
+            runtime_link = native_root / "runtime-created-link"
+            try:
+                runtime_link.symlink_to(external)
+                runtime_link_created = True
+            except (NotImplementedError, OSError):
+                pass
         finally:
-            snapshot_target.cleanup_nvim_sandbox_host(native_sandbox_path)
+            try:
+                snapshot_target.cleanup_nvim_sandbox_host(
+                    native_sandbox_path,
+                    windows_job=snapshot_cleanup_job,
+                    linux_subreaper=snapshot_subreaper,
+                )
+            finally:
+                if snapshot_subreaper is not None:
+                    snapshot_subreaper.close()
         assert not Path(native_sandbox_path).exists()
+        if runtime_link_created:
+            assert external.read_text(encoding="utf-8") == "-- external fixture\n"
+
+        wait_state = NvimSidebarWaitState("SIDEBAR_MARKER", 0.5)
+        assert wait_state.observe("SIDEBAR_MARKER", "frame-a", [0, 0], 0, 0.0) == (
+            False,
+            False,
+        )
+        # A changed frame resets the quiet period instead of inheriting the
+        # first marker timestamp.
+        assert wait_state.observe(
+            "SIDEBAR_MARKER changed", "frame-b", [0, 0], 0, 0.4
+        ) == (
+            False,
+            False,
+        )
+        # Cursor/history changes count as activity even when the rendered text
+        # and text-derived snapshot are identical.
+        assert wait_state.observe(
+            "SIDEBAR_MARKER changed", "frame-b", [0, 1], 0, 0.8
+        ) == (
+            False,
+            False,
+        )
+        assert wait_state.observe(
+            "SIDEBAR_MARKER changed", "frame-b", [0, 1], 0, 1.31
+        ) == (
+            True,
+            False,
+        )
+        pager = "Press ENTER or type command to continue"
+        pager_state = NvimSidebarWaitState("SIDEBAR_MARKER", 0.0)
+        assert pager_state.observe(pager, "same-frame", [0, 0], 0, 0.0) == (False, True)
+        assert pager_state.observe(pager, "same-frame", [0, 0], 0, 0.1) == (False, False)
+        # A second prompt can replace the first without an observable clear
+        # frame. A changed prompt and a still-covered prompt after the bounded
+        # retry interval both get another Enter.
+        assert pager_state.observe(pager + " 2", "second-frame", [0, 0], 0, 0.2) == (
+            False,
+            True,
+        )
+        assert pager_state.observe(pager + " 2", "second-frame", [0, 0], 0, 0.8) == (
+            False,
+            True,
+        )
+        assert pager_state.observe("cleared", "clear-frame", [0, 0], 0, 0.9) == (
+            False,
+            False,
+        )
+        # An identical pager frame after a visible absence is a new prompt and
+        # must be dismissed again.
+        assert pager_state.observe(pager, "same-frame", [0, 0], 0, 1.0) == (False, True)
+
+        cleanup_probe = LiveKettle("unused", Path("unused"), Path("unused"))
+        cleanup_ran: List[bool] = []
+
+        def fail_process_cleanup() -> None:
+            raise RuntimeError("intentional termination failure")
+
+        cleanup_probe._terminate_process = fail_process_cleanup  # type: ignore[method-assign]
+        cleanup_probe.add_post_exit_cleanup(lambda: cleanup_ran.append(True))
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cleanup_probe.__exit__(None, None, None)
+            except RuntimeError as error:
+                assert "intentional termination failure" in str(error)
+            else:
+                raise AssertionError("a process cleanup failure must still be reported")
+        assert cleanup_ran == [True], "post-exit cleanup was skipped after termination failed"
+
+        cleanup_order: List[str] = []
+
+        def record_remove() -> None:
+            assert cleanup_order == ["drain"], (
+                "sandbox removal ran before descendant drain completed"
+            )
+            cleanup_order.append("remove")
+
+        _drain_then_remove(lambda: cleanup_order.append("drain"), record_remove)
+        assert cleanup_order == ["drain", "remove"]
+
+        # Once Popen succeeds, every startup-probe exception must cross the
+        # same cleanup boundary as a timeout. Context-manager __exit__ is never
+        # invoked when __enter__ raises, so this is the only owner of the live
+        # process and registered temporary paths in that case.
+        startup_probe = LiveKettle("unused", Path("unused"), Path("unused"))
+        startup_process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=os.name != "nt",
+        )
+        startup_probe.proc = startup_process
+        startup_probe._tracker_owner_pid = startup_process.pid
+        startup_cleanup: List[str] = []
+        startup_probe.add_post_exit_cleanup(
+            lambda: startup_cleanup.append("temporary-path")
+        )
+
+        def fail_startup_identity_probe() -> None:
+            raise RuntimeError("intentional startup identity uncertainty")
+
+        startup_probe._remember_tracker_sessions = (  # type: ignore[method-assign]
+            fail_startup_identity_probe
+        )
+        try:
+            startup_probe._finish_startup()
+        except SystemExit as error:
+            assert "intentional startup identity uncertainty" in str(error)
+        else:
+            raise AssertionError("a startup identity failure escaped cleanup")
+        startup_process.wait(timeout=3)
+        assert startup_cleanup == ["temporary-path"]
+
+        interrupted_probe = LiveKettle("unused", Path("unused"), Path("unused"))
+        interrupted_process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=os.name != "nt",
+        )
+        interrupted_probe.proc = interrupted_process
+        interrupted_probe._tracker_owner_pid = interrupted_process.pid
+        interrupt_cleanup: List[str] = []
+        interrupted_probe.add_post_exit_cleanup(
+            lambda: interrupt_cleanup.append("temporary-path")
+        )
+
+        def interrupt_control_wait() -> LiveKettle:
+            raise KeyboardInterrupt
+
+        interrupted_probe._await_control_server = (  # type: ignore[method-assign]
+            interrupt_control_wait
+        )
+        try:
+            interrupted_probe._finish_startup()
+        except KeyboardInterrupt:
+            pass
+        else:
+            raise AssertionError("an interrupted __enter__ escaped owned cleanup")
+        interrupted_process.wait(timeout=3)
+        assert interrupt_cleanup == ["temporary-path"]
+
+        # Ownership starts at mkdir, not after the wrapper has been written.
+        # Inject that exact startup failure and prove the registered cleanup
+        # removes the otherwise stranded owner-private directory.
+        if os.name != "nt":
+            failed_wrapper = LiveKettle("unused", Path("unused"), Path("unused"))
+            real_path_write_text = Path.write_text
+            failed_wrapper_roots: List[Path] = []
+
+            def reject_wrapper_write(
+                path: Path, *_args: object, **_kwargs: object
+            ) -> int:
+                if path.parent.name.startswith("kettle-live-ui-shell-"):
+                    failed_wrapper_roots.append(path.parent)
+                    raise OSError("intentional PTY wrapper write failure")
+                return real_path_write_text(  # type: ignore[arg-type]
+                    path, *_args, **_kwargs
+                )
+
+            Path.write_text = reject_wrapper_write  # type: ignore[assignment]
+            try:
+                try:
+                    failed_wrapper._prepare_unix_pty_tracker(["unused"])
+                except OSError as error:
+                    assert "intentional PTY wrapper write failure" in str(error)
+                else:
+                    raise AssertionError("the PTY wrapper write failure did not fire")
+            finally:
+                Path.write_text = real_path_write_text  # type: ignore[assignment]
+            assert (
+                len(failed_wrapper_roots) == 1 and failed_wrapper_roots[0].exists()
+            )
+            failed_wrapper._run_post_exit_cleanups()
+            assert not failed_wrapper_roots[0].exists(), (
+                "a PTY tracker startup failure stranded its private directory"
+            )
+
+        class OwnedSandboxFixture:
+            powershell = True
+
+            def __init__(self) -> None:
+                self.created = False
+                self.cleaned = False
+                self.path: Optional[Path] = None
+
+            def create_nvim_sandbox_host(self) -> str:
+                self.created = True
+                self.path = Path(tempfile.mkdtemp(prefix="kettle-agent-tui-"))
+                return str(self.path)
+
+            def cleanup_nvim_sandbox_host(
+                self,
+                path: str,
+                *,
+                windows_job: Optional[object] = None,
+                linux_subreaper: Optional[LinuxSubreaperScope] = None,
+            ) -> None:
+                self.cleaned = True
+                assert linux_subreaper is None
+                if windows_job is not None:
+                    windows_job.close()
+                shutil.rmtree(path)
+
+        job_failure_target = OwnedSandboxFixture()
+
+        def reject_job_creation(**_kwargs: object) -> WindowsKillJob:
+            raise OSError("intentional Job construction failure")
+
+        try:
+            _create_owned_nvim_sandbox(  # type: ignore[arg-type]
+                job_failure_target,
+                lambda _cleanup: None,
+                reject_job_creation,
+            )
+        except OSError as error:
+            assert "intentional Job construction failure" in str(error)
+        else:
+            raise AssertionError("the injected Job construction failure did not fire")
+        assert not job_failure_target.created, (
+            "the Neovim sandbox was created before Windows containment existed"
+        )
+
+        class OwnedSandboxJobFixture:
+            def __init__(self, **_kwargs: object) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class FailingSandboxFixture(OwnedSandboxFixture):
+            def create_nvim_sandbox_host(self) -> str:
+                self.created = True
+                raise OSError("intentional sandbox creation failure")
+
+        sandbox_failure_jobs: List[OwnedSandboxJobFixture] = []
+
+        def make_sandbox_failure_job(**kwargs: object) -> OwnedSandboxJobFixture:
+            job = OwnedSandboxJobFixture(**kwargs)
+            sandbox_failure_jobs.append(job)
+            return job
+
+        try:
+            _create_owned_nvim_sandbox(  # type: ignore[arg-type]
+                FailingSandboxFixture(),
+                lambda _cleanup: None,
+                make_sandbox_failure_job,  # type: ignore[arg-type]
+            )
+        except OSError as error:
+            assert "intentional sandbox creation failure" in str(error)
+        else:
+            raise AssertionError("the injected sandbox creation failure did not fire")
+        assert len(sandbox_failure_jobs) == 1 and sandbox_failure_jobs[0].closed, (
+            "a sandbox creation failure leaked its already-created Windows Job"
+        )
+
+        class FailingNativeSandboxFixture:
+            powershell = False
+            mode = "native"
+
+            @staticmethod
+            def create_nvim_sandbox_host() -> str:
+                raise OSError("intentional native sandbox creation failure")
+
+        class FailingSubreaperFixture:
+            @staticmethod
+            def close() -> None:
+                raise OSError("intentional subreaper rollback failure")
+
+        original_platform_system = platform.system
+        original_subreaper_acquire = LinuxSubreaperScope.__dict__["acquire"]
+        platform.system = lambda: "Linux"  # type: ignore[assignment]
+        LinuxSubreaperScope.acquire = classmethod(  # type: ignore[method-assign]
+            lambda _cls: FailingSubreaperFixture()
+        )
+        try:
+            try:
+                _create_owned_nvim_sandbox(  # type: ignore[arg-type]
+                    FailingNativeSandboxFixture(), lambda _cleanup: None
+                )
+            except RuntimeError as error:
+                assert "intentional native sandbox creation failure" in str(error)
+                assert "intentional subreaper rollback failure" in str(error)
+            else:
+                raise AssertionError("a failed subreaper rollback was suppressed")
+        finally:
+            platform.system = original_platform_system  # type: ignore[assignment]
+            LinuxSubreaperScope.acquire = original_subreaper_acquire
+
+        registration_target = OwnedSandboxFixture()
+        registration_jobs: List[OwnedSandboxJobFixture] = []
+
+        def make_fixture_job(**kwargs: object) -> OwnedSandboxJobFixture:
+            job = OwnedSandboxJobFixture(**kwargs)
+            registration_jobs.append(job)
+            return job
+
+        def reject_cleanup_registration(_cleanup: Callable[[], None]) -> None:
+            raise RuntimeError("intentional cleanup registration failure")
+
+        try:
+            _create_owned_nvim_sandbox(  # type: ignore[arg-type]
+                registration_target,
+                reject_cleanup_registration,
+                make_fixture_job,  # type: ignore[arg-type]
+            )
+        except RuntimeError as error:
+            assert "intentional cleanup registration failure" in str(error)
+        else:
+            raise AssertionError("the injected cleanup registration failure did not fire")
+        assert registration_target.created and registration_target.cleaned
+        assert registration_target.path is not None
+        assert not registration_target.path.exists()
+        assert len(registration_jobs) == 1 and registration_jobs[0].closed
+
+        if platform.system() != "Windows":
+            import pty
+
+            tracker = LiveKettle("unused", Path("unused"), Path("unused"))
+            tracker._tracker_owner_pid = os.getpid()
+            tracked_argv, tracked_env = tracker._prepare_unix_pty_tracker(
+                [
+                    "unused",
+                    "-e",
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(60)",
+                ]
+            )
+            execute_at = tracked_argv.index("-e")
+            with tempfile.TemporaryDirectory(
+                prefix="kettle-pty-python-startup-"
+            ) as hook_fixture:
+                hook_root = Path(hook_fixture)
+                hook_marker = hook_root / "sitecustomize-ran"
+                (hook_root / "sitecustomize.py").write_text(
+                    "import os,pathlib\n"
+                    "pathlib.Path(os.environ['KETTLE_PTY_SITE_MARKER']).write_text('ran')\n",
+                    encoding="utf-8",
+                )
+                hook_env = dict(tracked_env or os.environ)
+                hook_env["PYTHONPATH"] = str(hook_root)
+                hook_env["KETTLE_PTY_SITE_MARKER"] = str(hook_marker)
+                control = subprocess.run(
+                    [sys.executable, "-c", "pass"],
+                    env=hook_env,
+                    timeout=5,
+                    check=False,
+                )
+                assert control.returncode == 0 and hook_marker.is_file()
+                hook_marker.unlink()
+                isolated_wrapper = subprocess.run(
+                    [tracked_argv[execute_at + 1], "/usr/bin/true"],
+                    env=hook_env,
+                    start_new_session=True,
+                    timeout=5,
+                    check=False,
+                )
+                assert isolated_wrapper.returncode == 0
+                assert not hook_marker.exists(), (
+                    "the PTY ownership wrapper ran user Python startup code "
+                    "before recording its session"
+                )
+                # A tty descriptor can be inherited after setsid without being
+                # this process's controlling terminal. `isatty(0)` remains
+                # true, but tcsetpgrp must not be attempted. This is distinct
+                # from the real controlling-terminal handoff exercised below.
+                unowned_master, unowned_slave = pty.openpty()
+                try:
+                    unowned_tty = subprocess.run(
+                        [tracked_argv[execute_at + 1], "/usr/bin/true"],
+                        env=tracked_env,
+                        stdin=unowned_slave,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                        timeout=5,
+                        check=False,
+                        text=True,
+                    )
+                finally:
+                    os.close(unowned_slave)
+                    os.close(unowned_master)
+                assert unowned_tty.returncode == 0, unowned_tty.stderr
+            payload_env = dict(tracked_env or os.environ)
+            payload_env["KETTLE_SMOKE_TEST_REJECT_TCSETPGRP"] = (
+                "payload-must-not-see-this"
+            )
+            payload_environment = subprocess.run(
+                [
+                    tracked_argv[execute_at + 1],
+                    sys.executable,
+                    "-c",
+                    (
+                        "import json,os; print(json.dumps({name: os.environ.get(name) "
+                        "for name in ('SHELL','KETTLE_SMOKE_PTY_SESSIONS',"
+                        "'KETTLE_SMOKE_REAL_SHELL','KETTLE_SMOKE_TEST_REJECT_TCSETPGRP')}))"
+                    ),
+                ],
+                env=payload_env,
+                start_new_session=True,
+                timeout=3,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert payload_environment.returncode == 0, payload_environment.stderr
+            observed_payload_env = json.loads(payload_environment.stdout)
+            assert observed_payload_env == {
+                "SHELL": tracked_env["KETTLE_SMOKE_REAL_SHELL"],
+                "KETTLE_SMOKE_PTY_SESSIONS": None,
+                "KETTLE_SMOKE_REAL_SHELL": None,
+                "KETTLE_SMOKE_TEST_REJECT_TCSETPGRP": None,
+            }, observed_payload_env
+
+            record_probe = LiveKettle("unused", Path("unused"), Path("unused"))
+            _record_argv, record_env = record_probe._prepare_unix_pty_tracker(
+                ["unused"]
+            )
+            assert record_env is not None
+            assert record_probe._pty_session_file is not None
+            retained_records: List[int] = []
+
+            class RecordProbeHandle:
+                def __init__(self, pid: int) -> None:
+                    self.pid = pid
+                    self.identity = (pid,)
+                    self.closed = False
+
+                @staticmethod
+                def matches_current() -> bool:
+                    return True
+
+                def close(self) -> None:
+                    self.closed = True
+
+            def remember_probe_record(
+                session: int, *, deadline: Optional[float] = None
+            ) -> RecordProbeHandle:
+                assert deadline is not None
+                retained_records.append(session)
+                return RecordProbeHandle(session)
+
+            record_probe._open_owned_tracker_session = remember_probe_record  # type: ignore[method-assign]
+            record_probe._pty_session_file.write_bytes(b"malformed\n123\n")
+            try:
+                record_probe._remember_tracker_sessions()
+            except RuntimeError as error:
+                assert "invalid PTY session ownership record at line 1" in str(error)
+            else:
+                raise AssertionError("a malformed PTY tracker record was accepted")
+            assert retained_records == [123], (
+                "a malformed record prevented a later valid session from being retained"
+            )
+            retained_probe_handle = record_probe._tracker_sessions.get(123)
+            assert isinstance(retained_probe_handle, RecordProbeHandle), (
+                "a later valid tracker record was checked but not published"
+            )
+            record_probe._tracker_sessions.clear()
+            record_probe._pty_sessions.clear()
+            retained_probe_handle.close()
+
+            retained_records.clear()
+            record_probe._pty_session_file.write_bytes(b"321\n" * 4096)
+            record_probe._open_owned_tracker_session = (  # type: ignore[method-assign]
+                lambda session, *, deadline=None: (
+                    retained_records.append(session), None
+                )[1]
+            )
+            record_probe._remember_tracker_sessions()
+            assert retained_records == [321], (
+                "duplicate tracker records repeated the ownership probe"
+            )
+
+            retained_records.clear()
+            record_probe._pty_session_file.write_bytes(b"654\n")
+            try:
+                record_probe._remember_tracker_sessions(deadline=time.monotonic())
+            except RuntimeError as error:
+                assert "scan exceeded its time limit" in str(error)
+            else:
+                raise AssertionError("the PTY tracker ignored its absolute deadline")
+            assert not retained_records, (
+                "an expired tracker budget still started an ownership probe"
+            )
+
+            record_probe._pty_session_file.write_bytes(b"2\n" * 4097)
+            try:
+                record_probe._remember_tracker_sessions()
+            except RuntimeError as error:
+                assert f"more than {PTY_TRACKER_MAX_RECORDS} records" in str(error)
+            else:
+                raise AssertionError("the PTY tracker record-count limit was ignored")
+
+            retained_records.clear()
+            record_probe._open_owned_tracker_session = remember_probe_record  # type: ignore[method-assign]
+            record_probe._pty_session_file.write_bytes(
+                b"1\n2147483648\n2147483647\n789"
+            )
+            try:
+                record_probe._remember_tracker_sessions()
+            except RuntimeError as error:
+                detail = str(error)
+                assert "not a valid child PID: 1" in detail
+                assert "exceeds the pid_t limit: 2147483648" in detail
+                assert "ends with an incomplete line" in detail
+            else:
+                raise AssertionError("invalid or incomplete PTY records were accepted")
+            assert retained_records == [PTY_TRACKER_MAX_PID]
+            assert PTY_TRACKER_MAX_PID in record_probe._tracker_sessions
+            record_probe._tracker_sessions.clear()
+            record_probe._pty_sessions.clear()
+
+            record_probe._pty_session_file.write_bytes(
+                b"1\n" * (PTY_TRACKER_MAX_BYTES // 2 + 1)
+            )
+            try:
+                record_probe._remember_tracker_sessions()
+            except RuntimeError as error:
+                assert f"exceeds {PTY_TRACKER_MAX_BYTES} bytes" in str(error)
+            else:
+                raise AssertionError("an oversized PTY tracker record was accepted")
+
+            record_target = record_probe._pty_session_file.with_name("replacement")
+            record_target.write_bytes(b"456\n")
+            record_probe._pty_session_file.unlink()
+            record_probe._pty_session_file.symlink_to(record_target)
+            try:
+                record_probe._remember_tracker_sessions()
+            except RuntimeError as error:
+                assert "not the retained private file" in str(error)
+            else:
+                raise AssertionError("a replaced PTY tracker pathname was accepted")
+            assert record_target.read_bytes() == b"456\n"
+            replaced_writer = subprocess.run(
+                [record_env["SHELL"], "/usr/bin/true"],
+                env=record_env,
+                start_new_session=True,
+                timeout=3,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert replaced_writer.returncode != 0, (
+                "the PTY wrapper followed a replaced tracker pathname"
+            )
+            assert record_target.read_bytes() == b"456\n"
+            assert not record_probe._run_post_exit_cleanups()
+            ordinary_exit = subprocess.run(
+                [
+                    tracked_argv[execute_at + 1],
+                    sys.executable,
+                    "-c",
+                    "raise SystemExit(7)",
+                ],
+                env=tracked_env,
+                start_new_session=True,
+                timeout=3,
+                check=False,
+            )
+            assert ordinary_exit.returncode == 7, (
+                "the PTY tracker hid ordinary payload completion/status: "
+                f"{ordinary_exit.returncode}"
+            )
+            signalled_exit = subprocess.run(
+                [
+                    tracked_argv[execute_at + 1],
+                    sys.executable,
+                    "-c",
+                    "import os,signal; os.kill(os.getpid(),signal.SIGTERM)",
+                ],
+                env=tracked_env,
+                start_new_session=True,
+                timeout=3,
+                check=False,
+            )
+            assert signalled_exit.returncode == -signal.SIGTERM, (
+                "the PTY tracker converted signal termination into an exit code: "
+                f"{signalled_exit.returncode}"
+            )
+            # Use a real controlling terminal.  The old wrapper restored
+            # SIGTTOU in the child and let parent/child race tcsetpgrp; the
+            # losing child stopped forever before exec.  A synchronized parent
+            # handoff must reliably make the payload group foreground.
+            import fcntl
+            import select
+            import termios
+
+            pty_launcher = (
+                "import fcntl,os,sys,termios\n"
+                "slave=int(sys.argv[1])\n"
+                "os.setsid()\n"
+                "fcntl.ioctl(slave,termios.TIOCSCTTY,0)\n"
+                "[os.dup2(slave,fd) for fd in (0,1,2)]\n"
+                "os.close(slave) if slave>2 else None\n"
+                "os.execv(sys.argv[2],sys.argv[2:])\n"
+            )
+            pty_payload = (
+                "import os; "
+                "assert os.tcgetpgrp(0)==os.getpgrp(); "
+                "print('KETTLE_PTY_HANDOFF_OK',flush=True)"
+            )
+            for _attempt in range(8):
+                master_fd, slave_fd = pty.openpty()
+                controlling = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        pty_launcher,
+                        str(slave_fd),
+                        tracked_argv[execute_at + 1],
+                        sys.executable,
+                        "-c",
+                        pty_payload,
+                    ],
+                    env=tracked_env,
+                    close_fds=True,
+                    pass_fds=(slave_fd,),
+                )
+                os.close(slave_fd)
+                pty_output = bytearray()
+                try:
+                    pty_deadline = time.monotonic() + 5
+                    while time.monotonic() < pty_deadline:
+                        readable, _, _ = select.select([master_fd], [], [], 0.05)
+                        if readable:
+                            try:
+                                chunk = os.read(master_fd, 4096)
+                            except OSError as error:
+                                if error.errno != errno.EIO:
+                                    raise
+                                break
+                            if not chunk:
+                                break
+                            pty_output.extend(chunk)
+                        # Process exit and PTY output publication are not one
+                        # event. Linux can report the former before the final
+                        # bytes (or terminal EIO) become readable, so keep
+                        # draining the master until EOF/EIO or the deadline.
+                    controlling.wait(timeout=1)
+                finally:
+                    os.close(master_fd)
+                    if controlling.returncode is None:
+                        controlling.kill()
+                        controlling.wait(timeout=3)
+                assert controlling.returncode == 0, pty_output.decode(
+                    "utf-8", errors="replace"
+                )
+                assert b"KETTLE_PTY_HANDOFF_OK" in pty_output
+
+            # A failed foreground handoff must not release the child barrier.
+            # Otherwise the restored SIGTTIN stops the background payload and
+            # leaves the session leader blocked forever in waitpid.
+            master_fd, slave_fd = pty.openpty()
+            rejected_env = dict(tracked_env or os.environ)
+            rejected_env["KETTLE_SMOKE_TEST_REJECT_TCSETPGRP"] = "1"
+            rejected_handoff = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    pty_launcher,
+                    str(slave_fd),
+                    tracked_argv[execute_at + 1],
+                    sys.executable,
+                    "-c",
+                    "print('KETTLE_PTY_HANDOFF_MUST_NOT_RUN',flush=True)",
+                ],
+                env=rejected_env,
+                close_fds=True,
+                pass_fds=(slave_fd,),
+            )
+            os.close(slave_fd)
+            rejected_output = bytearray()
+            try:
+                rejected_deadline = time.monotonic() + 5
+                while time.monotonic() < rejected_deadline:
+                    readable, _, _ = select.select([master_fd], [], [], 0.05)
+                    if readable:
+                        try:
+                            chunk = os.read(master_fd, 4096)
+                        except OSError as error:
+                            if error.errno != errno.EIO:
+                                raise
+                            break
+                        if not chunk:
+                            break
+                        rejected_output.extend(chunk)
+                rejected_handoff.wait(timeout=1)
+            finally:
+                os.close(master_fd)
+                if rejected_handoff.returncode is None:
+                    rejected_handoff.kill()
+                    rejected_handoff.wait(timeout=3)
+            assert rejected_handoff.returncode != 0
+            assert b"KETTLE_PTY_HANDOFF_MUST_NOT_RUN" not in rejected_output
+
+            # A pane can finish portable-pty's setsid after the first tracker
+            # snapshot. Inventory is the injected race point: the new wrapper
+            # becomes visible only after that first read. Freezing Kettle and
+            # draining the tracker again must retain and terminate it before
+            # the outer process group is killed.
+            race_probe = LiveKettle("unused", Path("unused"), Path("unused"))
+            race_probe.proc = object()  # type: ignore[assignment]
+            race_events: List[str] = []
+            race_state = {"inventory": False, "frozen": False}
+
+            class RaceProbeHandle:
+                pid = 4242
+                identity = (4242,)
+
+                @staticmethod
+                def matches_current() -> bool:
+                    return True
+
+                @staticmethod
+                def close() -> None:
+                    race_events.append("close")
+
+            def remember_raced_session(*, deadline: Optional[float] = None) -> None:
+                assert deadline is None or deadline > time.monotonic()
+                race_events.append("tracker")
+                if race_state["inventory"] and race_state["frozen"]:
+                    race_probe._tracker_sessions.setdefault(4242, RaceProbeHandle())  # type: ignore[arg-type]
+                    race_probe._pty_sessions.add(4242)
+
+            def inject_append_during_inventory(*, timeout: float) -> str:
+                assert timeout == 1
+                race_events.append("inventory")
+                race_state["inventory"] = True
+                return json.dumps({"panes": []})
+
+            def freeze_race_owner() -> None:
+                race_events.append("freeze")
+                race_state["frozen"] = True
+
+            race_probe._remember_tracker_sessions = remember_raced_session  # type: ignore[method-assign]
+            race_probe._control_pty_inventory = inject_append_during_inventory  # type: ignore[method-assign]
+            race_probe._freeze_outer_process_group = freeze_race_owner  # type: ignore[method-assign]
+            race_probe._remember_direct_child_sessions = (  # type: ignore[method-assign]
+                lambda *, deadline: race_events.append("direct")
+            )
+            original_terminate_session = globals()["terminate_owned_pty_session"]
+            original_terminate_group = globals()["terminate_owned_process_group"]
+            terminated_race_sessions: List[int] = []
+            globals()["terminate_owned_pty_session"] = (
+                lambda handle: terminated_race_sessions.append(handle.pid)
+            )
+            globals()["terminate_owned_process_group"] = (
+                lambda _process: race_events.append("outer")
+            )
+            try:
+                race_probe._terminate_process()
+            finally:
+                globals()["terminate_owned_pty_session"] = original_terminate_session
+                globals()["terminate_owned_process_group"] = original_terminate_group
+            assert terminated_race_sessions == [4242], (
+                "a PTY appended after the first snapshot escaped final cleanup"
+            )
+            assert race_events[:5] == [
+                "tracker",
+                "inventory",
+                "freeze",
+                "tracker",
+                "direct",
+            ], race_events
+            assert race_events[-2:] == ["close", "outer"], race_events
+
+            tracked = subprocess.Popen(
+                tracked_argv[execute_at + 1 :],
+                env=tracked_env,
+                start_new_session=True,
+            )
+            tracked_late: Optional[subprocess.Popen] = None
+            anchored_exit: Optional[subprocess.Popen] = None
+            anchored_descendant: Optional[int] = None
+            anchored_descendant_handle: Optional[StableProcessHandle] = None
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    tracker._remember_tracker_sessions()
+                    if tracked.pid in tracker._pty_sessions:
+                        break
+                    time.sleep(0.01)
+                assert tracked.pid in tracker._pty_sessions, (
+                    "the PTY wrapper did not anchor its session before payload startup"
+                )
+                stale_identity = tracker._tracker_sessions[tracked.pid]
+                stale_identity.matches_current = lambda: False  # type: ignore[method-assign]
+                tracker._remember_tracker_sessions()
+                replacement_identity = tracker._tracker_sessions.get(tracked.pid)
+                assert replacement_identity is not None
+                assert replacement_identity is not stale_identity, (
+                    "a reused tracker PID was forgotten instead of reopened in the same pass"
+                )
+                assert replacement_identity.matches_current(), (
+                    "the tracker PID replacement was not independently revalidated"
+                )
+                # A live wrapper reported by the owner-private session file
+                # must never disappear merely because stable-handle retention
+                # failed. Releasing the already-held handle recreates the
+                # first-observation path; the injected refusal must fail closed,
+                # then a normal retry must retain the same live wrapper.
+                retained = tracker._tracker_sessions.pop(tracked.pid)
+                tracker._pty_sessions.discard(tracked.pid)
+                retained.close()
+                original_open = StableProcessHandle.__dict__["open"]
+
+                def reject_live_tracker_handle(
+                    cls: type[StableProcessHandle], pid: int
+                ) -> StableProcessHandle:
+                    if pid == tracked.pid:
+                        raise OSError("intentional live tracker handle failure")
+                    return original_open.__func__(cls, pid)
+
+                StableProcessHandle.open = classmethod(reject_live_tracker_handle)
+                try:
+                    try:
+                        tracker._remember_tracker_sessions()
+                    except RuntimeError as error:
+                        assert "could not retain live owned PTY session" in str(error)
+                    else:
+                        raise AssertionError(
+                            "a live PTY wrapper with no stable handle looked absent"
+                        )
+                    assert tracked.poll() is None
+                    assert tracked.pid not in tracker._tracker_sessions
+                finally:
+                    StableProcessHandle.open = original_open
+                tracker._remember_tracker_sessions()
+                assert tracked.pid in tracker._tracker_sessions
+
+                # A retained process whose identity cannot be re-opened is not
+                # dead. The stable handle must remain owned while the probe
+                # fails closed, so startup/exit cleanup can still signal that
+                # exact process instance after the transient error clears.
+                StableProcessHandle.open = classmethod(reject_live_tracker_handle)
+                try:
+                    try:
+                        tracker._remember_tracker_sessions()
+                    except RuntimeError as error:
+                        assert "could not verify retained process" in str(error)
+                    else:
+                        raise AssertionError(
+                            "an unverifiable retained PTY wrapper looked absent"
+                        )
+                    assert tracked.pid in tracker._tracker_sessions
+                finally:
+                    StableProcessHandle.open = original_open
+
+                # Failure of the independent parent/session query is also
+                # uncertainty. With no stable handle available it must abort,
+                # never turn a live direct child into a stale-record skip.
+                retained = tracker._tracker_sessions.pop(tracked.pid)
+                tracker._pty_sessions.discard(tracked.pid)
+                retained.close()
+                original_run = globals()["run"]
+
+                def fail_live_parent_probe(
+                    _argv: List[str], **_kwargs: object
+                ) -> subprocess.CompletedProcess:
+                    return subprocess.CompletedProcess([], 1, "", "intentional ps failure")
+
+                StableProcessHandle.open = classmethod(reject_live_tracker_handle)
+                globals()["run"] = fail_live_parent_probe
+                try:
+                    try:
+                        tracker._remember_tracker_sessions()
+                    except RuntimeError as error:
+                        assert "could not retain or verify reported PTY session" in str(
+                            error
+                        )
+                    else:
+                        raise AssertionError(
+                            "a live PTY wrapper with an uncertain parent looked absent"
+                        )
+                finally:
+                    globals()["run"] = original_run
+                    StableProcessHandle.open = original_open
+                tracker._remember_tracker_sessions()
+                assert tracked.pid in tracker._tracker_sessions
+                tracker._remember_pty_sessions(
+                    json.dumps({"panes": [{"id": 7, "child_pid": tracked.pid}]})
+                )
+                # The append-only tracker must remain active after the first
+                # successful control inventory; later panes are the exact case
+                # the old `_control_inventory_seen` shortcut discarded.
+                tracked_late = subprocess.Popen(
+                    tracked_argv[execute_at + 1 :],
+                    env=tracked_env,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    tracker._remember_tracker_sessions()
+                    if tracked_late.pid in tracker._pty_sessions:
+                        break
+                    time.sleep(0.01)
+                assert tracked_late.pid in tracker._pty_sessions, (
+                    "a PTY session created after control startup was not retained"
+                )
+                # The payload can exit while a background job remains. The
+                # wrapper itself must keep the session identity alive so that
+                # cleanup can retain stable handles for that descendant.
+                descendant_record = Path(fixture) / "anchored-descendant"
+                anchored_exit = subprocess.Popen(
+                    [
+                        tracked_argv[execute_at + 1],
+                        sys.executable,
+                        "-c",
+                        (
+                            "import os,signal,sys,time\n"
+                            "child=os.fork()\n"
+                            "if child == 0:\n"
+                            " os.setpgid(0,0); signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(60)\n"
+                            "tmp=sys.argv[1]+'.tmp'\n"
+                            "with open(tmp,'w') as output: output.write(str(child))\n"
+                            "os.replace(tmp,sys.argv[1])\n"
+                        ),
+                        str(descendant_record),
+                    ],
+                    env=tracked_env,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and not descendant_record.exists():
+                    time.sleep(0.01)
+                anchored_descendant = int(descendant_record.read_text())
+                anchored_descendant_handle = StableProcessHandle.open(
+                    anchored_descendant
+                )
+                time.sleep(0.05)
+                assert anchored_exit.poll() is None, (
+                    "the PTY tracker exited with its payload and lost the session anchor"
+                )
+                tracker._remember_tracker_sessions()
+                assert anchored_exit.pid in tracker._tracker_sessions
+                tracker._remember_pty_sessions(
+                    json.dumps({"panes": [{"id": 7, "child_pid": None}]})
+                )
+                assert tracked.pid in tracker._pty_sessions, (
+                    "a transient child lock erased the retained session"
+                )
+                terminate_owned_pty_session(
+                    tracker._tracker_sessions[tracked.pid], grace_s=0.1
+                )
+                tracked.wait(timeout=3)
+                terminate_owned_pty_session(
+                    tracker._tracker_sessions[tracked_late.pid], grace_s=0.1
+                )
+                tracked_late.wait(timeout=3)
+                terminate_owned_pty_session(
+                    tracker._tracker_sessions[anchored_exit.pid], grace_s=0.1
+                )
+                anchored_exit.wait(timeout=3)
+                status = _process_state(anchored_descendant_handle) or ""
+                assert not status or status.startswith("Z"), (
+                    f"descendant outlived its exited payload and cleanup: {status}"
+                )
+                tracker._remember_tracker_sessions()
+                tracker._remember_pty_sessions(json.dumps({"panes": []}))
+                assert not tracker._pty_sessions, "a closed pane retained a stale pid"
+            finally:
+                if tracked.returncode is None:
+                    terminate_owned_process_group(tracked, grace_s=0.1)
+                if tracked_late is not None and tracked_late.returncode is None:
+                    terminate_owned_process_group(tracked_late, grace_s=0.1)
+                if anchored_exit is not None and anchored_exit.returncode is None:
+                    terminate_owned_process_group(anchored_exit, grace_s=0.1)
+                if anchored_descendant_handle is not None:
+                    try:
+                        anchored_descendant_handle.signal(signal.SIGKILL)
+                    except (OSError, RuntimeError):
+                        pass
+                    anchored_descendant_handle.close()
+                tracker._run_post_exit_cleanups()
+
+            failed_enumeration = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
+            failed_handle = StableProcessHandle.open(failed_enumeration.pid)
+            original_enumerator = _session_process_handles
+
+            def fail_session_enumeration(
+                _anchor: StableProcessHandle, _session: int
+            ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+                raise RuntimeError("intentional session enumeration failure")
+
+            globals()["_session_process_handles"] = fail_session_enumeration
+            try:
+                try:
+                    terminate_owned_pty_session(failed_handle, grace_s=0.1)
+                except RuntimeError as error:
+                    assert "intentional session enumeration failure" in str(error)
+                else:
+                    raise AssertionError("a session enumeration failure must be reported")
+                failed_enumeration.wait(timeout=3)
+            finally:
+                globals()["_session_process_handles"] = original_enumerator
+                failed_handle.close()
+                if failed_enumeration.returncode is None:
+                    terminate_owned_process_group(failed_enumeration, grace_s=0.1)
+
+            recheck_batch = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time\n"
+                        "child=os.fork()\n"
+                        "if child == 0: time.sleep(60); raise SystemExit(0)\n"
+                        "print(child,flush=True)\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert recheck_batch.stdout is not None
+            recheck_child = int(recheck_batch.stdout.readline().strip())
+            recheck_anchor = StableProcessHandle.open(recheck_batch.pid)
+            original_open = StableProcessHandle.__dict__["open"]
+            original_run = globals()["run"]
+            opened_for_recheck: List[StableProcessHandle] = []
+            recheck_closes: List[int] = []
+            closed_recheck_handles: Set[int] = set()
+
+            def open_with_recheck_failure(
+                cls: type[StableProcessHandle], pid: int
+            ) -> StableProcessHandle:
+                handle = original_open.__func__(cls, pid)
+                opened_for_recheck.append(handle)
+                original_close = handle.close
+
+                def record_close() -> None:
+                    recheck_closes.append(pid)
+                    closed_recheck_handles.add(id(handle))
+                    original_close()
+
+                handle.close = record_close  # type: ignore[method-assign]
+                if pid == recheck_child:
+
+                    def fail_recheck() -> bool:
+                        raise RuntimeError("intentional internal identity uncertainty")
+
+                    handle.matches_current = fail_recheck  # type: ignore[method-assign]
+                return handle
+
+            def list_only_recheck_session(
+                argv: List[str], **kwargs: object
+            ) -> subprocess.CompletedProcess:
+                if argv == ["ps", "-axo", "pid="]:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        f"{recheck_batch.pid}\n{recheck_child}\n",
+                        "",
+                    )
+                return original_run(argv, **kwargs)
+
+            StableProcessHandle.open = classmethod(open_with_recheck_failure)
+            globals()["run"] = list_only_recheck_session
+            try:
+                try:
+                    _session_process_handles(recheck_anchor, recheck_batch.pid)
+                except RuntimeError as error:
+                    assert "intentional internal identity uncertainty" in str(error)
+                else:
+                    raise AssertionError(
+                        "an internal PTY identity error leaked the acquired batch"
+                    )
+                assert recheck_batch.pid in recheck_closes
+                assert recheck_child in recheck_closes
+                assert all(
+                    id(handle) in closed_recheck_handles
+                    for handle in opened_for_recheck
+                ), "an internal recheck error leaked part of its stable-handle batch"
+            finally:
+                globals()["run"] = original_run
+                StableProcessHandle.open = original_open
+                for retained in opened_for_recheck:
+                    retained.close()
+                recheck_anchor.close()
+                if recheck_batch.returncode is None:
+                    terminate_owned_process_group(recheck_batch, grace_s=0.1)
+
+            getsid_batch = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time\n"
+                        "child=os.fork()\n"
+                        "if child == 0: time.sleep(60); raise SystemExit(0)\n"
+                        "print(child,flush=True)\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert getsid_batch.stdout is not None
+            getsid_child = int(getsid_batch.stdout.readline().strip())
+            getsid_anchor = StableProcessHandle.open(getsid_batch.pid)
+            original_open = StableProcessHandle.__dict__["open"]
+            original_getsid = os.getsid
+            original_run = globals()["run"]
+            getsid_closes: List[int] = []
+
+            def track_getsid_open(
+                cls: type[StableProcessHandle], pid: int
+            ) -> StableProcessHandle:
+                handle = original_open.__func__(cls, pid)
+                original_close = handle.close
+
+                def record_close() -> None:
+                    getsid_closes.append(pid)
+                    original_close()
+
+                handle.close = record_close  # type: ignore[method-assign]
+                return handle
+
+            def fail_late_getsid(pid: int) -> int:
+                if pid == getsid_child:
+                    raise PermissionError("intentional preliminary getsid failure")
+                return original_getsid(pid)
+
+            def list_getsid_session(
+                argv: List[str], **kwargs: object
+            ) -> subprocess.CompletedProcess:
+                if argv == ["ps", "-axo", "pid="]:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        f"{getsid_batch.pid}\n{getsid_child}\n",
+                        "",
+                    )
+                return original_run(argv, **kwargs)
+
+            StableProcessHandle.open = classmethod(track_getsid_open)
+            os.getsid = fail_late_getsid  # type: ignore[assignment]
+            globals()["run"] = list_getsid_session
+            try:
+                try:
+                    _session_process_handles(getsid_anchor, getsid_batch.pid)
+                except RuntimeError as error:
+                    assert "intentional preliminary getsid failure" in str(error)
+                else:
+                    raise AssertionError(
+                        "a preliminary getsid error leaked the acquired handle batch"
+                    )
+                assert getsid_batch.pid in getsid_closes, (
+                    "a preliminary getsid error did not close prior retained handles"
+                )
+            finally:
+                globals()["run"] = original_run
+                os.getsid = original_getsid  # type: ignore[assignment]
+                StableProcessHandle.open = original_open
+                getsid_anchor.close()
+                if getsid_batch.returncode is None:
+                    terminate_owned_process_group(getsid_batch, grace_s=0.1)
+
+            partial_batch = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time\n"
+                        "children=[]\n"
+                        "for _ in range(2):\n"
+                        " child=os.fork()\n"
+                        " if child == 0: time.sleep(60); raise SystemExit(0)\n"
+                        " children.append(child)\n"
+                        "print(*children,flush=True)\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert partial_batch.stdout is not None
+            partial_children = [
+                int(value) for value in partial_batch.stdout.readline().split()
+            ]
+            partial_anchor = StableProcessHandle.open(partial_batch.pid)
+            observations = [StableProcessHandle.open(pid) for pid in partial_children]
+            anchor_duplicate = StableProcessHandle.open(partial_batch.pid)
+            partial_handles = [StableProcessHandle.open(pid) for pid in partial_children]
+            original_bad_signal = partial_handles[0].signal
+
+            def fail_first_stop(signal_number: int) -> bool:
+                if signal_number == signal.SIGSTOP:
+                    raise RuntimeError("intentional mid-batch signal failure")
+                return original_bad_signal(signal_number)
+
+            partial_handles[0].signal = fail_first_stop  # type: ignore[method-assign]
+
+            def partial_enumerator(
+                _anchor: StableProcessHandle, _session: int
+            ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+                return {
+                    anchor_duplicate.identity: anchor_duplicate,
+                    partial_handles[0].identity: partial_handles[0],
+                    partial_handles[1].identity: partial_handles[1],
+                }
+
+            globals()["_session_process_handles"] = partial_enumerator
+            try:
+                try:
+                    terminate_owned_pty_session(partial_anchor, grace_s=0.1)
+                except RuntimeError as error:
+                    assert "intentional mid-batch signal failure" in str(error)
+                else:
+                    raise AssertionError("a mid-batch signal failure must be reported")
+                partial_batch.wait(timeout=3)
+                for observed in observations:
+                    state = _process_state(observed) or ""
+                    assert not state or state.startswith("Z"), (
+                        "a later retained session member escaped failed cleanup: "
+                        f"{state}"
+                    )
+            finally:
+                globals()["_session_process_handles"] = original_enumerator
+                partial_anchor.close()
+                anchor_duplicate.close()
+                for retained in partial_handles:
+                    retained.close()
+                for observed in observations:
+                    observed.close()
+                if partial_batch.returncode is None:
+                    terminate_owned_process_group(partial_batch, grace_s=0.1)
+
+            close_batch = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time\n"
+                        "children=[]\n"
+                        "for _ in range(2):\n"
+                        " child=os.fork()\n"
+                        " if child == 0: time.sleep(60); raise SystemExit(0)\n"
+                        " children.append(child)\n"
+                        "print(*children,flush=True)\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert close_batch.stdout is not None
+            close_children = [
+                int(value) for value in close_batch.stdout.readline().split()
+            ]
+            close_anchor = StableProcessHandle.open(close_batch.pid)
+            close_observations = [
+                StableProcessHandle.open(pid) for pid in close_children
+            ]
+            close_anchor_duplicate = StableProcessHandle.open(close_batch.pid)
+            close_handles = [
+                StableProcessHandle.open(pid) for pid in close_children
+            ]
+            original_duplicate_close = close_anchor_duplicate.close
+            original_first_close = close_handles[0].close
+            original_second_close = close_handles[1].close
+            close_attempts: List[str] = []
+
+            def fail_duplicate_close() -> None:
+                close_attempts.append("duplicate")
+                raise OSError("intentional duplicate close failure")
+
+            def fail_final_close() -> None:
+                close_attempts.append("first-final")
+                raise OSError("intentional final close failure")
+
+            def record_later_close() -> None:
+                close_attempts.append("second-final")
+                original_second_close()
+
+            close_anchor_duplicate.close = fail_duplicate_close  # type: ignore[method-assign]
+            close_handles[0].close = fail_final_close  # type: ignore[method-assign]
+            close_handles[1].close = record_later_close  # type: ignore[method-assign]
+
+            def close_failure_enumerator(
+                _anchor: StableProcessHandle, _session: int
+            ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+                return {
+                    close_anchor_duplicate.identity: close_anchor_duplicate,
+                    close_handles[0].identity: close_handles[0],
+                    close_handles[1].identity: close_handles[1],
+                }
+
+            globals()["_session_process_handles"] = close_failure_enumerator
+            try:
+                try:
+                    terminate_owned_pty_session(close_anchor, grace_s=0.1)
+                except RuntimeError as error:
+                    assert "intentional duplicate close failure" in str(error)
+                    assert "intentional final close failure" in str(error)
+                else:
+                    raise AssertionError("PTY handle-close failures were discarded")
+                close_batch.wait(timeout=3)
+                assert close_attempts == [
+                    "duplicate",
+                    "first-final",
+                    "second-final",
+                ], close_attempts
+                for observed in close_observations:
+                    state = _process_state(observed) or ""
+                    assert not state or state.startswith("Z"), (
+                        "a retained process escaped after a handle-close failure: "
+                        f"{state}"
+                    )
+            finally:
+                globals()["_session_process_handles"] = original_enumerator
+                close_anchor.close()
+                close_anchor_duplicate.close = original_duplicate_close  # type: ignore[method-assign]
+                close_anchor_duplicate.close()
+                close_handles[0].close = original_first_close  # type: ignore[method-assign]
+                close_handles[0].close()
+                close_handles[1].close = original_second_close  # type: ignore[method-assign]
+                close_handles[1].close()
+                for observed in close_observations:
+                    observed.close()
+                if close_batch.returncode is None:
+                    terminate_owned_process_group(close_batch, grace_s=0.1)
+
+            wedged = LiveKettle("unused", Path("unused"), Path("unused"))
+            outer = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
+            wedged.proc = outer
+            wedged._tracker_owner_pid = outer.pid
+            wedged_close_attempts: List[str] = []
+
+            class WedgedCloseHandle:
+                def __init__(self, name: str, fail: bool = False) -> None:
+                    self.name = name
+                    self.fail = fail
+
+                def close(self) -> None:
+                    wedged_close_attempts.append(self.name)
+                    if self.fail:
+                        raise OSError("intentional tracker close failure")
+
+            wedged._tracker_sessions = {  # type: ignore[assignment]
+                1: WedgedCloseHandle("first", fail=True),
+                2: WedgedCloseHandle("second"),
+            }
+
+            def timeout_ctl(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess:
+                raise subprocess.TimeoutExpired("kettle ctl", 0.01)
+
+            wedged.ctl = timeout_ctl  # type: ignore[method-assign]
+            try:
+                assert wedged._control_pty_inventory(timeout=0.01) is None
+                try:
+                    wedged._terminate_process()
+                except RuntimeError as error:
+                    assert "intentional tracker close failure" in str(error)
+                else:
+                    raise AssertionError("a tracker close failure was discarded")
+                outer.wait(timeout=3)
+                assert wedged_close_attempts == ["first", "second"]
+                assert not wedged._tracker_sessions
+            finally:
+                if outer.returncode is None:
+                    terminate_owned_process_group(outer, grace_s=0.1)
+
+            # Observe an exited leader without wait/poll, then prove outer-group
+            # cleanup still reaches the descendant whose PGID is anchored by
+            # that unreaped leader. This is the exact failure path used by the
+            # multi-window smoke when Kettle exits unexpectedly.
+            exited_group = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,signal,time\n"
+                        "child=os.fork()\n"
+                        "if child == 0:\n"
+                        " signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(60)\n"
+                        "print(child,flush=True)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert exited_group.stdout is not None
+            exited_descendant = int(exited_group.stdout.readline().strip())
+            exited_descendant_handle = StableProcessHandle.open(exited_descendant)
+            try:
+                deadline = time.monotonic() + 3
+                while (
+                    time.monotonic() < deadline
+                    and not process_exited_without_reaping(exited_group)
+                ):
+                    time.sleep(0.01)
+                assert process_exited_without_reaping(exited_group)
+                assert exited_group.returncode is None, (
+                    "the non-reaping exit probe consumed the process-group anchor"
+                )
+                terminate_owned_process_group(exited_group, grace_s=0.1)
+                state = _process_state(exited_descendant_handle) or ""
+                assert not state or state.startswith("Z"), (
+                    f"outer-group descendant survived leader exit cleanup: {state}"
+                )
+            finally:
+                if exited_group.returncode is None:
+                    terminate_owned_process_group(exited_group, grace_s=0.1)
+                try:
+                    exited_descendant_handle.signal(signal.SIGKILL)
+                except (OSError, RuntimeError):
+                    pass
+                exited_descendant_handle.close()
+
+            # A newly requested pane may not schedule its wrapper before the
+            # action response returns. The close smoke must poll for the new
+            # stable owner instead of sampling the append file once.
+            wait_target = LiveKettle(
+                "unused", fixture_root / "wait-config", fixture_root / "wait-log"
+            )
+            wait_target.proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
+            remember_calls = 0
+
+            def publish_tracker_after_delay() -> None:
+                nonlocal remember_calls
+                remember_calls += 1
+                if remember_calls == 3:
+                    wait_target._tracker_sessions[4242] = object()  # type: ignore[assignment]
+
+            wait_target._remember_tracker_sessions = (  # type: ignore[method-assign]
+                publish_tracker_after_delay
+            )
+            try:
+                wait_target.wait_for_tracker_sessions(1, timeout_s=1)
+                assert remember_calls == 3
+            finally:
+                terminate_owned_process_group(wait_target.proc, grace_s=0.1)
+
+            sandbox_target = AgentShellTarget(mode="native")
+            sandbox_root = Path(
+                tempfile.mkdtemp(prefix="kettle-agent-tui-space path-")
+            )
+            sandbox_root.chmod(0o700)
+            sandbox_target.validate_native_sandbox_path(str(sandbox_root))
+            if platform.system() == "Linux":
+                original_path_open = Path.open
+
+                def deny_process_environment(
+                    path: Path, *args: object, **kwargs: object
+                ) -> IO[bytes]:
+                    if path == Path(f"/proc/{os.getpid()}/environ"):
+                        raise PermissionError("intentional unreadable environment")
+                    return original_path_open(path, *args, **kwargs)  # type: ignore[return-value]
+
+                Path.open = deny_process_environment  # type: ignore[assignment]
+                try:
+                    assert sandbox_target._native_process_environment(
+                        os.getpid(), protected_candidates=set()
+                    ) == set()
+                    try:
+                        sandbox_target._native_process_environment(os.getpid())
+                    except RuntimeError as error:
+                        assert "could not inspect same-user process environment" in str(
+                            error
+                        )
+                    else:
+                        raise AssertionError(
+                            "an unreadable same-uid process environment must fail closed"
+                        )
+                finally:
+                    Path.open = original_path_open  # type: ignore[assignment]
+                subreaper_before = LinuxSubreaperScope._get()
+                subreaper_probe = LinuxSubreaperScope.acquire()
+                nested_subreaper_probe = LinuxSubreaperScope.acquire()
+                assert LinuxSubreaperScope._get() == 1
+                subreaper_probe.close()
+                assert LinuxSubreaperScope._get() == 1, (
+                    "an outer close disabled subreaping while a nested scope was active"
+                )
+                nested_subreaper_probe.close()
+                assert LinuxSubreaperScope._get() == subreaper_before, (
+                    "the Linux containment scope changed process-global state "
+                    "after it closed"
+                )
+
+                # Two process instances can share one numeric PID over time.
+                # The baseline decision must compare the retained identity, not
+                # the reusable number; this directly models the reuse boundary
+                # without depending on the host wrapping its PID space on cue.
+                reuse_scope = LinuxSubreaperScope(baseline={(4242, 10)})
+                reused_instance = StableProcessHandle(4242, (4242, 20))
+                assert not reuse_scope.was_present_at_acquire(reused_instance)
+                original_instance = StableProcessHandle(4242, (4242, 10))
+                assert reuse_scope.was_present_at_acquire(original_instance)
+
+                original_stable_open = StableProcessHandle.__dict__["open"]
+
+                def fail_stable_open(
+                    cls: type[StableProcessHandle], pid: int
+                ) -> StableProcessHandle:
+                    del cls, pid
+                    raise OSError(errno.EMFILE, "intentional handle exhaustion")
+
+                StableProcessHandle.open = classmethod(fail_stable_open)
+                try:
+                    try:
+                        _open_stable_process_if_present(4242, "fixture process")
+                    except RuntimeError as error:
+                        assert "intentional handle exhaustion" in str(error)
+                    else:
+                        raise AssertionError(
+                            "a stable-handle resource failure looked like process exit"
+                        )
+                finally:
+                    StableProcessHandle.open = original_stable_open
+
+                assert LinuxSubreaperScope._active_scopes == 0
+                original_subreaper_get = LinuxSubreaperScope.__dict__["_get"]
+                original_subreaper_set = LinuxSubreaperScope.__dict__["_set"]
+                simulated_state = {"value": 0, "get_calls": 0}
+
+                def failing_verify_get(cls: type[LinuxSubreaperScope]) -> int:
+                    del cls
+                    simulated_state["get_calls"] += 1
+                    if simulated_state["get_calls"] == 2:
+                        raise OSError(errno.EIO, "intentional verification failure")
+                    return simulated_state["value"]
+
+                def simulated_set(
+                    cls: type[LinuxSubreaperScope], value: int
+                ) -> None:
+                    del cls
+                    simulated_state["value"] = value
+
+                LinuxSubreaperScope._get = classmethod(failing_verify_get)
+                LinuxSubreaperScope._set = classmethod(simulated_set)
+                try:
+                    try:
+                        LinuxSubreaperScope.acquire()
+                    except OSError as error:
+                        assert "intentional verification failure" in str(error)
+                    else:
+                        raise AssertionError(
+                            "a failed subreaper verification did not abort acquisition"
+                        )
+                    assert simulated_state["value"] == 0
+                    assert LinuxSubreaperScope._active_scopes == 0
+                    assert LinuxSubreaperScope._original_state is None
+                finally:
+                    LinuxSubreaperScope._get = original_subreaper_get
+                    LinuxSubreaperScope._set = original_subreaper_set
+
+                simulated_state = {"value": 0, "restore_failures": 1}
+
+                def simulated_get(cls: type[LinuxSubreaperScope]) -> int:
+                    del cls
+                    return simulated_state["value"]
+
+                def retryable_set(
+                    cls: type[LinuxSubreaperScope], value: int
+                ) -> None:
+                    del cls
+                    if value == 0 and simulated_state["restore_failures"]:
+                        simulated_state["restore_failures"] -= 1
+                        raise OSError(errno.EIO, "intentional restoration failure")
+                    simulated_state["value"] = value
+
+                LinuxSubreaperScope._get = classmethod(simulated_get)
+                LinuxSubreaperScope._set = classmethod(retryable_set)
+                try:
+                    retryable_scope = LinuxSubreaperScope.acquire()
+                    try:
+                        retryable_scope.close()
+                    except OSError as error:
+                        assert "intentional restoration failure" in str(error)
+                    else:
+                        raise AssertionError(
+                            "a failed subreaper restoration looked successful"
+                        )
+                    assert not retryable_scope.closed
+                    assert LinuxSubreaperScope._active_scopes == 1
+                    retryable_scope.close()
+                    assert retryable_scope.closed
+                    assert simulated_state["value"] == 0
+                finally:
+                    LinuxSubreaperScope._get = original_subreaper_get
+                    LinuxSubreaperScope._set = original_subreaper_set
+                    LinuxSubreaperScope._active_scopes = 0
+                    LinuxSubreaperScope._original_state = None
+            matching_env = os.environ.copy()
+            matching_env["KETTLE_SMOKE_ROOT"] = str(sandbox_root)
+            matching_env["XDG_CONFIG_HOME"] = str(sandbox_root / "config")
+            other_env = os.environ.copy()
+            other_env["KETTLE_SMOKE_ROOT"] = str(sandbox_root) + "-other"
+            other_env["XDG_CONFIG_HOME"] = str(sandbox_root) + "-other/config"
+            matching = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                env=matching_env,
+                start_new_session=True,
+            )
+            other = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(60)",
+                    f"KETTLE_SMOKE_ROOT={sandbox_root}",
+                    f"XDG_CONFIG_HOME={sandbox_root / 'config'}",
+                ],
+                env=other_env,
+                start_new_session=True,
+            )
+            linux_scope = (
+                LinuxSubreaperScope.acquire()
+                if platform.system() == "Linux"
+                else None
+            )
+            nondumpable_handle: Optional[StableProcessHandle] = None
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if matching.pid in sandbox_target.native_nvim_sandbox_processes(
+                        sandbox_root
+                    ):
+                        break
+                    time.sleep(0.05)
+                assert matching.pid in sandbox_target.native_nvim_sandbox_processes(
+                    sandbox_root
+                )
+                assert other.pid not in sandbox_target.native_nvim_sandbox_processes(
+                    sandbox_root
+                )
+                if platform.system() == "Linux" and os.geteuid() != 0:
+                    orphan_record = sandbox_root / "run" / "orphan.pid"
+                    orphan_record.parent.mkdir(exist_ok=True)
+                    launcher = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            (
+                                "import ctypes,os,sys,time\n"
+                                "child=os.fork()\n"
+                                "if child:\n"
+                                " open(sys.argv[1],'w').write(str(child)+'\\n')\n"
+                                " os._exit(0)\n"
+                                "os.setsid()\n"
+                                "assert ctypes.CDLL(None).prctl(4,0,0,0,0) == 0\n"
+                                "time.sleep(60)\n"
+                            ),
+                            str(orphan_record),
+                        ],
+                        env=matching_env,
+                        start_new_session=True,
+                    )
+                    launcher.wait(timeout=3)
+                    nondumpable_pid = int(orphan_record.read_text(encoding="ascii"))
+                    nondumpable_handle = StableProcessHandle.open(nondumpable_pid)
+                    assert _linux_process_parent(nondumpable_pid) == os.getpid(), (
+                        "the detached descendant was not adopted by the subreaper"
+                    )
+                    assert (
+                        nondumpable_pid
+                        not in sandbox_target.native_nvim_sandbox_processes(
+                            sandbox_root
+                        )
+                    ), "unreadable environment was mistaken for exact ownership"
+                    assert linux_scope is not None
+                original_open = StableProcessHandle.__dict__["open"]
+
+                def reject_matching_handle(
+                    cls: type[StableProcessHandle], pid: int
+                ) -> StableProcessHandle:
+                    if pid == matching.pid:
+                        raise OSError("intentional stable-handle acquisition failure")
+                    return original_open.__func__(cls, pid)
+
+                StableProcessHandle.open = classmethod(reject_matching_handle)
+                try:
+                    try:
+                        sandbox_target.native_nvim_sandbox_handles(sandbox_root)
+                    except RuntimeError as error:
+                        assert "could not retain matching sandbox process" in str(error)
+                    else:
+                        raise AssertionError(
+                            "a matching process with no stable handle looked drained"
+                        )
+                finally:
+                    StableProcessHandle.open = original_open
+                sandbox_target.terminate_native_nvim_sandbox_processes(
+                    sandbox_root,
+                    linux_subreaper=linux_scope,
+                )
+                matching.wait(timeout=3)
+                if nondumpable_handle is not None:
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline and not (
+                        (_process_state(nondumpable_handle) or "").startswith("Z")
+                        or not nondumpable_handle.signal(0)
+                    ):
+                        time.sleep(0.02)
+                    assert (_process_state(nondumpable_handle) or "").startswith("Z") or not (
+                        nondumpable_handle.signal(0)
+                    ), "the adopted nondumpable descendant survived cleanup"
+                assert other.poll() is None, "sandbox cleanup killed a decoy"
+            finally:
+                if nondumpable_handle is not None:
+                    with contextlib.suppress(OSError, RuntimeError):
+                        nondumpable_handle.signal(signal.SIGKILL)
+                    nondumpable_handle.close()
+                if matching.returncode is None:
+                    terminate_owned_process_group(matching, grace_s=0.1)
+                if other.returncode is None:
+                    terminate_owned_process_group(other, grace_s=0.1)
+                try:
+                    sandbox_target.cleanup_nvim_sandbox_host(
+                        str(sandbox_root), linux_subreaper=linux_scope
+                    )
+                finally:
+                    if linux_scope is not None:
+                        linux_scope.close()
+
+            # The normal in-pane completion command is only a release marker.
+            # It must leave both a detached exact-environment daemon and its
+            # tree untouched until host cleanup can retain, drain, and remove
+            # them in that order.
+            normal_root = sandbox_target.validate_native_sandbox_path(
+                tempfile.mkdtemp(prefix="kettle-agent-tui-normal-cleanup-")
+            )
+            normal_root.chmod(0o700)
+            normal_env = os.environ.copy()
+            normal_env["KETTLE_SMOKE_ROOT"] = str(normal_root)
+            normal_env["XDG_CONFIG_HOME"] = str(normal_root / "config")
+            normal_scope = (
+                LinuxSubreaperScope.acquire()
+                if platform.system() == "Linux"
+                else None
+            )
+            normal_daemon = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                env=normal_env,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if normal_daemon.pid in sandbox_target.native_nvim_sandbox_processes(
+                        normal_root
+                    ):
+                        break
+                    time.sleep(0.05)
+                assert (
+                    normal_daemon.pid
+                    in sandbox_target.native_nvim_sandbox_processes(normal_root)
+                )
+                released = subprocess.run(
+                    [
+                        "/bin/sh",
+                        "-c",
+                        sandbox_target.nvim_sandbox_release_command(
+                            "KETTLE_NORMAL_SANDBOX_RELEASED"
+                        ),
+                    ],
+                    env=normal_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    check=False,
+                )
+                assert released.returncode == 0
+                assert "KETTLE_NORMAL_SANDBOX_RELEASED" in released.stdout
+                assert normal_daemon.poll() is None
+                assert normal_root.exists(), (
+                    "the pane deleted the sandbox before its detached daemon drained"
+                )
+                released_handles = sandbox_target.native_nvim_sandbox_handles(
+                    normal_root
+                )
+                try:
+                    assert any(
+                        handle.pid == normal_daemon.pid
+                        for handle in released_handles.values()
+                    ), "the released daemon could not be retained for host cleanup"
+                finally:
+                    close_errors = _close_stable_process_handles(released_handles)
+                    assert not close_errors
+                sandbox_target.cleanup_nvim_sandbox_host(
+                    str(normal_root), linux_subreaper=normal_scope
+                )
+                normal_daemon.wait(timeout=3)
+                assert not normal_root.exists()
+            finally:
+                if normal_daemon.returncode is None:
+                    terminate_owned_process_group(normal_daemon, grace_s=0.1)
+                try:
+                    if normal_root.exists():
+                        sandbox_target.cleanup_nvim_sandbox_host(
+                            str(normal_root), linux_subreaper=normal_scope
+                        )
+                finally:
+                    if normal_scope is not None:
+                        normal_scope.close()
+
+            cleanup_actions: List[str] = []
+
+            class CleanupHandle:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+                    self.pid = 9_999_990 if name == "first" else 9_999_991
+
+                def signal(self, number: int) -> bool:
+                    label = signal.Signals(number).name
+                    cleanup_actions.append(f"{self.name}:{label}")
+                    if self.name == "first" and number == signal.SIGSTOP:
+                        raise OSError("intentional STOP failure")
+                    return True
+
+                def close(self) -> None:
+                    cleanup_actions.append(f"{self.name}:close")
+                    if self.name == "first":
+                        raise OSError("intentional close failure")
+
+            original_handles = AgentShellTarget.__dict__["native_nvim_sandbox_handles"]
+            original_processes = AgentShellTarget.__dict__["native_nvim_sandbox_processes"]
+            fake_handles = {
+                (1,): CleanupHandle("first"),
+                (2,): CleanupHandle("second"),
+            }
+            AgentShellTarget.native_nvim_sandbox_handles = classmethod(
+                lambda _cls, _root, **_kwargs: fake_handles  # type: ignore[method-assign]
+            )
+            AgentShellTarget.native_nvim_sandbox_processes = classmethod(
+                lambda _cls, _root, **_kwargs: set()  # type: ignore[method-assign]
+            )
+
+            class EmptySubreaper:
+                def adopted_roots(
+                    self,
+                    _parents: Dict[int, int],
+                    _owned: Set[int],
+                    **_kwargs: object,
+                ) -> Dict[Tuple[int, ...], StableProcessHandle]:
+                    return {}
+
+            try:
+                try:
+                    sandbox_target.terminate_native_nvim_sandbox_processes(
+                        Path(tempfile.gettempdir()) / "kettle-agent-tui-error-probe",
+                        linux_subreaper=(
+                            EmptySubreaper()  # type: ignore[arg-type]
+                            if platform.system() == "Linux"
+                            else None
+                        ),
+                    )
+                except RuntimeError as error:
+                    assert "intentional STOP failure" in str(error)
+                    assert "intentional close failure" in str(error)
+                else:
+                    raise AssertionError("native cleanup failures were discarded")
+            finally:
+                AgentShellTarget.native_nvim_sandbox_handles = original_handles
+                AgentShellTarget.native_nvim_sandbox_processes = original_processes
+            assert cleanup_actions == [
+                "first:SIGSTOP",
+                "first:SIGKILL",
+                "second:SIGKILL",
+                "first:close",
+                "second:close",
+            ], cleanup_actions
+
+            duplicate_actions: List[str] = []
+
+            class DuplicateHandle:
+                def __init__(self, name: str, pid: int) -> None:
+                    self.name = name
+                    self.pid = pid
+
+                def signal(self, number: int) -> bool:
+                    duplicate_actions.append(
+                        f"{self.name}:{signal.Signals(number).name}"
+                    )
+                    return True
+
+                def close(self) -> None:
+                    duplicate_actions.append(f"{self.name}:close")
+                    if self.name == "duplicate-first":
+                        raise OSError("intentional duplicate close failure")
+
+            duplicate_scan = 0
+
+            def duplicate_handle_batch(
+                _cls: type[AgentShellTarget], _root: Path, **_kwargs: object
+            ) -> Dict[Tuple[int, ...], DuplicateHandle]:
+                nonlocal duplicate_scan
+                duplicate_scan += 1
+                prefix = "canonical" if duplicate_scan == 1 else "duplicate"
+                return {
+                    (1,): DuplicateHandle(f"{prefix}-first", 9_999_992),
+                    (2,): DuplicateHandle(f"{prefix}-second", 9_999_993),
+                }
+
+            AgentShellTarget.native_nvim_sandbox_handles = classmethod(
+                duplicate_handle_batch  # type: ignore[method-assign]
+            )
+            AgentShellTarget.native_nvim_sandbox_processes = classmethod(
+                lambda _cls, _root, **_kwargs: set()  # type: ignore[method-assign]
+            )
+            try:
+                try:
+                    sandbox_target.terminate_native_nvim_sandbox_processes(
+                        Path(tempfile.gettempdir()) / "kettle-agent-tui-duplicate-probe",
+                        linux_subreaper=(
+                            EmptySubreaper()  # type: ignore[arg-type]
+                            if platform.system() == "Linux"
+                            else None
+                        ),
+                    )
+                except RuntimeError as error:
+                    assert "intentional duplicate close failure" in str(error)
+                else:
+                    raise AssertionError("a duplicate handle close failure was discarded")
+            finally:
+                AgentShellTarget.native_nvim_sandbox_handles = original_handles
+                AgentShellTarget.native_nvim_sandbox_processes = original_processes
+            assert duplicate_scan == 2
+            assert duplicate_actions.index("duplicate-first:close") < (
+                duplicate_actions.index("duplicate-second:close")
+            ), duplicate_actions
+            assert "canonical-first:SIGKILL" in duplicate_actions
+            assert "canonical-second:SIGKILL" in duplicate_actions
+
+            decoy_env = os.environ.copy()
+            decoy_env["XDG_CONFIG_HOME"] = "/tmp/kettle-agent-tui-decoy/config"
+            decoy = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                env=decoy_env,
+                start_new_session=True,
+            )
+            term_handler_ran = fixture_root / "term-handler-ran"
+            session = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,signal,sys,time\n"
+                        "job=os.fork()\n"
+                        "if job == 0:\n"
+                        "  os.setpgid(0,0)\n"
+                        "  def on_term(_signum,_frame):\n"
+                        "    open(sys.argv[1],'w').write('resumed')\n"
+                        "    child=os.fork()\n"
+                        "    if child == 0:\n"
+                        "      os.setpgid(0,0); time.sleep(60)\n"
+                        "  signal.signal(signal.SIGTERM,on_term)\n"
+                        "  grand=os.fork()\n"
+                        "  if grand == 0: time.sleep(60)\n"
+                        "  print(os.getpid(),grand,flush=True)\n"
+                        "  time.sleep(60)\n"
+                        "time.sleep(60)\n"
+                    ),
+                    str(term_handler_ran),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                assert session.stdout is not None
+                job_pid, descendant_pid = map(
+                    int, session.stdout.readline().strip().split()
+                )
+                assert os.getsid(job_pid) == session.pid
+                assert os.getpgid(job_pid) == job_pid
+                session_anchor = StableProcessHandle.open(session.pid)
+                terminate_owned_pty_session(session_anchor, grace_s=0.1)
+                session_anchor.close()
+                session.wait(timeout=3)
+                assert not term_handler_ran.exists(), (
+                    "cleanup resumed a TERM handler that could spawn a new group"
+                )
+                assert decoy.poll() is None, "an unrelated env-match was killed"
+                for pid in (job_pid, descendant_pid):
+                    status = run(
+                        ["ps", "-p", str(pid), "-o", "stat="], timeout=2
+                    ).stdout.strip()
+                    assert not status or status.startswith("Z"), (
+                        f"PTY-session job {pid} survived: {status}"
+                    )
+            finally:
+                if session.returncode is None:
+                    try:
+                        session_anchor = StableProcessHandle.open(session.pid)
+                        terminate_owned_pty_session(session_anchor, grace_s=0.1)
+                        session_anchor.close()
+                    except RuntimeError:
+                        terminate_owned_process_group(session, grace_s=0.1)
+                terminate_owned_process_group(decoy, grace_s=0.1)
 
     # Limits are checked while traversing and before any file body can grow
     # the snapshot without bound.
@@ -3795,6 +11181,293 @@ def live_helper_selftest() -> None:
         prefix="kettle-nvim-limit-fixture-"
     ) as fixture:
         fixture_root = Path(fixture)
+        identity_source = fixture_root / "identity-source"
+        identity_source.mkdir()
+        identity_file = identity_source / "plugin.lua"
+        identity_file.write_bytes(b"return true\n")
+        identity = regular_tree_identity(identity_source)
+        assert identity["present"] is True
+        assert identity["files"] == 1
+        assert identity["bytes"] == len(b"return true\n")
+        assert regular_file_identity(identity_file)["sha256"]
+        target_identity = run(
+            [
+                sys.executable,
+                "-c",
+                AgentShellTarget.bounded_identity_code(),
+                "tree",
+                str(identity_source),
+            ],
+            timeout=10,
+        )
+        assert target_identity.returncode == 0, target_identity.stderr
+        assert json.loads(target_identity.stdout)["sha256"] == identity["sha256"]
+        empty_directory = identity_source / "empty"
+        empty_directory.mkdir()
+        identity_with_empty = regular_tree_identity(identity_source)
+        assert identity_with_empty["files"] == identity["files"]
+        assert identity_with_empty["bytes"] == identity["bytes"]
+        assert identity_with_empty["sha256"] != identity["sha256"], (
+            "adding an empty directory did not change the native tree identity"
+        )
+        target_with_empty = run(
+            [
+                sys.executable,
+                "-c",
+                AgentShellTarget.bounded_identity_code(),
+                "tree",
+                str(identity_source),
+            ],
+            timeout=10,
+        )
+        assert target_with_empty.returncode == 0, target_with_empty.stderr
+        assert (
+            json.loads(target_with_empty.stdout)["sha256"]
+            == identity_with_empty["sha256"]
+        ), "the WSL identity code did not hash the same directory entries"
+        empty_directory.rmdir()
+        assert regular_tree_identity(identity_source)["sha256"] == identity["sha256"], (
+            "removing an empty directory did not restore the tree identity"
+        )
+        try:
+            regular_tree_identity(
+                identity_source, SnapshotCopyBudget(max_entries=1)
+            )
+        except RuntimeError as error:
+            assert "entry limit" in str(error)
+        else:
+            raise AssertionError("identity traversal must enforce its entry limit")
+
+        class SentinelEntry:
+            path = str(identity_file)
+            name = identity_file.name
+
+        class SentinelScan:
+            def __init__(self) -> None:
+                self.consumed = 0
+
+            def __enter__(self) -> "SentinelScan":
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+            def __iter__(self) -> "SentinelScan":
+                return self
+
+            def __next__(self) -> SentinelEntry:
+                self.consumed += 1
+                if self.consumed > 1:
+                    raise AssertionError("directory iterator consumed beyond cap")
+                return SentinelEntry()
+
+        sentinel_scan = SentinelScan()
+        try:
+            _bounded_sorted_directory_entries(
+                identity_source,
+                SnapshotCopyBudget(max_entries=0),
+                lambda _directory: sentinel_scan,
+            )
+        except RuntimeError as error:
+            assert "entry limit" in str(error)
+        else:
+            raise AssertionError("bounded entry collection accepted an excess entry")
+        assert sentinel_scan.consumed == 1, (
+            "identity traversal read another entry after the cap fired"
+        )
+
+        generated_cap_probe = run(
+            [
+                sys.executable,
+                "-c",
+                AgentShellTarget.bounded_identity_code(),
+                "entry-cap-probe",
+                "ignored",
+            ],
+            timeout=10,
+        )
+        assert generated_cap_probe.returncode == 0, generated_cap_probe.stderr
+        assert json.loads(generated_cap_probe.stdout) == {
+            "pre_materialization_cap": True
+        }
+
+        identity_link = identity_source / "linked.lua"
+        identity_link_created = False
+        try:
+            identity_link.symlink_to(identity_file)
+            identity_link_created = True
+        except (NotImplementedError, OSError):
+            pass
+        if identity_link_created:
+            try:
+                regular_tree_identity(identity_source)
+            except RuntimeError as error:
+                assert "symlink" in str(error) or "junction" in str(error)
+            else:
+                raise AssertionError("identity traversal must reject links")
+            identity_link.unlink()
+
+        if os.name != "nt":
+            # Swap a checked child directory for a link immediately before the
+            # descriptor-relative open. A path walk follows the replacement and
+            # hashes the outside sentinel; openat + O_NOFOLLOW must refuse it.
+            swap_root = fixture_root / "identity-swap-root"
+            swap_child = swap_root / "child"
+            held_child = swap_root / "held-child"
+            outside = fixture_root / "identity-swap-outside"
+            swap_child.mkdir(parents=True)
+            outside.mkdir()
+            (swap_child / "inside").write_text("inside", encoding="utf-8")
+            outside_sentinel = outside / "outside"
+            outside_sentinel.write_text("outside", encoding="utf-8")
+            original_os_open = os.open
+            swapped = False
+
+            def swap_ancestor_before_open(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: Optional[int] = None,
+            ) -> int:
+                nonlocal swapped
+                if path == "child" and dir_fd is not None and not swapped:
+                    swapped = True
+                    swap_child.rename(held_child)
+                    swap_child.symlink_to(outside, target_is_directory=True)
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+            os.open = swap_ancestor_before_open  # type: ignore[assignment]
+            try:
+                try:
+                    regular_tree_identity(swap_root)
+                except (OSError, RuntimeError):
+                    pass
+                else:
+                    raise AssertionError(
+                        "identity followed an ancestor replaced with a symlink"
+                    )
+            finally:
+                os.open = original_os_open  # type: ignore[assignment]
+            assert outside_sentinel.read_text(encoding="utf-8") == "outside"
+            swap_child.unlink()
+            held_child.rename(swap_child)
+
+            # The remover binds and validates the directory before fchmod or
+            # deletion. Swap after its no-follow stat but before open; the
+            # outside tree must be untouched and cleanup must report uncertainty.
+            removal_root = fixture_root / "removal-swap-root"
+            removal_child = removal_root / "child"
+            removal_held = removal_root / "held-child"
+            removal_outside = fixture_root / "removal-swap-outside"
+            removal_child.mkdir(parents=True)
+            removal_outside.mkdir()
+            removal_sentinel = removal_outside / "outside"
+            removal_sentinel.write_text("outside", encoding="utf-8")
+            swapped = False
+
+            def swap_cleanup_ancestor(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: Optional[int] = None,
+            ) -> int:
+                nonlocal swapped
+                if path == "child" and dir_fd is not None and not swapped:
+                    swapped = True
+                    removal_child.rename(removal_held)
+                    removal_child.symlink_to(
+                        removal_outside, target_is_directory=True
+                    )
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+            os.open = swap_cleanup_ancestor  # type: ignore[assignment]
+            try:
+                try:
+                    _remove_tree_by_fd(removal_root)
+                except (OSError, RuntimeError):
+                    pass
+                else:
+                    raise AssertionError(
+                        "cleanup followed an ancestor replaced with a symlink"
+                    )
+            finally:
+                os.open = original_os_open  # type: ignore[assignment]
+            assert swapped, "cleanup sabotage never reached the child open"
+            assert removal_sentinel.read_text(encoding="utf-8") == "outside"
+            if removal_child.is_symlink():
+                removal_child.unlink()
+            if removal_held.exists():
+                removal_held.rename(removal_child)
+            shutil.rmtree(removal_root)
+
+            # A symlink is not the only replacement a same-UID process can
+            # make. Substitute a hard link to an external regular file after
+            # the directory stat. O_DIRECTORY must reject it before fchmod, so
+            # the external inode's mode cannot change.
+            hardlink_root = fixture_root / "removal-hardlink-root"
+            hardlink_child = hardlink_root / "child"
+            hardlink_held = hardlink_root / "held-child"
+            hardlink_external = fixture_root / "removal-hardlink-external"
+            hardlink_child.mkdir(parents=True)
+            hardlink_external.write_text("outside", encoding="utf-8")
+            hardlink_external.chmod(0o600)
+            swapped = False
+
+            def swap_cleanup_to_hardlink(
+                path: object,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: Optional[int] = None,
+            ) -> int:
+                nonlocal swapped
+                if path == "child" and dir_fd is not None and not swapped:
+                    swapped = True
+                    hardlink_child.rename(hardlink_held)
+                    os.link(hardlink_external, hardlink_child)
+                return original_os_open(path, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+            os.open = swap_cleanup_to_hardlink  # type: ignore[assignment]
+            try:
+                try:
+                    _remove_tree_by_fd(hardlink_root)
+                except (OSError, RuntimeError):
+                    pass
+                else:
+                    raise AssertionError(
+                        "cleanup accepted a directory replaced by a hard link"
+                    )
+            finally:
+                os.open = original_os_open  # type: ignore[assignment]
+            assert swapped, "hard-link sabotage never reached the child open"
+            assert hardlink_external.stat().st_mode & 0o777 == 0o600
+            if hardlink_child.is_file():
+                hardlink_child.unlink()
+            if hardlink_held.exists():
+                hardlink_held.rename(hardlink_child)
+            shutil.rmtree(hardlink_root)
+            hardlink_external.unlink()
+
+            # No path-based chmod is allowed in the descriptor remover. Apart
+            # from being racy, Python cannot provide its no-follow form on every
+            # supported Unix. A hostile replacement makes any call here fail.
+            chmod_root = fixture_root / "fd-chmod-root"
+            (chmod_root / "child").mkdir(parents=True)
+            (chmod_root / "child" / "leaf").write_text("leaf", encoding="utf-8")
+            original_os_chmod = os.chmod
+
+            def reject_path_chmod(*_args: object, **_kwargs: object) -> None:
+                raise AssertionError("descriptor cleanup used path-based chmod")
+
+            os.chmod = reject_path_chmod  # type: ignore[assignment]
+            try:
+                _remove_tree_by_fd(chmod_root)
+            finally:
+                os.chmod = original_os_chmod  # type: ignore[assignment]
+            assert not chmod_root.exists()
+
         source = fixture_root / "source"
         source.mkdir()
         (source / "too-large.lua").write_bytes(b"12345")
@@ -3894,6 +11567,12 @@ def live_helper_selftest() -> None:
             special_source.mkdir()
             os.mkfifo(special_source / "fifo")
             try:
+                regular_tree_identity(special_source)
+            except RuntimeError as error:
+                assert "non-regular" in str(error)
+            else:
+                raise AssertionError("identity traversal must reject special files")
+            try:
                 AgentShellTarget.copy_bounded_regular_tree(
                     special_source,
                     fixture_root / "copy-special",
@@ -3909,6 +11588,7 @@ def live_helper_selftest() -> None:
         nvim_marker, False, windows=False
     )
     assert "nvim --clean -n" in marker_command
+    assert "nvim.pid" in marker_command
     assert nvim_marker not in marker_command
     left_marker = "KETTLE_ASTRO_LEFT_RUNTIME"
     right_marker = "KETTLE_ASTRO_RIGHT_RUNTIME"
@@ -3916,6 +11596,7 @@ def live_helper_selftest() -> None:
         left_marker, right_marker, True, windows=False
     )
     assert "nvim -n" in split_command
+    assert "nvim.pid" in split_command
     assert left_marker not in split_command
     assert right_marker not in split_command
 
@@ -3923,13 +11604,18 @@ def live_helper_selftest() -> None:
     # checkable on every platform even though the live probe needs a window.
     lazyvcs_marker = "KETTLE_LAZYVCS_RUNTIME"
     lazyvcs_repo = "/tmp/kettle-smoke-lazyvcs"
-    setup_posix = lazyvcs_repo_setup_command(lazyvcs_repo, windows=False)
+    fixture_token = "A1B2C3D4"
+    setup_posix = lazyvcs_repo_setup_command(
+        lazyvcs_repo, fixture_token, windows=False
+    )
     assert "git init -q ." in setup_posix
     # An unstaged edit is the whole point: without it the sidebar renders no
     # changed files and no gutter signs, and the probe would assert nothing.
     assert "git commit -q -m base" in setup_posix
     assert setup_posix.count("tracked.txt") >= 3
-    setup_windows = lazyvcs_repo_setup_command(lazyvcs_repo, windows=True)
+    setup_windows = lazyvcs_repo_setup_command(
+        lazyvcs_repo, fixture_token, windows=True
+    )
     assert "Set-Content" in setup_windows and "Invoke-Git init -q ." in setup_windows
 
     sidebar_posix = lazyvcs_sidebar_command(
@@ -3937,22 +11623,135 @@ def live_helper_selftest() -> None:
     )
     # `nvim -n`, not `--clean`: the configured runtime is what has LazyVCS.
     assert "nvim -n" in sidebar_posix and "--clean" not in sidebar_posix
-    assert "+LazyVCS sidebar open" in sidebar_posix
+    assert "+silent! LazyVCS blame toggle" in sidebar_posix
+    assert "+silent! LazyVCS sidebar open" in sidebar_posix
     # The marker must reach the buffer as an expression, never as a literal, or
     # `wait_for_text` matches the command echo instead of the rendered buffer.
     assert lazyvcs_marker not in sidebar_posix
     # Discovery is asynchronous; without this wait the probe races the render.
     assert "lazyvcs_discovering" in sidebar_posix
     assert "vim.wait(30000" in sidebar_posix
+    assert "vim.uv.fs_realpath" in sidebar_posix
+    assert "debug.getinfo(native._state, 'S')" in sidebar_posix
+    assert "lazyvcs-loaded-source" in sidebar_posix
+    assert '"+language messages C"' in sidebar_posix
+    assert "nvim.pid" in sidebar_posix
+    assert "vim.api.nvim_buf_get_name(0)" in sidebar_posix
+    assert "vim.fs.basename(expected)" in sidebar_posix
+    assert "state_path == expected and exact_repo" in sidebar_posix
+    assert "s.lazyvcs_repo_specs" in sidebar_posix
     # The marker must be conditional. Written unconditionally, the probe passes
     # when `:LazyVCS` is missing, the plugin fails to load, or discovery times
     # out -- Neovim reports the error and runs the next `+` command anyway.
     assert "pcall(require, 'lazyvcs.source_control.native')" in sidebar_posix
     assert "rendered and" in sidebar_posix
-    assert "KETTLE_LAZYVCS_SIDEBAR_ABSENT" in sidebar_posix
+    # Neither outcome token may appear literally in the echoed shell command:
+    # the waiter reads the terminal while that command is still being entered.
+    # Seeing a literal failure token there used to abort before Neovim even ran.
+    assert "KETTLE_LAZYVCS_SIDEBAR_ABSENT" not in sidebar_posix
+    # The marker gate uses stable, visible state only. Gutter and blame are
+    # validated from the terminal grid by `lazyvcs_screen_evidence`; coupling
+    # this command to LazyVCS's private caches or extmark namespaces duplicated
+    # that proof and failed even while the required UI was visibly present.
+    assert "lazyvcs_repo_cache" not in sidebar_posix
+    assert "nvim_get_namespaces" not in sidebar_posix
+    assert "nvim_buf_get_extmarks" not in sidebar_posix
+    assert "vim.fs.normalize(vim.uv.fs_realpath" in sidebar_posix
+    # This expression is parsed by Lua. Reusing `nvim_string_expression`
+    # emitted Vimscript's single-dot concatenation and made Neovim stop at
+    # E5107 before it ever inspected LazyVCS state.
+    assert (
+        nvim_lua_string_expression("AB")
+        == "string.char(65) .. string.char(66)"
+    )
+    assert " . " not in sidebar_posix
+    # LazyVCS owns and asynchronously refreshes its sidebar buffer. An atomic
+    # regular marker therefore carries the internal-state result while
+    # independent cell assertions prove the sidebar and editor contents.
+    assert "'/run/lazyvcs-ready'" in sidebar_posix
+    assert "vim.uv.fs_rename(ready_tmp, ready)" in sidebar_posix
+    assert "vim.api.nvim_echo({{message, 'None'}}, false, {})" in sidebar_posix
+    assert "nvim_buf_set_lines" not in sidebar_posix
+    assert "vim.bo[target].modifiable" not in sidebar_posix
     # A failure string that CONTAINED the marker would still satisfy
     # `wait_for_text`, turning the failure branch back into a false pass.
     assert lazyvcs_marker not in "KETTLE_LAZYVCS_SIDEBAR_ABSENT"
+
+    def cell_fixture(lines: List[str]) -> Dict[str, object]:
+        rows = len(lines)
+        cols = max(len(line) for line in lines)
+        return {
+            "rows": rows,
+            "cols": cols,
+            "cells": [
+                {"row": row, "col": col, "ch": ch}
+                for row, line in enumerate(lines)
+                for col, ch in enumerate(line.ljust(cols))
+            ],
+        }
+
+    valid_lazyvcs_lines = [
+        f"{lazyvcs_marker:<38}│",
+        f"{'Changes (1)':<38}│   1   FIRST_A1B2C3D4   KTLBL,",
+        f"{'lazyvcs-smoke-repo':<38}│   1 ▎ CHANGED_A1B2C3D4",
+    ]
+    valid_lazyvcs_screen = cell_fixture(valid_lazyvcs_lines)
+    assert not lazyvcs_screen_evidence(
+        valid_lazyvcs_screen,
+        repo_name="lazyvcs-smoke-repo",
+        fixture_token=fixture_token,
+    )
+    # Tokens on the sidebar side cannot substitute for editor-buffer rows.
+    sabotaged = cell_fixture(
+        [
+            f"{lazyvcs_marker:<38}│",
+            f"{'Changes (1) FIRST_A1B2C3D4 KTLBL':<38}│",
+            f"{'lazyvcs-smoke-repo CHANGED_A1B2C3D4 ▎':<38}│",
+        ]
+    )
+    assert lazyvcs_screen_evidence(
+        sabotaged,
+        repo_name="lazyvcs-smoke-repo",
+        fixture_token=fixture_token,
+    ) == ["changed-row-gutter", "fixture-row-blame"]
+    review_counterexample = cell_fixture(
+        [
+            f"{lazyvcs_marker:<38}│",
+            f"{'Changes (1)':<38}│   99 ▎ CHANGED",
+            f"{'lazyvcs-smoke-repo':<38}│   88 first KTLBL",
+        ]
+    )
+    assert lazyvcs_screen_evidence(
+        review_counterexample,
+        repo_name="lazyvcs-smoke-repo",
+        fixture_token=fixture_token,
+    ) == ["changed-row-gutter", "fixture-row-blame"]
+    inconsistent_divider = cell_fixture(
+        [
+            f"{lazyvcs_marker:<37}│",
+            f"{'Changes (1)':<38}│   1   FIRST_A1B2C3D4   KTLBL,",
+            f"{'lazyvcs-smoke-repo':<39}│   1 ▎ CHANGED_A1B2C3D4",
+        ]
+    )
+    assert lazyvcs_screen_evidence(
+        inconsistent_divider,
+        repo_name="lazyvcs-smoke-repo",
+        fixture_token=fixture_token,
+    ) == ["sidebar-editor-divider"]
+
+    wsl_paths = AgentShellTarget(mode="wsl", wsl_distro="Fixture")
+    wsl_repo = wsl_paths.target_join(
+        "/tmp/kettle-agent-tui-Fixture", "lazyvcs-smoke-repo"
+    )
+    assert wsl_repo == "/tmp/kettle-agent-tui-Fixture/lazyvcs-smoke-repo"
+    wsl_sidebar = lazyvcs_sidebar_command(
+        wsl_repo, lazyvcs_marker, windows=False
+    )
+    assert (
+        "/tmp/kettle-agent-tui-Fixture/lazyvcs-smoke-repo/tracked.txt"
+        in wsl_sidebar
+    )
+    assert "\\tmp\\kettle-agent" not in wsl_sidebar
 
     # PowerShell: `$ErrorActionPreference` does not cover native executables, so
     # each git call needs an explicit exit-code check or a failed setup reaches
@@ -4133,25 +11932,64 @@ def nvim_string_expression(
     )
 
 
+def nvim_lua_string_expression(value: str) -> str:
+    """Build a Lua string expression without embedding the awaited value.
+
+    The live smoke waits for the resulting marker in Kettle's grid. Keeping the
+    literal out of Neovim's command line prevents an echoed command from
+    satisfying that wait before the buffer is actually updated. Byte-valued
+    `string.char` calls also avoid asking a shell quote to double as a Lua
+    quote; most importantly, Lua concatenates with `..`, not Vimscript's `.`.
+    """
+    if len(value) < 2:
+        raise ValueError(
+            "Neovim smoke markers must contain at least two characters"
+        )
+    left, right = split_marker(value)
+
+    def char_expression(part: str) -> str:
+        encoded = part.encode("utf-8")
+        return "string.char(" + ",".join(str(byte) for byte in encoded) + ")"
+
+    return f"{char_expression(left)} .. {char_expression(right)}"
+
+
+def nvim_pid_record_arg() -> str:
+    """Record the exact Neovim PID from inside the sandboxed process."""
+    return (
+        '--cmd "lua local root = vim.env.KETTLE_SMOKE_ROOT; '
+        "assert(type(root) == 'string' and root ~= ''); "
+        "assert(vim.fn.writefile({tostring(vim.fn.getpid())}, "
+        "root .. '/run/nvim.pid') == 0)\""
+    )
+
+
 def nvim_marker_command(
     marker: str, configured: bool, *, windows: Optional[bool] = None
 ) -> str:
     base = "nvim -n" if configured else "nvim --clean -n"
     marker_expression = nvim_string_expression(marker, windows=windows)
     return (
-        f'{base} "+set termguicolors" '
+        f'{base} {nvim_pid_record_arg()} "+set termguicolors" '
         f'"+call setline(1, {marker_expression})" '
         '"+normal! gg"'
     )
 
 
-def lazyvcs_repo_setup_command(repo: str, *, windows: Optional[bool] = None) -> str:
+def lazyvcs_repo_setup_command(
+    repo: str, fixture_token: str, *, windows: Optional[bool] = None
+) -> str:
     """Shell command creating a one-file Git repository with an unstaged edit.
 
     The edit is what makes the probe meaningful: LazyVCS only draws gutter
     signs and a populated sidebar when something has actually changed.
     """
+    if re.fullmatch(r"[A-Z0-9]{8,32}", fixture_token) is None:
+        raise ValueError("LazyVCS fixture token must be 8-32 uppercase alphanumerics")
     quoted = shell_quote(repo, windows=windows)
+    first = f"FIRST_{fixture_token}"
+    changed = f"CHANGED_{fixture_token}"
+    third = f"THIRD_{fixture_token}"
     if windows:
         # `$ErrorActionPreference='Stop'` does not apply to native executables,
         # so each `git` is followed by an explicit `$LASTEXITCODE` check --
@@ -4166,28 +12004,31 @@ def lazyvcs_repo_setup_command(repo: str, *, windows: Optional[bool] = None) -> 
             f"Push-Location {quoted}; "
             "try { "
             "Invoke-Git init -q .; "
-            "Invoke-Git config user.name kettle-smoke; "
+            "Invoke-Git config user.name KTLBL; "
             "Invoke-Git config user.email kettle-smoke@example.invalid; "
-            "Set-Content -Path tracked.txt -Value 'first','second','third'; "
+            f"Set-Content -Path tracked.txt -Value '{first}','SECOND','{third}'; "
             "Invoke-Git add tracked.txt; Invoke-Git commit -q -m base; "
-            "Set-Content -Path tracked.txt -Value 'first','CHANGED','third' "
+            f"Set-Content -Path tracked.txt -Value '{first}','{changed}','{third}' "
             "} finally { Pop-Location }"
         )
     return (
         f"mkdir -p {quoted} && cd {quoted} && "
         "git init -q . && "
-        "git config user.name kettle-smoke && "
+        "git config user.name KTLBL && "
         "git config user.email kettle-smoke@example.invalid && "
-        "printf 'first\\nsecond\\nthird\\n' > tracked.txt && "
+        f"printf '{first}\\nSECOND\\n{third}\\n' > tracked.txt && "
         "git add tracked.txt && git commit -q -m base && "
-        "printf 'first\\nCHANGED\\nthird\\n' > tracked.txt"
+        f"printf '{first}\\n{changed}\\n{third}\\n' > tracked.txt"
     )
 
 
 def lazyvcs_sidebar_command(
-    repo: str, marker: str, *, windows: Optional[bool] = None
+    repo: str,
+    marker: str,
+    *,
+    windows: Optional[bool] = None,
 ) -> str:
-    """Open a file with LazyVCS loaded, show the sidebar, and print a marker.
+    """Open a file with LazyVCS loaded, show the sidebar, and report readiness.
 
     Exercises the parts of LazyVCS that depend on the terminal rather than on
     Neovim: the sidebar's Nerd Font icons, the box-drawing gutter sign glyphs
@@ -4196,39 +12037,166 @@ def lazyvcs_sidebar_command(
     rendering defect rather than a font-installation problem on the runner.
 
     Discovery is asynchronous, so the sidebar's first frame reads
-    "Discovering repositories..." -- wait for it to settle before printing the
+    "Discovering repositories..." -- wait for it to settle before echoing the
     marker, or the probe races the very rendering it means to check.
     """
-    marker_expression = nvim_string_expression(marker, windows=windows)
-    tracked = shell_quote(os.path.join(repo, "tracked.txt"), windows=windows)
-    # The marker is written ONLY when the sidebar really rendered a repository.
+    marker_expression = nvim_lua_string_expression(marker)
+    failure_marker = "KETTLE_LAZYVCS_SIDEBAR_ABSENT"
+    failure_expression = nvim_lua_string_expression(failure_marker)
+    repo_expression = nvim_lua_string_expression(repo)
+    tracked_path = (
+        str(Path(repo) / "tracked.txt")
+        if windows
+        else posixpath.join(repo, "tracked.txt")
+    )
+    tracked = shell_quote(tracked_path, windows=windows)
+    # The marker is echoed ONLY when the sidebar really rendered a repository.
     #
     # Writing it unconditionally after the wait would make the probe pass when
     # `:LazyVCS` does not exist, when the plugin fails to load, or when
     # discovery times out -- Neovim reports the error and carries on to the next
     # `+` command regardless, so `wait_for_text` would find the marker and
-    # conclude the sidebar rendered. A distinct failure string is written
+    # conclude the sidebar rendered. A distinct failure string is echoed
     # instead, so the timeout that follows carries the reason in the captured
     # grid rather than just "marker not found".
     check = (
         "+lua local ok, native = pcall(require, 'lazyvcs.source_control.native'); "
+        "local info = ok and debug.getinfo(native._state, 'S') or nil; "
+        "local source = info and info.source or nil; "
+        "source = type(source) == 'string' and source:sub(1, 1) == '@' "
+        "and source:sub(2) or nil; "
+        "local loaded = source and vim.uv.fs_realpath(source) or nil; "
+        "local plugin_root = vim.uv.fs_realpath(vim.env.XDG_DATA_HOME "
+        ".. '/nvim/lazy/lazyvcs.nvim'); "
+        "local loaded_cmp = loaded; local root_cmp = plugin_root; "
+        "if vim.fn.has('win32') == 1 then "
+        "loaded_cmp = loaded_cmp and loaded_cmp:lower() or nil; "
+        "root_cmp = root_cmp and root_cmp:lower() or nil; end; "
+        "local separator = package.config:sub(1, 1); "
+        "local prefix = root_cmp and (root_cmp:sub(-1) == separator "
+        "and root_cmp or root_cmp .. separator) or nil; "
+        "local inside = loaded_cmp ~= nil and root_cmp ~= nil "
+        "and (loaded_cmp == root_cmp or loaded_cmp:sub(1, #prefix) == prefix); "
+        "local record = vim.env.KETTLE_SMOKE_ROOT .. '/run/lazyvcs-loaded-source'; "
+        "local recorded = inside and vim.fn.writefile({loaded}, record) == 0; "
         "local s = ok and native._state() or nil; "
+        f"local expected = vim.fs.normalize(vim.uv.fs_realpath({repo_expression}) "
+        f"or {repo_expression}); "
         "local settled = s ~= nil and vim.wait(30000, function() "
-        "return s.lazyvcs_discovering ~= true and s.lazyvcs_repo_specs ~= nil "
-        "end, 25); "
-        "local rendered = settled and #(s.lazyvcs_repo_specs or {}) > 0 "
+        "local lines = type(s.bufnr) == 'number' "
         "and vim.api.nvim_buf_is_valid(s.bufnr) "
-        f"and #vim.api.nvim_buf_get_lines(s.bufnr, 0, -1, false) > 1; "
-        f"vim.fn.setline(1, rendered and {marker_expression} "
-        "or ('KETTLE_LAZYVCS_SIDEBAR_ABSENT ok=' .. tostring(ok) "
-        ".. ' state=' .. tostring(s ~= nil) .. ' settled=' .. tostring(settled)))"
+        "and vim.api.nvim_buf_get_lines(s.bufnr, 0, -1, false) or {}; "
+        "local sidebar = table.concat(lines, '\\n'); "
+        "local state_path = s.path and vim.fs.normalize(vim.uv.fs_realpath(s.path) or s.path) or nil; "
+        "local exact_repo = false; for _, spec in ipairs(s.lazyvcs_repo_specs or {}) do "
+        "local root = spec.root and vim.fs.normalize(vim.uv.fs_realpath(spec.root) or spec.root) or nil; "
+        "if root == expected then exact_repo = true; break; end; end; "
+        "return s.lazyvcs_discovering ~= true "
+        "and state_path == expected and exact_repo "
+        "and sidebar:find(vim.fs.basename(expected), 1, true) ~= nil "
+        "and vim.fs.normalize(vim.api.nvim_buf_get_name(0)) "
+        "== vim.fs.normalize(expected .. '/tracked.txt') "
+        "end, 25); "
+        "local rendered = settled and recorded "
+        "and vim.api.nvim_buf_is_valid(s.bufnr); "
+        "local ready = vim.env.KETTLE_SMOKE_ROOT .. '/run/lazyvcs-ready'; "
+        "local ready_tmp = ready .. '.tmp-' .. tostring(vim.fn.getpid()); "
+        f"local ready_written = rendered and vim.fn.writefile({{{marker_expression}}}, ready_tmp) == 0; "
+        "if ready_written then ready_written = vim.uv.fs_chmod(ready_tmp, 384) ~= nil; end; "
+        "if ready_written then ready_written = vim.uv.fs_rename(ready_tmp, ready) ~= nil; end; "
+        "if not ready_written then pcall(vim.uv.fs_unlink, ready_tmp); end; "
+        f"local message = rendered and ready_written and {marker_expression} "
+        f"or ({failure_expression} .. ' ok=' .. tostring(ok) "
+        ".. ' state=' .. tostring(s ~= nil) .. ' settled=' .. tostring(settled) "
+        ".. ' loaded=' .. tostring(loaded) .. ' recorded=' .. tostring(recorded) "
+        ".. ' ready=' .. tostring(ready_written)); "
+        # Do not insert the result into LazyVCS's asynchronously refreshed
+        # sidebar buffer. The atomic regular file is the internal-state proof;
+        # independent cell-grid assertions below prove what actually rendered.
+        "if not ready_written then vim.api.nvim_echo({{message, 'None'}}, false, {}); end"
     )
     return (
-        f'nvim -n {tracked} "+set termguicolors" '
-        '"+LazyVCS sidebar open" '
-        f'"{check}" '
-        '"+normal! gg"'
+        f'nvim -n {tracked} {nvim_pid_record_arg()} '
+        '"+language messages C" "+set termguicolors" '
+        # Loading LazyVCS also activates unrelated configured completion
+        # sources. A warning from one of those sources must not leave Neovim's
+        # hit-enter pager covering the sidebar; the explicit state check below
+        # is the authoritative success/failure report for this probe.
+        '"+silent! LazyVCS blame toggle" '
+        '"+silent! LazyVCS sidebar open" '
+        '"+wincmd p" '
+        '"+normal! gg" '
+        f'"{check}"'
     )
+
+
+def lazyvcs_screen_evidence(
+    cells: Dict[str, object], *, repo_name: str, fixture_token: str
+) -> List[str]:
+    """Return missing evidence associated with one cell-proven split column."""
+    rows = int(cells.get("rows", 0))
+    cols = int(cells.get("cols", 0))
+    grid = [[" " for _col in range(cols)] for _row in range(rows)]
+    divider_counts: Dict[int, int] = {}
+    for cell in cells.get("cells", []):
+        if not isinstance(cell, dict):
+            continue
+        row = cell.get("row")
+        col = cell.get("col")
+        ch = cell.get("ch")
+        if not isinstance(row, int) or not isinstance(col, int) or not isinstance(ch, str):
+            continue
+        if 0 <= row < rows and 0 <= col < cols:
+            grid[row][col] = ch
+            if ch == "│":
+                divider_counts[col] = divider_counts.get(col, 0) + 1
+    missing: List[str] = []
+    if not divider_counts:
+        return ["sidebar-editor-divider"]
+    divider_col, divider_rows = max(
+        divider_counts.items(), key=lambda item: (item[1], -item[0])
+    )
+    if divider_rows < 2 or sum(
+        1 for count in divider_counts.values() if count == divider_rows
+    ) != 1:
+        return ["sidebar-editor-divider"]
+    sidebar_lines = ["".join(row[:divider_col]) for row in grid]
+    editor_lines = ["".join(row[divider_col + 1 :]) for row in grid]
+    sidebar_text = "\n".join(sidebar_lines)
+    editor_text = "\n".join(editor_lines)
+    for token in (repo_name, "Changes (1)"):
+        if token not in sidebar_text:
+            missing.append(f"sidebar:{token}")
+    changed = re.escape(f"CHANGED_{fixture_token}")
+    first = re.escape(f"FIRST_{fixture_token}")
+    if not any(
+        re.search(rf"\b\d+\s+[┃▎]\s+{changed}\b", line)
+        for line in editor_lines
+    ):
+        missing.append("changed-row-gutter")
+    if not any(
+        re.search(rf"\b\d+\s+{first}\s+KTLBL\b", line)
+        for line in editor_lines
+    ):
+        missing.append("fixture-row-blame")
+    return missing
+
+
+def cell_grid_text(cells: Dict[str, object]) -> str:
+    """Render one `read_cells` response for diagnostics without another read."""
+    rows = int(cells.get("rows", 0))
+    cols = int(cells.get("cols", 0))
+    grid = [[" " for _col in range(cols)] for _row in range(rows)]
+    for cell in cells.get("cells", []):
+        if not isinstance(cell, dict):
+            continue
+        row = cell.get("row")
+        col = cell.get("col")
+        ch = cell.get("ch")
+        if isinstance(row, int) and isinstance(col, int) and isinstance(ch, str):
+            if 0 <= row < rows and 0 <= col < cols:
+                grid[row][col] = ch
+    return "\n".join("".join(row).rstrip() for row in grid)
 
 
 def nvim_split_command(
@@ -4248,7 +12216,8 @@ def nvim_split_command(
         right_marker + "_LINE_2", windows=windows
     )
     return (
-        f'{base} "+set termguicolors cursorline laststatus=2" '
+        f'{base} {nvim_pid_record_arg()} '
+        '"+set termguicolors cursorline laststatus=2" '
         f'"+call setline(1, [{left_expression}, {left_line_expression}])" '
         '"+vsplit" '
         '"+wincmd l" '
@@ -4699,6 +12668,12 @@ def run_agent_tui(
         f"agent-tui-{shell_target.label}-{time.strftime('%Y%m%d-%H%M%S')}"
     )
     out.mkdir(parents=True, exist_ok=True)
+    provenance_before = agent_tui_provenance(kettle, shell_target)
+    provenance_path = out / "provenance.json"
+    provenance_path.write_text(
+        json.dumps({"before": provenance_before}, indent=2) + "\n",
+        encoding="utf-8",
+    )
     cfg = out / "config"
     cfg.write_text(
         "\n".join(
@@ -4723,6 +12698,8 @@ def run_agent_tui(
     )
     extra_args = shell_target.launch_args()
     states: List[Dict[str, object]] = []
+    lazyvcs_snapshot_after: Optional[Dict[str, object]] = None
+    lazyvcs_loaded_source_after: Optional[Dict[str, object]] = None
     probes: List[Dict[str, object]] = []
     run_auth_smoke = env_flag("KETTLE_AGENT_AUTH_SMOKE")
     require_auth_smoke = env_strict("KETTLE_AGENT_AUTH_SMOKE")
@@ -5245,12 +13222,25 @@ def run_agent_tui(
                 )
         else:
             sandbox_marker = "KETTLE_AGENT_TUI_NVIM_SANDBOX_READY"
-            sandbox_path = shell_target.create_nvim_sandbox_host()
-            live.add_post_exit_cleanup(
-                lambda path=sandbox_path: shell_target.cleanup_nvim_sandbox_host(
-                    path
-                )
+            # On Windows, acquire the unpredictable named Job before the
+            # sandbox exists.  The exact PowerShell pane then joins it without
+            # a reusable ctl PID; Neovim and all later descendants inherit the
+            # retained containment boundary.  The helper also registers
+            # cleanup before returning either owned resource to this caller.
+            sandbox_path, windows_sandbox_job = _create_owned_nvim_sandbox(
+                shell_target, live.add_post_exit_cleanup
             )
+            if windows_sandbox_job is not None:
+                containment_marker = "KETTLE_AGENT_TUI_WINDOWS_JOB_READY"
+                live_shell_command(
+                    live,
+                    command_with_marker(
+                        windows_sandbox_job.powershell_assign_current_process_command(),
+                        containment_marker,
+                        windows=True,
+                    ),
+                    containment_marker,
+                )
             shell_target.prepare_nvim_sandbox_host(sandbox_path)
             live_shell_command(
                 live,
@@ -5307,6 +13297,23 @@ def run_agent_tui(
                     shell_marker,
                 )
                 probes.append({"name": label, "status": "ok"})
+            # Configured Neovim may bootstrap lazy.nvim and LazyVCS into the
+            # disposable data directory on its first startup. Establish the
+            # provenance baseline only after that warm-up, then require the
+            # copied plugin to exist before asking it to render anything.
+            if configured_nvim_available:
+                provenance_before["lazyvcs_snapshot"] = (
+                    shell_target.nvim_snapshot_identity(sandbox_path)
+                )
+                if not provenance_before["lazyvcs_snapshot"].get("present"):
+                    raise SystemExit(
+                        "agent-tui smoke: configured Neovim did not provide "
+                        "LazyVCS inside the prepared snapshot"
+                    )
+                provenance_path.write_text(
+                    json.dumps({"before": provenance_before}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             # LazyVCS leg. Only meaningful against the configured runtime,
             # because that is what has the plugin; skipped otherwise rather
             # than silently passing.
@@ -5322,21 +13329,28 @@ def run_agent_tui(
                     }
                 )
             else:
-                lazyvcs_repo = str(Path(sandbox_path) / "lazyvcs-smoke-repo")
+                fixture_token = secrets.token_hex(4).upper()
+                lazyvcs_repo = shell_target.target_join(
+                    sandbox_path, f"lazyvcs-smoke-{fixture_token.lower()}"
+                )
                 live.ctl(
                     "send_text",
                     params={
                         "text": lazyvcs_repo_setup_command(
-                            lazyvcs_repo, windows=shell_target.powershell
+                            lazyvcs_repo,
+                            fixture_token,
+                            windows=shell_target.powershell,
                         )
                     },
                 )
                 live.ctl("send_keys", params={"keys": ["enter"]})
                 setup_marker = "KETTLE_LAZYVCS_REPO_READY"
-                ready_probe = (
-                    f"Write-Output {setup_marker}"
+                ready_probe = command_with_marker(
+                    "Write-Output lazyvcs-repository-ready"
                     if shell_target.powershell
-                    else f"printf '{setup_marker}\\n'"
+                    else "printf 'lazyvcs-repository-ready\\n'",
+                    setup_marker,
+                    windows=shell_target.powershell,
                 )
                 live.ctl("send_text", params={"text": ready_probe})
                 live.ctl("send_keys", params={"keys": ["enter"]})
@@ -5354,11 +13368,54 @@ def run_agent_tui(
                     },
                 )
                 live.ctl("send_keys", params={"keys": ["enter"]})
+                repo_name = (
+                    posixpath.basename(lazyvcs_repo)
+                    if shell_target.mode == "wsl"
+                    else Path(lazyvcs_repo).name
+                )
                 # Same budget as `nvim-configured`: a copied AstroNvim tree may
                 # bootstrap its plugins into the disposable XDG data dir first.
-                live.wait_for_text(marker, timeout_ms=120000, quiet_ms=500)
+                lazyvcs_cells, lazyvcs_screen = (
+                    live.wait_for_nvim_sidebar_evidence(
+                        repo_name,
+                        fixture_token,
+                        timeout_ms=120000,
+                        quiet_ms=500,
+                    )
+                )
+                shell_target.wait_for_nvim_sandbox_marker(
+                    sandbox_path,
+                    "lazyvcs-ready",
+                    marker,
+                    timeout_s=10.0,
+                )
+                lazyvcs_text = cell_grid_text(lazyvcs_cells)
+                missing = lazyvcs_screen_evidence(
+                    lazyvcs_cells,
+                    repo_name=repo_name,
+                    fixture_token=fixture_token,
+                )
+                if missing:
+                    raise SystemExit(
+                        "agent-tui smoke: LazyVCS rendered without the expected "
+                        "repository, change, gutter, and blame evidence: "
+                        f"missing={missing} screen={lazyvcs_text!r}"
+                    )
+                provenance_before["lazyvcs_loaded_source"] = (
+                    shell_target.lazyvcs_loaded_source_identity(sandbox_path)
+                )
+                provenance_path.write_text(
+                    json.dumps({"before": provenance_before}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
                 states.append(
-                    capture_live_state(live, out, "nvim-lazyvcs-sidebar")
+                    capture_live_state(
+                        live,
+                        out,
+                        "nvim-lazyvcs-sidebar",
+                        cells=lazyvcs_cells,
+                        screen=lazyvcs_screen,
+                    )
                 )
                 exit_nvim_to_shell(
                     live,
@@ -5433,13 +13490,65 @@ def run_agent_tui(
                     shell_marker,
                 )
                 probes.append({"name": label, "status": "ok"})
-            cleanup_marker = "KETTLE_AGENT_TUI_NVIM_SANDBOX_CLEAN"
+            lazyvcs_snapshot_after = shell_target.nvim_snapshot_identity(
+                sandbox_path
+            )
+            if "lazyvcs_loaded_source" in provenance_before:
+                lazyvcs_loaded_source_after = (
+                    shell_target.lazyvcs_loaded_source_identity(sandbox_path)
+                )
+            cleanup_marker = "KETTLE_AGENT_TUI_NVIM_SANDBOX_RELEASED"
             live_shell_command(
                 live,
-                shell_target.nvim_sandbox_cleanup_command(cleanup_marker),
+                shell_target.nvim_sandbox_release_command(cleanup_marker),
                 cleanup_marker,
                 timeout_ms=120000,
             )
+
+    provenance_after = agent_tui_provenance(kettle, shell_target)
+    if "lazyvcs_snapshot" in provenance_before:
+        provenance_after["lazyvcs_snapshot"] = lazyvcs_snapshot_after
+    if "lazyvcs_loaded_source" in provenance_before:
+        provenance_after["lazyvcs_loaded_source"] = (
+            lazyvcs_loaded_source_after
+        )
+    stable_fields = (
+        "executable",
+        "executable_sha256",
+        "harness",
+        "harness_sha256",
+        "git_commit",
+        "git_dirty",
+        "git_status_sha256",
+        "git_status_entries",
+        "source_state_sha256",
+        "target",
+        "lazyvcs_snapshot",
+        "lazyvcs_loaded_source",
+    )
+    changed = [
+        field
+        for field in stable_fields
+        if provenance_before.get(field) != provenance_after.get(field)
+    ]
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "before": provenance_before,
+                "after": provenance_after,
+                "stable": not changed,
+                "changed_fields": changed,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if changed:
+        raise SystemExit(
+            "agent-tui smoke: executable/harness provenance changed during run: "
+            + ", ".join(changed)
+        )
 
     ok = [p for p in probes if p.get("status") == "ok"]
     if not ok:
@@ -5447,6 +13556,7 @@ def run_agent_tui(
     (out / "analysis.json").write_text(
         json.dumps(
             {
+                "provenance": provenance_before,
                 "shell": {
                     "mode": shell_target.mode,
                     "wsl_distro": shell_target.wsl_distro,
@@ -5768,17 +13878,16 @@ def exercise_hovered_pane_wheel(live: LiveKettle, out: Path) -> Dict[str, int]:
     for pane_id, prefix in [(left_id, "LEFT"), (right_id, "RIGHT")]:
         done = f"KETTLE_HOVER_WHEEL_{prefix}_DONE"
         if platform.system() == "Windows":
-            fill = (
+            fill_body = (
                 "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
-                f"1..140 | ForEach-Object {{ 'KETTLE_HOVER_WHEEL_{prefix}_{{0:D3}}' -f $_ }}; "
-                f"Write-Output {done}"
+                f"1..140 | ForEach-Object {{ 'KETTLE_HOVER_WHEEL_{prefix}_{{0:D3}}' -f $_ }}"
             )
         else:
-            fill = (
+            fill_body = (
                 "printf '\\033[2J\\033[3J\\033[H'; "
-                f"for i in $(seq 1 140); do printf 'KETTLE_HOVER_WHEEL_{prefix}_%03d\\n' \"$i\"; done; "
-                f"printf '{done}\\n'"
+                f"for i in $(seq 1 140); do printf 'KETTLE_HOVER_WHEEL_{prefix}_%03d\\n' \"$i\"; done"
             )
+        fill = command_with_marker(fill_body, done)
         live.ctl("send_text", params={"pane": pane_id, "text": fill})
         live.ctl("send_keys", params={"pane": pane_id, "keys": ["enter"]})
         waited = json.loads(
@@ -5937,9 +14046,10 @@ def run_interaction(kettle: str, root: Path) -> Path:
 
         paste_marker = "KETTLE_INTERACTION_PASTE_DONE"
         if platform.system() == "Windows":
-            paste_text = "Write-Output PASTE_LINE_ONE; Write-Output PASTE_LINE_TWO; Write-Output " + shell_quote(paste_marker)
+            paste_body = "Write-Output PASTE_LINE_ONE; Write-Output PASTE_LINE_TWO"
         else:
-            paste_text = "printf '%s\\n' PASTE_LINE_ONE PASTE_LINE_TWO " + shell_quote(paste_marker)
+            paste_body = "printf '%s\\n' PASTE_LINE_ONE PASTE_LINE_TWO"
+        paste_text = command_with_marker(paste_body, paste_marker)
         live.ctl("send_text", params={"text": paste_text})
         live.ctl("send_keys", params={"keys": ["enter"]})
         live.wait_for_text(paste_marker, timeout_ms=10000, quiet_ms=250)
@@ -5949,15 +14059,16 @@ def run_interaction(kettle: str, root: Path) -> Path:
         states.append(capture_live_state(live, out, "paste"))
 
         scroll_marker = "KETTLE_INTERACTION_SCROLL_100"
+        scroll_done = "KETTLE_INTERACTION_SCROLL_DONE"
         if platform.system() == "Windows":
-            scroll_cmd = (
+            scroll_body = (
                 "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
-                "1..140 | ForEach-Object { 'KETTLE_INTERACTION_SCROLL_{0:D3}' -f $_ }; "
-                "Write-Output KETTLE_INTERACTION_SCROLL_DONE"
+                "1..140 | ForEach-Object { 'KETTLE_INTERACTION_SCROLL_{0:D3}' -f $_ }"
             )
         else:
-            scroll_cmd = "printf '\\033[2J\\033[3J\\033[H'; for i in $(seq 1 140); do printf 'KETTLE_INTERACTION_SCROLL_%03d\\n' \"$i\"; done; printf 'KETTLE_INTERACTION_SCROLL_DONE\\n'"
-        live_shell_command(live, scroll_cmd, "KETTLE_INTERACTION_SCROLL_DONE", timeout_ms=12000)
+            scroll_body = "printf '\\033[2J\\033[3J\\033[H'; for i in $(seq 1 140); do printf 'KETTLE_INTERACTION_SCROLL_%03d\\n' \"$i\"; done"
+        scroll_cmd = command_with_marker(scroll_body, scroll_done)
+        live_shell_command(live, scroll_cmd, scroll_done, timeout_ms=12000)
         live.screenshot(out / "scroll-bottom.png")
         bottom = live.json_ctl("read_screen")
         (out / "scroll-bottom.screen.json").write_text(json.dumps(bottom, indent=2) + "\n")
@@ -5992,7 +14103,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
         (out / "selection-after-end.screen.json").write_text(
             json.dumps(live.json_ctl("read_screen"), indent=2) + "\n"
         )
-        last_marker = "KETTLE_INTERACTION_SCROLL_DONE"
+        last_marker = scroll_done
         last_x, last_y = wait_for_text_cell_point(
             live,
             last_marker,
@@ -6414,6 +14525,22 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
     deterministic on every platform while exercising the same PTY exit event
     that an exited CLI produces.
     """
+    launch_env: Dict[str, Optional[str]] = {}
+    if platform.system() == "Linux":
+        if not os.environ.get("DISPLAY"):
+            raise SystemExit(
+                "window-close-isolation smoke: Linux requires an X11 display; "
+                "native Wayland surfaces have no portable independent window inventory"
+            )
+        require_cmd("xdotool")
+        # xdotool can inventory only X11 windows. A Wayland login often exports
+        # both backends, and winit 0.30 intentionally prefers Wayland. Remove
+        # only the Wayland selectors from this child's environment so winit
+        # selects the retained DISPLAY and the independent assertion can see
+        # the same native windows Kettle created.
+        launch_env["WAYLAND_DISPLAY"] = None
+        launch_env["WAYLAND_SOCKET"] = None
+
     out = root / f"window-close-isolation-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
     cfg = out / "config"
@@ -6435,7 +14562,7 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
         )
         + "\n"
     )
-    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_env=launch_env) as live:
         initial = live.json_ctl("list_tabs")
         initial_rows = [
             row for row in initial.get("tabs", []) if isinstance(row, dict)
@@ -6452,8 +14579,20 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
                 "window-close-isolation smoke: initial inventory is malformed: "
                 f"{initial_rows[0]}"
             )
+        native_before = wait_for_native_window_ids(
+            live.pid,
+            lambda windows: len(windows) == 1,
+            label="the initial native Kettle window",
+        )
+
+        tracked_before = 0
+        if os.name != "nt":
+            live.wait_for_tracker_sessions(1)
+            tracked_before = len(live._tracker_sessions)
 
         live.ctl("perform_action", params={"action": "new_tab"})
+        if os.name != "nt":
+            live.wait_for_tracker_sessions(tracked_before + 1)
         live.ctl("perform_action", params={"action": "move_tab_to_new_window"})
         split: Dict[str, object] = {}
         split_rows: List[Dict[str, object]] = []
@@ -6479,14 +14618,39 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
             )
         detached_window = detached[0]["window"]
         detached_pane = detached[0]["focused_pane"]
+        native_split = wait_for_native_window_ids(
+            live.pid,
+            lambda windows: native_before < windows and len(windows) == 2,
+            label="the detached native Kettle window",
+        )
+        detached_native = native_split - native_before
+        if len(detached_native) != 1:
+            raise SystemExit(
+                "window-close-isolation smoke: native detach inventory was ambiguous: "
+                f"before={sorted(native_before)} after={sorted(native_split)}"
+            )
 
         # Terminate the detached child, rather than clicking chrome, so the
         # asynchronous PTY reap path is the one under test. That is the path a
         # CLI exiting inside one of several Kettle windows takes.
-        live.ctl("send_text", params={"pane": detached_pane, "text": "exit\n"})
+        # `send_text` is literal. A line feed submits a Unix shell line but is
+        # not the Enter key ConPTY expects, so the Windows run previously sat
+        # here without ever exercising the child-exit path. Type the command,
+        # then encode Enter through the pane's live terminal mode just as a
+        # real key press does.
+        live.ctl("send_text", params={"pane": detached_pane, "text": "exit"})
+        live.ctl(
+            "send_keys",
+            params={"pane": detached_pane, "keys": ["enter"]},
+        )
         remaining: Dict[str, object] = {}
         for _ in range(100):
-            if live.proc.poll() is not None:
+            exited = (
+                live.proc.poll() is not None
+                if os.name == "nt"
+                else process_exited_without_reaping(live.proc)
+            )
+            if exited:
                 raise SystemExit(
                     "window-close-isolation smoke: the Kettle process exited with a "
                     "sibling window still expected"
@@ -6504,13 +14668,42 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
                 f"its own window: before={split} after={remaining}"
             )
 
+        state = live.json_ctl("get_state")
+        if state.get("windows") != 1:
+            raise SystemExit(
+                "window-close-isolation smoke: detached native window remained mapped: "
+                f"{state}"
+            )
+        stale_geometry = live.ctl(
+            "ui_geometry",
+            params={"window": detached_window},
+            raw=True,
+            allow_fail=True,
+        )
+        stale_detail = f"{stale_geometry.stderr}\n{stale_geometry.stdout}"
+        if stale_geometry.returncode == 0 or "no window with id" not in stale_detail:
+            raise SystemExit(
+                "window-close-isolation smoke: detached window still answered an exact "
+                f"geometry query: {stale_detail}"
+            )
+        native_after = wait_for_native_window_ids(
+            live.pid,
+            lambda windows: windows == native_before,
+            label="native destruction of only the detached Kettle window",
+        )
+
         marker = "KETTLE_WINDOW_CLOSE_SIBLING_SURVIVED"
-        command = (
-            f"Write-Output {marker}\n"
+        command = command_with_marker(
+            "Write-Output sibling-window-live"
             if platform.system() == "Windows"
-            else f"printf '{marker}\\n'\n"
+            else "printf 'sibling-window-live\\n'",
+            marker,
         )
         live.ctl("send_text", params={"pane": original_pane, "text": command})
+        live.ctl(
+            "send_keys",
+            params={"pane": original_pane, "keys": ["enter"]},
+        )
         sibling_screen: Dict[str, object] = {}
         for _ in range(50):
             sibling_screen = live.json_ctl(
@@ -6533,6 +14726,10 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
                     "original_pane": original_pane,
                     "closed_window": detached_window,
                     "closed_pane": detached_pane,
+                    "native_windows_before": sorted(native_before),
+                    "native_windows_detached": sorted(native_split),
+                    "native_windows_after": sorted(native_after),
+                    "closed_native_window": sorted(detached_native)[0],
                     "tabs_before_close": split,
                     "tabs_after_close": remaining,
                     "sibling_marker": marker,
@@ -7071,17 +15268,16 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
     with LiveKettle(kettle, cfg, out / "kettle.log") as live:
         marker = "KETTLE_TOUCHPAD_SCROLL_DONE"
         if platform.system() == "Windows":
-            fill_cmd = (
+            fill_body = (
                 "$esc=[char]27; [Console]::Write($esc + '[2J' + $esc + '[3J' + $esc + '[H'); "
-                "1..140 | ForEach-Object { 'KETTLE_TOUCHPAD_SCROLL_{0:D3}' -f $_ }; "
-                f"Write-Output {marker}"
+                "1..140 | ForEach-Object { 'KETTLE_TOUCHPAD_SCROLL_{0:D3}' -f $_ }"
             )
         else:
-            fill_cmd = (
+            fill_body = (
                 "printf '\\033[2J\\033[3J\\033[H'; "
-                "for i in $(seq 1 140); do printf 'KETTLE_TOUCHPAD_SCROLL_%03d\\n' \"$i\"; done; "
-                f"printf '{marker}\\n'"
+                "for i in $(seq 1 140); do printf 'KETTLE_TOUCHPAD_SCROLL_%03d\\n' \"$i\"; done"
             )
+        fill_cmd = command_with_marker(fill_body, marker)
         live_shell_command(live, fill_cmd, marker, timeout_ms=12000)
         bottom = live.json_ctl("read_screen")
         (out / "bottom.screen.json").write_text(json.dumps(bottom, indent=2) + "\n")
@@ -7089,7 +15285,7 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
             raise SystemExit(
                 f"touchpad smoke: expected bottom display_offset 0, got {bottom.get('display_offset')}"
             )
-        live.screenshot(out / "bottom.png")
+        bottom_screenshot = live.screenshot_if_visible(out / "bottom.png")
 
         # Scroll back with sub-detent events only. No single one of these can
         # move the viewport on its own; only the accumulated residue can.
@@ -7098,7 +15294,8 @@ def run_touchpad_scroll(kettle: str, root: Path) -> Path:
         time.sleep(0.2)
         scrolled = live.json_ctl("read_screen")
         (out / "scrolled.screen.json").write_text(json.dumps(scrolled, indent=2) + "\n")
-        live.screenshot(out / "scrolled.png")
+        scrolled_screenshot = live.screenshot_if_visible(out / "scrolled.png")
+        analysis["screenshots_captured"] = bottom_screenshot and scrolled_screenshot
         offset = int(scrolled.get("display_offset", 0))
         analysis["display_offset_after_gesture"] = offset
         if offset <= 0:
@@ -7245,6 +15442,31 @@ def live_session_failure_reason() -> Optional[str]:
 
 
 def main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == PROVENANCE_ANCHOR_PROBE_ARG:
+        anchor = _start_unix_repository_group_anchor()
+        if anchor is None or len(sys.argv) != 3:
+            print("repository anchor probe requires Unix and one record", file=sys.stderr)
+            return 2
+        record = Path(sys.argv[2])
+        staged = record.with_name(f".{record.name}.{os.getpid()}.tmp")
+        staged.write_text(f"{anchor}\n", encoding="ascii")
+        os.replace(staged, record)
+        if sys.stdin.read(1) != "1":
+            print("repository anchor probe handshake failed", file=sys.stderr)
+            return 2
+        return 0
+    if len(sys.argv) >= 2 and sys.argv[1] == PROVENANCE_WORKER_ARG:
+        _start_unix_repository_group_anchor()
+        if sys.stdin.read(1) != "1":
+            print("repository provenance worker handshake failed", file=sys.stderr)
+            return 2
+        return _repository_provenance_worker(sys.argv[2:])
+    if len(sys.argv) >= 2 and sys.argv[1] == PROVENANCE_SABOTAGE_WORKER_ARG:
+        _start_unix_repository_group_anchor()
+        if sys.stdin.read(1) != "1":
+            print("repository provenance timeout probe handshake failed", file=sys.stderr)
+            return 2
+        return _repository_provenance_timeout_probe(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "case",

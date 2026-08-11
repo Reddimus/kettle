@@ -5735,23 +5735,12 @@ struct TornDrag {
     signal_cursor: Option<(f64, f64)>,
 }
 
-/// Fire a desktop notification with the given title + optional body,
-/// added for Terminator plugin parity. Wraps
-/// `notify-rust::Notification` so the caller doesn't need to import
-/// it directly. Failure modes degrade silently to log::warn — a
-/// headless run (no DBUS_SESSION_BUS_ADDRESS) or a sandboxed
-/// environment (snap/flatpak) where the notification daemon isn't
-/// reachable doesn't crash kettle, just skips the notification.
+/// Queue a desktop notification without ever waiting on an OS notification
+/// service from Kettle's UI thread. The single bounded worker preserves order;
+/// a stalled backend fills the queue and drops later notifications instead of
+/// freezing rendering, input, and control replies.
 pub(crate) fn fire_notify(title: &str, body: &str) {
-    let mut n = notify_rust::Notification::new();
-    n.summary(title);
-    if !body.is_empty() {
-        n.body(body);
-    }
-    n.appname("kettle");
-    if let Err(e) = n.show() {
-        log::warn!("kettle.notify: notification send failed: {e}");
-    }
+    crate::queue_desktop_notification(title, body);
 }
 
 fn persist_keybind_rebind(
@@ -6387,6 +6376,7 @@ impl App {
             app.runtime_tracker.record_exit(&error.to_string());
         }
         app.runtime_tracker.stop();
+        crate::notifications::flush_desktop_notifications(std::time::Duration::from_millis(250));
         result.map_err(Into::into)
     }
 
@@ -29124,6 +29114,21 @@ mod tests {
             "restore-session = true"
         );
         assert!(should_restore_session(true, true));
+    }
+
+    #[test]
+    fn desktop_notifications_never_call_the_os_backend_on_the_ui_thread() {
+        let src = production_source();
+        let body = src
+            .split("pub(crate) fn fire_notify(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("fire_notify body");
+        assert!(body.contains("crate::queue_desktop_notification("));
+        assert!(
+            !src.contains("notify_rust::"),
+            "the UI event-loop module must not be able to call a platform notifier"
+        );
     }
 
     #[test]

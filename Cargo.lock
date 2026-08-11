@@ -1908,7 +1908,6 @@ dependencies = [
  "kettle-update",
  "libc",
  "log",
- "notify-rust",
  "serde",
  "serde_json",
  "tempfile",
