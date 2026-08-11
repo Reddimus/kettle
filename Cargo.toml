@@ -95,6 +95,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 regex = "1"
 regex-automata = "0.4"
+getrandom = "0.3"
 unicode-width = "0.2"
 unicode-segmentation = "1.13.2"
 # Lua scripting (WezTerm parity foundation).

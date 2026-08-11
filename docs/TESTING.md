@@ -410,11 +410,19 @@ discipline here.
   parent against rename, verifies the protected DACL, and rejects alternate
   streams, trailing-dot aliases, and embedded NULs before path normalization.
   The missing-parent and existing-leaf cases fail without creating or changing
-  anything on every platform. Injected PNG encoder and flush failures (the
-  latter after enough data to reach the underlying file) prove both output
-  policies remove the exact partial leaf they created. A displacement test
-  replaces the selected leaf before cleanup and proves the replacement survives;
-  cleanup errors are surfaced instead of silently claiming retry is available.
+  anything on every platform. Streaming-publication tests prove the requested
+  destination stays absent while bytes are written to its owner-only sibling,
+  publication creates the complete inode with a no-replace hard link or atomic
+  rename fallback, and no staging name remains. A platform seam forces only the
+  hard-link syscall to fail, then exercises the real `renameat2`,
+  `renameatx_np`, or `FILE_RENAME_INFO` path and its racing-destination refusal.
+  Deterministic nonce injection
+  proves random staging collisions stop after 32 attempts without touching the
+  destination. Injected PNG encoder and flush failures prove both
+  output policies remove their exact unpublished sibling. A racing destination
+  wins unchanged; primary and cleanup errors are reported together instead of
+  silently claiming retry is available. An injected post-publication failure
+  separately proves the result says the destination may exist.
   Windows test scratch files live under the current profile rather than the
   process temp directory because a machine policy may intentionally grant
   sandbox principals delete-child access there; the production policy rejects
@@ -804,6 +812,35 @@ cell-scale, accent, and queued ctl screenshot-completion ownership.
 occluded, minimized, explicitly invisible, and repair-pending paint
 suppression; the consumed output generation remains unchanged until a restored
 frame is presented.
+`an_explicit_screenshot_overrides_only_transient_surface_guards` pins the
+narrow exception: a queued live screenshot may bypass compositor occlusion and
+an already-armed transient surface retry only when the window is shown and the
+backend does not report it hidden/minimized. Wayland reports neither state, so
+the test also pins its explicit `Unknown` path and bounded-timeout fallback.
+Renderer rebuilds remain a hard gate. The renderer creates a process-budgeted
+transient scene texture, encodes the render and copy before swapchain
+acquisition, and allocates any presentation-only texture afterwards. Separate
+target and staging reservations are both admitted before encoding and remain
+charged through submission completion or device loss; one timeout cannot retire
+them, while two repeated timeouts prove the wedged device is reset rather than
+stranding worker admission. A loss flag raised during a successful poll still
+wakes recovery. After mapped bytes reach CPU memory, a source-order guard proves
+GPU admission clears before the process-wide bounded two-worker persistence
+pool can block; multiple renderer generations share the same admission counter;
+permit tests cap that pool and prove slots reopen on every drop.
+The 6K/256 MiB and source-order regressions distinguish that path from the 64
+MiB retained-image limit and require every no-drawable/presentation-failure
+outcome to submit the capture. Known hidden/minimized control targets fail
+before queueing; deliberately blocked encoder and durability-flush steps prove
+timeout cancellation wins before atomic no-replace sibling publication,
+leaving the requested leaf absent throughout. Once publication begins, a
+second finite wait produces either the real result or an explicit
+destination-may-exist error, never an unbounded control thread. A repeated GPU
+wait timeout must destroy the device and wake the event loop. A racing
+destination is preserved. The native `agent-tui-smoke`
+screenshot sequence is the render/readback boundary; a focused macOS check
+additionally activates Finder and requires two consecutive non-empty
+`ctl screenshot` results.
 `hidden_output_sidechannels_keep_transport_wakes_without_enabling_paints`
 separately proves an opt-in recorder/Lua sidechannel keeps the transport gate
 serviceable while hidden without bypassing the paint guards.
@@ -1319,10 +1356,13 @@ These need a real display and are run by hand (or on real hardware):
     `just hover-wheel-smoke` extracts the split-wheel portion as a focused
     control-plane scenario: it fills two independent panes, keeps keyboard
     focus on the left, hovers the right, and proves only the right viewport
-    moves. It deliberately requires no live-surface screenshot, so a virtual
-    GLES adapter that renders but lacks swapchain `COPY_SRC` can still supply
-    native pointer-routing evidence; the broad interaction scenario retains
-    its strict screenshot assertions.
+    moves. It deliberately requires no screenshot so pointer routing remains a
+    focused assertion independent of PNG encoding; the broad interaction
+    scenario retains its strict screenshot checks. Live captures themselves no
+    longer require swapchain `COPY_SRC`, because they read Kettle's offscreen
+    scene target. This removes the known capability blocker for RDP/virtual
+    adapters, but native capture completion on those backends is not claimed
+    until it is exercised there.
     `just window-close-isolation-smoke` detaches a tab into a second native
     window, exits only that window's shell, and then proves the original window
     and pane still accept terminal input. The child program is deliberately the

@@ -1139,6 +1139,10 @@ pub struct GpuContext {
     /// bounded in-memory value; the UI thread owns durable diagnostics so a
     /// driver callback never blocks on filesystem I/O.
     gpu_fault: std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
+    /// Application event-loop wake shared with driver callbacks. The context
+    /// is created before the UI owns a live proxy, so the App installs this
+    /// immediately after renderer construction.
+    recovery_wake: std::sync::Arc<std::sync::Mutex<Option<ScreenshotRecoveryWake>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1187,6 +1191,13 @@ impl GpuContext {
             .clone()
     }
 
+    pub fn set_recovery_wake(&self, wake: ScreenshotRecoveryWake) {
+        *self
+            .recovery_wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(wake);
+    }
+
     pub fn is_software(&self) -> bool {
         matches!(self.adapter.get_info().device_type, wgpu::DeviceType::Cpu)
     }
@@ -1214,9 +1225,11 @@ fn install_gpu_error_handlers(
     device: &wgpu::Device,
     gpu_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     gpu_fault: &std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
+    recovery_wake: &std::sync::Arc<std::sync::Mutex<Option<ScreenshotRecoveryWake>>>,
 ) {
     let flag = gpu_lost.clone();
     let fault = gpu_fault.clone();
+    let wake = recovery_wake.clone();
     // The uncaptured-error path catches errors NOT routed to an error scope.
     // NOTE (adversarial review): in wgpu 29 a genuine DEVICE-LOSS is delivered
     // via `set_device_lost_callback` below, NOT here — this handler only ever
@@ -1234,22 +1247,38 @@ fn install_gpu_error_handlers(
         wgpu::Error::OutOfMemory { .. } => {
             log::error!("wgpu fatal GPU error (out of memory): {e}");
             latch_gpu_fault(&flag, &fault, "out_of_memory", e.to_string());
+            wake_gpu_recovery(&wake);
         }
         wgpu::Error::Internal { .. } => {
             log::error!("wgpu fatal GPU error (internal): {e}");
             latch_gpu_fault(&flag, &fault, "internal", e.to_string());
+            wake_gpu_recovery(&wake);
         }
     }));
     let flag2 = gpu_lost.clone();
     let fault2 = gpu_fault.clone();
+    let wake2 = recovery_wake.clone();
     device.set_device_lost_callback(move |reason, msg| {
         // `Destroyed` fires on our own clean shutdown (`device.destroy()` at drop)
         // — that is not a crash. Only an `Unknown` loss (driver TDR/reset) flags.
         if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
             log::error!("wgpu device lost ({reason:?}): {msg}");
             latch_gpu_fault(&flag2, &fault2, "device_lost", msg);
+            wake_gpu_recovery(&wake2);
         }
     });
+}
+
+fn wake_gpu_recovery(
+    recovery_wake: &std::sync::Arc<std::sync::Mutex<Option<ScreenshotRecoveryWake>>>,
+) {
+    let wake = recovery_wake
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(wake) = wake {
+        wake.wake();
+    }
 }
 
 fn latch_gpu_fault(
@@ -1692,15 +1721,13 @@ pub struct Renderer {
     accent_override: Option<Rgb>,
     /// Phase 3 of
     /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md):
-    /// when `Some`, the next `render_frame` call should also do a
-    /// surface-readback into a staging buffer + dispatch a PNG
-    /// encode off-thread. v1 of this field is the storage only —
-    /// phase 4 wires the actual readback. `App::dispatch`
-    /// for `Action::TakeScreenshot` sets this via
-    /// `set_pending_screenshot()` after computing the path via
-    /// the `session_screenshot_path` helper.
+    /// when `Some`, the next `render_frame` call renders the prepared scene to
+    /// a bounded offscreen texture, copies it into a staging buffer, and
+    /// dispatches a PNG encode off-thread. `App::dispatch` for
+    /// `Action::TakeScreenshot` sets this via `set_pending_screenshot()` after
+    /// computing the path with `session_screenshot_path`.
     pub pending_screenshot: Option<ScreenshotRequest>,
-    /// Lazy, single-consumer readback worker. Live surface capture must never
+    /// Lazy, single-consumer readback worker. Screenshot capture must never
     /// block the winit event-loop thread: Wayland can disconnect clients that
     /// stop dispatching while output globals are changing. The worker owns the
     /// finite GPU wait, mapping, PNG encoding, and file write.
@@ -1741,25 +1768,156 @@ pub struct ScreenshotRequest {
     /// screenshot` / MCP). The UI action leaves this `None` and keeps its
     /// optimistic notification behavior.
     pub completion: Option<std::sync::mpsc::Sender<Result<std::path::PathBuf, String>>>,
+    /// Cooperative cancellation for bounded control-plane callers. A timed-out
+    /// request must neither keep the renderer BUSY nor publish a file later
+    /// when a minimized window is restored. UI-triggered captures leave this
+    /// `None` because their lifecycle is owned entirely by the renderer.
+    pub cancellation: Option<ScreenshotCancellation>,
+    /// Event-loop wake used only when a bounded GPU wait classifies the shared
+    /// device as wedged. The worker runs off-thread; without this wake an idle
+    /// application can remain asleep with the destroyed device installed.
+    pub recovery_wake: Option<ScreenshotRecoveryWake>,
+}
+
+/// Cloneable, application-owned event-loop wake for screenshot GPU recovery.
+#[derive(Clone)]
+pub struct ScreenshotRecoveryWake(
+    std::sync::Arc<dyn Fn() + Send + Sync + std::panic::UnwindSafe + 'static>,
+);
+
+impl std::fmt::Debug for ScreenshotRecoveryWake {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ScreenshotRecoveryWake(..)")
+    }
+}
+
+impl ScreenshotRecoveryWake {
+    pub fn new(wake: impl Fn() + Send + Sync + std::panic::UnwindSafe + 'static) -> Self {
+        Self(std::sync::Arc::new(wake))
+    }
+
+    fn wake(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)()));
+    }
+}
+
+/// Cloneable publication state shared by a control request and the renderer.
+///
+/// The final transition is a race between the caller cancelling and the worker
+/// committing the fully encoded, durably flushed file. Whichever wins is irreversible:
+/// a timeout that successfully cancels cannot publish later, while a worker
+/// that has already committed must report its real completion instead of a
+/// contradictory timeout.
+#[derive(Debug, Clone, Default)]
+pub struct ScreenshotCancellation(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+const SCREENSHOT_ACTIVE: u8 = 0;
+const SCREENSHOT_CANCELLED: u8 = 1;
+const SCREENSHOT_COMMITTED: u8 = 2;
+
+impl ScreenshotCancellation {
+    /// Cancel publication. Returns `false` only when the worker already won the
+    /// final commit race, in which case the caller must await its real result.
+    pub fn cancel(&self) -> bool {
+        loop {
+            match self.0.load(std::sync::atomic::Ordering::Acquire) {
+                SCREENSHOT_CANCELLED => return true,
+                SCREENSHOT_COMMITTED => return false,
+                SCREENSHOT_ACTIVE => {
+                    if self
+                        .0
+                        .compare_exchange(
+                            SCREENSHOT_ACTIVE,
+                            SCREENSHOT_CANCELLED,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                _ => unreachable!("invalid screenshot publication state"),
+            }
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == SCREENSHOT_CANCELLED
+    }
+
+    fn commit(&self) -> bool {
+        self.0
+            .compare_exchange(
+                SCREENSHOT_ACTIVE,
+                SCREENSHOT_COMMITTED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+impl ScreenshotRequest {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(ScreenshotCancellation::is_cancelled)
+    }
 }
 
 /// Filesystem policy for a screenshot destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenshotOutputPolicy {
     /// Kettle chose the path under its cache/state tree. Ancestors are created
-    /// and verified as private before the owner-only PNG is opened.
+    /// and verified as private before the owner-only PNG is staged.
     PrivateState,
     /// The caller explicitly chose the path. Its parent must already exist,
-    /// but ordinary user directories are accepted; the leaf is still created
-    /// atomically and owner-only.
+    /// but ordinary user directories are accepted; an owner-only sibling is
+    /// atomically linked or renamed into the requested leaf only after encoding succeeds.
     UserSelected,
 }
 
 const MAX_LIVE_SCREENSHOT_BYTES: u64 = 256 * 1024 * 1024;
 const LIVE_SCREENSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const LIVE_SCREENSHOT_MAX_GPU_WAITS: u32 = 2;
+
+fn screenshot_target_bytes(width: u32, height: u32) -> Option<usize> {
+    let bytes = u64::from(width)
+        .checked_mul(u64::from(height))?
+        .checked_mul(4)?;
+    if bytes == 0 || bytes > MAX_LIVE_SCREENSHOT_BYTES {
+        return None;
+    }
+    usize::try_from(bytes).ok()
+}
+
+struct ScreenshotCaptureTarget {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Process-wide charge for this short-lived render target. It travels with
+    /// the readback job so accounting remains live until the GPU submission and
+    /// PNG worker are both finished, not merely until command encoding ends.
+    gpu: kettle_core::GraphicsReservation,
+    staging: wgpu::Buffer,
+    staging_gpu: kettle_core::GraphicsReservation,
+    width: u32,
+    height: u32,
+    unpadded_bytes_per_row: u32,
+    padded_bytes_per_row: u32,
+}
 
 struct PreparedScreenshot {
     staging: wgpu::Buffer,
+    /// Keep the copy source and its transient reservation alive through the
+    /// worker's bounded GPU wait. wgpu also retains the texture internally,
+    /// but Kettle's accounting must cover the same lifetime.
+    _capture_texture: wgpu::Texture,
+    _capture_gpu: kettle_core::GraphicsReservation,
+    /// The MAP_READ staging buffer is a second allocation, not part of the
+    /// capture texture. Charge it independently for the same in-flight
+    /// lifetime so the process GPU limit bounds actual screenshot resources.
+    _staging_gpu: kettle_core::GraphicsReservation,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
@@ -1775,8 +1933,148 @@ struct PreparedScreenshot {
 
 struct ScreenshotJob {
     device: wgpu::Device,
+    gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gpu_fault: std::sync::Arc<std::sync::Mutex<Option<GpuFault>>>,
     submission: wgpu::SubmissionIndex,
     prepared: PreparedScreenshot,
+}
+
+struct ScreenshotPersistenceJob {
+    request: ScreenshotRequest,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    format: wgpu::TextureFormat,
+    premultiplied: bool,
+}
+
+const MAX_SCREENSHOT_PERSISTENCE_JOBS: usize = 2;
+
+struct ScreenshotPersistencePermit(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl ScreenshotPersistencePermit {
+    fn try_acquire(outstanding: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Option<Self> {
+        outstanding
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| (current < MAX_SCREENSHOT_PERSISTENCE_JOBS).then_some(current + 1),
+            )
+            .ok()
+            .map(|_| Self(outstanding.clone()))
+    }
+}
+
+impl Drop for ScreenshotPersistencePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+struct ScreenshotPersistenceWork {
+    job: ScreenshotPersistenceJob,
+    _permit: ScreenshotPersistencePermit,
+}
+
+#[derive(Clone)]
+struct ScreenshotPersistencePool {
+    sender: std::sync::mpsc::SyncSender<ScreenshotPersistenceWork>,
+    outstanding: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+static SCREENSHOT_PERSISTENCE_POOL: std::sync::OnceLock<
+    Result<ScreenshotPersistencePool, (std::io::ErrorKind, String)>,
+> = std::sync::OnceLock::new();
+
+impl ScreenshotPersistencePool {
+    /// Return the one process-wide persistence pool.
+    ///
+    /// Renderers are per window and are replaced during GPU recovery. Owning
+    /// these threads from a renderer would let every replacement leave another
+    /// pair blocked in an encoder or filesystem call. The global retains one
+    /// sender for the process lifetime, so there are exactly two persistence
+    /// threads and one shared admission counter across all windows and renderer
+    /// generations.
+    fn shared() -> std::io::Result<Self> {
+        match SCREENSHOT_PERSISTENCE_POOL.get_or_init(|| {
+            Self::start_process_pool().map_err(|error| (error.kind(), error.to_string()))
+        }) {
+            Ok(pool) => Ok(pool.clone()),
+            Err((kind, message)) => Err(std::io::Error::new(*kind, message.clone())),
+        }
+    }
+
+    fn start_process_pool() -> std::io::Result<Self> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<ScreenshotPersistenceWork>(
+            MAX_SCREENSHOT_PERSISTENCE_JOBS,
+        );
+        let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));
+        let outstanding = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for index in 0..MAX_SCREENSHOT_PERSISTENCE_JOBS {
+            let receiver = receiver.clone();
+            std::thread::Builder::new()
+                .name(format!("kettle-shot-save-{}", index + 1))
+                .spawn(move || {
+                    loop {
+                        let job = receiver
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .recv();
+                        let Ok(job) = job else {
+                            break;
+                        };
+                        let ScreenshotPersistenceWork { job, _permit } = job;
+                        let completion = job.request.completion.clone();
+                        let result = finish_live_screenshot_persistence(job);
+                        drop(_permit);
+                        if let Some(tx) = completion {
+                            let _ = tx.send(result.clone());
+                        }
+                        match result {
+                            Ok(path) => log::info!("screenshot saved: {}", path.display()),
+                            Err(error) => log::warn!("take_screenshot persistence failed: {error}"),
+                        }
+                    }
+                })
+                .map_err(|error| {
+                    std::io::Error::new(
+                        error.kind(),
+                        format!("could not create screenshot persistence worker: {error}"),
+                    )
+                })?;
+        }
+        Ok(Self {
+            sender,
+            outstanding,
+        })
+    }
+
+    fn try_submit(
+        &self,
+        job: ScreenshotPersistenceJob,
+    ) -> Result<(), ScreenshotPersistenceSubmitError> {
+        let Some(permit) = ScreenshotPersistencePermit::try_acquire(&self.outstanding) else {
+            return Err(ScreenshotPersistenceSubmitError::Busy(Box::new(job)));
+        };
+        let work = ScreenshotPersistenceWork {
+            job,
+            _permit: permit,
+        };
+        match self.sender.try_send(work) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(work)) => {
+                Err(ScreenshotPersistenceSubmitError::Busy(Box::new(work.job)))
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(work)) => Err(
+                ScreenshotPersistenceSubmitError::Disconnected(Box::new(work.job)),
+            ),
+        }
+    }
+}
+
+enum ScreenshotPersistenceSubmitError {
+    Busy(Box<ScreenshotPersistenceJob>),
+    Disconnected(Box<ScreenshotPersistenceJob>),
 }
 
 struct ScreenshotWorker {
@@ -1786,6 +2084,7 @@ struct ScreenshotWorker {
 
 impl ScreenshotWorker {
     fn start() -> std::io::Result<Self> {
+        let persistence = ScreenshotPersistencePool::shared()?;
         let (sender, receiver) = std::sync::mpsc::sync_channel::<ScreenshotJob>(1);
         let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_busy = busy.clone();
@@ -1794,15 +2093,38 @@ impl ScreenshotWorker {
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
                     let completion = job.prepared.request.completion.clone();
-                    let result = finish_live_screenshot(job);
-                    if let Some(tx) = completion {
-                        let _ = tx.send(result.clone());
-                    }
-                    match result {
-                        Ok(path) => log::info!("screenshot saved: {}", path.display()),
-                        Err(error) => log::warn!("take_screenshot capture failed: {error}"),
-                    }
+                    let captured = finish_live_screenshot_capture(job);
+                    // GPU capture admission ends as soon as the readback has
+                    // moved into bounded CPU memory. Persistence has its own
+                    // fixed-size pool, so a cancelled request stuck in an
+                    // encoder or filesystem flush cannot retain GPU accounting
+                    // or make every later capture BUSY indefinitely.
                     worker_busy.store(false, std::sync::atomic::Ordering::Release);
+                    match captured {
+                        Ok(job) => match persistence.try_submit(job) {
+                            Ok(()) => {}
+                            Err(ScreenshotPersistenceSubmitError::Busy(job)) => {
+                                let error = "screenshot persistence workers are busy; retry after an earlier save finishes".to_string();
+                                if let Some(tx) = job.request.completion {
+                                    let _ = tx.send(Err(error.clone()));
+                                }
+                                log::warn!("take_screenshot persistence rejected: {error}");
+                            }
+                            Err(ScreenshotPersistenceSubmitError::Disconnected(job)) => {
+                                let error = "screenshot persistence workers disconnected".to_string();
+                                if let Some(tx) = job.request.completion {
+                                    let _ = tx.send(Err(error.clone()));
+                                }
+                                log::warn!("take_screenshot persistence rejected: {error}");
+                            }
+                        },
+                        Err(error) => {
+                            if let Some(tx) = completion {
+                                let _ = tx.send(Err(error.clone()));
+                            }
+                            log::warn!("take_screenshot capture failed: {error}");
+                        }
+                    }
                 }
             })
             .map_err(|error| {
@@ -1968,23 +2290,109 @@ impl BgImageWorker {
     }
 }
 
-fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, String> {
+fn wait_for_screenshot_submission_with(
+    mut poll: impl FnMut() -> Result<(), wgpu::PollError>,
+    device_lost: impl Fn() -> bool,
+    mut device_loss_detected: impl FnMut(),
+    max_timeouts: u32,
+    mut submission_stalled: impl FnMut(),
+) -> Result<(), String> {
+    let mut timeouts = 0_u32;
+    loop {
+        let polled = poll();
+        // wgpu may deliver the device-lost callback while `poll` itself still
+        // reports success, or alongside a backend-specific error. The flag is
+        // the authoritative result and must wake an occluded event loop on
+        // every path, not only after `Timeout`.
+        if device_lost() {
+            device_loss_detected();
+            return Err("screenshot GPU wait ended because the device was lost".to_string());
+        }
+        match polled {
+            Ok(()) => return Ok(()),
+            Err(wgpu::PollError::Timeout) => {
+                timeouts = timeouts.saturating_add(1);
+                if timeouts >= max_timeouts {
+                    submission_stalled();
+                    return Err(format!(
+                        "screenshot GPU submission did not retire after {timeouts} bounded waits; resetting the GPU device"
+                    ));
+                }
+                log::warn!(
+                    "screenshot GPU submission is still pending after {timeouts} bounded wait(s); retaining its resources until completion or device loss"
+                );
+            }
+            Err(error) => return Err(format!("screenshot GPU wait failed: {error:?}")),
+        }
+    }
+}
+
+fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersistenceJob, String> {
     let ScreenshotJob {
         device,
+        gpu_lost,
+        gpu_fault,
         submission,
         prepared,
     } = job;
-    let buffer_slice = prepared.staging.slice(..);
+    let PreparedScreenshot {
+        staging,
+        _capture_texture: capture_texture,
+        _capture_gpu: capture_gpu,
+        _staging_gpu: staging_gpu,
+        width,
+        height,
+        unpadded_bytes_per_row,
+        padded_bytes_per_row,
+        format,
+        premultiplied,
+        request,
+    } = prepared;
+    let recovery_wake = request.recovery_wake.clone();
+    let buffer_slice = staging.slice(..);
     let (map_tx, map_rx) = std::sync::mpsc::sync_channel(1);
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = map_tx.send(result.map_err(|error| format!("{error:?}")));
     });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: Some(LIVE_SCREENSHOT_TIMEOUT),
-        })
-        .map_err(|error| format!("screenshot GPU wait failed: {error:?}"))?;
+    // A finite wait protects the worker from one uninterruptible driver call,
+    // not the accounting lifetime. `Timeout` explicitly means the submission
+    // may still own the texture and staging buffer, so retry while retaining
+    // `prepared` and its reservations. A latched device loss is the only safe
+    // early retirement boundary.
+    wait_for_screenshot_submission_with(
+        || {
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: Some(submission.clone()),
+                    timeout: Some(LIVE_SCREENSHOT_TIMEOUT),
+                })
+                .map(|_| ())
+        },
+        || gpu_lost.load(std::sync::atomic::Ordering::Acquire),
+        || {
+            if let Some(wake) = recovery_wake.as_ref() {
+                wake.wake();
+            }
+        },
+        LIVE_SCREENSHOT_MAX_GPU_WAITS,
+        || {
+            latch_gpu_fault(
+                &gpu_lost,
+                &gpu_fault,
+                "submission_stalled",
+                "screenshot GPU submission did not retire within 10 seconds".to_string(),
+            );
+            // A submission that has not retired after two five-second waits is
+            // no longer a screenshot problem: the shared device is wedged.
+            // Destroying it is the only safe boundary at which the in-flight
+            // texture and staging reservations may be released. The UI sees
+            // the latched fault and rebuilds every renderer on a fresh device.
+            device.destroy();
+            if let Some(wake) = recovery_wake.as_ref() {
+                wake.wake();
+            }
+        },
+    )?;
     map_rx
         .recv_timeout(std::time::Duration::from_millis(100))
         .map_err(|_| "screenshot map callback timed out".to_string())?
@@ -1993,22 +2401,22 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     let mapped = buffer_slice
         .get_mapped_range()
         .map_err(|error| format!("screenshot mapped range failed: {error:?}"))?;
-    let pixel_bytes = u64::from(prepared.width)
-        .checked_mul(u64::from(prepared.height))
+    let pixel_bytes = u64::from(width)
+        .checked_mul(u64::from(height))
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| "screenshot pixel size overflow".to_string())?;
     let capacity = usize::try_from(pixel_bytes)
         .map_err(|_| "screenshot pixel buffer does not fit this platform".to_string())?;
     let bgra = matches!(
-        prepared.format,
+        format,
         wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
     );
     let mut rgba = Vec::with_capacity(capacity);
-    for row in 0..prepared.height {
-        let start = usize::try_from(u64::from(row) * u64::from(prepared.padded_bytes_per_row))
+    for row in 0..height {
+        let start = usize::try_from(u64::from(row) * u64::from(padded_bytes_per_row))
             .map_err(|_| "screenshot row offset overflow".to_string())?;
         let end = start
-            .checked_add(prepared.unpadded_bytes_per_row as usize)
+            .checked_add(unpadded_bytes_per_row as usize)
             .ok_or_else(|| "screenshot row end overflow".to_string())?;
         let row_pixels = mapped
             .get(start..end)
@@ -2022,15 +2430,51 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
         }
     }
     drop(mapped);
-    prepared.staging.unmap();
+    staging.unmap();
+    // The GPU submission has retired and every byte now lives in `rgba`.
+    // Drop both resources and both reservations before any encoder or
+    // filesystem call can block. Kettle's GPU accounting therefore reflects
+    // the actual device lifetime rather than the unrelated PNG lifetime.
+    drop(staging);
+    drop(capture_texture);
+    drop(capture_gpu);
+    drop(staging_gpu);
 
-    let (out_w, out_h, mut out_pixels) =
-        crop_screenshot(prepared.width, prepared.height, rgba, prepared.request.crop)?;
+    if request.is_cancelled() {
+        return Err("screenshot request was cancelled".to_string());
+    }
+
+    Ok(ScreenshotPersistenceJob {
+        request,
+        width,
+        height,
+        rgba,
+        format,
+        premultiplied,
+    })
+}
+
+fn finish_live_screenshot_persistence(
+    job: ScreenshotPersistenceJob,
+) -> Result<std::path::PathBuf, String> {
+    let ScreenshotPersistenceJob {
+        request,
+        width,
+        height,
+        rgba,
+        format,
+        premultiplied,
+    } = job;
+    if request.is_cancelled() {
+        return Err("screenshot request was cancelled".to_string());
+    }
+
+    let (out_w, out_h, mut out_pixels) = crop_screenshot(width, height, rgba, request.crop)?;
     // A `PreMultiplied` surface holds premultiplied colour, and PNG stores
     // straight alpha. Converting after the crop touches only the pixels that
     // are actually saved.
-    if prepared.premultiplied {
-        unpremultiply_rgba8(&mut out_pixels, prepared.format.is_srgb());
+    if premultiplied {
+        unpremultiply_rgba8(&mut out_pixels, format.is_srgb());
     }
     use image::{ImageBuffer, Rgba};
     let image: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(out_w, out_h, out_pixels)
@@ -2043,73 +2487,65 @@ fn finish_live_screenshot(job: ScreenshotJob) -> Result<std::path::PathBuf, Stri
     // `ImageBuffer::save`'s internal `File::create` pick up the process
     // umask, typically `0o644` on a `022` umask) closes that gap for the
     // render crate's screenshot path too.
-    let file = create_screenshot_file(&prepared.request.out_path, prepared.request.output_policy)
+    if request.is_cancelled() {
+        return Err("screenshot request was cancelled".to_string());
+    }
+    let file = create_screenshot_file(&request.out_path, request.output_policy)
         .map_err(|error| format!("screenshot output file could not be opened: {error}"))?;
-    persist_screenshot_file(file, |writer| {
-        image
-            .write_to(writer, image::ImageFormat::Png)
-            .map_err(|error| format!("PNG save failed: {error}"))
-    })?;
-    Ok(prepared.request.out_path)
-}
-
-#[derive(Debug)]
-enum ScreenshotFileKind {
-    Private(std::fs::File),
-    UserSelected(kettle_state::CreatedUserSelectedFile),
+    let cancellation = request.cancellation.clone();
+    persist_screenshot_file_if(
+        file,
+        |writer| {
+            image
+                .write_to(writer, image::ImageFormat::Png)
+                .map_err(|error| format!("PNG save failed: {error}"))
+        },
+        || {
+            cancellation
+                .as_ref()
+                .is_none_or(ScreenshotCancellation::commit)
+        },
+    )?;
+    Ok(request.out_path)
 }
 
 #[derive(Debug)]
 struct CreatedScreenshotFile {
-    file: Option<ScreenshotFileKind>,
-    path: std::path::PathBuf,
+    file: Option<kettle_state::StagedUserSelectedFile>,
 }
 
 impl CreatedScreenshotFile {
     fn file(&self) -> &std::fs::File {
-        match self
-            .file
+        self.file
             .as_ref()
             .expect("created screenshot file is present")
-        {
-            ScreenshotFileKind::Private(file) => file,
-            ScreenshotFileKind::UserSelected(file) => file,
-        }
     }
 
     fn file_mut(&mut self) -> &mut std::fs::File {
-        match self
-            .file
+        self.file
             .as_mut()
             .expect("created screenshot file is present")
-        {
-            ScreenshotFileKind::Private(file) => file,
-            ScreenshotFileKind::UserSelected(file) => file,
-        }
     }
 
-    fn persist(mut self) -> std::fs::File {
-        match self
-            .file
+    fn sync_for_publish(&self) -> std::io::Result<()> {
+        self.file
+            .as_ref()
+            .expect("created screenshot file is present")
+            .sync_for_publish()
+    }
+
+    fn publish_synced(mut self) -> Result<(), kettle_state::StagedFilePublishError> {
+        self.file
             .take()
             .expect("created screenshot file is present")
-        {
-            ScreenshotFileKind::Private(file) => file,
-            ScreenshotFileKind::UserSelected(file) => file.persist(),
-        }
+            .publish_synced()
     }
 
     fn discard(mut self) -> std::io::Result<()> {
-        match self
-            .file
+        self.file
             .take()
             .expect("created screenshot file is present")
-        {
-            ScreenshotFileKind::Private(file) => {
-                kettle_state::discard_created_private_file_checked(file, &self.path)
-            }
-            ScreenshotFileKind::UserSelected(file) => file.discard(),
-        }
+            .discard()
     }
 }
 
@@ -2137,27 +2573,52 @@ impl std::io::Seek for CreatedScreenshotFile {
     }
 }
 
-impl Drop for CreatedScreenshotFile {
-    fn drop(&mut self) {
-        if let Some(ScreenshotFileKind::Private(file)) = self.file.take() {
-            kettle_state::discard_created_private_file(file, &self.path);
-        }
-        // `CreatedUserSelectedFile` owns its descriptor-relative cleanup and
-        // removes the exact leaf when its variant is dropped while armed.
-    }
-}
-
+#[cfg(test)]
 fn persist_screenshot_file(
     file: CreatedScreenshotFile,
     encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
 ) -> Result<(), String> {
-    persist_screenshot_file_with_flush(file, encode, std::io::Write::flush)
+    persist_screenshot_file_if(file, encode, || true)
 }
 
+fn persist_screenshot_file_if(
+    file: CreatedScreenshotFile,
+    encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
+    publish: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    persist_screenshot_file_with_flush_and_publish(file, encode, std::io::Write::flush, publish)
+}
+
+#[cfg(test)]
 fn persist_screenshot_file_with_flush(
     file: CreatedScreenshotFile,
     encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
     flush: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> std::io::Result<()>,
+) -> Result<(), String> {
+    persist_screenshot_file_with_flush_and_publish(file, encode, flush, || true)
+}
+
+fn persist_screenshot_file_with_flush_and_publish(
+    file: CreatedScreenshotFile,
+    encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
+    flush: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> std::io::Result<()>,
+    begin_publication: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    persist_screenshot_file_with_steps(
+        file,
+        encode,
+        flush,
+        CreatedScreenshotFile::sync_for_publish,
+        begin_publication,
+    )
+}
+
+fn persist_screenshot_file_with_steps(
+    file: CreatedScreenshotFile,
+    encode: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> Result<(), String>,
+    flush: impl FnOnce(&mut std::io::BufWriter<CreatedScreenshotFile>) -> std::io::Result<()>,
+    sync: impl FnOnce(&CreatedScreenshotFile) -> std::io::Result<()>,
+    begin_publication: impl FnOnce() -> bool,
 ) -> Result<(), String> {
     fn fail_file(file: CreatedScreenshotFile, error: String) -> Result<(), String> {
         match file.discard() {
@@ -2194,43 +2655,77 @@ fn persist_screenshot_file_with_flush(
             return fail_file(file, "PNG save failed: writer panicked".to_string());
         }
     }
-    drop(file.persist());
+    // Encoding, buffering, and the potentially slow inode flush deliberately
+    // happen while publication remains cancellable. Commit immediately before
+    // the atomic no-replace filesystem operation; if the caller won the
+    // timeout race, the armed file guard removes the exact staging leaf instead
+    // of allowing a late PNG to contradict the response.
+    if let Err(error) = sync(&file) {
+        return fail_file(file, format!("PNG durability flush failed: {error}"));
+    }
+    if !begin_publication() {
+        return fail_file(file, "screenshot request was cancelled".to_string());
+    }
+    file.publish_synced()
+        .map_err(|error| screenshot_publication_error(&error))?;
     Ok(())
 }
 
-/// Creates `path` with owner-only permissions (`0600` on Unix, a protected
-/// current-user DACL on Windows), refusing any existing leaf. Private-state
-/// outputs also reject untrusted ancestors; an explicit user-selected output
-/// pins and verifies its already-existing parent while creating the leaf.
+fn screenshot_publication_error(error: &kettle_state::StagedFilePublishError) -> String {
+    screenshot_publication_error_message(
+        error.destination_may_exist(),
+        error.kind(),
+        &error.to_string(),
+    )
+}
+
+fn screenshot_publication_error_message(
+    kettle_may_have_published: bool,
+    kind: std::io::ErrorKind,
+    detail: &str,
+) -> String {
+    if kettle_may_have_published {
+        format!(
+            "PNG publication completed, but cleanup or durability verification failed; Kettle may have published the destination: {detail}"
+        )
+    } else if kind == std::io::ErrorKind::AlreadyExists {
+        format!(
+            "Kettle did not publish this screenshot because the destination already exists: {detail}"
+        )
+    } else {
+        format!("Kettle did not publish this screenshot: {detail}")
+    }
+}
+
+/// Stages an owner-only PNG sibling (`0600` on Unix, a protected current-user
+/// DACL on Windows), refusing any existing destination at publication.
+/// Private-state outputs also reject untrusted ancestors; an explicit
+/// user-selected output pins and verifies its already-existing parent.
 /// Screenshot PNGs may capture private on-screen content; see the call site in
 /// `finish_live_screenshot`.
 fn create_screenshot_file(
     path: &std::path::Path,
     policy: ScreenshotOutputPolicy,
 ) -> std::io::Result<CreatedScreenshotFile> {
-    // `create_new` (O_CREAT | O_EXCL, CREATE_NEW on Windows) is the security
-    // boundary here, not the earlier `validate_screenshot_path` pre-check in
-    // the ctl handler. That pre-check runs synchronously when the request
-    // arrives, but the file is not opened until this worker thread runs, up to
-    // `LIVE_SCREENSHOT_TIMEOUT` (5s) later once the GPU capture maps — a wide
-    // check-then-use window. `O_EXCL` closes it atomically: if anything (a
-    // regular file, or a symlink planted into the window to redirect the write
-    // at, say, `~/.ssh/authorized_keys`) already exists at `path`, the open
-    // fails with `AlreadyExists` rather than following it and truncating the
-    // target. The shared helper also applies the private descriptor in that
-    // same create operation, before any screenshot bytes can be written.
-    let file = match policy {
-        ScreenshotOutputPolicy::PrivateState => {
-            ScreenshotFileKind::Private(kettle_state::create_private_file_new(path)?)
-        }
-        ScreenshotOutputPolicy::UserSelected => {
-            ScreenshotFileKind::UserSelected(kettle_state::create_user_selected_file_new(path)?)
-        }
-    };
-    Ok(CreatedScreenshotFile {
-        file: Some(file),
-        path: path.to_path_buf(),
-    })
+    // The final no-replace link/rename, not the earlier
+    // `validate_screenshot_path` metadata probe, is the security boundary. The
+    // probe runs when the request arrives; GPU readback and encoding happen
+    // later. A regular file or symlink planted during that interval therefore
+    // wins with `AlreadyExists` rather than being followed or replaced. PNG
+    // bytes stream only into an owner-only sibling, so the requested path is
+    // absent until a complete, flushed inode is atomically published.
+    if matches!(policy, ScreenshotOutputPolicy::PrivateState) {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("screenshot output has no parent: {}", path.display()),
+            )
+        })?;
+        kettle_state::create_private_dirs(parent)?;
+        kettle_state::validate_trusted_directory(parent)?;
+    }
+    let file = kettle_state::stage_user_selected_file_new(path)?;
+    Ok(CreatedScreenshotFile { file: Some(file) })
 }
 
 fn crop_screenshot(
@@ -2283,8 +2778,12 @@ fn crop_screenshot(
 #[cfg(test)]
 mod live_screenshot_tests {
     use super::{
-        ScreenshotOutputPolicy, create_screenshot_file, crop_screenshot, persist_screenshot_file,
-        persist_screenshot_file_with_flush,
+        MAX_SCREENSHOT_PERSISTENCE_JOBS, ScreenshotCancellation, ScreenshotOutputPolicy,
+        ScreenshotPersistencePermit, ScreenshotPersistencePool, create_screenshot_file,
+        crop_screenshot, persist_screenshot_file, persist_screenshot_file_if,
+        persist_screenshot_file_with_flush, persist_screenshot_file_with_steps, production_source,
+        screenshot_publication_error_message, screenshot_target_bytes,
+        wait_for_screenshot_submission_with,
     };
 
     fn test_tempdir() -> kettle_test_support::PrivateTempDir {
@@ -2295,6 +2794,361 @@ mod live_screenshot_tests {
         (0..width * height)
             .flat_map(|pixel| [pixel as u8, 0, 0, 255])
             .collect()
+    }
+
+    /// Metal returns `SurfaceError::Occluded` before it vends a drawable. The
+    /// capture therefore has to render and copy Kettle's own target before
+    /// swapchain acquisition, and every no-drawable outcome still has to submit
+    /// that work. Moving any of those operations restores the control timeout
+    /// even though visible screenshots continue to pass.
+    #[test]
+    fn live_capture_is_encoded_before_swapchain_acquisition() {
+        let src = production_source();
+        let body = src
+            .split("pub fn render_frame_with_status_and_pre_present")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("render_frame_with_status_and_pre_present body");
+        let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let target = normalized
+            .find("self.create_screenshot_target(target_size)")
+            .expect("live capture must allocate an independent offscreen target");
+        let render = normalized
+            .find("self.encode_scene_pass(&capture.view")
+            .expect("live capture must render the scene into its target");
+        let copy = normalized
+            .find("self.prepare_texture_screenshot(")
+            .expect("live capture must copy the rendered target");
+        let acquire = normalized
+            .find("self.surface.get_current_texture()")
+            .expect("live rendering must acquire the swapchain");
+        let presentation = normalized
+            .find(".presentation .ensure_target(")
+            .expect("translucent visible frames need a presentation target");
+        assert!(
+            target < render && render < copy && copy < acquire && acquire < presentation,
+            "capture ordering must be target creation < scene render < readback copy < acquire < presentation allocation"
+        );
+        let acquire_tail = &normalized[acquire..];
+        assert_eq!(
+            acquire_tail
+                .matches("self.submit_offscreen_screenshot(encoder, prepared_screenshot)")
+                .count(),
+            6,
+            "Occluded, Timeout, Outdated, Lost, Validation, and presentation-allocation failure must all submit the offscreen capture"
+        );
+        assert!(
+            src.contains(
+                "usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC"
+            ),
+            "only Kettle's transient capture texture, not the compositor surface, needs COPY_SRC"
+        );
+        let creator = src
+            .split("fn create_screenshot_target")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("screenshot target creator");
+        let staging_reservation = creator
+            .find("reserve_transient_gpu(staging_bytes)")
+            .expect("staging memory must be reserved");
+        let texture_creation = creator
+            .find("device.create_texture")
+            .expect("capture texture must be created");
+        assert!(
+            staging_reservation < texture_creation,
+            "all screenshot allocations must be reserved before a texture can enter an encoder"
+        );
+    }
+
+    #[test]
+    fn live_capture_keeps_the_advertised_6k_and_256_mib_bounds() {
+        let six_k = screenshot_target_bytes(6016, 3384).expect("6K target must fit");
+        assert!(
+            six_k > 64 * 1024 * 1024,
+            "this discriminates the old image cap"
+        );
+        assert_eq!(screenshot_target_bytes(8192, 8192), Some(256 * 1024 * 1024));
+        assert_eq!(screenshot_target_bytes(8193, 8192), None);
+        assert_eq!(screenshot_target_bytes(0, 1), None);
+
+        let src = production_source();
+        let creator = src
+            .split("fn create_screenshot_target")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("screenshot target creator");
+        assert!(
+            creator.contains("reserve_transient_gpu(bytes)"),
+            "large captures must use the process-only transient budget, not the 64 MiB image cap"
+        );
+        assert!(
+            src.contains("_capture_texture: wgpu::Texture")
+                && src.contains("_capture_gpu: kettle_core::GraphicsReservation")
+                && src.contains("_staging_gpu: kettle_core::GraphicsReservation"),
+            "the copy source, staging buffer, and both accounting reservations must travel with the worker job"
+        );
+    }
+
+    #[test]
+    fn control_timeout_cancellation_is_shared_with_the_renderer() {
+        let cancellation = ScreenshotCancellation::default();
+        let renderer_side = cancellation.clone();
+        assert!(!renderer_side.is_cancelled());
+        assert!(cancellation.cancel());
+        assert!(renderer_side.is_cancelled());
+        assert!(!renderer_side.commit(), "cancelled work cannot publish");
+
+        let committed = ScreenshotCancellation::default();
+        assert!(committed.commit());
+        assert!(
+            !committed.cancel(),
+            "a caller must await the real result once publication committed"
+        );
+    }
+
+    #[test]
+    fn cancellation_during_encoding_discards_instead_of_publishing() {
+        use std::io::Write as _;
+
+        let dir = test_tempdir();
+        let path = dir.path().join("cancelled-during-encode.png");
+        let file = create_screenshot_file(&path, ScreenshotOutputPolicy::UserSelected).unwrap();
+        assert!(
+            !path.exists(),
+            "the requested leaf must stay absent while encoding is cancellable"
+        );
+        let cancellation = ScreenshotCancellation::default();
+        let worker_state = cancellation.clone();
+        let (encoding_tx, encoding_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+
+        let worker = std::thread::spawn(move || {
+            persist_screenshot_file_if(
+                file,
+                |writer| {
+                    writer.write_all(b"encoded bytes").unwrap();
+                    encoding_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    Ok(())
+                },
+                || worker_state.commit(),
+            )
+        });
+        encoding_rx.recv().unwrap();
+        assert!(
+            !path.exists(),
+            "a blocked encoder must not expose a changing destination leaf"
+        );
+        assert!(
+            cancellation.cancel(),
+            "timeout must win while the encoder is still active"
+        );
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err(),
+            "screenshot request was cancelled"
+        );
+        assert!(!path.exists(), "cancelled output must never become visible");
+    }
+
+    #[test]
+    fn cancellation_can_win_during_the_staged_inode_sync() {
+        use std::io::Write as _;
+
+        let dir = test_tempdir();
+        let path = dir.path().join("cancelled-during-sync.png");
+        let file = create_screenshot_file(&path, ScreenshotOutputPolicy::UserSelected).unwrap();
+        let cancellation = ScreenshotCancellation::default();
+        let worker_state = cancellation.clone();
+        let (syncing_tx, syncing_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+
+        let worker = std::thread::spawn(move || {
+            persist_screenshot_file_with_steps(
+                file,
+                |writer| {
+                    writer.write_all(b"encoded bytes").unwrap();
+                    Ok(())
+                },
+                std::io::Write::flush,
+                |_| {
+                    syncing_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    Ok(())
+                },
+                || worker_state.commit(),
+            )
+        });
+        syncing_rx.recv().unwrap();
+        assert!(
+            cancellation.cancel(),
+            "a slow durability flush must remain on the reversible side of publication"
+        );
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            worker.join().unwrap().unwrap_err(),
+            "screenshot request was cancelled"
+        );
+        assert!(!path.exists(), "cancelled output must never become visible");
+    }
+
+    #[test]
+    fn a_gpu_wait_timeout_keeps_accounting_live_until_retirement() {
+        struct Reservation(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for Reservation {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        let usage = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let reservation = Reservation(usage.clone());
+        let mut polls = 0;
+        wait_for_screenshot_submission_with(
+            || {
+                polls += 1;
+                assert_eq!(
+                    usage.load(std::sync::atomic::Ordering::Acquire),
+                    1,
+                    "timeout must not retire the in-flight reservation"
+                );
+                if polls == 1 {
+                    Err(wgpu::PollError::Timeout)
+                } else {
+                    Ok(())
+                }
+            },
+            || false,
+            || {},
+            2,
+            || panic!("one timeout followed by success must not reset the device"),
+        )
+        .unwrap();
+        assert_eq!(usage.load(std::sync::atomic::Ordering::Acquire), 1);
+        drop(reservation);
+        assert_eq!(usage.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn repeated_gpu_wait_timeouts_reset_instead_of_stranding_admission() {
+        let resets = std::cell::Cell::new(0);
+        let error = wait_for_screenshot_submission_with(
+            || Err(wgpu::PollError::Timeout),
+            || false,
+            || {},
+            2,
+            || resets.set(resets.get() + 1),
+        )
+        .unwrap_err();
+        assert_eq!(resets.get(), 1);
+        assert!(error.contains("resetting the GPU device"));
+
+        let src = production_source();
+        let wait = src
+            .split("wait_for_screenshot_submission_with(")
+            .nth(2)
+            .and_then(|rest| rest.split("map_rx").next())
+            .expect("live screenshot GPU wait call");
+        let destroy = wait.find("device.destroy()").expect("device reset");
+        let wake = wait
+            .rfind("wake.wake()")
+            .expect("event-loop recovery wake after reset");
+        assert!(
+            destroy < wake,
+            "a wedged device must wake the event loop after it is destroyed"
+        );
+    }
+
+    #[test]
+    fn device_loss_wakes_recovery_even_when_poll_reports_success() {
+        let lost = std::cell::Cell::new(false);
+        let wakes = std::cell::Cell::new(0_u32);
+        let error = wait_for_screenshot_submission_with(
+            || {
+                lost.set(true);
+                Ok(())
+            },
+            || lost.get(),
+            || wakes.set(wakes.get() + 1),
+            2,
+            || panic!("a real device loss is not a submission timeout"),
+        )
+        .unwrap_err();
+        assert!(error.contains("device was lost"));
+        assert_eq!(wakes.get(), 1, "device loss must wake an occluded loop");
+    }
+
+    #[test]
+    fn capture_admission_clears_before_persistence_can_block() {
+        let src = production_source();
+        let worker = src
+            .split("impl ScreenshotWorker")
+            .nth(1)
+            .and_then(|rest| rest.split("enum ScreenshotSubmitError").next())
+            .expect("ScreenshotWorker implementation");
+        let clear = worker
+            .find("worker_busy.store(false")
+            .expect("worker busy flag must be cleared");
+        let persist = worker
+            .find("persistence.try_submit(job)")
+            .expect("captured pixels must move to the bounded persistence pool");
+        assert!(
+            clear < persist,
+            "filesystem persistence must not retain GPU capture admission"
+        );
+    }
+
+    #[test]
+    fn persistence_admission_is_process_wide_across_renderer_generations() {
+        let first_generation = ScreenshotPersistencePool::shared().unwrap();
+        let replacement_generation = ScreenshotPersistencePool::shared().unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &first_generation.outstanding,
+            &replacement_generation.outstanding
+        ));
+
+        let outstanding = &first_generation.outstanding;
+        let first = ScreenshotPersistencePermit::try_acquire(outstanding).unwrap();
+        let second =
+            ScreenshotPersistencePermit::try_acquire(&replacement_generation.outstanding).unwrap();
+        assert!(ScreenshotPersistencePermit::try_acquire(outstanding).is_none());
+        assert_eq!(
+            outstanding.load(std::sync::atomic::Ordering::Acquire),
+            MAX_SCREENSHOT_PERSISTENCE_JOBS
+        );
+        drop(first);
+        let replacement = ScreenshotPersistencePermit::try_acquire(outstanding)
+            .expect("a finished persistence job must reopen exactly one slot");
+        drop((second, replacement));
+        assert_eq!(outstanding.load(std::sync::atomic::Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn publication_errors_distinguish_kettles_commit_from_path_existence() {
+        assert_eq!(
+            screenshot_publication_error_message(
+                false,
+                std::io::ErrorKind::AlreadyExists,
+                "racing writer won",
+            ),
+            "Kettle did not publish this screenshot because the destination already exists: racing writer won"
+        );
+        assert_eq!(
+            screenshot_publication_error_message(
+                false,
+                std::io::ErrorKind::PermissionDenied,
+                "parent refused publication",
+            ),
+            "Kettle did not publish this screenshot: parent refused publication"
+        );
+        assert_eq!(
+            screenshot_publication_error_message(
+                true,
+                std::io::ErrorKind::Other,
+                "directory sync failed",
+            ),
+            "PNG publication completed, but cleanup or durability verification failed; Kettle may have published the destination: directory sync failed"
+        );
     }
 
     #[test]
@@ -2418,22 +3272,29 @@ mod live_screenshot_tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_selected_screenshot_never_deletes_a_replacement_leaf() {
+    fn selected_screenshot_never_replaces_a_racing_leaf() {
+        use std::io::Write as _;
+
         let dir = test_tempdir();
         let path = dir.path().join("selected.png");
-        let displaced = dir.path().join("displaced-partial.png");
         let file = create_screenshot_file(&path, ScreenshotOutputPolicy::UserSelected)
             .expect("create screenshot leaf");
-        std::fs::rename(&path, &displaced).expect("displace created leaf");
         std::fs::write(&path, b"replacement").expect("install replacement leaf");
 
-        let error = persist_screenshot_file(file, |_writer| Err("injected failure".to_string()))
-            .expect_err("the injected failure must propagate");
-        assert_eq!(error, "injected failure");
+        let error = persist_screenshot_file(file, |writer| {
+            writer
+                .write_all(b"complete png")
+                .map_err(|error| error.to_string())
+        })
+        .expect_err("no-replace publication must lose to the racing writer");
+        assert!(
+            error.starts_with(
+                "Kettle did not publish this screenshot because the destination already exists:"
+            ),
+            "unexpected error: {error}"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
-        assert!(displaced.exists(), "cleanup cannot reach a displaced inode");
     }
 
     /// The same O_EXCL guarantee, exercised against a symlink: a planted
@@ -2757,7 +3618,8 @@ impl Renderer {
         // turned into a hard crash). Installed once on the shared device.
         let gpu_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let gpu_fault = std::sync::Arc::new(std::sync::Mutex::new(None));
-        install_gpu_error_handlers(&device, &gpu_lost, &gpu_fault);
+        let recovery_wake = std::sync::Arc::new(std::sync::Mutex::new(None));
+        install_gpu_error_handlers(&device, &gpu_lost, &gpu_fault, &recovery_wake);
         let gpu = GpuContext {
             instance,
             adapter,
@@ -2765,6 +3627,7 @@ impl Renderer {
             queue,
             gpu_lost,
             gpu_fault,
+            recovery_wake,
         };
         let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
         let t_rest = std::time::Instant::now();
@@ -2833,26 +3696,13 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
         let alpha_mode = desired_alpha_mode(cfg, &caps.alpha_modes);
-        // Phase 4 of TERMINATOR-TERMINALSHOT-DESIGN.md: add COPY_SRC
-        // so the `pending_screenshot` path can read
-        // back the live surface. Gate it on the surface's advertised caps:
-        // most desktop adapters support it, but the Microsoft Remote Display
-        // adapter injected in a Windows RDP session advertises only
-        // RENDER_ATTACHMENT, so OR-ing COPY_SRC unconditionally made
-        // `Surface::configure` fail validation — the surface stayed
-        // unconfigured and the next `get_current_texture` panicked
-        // ("Surface is not configured for presentation"). When COPY_SRC is
-        // absent, the live-in-window screenshot readback degrades gracefully
-        // (see `render_frame_with_status`); offscreen `--screenshot` builds
-        // its own COPY_SRC texture and is unaffected.
-        let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
-        if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
-            usage |= wgpu::TextureUsages::COPY_SRC;
-        }
         let (width, height) =
             live_surface_dimensions(width, height, device.limits().max_texture_dimension_2d);
         let config = wgpu::SurfaceConfiguration {
-            usage,
+            // Screenshots read the offscreen scene target, not the swapchain.
+            // Keeping presentation to its sole required usage also supports
+            // RDP/virtual adapters that advertise no surface COPY_SRC.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width,
@@ -3233,6 +4083,17 @@ impl Renderer {
         &mut self,
         req: ScreenshotRequest,
     ) -> Result<(), ScreenshotRequest> {
+        if self
+            .pending_screenshot
+            .as_ref()
+            .is_some_and(ScreenshotRequest::is_cancelled)
+        {
+            let cancelled = self
+                .pending_screenshot
+                .take()
+                .expect("cancelled pending screenshot checked above");
+            Self::complete_screenshot_error(cancelled, "screenshot request was cancelled".into());
+        }
         if self.pending_screenshot.is_some()
             || self
                 .screenshot_worker
@@ -3243,6 +4104,17 @@ impl Renderer {
         }
         self.pending_screenshot = Some(req);
         Ok(())
+    }
+
+    /// Whether the next frame owes an explicit live-scene capture.
+    ///
+    /// The app uses this to distinguish ordinary background-window paints,
+    /// which stay quiescent, from a requested screenshot that must render one
+    /// frame even when the compositor reports the visible window as occluded.
+    pub fn has_pending_screenshot(&self) -> bool {
+        self.pending_screenshot
+            .as_ref()
+            .is_some_and(|request| !request.is_cancelled())
     }
 
     /// Peek and clear a queued request. Primarily retained for focused tests
@@ -6125,7 +6997,10 @@ impl Renderer {
         // v2.24.0: refresh the procedural starfield's per-frame uniform (just
         // resolution + the continuous `time` clock; the look is baked into the
         // shader as of v2.24.1) when it's the active wallpaper.
-        if matches!(cfg.background_type, BackgroundType::Starfield) {
+        if matches!(
+            cfg.background_type,
+            kettle_config::BackgroundType::Starfield
+        ) {
             self.starfield.upload(
                 &self.gpu.queue,
                 [sw, sh],
@@ -6138,6 +7013,67 @@ impl Renderer {
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
         self.menu_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
+
+        let target_size = [self.config.width.max(1), self.config.height.max(1)];
+        let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
+        let needs_presentation =
+            needs_postmultiplied_presentation(self.config.alpha_mode, scene_is_opaque);
+        let screenshot_request = self.pending_screenshot.take().and_then(|request| {
+            if request.is_cancelled() {
+                Self::complete_screenshot_error(
+                    request,
+                    "screenshot request was cancelled".to_string(),
+                );
+                None
+            } else {
+                Some(request)
+            }
+        });
+        if !needs_presentation {
+            // A target retained from a previous translucent configuration or
+            // animation frame should not keep a full-surface texture charged
+            // while the completed scene is provably alpha 1 everywhere.
+            self.presentation.discard_target();
+        }
+
+        let mut encoder = self
+            .gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kettle-encoder"),
+            });
+        // Screenshot capture owns an offscreen render. Do this before touching
+        // the swapchain: Metal intentionally refuses `nextDrawable` for an
+        // occluded NSWindow, but a control-plane screenshot still has a complete
+        // terminal scene to render. The extra pass exists only for a capture;
+        // ordinary visible frames retain their previous single-pass path.
+        let prepared_screenshot = if let Some(request) = screenshot_request {
+            match self.create_screenshot_target(target_size) {
+                Ok(capture) => {
+                    if let Err(error) =
+                        self.encode_scene_pass(&capture.view, target_size, cfg, &mut encoder)
+                    {
+                        Self::complete_screenshot_error(
+                            request,
+                            format!("screenshot render failed: {error}"),
+                        );
+                        return Err(error);
+                    }
+                    Some(Ok(self.prepare_texture_screenshot(
+                        capture,
+                        request,
+                        &mut encoder,
+                        true,
+                    )))
+                }
+                Err(error) => {
+                    Self::complete_screenshot_error(request, error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => (t, false),
@@ -6154,48 +7090,72 @@ impl Renderer {
             // and FALSELY latch `gpu_lost` on a perfectly healthy device. Pure
             // skip-frame: do NOT reconfigure (reconfiguring an occluded surface
             // can itself hang).
-            wgpu::CurrentSurfaceTexture::Occluded => return Ok(FrameOutcome::Occluded),
-            wgpu::CurrentSurfaceTexture::Timeout => return Ok(FrameOutcome::RetryLater),
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+                if need_prepare {
+                    self.atlas.trim();
+                }
+                return Ok(FrameOutcome::Occluded);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+                if need_prepare {
+                    self.atlas.trim();
+                }
+                return Ok(FrameOutcome::RetryLater);
+            }
             // Outdated means the existing surface is still valid but its
             // configuration no longer matches the window. Reconfigure that
             // surface, retain damage, and let the UI's bounded retry scheduler
             // decide when to acquire again.
             wgpu::CurrentSurfaceTexture::Outdated => {
                 self.surface.configure(&self.gpu.device, &self.config);
+                self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+                if need_prepare {
+                    self.atlas.trim();
+                }
                 return Ok(FrameOutcome::RetryLater);
             }
             // wgpu 30 explicitly requires a Lost surface to be recreated with
             // Instance::create_surface; configuring the old object cannot
             // recover it. This is a per-window failure, not evidence that the
             // process-wide device shared by every renderer is lost.
-            wgpu::CurrentSurfaceTexture::Lost => return Ok(FrameOutcome::SurfaceLost),
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+                if need_prepare {
+                    self.atlas.trim();
+                }
+                return Ok(FrameOutcome::SurfaceLost);
+            }
             // The uncaptured-error callback already logs the validation
             // details. Return an ordinary render error so the UI rebuilds this
             // renderer's retained resources on a bounded schedule rather than
             // consuming damage or escalating a healthy shared device.
             wgpu::CurrentSurfaceTexture::Validation => {
+                self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+                if need_prepare {
+                    self.atlas.trim();
+                }
                 return Err(anyhow!("surface acquisition validation error"));
             }
         };
-        let target_extent = frame.texture.size();
-        let target_size = [target_extent.width.max(1), target_extent.height.max(1)];
         let surface_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
-        let needs_presentation =
-            needs_postmultiplied_presentation(self.config.alpha_mode, scene_is_opaque);
-        if !needs_presentation {
-            // A target retained from a previous translucent configuration or
-            // animation frame should not keep a full-surface texture charged
-            // while the completed scene is provably alpha 1 everywhere.
-            self.presentation.discard_target();
-        }
+        // This texture is presentation-only. Allocate it only after the
+        // compositor actually vends a drawable: an occluded screenshot has no
+        // need for it, and a retained-image cap must not gate an independent
+        // 6K transient capture. If visible presentation cannot allocate, still
+        // submit the already encoded screenshot before scheduling recovery.
         if needs_presentation
             && !self
                 .presentation
                 .ensure_target(&self.gpu.device, target_size[0], target_size[1])
         {
+            self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+            if need_prepare {
+                self.atlas.trim();
+            }
             return Err(anyhow!(
                 "GPU graphics budget exhausted while creating the presentation target"
             ));
@@ -6203,75 +7163,11 @@ impl Renderer {
         let scene_view = if needs_presentation {
             self.presentation
                 .scene_view()
-                .expect("presentation target ensured above")
+                .expect("presentation target ensured after surface acquisition")
         } else {
             &surface_view
         };
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("kettle-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kettle-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: scene_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // v2.23.0 layering: wallpaper at the very back → cell + chrome +
-            // border quads opaquely on top → inline kitty/sixel images over the
-            // cell backgrounds → text. Pre-2.23.0 the wallpaper drew *after*
-            // `quads`, hiding all cell backgrounds and bleeding the animation
-            // through the chrome.
-            if matches!(cfg.background_type, BackgroundType::Starfield) {
-                // The procedural starfield is the opaque back-most wallpaper
-                // (mutually exclusive with an image background).
-                self.starfield.draw(&mut pass);
-            } else {
-                self.bg_imgs.draw(&mut pass);
-            }
-            self.pane_bases.draw(&mut pass);
-            self.quads.draw(&mut pass);
-            self.imgs.draw(&mut pass);
-            // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
-            // images and below chrome text (titlebars / menus) and the cursor
-            // glyph. A no-op (count 0) in legacy mode, where pane text rides the
-            // glyphon `text_renderer` below.
-            self.glyph_pipeline
-                .draw(&mut pass, &self.glyph_clips, target_size);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
-            // Dimming + scrollbar sit on top of glyphs.
-            self.overlay_quads.draw(&mut pass);
-            // The right-click context menu owns the last
-            // two passes — chrome quads (shadow / bg / border /
-            // highlight) then row labels — so the menu sits above
-            // every other UI element AND the row labels sit above the
-            // menu's own panel bg. Both calls are cheap no-ops when
-            // the menu is closed (empty uploads / zero areas).
-            self.menu_quads.draw(&mut pass);
-            self.menu_text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)?;
-            // v2.21.0 (idle perf): the focused solid-block cursor's inverted
-            // glyph, drawn last so it sits on top of the block quad (in
-            // `quads`) and the same glyph's normal-fg copy (in `text_renderer`).
-            if self.pending_cursor_glyph.is_some() {
-                self.cursor_glyph_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)?;
-            }
-        }
+        self.encode_scene_pass(scene_view, target_size, cfg, &mut encoder)?;
         if needs_presentation {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-presentation-pass"),
@@ -6291,35 +7187,8 @@ impl Renderer {
             });
             self.presentation.draw(&mut pass);
         }
-        // Encode a pending surface readback into this frame's submission. The
-        // finite GPU wait, mapping, conversion, PNG encode, and write happen on
-        // the lazy worker after submit, never on winit's event-loop thread.
-        let prepared_screenshot = self.pending_screenshot.take().map(|request| {
-            if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
-                self.prepare_live_screenshot(&frame, request, &mut encoder)
-            } else {
-                Err((
-                    request,
-                    "live-surface screenshot unavailable: surface lacks COPY_SRC \
-                     (for example an RDP remote display); use offscreen --screenshot"
-                        .to_string(),
-                ))
-            }
-        });
         let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        if let Some(prepared) = prepared_screenshot {
-            match prepared {
-                Ok(prepared) => {
-                    let job = ScreenshotJob {
-                        device: self.gpu.device.clone(),
-                        submission,
-                        prepared,
-                    };
-                    self.submit_screenshot_job(job);
-                }
-                Err((request, error)) => Self::complete_screenshot_error(request, error),
-            }
-        }
+        self.dispatch_prepared_screenshot(prepared_screenshot, submission);
         pre_present();
         self.gpu.queue.present(frame);
         if reconfigure_after_present {
@@ -6335,86 +7204,226 @@ impl Renderer {
         Ok(FrameOutcome::Presented)
     }
 
-    fn prepare_live_screenshot(
+    fn submit_offscreen_screenshot(
+        &mut self,
+        encoder: wgpu::CommandEncoder,
+        prepared: Option<Result<PreparedScreenshot, (ScreenshotRequest, String)>>,
+    ) {
+        let Some(prepared) = prepared else {
+            return;
+        };
+        let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        self.dispatch_prepared_screenshot(Some(prepared), submission);
+    }
+
+    fn dispatch_prepared_screenshot(
+        &mut self,
+        prepared: Option<Result<PreparedScreenshot, (ScreenshotRequest, String)>>,
+        submission: wgpu::SubmissionIndex,
+    ) {
+        let Some(prepared) = prepared else {
+            return;
+        };
+        match prepared {
+            Ok(prepared) => {
+                let job = ScreenshotJob {
+                    device: self.gpu.device.clone(),
+                    gpu_lost: self.gpu.gpu_lost.clone(),
+                    gpu_fault: self.gpu.gpu_fault.clone(),
+                    submission,
+                    prepared,
+                };
+                self.submit_screenshot_job(job);
+            }
+            Err((request, error)) => Self::complete_screenshot_error(request, error),
+        }
+    }
+
+    fn encode_scene_pass(
         &self,
-        frame: &wgpu::SurfaceTexture,
-        request: ScreenshotRequest,
+        target: &wgpu::TextureView,
+        target_size: [u32; 2],
+        cfg: &Config,
         encoder: &mut wgpu::CommandEncoder,
-    ) -> Result<PreparedScreenshot, (ScreenshotRequest, String)> {
-        let texture = &frame.texture;
-        let size = texture.size();
-        let width = size.width;
-        let height = size.height;
-        let unpadded_bytes_per_row = width
+    ) -> Result<()> {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("kettle-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        // v2.23.0 layering: wallpaper at the very back → cell + chrome +
+        // border quads opaquely on top → inline kitty/sixel images over the
+        // cell backgrounds → text. Pre-2.23.0 the wallpaper drew *after*
+        // `quads`, hiding all cell backgrounds and bleeding the animation
+        // through the chrome.
+        if matches!(
+            cfg.background_type,
+            kettle_config::BackgroundType::Starfield
+        ) {
+            // The procedural starfield is the opaque back-most wallpaper
+            // (mutually exclusive with an image background).
+            self.starfield.draw(&mut pass);
+        } else {
+            self.bg_imgs.draw(&mut pass);
+        }
+        self.pane_bases.draw(&mut pass);
+        self.quads.draw(&mut pass);
+        self.imgs.draw(&mut pass);
+        // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
+        // images and below chrome text (titlebars / menus) and the cursor
+        // glyph. A no-op (count 0) in legacy mode, where pane text rides the
+        // glyphon `text_renderer` below.
+        self.glyph_pipeline
+            .draw(&mut pass, &self.glyph_clips, target_size);
+        self.text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        // Dimming + scrollbar sit on top of glyphs.
+        self.overlay_quads.draw(&mut pass);
+        // The right-click context menu owns the last two passes — chrome quads
+        // then row labels — so the menu sits above every other UI element and
+        // the labels sit above the panel itself.
+        self.menu_quads.draw(&mut pass);
+        self.menu_text_renderer
+            .render(&self.atlas, &self.viewport, &mut pass)?;
+        // v2.21.0 (idle perf): the focused solid-block cursor's inverted glyph,
+        // drawn last so it sits on top of the block quad and normal glyph.
+        if self.pending_cursor_glyph.is_some() {
+            self.cursor_glyph_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)?;
+        }
+        Ok(())
+    }
+
+    fn create_screenshot_target(&self, size: [u32; 2]) -> Result<ScreenshotCaptureTarget, String> {
+        let bytes = screenshot_target_bytes(size[0], size[1]).ok_or_else(|| {
+            "screenshot target size overflow or exceeds the 256 MiB capture limit".to_string()
+        })?;
+        let gpu = self
+            .graphics_budget
+            .reserve_transient_gpu(bytes)
+            .ok_or_else(|| {
+                format!(
+                    "GPU graphics budget exhausted while creating a {bytes}-byte screenshot target"
+                )
+            })?;
+        let unpadded_bytes_per_row = size[0]
             .checked_mul(4)
-            .ok_or_else(|| (request.clone(), "screenshot row size overflow".to_string()))?;
+            .ok_or_else(|| "screenshot row size overflow".to_string())?;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = unpadded_bytes_per_row
             .checked_add(align - 1)
-            .map(|bytes| bytes / align * align)
-            .ok_or_else(|| {
-                (
-                    request.clone(),
-                    "screenshot aligned row size overflow".to_string(),
-                )
-            })?;
+            .map(|row| row / align * align)
+            .ok_or_else(|| "screenshot aligned row size overflow".to_string())?;
         let buffer_size = u64::from(padded_bytes_per_row)
-            .checked_mul(u64::from(height))
-            .ok_or_else(|| {
-                (
-                    request.clone(),
-                    "screenshot readback size overflow".to_string(),
-                )
-            })?;
+            .checked_mul(u64::from(size[1]))
+            .ok_or_else(|| "screenshot readback size overflow".to_string())?;
         if buffer_size > MAX_LIVE_SCREENSHOT_BYTES {
-            return Err((
-                request,
-                format!(
-                    "screenshot readback requires {buffer_size} bytes; limit is \
-                     {MAX_LIVE_SCREENSHOT_BYTES} bytes"
-                ),
+            return Err(format!(
+                "screenshot readback requires {buffer_size} bytes; limit is \
+                 {MAX_LIVE_SCREENSHOT_BYTES} bytes"
             ));
         }
+        let staging_bytes = usize::try_from(buffer_size)
+            .map_err(|_| "screenshot staging buffer does not fit this platform".to_string())?;
+        // Reserve every allocation before encoding any commands. If the second
+        // reservation fails, `gpu` drops while no command buffer can yet refer
+        // to the capture texture; accounting can therefore never end before a
+        // submitted use of the resource retires.
+        let staging_gpu = self
+            .graphics_budget
+            .reserve_transient_gpu(staging_bytes)
+            .ok_or_else(|| {
+                format!(
+                    "GPU graphics budget exhausted while creating a {staging_bytes}-byte screenshot staging buffer"
+                )
+            })?;
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kettle-screenshot-scene"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-screenshot-readback"),
             size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        Ok(ScreenshotCaptureTarget {
+            texture,
+            view,
+            gpu,
+            staging,
+            staging_gpu,
+            width: size[0],
+            height: size[1],
+            unpadded_bytes_per_row,
+            padded_bytes_per_row,
+        })
+    }
+
+    fn prepare_texture_screenshot(
+        &self,
+        capture: ScreenshotCaptureTarget,
+        request: ScreenshotRequest,
+        encoder: &mut wgpu::CommandEncoder,
+        premultiplied: bool,
+    ) -> PreparedScreenshot {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture,
+                texture: &capture.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
+                buffer: &capture.staging,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(capture.padded_bytes_per_row),
+                    rows_per_image: Some(capture.height),
                 },
             },
             wgpu::Extent3d {
-                width,
-                height,
+                width: capture.width,
+                height: capture.height,
                 depth_or_array_layers: 1,
             },
         );
-        Ok(PreparedScreenshot {
-            staging,
-            width,
-            height,
-            unpadded_bytes_per_row,
-            padded_bytes_per_row,
-            format: texture.format(),
-            premultiplied: !matches!(
-                self.config.alpha_mode,
-                wgpu::CompositeAlphaMode::PostMultiplied
-            ),
+        let format = capture.texture.format();
+        PreparedScreenshot {
+            staging: capture.staging,
+            _capture_texture: capture.texture,
+            _capture_gpu: capture.gpu,
+            _staging_gpu: capture.staging_gpu,
+            width: capture.width,
+            height: capture.height,
+            unpadded_bytes_per_row: capture.unpadded_bytes_per_row,
+            padded_bytes_per_row: capture.padded_bytes_per_row,
+            format,
+            premultiplied,
             request,
-        })
+        }
     }
 
     fn complete_screenshot_error(request: ScreenshotRequest, error: String) {
@@ -13097,6 +14106,8 @@ mod renderer_recovery_state_tests {
                 output_policy: ScreenshotOutputPolicy::UserSelected,
                 crop: Some((1.0, 2.0, 3.0, 4.0)),
                 completion: Some(completion),
+                cancellation: None,
+                recovery_wake: None,
             }),
         };
 
@@ -15861,7 +16872,7 @@ mod glyph_cell_lock_tests {
 
     /// Wiring drift guards: the grid path must NOT push a pane TextArea (that
     /// would double-draw via glyphon), the cell-locked draw must sit in the
-    /// render pass, and the emit must be gated on grid mode.
+    /// shared scene pass, and the emit must be gated on grid mode.
     #[test]
     fn grid_path_wiring_is_present() {
         let src = super::production_source();
@@ -15871,10 +16882,11 @@ mod glyph_cell_lock_tests {
         );
         assert!(
             src.contains(
-                "let target_size = [target_extent.width.max(1), target_extent.height.max(1)];"
-            ) && src.contains("self.glyph_pipeline")
+                "let target_size = [self.config.width.max(1), self.config.height.max(1)];"
+            ) && src.contains("fn encode_scene_pass(")
+                && src.contains("self.glyph_pipeline")
                 && src.contains(".draw(&mut pass, &self.glyph_clips, target_size);"),
-            "the cell-locked glyph pipeline must draw against the acquired target size"
+            "the cell-locked glyph pipeline must draw against the live target size"
         );
         assert!(
             src.contains("if cfg.text_renderer == TextRendererMode::Grid {")

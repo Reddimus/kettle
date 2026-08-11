@@ -447,7 +447,17 @@ AstroNvim, Codex CLI, or Claude Code CLI owns the pane without corrupting that
 program's input stream.
 
 The control surface also exposes `screenshot`, which saves a live PNG using the
-same renderer readback path as the UI screenshot action. It requires
+same offscreen-scene readback path as the UI screenshot action, so capture does
+not depend on the target window having a compositor drawable. A target the
+window backend reports as minimized, explicitly hidden, or not-yet-shown is
+rejected rather than leaving a request pending until restore. Wayland cannot
+report visibility/minimization, so its bounded control timeout remains the
+fallback. Timeout and final publication are one atomic race: cancellation wins
+without a file, or Kettle reports the already-committed result. PNG bytes are
+written to an owner-only sibling and atomically linked or no-replace-renamed
+into the requested leaf only after commit, so readers never observe a partial
+destination. A post-publication durability or cleanup failure explicitly says
+the destination may exist and must be inspected before retry. It requires
 `agent-server=full` because it writes to the filesystem; by default it captures
 the focused pane crop, and `--json '{"full_window":true}'` captures the whole
 window. An explicit `path` must name a new leaf beneath an already-existing

@@ -1,14 +1,18 @@
 # Terminator `terminalshot.py` port — design
 
-> Status: **Shipped in v1.46.0.** The live wgpu surface-readback path
-> landed end to end: `Renderer::capture_live_surface`, the
+> Status: **Shipped in v1.46.0; readback target revised in v2.56.x.** The live
+> renderer screenshot path landed end to end: the
 > `ScreenshotWorker`/`ScreenshotJob` pipeline (`crates/kettle-render/src/lib.rs`),
 > a `kettle-ctl` `Method::Screenshot`, an MCP `kettle_screenshot` tool
 > (`crates/kettle/src/mcp_tools.rs`), and the focused-pane crop path.
 > This is in addition to (not a replacement for) the pre-existing
 > offscreen `kettle --screenshot=PATH` synthetic-scene renderer used
 > for visual regression testing. This doc is kept as the historical
-> design record; the phase roadmap below describes what was built.
+> design record; the phase roadmap below describes what was built. The original
+> swapchain copy was later replaced with a one-shot offscreen scene target so
+> screenshots work while Metal withholds drawables for occluded windows. It
+> also removes the surface-`COPY_SRC` requirement used by the old path; native
+> RDP/virtual-adapter completion remains a platform verification item.
 
 ## What it is
 
@@ -38,8 +42,8 @@ window readback gap.
 
 Three cross-cutting changes:
 
-1. **wgpu surface readback**. kettle's renderer paints into the wgpu
-   swap-chain texture and presents. To read it back we have to either:
+1. **wgpu scene readback**. kettle's renderer paints into the wgpu scene and
+   presents it. To read it back we have to either:
    - Render into an intermediate texture + copy to a readable buffer
      + map-async + write PNG (most general, but adds a full extra
      render pass each screenshot).
@@ -48,8 +52,14 @@ Three cross-cutting changes:
      overhead, but requires a state machine: queue screenshot request →
      next render copies the surface in its normal submission → a bounded
      worker waits, maps, and writes the PNG).
-   - Decision: the second approach. One frame's worth of latency is
-     fine for a user-triggered screenshot. The hot path stays unchanged.
+   - Original decision: the second approach. That fails when a compositor
+     withholds the swapchain drawable (Metal occlusion) or a surface lacks
+     `COPY_SRC` (some RDP/virtual adapters). The current path therefore renders
+   one requested frame into a dedicated, process-budgeted transient target and
+   copies that texture. The target and reservation stay with the worker until
+   GPU completion, so a 6K capture can exceed the hostile-image cap without
+   undercounting in-flight GPU memory. Ordinary frames keep the hot path
+   unchanged.
 
 2. **Per-pane vs full-window capture**. Terminator captures *the focused
    terminal widget*. kettle's renderer paints the whole window in one
@@ -89,27 +99,41 @@ Three cross-cutting changes:
 │ kettle_render::Renderer::render_frame (extended)                     │
 │                                                                      │
 │  if let Some(req) = pending_screenshot.take():                       │
-│    copy the acquired surface into a capped staging buffer            │
-│    queue.submit(draw + copy)                                         │
-│    hand {device, submission, staging, req} to one lazy worker        │
-│    call Window::pre_present_notify, then present                      │
+│    reserve + create one transient offscreen scene target             │
+│    encode scene → target; reserve + copy → capped staging buffer     │
+│  acquire surface                                                     │
+│    success: encode/present normal frame + capture in one submission  │
+│    no drawable: submit the offscreen capture independently           │
+│  hand {device, loss flag, submission, target+staging reservations,   │
+│        staging, req}                                                  │
+│    to one lazy capture worker                                         │
 └──────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Screenshot worker (never the winit event-loop thread)                │
-│  finite GPU wait → map → validate rows → BGRA/RGBA → crop → PNG      │
+│  at most two wait slices → completion/loss or reset wedged device     │
+│  map → CPU RGBA; drop target, staging buffer, and GPU reservations    │
+│  bounded two-worker pool: crop → staged PNG → sync → publish         │
 │  log result + answer optional control-plane completion sender         │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 The queue is a single `Option<ScreenshotRequest>` owned on the event-loop
-thread. The worker uses a capacity-one synchronous channel and atomic busy
-latch. Readback is capped at 256 MiB and the GPU wait at five seconds.
+thread. The capture worker uses a capacity-one synchronous channel and atomic
+busy latch. Each readback allocation is capped at 256 MiB. The worker polls in
+five-second slices and retains both reservations until submission completion or
+device loss; one slice timeout is not mistaken for resource retirement. Two
+consecutive timeouts latch a device fault and destroy the wedged device so the
+normal renderer-recovery path can clear admission safely. Once readback reaches
+CPU memory, the GPU resources drop and a fixed two-worker persistence pool
+performs crop/encode/sync/publication. This bounds retained CPU jobs while
+letting a new capture complete when one cancelled filesystem operation stalls.
 
 The PNG encoder is the same crate used by the existing `capture_png`
 function — `image` is already a transitive dep via
-kettle-render. No new deps.
+kettle-render. Secure staging names use the existing lockfile's `getrandom`
+package directly rather than adding a new dependency package.
 
 ## Phase roadmap
 
@@ -158,11 +182,14 @@ $ xdg-open ~/.cache/kettle/shots/kettle-*.png
 ## Risks + mitigations
 
 - **Risk:** wgpu readback can be slow or a driver can stop completing work.
-  **Mitigation:** one bounded worker owns a finite five-second wait; the winit
-  event loop submits and presents without waiting.
+  **Mitigation:** one bounded worker owns two finite five-second waits; the
+  winit event loop submits and presents without waiting. A second timeout
+  resets the shared device rather than dropping in-flight accounting or
+  permanently holding screenshot admission.
 - **Risk:** repeated capture requests grow staging memory or overwrite a
-  completion channel. **Mitigation:** exactly one request may be pending or in
-  flight; later callers receive a busy result.
+  completion channel. **Mitigation:** exactly one GPU capture may be pending or
+  in flight and at most two persistence jobs may exist; later work receives an
+  explicit busy result.
 - **Risk:** mapped-buffer cleanup when the user closes kettle mid-encode.
   **Mitigation:** the worker owns the job and staging buffer to completion; a
   process exit lets wgpu/the OS release them, with no detached borrowed state.

@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 fs4 = "1.1"
+getrandom.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

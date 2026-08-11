@@ -76,23 +76,27 @@ validate, backup, and replacement transaction.
 Screenshot persistence has two deliberately separate policies. UI/default
 screenshots are private state and therefore require Kettle-owned, verified
 ancestors. An explicit ctl/MCP `path` is a user-selected export: its parent must
-already exist, but it may be an ordinary user directory. Creation pins that
-parent, derives the child from the held object, publishes only a new owner-only
-regular file, and revalidates the parent before returning. Unix uses `openat`
-and identity-matched descriptor-relative cleanup. Because Darwin ACLs can grant
+already exist, but it may be an ordinary user directory. Both policies stream
+into a randomly named owner-only sibling; the requested leaf remains absent
+until a complete, durably flushed inode is atomically linked without
+replacement. Filesystems without hard-link support use the platform's atomic
+no-replace rename operation instead.
+Creation and publication pin the selected parent, derive both children from the
+held object, and verify file identity. Unix uses `openat`/`linkat` and
+`renameat2`/`renameatx_np` fallback plus identity-matched descriptor-relative
+cleanup. Because Darwin ACLs can grant
 read access independently of mode bits, macOS first creates an empty owner-only,
-ACL-free staging directory in the selected parent, secures the file there, and
-publishes it with `renameatx_np(RENAME_EXCL)`; the final name is never visible
-with an inherited ACL. Windows denies parent deletion while creating the leaf under a
-protected current-user DACL and rejects NUL, alternate-stream, and trailing
+ACL-free staging directory in the selected parent and secures the sibling there;
+the requested name is never visible with an inherited ACL or partial content.
+Windows denies parent deletion through publication, creates the sibling under a
+protected current-user DACL, and rejects NUL, alternate-stream, and trailing
 dot/space aliases before Win32 normalization can erase them. Neither policy
 overwrites or follows an existing leaf. A writable export parent can still
-rename or remove the pathname immediately after the instantaneous verification,
-including while PNG bytes are still being encoded and written. The open file
-object remains the one Kettle created, and failure cleanup removes only that
-object when it still occupies the selected leaf, reports cleanup failure to the
-caller, and never removes a replacement, but the pathname is not a
-durable capability. This policy is not a substitute for private-state storage
+rename or remove the staging name or published pathname; the open file object
+remains the one Kettle created, publication then fails closed, and cleanup
+removes only that object when it still occupies the staging sibling. Cleanup
+failure is reported and a replacement is never removed, but the pathname is not
+a durable capability. This policy is not a substitute for private-state storage
 and is never used implicitly.
 
 Configuration reads carry provenance across the CLI/UI boundary. Default and
@@ -480,10 +484,36 @@ putting a user path on the wire.
 - **Presentation and readback respect the window-system boundary** — every live
   frame calls winit's `pre_present_notify` after queue submission and
   immediately before `present`, which is required for correct compositor frame
-  tracking. A live screenshot copies the surface in that same submission, then
-  hands the staging buffer to one bounded worker for a finite GPU wait, mapping,
-  conversion, crop, and PNG write. The event-loop thread never waits for a GPU
-  readback, and a second capture receives an explicit busy result.
+  tracking. A live screenshot renders one scene into a process-budgeted,
+  transient offscreen target before swapchain acquisition, copies that texture
+  in the same submission when a drawable exists (or in its own submission when
+  it does not), then hands the staging buffer to one bounded worker for finite
+  GPU-wait intervals, mapping, and conversion. The target,
+  staging buffer, and their separate process-budget reservations are admitted
+  before encoding and travel with that job until submission completion or
+  device loss; one wait timeout retains rather than undercounts them, while two
+  consecutive timeouts classify the shared device as wedged and enter ordinary
+  device recovery. Once readback reaches bounded CPU memory, those GPU objects
+  and reservations drop immediately; crop, PNG encoding, inode sync, and atomic
+  publication run in one process-wide fixed two-worker persistence pool shared
+  by every window and replacement renderer. Thus one cancelled
+  save stuck in the filesystem cannot retain capture admission indefinitely,
+  while the pool bounds stranded CPU buffers. This makes
+  capture independent of Metal occlusion and surface `COPY_SRC` without
+  weakening the retained terminal-image limit. The event-loop thread never
+  waits for a GPU readback; targets known hidden/minimized fail promptly, while
+  a backend that cannot report those states falls back to the bounded control
+  timeout. Encoding and the staged-inode durability flush remain cancellable;
+  cancellation and publication use one atomic final transition immediately
+  before the no-replace link/rename, so the destination is never a partial
+  file. A finite post-commit grace period reports an uncertain destination
+  instead of blocking a control thread indefinitely if publication itself
+  stalls. Publication errors distinguish "not published" from
+  "destination may exist" after durability, verification, or staging-cleanup
+  failure. A wedged worker explicitly wakes the event loop after destroying the
+  device, and genuine wgpu loss callbacks use the same process-wide wake, so an
+  occluded application enters recovery. A concurrent GPU capture receives an
+  explicit busy result; persistence accepts at most two jobs.
 - **Runtime diagnostics are phase-only** — a watchdog observes fixed event-loop
   phase names (`resumed`, `gpu_init`, `window_event`, `redraw`, `user_event`,
   `about_to_wait`) and writes one private, rotated record after a bounded stall.
@@ -1341,7 +1371,7 @@ The most recent additions:
 - **named-broadcast-groups subsystem** (`BroadcastScope` enum with
   per-tab / per-window / cross-tab named scopes).
 - **right-click drill-in submenu UX** (Theme + Profile + Preferences).
-- **vertical tab strips** and a **wgpu surface-readback screenshot path**.
+- **vertical tab strips** and a **wgpu offscreen-scene screenshot path**.
 - **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
   editor** — a keyboard-navigable preferences panel with live persist + reload
   (see the dedicated subsection below).

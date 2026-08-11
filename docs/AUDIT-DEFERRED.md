@@ -488,50 +488,36 @@ tracked here so they are not lost.
   or a supervisor/subreaper designed into process creation), not a procfs
   heuristic; that is a separate architecture change.
 
-- **`kettle ctl screenshot` times out on macOS, so the live-UI smoke cannot
-  finish there.** This is the blocker for `just agent-tui-smoke` on macOS, which
-  until this release could never run at all — it gated on
-  `DISPLAY`/`WAYLAND_DISPLAY` and skipped with exit 0, reading exactly like a
-  pass. The gate is fixed; this is what the smoke hits next.
+- **~~`kettle ctl screenshot` times out on an occluded macOS window~~ — fixed.**
+  The earlier non-bundled-window hypothesis was wrong. A direct reproduction
+  put Finder in front of a source-built Kettle window: CoreGraphics reported a
+  real layer-zero, on-screen Kettle window, but its client surface remained
+  blank and the control screenshot timed out. The request had been queued
+  correctly; `redraw()` then returned at the general occluded-window power
+  guard. The first attempted fix bypassed that guard and was rejected in review:
+  wgpu's Metal backend intentionally returns `SurfaceError::Occluded` before
+  `nextDrawable`, so no swapchain-based readback can work in this state.
 
-  What is established, by direct measurement on an Apple-silicon macOS 15 host
-  running the bare `target/release/kettle` binary:
-
-  - `kettle ctl list_panes` and `kettle ctl ui_geometry` **work** — the control
-    server is healthy and Kettle believes it has a window with sane geometry.
-  - `kettle --screenshot out.png` and `--screenshot-menu` **work** (a 61 KB
-    96x28 PNG). The offscreen render-and-read-back path is fine.
-  - `kettle ctl screenshot` **times out at exactly 10 s**
-    (`crates/kettle-ui/src/app.rs:16922`). That path calls `request_redraw()` and
-    waits for the presented frame, unlike the offscreen path.
-  - macOS System Events reports the process has **0 windows**, and AppleScript
-    cannot bring it frontmost.
-  - `/Applications/kettle.app` exists and is what real users launch; the smoke
-    drives the bare binary.
-
-  So the leading hypothesis is that a non-bundled Mach-O does not register a
-  presenting window with the macOS window server, meaning `request_redraw()`
-  never delivers a frame and the ctl screenshot legitimately cannot complete —
-  a HARNESS problem, with real users unaffected because they launch the bundle.
-  **That hypothesis is NOT confirmed.** An investigation that was constructing a
-  minimal `.app` bundle to test it died on a network failure before reaching a
-  verdict, so the alternative — that the screenshot path itself is broken on
-  Metal — has not been excluded.
-
-  Settle it before assuming either. Useful evidence: `CGWindowListCopyWindowInfo`
-  at the CoreGraphics level rather than the accessibility level, and whether the
-  same ctl screenshot succeeds when driven against `/Applications/kettle.app`.
-  If it is the harness, the smoke must drive a bundle; either way it must fail
-  loudly rather than skip, because a silent skip is what hid this for so long.
-
-  Consequence to state plainly: **the live interactive leg — tmux, Codex CLI,
-  Claude Code CLI, and Neovim/AstroNvim inside a real Kettle window — is not
-  verified on macOS.** The non-interactive `scripts/check-agent-cli-smoke.sh`
-  passed all 12 checks in the direct host measurement above, including the
-  configured-AstroNvim path. Its mandatory Kettle-owned probes now also run in
-  macOS CI through `just agent-cli-smoke`; optional machine-local clients remain
-  explicit skips there. That non-interactive evidence is the full extent of
-  what macOS coverage currently proves.
+  The capture now renders the same prepared scene into a process-budgeted
+  transient target before surface acquisition and reads that texture back. The
+  target, staging buffer, and their separate reservations stay alive through
+  submission completion or device loss; a finite GPU-wait timeout retains the
+  job instead of undercounting it. Thus 6K/8K captures retain the documented
+  256 MiB per-allocation bound without weakening the 64 MiB retained-image cap
+  or hiding in-flight work. Ordinary occluded output
+  stays quiescent, while a shown, visible, non-minimized target may run this one
+  explicit offscreen frame through compositor occlusion or transient surface
+  recovery. Renderer rebuilds remain blocking. Targets the backend reports as
+  hidden/minimized fail before queueing; Wayland cannot report either state and
+  therefore retains the bounded timeout. Encoding and staged-inode sync remain
+  cancellable; file commit occurs immediately before atomic no-replace
+  publication. A finite post-commit grace reports an uncertain destination
+  instead of waiting forever, and a wedged GPU worker wakes the event loop into
+  recovery, preventing a late write or a stranded `BUSY` request. Native
+  verification put Finder in front and completed two consecutive control
+  screenshots (816x520 RGBA, non-empty and
+  byte-identical); the broader agent smoke produced eleven live screenshots
+  before reaching its separate, superseded LazyVCS marker failure.
 
 - **One shared streaming control-state kernel for the three ANSI parsers.** The
   `kettle exec` stripper, the session-log scrubber, and the VT extractor have now
