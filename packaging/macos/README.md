@@ -16,6 +16,11 @@ Official tags fail closed when its signing material is absent.
 | `APPLE_API_ISSUER_ID` | App Store Connect API issuer identifier |
 | `APPLE_API_PRIVATE_KEY` | Complete contents of the downloaded `AuthKey_*.p8` file |
 
+Restrict the environment's deployment branches and tags to the `main` branch
+and `v*` tags. Those are the release workflow's manual and official-tag entry
+points; an unrestricted environment would let an arbitrary repository branch
+request the certificate and notarization key.
+
 Use a Kettle-specific Developer ID certificate and App Store Connect API key.
 The workflow reconstructs both only under `RUNNER_TEMP`, imports the identity
 into an ephemeral keychain restricted to `codesign`, and deletes the material
