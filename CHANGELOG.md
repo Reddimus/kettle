@@ -6,7 +6,40 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **Official macOS packages are now Developer ID signed, notarized, stapled,
+  and Gatekeeper-assessed before their release ZIP is created.** The release
+  runner imports a Kettle-specific certificate into an ephemeral keychain and
+  authenticates notarization with a least-privilege App Store Connect API key;
+  an official tag fails closed when any credential is absent, the signature's
+  Team ID is wrong, notarization is rejected, or the ticket cannot be stapled.
+  Pull requests remain unsigned, and all credential material is removed from
+  the runner after packaging.
+
 ### Fixed
+
+- **The focused-pane accent was visibly cut off at both lower macOS window
+  corners.** Four square border strips reached AppKit's rounded native mask and
+  were clipped independently, so the color disappeared through each curve.
+  Decorated macOS windows now render a single antialiased pane outline whose
+  selected outer corners follow the native radius; split-internal corners,
+  fullscreen/borderless windows, Linux, and Windows retain square dividers.
+  The trailing new-tab dropdown and `+` also gained independent mouse-hover
+  surfaces, pointer affordances, a subtle separator, optically centered glyphs,
+  and a persistent two-pixel accent cap on the outside edge of `+`. Vertical
+  tab bars now use their full column for pointer dispatch instead of only the
+  first row, and each row clips its `+`/close glyph to its own button, so the
+  newly visible affordances remain clickable and do not disappear below row
+  one.
+
+- **The Dock and Finder could show different Kettle silhouettes on current
+  macOS.** The bundle now compiles one native Icon Composer document into both
+  `Assets.car` and its macOS 11 fallback instead of replacing AppKit's icon at
+  runtime. The blue canvas and outer rounding are owned by macOS exactly once,
+  while the terminal face, prompt and caret remain Kettle artwork; this removes
+  the clipped-color/double-mask treatment at the rounded edge and keeps Finder,
+  the running and closed Dock item, and the app switcher on one asset.
 
 - **A new dependency-unsoundness warning had no fail-closed scope guard.**
   RUSTSEC-2026-0253 affects `LruCache::pop()` in `lru 0.16.4`. Kettle reaches

@@ -162,7 +162,8 @@ tempfile = "3"
 objc2 = "0.5"
 # Class features must be opted into (objc2-app-kit ships none by default).
 # NSView + NSWindow support sticky windows; NSColor synchronizes the native
-# titlebar background with Kettle's palette; NSApplication + NSImage apply the
-# macOS 26 full-bleed Dock art without weakening the legacy bundle icon.
-objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSColor", "NSImage", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.2", features = ["NSData", "NSProcessInfo", "NSThread"] }
+# titlebar background with Kettle's palette. The application icon is compiled
+# into the bundle by Xcode's asset pipeline, so runtime AppKit icon mutation is
+# deliberately not enabled here.
+objc2-app-kit = { version = "0.2", features = ["NSColor", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2", features = ["NSThread"] }

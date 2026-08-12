@@ -136,27 +136,20 @@ jobs:
         # Linux installs Fish above; Windows supplies Windows PowerShell 5.1
         # and PowerShell 7.
         run: just shell-integration-check
-      - name: Packaging smoke — macOS .icns
-        # The release.yml's iconutil step only fires on a
-        # `v*` tag push, so a regression like "remove a PNG from
-        # packaging/macos/kettle.iconset" only surfaces at the next
-        # release cut — by which point bisect-and-revert is the only
-        # remedy. Running iconutil on every macOS CI build catches
-        # malformed iconsets immediately. iconutil ships with macOS;
-        # no installs needed.
+      - name: Packaging smoke — macOS native AppIcon
+        # Compile the Icon Composer package on every macOS CI build, rather
+        # than discovering a broken Assets.car or fallback only on a tag.
         if: runner.os == 'macOS'
         run: |
-          iconutil -c icns packaging/macos/kettle.iconset -o /tmp/kettle.icns
-          file /tmp/kettle.icns | grep -q "Mac OS X icon" \
-            || { echo "iconutil produced a non-icns file"; file /tmp/kettle.icns; exit 1; }
-          # Sanity-check size — a tiny .icns means iconutil silently
-          # produced an empty container. Real one is ~300 KB; floor
-          # at 100 KB catches the regression while staying tolerant
-          # of icon redesigns.
-          size=$(stat -f%z /tmp/kettle.icns)
-          test "$size" -gt 100000 \
-            || { echo "icns too small ($size bytes) — iconutil likely produced an empty container"; exit 1; }
-          echo "iconutil OK ($size bytes)"
+          out=$(mktemp -d /tmp/kettle-app-icon.XXXXXX)
+          xcrun actool packaging/macos/AppIcon.icon \
+            --compile "$out" --platform macosx --minimum-deployment-target 11.0 \
+            --app-icon AppIcon --output-partial-info-plist "$out/partial.plist"
+          test -s "$out/Assets.car"
+          test -s "$out/AppIcon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$out/partial.plist")" = AppIcon
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$out/partial.plist")" = AppIcon
+          echo "actool AppIcon OK"
       - name: Packaging smoke — Windows .ico
         # Same logic as the macOS step: the winresource build-dep
         # already compiles via `cargo build --workspace --all-targets`

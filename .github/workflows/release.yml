@@ -119,6 +119,7 @@ jobs:
   package:
     name: package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    environment: ${{ matrix.environment }}
     # Package only runs after pretest passes. A red
     # `cargo test --workspace` blocks the per-OS builds before
     # they consume runner minutes.
@@ -141,10 +142,13 @@ jobs:
           # and strand Ubuntu 22.04 users of the one-line installer.
           - os: ubuntu-22.04
             artifact: kettle-linux-x86_64.tar.gz
+            environment: release-build
           - os: macos-15
             artifact: kettle-macos-universal.zip
+            environment: macos-signing
           - os: windows-2022
             artifact: kettle-windows-x86_64.zip
+            environment: release-build
           # ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
           # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
           # ci.yml early-warning job proves this target builds. Windowing deps
@@ -152,6 +156,7 @@ jobs:
           - os: ubuntu-22.04
             artifact: kettle-linux-aarch64.tar.gz
             rust_target: aarch64-unknown-linux-gnu
+            environment: release-build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -287,15 +292,27 @@ jobs:
       - name: Package (macOS .app bundle)
         if: runner.os == 'macOS'
         run: |
+          set -euo pipefail
           APP=dist/kettle.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          # Convert the maintained .iconset directory to .icns using
-          # Apple's own iconutil — only available on macOS. The result
-          # lands at Resources/kettle.icns and the Info.plist's
-          # CFBundleIconFile=kettle (no extension) picks it up so the
-          # Finder, Dock, and ⌘-Tab switcher all show our icon.
-          iconutil -c icns packaging/macos/kettle.iconset \
-            -o "$APP/Contents/Resources/kettle.icns"
+          # Compile one native AppIcon for every macOS surface. Xcode emits
+          # Assets.car for current systems and a loose AppIcon.icns generated
+          # for the deployment target, so Finder, the closed and running Dock
+          # item, and the app switcher never disagree. Icon Composer and macOS
+          # own the blue canvas and outer mask; Kettle's SVG contains only its
+          # terminal face and prompt, avoiding the double-rounded gutter.
+          ICON_OUT="$RUNNER_TEMP/kettle-app-icon"
+          mkdir -p "$ICON_OUT"
+          xcrun actool packaging/macos/AppIcon.icon \
+            --compile "$ICON_OUT" \
+            --platform macosx \
+            --minimum-deployment-target 11.0 \
+            --app-icon AppIcon \
+            --output-partial-info-plist "$ICON_OUT/partial.plist"
+          test -s "$ICON_OUT/Assets.car"
+          test -s "$ICON_OUT/AppIcon.icns"
+          cp "$ICON_OUT/Assets.car" "$ICON_OUT/AppIcon.icns" \
+            "$APP/Contents/Resources/"
           # Patch the Info.plist version from the workspace Cargo.toml
           # at release time so a CFBundleVersion drift from a forgotten
           # manual bump can't ship. PlistBuddy is built into macOS.
@@ -312,7 +329,111 @@ jobs:
           # without needing the source tree. Same content as the
           # binary's embedded copies.
           cp -r shell-integration "$APP/Contents/Resources/"
-          (cd dist && zip -r ../${{ matrix.artifact }} kettle.app)
+
+      # Sign and notarize after the final bundle layout exists. App resources
+      # are part of the outer seal, and stapling rewrites that signed bundle;
+      # packaging or hashing before either operation publishes stale bytes.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERT_P12" ]; then
+            if [ "$GITHUB_REPOSITORY" = "Reddimus/kettle" ] \
+              && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              echo "::error::Apple signing credentials are absent; an official tag must not publish an unsigned macOS app."
+              exit 1
+            fi
+            echo "::warning::Building an unsigned macOS preview because signing credentials are absent."
+            exit 0
+          fi
+          APP=dist/kettle.app
+          KEYCHAIN="$RUNNER_TEMP/kettle-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          CERT="$RUNNER_TEMP/kettle-developer-id.p12"
+          API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          for required in APPLE_CERT_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_TEAM_ID APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
+            APPLE_API_PRIVATE_KEY; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::$required is absent from the macos-signing environment."
+              exit 1
+            fi
+          done
+          printf '%s' "$APPLE_CERT_P12" | base64 -D > "$CERT"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY"
+          chmod 600 "$CERT" "$API_KEY"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          # The final positional argument scopes the ACL update to the same
+          # ephemeral keychain the certificate was imported into. Omitting it
+          # searches only the default list, where this keychain is absent.
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          while IFS= read -r -d '' candidate; do
+            if file -b "$candidate" | grep -q 'Mach-O'; then
+              codesign --force --timestamp --options runtime \
+                --entitlements packaging/macos/kettle.entitlements \
+                --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
+                "$candidate"
+            fi
+          done < <(find "$APP/Contents" -type f -print0)
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/macos/kettle.entitlements \
+            --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KEYCHAIN" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          SIGNED_TEAM=$(
+            codesign -d --verbose=4 "$APP" 2>&1 \
+              | sed -n 's/^TeamIdentifier=//p'
+          )
+          if [ "$SIGNED_TEAM" != "$APPLE_TEAM_ID" ]; then
+            echo "::error::signed app has TeamIdentifier=$SIGNED_TEAM, expected $APPLE_TEAM_ID"
+            exit 1
+          fi
+
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/kettle-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/kettle-notarize.zip" \
+            --key "$API_KEY" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" --wait --timeout 30m
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+
+      - name: Verify macOS signing policy
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=dist/kettle.app
+          if [ -n "$APPLE_CERT_P12" ]; then
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            xcrun stapler validate "$APP"
+            spctl --assess --type execute --verbose=4 "$APP"
+          else
+            echo "unsigned preview policy already checked"
+          fi
+
+      - name: Package signed/stapled macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        # Generic recursive ZIP tools drop the extended attributes/resource-
+        # fork data used by a stapled notarization ticket. `ditto` is Apple's
+        # bundle-aware path and preserves the exact app Gatekeeper assessed.
+        run: ditto -c -k --keepParent dist/kettle.app ${{ matrix.artifact }}
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -350,6 +471,14 @@ jobs:
           python scripts/package-manifest.py verify `
             --root dist/kettle --target x86_64-pc-windows-msvc --version $version
           Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
+
+      - name: Remove ephemeral Apple signing material
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/kettle-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/kettle-developer-id.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/kettle-notarize.zip"
 
       # Generate a SHA-256 sidecar for the artifact so users (and the
       # `install-online.sh` one-liner) can verify a download

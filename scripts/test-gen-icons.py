@@ -149,40 +149,39 @@ class PillowIconTests(unittest.TestCase):
                 stack.enter_context(redirect_stdout(StringIO()))
                 self.assertEqual(MODULE.main(), 0)
 
-    def test_macos_keeps_legacy_icon_and_has_modern_runtime_source(self):
+    def test_macos_keeps_legacy_icon_and_has_native_composer_source(self):
         linux = MODULE.render_master()
-        modern = MODULE.render_modern_macos_master()
 
         self.assertEqual(linux.getpixel((0, 0))[3], 0)
-        self.assertEqual(modern.getpixel((0, 0)), MODULE.ACCENT)
-        self.assertEqual(modern.getchannel("A").getextrema(), (255, 255))
 
         legacy = self.root / "iconset" / "icon_512x512@2x.png"
         with MODULE.Image.open(legacy) as icon:
             self.assertEqual(icon.getpixel((0, 0))[3], 0)
 
-        emitted = self.root / "kettle-modern.png"
-        with MODULE.Image.open(emitted) as icon:
-            self.assertEqual(icon.size, (1024, 1024))
-            self.assertEqual(icon.getpixel((0, 0)), MODULE.ACCENT)
-            self.assertEqual(icon.getchannel("A").getextrema(), (255, 255))
+        document = self.root / "AppIcon.icon" / "icon.json"
+        artwork = self.root / "AppIcon.icon" / "Assets" / "kettle.svg"
+        self.assertTrue(document.is_file())
+        self.assertEqual(document.read_text(), MODULE.icon_composer_json_source())
+        self.assertEqual(artwork.read_text(), MODULE.icon_composer_svg_source())
+        self.assertIn('"solid"', document.read_text())
+        self.assertIn('"specular" : false', document.read_text())
+        self.assertIn('"enabled" : false', document.read_text())
+        self.assertIn('"scale" : 2', document.read_text())
+        self.assertIn('"translation-in-points"', document.read_text())
+        self.assertNotIn('x="0" y="0"', artwork.read_text())
 
-    def test_svg_sources_are_generated_from_the_raster_geometry(self):
+    def test_svg_sources_are_generated_from_the_shared_geometry(self):
         linux = self.root / "linux" / "kettle.svg"
-        macos = self.root / "kettle.svg"
 
-        self.assertEqual(
-            linux.read_text(), MODULE.svg_source(modern_macos=False)
-        )
-        self.assertEqual(
-            macos.read_text(), MODULE.svg_source(modern_macos=True)
-        )
-        self.assertIn('fill="#7aa2f7"', macos.read_text())
-        self.assertNotIn('fill="none" stroke="#7aa2f7"', macos.read_text())
+        self.assertEqual(linux.read_text(), MODULE.svg_source())
 
-        mutant = self.root / "macos-mutant.svg"
-        mutant.write_text(macos.read_text().replace('x="42"', 'x="43"', 1))
-        self.assertFalse(MODULE.same_artifact(macos, mutant))
+        composer = self.root / "AppIcon.icon" / "Assets" / "kettle.svg"
+        self.assertEqual(composer.read_text(), MODULE.icon_composer_svg_source())
+        self.assertNotIn('width="512" height="512" rx="0"', composer.read_text())
+
+        mutant = self.root / "composer-mutant.svg"
+        mutant.write_text(composer.read_text().replace('rx="70"', 'rx="54"', 1))
+        self.assertFalse(MODULE.same_artifact(composer, mutant))
 
     def test_svg_generation_never_uses_platform_text_newlines(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -198,28 +197,17 @@ class PillowIconTests(unittest.TestCase):
                     root / "windows" / "kettle.ico",
                     quiet=True,
                 )
-            for svg in [root / "linux" / "kettle.svg", root / "kettle.svg"]:
+            for svg in [
+                root / "linux" / "kettle.svg",
+                root / "AppIcon.icon" / "Assets" / "kettle.svg",
+            ]:
                 self.assertNotIn(b"\r", svg.read_bytes())
 
     def test_svg_and_raster_paths_consume_the_same_primitives(self):
-        modern = MODULE.icon_primitives(modern_macos=True)
-        legacy = MODULE.icon_primitives(modern_macos=False)
-
         with patch.object(MODULE, "icon_primitives", wraps=MODULE.icon_primitives) as model:
-            MODULE.svg_source(modern_macos=True)
-            MODULE.render_modern_macos_master()
-            MODULE.svg_source(modern_macos=False)
+            MODULE.svg_source()
             MODULE.render_master()
-        self.assertEqual(
-            model.call_args_list,
-            [
-                unittest.mock.call(modern_macos=True),
-                unittest.mock.call(modern_macos=True),
-                unittest.mock.call(modern_macos=False),
-                unittest.mock.call(modern_macos=False),
-            ],
-        )
-        self.assertNotEqual(modern[0], legacy[0])
+        self.assertEqual(model.call_args_list, [unittest.mock.call(), unittest.mock.call()])
 
     def test_compatibility_wrapper_forwards_arguments_and_status(self):
         if os.name == "nt" or shutil.which("bash") is None:

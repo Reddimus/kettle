@@ -7,7 +7,7 @@
 //! one instanced quad pass and all text through one glyphon prepare/render.
 //!
 //! Pipeline order per frame (matters for transparency + dim overlays):
-//! 1. **Quads** — cell backgrounds, tab-bar chrome, focus borders,
+//! 1. **Quads + pane outlines** — cell backgrounds, tab-bar chrome, focus borders,
 //!    cursor block / beam / underline / hollow outline. Active-tab + focused-
 //!    pane accents flip to theme `palette[3]` (yellow) while broadcast
 //!    mode is on so the user can see input is fan-out.
@@ -43,6 +43,7 @@ mod color;
 mod cursor_policy;
 mod glyphpipe;
 mod imgpipe;
+mod outline;
 mod present;
 mod quad;
 mod snapshot;
@@ -74,6 +75,7 @@ pub use color::{
     dim as dim_color, reply_for_query, reply_for_text_area_size, resolve, resolve_query,
 };
 use glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
+use outline::{OutlineInstance, OutlinePipeline};
 use quad::{QuadInstance, QuadPipeline};
 
 fn load_bundled_font(font_system: &mut FontSystem, face: &'static [u8]) {
@@ -983,6 +985,13 @@ pub struct TabBar {
     /// the dropdown is disabled (vertical tab bars) — the renderer then draws a
     /// plain `+` and the hit-test skips the arrow branch.
     pub new_tab_menu: Rect4,
+    /// The pointer is over the `+` hit target. The UI computes this from the
+    /// same rect used for click dispatch, so hover paint cannot drift from the
+    /// action users actually trigger.
+    pub hovered_new_tab: bool,
+    /// The pointer is over the shell-dropdown hit target immediately left of
+    /// `+`. Kept separate so each half has an unambiguous hover response.
+    pub hovered_new_tab_menu: bool,
     /// Visual indicator that broadcast / group-input mode is
     /// on. Without this, the user can forget broadcast is enabled and
     /// type to one pane expecting it to stay local — every keystroke
@@ -1049,6 +1058,8 @@ impl TabBar {
             segments: Vec::new(),
             new_tab: (0.0, 0.0, 0.0, 0.0),
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+            hovered_new_tab: false,
+            hovered_new_tab_menu: false,
             broadcast: false,
             hovered_close_idx: None,
             drag_cursor_x: None,
@@ -1616,6 +1627,11 @@ pub struct Renderer {
 
     pane_bases: QuadPipeline,
     quads: QuadPipeline,
+    /// Rounded pane outlines used only where a decorated native window clips
+    /// an outer pane corner. Kept out of `QuadInstance`: cell backgrounds
+    /// dominate that buffer, and paying a larger instance for every cell to
+    /// fix at most two window corners would be the wrong hot-path trade-off.
+    pane_outlines: OutlinePipeline,
     /// Second quad pass drawn *after* text (pane dimming, scrollbar).
     overlay_quads: QuadPipeline,
     /// Third quad pass drawn after the overlay quads — reserved for
@@ -1719,6 +1735,9 @@ pub struct Renderer {
     /// the theme signature. The offscreen `--screenshot` renderer never sets
     /// one, so hero renders stay cfg-governed.
     accent_override: Option<Rgb>,
+    /// Whether the current OS window has rounded content corners. The UI owns
+    /// fullscreen/decorations state and refreshes this before every frame.
+    rounded_window_corners: bool,
     /// Phase 3 of
     /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md):
     /// when `Some`, the next `render_frame` call renders the prepared scene to
@@ -3771,6 +3790,7 @@ impl Renderer {
 
         let pane_bases = QuadPipeline::new_replace(&device, format);
         let quads = QuadPipeline::new(&device, format);
+        let pane_outlines = OutlinePipeline::new(&device, format);
         let overlay_quads = QuadPipeline::new(&device, format);
         let menu_quads = QuadPipeline::new(&device, format);
         let menu_text_renderer =
@@ -3875,6 +3895,7 @@ impl Renderer {
             status_bar_buffer,
             pane_bases,
             quads,
+            pane_outlines,
             overlay_quads,
             menu_quads,
             menu_text_renderer,
@@ -3896,6 +3917,7 @@ impl Renderer {
             cell_scale_h,
             scale,
             accent_override: None,
+            rounded_window_corners: false,
             pending_screenshot: None,
             screenshot_worker: None,
         })
@@ -3945,6 +3967,14 @@ impl Renderer {
     /// Multi-window (Peacock): set/clear this window's accent.
     pub fn set_accent_override(&mut self, accent: Option<Rgb>) {
         self.accent_override = accent;
+    }
+
+    /// Tell the renderer whether the native content surface currently ends in
+    /// rounded bottom corners. The app owns decoration/fullscreen state; the
+    /// renderer owns pane geometry and is therefore the only layer that can
+    /// round exactly the focused/inactive pane corners that meet the window.
+    pub fn set_rounded_window_corners(&mut self, rounded: bool) {
+        self.rounded_window_corners = rounded;
     }
 
     /// The accent every LIVE chrome element uses (focused-pane border,
@@ -4605,6 +4635,7 @@ impl Renderer {
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
+        let mut pane_outlines: Vec<OutlineInstance> = Vec::with_capacity(panes.len());
         let mut pane_bases: Vec<QuadInstance> = Vec::with_capacity(panes.len() + 1);
         if !background_has_wallpaper(cfg) {
             pane_bases.push(rect(
@@ -4941,7 +4972,15 @@ impl Renderer {
                     ));
                 }
             }
-            // New-tab (+) button background. Use the
+            // New-tab control group. The dropdown and `+` keep independent
+            // hit targets and hover surfaces, while the rest-state background
+            // unifies them as one trailing action cluster.
+            //
+            // A permanent two-pixel accent cap closes the right edge. It
+            // mirrors the active tab's two-pixel leading accent and prevents
+            // the `+` from reading like an unfinished rectangle at the window
+            // boundary. Two *physical* pixels stays crisp at every scale.
+            // Use the
             // new_tab rect's own y/h (set to the
             // strip-bottom row for vertical layouts).
             // Paint the union of [▾ | +] when the dropdown arrow is
@@ -4951,6 +4990,26 @@ impl Renderer {
             let (mx, _, mw, _) = tabbar.new_tab_menu;
             let (bx, bw) = if mw > 0.0 { (mx, mw + nw) } else { (nx, nw) };
             quads.push(rect(bx, ny, bw, nh, chrome_strip_bg, 1.0));
+            let accent = if tabbar.broadcast {
+                theme.palette[3]
+            } else {
+                self.ui_accent(cfg, theme)
+            };
+            if tabbar.hovered_new_tab_menu && mw > 0.0 {
+                quads.push(rect(mx, ny, mw, nh, accent, 0.14));
+            }
+            if tabbar.hovered_new_tab {
+                quads.push(rect(nx, ny, nw, nh, accent, 0.14));
+            }
+            if mw > 0.0 {
+                quads.push(rect(nx, ny + 6.0, 1.0, (nh - 12.0).max(0.0), accent, 0.45));
+            }
+            let cap_x = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
+                nx
+            } else {
+                nx + nw - 2.0
+            };
+            quads.push(rect(cap_x, ny, 2.0, nh, accent, 1.0));
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -5160,10 +5219,26 @@ impl Renderer {
             } else {
                 cfg.handle_size as f32
             };
-            quads.push(rect(rx, ry, rw, bw, border, 1.0));
-            quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
-            quads.push(rect(rx, ry, bw, rh, border, 1.0));
-            quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
+            let corner_mask =
+                pane_bottom_window_corner_mask(pv.rect, (sw, sh), self.rounded_window_corners);
+            if bw <= 0.0 {
+                // A zero handle size means no pane border. Do not send a
+                // degenerate outline to the shader: derivative AA can otherwise
+                // give a mathematical zero-width centreline visible coverage.
+            } else if corner_mask == 0 {
+                quads.push(rect(rx, ry, rw, bw, border, 1.0));
+                quads.push(rect(rx, ry + rh - bw, rw, bw, border, 1.0));
+                quads.push(rect(rx, ry, bw, rh, border, 1.0));
+                quads.push(rect(rx + rw - bw, ry, bw, rh, border, 1.0));
+            } else {
+                pane_outlines.push(pane_outline(
+                    pv.rect,
+                    border,
+                    bw,
+                    MACOS_WINDOW_CORNER_RADIUS_POINTS * self.scale,
+                    corner_mask,
+                ));
+            }
 
             // Per-pane titlebar background quad. Drawn
             // ABOVE the pane's border + BELOW the pane's content.
@@ -5950,14 +6025,14 @@ impl Renderer {
             self.tabbar_buffer
                 .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
             // v2.20.0 P1b: constant glyph — shaped once per font family.
-            if self.tabbar_text != " +" {
+            if self.tabbar_text != NEW_TAB_PLUS_GLYPH {
                 self.tabbar_buffer.set_text(
-                    " +",
+                    NEW_TAB_PLUS_GLYPH,
                     &Attrs::new().family(Family::Name(&family)),
                     Shaping::Advanced,
                     None,
                 );
-                self.tabbar_text = " +".into();
+                self.tabbar_text = NEW_TAB_PLUS_GLYPH.into();
             }
             self.tabbar_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -5968,14 +6043,14 @@ impl Renderer {
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
                 // v2.20.0 P1b: constant glyph — shaped once per font family.
-                if self.new_tab_arrow_text != " ▾" {
+                if self.new_tab_arrow_text != NEW_TAB_MENU_GLYPH {
                     self.new_tab_arrow_buffer.set_text(
-                        " ▾",
+                        NEW_TAB_MENU_GLYPH,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.new_tab_arrow_text = " ▾".into();
+                    self.new_tab_arrow_text = NEW_TAB_MENU_GLYPH.into();
                 }
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);
@@ -6437,7 +6512,7 @@ impl Renderer {
                 if !cfg.close_button_on_tab {
                     continue;
                 }
-                let (cx, _, ccw, _) = s.close;
+                let (cx, cy, ccw, cch) = s.close;
                 let hovered = tabbar.hovered_close_idx == Some(s.idx);
                 let close_fg = if hovered {
                     // Dark glyph (theme.cursor_text) on the theme-red
@@ -6448,52 +6523,67 @@ impl Renderer {
                     // Rest: dim chrome — readable but secondary.
                     theme.palette[8]
                 };
+                let (close_left, close_top) = centered_text_origin((cx, cy, ccw, cch), (cw, ch));
                 areas.push(TextArea {
                     buffer: &self.tab_close_buffer,
-                    left: cx + (ccw - cw) * 0.5,
-                    top: tabbar.y + 4.0,
+                    left: close_left,
+                    top: close_top,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: cx as i32,
-                        top: ty,
-                        right: (cx + ccw) as i32,
-                        bottom: tb,
-                    },
+                    bounds: text_bounds_for_rect(s.close),
                     default_color: GColor::rgb(close_fg.r, close_fg.g, close_fg.b),
                     custom_glyphs: &[],
                 });
             }
-            let (nx, _, nw, _) = tabbar.new_tab;
+            let (nx, ny, nw, nh) = tabbar.new_tab;
+            let plus_fg = if tabbar.hovered_new_tab {
+                self.ui_accent(cfg, theme)
+            } else {
+                fg
+            };
+            let plus_w = self
+                .tabbar_buffer
+                .layout_runs()
+                .next()
+                .map_or(cw, |run| run.line_w);
+            // The cap owns the outside two pixels. Center against the remaining
+            // content box so it does not make the glyph read one pixel right.
+            let plus_content = if matches!(cfg.tab_bar_pos, kettle_config::TabBarPos::Left) {
+                (nx + 2.0, ny, (nw - 2.0).max(0.0), nh)
+            } else {
+                (nx, ny, (nw - 2.0).max(0.0), nh)
+            };
+            let (plus_left, plus_top) = centered_text_origin(plus_content, (plus_w, ch));
             areas.push(TextArea {
                 buffer: &self.tabbar_buffer,
-                left: nx + 4.0,
-                top: tabbar.y + 4.0,
+                left: plus_left,
+                top: plus_top,
                 scale: 1.0,
-                bounds: TextBounds {
-                    left: nx as i32,
-                    top: ty,
-                    right: (nx + nw) as i32,
-                    bottom: tb,
-                },
-                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                bounds: text_bounds_for_rect(tabbar.new_tab),
+                default_color: GColor::rgb(plus_fg.r, plus_fg.g, plus_fg.b),
                 custom_glyphs: &[],
             });
             // The `▾` dropdown arrow glyph, at `new_tab_menu` (left
             // of `+`). Only present when the dropdown is enabled.
             if tabbar.new_tab_menu.2 > 0.0 {
-                let (ax, _, aw, _) = tabbar.new_tab_menu;
+                let (ax, ay, aw, ah) = tabbar.new_tab_menu;
+                let arrow_fg = if tabbar.hovered_new_tab_menu {
+                    self.ui_accent(cfg, theme)
+                } else {
+                    fg
+                };
+                let arrow_w = self
+                    .new_tab_arrow_buffer
+                    .layout_runs()
+                    .next()
+                    .map_or(cw, |run| run.line_w);
+                let (arrow_left, arrow_top) = centered_text_origin((ax, ay, aw, ah), (arrow_w, ch));
                 areas.push(TextArea {
                     buffer: &self.new_tab_arrow_buffer,
-                    left: ax + 4.0,
-                    top: tabbar.y + 4.0,
+                    left: arrow_left,
+                    top: arrow_top,
                     scale: 1.0,
-                    bounds: TextBounds {
-                        left: ax as i32,
-                        top: ty,
-                        right: (ax + aw) as i32,
-                        bottom: tb,
-                    },
-                    default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                    bounds: text_bounds_for_rect(tabbar.new_tab_menu),
+                    default_color: GColor::rgb(arrow_fg.r, arrow_fg.g, arrow_fg.b),
                     custom_glyphs: &[],
                 });
             }
@@ -6976,6 +7066,8 @@ impl Renderer {
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
+        self.pane_outlines
+            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_outlines);
         // Return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
@@ -7279,6 +7371,7 @@ impl Renderer {
         }
         self.pane_bases.draw(&mut pass);
         self.quads.draw(&mut pass);
+        self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
         // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
         // images and below chrome text (titlebars / menus) and the cursor
@@ -10240,6 +10333,150 @@ fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
     }
 }
 
+const NEW_TAB_MENU_GLYPH: &str = "▾";
+const NEW_TAB_PLUS_GLYPH: &str = "+";
+
+/// Center one shaped, single-line chrome glyph inside its interactive rect.
+/// Keeping this independent of the font's advance and the tab-bar height is
+/// what makes visually different symbols such as `▾` and `+` share one optical
+/// center without hard-coded spaces or padding that drift across fonts/scales.
+fn centered_text_origin(rect: Rect4, text_size: (f32, f32)) -> (f32, f32) {
+    let (x, y, w, h) = rect;
+    let (text_w, text_h) = text_size;
+    (
+        x + ((w - text_w) * 0.5).max(0.0),
+        y + ((h - text_h) * 0.5).max(0.0),
+    )
+}
+
+/// Clip chrome text to the interactive rect that positioned it. Vertical tab
+/// rows do not share the strip's first-row y range, so reusing a bar-wide clip
+/// can make a correctly positioned glyph disappear outside its bounds.
+fn text_bounds_for_rect((x, y, width, height): Rect4) -> TextBounds {
+    TextBounds {
+        left: x as i32,
+        top: y as i32,
+        right: (x + width) as i32,
+        bottom: (y + height) as i32,
+    }
+}
+
+/// AppKit's decorated-window bottom radius in logical points. The renderer
+/// multiplies by the live scale factor, so the visible curve stays concentric
+/// with the native mask on both Retina and non-Retina displays.
+const MACOS_WINDOW_CORNER_RADIUS_POINTS: f32 = 16.0;
+const PANE_EDGE_EPSILON: f32 = 1.0;
+const OUTLINE_BOTTOM_RIGHT: u32 = 1 << 2;
+const OUTLINE_BOTTOM_LEFT: u32 = 1 << 3;
+
+fn pane_bottom_window_corner_mask(
+    rect: (f32, f32, f32, f32),
+    surface: (f32, f32),
+    rounded_window_corners: bool,
+) -> u32 {
+    if !rounded_window_corners {
+        return 0;
+    }
+    let (x, y, width, height) = rect;
+    let (surface_width, surface_height) = surface;
+    if (y + height - surface_height).abs() > PANE_EDGE_EPSILON {
+        return 0;
+    }
+    let mut mask = 0;
+    if x.abs() <= PANE_EDGE_EPSILON {
+        mask |= OUTLINE_BOTTOM_LEFT;
+    }
+    if (x + width - surface_width).abs() <= PANE_EDGE_EPSILON {
+        mask |= OUTLINE_BOTTOM_RIGHT;
+    }
+    mask
+}
+
+fn pane_outline(
+    rect: (f32, f32, f32, f32),
+    color: Rgb,
+    border_width: f32,
+    corner_radius: f32,
+    corner_mask: u32,
+) -> OutlineInstance {
+    OutlineInstance {
+        pos: [rect.0, rect.1],
+        size: [rect.2.max(0.0), rect.3.max(0.0)],
+        color: [
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            1.0,
+        ],
+        border_width: border_width.max(0.0),
+        corner_radius: corner_radius.max(0.0),
+        corner_mask,
+        _pad: 0,
+    }
+}
+
+#[cfg(test)]
+mod pane_window_corner_tests {
+    use super::{
+        NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, OUTLINE_BOTTOM_LEFT, OUTLINE_BOTTOM_RIGHT,
+        centered_text_origin, pane_bottom_window_corner_mask, text_bounds_for_rect,
+    };
+
+    #[test]
+    fn new_tab_glyphs_are_unpadded_and_centered_in_their_own_hit_rects() {
+        assert_eq!(NEW_TAB_MENU_GLYPH, NEW_TAB_MENU_GLYPH.trim());
+        assert_eq!(NEW_TAB_PLUS_GLYPH, NEW_TAB_PLUS_GLYPH.trim());
+        assert_eq!(
+            centered_text_origin((10.0, 20.0, 26.0, 26.0), (8.0, 18.0)),
+            (19.0, 24.0)
+        );
+        assert_eq!(
+            centered_text_origin((10.0, 20.0, 12.0, 10.0), (20.0, 20.0)),
+            (10.0, 20.0)
+        );
+        let lower_row_clip = text_bounds_for_rect((10.0, 72.0, 26.0, 26.0));
+        assert_eq!(lower_row_clip.left, 10);
+        assert_eq!(lower_row_clip.top, 72);
+        assert_eq!(lower_row_clip.right, 36);
+        assert_eq!(lower_row_clip.bottom, 98);
+    }
+
+    #[test]
+    fn only_panes_touching_a_rounded_window_bottom_receive_corner_masks() {
+        let surface = (1200.0, 800.0);
+        assert_eq!(
+            pane_bottom_window_corner_mask((0.0, 100.0, 1200.0, 700.0), surface, true),
+            OUTLINE_BOTTOM_LEFT | OUTLINE_BOTTOM_RIGHT
+        );
+        assert_eq!(
+            pane_bottom_window_corner_mask((0.0, 100.0, 600.0, 700.0), surface, true),
+            OUTLINE_BOTTOM_LEFT
+        );
+        assert_eq!(
+            pane_bottom_window_corner_mask((600.0, 100.0, 600.0, 700.0), surface, true),
+            OUTLINE_BOTTOM_RIGHT
+        );
+        assert_eq!(
+            pane_bottom_window_corner_mask((0.0, 100.0, 1200.0, 350.0), surface, true),
+            0,
+            "an internal split edge must stay square"
+        );
+        assert_eq!(
+            pane_bottom_window_corner_mask((0.0, 100.0, 1200.0, 700.0), surface, false),
+            0,
+            "borderless, fullscreen, Linux and Windows windows stay unchanged"
+        );
+    }
+
+    #[test]
+    fn fractional_layout_rounding_still_matches_the_surface_edge() {
+        assert_eq!(
+            pane_bottom_window_corner_mask((0.25, 64.0, 799.5, 535.25), (800.0, 600.0), true,),
+            OUTLINE_BOTTOM_LEFT | OUTLINE_BOTTOM_RIGHT
+        );
+    }
+}
+
 /// Compatibility fix (audit): draws one cell's underline segment(s),
 /// differentiating the `Flags::ALL_UNDERLINES` style bits instead of
 /// collapsing UNDERLINE / UNDERCURL / DOTTED_UNDERLINE / DASHED_UNDERLINE to
@@ -12150,6 +12387,7 @@ pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
         // Pipeline construction compiles our WGSL on the active backend —
         // this is the part that historically breaks per-platform.
         let mut quads = QuadPipeline::new(&device, format);
+        let mut pane_outlines = OutlinePipeline::new(&device, format);
         let Some(mut imgs) = imgpipe::ImagePipeline::new(&device, format) else {
             return Err(anyhow!(
                 "GPU graphics budget exhausted while creating offscreen image pipeline"
@@ -12164,6 +12402,18 @@ pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
                 size: [4.0, 4.0],
                 color: [1.0, 0.0, 0.0, 1.0],
             }],
+        );
+        pane_outlines.upload(
+            &device,
+            &queue,
+            [8.0, 8.0],
+            &[pane_outline(
+                (0.0, 0.0, 8.0, 8.0),
+                Rgb::new(0, 255, 0),
+                1.0,
+                3.0,
+                OUTLINE_BOTTOM_LEFT | OUTLINE_BOTTOM_RIGHT,
+            )],
         );
         imgs.upload(&device, &queue, [8.0, 8.0], &[]);
 
@@ -12202,6 +12452,7 @@ pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
                 multiview_mask: None,
             });
             quads.draw(&mut pass);
+            pane_outlines.draw(&mut pass);
             imgs.draw(&mut pass);
         }
         queue.submit(std::iter::once(enc.finish()));

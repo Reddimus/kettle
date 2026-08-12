@@ -658,6 +658,11 @@ pub(crate) struct WindowState {
     /// Index of the tab whose close-button (`✕`) zone the mouse cursor
     /// is currently over (pointer-cursor swap + hover-background quad).
     pub(crate) hovered_close_idx: Option<usize>,
+    /// Hovered half of the trailing horizontal new-tab control. Stored beside
+    /// close hover so pointer motion repaints only when the visual state
+    /// actually changes; `tab_bar()` forwards it to the renderer.
+    pub(crate) hovered_new_tab: bool,
+    pub(crate) hovered_new_tab_menu: bool,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -858,6 +863,8 @@ impl WindowState {
             pane_drag: None,
             dock_preview: None,
             hovered_close_idx: None,
+            hovered_new_tab: false,
+            hovered_new_tab_menu: false,
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,

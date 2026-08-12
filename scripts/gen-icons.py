@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """kettle — regenerate every icon source and raster from one geometry model.
 
-This script owns the shared terminal-face geometry and emits both vector
-treatments: the compatible pre-rounded icon for Linux/Windows and macOS 11-15,
-plus an opaque full-bleed source that kettle applies at runtime on macOS 26+.
-It then renders the committed platform rasters with Pillow at 4x
+This script owns the shared terminal-face geometry and emits the compatible
+pre-rounded Linux/Windows vector plus the native Icon Composer foreground that
+Apple's asset compiler masks for every macOS surface. It then renders the
+committed platform rasters with Pillow at 4x
 supersampling (2048 px canvas, LANCZOS downscale) and writes:
 
-  - packaging/{linux,macos}/kettle.svg                    (generated sources)
-  - packaging/macos/kettle-modern.png                     (macOS 26+ runtime)
+  - packaging/linux/kettle.svg                            (generated source)
+  - packaging/macos/AppIcon.icon/{icon.json,Assets/kettle.svg}
   - packaging/linux/kettle-{16,24,32,48,64,128,256}.png  (hicolor theme +
     the `include_bytes!` embedded winit window icon, which needs a binary
     rebuild to pick up)
-  - packaging/macos/kettle.iconset/icon_*.png            (10 files; CI runs
-    `iconutil -c icns` over them)
+  - packaging/macos/kettle.iconset/icon_*.png            (10 compatibility
+    sources retained for downstream packagers)
   - packaging/windows/kettle.ico                          (exactly 7 sizes;
     CI asserts the resolution count)
 
@@ -60,7 +60,12 @@ OUTER_BOX = (32, 32, 480, 480)
 OUTER_RADIUS = 64
 OUTER_STROKE = 20
 FACE_BOX = (42, 42, 470, 470)
-FACE_RADIUS = 54
+# At Icon Composer's 200% layer scale, the native mask renders with about a
+# 45 px corner radius and the terminal face sits about 17 px inside it. The
+# source radius below renders near 28 px: the outer radius minus the inset, so
+# both curves share a center and the blue rim stays visually even.
+FACE_RADIUS = 70
+ICON_COMPOSER_SCALE = 2
 PROMPT_POINTS = ((156, 168), (260, 256), (156, 344))
 PROMPT_STROKE = 36
 CARET_BOX = (296, 326, 416, 354)
@@ -86,26 +91,37 @@ class PolylinePrimitive:
 Primitive = RectPrimitive | PolylinePrimitive
 
 
-def icon_primitives(*, modern_macos: bool) -> tuple[Primitive, ...]:
-    """Return the one geometry model consumed by both SVG and Pillow."""
-    face = (
-        RectPrimitive((0, 0, CANVAS, CANVAS), 0, ACCENT),
-        RectPrimitive(FACE_BOX, FACE_RADIUS, BASE),
-    ) if modern_macos else (
+def icon_primitives() -> tuple[Primitive, ...]:
+    """Return the compatible geometry consumed by Linux/Windows outputs."""
+    return (
         RectPrimitive(OUTER_BOX, OUTER_RADIUS, BASE, ACCENT, OUTER_STROKE),
+        PolylinePrimitive(PROMPT_POINTS, TEXT, PROMPT_STROKE),
+        RectPrimitive(CARET_BOX, CARET_RADIUS, ACCENT),
     )
-    return (*face, PolylinePrimitive(PROMPT_POINTS, TEXT, PROMPT_STROKE),
-            RectPrimitive(CARET_BOX, CARET_RADIUS, ACCENT))
+
+
+def icon_composer_primitives() -> tuple[Primitive, ...]:
+    """Artwork above Icon Composer's Kettle-blue system background.
+
+    The document owns the full canvas fill and macOS owns the outer mask.
+    Keeping both out of this SVG prevents the old double-rounded treatment and
+    lets Finder, the Dock and the running application render one asset.
+    """
+    return (
+        RectPrimitive(FACE_BOX, FACE_RADIUS, BASE),
+        PolylinePrimitive(PROMPT_POINTS, TEXT, PROMPT_STROKE),
+        RectPrimitive(CARET_BOX, CARET_RADIUS, ACCENT),
+    )
 
 
 def color_hex(color: tuple[int, int, int, int]) -> str:
     return "#" + "".join(f"{component:02x}" for component in color[:3])
 
 
-def svg_source(*, modern_macos: bool) -> str:
+def svg_source() -> str:
     """Return a vector artifact from the same primitives Pillow consumes."""
     body: list[str] = []
-    for primitive in icon_primitives(modern_macos=modern_macos):
+    for primitive in icon_primitives():
         if isinstance(primitive, RectPrimitive):
             left, top, right, bottom = primitive.box
             attributes = [
@@ -125,19 +141,86 @@ def svg_source(*, modern_macos: bool) -> str:
                 f'stroke-width="{primitive.stroke_width}" '
                 'stroke-linecap="round" stroke-linejoin="round"/>'
             )
-    treatment = (
-        "Full-bleed runtime source for macOS 26+; AppKit supplies the outer mask."
-        if modern_macos
-        else "Compatible pre-rounded source for Linux, Windows and macOS 11-15."
-    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        f'<!-- {treatment} Geometry below is generated from icon_primitives. -->\n'
+        '<!-- Compatible pre-rounded source for Linux, Windows and macOS 11-15. Geometry '
+        'below is generated from icon_primitives. -->\n'
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS}" '
         f'height="{CANVAS}" viewBox="0 0 {CANVAS} {CANVAS}">\n'
         + "\n".join(body)
         + "\n</svg>\n"
     )
+
+
+def icon_composer_svg_source() -> str:
+    body: list[str] = []
+    for primitive in icon_composer_primitives():
+        if isinstance(primitive, RectPrimitive):
+            left, top, right, bottom = primitive.box
+            body.append(
+                f'  <rect x="{left}" y="{top}" width="{right - left}" '
+                f'height="{bottom - top}" rx="{primitive.radius}" '
+                f'fill="{color_hex(primitive.fill)}"/>'
+            )
+        else:
+            points = " ".join(f"{x},{y}" for x, y in primitive.points)
+            body.append(
+                f'  <polyline points="{points}" fill="none" '
+                f'stroke="{color_hex(primitive.stroke)}" '
+                f'stroke-width="{primitive.stroke_width}" '
+                'stroke-linecap="round" stroke-linejoin="round"/>'
+            )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!-- Foreground for AppIcon.icon. Icon Composer supplies the blue '
+        'background and macOS supplies the outer mask. -->\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS}" '
+        f'height="{CANVAS}" viewBox="0 0 {CANVAS} {CANVAS}">\n'
+        + "\n".join(body)
+        + "\n</svg>\n"
+    )
+
+
+def icon_composer_json_source() -> str:
+    return f"""{{
+  "fill" : {{
+    "solid" : "srgb:0.47843,0.63529,0.96863,1.00000"
+  }},
+  "groups" : [
+    {{
+      "layers" : [
+        {{
+          "hidden" : false,
+          "image-name" : "kettle.svg",
+          "name" : "Kettle Terminal",
+          "position" : {{
+            "scale" : {ICON_COMPOSER_SCALE},
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }}
+        }}
+      ],
+      "shadow" : {{
+        "kind" : "none",
+        "opacity" : 0.5
+      }},
+      "specular" : false,
+      "translucency" : {{
+        "enabled" : false,
+        "value" : 0.5
+      }}
+    }}
+  ],
+  "supported-platforms" : {{
+    "circles" : [
+
+    ],
+    "squares" : "shared"
+  }}
+}}
+"""
 
 
 def render_primitives(primitives: tuple[Primitive, ...]) -> Image.Image:
@@ -184,11 +267,7 @@ def render_primitives(primitives: tuple[Primitive, ...]) -> Image.Image:
 
 
 def render_master() -> Image.Image:
-    return render_primitives(icon_primitives(modern_macos=False))
-
-
-def render_modern_macos_master() -> Image.Image:
-    return render_primitives(icon_primitives(modern_macos=True))
+    return render_primitives(icon_primitives())
 
 
 def scaled(master: Image.Image, px: int) -> Image.Image:
@@ -213,7 +292,6 @@ def emit(
     set it would have produced.
     """
     master = render_master()
-    modern_macos_master = render_modern_macos_master()
     written: list[tuple[Path, str]] = []
 
     linux_dir.mkdir(parents=True, exist_ok=True)
@@ -221,17 +299,20 @@ def emit(
     # Write bytes, not text mode: Windows translates `\n` to CRLF in
     # `Path.write_text`, while .gitattributes forces the tracked SVGs to LF and
     # the drift gate deliberately compares vector bytes exactly.
-    linux_svg.write_bytes(svg_source(modern_macos=False).encode("utf-8"))
+    linux_svg.write_bytes(svg_source().encode("utf-8"))
     written.append((linux_svg, "packaging/linux/kettle.svg"))
 
-    macos_svg = iconset_dir.parent / "kettle.svg"
-    macos_svg.parent.mkdir(parents=True, exist_ok=True)
-    macos_svg.write_bytes(svg_source(modern_macos=True).encode("utf-8"))
-    written.append((macos_svg, "packaging/macos/kettle.svg"))
-
-    modern_macos_png = iconset_dir.parent / "kettle-modern.png"
-    scaled(modern_macos_master, 1024).save(modern_macos_png)
-    written.append((modern_macos_png, "packaging/macos/kettle-modern.png"))
+    icon_composer = iconset_dir.parent / "AppIcon.icon"
+    composer_assets = icon_composer / "Assets"
+    composer_assets.mkdir(parents=True, exist_ok=True)
+    composer_svg = composer_assets / "kettle.svg"
+    composer_svg.write_bytes(icon_composer_svg_source().encode("utf-8"))
+    written.append(
+        (composer_svg, "packaging/macos/AppIcon.icon/Assets/kettle.svg")
+    )
+    composer_json = icon_composer / "icon.json"
+    composer_json.write_bytes(icon_composer_json_source().encode("utf-8"))
+    written.append((composer_json, "packaging/macos/AppIcon.icon/icon.json"))
 
     for px in LINUX_SIZES:
         path = linux_dir / f"kettle-{px}.png"
@@ -247,9 +328,9 @@ def emit(
             (f"icon_{base}x{base}@2x.png", base * 2),
         )
         for name, px in names_and_sizes:
-            # macOS 11-15 do not provide Tahoe's automatic source treatment.
-            # Keep the static .icns pre-rounded; the full-bleed source is set
-            # at runtime only on macOS 26+.
+            # Keep the former standalone iconset reproducible for downstream
+            # packagers. The official .app now uses AppIcon.icon, whose actool
+            # output includes its own previous-release fallback.
             scaled(master, px).save(iconset_dir / name)
             written.append(
                 (iconset_dir / name, f"packaging/macos/kettle.iconset/{name}")
@@ -333,7 +414,7 @@ def same_pixels(a: Path, b: Path) -> bool:
 
 
 def same_artifact(generated: Path, tracked: Path) -> bool:
-    if generated.suffix == ".svg":
+    if generated.suffix in {".svg", ".json"}:
         return generated.read_bytes() == tracked.read_bytes()
     return same_pixels(generated, tracked)
 

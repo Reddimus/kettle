@@ -367,16 +367,17 @@ would require compensating every one of those coordinate systems for AppKit's
 content layout rect; no such hidden geometry shift is introduced for a cosmetic
 fix.
 
-The application icon is versioned at runtime rather than weakening the static
-bundle's compatibility. macOS 11–15 receive the pre-rounded transparent
-`.icns` they expect. On macOS 26+, `ApplicationHandler::resumed` replaces the
-running application's icon once with an embedded opaque full-bleed PNG, then
-AppKit applies Tahoe's single outer mask. This avoids both failure modes: a
-square full-bleed icon on older systems and a twice-rounded accent on current
-systems. A closed app still exposes the compatible bundle icon because a
-single static `.icns` cannot select different artwork by OS release. The live
-Dock result is a native visual release gate, not inferred from image alpha or a
-Linux generator test.
+The application icon is one native Icon Composer asset rather than a static
+bundle icon plus a runtime override. The generated `AppIcon.icon` holds a
+Kettle-blue system background and one vector foreground layer for the terminal
+face, prompt and caret; it deliberately bakes neither an outer mask nor a
+shadow. Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
+metadata, and a loose previous-release `.icns` for the macOS 11 deployment
+target. Finder, the closed and running Dock item, and the app switcher therefore
+resolve the same asset, while macOS owns the only outer mask. This removes both
+the twice-rounded current-system icon and the old running-versus-closed split.
+The native visual result remains a release gate rather than something inferred
+from SVG source or a Linux generator test.
 
 Since v2.18.0 every kettle window lives in one process. `App` holds
 `windows: BTreeMap<u64, WindowState>`
@@ -1338,6 +1339,16 @@ See [TESTING.md](TESTING.md) for the per-crate breakdown
 (run `cargo test --workspace` for today's count — it grows ~1/cycle).
 Comparative analysis behind these choices (with citations) is in
 [RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
+
+The main solid-quad instance remains deliberately minimal because terminal
+cell backgrounds dominate it. Pane outlines that meet a decorated macOS
+window's rounded bottom corners use the separate instanced pipeline in
+`crates/kettle-render/src/outline.rs`: one outline per affected pane, a per-corner
+mask so internal split corners stay square, and derivative-based antialiasing.
+This avoids adding radius/mask fields to every cell quad and keeps other
+platforms on their exact existing four-strip path. The UI supplies only the
+native decoration/fullscreen policy; the renderer owns pane geometry and is
+therefore responsible for selecting which pane corners touch the surface.
 
 ## Terminator-parity subsystems
 

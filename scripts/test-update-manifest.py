@@ -208,6 +208,26 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("contents: write", publish)
         self.assertIn("GH_TOKEN:", publish)
         self.assertNotIn("KETTLE_UPDATE_SIGNING_KEY_PEM", publish)
+        package = release_workflow.split("\n  package:\n", 1)[1].split(
+            "\n  finalize:\n", 1
+        )[0]
+        self.assertIn("environment: ${{ matrix.environment }}", package)
+        self.assertEqual(package.count("environment: release-build"), 3)
+        self.assertEqual(package.count("environment: macos-signing"), 1)
+        self.assertIn("printf '%s' \"$APPLE_CERT_P12\" | base64 -D", package)
+        self.assertIn('-k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"', package)
+        self.assertIn('SIGNED_TEAM=$(\n', package)
+        self.assertIn('!= \"$APPLE_TEAM_ID\"', package)
+        final_macos_archive = (
+            "ditto -c -k --keepParent dist/kettle.app "
+            "${{ matrix.artifact }}"
+        )
+        self.assertIn(final_macos_archive, package)
+        self.assertNotIn("zip -r", package)
+        self.assertLess(
+            package.index('xcrun stapler staple "$APP"'),
+            package.index(final_macos_archive),
+        )
         self.assertNotIn("runs-on: ubuntu-latest", release_workflow)
         self.assertNotIn("runs-on: macos-latest", release_workflow)
         self.assertNotIn("runs-on: windows-latest", release_workflow)

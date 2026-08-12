@@ -6,7 +6,7 @@
 |---|---|---|
 | Linux | x86_64 | **Tier 1** — glibc 2.35+, prebuilt binary + one-line installer |
 | Linux | aarch64 | **Tier 1 distribution** — glibc 2.35+, cross-built prebuilt binary + one-line installer; native ARM UI/runtime is manually verified but not yet in CI |
-| macOS | universal (Intel + Apple Silicon) | **Tier 1** — `.app` bundle (unsigned) |
+| macOS | universal (Intel + Apple Silicon) | **Tier 1** — signed and notarized universal `.app` bundle |
 | Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
 | Windows 11 | aarch64 | **Tier 2** — native source build verified; no prebuilt archive |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
@@ -184,17 +184,12 @@ GitHub runners for every platform:
   `nix run github:reddimus/kettle` runs without installing; see
   [`packaging/nix/README.md`](../packaging/nix/README.md) for
   `nix profile install` + dev-shell + home-manager usage.
-- **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Unzip and
-  drag `kettle.app` to `/Applications`. It's an unsigned build, so the first
-  launch needs a one-time Gatekeeper approval:
-  - **macOS 14 (Sonoma) and earlier:** right-click `kettle.app` → **Open** →
-    **Open** in the dialog.
-  - **macOS 15 (Sequoia) and later:** double-click once (it'll be blocked),
-    then go to **System Settings → Privacy & Security**, scroll to the
-    *"kettle was blocked"* notice, and click **Open Anyway** (right-click →
-    Open no longer bypasses Gatekeeper for unsigned apps on 15+).
-  - From a terminal you can instead clear the quarantine flag directly:
-    `xattr -dr com.apple.quarantine /Applications/kettle.app`.
+- **macOS** — `kettle-macos-universal.zip` containing `kettle.app`. Official
+  release apps are Developer ID signed, notarized, stapled, and assessed by
+  Gatekeeper before publication. Unzip and drag `kettle.app` to `/Applications`;
+  it should open normally on first launch. Locally built and pull-request preview
+  apps are intentionally unsigned and are for development use rather than the
+  recommended installation path.
 
   Each release includes a ready-to-use `kettle.rb` formula rendered from
   [`packaging/homebrew/kettle.rb.in`](../packaging/homebrew/kettle.rb.in);
@@ -492,19 +487,16 @@ drivers). The workspace also contains native PTY/ConPTY lifecycle tests. See
 ## Regenerating the app icons (contributors)
 
 `scripts/gen-icons.py` is the single source of truth for the icon geometry. It
-emits two deliberate SVG treatments and every shipped raster from that same
-model. The generated `packaging/linux/kettle.svg` is transparent for Linux and
-Windows. The static macOS iconset deliberately uses that compatible pre-rounded
-treatment because macOS 11–15 do not apply Tahoe's mask. The generated
-`packaging/macos/kettle.svg` and `kettle-modern.png` are opaque and full-bleed;
-Kettle embeds that PNG and applies it to the running app only on macOS 26+ so
-the system owns the single outer curve. The generator also writes the fixed-size
-hicolor PNGs (`kettle-16.png` … `kettle-256.png`), the legacy macOS iconset,
-and the Windows `.ico`:
+emits the transparent compatible treatment used by Linux/Windows and the
+foreground for `packaging/macos/AppIcon.icon`. The native macOS document owns
+the Kettle-blue background while the system owns the only outer mask; Xcode
+generates its previous-release fallback for the macOS 11 deployment target.
+The generator also writes the fixed-size hicolor PNGs (`kettle-16.png` …
+`kettle-256.png`), the retained compatibility iconset, and the Windows `.ico`:
 
 ```sh
-# Cross-platform path (needs Pillow) — regenerates both SVGs, the modern
-# macOS PNG, every Linux PNG and legacy iconset member, and the Windows .ico:
+# Cross-platform path (needs Pillow) — regenerates both SVG sources,
+# AppIcon.icon, every Linux PNG and compatibility iconset member, and .ico:
 python3 scripts/gen-icons.py
 
 # Backward-compatible wrapper around the same canonical generator:

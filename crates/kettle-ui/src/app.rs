@@ -711,45 +711,10 @@ fn set_macos_window_background(window: &Window, color: kettle_config::Rgb) {
     ns_window.setBackgroundColor(Some(&background));
 }
 
-#[cfg(any(test, target_os = "macos"))]
-fn macos_uses_modern_application_icon(major_version: i64) -> bool {
-    major_version >= 26
-}
-
-#[cfg(target_os = "macos")]
-fn set_macos_application_icon_for_current_os() {
-    use objc2::ClassType as _;
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::{MainThreadMarker, NSData, NSProcessInfo};
-    use std::sync::Once;
-
-    static SET_APPLICATION_ICON: Once = Once::new();
-    SET_APPLICATION_ICON.call_once(|| {
-        let version = NSProcessInfo::processInfo().operatingSystemVersion();
-        if !macos_uses_modern_application_icon(version.majorVersion as i64) {
-            return;
-        }
-        let Some(main_thread) = MainThreadMarker::new() else {
-            log::warn!("cannot set the modern macOS icon away from the main thread");
-            return;
-        };
-        let data = NSData::with_bytes(include_bytes!("../../../packaging/macos/kettle-modern.png"));
-        let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) else {
-            log::warn!("cannot decode the embedded modern macOS application icon");
-            return;
-        };
-        let application = NSApplication::sharedApplication(main_thread);
-        // SAFETY: winit invokes `resumed` on AppKit's main thread, proven by
-        // `MainThreadMarker`, and the retained NSImage outlives this message.
-        unsafe { application.setApplicationIconImage(Some(&icon)) };
-    });
-}
-
 #[cfg(test)]
 mod macos_chrome_policy_tests {
     use super::{
-        MacosTitlebarPolicy, macos_titlebar_policy, macos_uses_modern_application_icon,
-        production_source,
+        MacosTitlebarPolicy, macos_titlebar_policy, production_source, rounded_window_corner_policy,
     };
 
     #[test]
@@ -769,23 +734,46 @@ mod macos_chrome_policy_tests {
     }
 
     #[test]
-    fn full_bleed_runtime_icon_starts_with_macos_26() {
-        assert!(!macos_uses_modern_application_icon(15));
-        assert!(macos_uses_modern_application_icon(26));
-        assert!(macos_uses_modern_application_icon(27));
+    fn only_live_decorated_macos_windows_receive_rounded_content_corners() {
+        assert!(rounded_window_corner_policy(true, true, false));
+        assert!(!rounded_window_corner_policy(true, false, false));
+        assert!(!rounded_window_corner_policy(true, true, true));
+        assert!(!rounded_window_corner_policy(false, true, false));
+
+        let src = production_source();
+        let corner_wiring = src
+            .split("// AppKit clips a decorated window's bottom corners")
+            .nth(1)
+            .and_then(|rest| rest.split("let frame_result =").next())
+            .expect("rounded-corner render wiring");
+        assert!(
+            corner_wiring.contains("window.fullscreen().is_some()"),
+            "AppKit's green button bypasses Kettle's cached fullscreen action; \
+             the corner policy must query winit's live native state"
+        );
+        assert!(
+            !corner_wiring.contains("!ws.fullscreen"),
+            "the cached action state desynchronizes after a native fullscreen transition"
+        );
+        assert!(
+            corner_wiring.contains("window.is_decorated()"),
+            "live reload can change cfg.borderless without changing an existing window; \
+             the corner policy must query the native decoration state"
+        );
+        assert!(
+            !corner_wiring.contains("self.cfg.borderless"),
+            "configuration intent is not the existing window's decoration state"
+        );
     }
 
     #[test]
-    fn production_wires_the_runtime_icon_and_native_background() {
+    fn production_wires_the_native_background_without_an_icon_override() {
         let src = production_source();
-        let resumed = src
-            .split("fn resumed(&mut self, event_loop: &ActiveEventLoop)")
-            .nth(1)
-            .and_then(|rest| rest.split("fn window_event(").next())
-            .expect("ApplicationHandler::resumed body");
         assert!(
-            resumed.contains("set_macos_application_icon_for_current_os()"),
-            "the tested macOS version policy must be wired into startup"
+            !src.contains("setApplicationIconImage")
+                && !src.contains("set_macos_application_icon_for_current_os"),
+            "the bundle's AppIcon asset must be the one icon source for Finder, \
+             Dock, app switching and the running application"
         );
 
         let post_create = src
@@ -1100,6 +1088,14 @@ fn set_visible_on_all_spaces(window: &winit::window::Window) {
 
 fn rect_contains(rect: kettle_render::Rect4, x: f32, y: f32) -> bool {
     x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
+}
+
+fn rounded_window_corner_policy(
+    is_macos: bool,
+    live_decorated: bool,
+    live_fullscreen: bool,
+) -> bool {
+    is_macos && live_decorated && !live_fullscreen
 }
 
 fn rect_json(rect: kettle_render::Rect4) -> serde_json::Value {
@@ -2001,6 +1997,31 @@ fn split_new_tab_button(
     let (x, y, w, h) = button;
     let aw = arrow_w.clamp(0.0, w);
     ((x, y, aw, h), (x + aw, y, (w - aw).max(0.0), h))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NewTabHoverTarget {
+    Menu,
+    Plus,
+}
+
+fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {
+    if bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, x, y) {
+        Some(NewTabHoverTarget::Menu)
+    } else if rect_contains(bar.new_tab, x, y) {
+        Some(NewTabHoverTarget::Plus)
+    } else {
+        None
+    }
+}
+
+/// Whether a pointer event belongs to the tab-bar chrome. `bar.height` is the
+/// row height, not the full extent of a vertical strip, so using
+/// `bar.y..bar.y + bar.height` silently makes every vertical row after the
+/// first (including the new-tab button) non-interactive. `band` is the layout's
+/// actual horizontal row or vertical column and is shared with rendering.
+fn tab_bar_pointer_region_contains(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.height > 0.0 && rect_contains(bar.band, x, y)
 }
 
 /// Terminator parity (key_next_profile / key_previous_profile):
@@ -6620,12 +6641,17 @@ impl App {
     /// Every Mux::new_tab / new_tab_with call site that USER-VISIBLY
     /// creates a tab (i.e. NOT startup-time first-tab init before
     /// plugins load) should call this. Centralizes the plugin-
-    /// contract dispatch so future new_tab callers can't drift.
+    /// contract dispatch so future new_tab callers can't drift. It also
+    /// recomputes chrome hover from the new layout: on a vertical tab bar the
+    /// `+` moves down one row when a tab is added, so retaining the old hover
+    /// would leave the relocated button highlighted and the cursor as a hand
+    /// while the pointer is actually over the new tab.
     fn fire_tab_add_event(&mut self, ws: &mut WindowState) {
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_add");
         }
         self.fire_lua_event(ws, crate::LuaEvent::TabAdd(ws.mux.active), "tab_add hook");
+        self.sync_cursor_icon(ws);
     }
 
     /// Fire LuaEvent::TabClose + drain commands.
@@ -6963,9 +6989,30 @@ impl App {
         // `tabbar.hovered_close_idx`, which we pass through in
         // `tab_bar()`).
         let bar = self.tab_bar(ws);
+        let prior_hover = (
+            ws.hovered_close_idx,
+            ws.hovered_new_tab,
+            ws.hovered_new_tab_menu,
+        );
         ws.hovered_close_idx =
             hovered_close_button(&bar.segments, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let new_tab_hover = new_tab_hover_target(&bar, cursor_x, cursor_y);
+        ws.hovered_new_tab = new_tab_hover == Some(NewTabHoverTarget::Plus);
+        ws.hovered_new_tab_menu = new_tab_hover == Some(NewTabHoverTarget::Menu);
+        if prior_hover
+            != (
+                ws.hovered_close_idx,
+                ws.hovered_new_tab,
+                ws.hovered_new_tab_menu,
+            )
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
+        let new_tab_hover_icon =
+            (ws.hovered_new_tab || ws.hovered_new_tab_menu).then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {
@@ -6997,6 +7044,7 @@ impl App {
         // (after chrome/close-button, before the link-pointer / I-beam default).
         let want = drag_icon
             .or(close_hover)
+            .or(new_tab_hover_icon)
             .or(confirm_hover)
             .or(search_hover)
             .or(chrome)
@@ -7390,6 +7438,8 @@ impl App {
                 segments: Vec::new(),
                 new_tab: (strip_x, y, strip_w, height),
                 new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+                hovered_new_tab: false,
+                hovered_new_tab_menu: false,
                 broadcast: ws.mux.is_broadcast_on(),
                 hovered_close_idx: None,
                 drag_cursor_x: None,
@@ -7501,6 +7551,8 @@ impl App {
             segments,
             new_tab: plus_rect,
             new_tab_menu: arrow_rect,
+            hovered_new_tab: ws.hovered_new_tab,
+            hovered_new_tab_menu: ws.hovered_new_tab_menu,
             // Broadcast indicator on the active tab.
             broadcast: ws.mux.is_broadcast_on(),
             // Hover-on-✕ chip: renderer paints a red highlight behind
@@ -7634,6 +7686,8 @@ impl App {
             // No dropdown arrow on vertical bars — the bottom-of-
             // strip full-width `+` has nowhere sensible for a left-side arrow.
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
+            hovered_new_tab: ws.hovered_new_tab,
+            hovered_new_tab_menu: false,
             broadcast: ws.mux.is_broadcast_on(),
             hovered_close_idx: ws.hovered_close_idx,
             // A vertical strip's ghost rides the cursor's y down a fixed
@@ -11463,6 +11517,25 @@ impl App {
             ws.output_pacer.presentation_failed();
             return;
         };
+        // AppKit clips a decorated window's bottom corners after the Metal
+        // scene is drawn. Tell the renderer to replace the square pane-border
+        // strips at those two outer corners with one concentric antialiased
+        // outline. Borderless/fullscreen windows have square content surfaces;
+        // every non-macOS platform deliberately stays on the existing path.
+        // Both inputs come from winit's live native state. `ws.fullscreen`
+        // misses AppKit's green-button transition, while `cfg.borderless` may
+        // change during a live reload even though winit cannot retrofit the
+        // existing window's decorations. Reading the window itself keeps the
+        // renderer aligned with the surface AppKit is actually clipping.
+        let live_fullscreen = window
+            .as_ref()
+            .is_some_and(|window| window.fullscreen().is_some());
+        let live_decorated = window.as_ref().is_some_and(|window| window.is_decorated());
+        renderer.set_rounded_window_corners(rounded_window_corner_policy(
+            cfg!(target_os = "macos"),
+            live_decorated,
+            live_fullscreen,
+        ));
         let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
             &tabbar,
@@ -17334,8 +17407,7 @@ impl App {
         if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
-        if bar.height > 0.0 && py >= bar.y && py < bar.y + bar.height && (bcode == 0 || bcode == 1)
-        {
+        if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if bcode == 0 && bar.new_tab_menu.2 > 0.0 && rect_contains(bar.new_tab_menu, px, py) {
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
@@ -20991,8 +21063,6 @@ impl ApplicationHandler<UserEvent> for App {
     // mid-handler drops the entry, which is fine: kettle aborts on panic,
     // nothing observes the missing window.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        #[cfg(target_os = "macos")]
-        set_macos_application_icon_for_current_os();
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("resumed");
         let seq = self.focused_seq;
@@ -23961,6 +24031,9 @@ impl App {
                 // v2.26.0: pointer left the window → drop the scrollbar hover so
                 // the overlay bar relaxes to its dim state.
                 ws.scrollbar_hover = false;
+                ws.hovered_close_idx = None;
+                ws.hovered_new_tab = false;
+                ws.hovered_new_tab_menu = false;
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -24470,11 +24543,7 @@ impl App {
                 let in_bar = |r: kettle_render::Rect4, px: f32, py: f32| {
                     px >= r.0 && px < r.0 + r.2 && py >= r.1 && py < r.1 + r.3
                 };
-                if bar.height > 0.0
-                    && py >= bar.y
-                    && py < bar.y + bar.height
-                    && (bcode == 0 || bcode == 1)
-                {
+                if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
                     if bcode == 0 && bar.new_tab_menu.2 > 0.0 && in_bar(bar.new_tab_menu, px, py) {
                         // The `▾` dropdown — open the shell chooser
                         // anchored at the arrow's bottom-left. Checked BEFORE the
@@ -29281,6 +29350,16 @@ mod tests {
                 && body.find("rect_contains(bar.new_tab_menu, px, py)")
                     < body.find("rect_contains(bar.new_tab, px, py)"),
             "ctl_mouse_press must check the new-tab dropdown arrow before the + button"
+        );
+        assert!(
+            body.contains("tab_bar_pointer_region_contains(&bar, px, py)"),
+            "ctl_mouse_press must use the full vertical tab-bar band, not only its first row"
+        );
+        assert_eq!(
+            src.matches("tab_bar_pointer_region_contains(&bar, px, py)")
+                .count(),
+            2,
+            "both the control-plane and real-window mouse paths must use the full tab-bar band"
         );
     }
 
@@ -34488,7 +34567,10 @@ mod tests {
     /// negative `+` width.
     #[test]
     fn split_new_tab_button_places_arrow_left_of_plus() {
-        use super::split_new_tab_button;
+        use super::{
+            NewTabHoverTarget, new_tab_hover_target, split_new_tab_button,
+            tab_bar_pointer_region_contains,
+        };
         // button at x=200, 52 wide (two 26-px halves), arrow 26 wide.
         let (arrow, plus) = split_new_tab_button((200.0, 0.0, 52.0, 26.0), 26.0);
         assert_eq!(arrow, (200.0, 0.0, 26.0, 26.0)); // arrow on the LEFT
@@ -34500,6 +34582,58 @@ mod tests {
         assert_eq!(a2.2, 20.0);
         assert_eq!(p2.2, 0.0);
         assert!(p2.2 >= 0.0);
+
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.new_tab_menu = arrow;
+        bar.new_tab = plus;
+        assert_eq!(
+            new_tab_hover_target(&bar, 213.0, 13.0),
+            Some(NewTabHoverTarget::Menu)
+        );
+        assert_eq!(
+            new_tab_hover_target(&bar, 239.0, 13.0),
+            Some(NewTabHoverTarget::Plus)
+        );
+        assert_eq!(new_tab_hover_target(&bar, 199.9, 13.0), None);
+        assert_eq!(new_tab_hover_target(&bar, 252.1, 13.0), None);
+
+        // Horizontal bars occupy one row; vertical bars keep the same row
+        // height but expose a full-height interaction band. The latter is the
+        // geometry that makes lower tab rows and their trailing `+` clickable.
+        bar.height = 26.0;
+        bar.band = (0.0, 0.0, 252.0, 26.0);
+        assert!(tab_bar_pointer_region_contains(&bar, 239.0, 13.0));
+        assert!(!tab_bar_pointer_region_contains(&bar, 239.0, 27.0));
+        bar.band = (200.0, 0.0, 52.0, 400.0);
+        bar.new_tab = (200.0, 78.0, 52.0, 26.0);
+        assert!(tab_bar_pointer_region_contains(&bar, 226.0, 91.0));
+        assert_eq!(
+            new_tab_hover_target(&bar, 226.0, 91.0),
+            Some(NewTabHoverTarget::Plus)
+        );
+        // Adding a vertical tab moves the button down one row. Re-running the
+        // same hit-test against the new layout must clear the stale hover even
+        // though the physical pointer has not moved.
+        bar.new_tab = (200.0, 104.0, 52.0, 26.0);
+        assert_eq!(new_tab_hover_target(&bar, 226.0, 91.0), None);
+        assert!(!tab_bar_pointer_region_contains(&bar, 199.9, 91.0));
+    }
+
+    /// Every user-visible tab-add path funnels through this helper, so keep the
+    /// post-layout hover refresh beside the Lua/recording event rather than
+    /// relying on each input route to remember it independently.
+    #[test]
+    fn tab_add_event_recomputes_chrome_hover_after_layout_changes() {
+        let src = production_source();
+        let body = src
+            .split("fn fire_tab_add_event(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("fire_tab_add_event body");
+        assert!(
+            body.contains("self.sync_cursor_icon(ws);"),
+            "adding a tab must recompute hover after a vertical new-tab button moves"
+        );
     }
 
     /// Drift guard. `pick_next_profile` is the pure
