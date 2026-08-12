@@ -30,7 +30,9 @@
   <key>CFBundleExecutable</key>
   <string>kettle</string>
   <key>CFBundleIconFile</key>
-  <string>kettle</string>
+  <string>AppIcon</string>
+  <key>CFBundleIconName</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>

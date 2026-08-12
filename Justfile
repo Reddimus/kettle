@@ -155,9 +155,10 @@ vendor-check: vendor-parser-check vendor-pty-check
 # bounds. The focused self-test pins that a missing Markdown target is fatal.
 # The JSON ledger is written under ignored target/diagnostics.
 
-# Verify 2 generated SVGs and 19 raster artifacts against the canonical
-# geometry model. The check compares SVG bytes, 18 decoded PNGs, all 7 ICO
-# resolutions, and required PNG mode/bit depth; it ignores only
+# Verify the generated platform icon set against the canonical geometry model.
+# The check compares the Linux SVG, the native AppIcon.icon document and its
+# SVG artwork, 17 decoded PNGs, all 7 ICO resolutions, and required PNG
+# mode/bit depth; it ignores only
 # encoder-dependent compression and chunk ordering. Skips without Pillow so a
 # contributor is not blocked; CI and `gauntlet-full` pass
 # --require-tooling so the gate cannot quietly stop running.
@@ -295,38 +296,36 @@ online-installer-test:
     @echo "online-installer-test exercises the Linux/POSIX one-line installer."
     @echo "Run it under WSL, or trust the Linux CI leg."
 
-# Rebuild packaging/macos/kettle.iconset into a .icns via the same
-# `iconutil` CI uses, and sanity-check the result isn't a malformed or
-# empty container (the same regression class the release.yml iconutil
-# step could otherwise only catch at tag-cut time). `iconutil` ships
-# with macOS only — there's no Linux/Windows equivalent. The macOS recipe
-# fails if the required tool is missing; other OS recipes only classify it as
-# inapplicable and are not dependencies of their full gate. Mirrors CI's
-# "Packaging smoke — macOS .icns" step. Output lands under
+# Compile the maintained Icon Composer package through the same Xcode asset
+# pipeline the release uses. Require Assets.car, a loose AppIcon.icns fallback,
+# and both plist keys: without any one of them Finder, a closed Dock item, or
+# the running application can silently fall back to different artwork. Xcode's
+# actool ships with macOS only; other OS recipes classify this as inapplicable.
+# Output lands under
 # `{{TMPDIR}}` like the `screenshot`/`menu` recipes.
 [macos]
 icns-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    command -v iconutil >/dev/null 2>&1 \
-      || { echo "error: icns-smoke requires iconutil on macOS" >&2; exit 1; }
-    out="{{TMPDIR}}/kettle-icns-smoke.icns"
-    iconutil -c icns packaging/macos/kettle.iconset -o "$out"
-    file "$out" | grep -q "Mac OS X icon" \
-      || { echo "iconutil produced a non-icns file"; file "$out"; exit 1; }
-    # Real one is ~300 KB; floor at 100 KB catches an empty container.
-    size=$(stat -f%z "$out")
-    test "$size" -gt 100000 \
-      || { echo "icns too small ($size bytes) — iconutil likely produced an empty container"; exit 1; }
-    echo "iconutil OK ($size bytes)"
+    command -v xcrun >/dev/null 2>&1 \
+      || { echo "error: icns-smoke requires Xcode's actool on macOS" >&2; exit 1; }
+    out=$(mktemp -d "{{TMPDIR}}/kettle-app-icon.XXXXXX")
+    xcrun actool packaging/macos/AppIcon.icon \
+      --compile "$out" --platform macosx --minimum-deployment-target 11.0 \
+      --app-icon AppIcon --output-partial-info-plist "$out/partial.plist"
+    test -s "$out/Assets.car"
+    test -s "$out/AppIcon.icns"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$out/partial.plist")" = AppIcon
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$out/partial.plist")" = AppIcon
+    echo "actool AppIcon OK"
 
 [linux]
 icns-smoke:
-    @echo "icns-smoke requires macOS iconutil and is not a Linux gate."
+    @echo "icns-smoke requires macOS Xcode actool and is not a Linux gate."
 
 [windows]
 icns-smoke:
-    @echo "icns-smoke needs iconutil (macOS-only); not applicable on Windows."
+    @echo "icns-smoke needs Xcode actool (macOS-only); not applicable on Windows."
     @echo "See 'just ico-smoke' for the Windows .ico equivalent."
 
 # Verify packaging/windows/kettle.ico parses as a well-formed,
@@ -433,11 +432,11 @@ gauntlet-full: gauntlet-strict full-native-gates
 
 [windows]
 full-native-gates: icons-check-required update-manifest-test release-assets-test package-manifest-test ico-smoke windows-installer-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke perf-self-test
-    @echo "NOT APPLICABLE on Windows: Linux installer/online/package-template/headless-Xvfb and macOS iconutil gates."
+    @echo "NOT APPLICABLE on Windows: Linux installer/online/package-template/headless-Xvfb and macOS actool gates."
 
 [linux]
 full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
-    @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS iconutil gates."
+    @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS actool gates."
 
 [macos]
 full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke

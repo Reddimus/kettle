@@ -594,6 +594,12 @@ discipline here.
   `tab_drag_target_index_clamps_to_strip`;
   `hovered_close_button_finds_only_the_close_rect_hits`
   + `tab_close_hover_icon_overrides_chrome_default`;
+  `split_new_tab_button_places_arrow_left_of_plus` also pins independent
+  dropdown/`+` hover hit targets;
+  `new_tab_glyphs_are_unpadded_and_centered_in_their_own_hit_rects` prevents
+  artificial text padding from shifting either symbol, while
+  `pane_window_corner_tests` proves only panes touching a rounded surface bottom
+  receive left/right corner masks.
   selection-autoscroll ladder; cwd-basename tab-title fallback;
   the SSH and `-e PROG` initial-pane-title heuristics;
   session JSON round-trips, durable private save,
@@ -1815,18 +1821,17 @@ name the shape of bug each pass caught.
   toolchain@1.89` builds + tests the workspace at the declared
   floor, catches a future transitive-dep MSRV bump at PR time
   instead of release time.
-- The **icon raster, iconutil, and ico packaging smokes** — the Linux CI leg
-  compares 2 generated SVGs and 19 raster artifacts: 18 PNG files plus the
-  Windows ICO. It decodes all 18 PNGs and all 7 ICO resolutions (25 decoded
-  images). The macOS leg compiles the unchanged legacy iconset into `.icns`;
-  the Windows leg validates and embeds the existing `.ico`. Generator tests pin
-  the platform boundary: legacy Linux/Windows/macOS assets keep transparent
-  outer corners, while the macOS 26+ runtime PNG is fully opaque. A macOS-native
-  source guard pins that production startup invokes the versioned icon setter
-  and that window creation plus runtime palette changes synchronize the native
-  titlebar background. These checks prove wiring and input assets; they do not
-  prove AppKit's visual treatment. Before release, run the native macOS 26 Dock
-  and rounded-window check in [RELEASING.md](RELEASING.md#macos-appearance-gate).
+- The **icon raster, actool, and ico packaging smokes** — the cross-platform
+  generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
+  all seven ICO resolutions. The macOS leg compiles the Icon Composer document
+  and requires `Assets.car`, `AppIcon.icns`, `CFBundleIconName`, and
+  `CFBundleIconFile`; the Windows leg validates and embeds the existing `.ico`.
+  Source guards pin that production no longer mutates the application icon at
+  runtime and that window creation plus palette changes still synchronize the
+  native titlebar background. These checks prove wiring and input assets; they
+  do not prove AppKit's visual treatment. Before release, run the native macOS
+  Dock and rounded-window check in
+  [RELEASING.md](RELEASING.md#macos-appearance-gate).
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale
   PowerShell launcher arguments, upgrades it, and verifies the shortcut target,

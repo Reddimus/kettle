@@ -308,9 +308,11 @@ Future → Done since the v1.0 cut of this matrix"):
   sticky-note overlay + search-jump-to. L effort.
 - **Native macOS menu bar**. Needs macOS to test interactively;
   a separate effort once a maintainer with macOS commits to drive it.
-- **Code-signed / notarized macOS build; Windows MSI installer.**
-  Needs Apple Developer / Windows code-signing certificates; not
-  doable from the public CI matrix.
+- **Windows MSI installer.** Needs a Windows code-signing certificate; not
+  doable from the public CI matrix. The macOS half is now implemented: official
+  tags use the protected signing environment to Developer ID sign, notarize,
+  staple and Gatekeeper-assess the app, and fail closed if credentials are
+  absent.
 - **Background blur / translucency on macOS / Windows** — kettle
   already honors `background-opacity` on Linux;
   the per-OS Vibrancy / DWM blur extension is desktop-shell-

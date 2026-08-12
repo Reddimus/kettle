@@ -22,25 +22,32 @@ The gate after the tag is the one that catches a mistake late: a tag signed
 with a key GitHub does not know is *locally* valid and still fails the
 release. See [Signing prerequisites](#signing-prerequisites).
 
+The macOS package additionally uses the protected `macos-signing` environment.
+Its Developer ID and App Store Connect API-key contract is documented in
+[`packaging/macos/README.md`](../packaging/macos/README.md); the workflow signs,
+notarizes, staples, and Gatekeeper-assesses the app before creating its ZIP.
+
 ### macOS appearance gate
 
 Before merging the release-cut pull request, run its universal `.app` on a
-native macOS 26 or later desktop and record a screenshot containing both a
-decorated Kettle window and its running Dock icon. Check two things that unit
-and image tests cannot establish:
+native macOS 26 or later desktop and record screenshots containing a decorated
+Kettle window plus the running and closed-but-pinned Dock icon. Check two things
+that unit and image tests cannot establish:
 
 - the active theme reaches both rounded top corners without a mismatched strip,
   while the traffic lights, drag region, first terminal row, and pointer targets
   remain in their native positions; switch once between a light and dark theme
   to prove the NSWindow background follows a palette change;
-- the running Dock icon's blue accent reaches the system mask without a second
-  transparent gutter or an inner pre-rounded outline.
+- the running, closed, Finder and app-switcher icons agree; the blue accent
+  reaches the system mask without a second transparent gutter or an inner
+  pre-rounded outline, and the terminal face, prompt and caret remain legible
+  at normal and magnified Dock sizes.
 
-The static bundle icon intentionally remains compatible with macOS 11–15, so a
-closed or never-launched app can still look pre-rounded on macOS 26. The gate is
-about the running application icon that Kettle replaces after startup. Record
-an unavailable macOS 26 host as a skipped release check; do not infer this
-appearance from PNG opacity, `iconutil`, or a Linux CI run.
+The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
+pipeline with a macOS 11 deployment target. The emitted asset catalog and loose
+fallback must be present before the app is signed. Record an unavailable macOS
+26 host as a skipped release check; do not infer this appearance from source
+alpha, `actool` success, or a Linux CI run.
 
 ## 1. Merge the changelog prep pull request
 
@@ -196,9 +203,10 @@ expected to fail.
 
 ## Known gaps
 
-- The current release workflow does not code-sign or notarize the macOS app, so
-  Gatekeeper may warn users. The tracked implementation is draft PR #156; the
-  credential dependency is recorded in `docs/ROADMAP.md`.
+- The macOS signing/notarization path is implemented and fails closed on an
+  official tag when its protected-environment credentials are absent. Before
+  calling the first signed release ready, provision that environment and run
+  the native appearance and Gatekeeper checks above against the final archive.
 - `scripts/verify-release-assets.py` intentionally accepts only draft-release
   API responses. It protects the publish transition in `release.yml`; after
   publication, use the sidecars and signed-manifest procedure above.
