@@ -1733,8 +1733,9 @@ features list. What's left is genuinely-multi-week threads + polish.
 - [ ] sysinfo CPU / MEM widgets for the `status-bar` status bar.
 - [ ] Native macOS menu bar (needs macOS-hands-on dev).
 - [x] Developer ID sign, notarize, staple and Gatekeeper-assess the macOS app in
-      the official release workflow; the first signed release still requires
-      provisioning the protected environment and running its native gate.
+      the official release workflow. The protected environment is provisioned
+      and its credentials passed a native notarization rehearsal; the first
+      official-tag universal artifact remains the final native gate.
 - [ ] Windows MSI installer (needs a Windows code-signing certificate).
 - [ ] Source-build AUR companion (`kettle`, no `-bin` suffix) +
       Homebrew `--HEAD` formula (build from `main` rather than the

@@ -203,10 +203,14 @@ expected to fail.
 
 ## Known gaps
 
-- The macOS signing/notarization path is implemented and fails closed on an
-  official tag when its protected-environment credentials are absent. Before
-  calling the first signed release ready, provision that environment and run
-  the native appearance and Gatekeeper checks above against the final archive.
+- The protected `macos-signing` environment is provisioned, and a native arm64
+  rehearsal using its Developer ID certificate and App Store Connect API key
+  was accepted by Apple's notary service. Its stapled ticket survived the final
+  `ditto` archive/extract round trip, Gatekeeper accepted the extracted app, and
+  the executable launched. That proves the credentials and signing order, but
+  it is not a substitute for the release workflow's universal artifact. Before
+  calling the first signed release ready, run the native appearance and
+  Gatekeeper checks above against that official-tag archive.
 - `scripts/verify-release-assets.py` intentionally accepts only draft-release
   API responses. It protects the publish transition in `release.yml`; after
   publication, use the sidecars and signed-manifest procedure above.

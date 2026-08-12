@@ -22,6 +22,13 @@ into an ephemeral keychain restricted to `codesign`, and deletes the material
 in an unconditional cleanup step. Do not store Apple-ID passwords or app-
 specific passwords; notarization uses the API key.
 
+The `Reddimus/kettle` environment is provisioned. A native arm64 rehearsal with
+the same certificate and API-key contract was notarized successfully, stapled,
+archived with `ditto`, extracted, accepted by Gatekeeper, and launched. The
+first official tag must still repeat those checks against the workflow's
+universal artifact; a local single-architecture rehearsal does not certify that
+package.
+
 Before saving the secrets, prove the local export contains the private key:
 
 ```sh
