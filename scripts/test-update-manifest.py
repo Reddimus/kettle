@@ -219,6 +219,12 @@ class ManifestTests(unittest.TestCase):
         self.assertIn('-k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"', package)
         self.assertNotIn("APPLE_SIGNING_IDENTITY", package)
         self.assertIn("scripts/select-macos-signing-identity.py", package)
+        self.assertIn(
+            "scripts/configure-macos-signing-keychain.swift add", package
+        )
+        self.assertIn(
+            "scripts/configure-macos-signing-keychain.swift remove", package
+        )
         self.assertIn('--sign "$SIGNING_IDENTITY"', package)
         self.assertIn('SIGNED_TEAM=$(\n', package)
         self.assertIn('!= \"$APPLE_TEAM_ID\"', package)
@@ -275,6 +281,52 @@ class ManifestTests(unittest.TestCase):
         )
         self.assertNotEqual(ambiguous.returncode, 0)
         self.assertIn("found 2", ambiguous.stderr)
+
+    def test_macos_signing_keychain_search_list_is_reversible(self):
+        if sys.platform != "darwin":
+            self.skipTest("the search-list helper uses macOS Security.framework")
+
+        helper = ROOT / "scripts" / "configure-macos-signing-keychain.swift"
+        with tempfile.TemporaryDirectory() as directory:
+            original = subprocess.run(
+                [
+                    "xcrun",
+                    "swift",
+                    "-suppress-warnings",
+                    str(helper),
+                    "list-json",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            command = [
+                "xcrun",
+                "swift",
+                "-suppress-warnings",
+                str(helper),
+                "self-test",
+                directory,
+            ]
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            after = subprocess.run(
+                [
+                    "xcrun",
+                    "swift",
+                    "-suppress-warnings",
+                    str(helper),
+                    "list-json",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+            self.assertEqual(after, original)
 
     def test_online_installer_shares_the_signed_channel_bounds(self):
         installer = (ROOT / "scripts" / "install-online.sh").read_text(

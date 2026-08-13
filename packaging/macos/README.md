@@ -22,8 +22,13 @@ request the certificate and notarization key.
 
 Use a Kettle-specific Developer ID certificate and App Store Connect API key.
 The workflow reconstructs both only under `RUNNER_TEMP`, imports the identity
-into an ephemeral keychain restricted to `codesign`, and deletes the material
-in an unconditional cleanup step. It derives the signing hash from the single
+into an ephemeral keychain restricted to `codesign`, prepends that keychain to
+the runner user's search list through Security.framework as Apple's signing
+contract requires, and removes it from the list before deleting the material in
+an unconditional cleanup step. The cleanup fails the job if either the search
+list entry or the keychain file survives; errors are not treated as evidence of
+removal.
+It derives the signing hash from the single
 valid `Developer ID Application` identity actually imported into that keychain;
 a separate display-name secret can drift from the PKCS#12 and is deliberately
 not used. Do not store Apple-ID passwords or app-specific passwords;

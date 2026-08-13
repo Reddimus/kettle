@@ -366,6 +366,13 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # `codesign --keychain` narrows identity matching but does not make an
+          # off-list identity usable. Apple's codesign contract requires the
+          # identity's keychain to be on the calling user's search list; keep
+          # the runner's existing entries behind this ephemeral one so the
+          # certificate chain remains resolvable too.
+          xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift add "$KEYCHAIN"
           security import "$CERT" -k "$KEYCHAIN" \
             -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
           # The final positional argument scopes the ACL update to the same
@@ -479,9 +486,34 @@ jobs:
         if: always() && runner.os == 'macOS'
         shell: bash
         run: |
-          security delete-keychain "$RUNNER_TEMP/kettle-signing.keychain-db" 2>/dev/null || true
-          rm -f "$RUNNER_TEMP/kettle-developer-id.p12" \
-            "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/kettle-notarize.zip"
+          KEYCHAIN="$RUNNER_TEMP/kettle-signing.keychain-db"
+          if ! xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift remove "$KEYCHAIN"; then
+            echo "::warning::could not remove the signing keychain from the search list before deletion"
+          fi
+          if [ -e "$KEYCHAIN" ] && ! security delete-keychain "$KEYCHAIN"; then
+            echo "::warning::security delete-keychain failed; final cleanup checks will decide the job"
+          fi
+
+          cleanup_status=0
+          if ! xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift verify-absent "$KEYCHAIN"; then
+            echo "::error::the ephemeral signing keychain remains searchable"
+            cleanup_status=1
+          fi
+          if [ -e "$KEYCHAIN" ]; then
+            echo "::error::the ephemeral signing keychain still exists at $KEYCHAIN"
+            cleanup_status=1
+          fi
+          for material in "$RUNNER_TEMP/kettle-developer-id.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/kettle-notarize.zip"; do
+            rm -f "$material"
+            if [ -e "$material" ]; then
+              echo "::error::ephemeral Apple signing material remains at $material"
+              cleanup_status=1
+            fi
+          done
+          exit "$cleanup_status"
 
       # Generate a SHA-256 sidecar for the artifact so users (and the
       # `install-online.sh` one-liner) can verify a download

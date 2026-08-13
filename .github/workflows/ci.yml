@@ -195,7 +195,10 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/check-package-templates.sh
       - name: Signed update manifest generator
-        if: runner.os == 'Linux'
+        # Linux covers the portable feed fixtures. macOS additionally exercises
+        # the native Security.framework search-list helper against disposable
+        # keychains with quote and backslash characters in their filenames.
+        if: runner.os != 'Windows'
         run: python3 scripts/test-update-manifest.py
       - name: Exact draft-release asset verifier
         if: runner.os == 'Linux'
