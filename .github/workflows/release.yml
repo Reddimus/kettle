@@ -331,7 +331,6 @@ jobs:
         env:
           APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
           APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
@@ -353,8 +352,8 @@ jobs:
           KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
           CERT="$RUNNER_TEMP/kettle-developer-id.p12"
           API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          for required in APPLE_CERT_PASSWORD APPLE_SIGNING_IDENTITY \
-            APPLE_TEAM_ID APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
+          for required in APPLE_CERT_PASSWORD APPLE_TEAM_ID \
+            APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
             APPLE_API_PRIVATE_KEY; do
             if [ -z "${!required:-}" ]; then
               echo "::error::$required is absent from the macos-signing environment."
@@ -375,17 +374,28 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
+          # Select the identity that was actually imported, not a separately
+          # maintained display-name secret. The latter can drift from the P12
+          # while `security import` still succeeds, making codesign fail with
+          # the opaque "no identity found" error. Exactly one valid Developer
+          # ID Application identity is required; development certificates and
+          # ambiguous bundles fail closed.
+          SIGNING_IDENTITY=$(
+            security find-identity -v -p codesigning "$KEYCHAIN" \
+              | python3 scripts/select-macos-signing-identity.py
+          )
+
           while IFS= read -r -d '' candidate; do
             if file -b "$candidate" | grep -q 'Mach-O'; then
               codesign --force --timestamp --options runtime \
                 --entitlements packaging/macos/kettle.entitlements \
-                --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
+                --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
                 "$candidate"
             fi
           done < <(find "$APP/Contents" -type f -print0)
           codesign --force --timestamp --options runtime \
             --entitlements packaging/macos/kettle.entitlements \
-            --sign "$APPLE_SIGNING_IDENTITY" --keychain "$KEYCHAIN" "$APP"
+            --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           SIGNED_TEAM=$(
             codesign -d --verbose=4 "$APP" 2>&1 \

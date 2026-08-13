@@ -23,6 +23,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   installing its HUP policy, signals readiness to the parent, and proves that
   process still owns the PTY slave through `/proc/<pid>/fd/1` before checking
   the timeout path.
+- **The first signed macOS package imported its Developer ID identity, then
+  failed to select it.** The workflow maintained the certificate and its
+  display name as separate secrets, so the name could drift while the PKCS#12
+  remained valid; `codesign` then reported only `no identity found`. Packaging
+  now derives the signing hash from the one valid `Developer ID Application`
+  identity actually imported into the ephemeral keychain and fails closed on
+  zero or multiple matches.
 
 ### Added
 
