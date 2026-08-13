@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -216,6 +217,9 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(package.count("environment: macos-signing"), 1)
         self.assertIn("printf '%s' \"$APPLE_CERT_P12\" | base64 -D", package)
         self.assertIn('-k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"', package)
+        self.assertNotIn("APPLE_SIGNING_IDENTITY", package)
+        self.assertIn("scripts/select-macos-signing-identity.py", package)
+        self.assertIn('--sign "$SIGNING_IDENTITY"', package)
         self.assertIn('SIGNED_TEAM=$(\n', package)
         self.assertIn('!= \"$APPLE_TEAM_ID\"', package)
         final_macos_archive = (
@@ -238,6 +242,39 @@ class ManifestTests(unittest.TestCase):
             flags=re.MULTILINE,
         ):
             self.assertIn("--locked", cargo_line)
+
+    def test_macos_signing_selector_requires_one_distribution_identity(self):
+        selector = ROOT / "scripts" / "select-macos-signing-identity.py"
+        first = "A" * 40
+        second = "b" * 40
+
+        def select(output: str):
+            return subprocess.run(
+                [sys.executable, str(selector)],
+                input=output,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        selected = select(
+            f'  1) {first} "Apple Development: Test (TEAMID)"\n'
+            f'  2) {second} "Developer ID Application: Test (TEAMID)"\n'
+            "     2 valid identities found\n"
+        )
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        self.assertEqual(selected.stdout, f"{second}\n")
+
+        missing = select(f'1) {first} "Apple Development: Test (TEAMID)"\n')
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("found 0", missing.stderr)
+
+        ambiguous = select(
+            f'1) {first} "Developer ID Application: First (TEAMID)"\n'
+            f'2) {second} "Developer ID Application: Second (TEAMID)"\n'
+        )
+        self.assertNotEqual(ambiguous.returncode, 0)
+        self.assertIn("found 2", ambiguous.stderr)
 
     def test_online_installer_shares_the_signed_channel_bounds(self):
         installer = (ROOT / "scripts" / "install-online.sh").read_text(

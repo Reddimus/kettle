@@ -10,7 +10,6 @@ Official tags fail closed when its signing material is absent.
 | --- | --- |
 | `APPLE_CERT_P12` | Base64 of a Developer ID Application certificate and its private key exported as password-protected PKCS#12 |
 | `APPLE_CERT_PASSWORD` | PKCS#12 export password |
-| `APPLE_SIGNING_IDENTITY` | Exact `Developer ID Application: Name (TEAMID)` identity reported by `security find-identity -v -p codesigning` |
 | `APPLE_TEAM_ID` | Apple Developer Team ID |
 | `APPLE_API_KEY_ID` | App Store Connect API key identifier |
 | `APPLE_API_ISSUER_ID` | App Store Connect API issuer identifier |
@@ -24,8 +23,11 @@ request the certificate and notarization key.
 Use a Kettle-specific Developer ID certificate and App Store Connect API key.
 The workflow reconstructs both only under `RUNNER_TEMP`, imports the identity
 into an ephemeral keychain restricted to `codesign`, and deletes the material
-in an unconditional cleanup step. Do not store Apple-ID passwords or app-
-specific passwords; notarization uses the API key.
+in an unconditional cleanup step. It derives the signing hash from the single
+valid `Developer ID Application` identity actually imported into that keychain;
+a separate display-name secret can drift from the PKCS#12 and is deliberately
+not used. Do not store Apple-ID passwords or app-specific passwords;
+notarization uses the API key.
 
 The `Reddimus/kettle` environment is provisioned. A native arm64 rehearsal with
 the same certificate and API-key contract was notarized successfully, stapled,
