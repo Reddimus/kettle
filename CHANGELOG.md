@@ -8,6 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [3.0.0] — 2026-08-12
 
+- **The macOS release host could not compile its native AppIcon.** Normal CI
+  compiled the Icon Composer package on macOS 26, but the macOS 15 release host
+  defaulted to Xcode 16.4: `actool` returned success while emitting neither
+  `Assets.car` nor `AppIcon.icns`. Selecting its installed Xcode 26.3 exposed a
+  second incompatibility when the Asset Catalog agent crashed against the older
+  host frameworks. Packaging now runs on macOS 26, pins the compiler to Xcode
+  26.x so a future preview cannot silently change release assets, and exercises
+  that exact release-host path in a focused pull-request gate.
+
 ### Added
 
 - **Official macOS packages are now Developer ID signed, notarized, stapled,
