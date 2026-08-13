@@ -121,7 +121,7 @@
           pname = "kettle";
           # Keep in lockstep with `Cargo.toml`'s workspace `version`.
           # Bump in the same PR that bumps the release tag.
-          version = "2.56.0";
+          version = "3.0.0";
           src = ./.;
 
           cargoLock = {
