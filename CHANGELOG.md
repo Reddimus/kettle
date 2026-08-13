@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-08-13
+
 ### Fixed
 
 - **The macOS Dock icon's dark terminal face crowded the system-owned edge.**
