@@ -12075,11 +12075,18 @@ mod teardown_tests {
             }
         }
 
+        // The child writes its own PID before waking the parent. Reporting
+        // `$!` after a parent-side sleep only proved that `fork` happened; the
+        // parent could exit before the child installed its HUP policy, turning
+        // this retained-slave fixture into an ordinary-EOF fixture.
         let argv = vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            "setsid sh -c 'trap \"\" HUP; sleep 30' & pid=$!; sleep 0.1; \
-             printf 'LEAKED_SLAVE_PID %s\\n' \"$pid\""
+            "ready=; trap 'ready=1' USR1; \
+             setsid sh -c 'trap \"\" HUP; \
+             printf \"LEAKED_SLAVE_PID %s\\n\" \"$$\"; \
+             kill -USR1 \"$1\"; exec sleep 30' sh \"$$\" & \
+             while [ -z \"$ready\" ]; do sleep 0.01; done"
                 .to_string(),
         ];
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -12132,9 +12139,15 @@ mod teardown_tests {
             }
         }
 
+        let leaked_pid = cleanup
+            .0
+            .expect("fixture did not report its descendant pid");
+        let leaked_stdout = std::fs::read_link(format!("/proc/{leaked_pid}/fd/1"))
+            .expect("the detached fixture must still own its PTY stdout");
         assert!(
-            cleanup.0.is_some(),
-            "fixture did not report its descendant pid"
+            leaked_stdout.starts_with("/dev/pts/"),
+            "detached fixture stdout is not a PTY slave: {}",
+            leaked_stdout.display()
         );
         assert!(
             saw_exit,
