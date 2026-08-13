@@ -21,6 +21,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  macos-26-release-icon:
+    name: macOS 26 release icon toolchain
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compile the release AppIcon with Xcode 26.x
+        run: |
+          out=$(mktemp -d /tmp/kettle-release-app-icon.XXXXXX)
+          trap 'rm -rf "$out"' EXIT
+          scripts/compile-macos-app-icon.sh "$out"
+
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -137,19 +149,13 @@ jobs:
         # and PowerShell 7.
         run: just shell-integration-check
       - name: Packaging smoke — macOS native AppIcon
-        # Compile the Icon Composer package on every macOS CI build, rather
-        # than discovering a broken Assets.car or fallback only on a tag.
+        # Compile the Icon Composer package on every macOS CI build through
+        # the same Xcode-selection helper the stable release runner uses.
         if: runner.os == 'macOS'
         run: |
           out=$(mktemp -d /tmp/kettle-app-icon.XXXXXX)
-          xcrun actool packaging/macos/AppIcon.icon \
-            --compile "$out" --platform macosx --minimum-deployment-target 11.0 \
-            --app-icon AppIcon --output-partial-info-plist "$out/partial.plist"
-          test -s "$out/Assets.car"
-          test -s "$out/AppIcon.icns"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$out/partial.plist")" = AppIcon
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$out/partial.plist")" = AppIcon
-          echo "actool AppIcon OK"
+          trap 'rm -rf "$out"' EXIT
+          scripts/compile-macos-app-icon.sh "$out"
       - name: Packaging smoke — Windows .ico
         # Same logic as the macOS step: the winresource build-dep
         # already compiles via `cargo build --workspace --all-targets`

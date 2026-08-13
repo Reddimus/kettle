@@ -310,14 +310,7 @@ icns-smoke:
     command -v xcrun >/dev/null 2>&1 \
       || { echo "error: icns-smoke requires Xcode's actool on macOS" >&2; exit 1; }
     out=$(mktemp -d "{{TMPDIR}}/kettle-app-icon.XXXXXX")
-    xcrun actool packaging/macos/AppIcon.icon \
-      --compile "$out" --platform macosx --minimum-deployment-target 11.0 \
-      --app-icon AppIcon --output-partial-info-plist "$out/partial.plist"
-    test -s "$out/Assets.car"
-    test -s "$out/AppIcon.icns"
-    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconName' "$out/partial.plist")" = AppIcon
-    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$out/partial.plist")" = AppIcon
-    echo "actool AppIcon OK"
+    scripts/compile-macos-app-icon.sh "$out"
 
 [linux]
 icns-smoke:

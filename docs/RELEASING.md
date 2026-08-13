@@ -49,6 +49,15 @@ fallback must be present before the app is signed. Record an unavailable macOS
 26 host as a skipped release check; do not infer this appearance from source
 alpha, `actool` success, or a Linux CI run.
 
+The package job runs on `macos-26` and
+`scripts/compile-macos-app-icon.sh` selects the newest installed Xcode 26.x
+toolchain explicitly. Do not move icon compilation back to `macos-15`: its
+default Xcode 16.4 emits no Icon Composer artifacts, while its installed Xcode
+26.3 Asset Catalog agent crashes against the older host frameworks. A focused
+pull-request job runs the exact `macos-26` release-host path in addition to the
+normal current-macOS CI leg. The major-version pin also prevents a future Xcode
+27 preview from silently changing release assets.
+
 ## 1. Merge the changelog prep pull request
 
 Create `release/prep-vX.Y.Z` from synchronized `main`. Promote
@@ -100,6 +109,14 @@ same command after fixing the cause. `tag-release.sh` reuses the tag only after
 checking that it is annotated, points to the current `HEAD`, and passes
 `git verify-tag`. Delete the local tag only when one of those checks shows that
 it is the wrong tag.
+
+If a pushed tag fails before any release record is created and the fix changes
+the tagged commit, a workflow rerun cannot contain that fix. First verify that
+the releases API contains no public **or draft** release for the tag. After the
+fix merges to `main`, delete only that failed tag locally and remotely, then run
+`tag-release.sh` again so it creates a new signed tag at synchronized `main`.
+The script deliberately refuses to overwrite a remote tag. If any release
+record exists, do not move the tag; ship the correction as a patch release.
 
 ### Signing prerequisites
 

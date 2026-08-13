@@ -143,7 +143,7 @@ jobs:
           - os: ubuntu-22.04
             artifact: kettle-linux-x86_64.tar.gz
             environment: release-build
-          - os: macos-15
+          - os: macos-26
             artifact: kettle-macos-universal.zip
             environment: macos-signing
           - os: windows-2022
@@ -303,14 +303,7 @@ jobs:
           # terminal face and prompt, avoiding the double-rounded gutter.
           ICON_OUT="$RUNNER_TEMP/kettle-app-icon"
           mkdir -p "$ICON_OUT"
-          xcrun actool packaging/macos/AppIcon.icon \
-            --compile "$ICON_OUT" \
-            --platform macosx \
-            --minimum-deployment-target 11.0 \
-            --app-icon AppIcon \
-            --output-partial-info-plist "$ICON_OUT/partial.plist"
-          test -s "$ICON_OUT/Assets.car"
-          test -s "$ICON_OUT/AppIcon.icns"
+          scripts/compile-macos-app-icon.sh "$ICON_OUT"
           cp "$ICON_OUT/Assets.car" "$ICON_OUT/AppIcon.icns" \
             "$APP/Contents/Resources/"
           # Patch the Info.plist version from the workspace Cargo.toml
