@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The macOS Dock icon's dark terminal face crowded the system-owned edge.**
+  At normal Dock size the blue frame collapsed to a roughly three-pixel
+  hairline, and native lighting made the inner and outer corner curves appear
+  to converge. The prompt and caret retain their 200% layer scale, while the
+  face now uses a wider optical safe area and a matching concentric radius; the
+  caret also moves inward so the wider frame does not simply relocate the pinch
+  to the terminal mark. The blue frame stays even at both normal and magnified
+  sizes.
+
 ## [3.0.0] — 2026-08-13
 
 - **The macOS signing keychain was imported correctly but remained unusable by

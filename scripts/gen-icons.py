@@ -59,16 +59,26 @@ CANVAS = 512
 OUTER_BOX = (32, 32, 480, 480)
 OUTER_RADIUS = 64
 OUTER_STROKE = 20
-FACE_BOX = (42, 42, 470, 470)
-# At Icon Composer's 200% layer scale, the native mask renders with about a
-# 45 px corner radius and the terminal face sits about 17 px inside it. The
-# source radius below renders near 28 px: the outer radius minus the inset, so
-# both curves share a center and the blue rim stays visually even.
-FACE_RADIUS = 70
+FACE_BOX = (66, 66, 446, 446)
+# In Xcode 26's 256 px compiled fallback, the system mask spans about 26..229
+# with a 45 px corner radius. This source box renders at 52..203 and its 47 px
+# radius renders near 19 px: a 26 px blue rim whose inset plus inner radius is
+# the outer radius. Keeping those curves concentric prevents the native lighting
+# and Dock downsampling from collapsing the accent to a clipped-looking hairline.
+XCODE_26_COMPILED_SCALE = 0.4
+XCODE_26_MASK_EDGE = 25.6
+XCODE_26_MASK_RADIUS = 45
+FACE_RADIUS = 47
 ICON_COMPOSER_SCALE = 2
 PROMPT_POINTS = ((156, 168), (260, 256), (156, 344))
 PROMPT_STROKE = 36
 CARET_BOX = (296, 326, 416, 354)
+# The native face is narrower than the compatibility artwork, so its caret ends
+# sooner rather than moving the old edge pinch inside the dark face. Keep at
+# least this much source-space clearance; Linux, Windows and the legacy iconset
+# retain the wider compatibility caret above.
+ICON_COMPOSER_MIN_GLYPH_CLEARANCE = 46
+ICON_COMPOSER_CARET_BOX = (296, 326, 398, 354)
 CARET_RADIUS = 8
 
 
@@ -110,7 +120,7 @@ def icon_composer_primitives() -> tuple[Primitive, ...]:
     return (
         RectPrimitive(FACE_BOX, FACE_RADIUS, BASE),
         PolylinePrimitive(PROMPT_POINTS, TEXT, PROMPT_STROKE),
-        RectPrimitive(CARET_BOX, CARET_RADIUS, ACCENT),
+        RectPrimitive(ICON_COMPOSER_CARET_BOX, CARET_RADIUS, ACCENT),
     )
 
 

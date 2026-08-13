@@ -170,6 +170,42 @@ class PillowIconTests(unittest.TestCase):
         self.assertIn('"translation-in-points"', document.read_text())
         self.assertNotIn('x="0" y="0"', artwork.read_text())
 
+    def test_macos_face_keeps_a_parallel_optical_safe_area(self):
+        left, top, right, bottom = MODULE.FACE_BOX
+        self.assertEqual(left + right, MODULE.CANVAS)
+        self.assertEqual(top + bottom, MODULE.CANVAS)
+        self.assertEqual(right - left, bottom - top)
+
+        # Xcode 26 maps the 200% foreground into its 256 px compatibility
+        # rendering with this centered 0.4 scale. The native mask begins near
+        # x=26 and has a roughly 45 px corner radius. Pin both the visible rim
+        # and the concentric-radius relationship that the Dock screenshot can
+        # otherwise regress to a two-pixel, clipped-looking outline.
+        compiled = lambda coordinate: 128 + (
+            coordinate - 256
+        ) * MODULE.XCODE_26_COMPILED_SCALE
+        compiled_face = (round(compiled(left)), int(compiled(right)) - 1)
+        self.assertEqual(compiled_face, (52, 203))
+        rim = compiled(left) - MODULE.XCODE_26_MASK_EDGE
+        inner_radius = MODULE.FACE_RADIUS * MODULE.XCODE_26_COMPILED_SCALE
+        self.assertGreaterEqual(rim, 24)
+        self.assertAlmostEqual(
+            rim + inner_radius, MODULE.XCODE_26_MASK_RADIUS, delta=0.25
+        )
+
+        prompt_left = (
+            min(x for x, _ in MODULE.PROMPT_POINTS) - MODULE.PROMPT_STROKE / 2
+        )
+        prompt_top = min(y for _, y in MODULE.PROMPT_POINTS) - MODULE.PROMPT_STROKE / 2
+        prompt_bottom = max(y for _, y in MODULE.PROMPT_POINTS) + MODULE.PROMPT_STROKE / 2
+        self.assertGreaterEqual(prompt_left - left, 30)
+        self.assertGreaterEqual(prompt_top - top, 30)
+        self.assertGreaterEqual(bottom - prompt_bottom, 30)
+        self.assertGreaterEqual(
+            right - MODULE.ICON_COMPOSER_CARET_BOX[2],
+            MODULE.ICON_COMPOSER_MIN_GLYPH_CLEARANCE,
+        )
+
     def test_svg_sources_are_generated_from_the_shared_geometry(self):
         linux = self.root / "linux" / "kettle.svg"
 
@@ -180,7 +216,11 @@ class PillowIconTests(unittest.TestCase):
         self.assertNotIn('width="512" height="512" rx="0"', composer.read_text())
 
         mutant = self.root / "composer-mutant.svg"
-        mutant.write_text(composer.read_text().replace('rx="70"', 'rx="54"', 1))
+        face_radius = f'rx="{MODULE.FACE_RADIUS}"'
+        mutant_radius = f'rx="{MODULE.FACE_RADIUS - 1}"'
+        mutated = composer.read_text().replace(face_radius, mutant_radius, 1)
+        self.assertNotEqual(mutated, composer.read_text())
+        mutant.write_bytes(mutated.encode("utf-8"))
         self.assertFalse(MODULE.same_artifact(composer, mutant))
 
     def test_svg_generation_never_uses_platform_text_newlines(self):
