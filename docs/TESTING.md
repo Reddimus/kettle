@@ -1848,8 +1848,13 @@ name the shape of bug each pass caught.
   Source guards pin that production no longer mutates the application icon at
   runtime and that window creation plus palette changes still synchronize the
   native titlebar background. These checks prove wiring and input assets; they
-  do not prove AppKit's visual treatment. Before release, run the native macOS
-  Dock and rounded-window check in
+  also pin the macOS face's centered safe area, minimum accent rim, concentric
+  radius, and glyph padding. They do not prove AppKit's visual treatment.
+  Before release, compile the asset with Xcode 26 and inspect the 256 px
+  fallback plus a normal-size Dock item: the dark face should occupy about
+  `52..203` inside the native mask's `26..229`, leaving an even blue frame that
+  does not collapse at the corners. Then run the native macOS Dock and
+  rounded-window check in
   [RELEASING.md](RELEASING.md#macos-appearance-gate).
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale

@@ -40,8 +40,9 @@ that unit and image tests cannot establish:
   to prove the NSWindow background follows a palette change;
 - the running, closed, Finder and app-switcher icons agree; the blue accent
   reaches the system mask without a second transparent gutter or an inner
-  pre-rounded outline, and the terminal face, prompt and caret remain legible
-  at normal and magnified Dock sizes.
+  pre-rounded outline; the blue frame remains visibly even through all four
+  corners instead of collapsing to a hairline; and the terminal face, prompt
+  and caret remain legible at normal and magnified Dock sizes.
 
 The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
 pipeline with a macOS 11 deployment target. The emitted asset catalog and loose
