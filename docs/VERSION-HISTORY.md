@@ -20,9 +20,9 @@ actually shipped.
   shipped.
 - Current workspace version: `3.0.1`
 - Release records inspected: 162 Git tags and 162 changelog headings, from
-  `v0.1.0` through `v3.0.1`. During release preparation the changelog leads the
-  tag count by one; this post-release snapshot records the tag after release CI
-  published it.
+  `v0.1.0` through `v3.0.1`. The counts are equal after a release tag is
+  published; during release preparation the changelog leads by one until
+  `tag-release.sh` creates that tag.
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
