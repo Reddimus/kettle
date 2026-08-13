@@ -980,7 +980,12 @@ master-plus-process kqueue, and the portable fallback backs off from one
 millisecond to one second rather than polling every frame. The Linux
 `leaked_slave_cannot_hold_the_terminal_exit_event_forever` test launches a
 `setsid()` descendant that retains the slave and proves the ordered exit marker
-still arrives at the five-second bound. The source guard also pins that
+still arrives at the five-second bound. The detached child reports its own PID
+after installing its HUP policy, signals readiness to the parent, and remains
+alive with that PID after `exec sleep`. The test also verifies
+`/proc/<pid>/fd/1` still names the PTY slave before accepting `EofTimeout`; a
+timed parent-side `$!` report can otherwise turn a fixture startup race into a
+false product failure. The source guard also pins that
 `Mux::reap` keys on the UI-consumed exit event, not `child_exited()`, and that
 an earlier `ChildExit(status)` notification cannot apply exit policy, so neither
 can get ahead of the reader's final output; a held pane whose status lags EOF

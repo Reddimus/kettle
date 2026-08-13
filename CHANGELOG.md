@@ -16,6 +16,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   host frameworks. Packaging now runs on macOS 26, pins the compiler to Xcode
   26.x so a future preview cannot silently change release assets, and exercises
   that exact release-host path in a focused pull-request gate.
+- **A Linux PTY lifecycle test could claim its detached fixture was ready before
+  the child had started.** The parent reported `$!` after a timed sleep, so a
+  delayed `setsid` launch occasionally produced orderly EOF where the test
+  required a forced timeout. The detached child now reports its own PID after
+  installing its HUP policy, signals readiness to the parent, and proves that
+  process still owns the PTY slave through `/proc/<pid>/fd/1` before checking
+  the timeout path.
 
 ### Added
 
