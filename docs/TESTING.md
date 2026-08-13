@@ -1200,13 +1200,19 @@ python3 scripts/test-package-manifest.py
 python3 scripts/test-install-online.py
 ```
 
-The current suites cover seven signed-update-manifest cases, six exact
+The current suites cover nine signed-update-manifest cases, six exact
 draft-release cases, seventeen package-manifest cases (with platform-dependent
 skips), and fifteen POSIX online-installer cases. They pin the checked-in Ed25519
 trust root, canonical manifest bytes and sidecars, no-follow same-handle
 artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
 archive structure and extraction, modern no-downgrade behavior, compatible
 legacy sidecars, and hostile archive/network/parser fixtures.
+On macOS the signed-update suite also opens disposable keychains whose paths
+contain quotes and backslashes, then proves the native Security.framework
+helper's prepend, de-duplication, removal, and empty-list transformations
+losslessly. The test never writes the developer's user search list, so a killed
+test process cannot strand it in a cleared or partially mutated state. Other
+platforms skip only that native case.
 The online-installer transport cases route the installed curl through a
 hermetic local HTTPS server: transient manifest failures recover or stop after
 exactly three total attempts, while a permanent HTTP refusal and an

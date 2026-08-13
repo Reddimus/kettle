@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+- **The macOS signing keychain was imported correctly but remained unusable by
+  `codesign`.** `--keychain` narrows identity matching; it does not make an
+  off-list keychain usable. Packaging now prepends the ephemeral keychain to
+  the user search list while preserving existing certificate-chain sources,
+  then removes it during cleanup. Native Security.framework APIs preserve
+  every existing filename losslessly, and the cleanup fails if the search-list
+  entry or private-key keychain survives.
+
 ## [3.0.0] — 2026-08-12
 
 - **The macOS release host could not compile its native AppIcon.** Normal CI
