@@ -372,9 +372,12 @@ bundle icon plus a runtime override. The generated `AppIcon.icon` holds a
 Kettle-blue system background and one vector foreground layer for the terminal
 face, prompt and caret. The face has an explicit optical safe area whose inset
 and radius remain concentric with Xcode 26's compiled native mask; the prompt
-and caret retain their 200% scale so widening that frame does not make the
-terminal mark look small. The artwork deliberately bakes neither an outer mask
-nor a shadow. Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
+and caret remain on the 200% foreground layer so widening that frame does not
+make the terminal mark look small. The macOS caret is deliberately narrower
+than the compatibility artwork, adding right-side breathing room without
+moving the prompt; Linux, Windows, and the legacy iconset keep their existing
+geometry. The artwork deliberately bakes neither an outer mask nor a shadow.
+Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
 metadata, and a loose previous-release `.icns` for the macOS 11 deployment
 target. Finder, the closed and running Dock item, and the app switcher therefore
 resolve the same asset, while macOS owns the only outer mask. This removes both

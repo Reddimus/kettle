@@ -184,8 +184,9 @@ class PillowIconTests(unittest.TestCase):
         compiled = lambda coordinate: 128 + (
             coordinate - 256
         ) * MODULE.XCODE_26_COMPILED_SCALE
-        compiled_face = (round(compiled(left)), int(compiled(right)) - 1)
+        compiled_face = (round(compiled(left)), round(compiled(right)) - 1)
         self.assertEqual(compiled_face, (52, 203))
+        self.assertEqual(MODULE.FACE_RADIUS, 47)
         rim = compiled(left) - MODULE.XCODE_26_MASK_EDGE
         inner_radius = MODULE.FACE_RADIUS * MODULE.XCODE_26_COMPILED_SCALE
         self.assertGreaterEqual(rim, 24)
@@ -198,13 +199,13 @@ class PillowIconTests(unittest.TestCase):
         )
         prompt_top = min(y for _, y in MODULE.PROMPT_POINTS) - MODULE.PROMPT_STROKE / 2
         prompt_bottom = max(y for _, y in MODULE.PROMPT_POINTS) + MODULE.PROMPT_STROKE / 2
-        self.assertGreaterEqual(prompt_left - left, 30)
-        self.assertGreaterEqual(prompt_top - top, 30)
-        self.assertGreaterEqual(bottom - prompt_bottom, 30)
-        self.assertGreaterEqual(
-            right - MODULE.ICON_COMPOSER_CARET_BOX[2],
-            MODULE.ICON_COMPOSER_MIN_GLYPH_CLEARANCE,
+        self.assertEqual(
+            (prompt_left - left, prompt_top - top, bottom - prompt_bottom),
+            (72, 84, 84),
         )
+        caret_clearance = right - MODULE.ICON_COMPOSER_CARET_BOX[2]
+        self.assertEqual(caret_clearance, 48)
+        self.assertGreaterEqual(caret_clearance, MODULE.ICON_COMPOSER_MIN_GLYPH_CLEARANCE)
 
     def test_svg_sources_are_generated_from_the_shared_geometry(self):
         linux = self.root / "linux" / "kettle.svg"
