@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-08-12
+
 ### Added
 
 - **Official macOS packages are now Developer ID signed, notarized, stapled,
