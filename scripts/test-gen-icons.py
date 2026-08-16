@@ -185,6 +185,27 @@ class PillowIconTests(unittest.TestCase):
                 stack.enter_context(redirect_stdout(StringIO()))
                 self.assertEqual(MODULE.main(), 0)
 
+    def test_emit_renders_the_compact_master_only_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            original = MODULE.render_primitives
+            compact_calls = 0
+
+            def counted(primitives):
+                nonlocal compact_calls
+                if primitives == MODULE.compact_icon_primitives():
+                    compact_calls += 1
+                return original(primitives)
+
+            with patch.object(MODULE, "render_primitives", side_effect=counted):
+                MODULE.emit(
+                    root / "linux",
+                    root / "iconset",
+                    root / "windows" / "kettle.ico",
+                    quiet=True,
+                )
+            self.assertEqual(compact_calls, 1)
+
     def test_macos_keeps_legacy_icon_and_has_native_composer_source(self):
         linux = MODULE.render_master()
 

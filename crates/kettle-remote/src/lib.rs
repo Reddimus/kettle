@@ -1088,8 +1088,9 @@ pub fn argv_accepts_unnegotiated_modified_enter(argv: &[String]) -> bool {
 
     // Some distributions are JavaScript entrypoints. Inspect only the
     // runtime's entrypoint, never later command arguments. A named parent is
-    // accepted only for generic package entry leaves (`claude-code/cli.js`),
-    // so an unrelated `codex/scripts/repl.js` remains rejected.
+    // accepted only for generic package entry leaves (`claude-code/cli.js`)
+    // installed beneath `node_modules`, so an unrelated project directory
+    // called `codex` or `gemini` remains rejected.
     let runtime = argv0_basename(argv0);
     let entrypoint = match runtime.as_str() {
         "node" | "bun" => argv.get(1),
@@ -1108,9 +1109,11 @@ pub fn argv_accepts_unnegotiated_modified_enter(argv: &[String]) -> bool {
         known_composer(leaf)
             || (matches!(leaf, "cli" | "index" | "main" | "bin")
                 && components
+                    .clone()
+                    .any(|component| component.eq_ignore_ascii_case("node_modules"))
+                && components
                     .take(2)
-                    .map(|component| component.to_ascii_lowercase())
-                    .any(|component| known_composer(&component)))
+                    .any(|component| known_composer(&component.to_ascii_lowercase())))
     })
 }
 
@@ -4854,6 +4857,8 @@ mod tests {
             "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js"
         ]));
         assert!(!accepts(&["node", "/home/me/src/codex/scripts/repl.js"]));
+        assert!(!accepts(&["node", "/home/me/projects/gemini/index.js"]));
+        assert!(!accepts(&["node", "/home/me/src/codex/bin/cli.js"]));
         assert!(!accepts(&["node", "/tmp/server.js", "codex"]));
         assert!(!accepts(&["python3"]));
     }

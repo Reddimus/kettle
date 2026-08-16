@@ -30435,6 +30435,40 @@ mod tests {
         ));
     }
 
+    /// The adaptive edge case deliberately bypasses `handle_action` and falls
+    /// through to normal terminal input. Pin the production wiring as well as
+    /// the two pure helpers: once a repeated press reaches the PTY, the shared
+    /// ownership ledger must be updated before its encoded bytes are queued so
+    /// the eventual release cannot be swallowed by later geometry changes.
+    #[test]
+    fn adaptive_alt_focus_fallthrough_records_terminal_ownership_before_writing() {
+        let src = production_source();
+        let routing = src
+            .split("let adaptive_direction =")
+            .nth(1)
+            .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
+            .expect("adaptive keyboard routing block");
+        let fallthrough = routing
+            .find("if !adaptive_focus_falls_through")
+            .expect("adaptive focus must retain its application-owned branch");
+        let terminal_ownership = routing
+            .find("track_terminal_key_press(")
+            .expect("fall-through input must record terminal key ownership");
+        let terminal_write = routing
+            .find("self.write_terminal_key_event(ws, &event, true)")
+            .expect("fall-through input must reach the terminal");
+        assert!(
+            fallthrough < terminal_ownership && terminal_ownership < terminal_write,
+            "adaptive focus must decide the UI branch first, then record PTY \
+             ownership before writing the fall-through press"
+        );
+        assert_eq!(
+            routing.matches("track_terminal_key_press(").count(),
+            1,
+            "the keyboard fall-through path must have one shared ownership update"
+        );
+    }
+
     /// v2.20.0 (`vim-menu-nav`) drift guards: (1) the vim layer must run
     /// BEFORE the mnemonic/typeahead catch-all in `context_menu_key` — moved
     /// after it, bare `j`/`k` would be eaten as typeahead input and the nav

@@ -427,9 +427,19 @@ def scaled(master: Image.Image, px: int) -> Image.Image:
     return out
 
 
-def render_icon_at_size(master: Image.Image, px: int) -> Image.Image:
+def render_icon_at_size(
+    master: Image.Image,
+    px: int,
+    compact_master: Image.Image | None = None,
+) -> Image.Image:
     """Render the optical-size variant appropriate for a fixed-size output."""
-    source = render_primitives(compact_icon_primitives()) if px == 16 else master
+    source = master
+    if px == 16:
+        source = (
+            compact_master
+            if compact_master is not None
+            else render_primitives(compact_icon_primitives())
+        )
     return scaled(source, px)
 
 
@@ -506,6 +516,7 @@ def emit(
     set it would have produced.
     """
     master = render_master()
+    compact_master = render_primitives(compact_icon_primitives())
     written: list[tuple[Path, str]] = []
 
     linux_dir.mkdir(parents=True, exist_ok=True)
@@ -530,7 +541,7 @@ def emit(
 
     for px in LINUX_SIZES:
         path = linux_dir / f"kettle-{px}.png"
-        render_icon_at_size(master, px).save(path)
+        render_icon_at_size(master, px, compact_master).save(path)
         written.append((path, f"packaging/linux/kettle-{px}.png"))
         if not quiet:
             print(f"wrote {path}")
@@ -545,7 +556,7 @@ def emit(
             # Keep the former standalone iconset reproducible for downstream
             # packagers. The official .app now uses AppIcon.icon, whose actool
             # output includes its own previous-release fallback.
-            render_icon_at_size(master, px).save(iconset_dir / name)
+            render_icon_at_size(master, px, compact_master).save(iconset_dir / name)
             written.append(
                 (iconset_dir / name, f"packaging/macos/kettle.iconset/{name}")
             )
@@ -555,7 +566,10 @@ def emit(
     ico_path.parent.mkdir(parents=True, exist_ok=True)
     write_ico(
         ico_path,
-        [(px, render_icon_at_size(master, px)) for px in LINUX_SIZES],
+        [
+            (px, render_icon_at_size(master, px, compact_master))
+            for px in LINUX_SIZES
+        ],
     )
     written.append((ico_path, "packaging/windows/kettle.ico"))
     if not quiet:
