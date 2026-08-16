@@ -5,6 +5,7 @@
 
 use crate::image::{ImageData, Placed, PlacementParams};
 use crate::kitty::{Delete, KittyOut, KittyState, PlacementKey};
+use crate::{CompletionUpdate, completion};
 use crate::{GraphicsBudget, GraphicsReservation};
 use crate::{iterm, sixel};
 
@@ -38,6 +39,16 @@ enum GraphicsScreen {
 pub enum Chunk {
     /// Bytes to forward to the terminal engine unchanged.
     Pass(Vec<u8>),
+    /// Bytes for the terminal engine only. Emitted when Kettle rewrites a
+    /// control sequence (OSC 1 → OSC 2, 8-bit ST → `ESC \`) and a raw consumer
+    /// already received the original through [`Chunk::Raw`]. With no raw
+    /// consumer these sequences stay ordinary [`Chunk::Pass`] bytes.
+    Terminal(Vec<u8>),
+    /// Original bytes for raw output consumers only. The terminal engine must
+    /// not see this duplicate. Emitted for consumed or rewritten protocols when
+    /// raw tapping is enabled; private completion messages are deliberately
+    /// excluded.
+    Raw(Vec<u8>),
     /// A decoded image to place at the current cursor position.
     Image(Placed),
     /// Kitty `a=d`: delete placements selected by id, number, cursor/cell,
@@ -92,6 +103,8 @@ pub enum Chunk {
     /// Protocol desktop notification (`OSC 9 ; message` or
     /// `OSC 777 ; notify ; title ; body`).
     Notification { title: String, body: String },
+    /// Shell-owned candidates for Kettle's passive completion overlay.
+    Completion(CompletionUpdate),
 }
 
 /// One process-budgeted graphics control string deferred by DEC 2026.
@@ -163,15 +176,44 @@ fn is_graphics_sequence(mode: Mode, seq: &[u8]) -> bool {
     }
 }
 
+/// How a control string was terminated on the wire.
+///
+/// `EscSt` and `C1St` mean the same thing to the VT engine, but they are
+/// different bytes: the raw output tap must replay whichever one actually
+/// arrived, and the engine keeps receiving the `ESC \` form it has always been
+/// fed (see `raw_st_terminates_a_sequence`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SeqTerminator {
+    /// `ESC \` (7-bit ST) — also the value while no sequence is active.
+    EscSt,
+    /// `BEL` (`0x07`), OSC only.
+    Bel,
+    /// Raw C1 ST (`0x9c`).
+    C1St,
+}
+
+impl SeqTerminator {
+    /// The bytes as received. `Bel` is only ever recorded for OSC, but the mode
+    /// guard is kept so a future DCS/APC path cannot emit a BEL terminator.
+    fn bytes(self, mode: Mode) -> &'static [u8] {
+        match self {
+            Self::Bel if mode == Mode::Osc => b"\x07",
+            Self::C1St => b"\x9c",
+            _ => b"\x1b\\",
+        }
+    }
+}
+
 pub struct Extractor {
     mode: Mode,
     pass: Vec<u8>,
     seq: Vec<u8>,
     esc_pending: bool,
     st_pending: bool,
-    /// The terminator that ended the current sequence was a BEL (`0x07`),
-    /// not `ESC \`; preserved so pass-through bytes echo exactly.
-    term_bel: bool,
+    /// Exactly which terminator ended the sequence being finished, so
+    /// pass-through bytes echo it and the raw tap can reproduce the original
+    /// stream byte for byte.
+    term: SeqTerminator,
     kitty_primary: KittyState,
     kitty_alternate: KittyState,
     graphics_screen: GraphicsScreen,
@@ -184,6 +226,7 @@ pub struct Extractor {
     /// recovery boundary. They belong to the swallowed lead even though the
     /// control-string state has already returned to pass-through.
     discard_utf8_continuations: u8,
+    raw_tap: bool,
     /// Rolling tail (≤3 bytes) of the active control string's payload, kept
     /// even while discarding, so a raw `0x9c` can be classified as either a
     /// standalone C1 ST or a UTF-8 continuation byte of an in-progress
@@ -218,7 +261,7 @@ impl Extractor {
             seq: Vec::new(),
             esc_pending: false,
             st_pending: false,
-            term_bel: false,
+            term: SeqTerminator::EscSt,
             kitty_primary: KittyState::new(budget.clone()),
             kitty_alternate: KittyState::new(budget.clone()),
             graphics_screen: GraphicsScreen::Primary,
@@ -228,9 +271,17 @@ impl Extractor {
             discarding_seq: false,
             discard_remaining: 0,
             discard_utf8_continuations: 0,
+            raw_tap: false,
             seq_tail: [0; 3],
             seq_tail_len: 0,
         }
+    }
+
+    /// Include byte-exact copies of consumed, non-private protocols for raw
+    /// output subscribers. Plain [`Chunk::Pass`] bytes already serve both
+    /// consumers and are never duplicated.
+    pub fn set_raw_tap(&mut self, enabled: bool) {
+        self.raw_tap = enabled;
     }
 
     /// Complete a kitty deletion after the terminal core has resolved spatial
@@ -384,7 +435,7 @@ impl Extractor {
                         self.st_pending = false;
                         if b == b'\\' {
                             i += 1;
-                            self.term_bel = false;
+                            self.term = SeqTerminator::EscSt;
                             self.finish_seq(&mut out);
                             self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
@@ -468,7 +519,11 @@ impl Extractor {
                                 } else if b == 0x1b {
                                     self.st_pending = true;
                                 } else {
-                                    self.term_bel = b == 0x07;
+                                    self.term = if b == 0x07 {
+                                        SeqTerminator::Bel
+                                    } else {
+                                        SeqTerminator::C1St
+                                    };
                                     self.finish_seq(&mut out);
                                 }
                             }
@@ -587,6 +642,12 @@ impl Extractor {
                 self.bail(room);
             } else if self.append_seq(bytes) {
                 self.note_seq_tail(bytes);
+                if self.mode == Mode::Osc
+                    && self.seq.starts_with(completion::PREFIX)
+                    && self.seq.len() > completion::MAX_MESSAGE_BYTES
+                {
+                    self.bail_private();
+                }
                 return bytes.len();
             }
         }
@@ -676,6 +737,16 @@ impl Extractor {
         self.discard_remaining = bytes_before_limit.saturating_add(recovery);
     }
 
+    fn bail_private(&mut self) {
+        self.seq = Vec::new();
+        self.seq_reservation = None;
+        self.discarding_seq = true;
+        // A namespaced completion message is private even when malformed or
+        // oversized. Keep discarding to its actual terminator instead of
+        // exposing a tail after the generic bounded recovery window.
+        self.discard_remaining = usize::MAX;
+    }
+
     fn reset_discard(&mut self) {
         self.seq = Vec::new();
         self.seq_reservation = None;
@@ -683,7 +754,7 @@ impl Extractor {
         self.discard_remaining = 0;
         self.discard_utf8_continuations = 0;
         self.st_pending = false;
-        self.term_bel = false;
+        self.term = SeqTerminator::EscSt;
         self.mode = Mode::Pass;
     }
 
@@ -713,7 +784,7 @@ impl Extractor {
         let _seq_reservation = self.seq_reservation.take();
         self.mode = Mode::Pass;
         self.st_pending = false;
-        self.term_bel = false;
+        self.term = SeqTerminator::EscSt;
     }
 
     fn finish_seq(&mut self, out: &mut Vec<Chunk>) {
@@ -725,8 +796,20 @@ impl Extractor {
         let _seq_reservation = self.seq_reservation.take();
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
 
+        // Kettle completion messages are private UI metadata. Consume every
+        // namespaced message, including malformed or unsupported versions, so
+        // candidates and paths never reach the grid, session logs, recordings,
+        // or plugin output hooks.
+        if mode == Mode::Osc && seq.starts_with(completion::PREFIX) {
+            if let Some(update) = completion::parse(&seq) {
+                out.push(Chunk::Completion(update));
+            }
+            return;
+        }
+
         // OSC 133 shell-integration marks are consumed (not forwarded).
         if mode == Mode::Osc && seq.starts_with(b"133;") {
+            self.emit_raw_control(mode, &seq, out);
             if let Some(kind) = parse_prompt(&seq[4..]) {
                 out.push(Chunk::Prompt(kind));
             }
@@ -734,6 +817,7 @@ impl Extractor {
         }
         // OSC 7 cwd report (`7;file://host/abs/path`).
         if mode == Mode::Osc && seq.starts_with(b"7;") {
+            self.emit_raw_control(mode, &seq, out);
             if let Some(path) =
                 parse_osc7(&String::from_utf8_lossy(&seq[2..])).and_then(safe_reported_cwd)
             {
@@ -746,6 +830,7 @@ impl Extractor {
         // engine ignores it, so consume it here and surface a Progress chunk
         // the UI maps onto the OS taskbar indicator.
         if mode == Mode::Osc && seq.starts_with(b"9;4;") {
+            self.emit_raw_control(mode, &seq, out);
             if let Some(p) = parse_osc9_4(&seq) {
                 out.push(Chunk::Progress(p));
             }
@@ -759,6 +844,7 @@ impl Extractor {
         // notification. Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins;
         // both are shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
+            self.emit_raw_control(mode, &seq, out);
             if let Some(path) = parse_osc9_9(&seq[4..]).and_then(safe_reported_cwd) {
                 out.push(Chunk::Cwd(path));
             }
@@ -771,9 +857,11 @@ impl Extractor {
         if mode == Mode::Osc
             && let Some((title, body)) = parse_protocol_notification(&seq)
         {
+            self.emit_raw_control(mode, &seq, out);
             out.push(Chunk::Notification { title, body });
             return;
         }
+        let mut terminal_only = false;
         // OSC 1 (icon name) — VTE/alacritty drop it entirely (their
         // dispatch table only matches "0" and "2"), but vim / tmux /
         // ranger / mc emit it to set the *short* title intended for
@@ -784,15 +872,17 @@ impl Extractor {
         // first byte of the payload from `1` to `2` so VTE picks it
         // up; everything downstream then behaves identically.
         if mode == Mode::Osc && seq.starts_with(b"1;") {
+            self.emit_raw_control(mode, &seq, out);
             seq[0] = b'2';
+            // Engine-only exactly when a raw consumer already received the
+            // untouched original. With nobody tapping, this stays the ordinary
+            // single Pass chunk it has always been.
+            terminal_only = self.raw_tap;
         }
 
         if self.defer_graphics && is_graphics_sequence(mode, &seq) {
-            let terminator_len = if self.term_bel && mode == Mode::Osc {
-                1
-            } else {
-                2
-            };
+            self.emit_raw_control(mode, &seq, out);
+            let terminator_len = if self.term_is_bel(mode) { 1 } else { 2 };
             let Some(raw_len) = seq
                 .len()
                 .checked_add(2)
@@ -985,8 +1075,14 @@ impl Extractor {
         };
 
         match result {
-            R::Img(data) => out.push(Chunk::Image(data)),
-            R::Del(delete) => out.push(Chunk::DeleteImages(delete)),
+            R::Img(data) => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::Image(data));
+            }
+            R::Del(delete) => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::DeleteImages(delete));
+            }
             R::Virtual {
                 id,
                 placement,
@@ -994,25 +1090,31 @@ impl Extractor {
                 cols,
                 rows,
                 z,
-            } => out.push(Chunk::VirtualImage {
-                id,
-                placement,
-                img,
-                cols,
-                rows,
-                z,
-            }),
+            } => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::VirtualImage {
+                    id,
+                    placement,
+                    img,
+                    cols,
+                    rows,
+                    z,
+                });
+            }
             R::Anim {
                 id,
                 imgs,
                 gaps,
                 state,
-            } => out.push(Chunk::Animation {
-                id,
-                imgs,
-                gaps,
-                state,
-            }),
+            } => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::Animation {
+                    id,
+                    imgs,
+                    gaps,
+                    state,
+                });
+            }
             R::Rel {
                 id,
                 placement,
@@ -1023,20 +1125,33 @@ impl Extractor {
                 v,
                 z,
                 params,
-            } => out.push(Chunk::RelativePlacement {
-                id,
-                placement,
-                img,
-                parent_img,
-                parent_placement,
-                h,
-                v,
-                z,
-                params,
-            }),
+            } => {
+                self.emit_raw_control(mode, &seq, out);
+                out.push(Chunk::RelativePlacement {
+                    id,
+                    placement,
+                    img,
+                    parent_img,
+                    parent_placement,
+                    h,
+                    v,
+                    z,
+                    params,
+                });
+            }
             R::None => {
                 // Not an image (or unsupported): forward verbatim, terminator
                 // included, so the VT engine handles it.
+                //
+                // The engine has always been fed the `ESC \` form of ST, so a
+                // raw C1 ST is still normalized here. That makes the forwarded
+                // copy differ from the wire, which raw consumers must not see:
+                // when one is listening, hand them the exact bytes and mark the
+                // normalized copy terminal-only.
+                if self.raw_tap && !terminal_only && self.term == SeqTerminator::C1St {
+                    self.emit_raw_control(mode, &seq, out);
+                    terminal_only = true;
+                }
                 let Some(pass_len) = seq.len().checked_add(4) else {
                     return;
                 };
@@ -1055,15 +1170,57 @@ impl Extractor {
                     Mode::Pass => b' ',
                 });
                 v.extend_from_slice(&seq);
-                if self.term_bel && mode == Mode::Osc {
+                if self.term_is_bel(mode) {
                     v.push(0x07);
                 } else {
                     v.push(0x1b);
                     v.push(b'\\');
                 }
-                out.push(Chunk::Pass(v));
+                out.push(if terminal_only {
+                    Chunk::Terminal(v)
+                } else {
+                    Chunk::Pass(v)
+                });
             }
         }
+    }
+
+    fn term_is_bel(&self, mode: Mode) -> bool {
+        self.term == SeqTerminator::Bel && mode == Mode::Osc
+    }
+
+    /// Hand raw output consumers the sequence exactly as it arrived.
+    ///
+    /// Byte identity holds because every field is reproduced, not re-derived:
+    /// the introducer is always the two-byte `ESC` form (the extractor never
+    /// enters a control string on a C1 introducer, so no 8-bit form can be
+    /// normalized away), `seq` is the payload appended verbatim, and `term`
+    /// records which of BEL / `ESC \` / C1 ST actually closed it.
+    ///
+    /// A sequence that exceeded the sequence-byte budget was discarded before
+    /// reaching here and never reaches the tap either. Because the bounded
+    /// payload remains buffered until its terminator, a tap enabled on a later
+    /// PTY read receives that in-flight sequence in full rather than a corrupt
+    /// suffix.
+    fn emit_raw_control(&self, mode: Mode, seq: &[u8], out: &mut Vec<Chunk>) {
+        if !self.raw_tap {
+            return;
+        }
+        let introducer = match mode {
+            Mode::Dcs => b'P',
+            Mode::Apc => b'_',
+            Mode::Osc => b']',
+            Mode::Pass => return,
+        };
+        let terminator = self.term.bytes(mode);
+        let Some(capacity) = seq.len().checked_add(2 + terminator.len()) else {
+            return;
+        };
+        let mut raw = Vec::with_capacity(capacity);
+        raw.extend_from_slice(&[0x1b, introducer]);
+        raw.extend_from_slice(seq);
+        raw.extend_from_slice(terminator);
+        out.push(Chunk::Raw(raw));
     }
 }
 
@@ -1578,6 +1735,161 @@ mod tests {
 
     use super::{Chunk, Extractor, PromptKind};
     use crate::kitty::PlacementKey;
+
+    #[test]
+    fn completion_metadata_never_enters_the_raw_tap() {
+        let mut extractor = Extractor::default();
+        extractor.set_raw_tap(true);
+        let input =
+            b"before\x1b]777;kettle-completion;1;show;3;completion;0;fish;git;command\x1b\\after";
+        let chunks = extractor.feed(input);
+
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Completion(_)))
+        );
+        let published = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::Pass(bytes) | Chunk::Raw(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(published, b"beforeafter");
+        assert!(
+            !published
+                .windows(17)
+                .any(|bytes| bytes == b"kettle-completion")
+        );
+    }
+
+    #[test]
+    fn malformed_and_oversized_private_messages_fail_closed() {
+        let mut extractor = Extractor::default();
+        extractor.set_raw_tap(true);
+        let mut input = b"\x1b]777;kettle-completion;1;show;broken".to_vec();
+        input.extend(std::iter::repeat_n(
+            b'x',
+            crate::completion::MAX_MESSAGE_BYTES + 1,
+        ));
+        input.extend_from_slice(b"\x07visible");
+
+        let chunks = extractor.feed(&input);
+        let published = chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::Pass(bytes) | Chunk::Raw(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(published, b"visible");
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::Completion(_)))
+        );
+    }
+
+    /// Everything a raw output subscriber (session log, Lua output hook) would
+    /// see for one feed, in chunk order.
+    fn tapped(out: &[Chunk]) -> Vec<u8> {
+        out.iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::Pass(bytes) | Chunk::Raw(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// The raw tap exists so a log or plugin still sees protocols Kettle
+    /// consumes. "Sees" has to mean the original bytes: a re-serialized copy
+    /// would silently rewrite BEL to `ESC \`, drop an 8-bit ST, and make
+    /// captures useless as a protocol reference.
+    #[test]
+    fn the_raw_tap_replays_consumed_protocols_byte_for_byte() {
+        for (label, input) in [
+            ("osc133 BEL", &b"a\x1b]133;A\x07b"[..]),
+            ("osc133 ST", &b"a\x1b]133;A\x1b\\b"[..]),
+            ("osc133 C1 ST", &b"a\x1b]133;A\x9cb"[..]),
+            ("osc7 BEL", &b"\x1b]7;file://localhost/tmp\x07"[..]),
+            ("osc7 C1 ST", &b"\x1b]7;file://localhost/tmp\x9c"[..]),
+            ("osc9;4 BEL", &b"\x1b]9;4;1;40\x07"[..]),
+            ("osc9;4 C1 ST", &b"\x1b]9;4;1;40\x9c"[..]),
+            ("osc9;9 ST", &b"\x1b]9;9;/tmp\x1b\\"[..]),
+            ("notification BEL", &b"\x1b]9;hello\x07"[..]),
+            ("notification C1 ST", &b"\x1b]777;notify;t;b\x9c"[..]),
+            // OSC 1 is rewritten to OSC 2 for the engine; the tap keeps the 1.
+            ("osc1 rewrite BEL", &b"\x1b]1;short\x07"[..]),
+            ("osc1 rewrite C1 ST", &b"\x1b]1;short\x9c"[..]),
+        ] {
+            let mut extractor = Extractor::default();
+            extractor.set_raw_tap(true);
+            let out = extractor.feed(input);
+            assert_eq!(
+                tapped(&out),
+                input,
+                "{label}: raw consumers must receive the original bytes"
+            );
+        }
+    }
+
+    /// A pass-through control string is forwarded to the engine in its
+    /// `ESC \` form (`raw_st_terminates_a_sequence`), so when a raw consumer is
+    /// listening the original 8-bit ST has to reach it separately.
+    #[test]
+    fn a_c1_terminated_passthrough_stays_exact_for_raw_consumers() {
+        let input = b"\x1b]0;title\x9cafter";
+
+        let mut tapping = Extractor::default();
+        tapping.set_raw_tap(true);
+        let out = tapping.feed(input);
+        assert_eq!(tapped(&out), input);
+        assert_eq!(
+            passed(&out),
+            b"after",
+            "the normalized copy must be terminal-only, never double-published"
+        );
+        let engine: Vec<u8> = out
+            .iter()
+            .filter_map(|chunk| match chunk {
+                Chunk::Pass(bytes) | Chunk::Terminal(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(engine, b"\x1b]0;title\x1b\\after");
+
+        // With no subscriber the old single-chunk shape is preserved exactly.
+        let mut quiet = Extractor::default();
+        let out = quiet.feed(input);
+        assert!(!out.iter().any(|chunk| matches!(chunk, Chunk::Raw(_))));
+        assert_eq!(passed(&out), b"\x1b]0;title\x1b\\after");
+    }
+
+    /// DCS/APC strings reach the tap through the same path, and BEL inside
+    /// them is payload rather than a terminator.
+    #[test]
+    fn dcs_and_apc_strings_reach_the_tap_unchanged() {
+        for input in [
+            &b"\x1b_Ga=q\x1b\\"[..],
+            &b"\x1b_Ga=q\x9c"[..],
+            &b"\x1bPnot-sixel\x07body\x1b\\"[..],
+        ] {
+            let mut extractor = Extractor::default();
+            extractor.set_raw_tap(true);
+            let out = extractor.feed(input);
+            assert_eq!(tapped(&out), input);
+        }
+    }
+
     use base64::Engine;
 
     fn png(w: u32, h: u32) -> Vec<u8> {

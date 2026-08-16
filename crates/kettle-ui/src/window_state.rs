@@ -474,6 +474,7 @@ pub(crate) struct WindowState {
     /// surface must go before the `Arc<Window>` it borrows from.
     pub(crate) renderer: Option<Renderer>,
     pub(crate) window: Option<Arc<Window>>,
+    pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
     /// Native accessibility bridge. Constructed while the window is still
     /// hidden, before its first `set_visible(true)`.
     pub(crate) accessibility: Option<accesskit_winit::Adapter>,
@@ -826,6 +827,7 @@ impl WindowState {
             seq,
             renderer: None,
             window: None,
+            native_material: None,
             accessibility: None,
             accessibility_key: None,
             accessibility_updated_at: None,

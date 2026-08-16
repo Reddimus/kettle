@@ -15,7 +15,7 @@ use kettle_config::{
     Action, Bindings, Config, ConfigTrust, Key as KKey, Mods, Osc52, StatusBarMode, TabBarMode,
     TabBarPos, Trigger,
 };
-use kettle_core::{ClipboardType, PtyGeometry, Scroll, TermEvent};
+use kettle_core::{ClipboardType, Dimensions, PtyGeometry, Scroll, TermEvent};
 use kettle_render::{
     ContextMenu, ContextMenuRow, FrameOutcome, HighlightRect, HintLabel, ImePreedit, Overlay,
     PaneSnapshot, PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
@@ -48,6 +48,8 @@ const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
+const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
+const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn apply_pane_exit_action(
@@ -408,6 +410,10 @@ fn accessibility_text_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
 }
 
+fn accessibility_completion_row_id(index: usize) -> NodeId {
+    NodeId(ACCESSIBILITY_COMPLETION_ID_MASK | (index as u64 + 1))
+}
+
 fn accessibility_search_control_id(control: kettle_render::SearchControl) -> NodeId {
     let offset = match control {
         kettle_render::SearchControl::Editor => 1,
@@ -682,35 +688,6 @@ fn apply_macos_window_chrome(
     }
 }
 
-#[cfg(target_os = "macos")]
-fn set_macos_window_background(window: &Window, color: kettle_config::Rgb) {
-    use objc2_app_kit::{NSColor, NSView};
-    use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
-
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
-        return;
-    };
-    // SAFETY: winit owns a live NSView for this window, and every caller runs
-    // on the event-loop (AppKit main) thread. The color is an owned sRGB
-    // object retained by NSWindow when assigned.
-    let view: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
-    let Some(ns_window) = view.window() else {
-        return;
-    };
-    let background = unsafe {
-        NSColor::colorWithSRGBRed_green_blue_alpha(
-            f64::from(color.r) / 255.0,
-            f64::from(color.g) / 255.0,
-            f64::from(color.b) / 255.0,
-            1.0,
-        )
-    };
-    ns_window.setBackgroundColor(Some(&background));
-}
-
 #[cfg(test)]
 mod macos_chrome_policy_tests {
     use super::{
@@ -767,7 +744,7 @@ mod macos_chrome_policy_tests {
     }
 
     #[test]
-    fn production_wires_the_native_background_without_an_icon_override() {
+    fn production_wires_the_native_material_without_an_icon_override() {
         let src = production_source();
         assert!(
             !src.contains("setApplicationIconImage")
@@ -776,18 +753,13 @@ mod macos_chrome_policy_tests {
              Dock, app switching and the running application"
         );
 
-        let post_create = src
-            .split("fn apply_post_create(&self, window: &Window)")
-            .nth(1)
-            .and_then(|rest| rest.split("fn open_window(").next())
-            .expect("apply_post_create body");
         assert!(
-            post_create.contains("set_macos_window_background(window, self.cfg.theme.background)"),
-            "every created window must seed its native titlebar background"
+            src.matches("NativeMaterial::install(").count() == 2,
+            "both window creation paths must install the native material"
         );
         assert!(
-            src.contains("set_macos_window_background(w, background)"),
-            "runtime theme changes must update every native titlebar background"
+            src.contains("material.sync(window, &self.cfg)"),
+            "redraw must keep native material in step with runtime config changes"
         );
     }
 
@@ -5459,12 +5431,6 @@ pub struct App {
     /// at redraw (vs. per-mutation-site calls) can't drift when a new
     /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
     native_theme_synced: Option<Option<WindowTheme>>,
-    /// The sRGB color last assigned to every decorated NSWindow background.
-    /// A transparent titlebar without full-size content reveals this native
-    /// background, so it must follow palette changes independently of the
-    /// coarse light/dark theme hint above.
-    #[cfg(target_os = "macos")]
-    macos_window_background_synced: Option<kettle_config::Rgb>,
     /// Window ids awaiting removal after their checked-out dispatch finishes.
     /// This must be keyed by window: a process-global boolean can be set while
     /// ctl/Lua dispatches into one mapped window and then consumed by another
@@ -5805,6 +5771,31 @@ fn persist_keybind_rebind(
         saved = false;
     }
     saved
+}
+
+fn completion_surface_available(mode: kettle_core::TermMode, display_offset: usize) -> bool {
+    !mode.contains(kettle_core::TermMode::ALT_SCREEN) && display_offset == 0
+}
+
+#[cfg(test)]
+mod completion_surface_tests {
+    use super::completion_surface_available;
+
+    #[test]
+    fn completion_stays_on_the_live_primary_screen() {
+        assert!(completion_surface_available(
+            kettle_core::TermMode::empty(),
+            0
+        ));
+        assert!(!completion_surface_available(
+            kettle_core::TermMode::ALT_SCREEN,
+            0
+        ));
+        assert!(!completion_surface_available(
+            kettle_core::TermMode::empty(),
+            1
+        ));
+    }
 }
 
 impl App {
@@ -6348,8 +6339,6 @@ impl App {
             gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
             native_theme_synced: None,
-            #[cfg(target_os = "macos")]
-            macos_window_background_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
             recorder: None,
@@ -10873,6 +10862,62 @@ impl App {
             && ws.confirm_dialog.is_none()
             && ws.editing_title.is_none()
             && !ws.search.open;
+        let completion = (terminal_surface
+            && ws.window_focused
+            && ws.ime_preedit.is_none()
+            && self.cfg.completion_overlay == kettle_config::CompletionOverlayMode::Auto)
+            .then(|| {
+                let pane_id = ws.mux.active_focus()?;
+                let pane = ws.mux.panes.get(&pane_id)?;
+                let (mode, display_offset, columns, rows) = {
+                    let term = pane.term.term.lock().ok()?;
+                    (
+                        *term.mode(),
+                        term.grid().display_offset(),
+                        term.columns(),
+                        term.screen_lines(),
+                    )
+                };
+                if !completion_surface_available(mode, display_offset) {
+                    return None;
+                }
+                let list = pane.term.completion()?;
+                let pane_rect = self.focused_rect(ws, self.area(ws))?;
+                let titlebar =
+                    self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
+                let grid_origin = kettle_render::pane_grid_origin(
+                    pane_rect,
+                    (self.cfg.padding_x, self.cfg.padding_y),
+                    titlebar,
+                    self.cfg.title_at_bottom,
+                );
+                let renderer = ws.renderer.as_ref()?;
+                let kind = match list.kind {
+                    kettle_core::CompletionKind::Completion => "Completions",
+                    kettle_core::CompletionKind::Prediction => "Prediction",
+                };
+                Some(kettle_render::CompletionOverlay {
+                    pane_rect,
+                    grid_rect: (
+                        grid_origin.0,
+                        grid_origin.1,
+                        columns as f32 * renderer.cell_w,
+                        rows as f32 * renderer.cell_h,
+                    ),
+                    kind: kind.to_string(),
+                    source: list.source,
+                    selected: list.selected,
+                    candidates: list
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| kettle_render::CompletionOverlayRow {
+                            label: candidate.label,
+                            description: candidate.description,
+                        })
+                        .collect(),
+                })
+            })
+            .flatten();
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -10990,6 +11035,7 @@ impl App {
                 edit_title,
                 hint_labels,
                 ime_preedit,
+                completion,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -11102,6 +11148,7 @@ impl App {
             edit_title,
             hint_labels,
             ime_preedit,
+            completion: None,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -11189,6 +11236,9 @@ impl App {
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
         self.maybe_sync_native_theme(ws);
+        if let (Some(material), Some(window)) = (&ws.native_material, &ws.window) {
+            material.sync(window, &self.cfg);
+        }
         // v2.31.0: if the GPU device was lost (a driver TDR/reset) or hit an
         // uncaptured error (VRAM exhaustion under memory pressure), rendering
         // against the dead device cannot succeed. The new wgpu error handlers
@@ -15446,18 +15496,6 @@ impl App {
                 .filter_map(|s| s.window.as_ref())
             {
                 w.set_theme(hint);
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        if self.macos_window_background_synced != Some(self.cfg.theme.background) {
-            let background = self.cfg.theme.background;
-            self.macos_window_background_synced = Some(background);
-            for w in std::iter::once(ws)
-                .chain(self.windows.values())
-                .filter_map(|s| s.window.as_ref())
-            {
-                set_macos_window_background(w, background);
             }
         }
     }
@@ -21740,6 +21778,12 @@ impl App {
     ) -> winit::window::WindowAttributes {
         let mut attrs = Window::default_attributes()
             .with_title("kettle")
+            // Alpha-capable surfaces can cost compositor work and subtly alter
+            // text blending even when every rendered pixel is opaque. Ask for
+            // one only when this window can actually expose the desktop or a
+            // native material. A runtime toggle takes full effect in newly
+            // opened windows, as documented by the setting itself.
+            .with_transparent(self.cfg.background_opacity < 1.0 || self.cfg.window_blur)
             // Show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
             .with_window_icon(load_window_icon())
@@ -21747,6 +21791,17 @@ impl App {
             // Adwaita CSD) to match the active palette from the first frame;
             // runtime changes go through `maybe_sync_native_theme`.
             .with_theme(self.native_theme_hint());
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+        {
+            // Wayland implements this through KWin's blur protocol. Other
+            // compositors ignore the hint and retain alpha-only transparency.
+            attrs = attrs.with_blur(self.cfg.window_blur);
+        }
+        #[cfg(target_os = "windows")]
+        if self.cfg.window_blur {
+            use winit::platform::windows::{BackdropType, WindowAttributesExtWindows as _};
+            attrs = attrs.with_system_backdrop(BackdropType::TransientWindow);
+        }
         #[cfg(target_os = "macos")]
         {
             // Keep AppKit's title, traffic lights, rounded mask and drag region,
@@ -22033,6 +22088,50 @@ impl App {
             search.set_bounds(bounds(geometry.rect));
             nodes.push((ACCESSIBILITY_SEARCH_CONTAINER_ID, search));
         }
+        if let Some(completion) = self.overlay(ws, false).completion {
+            let cell = self.menu_cell(ws);
+            let visible_rows = kettle_render::completion_overlay_row_rects(&completion, cell);
+            let mut row_ids = Vec::with_capacity(visible_rows.len());
+            for (index, (x, y, width, height)) in visible_rows {
+                let Some(candidate) = completion.candidates.get(index) else {
+                    continue;
+                };
+                let id = accessibility_completion_row_id(index);
+                row_ids.push(id);
+                let mut row = Node::new(Role::ListItem);
+                row.set_label(if candidate.description.is_empty() {
+                    candidate.label.clone()
+                } else {
+                    format!("{}, {}", candidate.label, candidate.description)
+                });
+                if completion.selected == Some(index) {
+                    row.set_selected(true);
+                }
+                row.set_bounds(accesskit::Rect::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(x + width),
+                    f64::from(y + height),
+                ));
+                nodes.push((id, row));
+            }
+            let mut list = Node::new(Role::List);
+            list.set_label(format!("{} from {}", completion.kind, completion.source));
+            list.set_children(row_ids);
+            list.set_live(accesskit::Live::Polite);
+            if let Some((x, y, width, height)) =
+                kettle_render::completion_overlay_rect(&completion, cell)
+            {
+                list.set_bounds(accesskit::Rect::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(x + width),
+                    f64::from(y + height),
+                ));
+            }
+            children.push(ACCESSIBILITY_COMPLETION_CONTAINER_ID);
+            nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
+        }
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
         root.set_children(children);
@@ -22087,6 +22186,21 @@ impl App {
                 .hash(&mut hasher);
             ws.search.focused_control.hash(&mut hasher);
         }
+        if let Some(pane) = ws
+            .mux
+            .active_focus()
+            .and_then(|pane_id| ws.mux.panes.get(&pane_id))
+            && let Some(completion) = pane.term.completion()
+        {
+            completion.generation.hash(&mut hasher);
+            completion.source.hash(&mut hasher);
+            completion.selected.hash(&mut hasher);
+            std::mem::discriminant(&completion.kind).hash(&mut hasher);
+            for candidate in completion.candidates {
+                candidate.label.hash(&mut hasher);
+                candidate.description.hash(&mut hasher);
+            }
+        }
         let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
         layout.sort_by_key(|(pane_id, _)| *pane_id);
         for (pane_id, rect) in layout {
@@ -22140,10 +22254,6 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             set_macos_option_as_alt(window, self.cfg.macos_option_as_alt);
-            // `titlebarAppearsTransparent` does not extend Kettle's content
-            // beneath AppKit's controls; it reveals NSWindow's background.
-            // Seed that background before the hidden window is ever shown.
-            set_macos_window_background(window, self.cfg.theme.background);
         }
         // Terminator parity, terminatorlib/config.py:81
         // `sticky`: show window on every workspace. macOS exposes
@@ -22230,6 +22340,7 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        let native_material = crate::native_material::NativeMaterial::install(&window, &self.cfg);
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
         // Synchronous renderer init against the shared device — no block_on,
@@ -22266,6 +22377,7 @@ impl App {
         ws.renderer = Some(renderer);
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
+        ws.native_material = Some(native_material);
         self.sync_output_frame_budget(&mut ws, true);
         let area = self.area(&ws);
         let (cols, rows) = self.grid_of(&ws, area);
@@ -23311,6 +23423,9 @@ impl App {
             }
         };
         self.apply_post_create(&window);
+        ws.native_material = Some(crate::native_material::NativeMaterial::install(
+            &window, &self.cfg,
+        ));
         // Measured AFTER apply_post_create, because the gpu figure below is
         // derived by subtraction -- stopping the clock before it charged that
         // setup to the GPU and skewed every number quoted from this line.
@@ -25896,6 +26011,12 @@ impl App {
                 DpiResizeAction::Defer => {}
             }
         }
+        let (completion_hide_due, completion_hide_wait) = ws
+            .mux
+            .active_focus()
+            .and_then(|pane_id| ws.mux.panes.get(&pane_id))
+            .map(|pane| pane.term.poll_completion_hide(now))
+            .unwrap_or((false, None));
         // Drive cursor blink + visual-bell decay without busy-looping: only
         // schedule wake-ups while something is actually animating.
         let bell_active = !render_hidden
@@ -26018,7 +26139,8 @@ impl App {
             || bg_frame_due
             || autoscroll_active
             || coalesce_due
-            || resize_chip_active)
+            || resize_chip_active
+            || completion_hide_due)
             && let Some(w) = &ws.window
         {
             w.request_redraw();
@@ -26055,6 +26177,10 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = automation_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = completion_hide_wait {
+            let next = next.max(std::time::Duration::from_millis(1));
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         #[cfg(windows)]

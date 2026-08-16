@@ -207,6 +207,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 ),
                 number("Font size", "font-size", 6, 72, 1, "pt"),
                 number("Background opacity", "background-opacity", 20, 100, 5, "%"),
+                toggle("Window blur", "window-blur"),
                 number("Window padding", "window-padding-x", 0, 40, 2, "px"),
                 choice(
                     // Use the canonical `cursor-style`
@@ -270,6 +271,12 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "scrollbar",
                     &["never", "auto", "always"],
                     &["hidden", "auto", "always"],
+                ),
+                choice(
+                    "Completion overlay",
+                    "completion-overlay",
+                    &["auto", "off"],
+                    &["automatic", "off"],
                 ),
                 // v2.28.0: width of the pronounced overlay scrollbar.
                 number("Scrollbar width", "scrollbar-width", 2, 40, 2, "px"),
@@ -591,6 +598,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
     match key {
         "cursor-blink" => cfg.cursor_blink,
         "show-titlebar" => cfg.show_titlebar,
+        "window-blur" => cfg.window_blur,
         "copy-on-select" => cfg.copy_on_select,
         "mouse-hide-while-typing" => cfg.mouse_hide_while_typing,
         "vim-menu-nav" => cfg.vim_menu_nav,
@@ -643,6 +651,11 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             kettle_config::SearchCaseSensitivity::Smart => "smart",
             kettle_config::SearchCaseSensitivity::Always => "always",
             kettle_config::SearchCaseSensitivity::Never => "never",
+        }
+        .to_string(),
+        "completion-overlay" => match cfg.completion_overlay {
+            kettle_config::CompletionOverlayMode::Auto => "auto",
+            kettle_config::CompletionOverlayMode::Off => "off",
         }
         .to_string(),
         // v2.23.0 background controls.

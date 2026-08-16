@@ -36,6 +36,26 @@ const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
+fn completion_refresh_input(bytes: &[u8]) -> bool {
+    matches!(bytes, b"\t" | b"\x1b[Z")
+}
+
+fn pane_environment(config: &Config) -> Vec<(String, String)> {
+    let mut environment = config.env.clone();
+    // Append after user env so the runtime capability is authoritative. The
+    // terminal's existing extra-env route also carries it into WSLENV.
+    environment.push((
+        "KETTLE_COMPLETION_OVERLAY".to_string(),
+        if config.completion_overlay == kettle_config::CompletionOverlayMode::Auto {
+            "1"
+        } else {
+            "0"
+        }
+        .to_string(),
+    ));
+    environment
+}
+
 /// Result of attempting to enqueue input for a pane.
 ///
 /// Keeping these states distinct is a correctness boundary: read-only is a
@@ -744,6 +764,11 @@ impl Pane {
     pub fn feed_input_shared(&self, bytes: Arc<[u8]>) -> PaneInputResult {
         if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
             return result;
+        }
+        if completion_refresh_input(bytes.as_ref()) {
+            self.term.defer_completion_hide();
+        } else {
+            self.term.clear_completion();
         }
         self.pty_input.enqueue_user(bytes)
     }
@@ -1692,6 +1717,9 @@ impl Mux {
         } else {
             None
         };
+        // Shell integration must not take over a stock completion binding when
+        // the matching UI is disabled.
+        let pane_env = pane_environment(cfg);
         // Terminator parity: route through new_with_env so
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
@@ -1707,7 +1735,7 @@ impl Mux {
             Some(cfg.word_delimiters.as_str()),
             &cfg.term,
             &cfg.colorterm,
-            &cfg.env,
+            &pane_env,
             cfg.login_shell,
             cfg.shell_integration,
             TerminalCapabilities {
@@ -7694,5 +7722,28 @@ mod node_tests {
         let a = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let b = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         assert!(b > a, "monotonic process-wide allocation");
+    }
+
+    #[test]
+    fn only_tab_navigation_gets_the_completion_grace_window() {
+        assert!(super::completion_refresh_input(b"\t"));
+        assert!(super::completion_refresh_input(b"\x1b[Z"));
+        for input in [b"x".as_slice(), b"\r", b"\x1b[A", b"\x1b[1;2Z"] {
+            assert!(!super::completion_refresh_input(input), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn completion_capability_overrides_a_spoofed_user_env_value() {
+        let mut config = Config::default();
+        config
+            .env
+            .push(("KETTLE_COMPLETION_OVERLAY".to_string(), "stale".to_string()));
+        let environment = super::pane_environment(&config);
+        assert_eq!(environment.last().unwrap().1, "1");
+
+        config.completion_overlay = kettle_config::CompletionOverlayMode::Off;
+        let environment = super::pane_environment(&config);
+        assert_eq!(environment.last().unwrap().1, "0");
     }
 }

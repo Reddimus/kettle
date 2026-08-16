@@ -99,6 +99,7 @@ if (-not $global:__kettle_prompt_installed) {
 
         $esc = [char]27
         $bel = [char]7
+        __kettle_completion_clear
         # D = last command's exit code, A = this prompt's start.
         # Emitted together at the top of the prompt function.
         [Console]::Write("$esc]133;D;$__kettle_code$bel$esc]133;A$bel")
@@ -131,6 +132,71 @@ if (-not $global:__kettle_prompt_installed) {
         return "$rendered$esc]133;B$bel"
     }
 
+    function global:__kettle_completion_field([string]$Value, [int]$Limit) {
+        if ($null -eq $Value) { return '' }
+        try {
+            # Bound UTF-8 bytes without cutting a surrogate pair or combining
+            # sequence. `Substring(0, $Limit)` can create invalid UTF-16 when a
+            # completion crosses the boundary on an emoji.
+            $starts = [Globalization.StringInfo]::ParseCombiningCharacters($Value)
+            $end = 0
+            $bytes = 0
+            for ($index = 0; $index -lt $starts.Count; $index++) {
+                $next = if ($index + 1 -lt $starts.Count) {
+                    $starts[$index + 1]
+                } else {
+                    $Value.Length
+                }
+                $part = $Value.Substring($starts[$index], $next - $starts[$index])
+                $partBytes = [Text.Encoding]::UTF8.GetByteCount($part)
+                if ($bytes + $partBytes -gt $Limit) { break }
+                $bytes += $partBytes
+                $end = $next
+            }
+            return [uri]::EscapeDataString($Value.Substring(0, $end))
+        } catch {
+            return ''
+        }
+    }
+
+    function global:__kettle_completion_clear {
+        $global:__kettle_completion_generation =
+            [uint64]$global:__kettle_completion_generation + 1
+        [Console]::Write(
+            [char]27 + ']777;kettle-completion;1;clear;' +
+            $global:__kettle_completion_generation + [char]7
+        )
+    }
+
+    function global:__kettle_completion_emit($Result, $Selected) {
+        $global:__kettle_completion_generation =
+            [uint64]$global:__kettle_completion_generation + 1
+        if ($null -eq $Result -or $Result.CompletionMatches.Count -eq 0) {
+            __kettle_completion_clear
+            return
+        }
+        $selectedField = if ($null -eq $Selected) { '' } else { [string]$Selected }
+        $payload = '777;kettle-completion;1;show;' +
+            $global:__kettle_completion_generation +
+            ';completion;' + $selectedField + ';powershell'
+        $count = 0
+        foreach ($match in $Result.CompletionMatches) {
+            if ($count -ge 64) { break }
+            $label = __kettle_completion_field ([string]$match.CompletionText) 64
+            if ([string]::IsNullOrEmpty($label)) { continue }
+            $description = __kettle_completion_field ([string]$match.ToolTip) 256
+            $addition = ";$label;$description"
+            if (($payload.Length + $addition.Length) -gt 30000) { break }
+            $payload += $addition
+            $count++
+        }
+        if ($count -eq 0) {
+            __kettle_completion_clear
+        } else {
+            [Console]::Write([char]27 + ']' + $payload + [char]7)
+        }
+    }
+
     # C = command started executing. PSReadLine (the default in
     # PowerShell 5.1+ since Windows 10 1809; bundled with PS 7) fires
     # AcceptLine when the user hits Enter — hook the stock binding to emit
@@ -146,8 +212,54 @@ if (-not $global:__kettle_prompt_installed) {
                 Select-Object -First 1
             if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
                 Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                    __kettle_completion_clear
                     [Console]::Write([char]27 + ']133;C' + [char]7)
                     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+                }
+            }
+
+            $tabHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Tab' } |
+                Select-Object -First 1
+            if ($env:KETTLE_COMPLETION_OVERLAY -eq '1' -and
+                $null -ne $tabHandler -and
+                $tabHandler.Function -eq 'TabCompleteNext') {
+                Set-PSReadLineKeyHandler -Key Tab -ScriptBlock {
+                    $line = $null
+                    $cursor = 0
+                    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+                        [ref]$line,
+                        [ref]$cursor
+                    )
+                    try {
+                        $result = TabExpansion2 -inputScript $line -cursorColumn $cursor
+                    } catch {
+                        $result = $null
+                    }
+                    [Microsoft.PowerShell.PSConsoleReadLine]::TabCompleteNext()
+                    $after = $null
+                    $afterCursor = 0
+                    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+                        [ref]$after,
+                        [ref]$afterCursor
+                    )
+                    $selected = $null
+                    if ($null -ne $result) {
+                        for ($index = 0; $index -lt $result.CompletionMatches.Count; $index++) {
+                            $candidate = $line.Substring(0, $result.ReplacementIndex) +
+                                $result.CompletionMatches[$index].CompletionText +
+                                $line.Substring($result.ReplacementIndex + $result.ReplacementLength)
+                            if ($candidate -eq $after) {
+                                $selected = $index
+                                break
+                            }
+                        }
+                    }
+                    try {
+                        __kettle_completion_emit $result $selected
+                    } catch {
+                        __kettle_completion_clear
+                    }
                 }
             }
         }

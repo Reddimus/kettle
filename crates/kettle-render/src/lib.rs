@@ -484,6 +484,22 @@ fn dim_blend(fg: Rgb, bg: Rgb) -> Rgb {
     )
 }
 
+/// Opaque color mixture used for UI surfaces that must remain legible over a
+/// translucent terminal window. `source_percent` is clamped to 0..=100; the
+/// result is pre-blended rather than alpha-composited with terminal text.
+fn solid_blend(source: Rgb, target: Rgb, source_percent: u16) -> Rgb {
+    let source_percent = source_percent.min(100);
+    let target_percent = 100 - source_percent;
+    let channel = |source: u8, target: u8| {
+        ((u16::from(source) * source_percent + u16::from(target) * target_percent + 50) / 100) as u8
+    };
+    Rgb::new(
+        channel(source.r, target.r),
+        channel(source.g, target.g),
+        channel(source.b, target.b),
+    )
+}
+
 /// Right-click context menu (Terminator / GNOME Terminal / iTerm2
 /// parity). Drawn as a floating panel anchored at the click point;
 /// the UI clamps the anchor so the panel fits the surface. The
@@ -685,6 +701,28 @@ pub struct SearchOverlay {
     pub focused: SearchControl,
 }
 
+/// A shell-owned completion list projected over the focused pane. Kettle only
+/// presents these rows; accepting or executing a candidate remains the shell's
+/// job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionOverlay {
+    pub pane_rect: (f32, f32, f32, f32),
+    /// Exact terminal grid bounds inside `pane_rect`, excluding padding and a
+    /// pane title bar. The completion panel is centered near the top of this
+    /// grid so it stays separate from the command line.
+    pub grid_rect: (f32, f32, f32, f32),
+    pub kind: String,
+    pub source: String,
+    pub selected: Option<usize>,
+    pub candidates: Vec<CompletionOverlayRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionOverlayRow {
+    pub label: String,
+    pub description: String,
+}
+
 impl Default for SearchOverlay {
     fn default() -> Self {
         Self {
@@ -772,6 +810,8 @@ pub struct Overlay {
     pub hint_labels: Vec<HintLabel>,
     /// Input-method preedit text drawn at the focused terminal cursor.
     pub ime_preedit: Option<ImePreedit>,
+    /// Shell completion card shown near the top of the focused pane.
+    pub completion: Option<CompletionOverlay>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
@@ -898,6 +938,116 @@ pub struct SettingsRow {
 
 /// Pixel rectangle `(x, y, w, h)`.
 pub type Rect4 = (f32, f32, f32, f32);
+
+const MAX_COMPLETION_ROWS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CompletionPanelGeometry {
+    rect: Rect4,
+    row_h: f32,
+    label_w: f32,
+    first: usize,
+    rows: usize,
+}
+
+fn completion_panel_geometry(
+    overlay: &CompletionOverlay,
+    cell: (f32, f32),
+) -> Option<CompletionPanelGeometry> {
+    if overlay.candidates.is_empty() {
+        return None;
+    }
+    let (px, py, pw, ph) = overlay.pane_rect;
+    let (gx, gy, gw, gh) = overlay.grid_rect;
+    let pane_left = px.max(gx);
+    let pane_right = (px + pw).min(gx + gw);
+    let available_w = (pane_right - pane_left).max(0.0);
+    let top = py.max(gy);
+    let bottom = (py + ph).min(gy + gh);
+    let row_h = cell.1;
+    if available_w < cell.0 * 20.0 || bottom - top < cell.1 * 3.0 {
+        return None;
+    }
+    let wanted_rows = overlay.candidates.len().min(MAX_COMPLETION_ROWS);
+    // Reserve one grid row above and below the panel. The top inset keeps it
+    // visually detached from pane chrome; the lower inset prevents a nearly
+    // full-height card in a very short split.
+    let capacity = (((bottom - top) / row_h).floor() as usize).saturating_sub(2);
+    let rows = wanted_rows.min(capacity);
+    if rows == 0 {
+        return None;
+    }
+    let selected = overlay
+        .selected
+        .unwrap_or(0)
+        .min(overlay.candidates.len().saturating_sub(1));
+    let first = selected
+        .saturating_add(1)
+        .saturating_sub(rows)
+        .min(overlay.candidates.len().saturating_sub(rows));
+    let label_columns = overlay
+        .candidates
+        .iter()
+        .map(|candidate| display_width(&candidate.label))
+        .max()
+        .unwrap_or(1)
+        .clamp(1, 24);
+    let description_columns = overlay
+        .candidates
+        .iter()
+        .map(|candidate| display_width(&candidate.description))
+        .max()
+        .unwrap_or(0)
+        .min(36);
+    let gap_columns = usize::from(description_columns > 0) * 2;
+    let content_columns = (label_columns + gap_columns + description_columns).clamp(16, 62);
+    let horizontal_pad = cell.0;
+    let width = (content_columns as f32 * cell.0 + horizontal_pad * 2.0).min(available_w);
+    let height = rows as f32 * row_h;
+    // Center in whole-cell increments so the card stays crisp at every DPI and
+    // does not wander as the shell cursor moves.
+    let slack_cells = ((available_w - width) / cell.0).floor().max(0.0) as usize;
+    let x = pane_left + (slack_cells / 2) as f32 * cell.0;
+    let y = top + row_h;
+    Some(CompletionPanelGeometry {
+        rect: (x, y, width, height),
+        row_h,
+        label_w: (label_columns as f32 * cell.0).min(width - horizontal_pad * 2.0),
+        first,
+        rows,
+    })
+}
+
+/// Bounds of the visible completion card. Shared with accessibility so the
+/// semantic list occupies the same compact region users see on screen.
+pub fn completion_overlay_rect(overlay: &CompletionOverlay, cell: (f32, f32)) -> Option<Rect4> {
+    completion_panel_geometry(overlay, cell).map(|geometry| geometry.rect)
+}
+
+/// Candidate index and pixel bounds for each visible completion row. Paint
+/// and accessibility share this geometry so assistive hit targets never point
+/// at clipped or off-screen candidates.
+pub fn completion_overlay_row_rects(
+    overlay: &CompletionOverlay,
+    cell: (f32, f32),
+) -> Vec<(usize, Rect4)> {
+    let Some(geometry) = completion_panel_geometry(overlay, cell) else {
+        return Vec::new();
+    };
+    (0..geometry.rows)
+        .map(|row| {
+            (
+                geometry.first + row,
+                (
+                    geometry.rect.0,
+                    geometry.rect.1 + row as f32 * geometry.row_h,
+                    geometry.rect.2,
+                    geometry.row_h,
+                ),
+            )
+        })
+        .collect()
+}
 
 /// Activity state of a tab — `Normal` draws no indicator, `Output`
 /// draws a small cyan dot, `Bell` draws a yellow dot. Terminator-
@@ -1592,6 +1742,13 @@ pub struct Renderer {
     /// (or never populated) and must be recomputed.
     settings_lines_source: Option<SettingsOverlay>,
     settings_lines_cache: Vec<String>,
+    /// Label and secondary-description buffers for the focused pane's
+    /// completion shelf. Separate pools keep the command token crisp while the
+    /// explanation stays visually subordinate.
+    completion_buffers: Vec<TextBuffer>,
+    completion_texts: Vec<String>,
+    completion_description_buffers: Vec<TextBuffer>,
+    completion_description_texts: Vec<String>,
     tabbar_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
@@ -3885,6 +4042,10 @@ impl Renderer {
             settings_texts: Vec::new(),
             settings_lines_source: None,
             settings_lines_cache: Vec::new(),
+            completion_buffers: Vec::new(),
+            completion_texts: Vec::new(),
+            completion_description_buffers: Vec::new(),
+            completion_description_texts: Vec::new(),
             tabbar_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
@@ -4497,6 +4658,8 @@ impl Renderer {
                 self.context_menu_hint_texts.clear();
                 self.settings_texts.clear();
                 self.settings_lines_source = None;
+                self.completion_texts.clear();
+                self.completion_description_texts.clear();
                 self.search_buffer_text.clear();
             }
         }
@@ -6274,6 +6437,70 @@ impl Renderer {
             }
         }
 
+        if let Some(completion) = &overlay.completion
+            && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
+        {
+            let count = geometry.rows;
+            while self.completion_buffers.len() < count {
+                let mut buffer = TextBuffer::new(&mut self.font_system, metrics);
+                buffer.set_wrap(Wrap::None);
+                self.completion_buffers.push(buffer);
+            }
+            while self.completion_texts.len() < count {
+                self.completion_texts.push(String::new());
+            }
+            while self.completion_description_buffers.len() < count {
+                let mut buffer = TextBuffer::new(&mut self.font_system, metrics);
+                buffer.set_wrap(Wrap::None);
+                self.completion_description_buffers.push(buffer);
+            }
+            while self.completion_description_texts.len() < count {
+                self.completion_description_texts.push(String::new());
+            }
+            self.completion_buffers.truncate(count);
+            self.completion_texts.truncate(count);
+            self.completion_description_buffers.truncate(count);
+            self.completion_description_texts.truncate(count);
+            let label_columns = (geometry.label_w / cw).floor().max(1.0) as usize;
+            let description_width =
+                (geometry.rect.2 - 2.0 * cw - geometry.label_w - 2.0 * cw).max(0.0);
+            let description_columns = (description_width / cw).floor().max(0.0) as usize;
+            for line_index in 0..count {
+                let candidate_index = geometry.first + line_index;
+                let candidate = &completion.candidates[candidate_index];
+                let line = fit_single_line_label(&candidate.label, label_columns);
+                let buffer = &mut self.completion_buffers[line_index];
+                buffer.set_metrics(metrics);
+                buffer.set_size(Some(geometry.label_w), Some(geometry.row_h));
+                if self.completion_texts[line_index] != line {
+                    buffer.set_text(
+                        &line,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.completion_texts[line_index] = line;
+                }
+                buffer.shape_until_scroll(&mut self.font_system, false);
+
+                let description =
+                    fit_single_line_label(&candidate.description, description_columns);
+                let buffer = &mut self.completion_description_buffers[line_index];
+                buffer.set_metrics(metrics);
+                buffer.set_size(Some(description_width), Some(geometry.row_h));
+                if self.completion_description_texts[line_index] != description {
+                    buffer.set_text(
+                        &description,
+                        &Attrs::new().family(Family::Name(&family)),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    self.completion_description_texts[line_index] = description;
+                }
+                buffer.shape_until_scroll(&mut self.font_system, false);
+            }
+        }
+
         // Quick-select hint label glyphs (one buffer per label).
         if !overlay.hint_labels.is_empty() {
             while self.hint_buffers.len() < overlay.hint_labels.len() {
@@ -6386,6 +6613,117 @@ impl Renderer {
                 ),
                 custom_glyphs: &[],
             });
+        }
+        if let Some(completion) = &overlay.completion
+            && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
+        {
+            let (x, y, width, height) = geometry.rect;
+            let accent = self.ui_accent(cfg, theme);
+            let panel_bg = solid_blend(theme.foreground, theme.background, 9);
+            let border_color = solid_blend(theme.foreground, theme.background, 30);
+            // Selection belongs to the terminal theme, not the per-window
+            // accent pool. Blending a random window accent into a dark panel
+            // produced muddy browns and olives; the theme's selection pair is
+            // already designed as a readable text surface. Keep the window
+            // accent for the slim leading edge, where it identifies which
+            // Kettle window owns the detached panel.
+            let selection_bg = solid_blend(theme.selection_background, panel_bg, 85);
+            let label_color = color::with_min_contrast(theme.foreground, panel_bg, 4.5);
+            let description_color =
+                color::with_min_contrast(color::dim(theme.foreground, panel_bg), panel_bg, 3.0);
+            let selected_label_color =
+                color::with_min_contrast(theme.selection_foreground, selection_bg, 4.5);
+            let selected_description_color = color::with_min_contrast(
+                color::dim(theme.selection_foreground, selection_bg),
+                selection_bg,
+                3.0,
+            );
+            menu_q.push(rect(x, y, width, height, panel_bg, 1.0));
+            let border = 1.0;
+            menu_q.push(rect(x, y, width, border, border_color, 1.0));
+            menu_q.push(rect(
+                x,
+                y + height - border,
+                width,
+                border,
+                border_color,
+                1.0,
+            ));
+            menu_q.push(rect(x, y, border, height, border_color, 1.0));
+            menu_q.push(rect(
+                x + width - border,
+                y,
+                border,
+                height,
+                border_color,
+                1.0,
+            ));
+            menu_q.push(rect(x, y, 2.0, height, accent, 1.0));
+            let bounds = TextBounds {
+                left: x as i32,
+                top: y as i32,
+                right: (x + width) as i32,
+                bottom: (y + height) as i32,
+            };
+            for row in 0..geometry.rows {
+                let candidate_index = geometry.first + row;
+                let row_y = y + row as f32 * geometry.row_h;
+                let selected = completion.selected == Some(candidate_index);
+                if selected {
+                    let selection_y = row_y + if row == 0 { border } else { 0.0 };
+                    let bottom_inset = if row + 1 == geometry.rows {
+                        border
+                    } else {
+                        0.0
+                    };
+                    menu_q.push(rect(
+                        x + border,
+                        selection_y,
+                        width - border * 2.0,
+                        (geometry.row_h - (selection_y - row_y) - bottom_inset).max(0.0),
+                        selection_bg,
+                        1.0,
+                    ));
+                    // A narrow accent rail makes the active row readable even
+                    // when a theme's selection background is deliberately
+                    // subtle. It does not recolor the text surface, avoiding
+                    // the muddy highlight produced by tinting the whole row.
+                    menu_q.push(rect(
+                        x + border,
+                        selection_y,
+                        2.0,
+                        (geometry.row_h - (selection_y - row_y) - bottom_inset).max(0.0),
+                        accent,
+                        1.0,
+                    ));
+                }
+                menu_areas.push(TextArea {
+                    buffer: &self.completion_buffers[row],
+                    left: x + cw,
+                    top: row_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: gc(if selected {
+                        selected_label_color
+                    } else {
+                        label_color
+                    }),
+                    custom_glyphs: &[],
+                });
+                menu_areas.push(TextArea {
+                    buffer: &self.completion_description_buffers[row],
+                    left: x + cw + geometry.label_w + 2.0 * cw,
+                    top: row_y,
+                    scale: 1.0,
+                    bounds,
+                    default_color: gc(if selected {
+                        selected_description_color
+                    } else {
+                        description_color
+                    }),
+                    custom_glyphs: &[],
+                });
+            }
         }
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
@@ -6890,6 +7228,7 @@ impl Renderer {
             || overlay.search_query.is_some()
             || !overlay.hint_labels.is_empty()
             || overlay.ime_preedit.is_some()
+            || overlay.completion.is_some()
             || overlay.ssh_query.is_some()
             || overlay.palette_query.is_some()
             || overlay.layout_picker_query.is_some()
@@ -15681,6 +16020,89 @@ mod search_bar_tests {
                 status.label()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod completion_panel_tests {
+    use super::{
+        CompletionOverlay, CompletionOverlayRow, MAX_COMPLETION_ROWS, completion_overlay_row_rects,
+        completion_panel_geometry, solid_blend,
+    };
+    use kettle_config::Rgb;
+
+    fn overlay(selected: Option<usize>, count: usize) -> CompletionOverlay {
+        CompletionOverlay {
+            pane_rect: (100.0, 40.0, 900.0, 700.0),
+            grid_rect: (108.0, 70.0, 884.0, 656.0),
+            kind: "Completions".to_string(),
+            source: "fish".to_string(),
+            selected,
+            candidates: (0..count)
+                .map(|index| CompletionOverlayRow {
+                    label: format!("item-{index}"),
+                    description: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn card_is_bounded_and_keeps_the_selection_visible() {
+        let geometry = completion_panel_geometry(&overlay(Some(19), 20), (8.0, 16.0)).unwrap();
+        assert_eq!(geometry.rows, MAX_COMPLETION_ROWS);
+        assert!(geometry.first <= 19);
+        assert!(19 < geometry.first + geometry.rows);
+        assert!(geometry.rect.0 >= 100.0);
+        assert!(geometry.rect.0 + geometry.rect.2 <= 1000.0);
+        assert!(geometry.rect.1 + geometry.rect.3 <= 740.0);
+
+        let rows = completion_overlay_row_rects(&overlay(Some(19), 20), (8.0, 16.0));
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows.first().map(|row| row.0), Some(12));
+        assert_eq!(rows.last().map(|row| row.0), Some(19));
+        assert_eq!(rows[1].1.1 - rows[0].1.1, 16.0);
+    }
+
+    #[test]
+    fn card_is_top_centered_and_content_fit_with_stable_width_limits() {
+        let short = completion_panel_geometry(&overlay(None, 2), (8.0, 16.0)).unwrap();
+        assert_eq!(short.rect, (476.0, 86.0, 144.0, 32.0));
+
+        let mut long = overlay(None, 2);
+        long.candidates[0].label = "x".repeat(200);
+        let long = completion_panel_geometry(&long, (8.0, 16.0)).unwrap();
+        assert_eq!(long.rect.2, 208.0, "label width clamps at 24 cells");
+        assert_eq!(long.rect.0, 444.0, "the card remains centered on the grid");
+    }
+
+    #[test]
+    fn card_stays_inside_the_grid_with_a_top_row_inset() {
+        let geometry = completion_panel_geometry(&overlay(None, 3), (8.0, 16.0)).unwrap();
+        assert_eq!(geometry.rect.1, 86.0);
+        assert!(geometry.rect.0 >= 108.0);
+        assert!(geometry.rect.0 + geometry.rect.2 <= 992.0);
+        assert!(geometry.rect.1 + geometry.rect.3 <= 726.0);
+    }
+
+    #[test]
+    fn card_declines_a_pane_too_small_for_one_row() {
+        let mut completion = overlay(None, 1);
+        completion.pane_rect = (0.0, 0.0, 60.0, 28.0);
+        completion.grid_rect = (0.0, 0.0, 60.0, 28.0);
+        assert!(completion_panel_geometry(&completion, (8.0, 16.0)).is_none());
+    }
+
+    #[test]
+    fn lifted_surface_moves_toward_foreground_in_both_theme_directions() {
+        assert_eq!(
+            solid_blend(Rgb::new(255, 255, 255), Rgb::new(0, 0, 0), 7),
+            Rgb::new(18, 18, 18)
+        );
+        assert_eq!(
+            solid_blend(Rgb::new(0, 0, 0), Rgb::new(255, 255, 255), 7),
+            Rgb::new(237, 237, 237)
+        );
     }
 }
 

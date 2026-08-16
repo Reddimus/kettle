@@ -20,6 +20,8 @@ OSC_A = b"\x1b]133;A\x07"
 OSC_B = b"\x1b]133;B\x07"
 OSC_C = b"\x1b]133;C\x07"
 OSC_D_1 = b"\x1b]133;D;1\x07"
+COMPLETION_SAMPLE = "abc\U0001FAD6def"
+COMPLETION_ENCODED = b"abc%F0%9F%AB%96"
 
 
 def run(command: list[str], label: str, announce: bool = True) -> bytes:
@@ -40,6 +42,19 @@ def run(command: list[str], label: str, announce: bool = True) -> bytes:
     if announce:
         print(f"{label}: PASS")
     return result.stdout
+
+
+def assert_completion_field(output: bytes, label: str) -> None:
+    begin = b"KETTLE_COMPLETION_BEGIN"
+    end = b"KETTLE_COMPLETION_END"
+    if begin not in output or end not in output:
+        raise RuntimeError(f"{label} omitted its completion sentinels: {output!r}")
+    encoded = output.split(begin, 1)[1].split(end, 1)[0]
+    if encoded != COMPLETION_ENCODED:
+        raise RuntimeError(
+            f"{label} cut a UTF-8 completion boundary: "
+            f"expected {COMPLETION_ENCODED!r}, got {encoded!r}"
+        )
 
 
 def check_zsh(executable: str) -> None:
@@ -79,6 +94,23 @@ def check_zsh(executable: str) -> None:
     )
     if b"KETTLE_ZSH_HOOKS_OK" not in hook_output:
         raise RuntimeError("zsh hook fixture omitted its success sentinel")
+
+    completion = run(
+        [
+            executable,
+            "-f",
+            "-c",
+            'source "$1" >/dev/null; print -rn KETTLE_COMPLETION_BEGIN; '
+            '__kettle_completion_encode "$2" 7; print -rn KETTLE_COMPLETION_END',
+            "kettle-completion-check",
+            str(INTEGRATION / "kettle.zsh"),
+            COMPLETION_SAMPLE,
+        ],
+        "zsh Unicode completion field fixture",
+        announce=False,
+    )
+    assert_completion_field(completion, "zsh Unicode completion field fixture")
+    print("zsh Unicode completion field fixture: PASS")
 
 
 def check_bash(executable: str, require_32: bool) -> None:
@@ -120,6 +152,24 @@ def check_bash(executable: str, require_32: bool) -> None:
         )
     if "%" in re.sub(r"%[0-9A-F]{2}", "", encoded_path):
         raise RuntimeError(f"Bash OSC 7 report contains a malformed escape: {encoded_path!r}")
+
+    completion = run(
+        [
+            executable,
+            "--noprofile",
+            "--norc",
+            "-c",
+            'source "$1" >/dev/null; trap - DEBUG; printf KETTLE_COMPLETION_BEGIN; '
+            '__kettle_completion_encode "$2" 7; printf KETTLE_COMPLETION_END',
+            "kettle-completion-check",
+            str(INTEGRATION / "kettle.bash"),
+            COMPLETION_SAMPLE,
+        ],
+        "Bash Unicode completion field fixture",
+        announce=False,
+    )
+    assert_completion_field(completion, "Bash Unicode completion field fixture")
+    print("Bash Unicode completion field fixture: PASS")
 
 
 def check_fish(executable: str) -> None:
@@ -167,6 +217,141 @@ def check_fish(executable: str) -> None:
 
     print("Fish OSC 133 and OSC 7 fixture: PASS")
 
+    completion = run(
+        [
+            executable,
+            "--no-config",
+            "-c",
+            "source $argv[1] >/dev/null; printf KETTLE_COMPLETION_BEGIN; "
+            "__kettle_completion_field $argv[2] 7; printf KETTLE_COMPLETION_END",
+            str(INTEGRATION / "kettle.fish"),
+            COMPLETION_SAMPLE,
+        ],
+        "Fish Unicode completion field fixture",
+        announce=False,
+    )
+    assert_completion_field(completion, "Fish Unicode completion field fixture")
+    print("Fish Unicode completion field fixture: PASS")
+
+    # A real key-binding round trip, not just a helper call. Fish emits its
+    # prompt event during an explicit `repaint`; the first overlay prototype
+    # repainted after publishing and therefore cleared the list in the same
+    # Tab press. TERM=dumb avoids terminal-query handshakes while retaining
+    # Fish's interactive line editor and bindings.
+    import fcntl
+    import pty
+    import select
+    import termios
+    import time
+
+    master, slave = pty.openpty()
+
+    def own_controlling_terminal() -> None:
+        os.setsid()
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+    env = os.environ.copy()
+    env.update(
+        TERM="dumb",
+        TERM_PROGRAM="kettle",
+        KETTLE_COMPLETION_OVERLAY="1",
+    )
+    process = subprocess.Popen(
+        [
+            executable,
+            "--no-config",
+            "-i",
+            "-C",
+            f"source {INTEGRATION / 'kettle.fish'}",
+        ],
+        cwd=ROOT,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        env=env,
+        preexec_fn=own_controlling_terminal,
+        close_fds=True,
+    )
+    os.close(slave)
+
+    def drain(seconds: float) -> bytes:
+        deadline = time.monotonic() + seconds
+        output = bytearray()
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                output.extend(os.read(master, 65536))
+            except OSError:
+                break
+        return bytes(output)
+
+    try:
+        startup = drain(1.0)
+        os.write(master, b"git ch\t")
+        after_tab = drain(1.0)
+        sequences = re.findall(
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", startup + after_tab
+        )
+        if not sequences or b";show;" not in sequences[-1] or b";checkout;" not in sequences[-1]:
+            raise RuntimeError(
+                "Fish Tab did not leave its completion list visible: "
+                f"{sequences[-3:]!r}"
+            )
+
+        os.write(master, b"\x1b[Z")
+        reverse = re.findall(
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.5)
+        )
+        if (
+            not reverse
+            or b";update;" not in reverse[-1]
+            or b";completion;2;fish;" not in reverse[-1]
+        ):
+            raise RuntimeError(
+                "Fish Shift-Tab did not start at the final candidate: "
+                f"{reverse[-3:]!r}"
+            )
+
+        os.write(master, b"\x03")
+        drain(0.25)
+        os.write(master, b"fish_vi_key_bindings; source " + str(INTEGRATION / "kettle.fish").encode() + b"\n")
+        drain(0.75)
+        os.write(master, b"git ch\t")
+        vi_sequences = re.findall(
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.75)
+        )
+        if not vi_sequences or b";show;" not in vi_sequences[-1]:
+            raise RuntimeError(
+                "Fish Vi insert-mode Tab did not publish completions: "
+                f"{vi_sequences[-3:]!r}"
+            )
+
+        os.write(master, b"\x1b[D")
+        drain(0.2)
+        os.write(master, b"\t")
+        moved_cursor = re.findall(
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.5)
+        )
+        if not moved_cursor or b";show;" not in moved_cursor[-1]:
+            raise RuntimeError(
+                "Fish reused a completion cycle after the cursor moved: "
+                f"{moved_cursor[-3:]!r}"
+            )
+    finally:
+        try:
+            os.write(master, b"\x03exit\n")
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            process.wait(timeout=2)
+        os.close(master)
+    print("Fish interactive completion binding fixture: PASS")
+
 
 def check_powershell(executable: str) -> None:
     common = [
@@ -209,6 +394,18 @@ def check_powershell(executable: str) -> None:
     )
     if b"KETTLE_POWERSHELL_ENTER_OK" not in enter_output:
         raise RuntimeError("PowerShell Enter fixture omitted its success sentinel")
+
+    completion_output = run(
+        [
+            *common,
+            str(FIXTURES / "powershell-completion.ps1"),
+            "-IntegrationPath",
+            str(INTEGRATION / "kettle.ps1"),
+        ],
+        f"{Path(executable).name} Unicode completion field fixture",
+    )
+    if b"KETTLE_POWERSHELL_COMPLETION_OK" not in completion_output:
+        raise RuntimeError("PowerShell completion fixture omitted its success sentinel")
 
 
 def main() -> int:

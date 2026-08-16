@@ -36,6 +36,82 @@ __kettle_osc7() {
   done
   printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$out"
 }
+
+__kettle_completion_encode() {
+  local LC_ALL=C p="$1" out='' i=0 j ch byte need valid len=${#1} limit=$2
+  while (( i < len && i < limit )); do
+    ch="${p:i:1}"
+    printf -v byte '%d' "'$ch"
+    byte=$(( byte & 0xFF ))
+    if (( byte < 0x80 )); then
+      need=1
+    elif (( byte >= 0xC2 && byte <= 0xDF )); then
+      need=2
+    elif (( byte >= 0xE0 && byte <= 0xEF )); then
+      need=3
+    elif (( byte >= 0xF0 && byte <= 0xF4 )); then
+      need=4
+    else
+      break
+    fi
+    (( i + need <= len && i + need <= limit )) || break
+    valid=1
+    for (( j = 1; j < need; j++ )); do
+      ch="${p:i+j:1}"
+      printf -v byte '%d' "'$ch"
+      byte=$(( byte & 0xFF ))
+      (( byte >= 0x80 && byte <= 0xBF )) || valid=0
+    done
+    (( valid )) || break
+    for (( j = 0; j < need; j++ )); do
+      ch="${p:i+j:1}"
+      printf -v byte '%d' "'$ch"
+      byte=$(( byte & 0xFF ))
+      case "$ch" in
+        [A-Za-z0-9_.~-]) out+="$ch" ;;
+        *)
+          printf -v ch '%%%02X' "$byte"
+          out+="$ch"
+          ;;
+      esac
+    done
+    (( i += need ))
+  done
+  printf '%s' "$out"
+}
+
+# Cooperative bridge for Bash completion frameworks. Call with
+#   kettle_completion_show KIND SOURCE SELECTED LABEL DESCRIPTION [...]
+# where SELECTED is empty or a zero-based row. Kettle presents the list but
+# never inserts or executes it.
+kettle_completion_show() {
+  local LC_ALL=C kind="${1:-completion}" source="${2:-bash}" selected="$3"
+  shift 3 || return
+  local payload label description addition count=0
+  __kettle_completion_generation=$(( ${__kettle_completion_generation:-0} + 1 ))
+  source="$(__kettle_completion_encode "$source" 64)"
+  payload="777;kettle-completion;1;show;$__kettle_completion_generation;$kind;$selected;$source"
+  while (( $# >= 2 && count < 64 )); do
+    label="$(__kettle_completion_encode "$1" 64)"
+    description="$(__kettle_completion_encode "$2" 256)"
+    shift 2
+    [[ -n "$label" ]] || continue
+    addition=";$label;$description"
+    (( ${#payload} + ${#addition} <= 30000 )) || break
+    payload+="$addition"
+    (( count++ ))
+  done
+  if (( count == 0 )); then
+    kettle_completion_clear
+  else
+    printf '\033]%s\007' "$payload"
+  fi
+}
+
+kettle_completion_clear() {
+  __kettle_completion_generation=$(( ${__kettle_completion_generation:-0} + 1 ))
+  printf '\033]777;kettle-completion;1;clear;%s\007' "$__kettle_completion_generation"
+}
 # Capture the command's status FIRST, and hand it back on the way out.
 #
 # kettle deliberately runs first in PROMPT_COMMAND so its own `$?` read is the
@@ -46,6 +122,7 @@ __kettle_osc7() {
 # hook transparent to whatever follows it.
 __kettle_pc() {
   local __kettle_status=$?
+  kettle_completion_clear
   printf '\033]133;D;%s\007\033]133;A\007' "$__kettle_status"
   __kettle_osc7
   return "$__kettle_status"

@@ -6,6 +6,22 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **Shell completions can appear in a compact panel at the top of the active
+  pane.** Fish and PowerShell publish their stock completion results
+  automatically when Tab has not been customized. Bash, Zsh, and customized
+  shells can use the cooperative bridge. The shell still owns matching,
+  quoting, insertion, selection, and execution; Kettle only displays a bounded
+  list away from the command line. `completion-overlay = off` leaves Tab
+  untouched.
+- **Application windows can use native background material behind translucent
+  terminal content.** Set `background-opacity` below `1.0` and
+  `window-blur = true`.
+  macOS follows Reduce Transparency changes immediately, Windows requests its
+  system backdrop, and supported Linux compositors receive a blur hint.
+  Unsupported systems keep ordinary alpha transparency.
+
 ### Fixed
 
 - **`Alt+Up` could not reach terminal applications on Linux and Windows.** The

@@ -21,7 +21,9 @@ use alacritty_terminal::vte::ansi::{
 use anyhow::{Context, Result};
 use kettle_vt::kitty::{Delete as KittyDelete, DeleteTarget as KittyDeleteTarget, PlacementKey};
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
-use kettle_vt::{Chunk, DeferredGraphics, Extractor, Progress, PromptKind};
+use kettle_vt::{
+    Chunk, CompletionList, CompletionUpdate, DeferredGraphics, Extractor, Progress, PromptKind,
+};
 use portable_pty::{CommandBuilder, PtySize};
 
 use crate::event::{EventProxy, OutputWakeGate, TermEvent, Waker};
@@ -2224,6 +2226,7 @@ fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
     matches!(
         chunk,
         Chunk::Pass(_)
+            | Chunk::Terminal(_)
             | Chunk::Image(_)
             | Chunk::DeleteImages(_)
             | Chunk::VirtualImage { .. }
@@ -2231,6 +2234,188 @@ fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
             | Chunk::Animation { .. }
             | Chunk::DeferredGraphics(_)
     )
+}
+
+/// How long a completion list stays on screen after a keystroke that is about
+/// to refresh it. The card only has to survive the PTY round-trip of one Tab.
+pub const COMPLETION_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[derive(Default)]
+struct CompletionSlot {
+    generation: u64,
+    list: Option<CompletionList>,
+    /// Set when input that is expected to refresh the list was sent. The list
+    /// stays visible until this passes, so a Tab that re-publishes the same
+    /// candidates does not blink the card off for the round-trip.
+    ///
+    /// Deliberately no timer: the shell's reply lands well inside the window in
+    /// the normal case and clears the deadline, and the cursor-blink tick
+    /// already bounds how long a stale card can linger when a foreground
+    /// program swallows the Tab instead. Do not add one.
+    hide_after: Option<std::time::Instant>,
+}
+
+/// The list a renderer should draw at `now`, honoring a pending grace-hide.
+fn completion_visible(slot: &CompletionSlot, now: std::time::Instant) -> Option<&CompletionList> {
+    match slot.hide_after {
+        Some(deadline) if now >= deadline => None,
+        _ => slot.list.as_ref(),
+    }
+}
+
+fn poll_completion_hide_slot(
+    slot: &mut CompletionSlot,
+    now: std::time::Instant,
+) -> (bool, Option<std::time::Duration>) {
+    let Some(deadline) = slot.hide_after else {
+        return (false, None);
+    };
+    if now < deadline {
+        return (false, Some(deadline.saturating_duration_since(now)));
+    }
+    slot.hide_after = None;
+    (slot.list.take().is_some(), None)
+}
+
+fn apply_completion_update(cell: &Mutex<CompletionSlot>, update: CompletionUpdate) {
+    let Ok(mut current) = cell.lock() else {
+        return;
+    };
+    match update {
+        CompletionUpdate::Show(list) | CompletionUpdate::Update(list)
+            if list.generation >= current.generation =>
+        {
+            current.generation = list.generation;
+            current.list = Some(list);
+            // The refresh the grace window was waiting for arrived.
+            current.hide_after = None;
+        }
+        CompletionUpdate::Clear { generation } if generation >= current.generation => {
+            current.generation = generation;
+            current.list = None;
+            current.hide_after = None;
+        }
+        CompletionUpdate::Show(_)
+        | CompletionUpdate::Update(_)
+        | CompletionUpdate::Clear { .. } => {}
+    }
+}
+
+fn reset_completion_session(cell: &Mutex<CompletionSlot>) {
+    if let Ok(mut current) = cell.lock() {
+        *current = CompletionSlot::default();
+    }
+}
+
+#[cfg(test)]
+mod completion_state_tests {
+    use super::{
+        COMPLETION_HIDE_GRACE, CompletionSlot, apply_completion_update, completion_visible,
+        poll_completion_hide_slot, reset_completion_session,
+    };
+    use kettle_vt::{CompletionKind, CompletionList, CompletionUpdate};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    fn list(generation: u64) -> CompletionList {
+        CompletionList {
+            generation,
+            kind: CompletionKind::Completion,
+            selected: None,
+            source: "test".to_string(),
+            candidates: vec![kettle_vt::CompletionCandidate {
+                label: "candidate".to_string(),
+                description: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_new_prompt_accepts_a_nested_shells_fresh_generation() {
+        let slot = Mutex::new(CompletionSlot::default());
+        apply_completion_update(&slot, CompletionUpdate::Show(list(42)));
+        reset_completion_session(&slot);
+        apply_completion_update(&slot, CompletionUpdate::Show(list(1)));
+
+        let current = slot.lock().unwrap();
+        assert_eq!(current.generation, 1);
+        assert_eq!(current.list.as_ref().map(|list| list.generation), Some(1));
+    }
+
+    #[test]
+    fn a_clear_keeps_older_updates_from_resurrecting() {
+        let slot = Mutex::new(CompletionSlot::default());
+        apply_completion_update(&slot, CompletionUpdate::Show(list(7)));
+        apply_completion_update(&slot, CompletionUpdate::Clear { generation: 8 });
+        apply_completion_update(&slot, CompletionUpdate::Update(list(7)));
+
+        let slot = slot.lock().unwrap();
+        assert_eq!(slot.generation, 8);
+        assert!(slot.list.is_none());
+    }
+
+    #[test]
+    fn a_pending_grace_window_keeps_the_card_up_until_it_lapses() {
+        let now = Instant::now();
+        let mut slot = CompletionSlot {
+            generation: 3,
+            list: Some(list(3)),
+            hide_after: Some(now + COMPLETION_HIDE_GRACE),
+        };
+        assert!(completion_visible(&slot, now).is_some());
+        assert!(
+            completion_visible(&slot, now + COMPLETION_HIDE_GRACE).is_none(),
+            "a Tab the shell never answered must stop showing stale candidates"
+        );
+
+        // The shell answering inside the window cancels the hide entirely.
+        slot.hide_after = Some(now + COMPLETION_HIDE_GRACE);
+        let cell = Mutex::new(slot);
+        apply_completion_update(&cell, CompletionUpdate::Update(list(4)));
+        let slot = cell.lock().unwrap();
+        assert!(slot.hide_after.is_none());
+        assert!(completion_visible(&slot, now + COMPLETION_HIDE_GRACE * 10).is_some());
+    }
+
+    #[test]
+    fn grace_expiry_requests_exactly_one_erase_frame() {
+        let now = Instant::now();
+        let mut slot = CompletionSlot {
+            generation: 3,
+            list: Some(list(3)),
+            hide_after: Some(now + COMPLETION_HIDE_GRACE),
+        };
+        assert_eq!(
+            poll_completion_hide_slot(&mut slot, now),
+            (false, Some(COMPLETION_HIDE_GRACE))
+        );
+        assert_eq!(
+            poll_completion_hide_slot(&mut slot, now + COMPLETION_HIDE_GRACE),
+            (true, None)
+        );
+        assert_eq!(
+            poll_completion_hide_slot(&mut slot, now + COMPLETION_HIDE_GRACE * 2),
+            (false, None),
+            "the event loop must quiesce after the erase redraw"
+        );
+    }
+
+    #[test]
+    fn a_stale_update_neither_reopens_the_card_nor_extends_the_window() {
+        let now = Instant::now();
+        let deadline = now + COMPLETION_HIDE_GRACE;
+        let cell = Mutex::new(CompletionSlot {
+            generation: 9,
+            list: None,
+            hide_after: Some(deadline),
+        });
+        apply_completion_update(&cell, CompletionUpdate::Update(list(8)));
+
+        let slot = cell.lock().unwrap();
+        assert_eq!(slot.generation, 9);
+        assert!(slot.list.is_none());
+        assert_eq!(slot.hide_after, Some(deadline));
+    }
 }
 
 fn reset_deferred_graphics(
@@ -2274,7 +2459,7 @@ fn apply_sync_marker(
     extractor.set_graphics_deferred(true);
     for chunk in replayed {
         match chunk {
-            Chunk::Pass(_) => {
+            Chunk::Pass(_) | Chunk::Terminal(_) | Chunk::Raw(_) => {
                 // The downstream text engine intentionally ignores malformed
                 // or incomplete graphics controls. The extractor still had to
                 // replay them to update bounded partial-upload state.
@@ -2800,6 +2985,9 @@ pub struct Terminal {
     /// Protocol desktop notifications requested by the PTY. Bounded in the
     /// reader thread so a hostile program cannot queue unbounded toasts.
     pub protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>>,
+    /// Latest shell-owned completion list. The extractor bounds and validates
+    /// it before publication; renderers clone at most 64 short rows.
+    completion: Arc<Mutex<CompletionSlot>>,
     /// Latest working directory reported via OSC 7 (or OSC 9;9). This is the
     /// *authoritative* cwd — a shell that volunteers it (incl. an in-distro WSL
     /// shell) is always right.
@@ -4811,6 +4999,7 @@ impl Terminal {
         let command_finished: Arc<Mutex<Vec<CommandFinished>>> = Arc::new(Mutex::new(Vec::new()));
         let protocol_notifications: Arc<Mutex<Vec<ProtocolNotification>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let completion_cell = Arc::new(Mutex::new(CompletionSlot::default()));
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
         // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
         // for native shells with no OSC 7/9;9). Starts empty.
@@ -4889,6 +5078,7 @@ impl Terminal {
             let output_start_seen = output_start_seen.clone();
             let command_finished = command_finished.clone();
             let protocol_notifications = protocol_notifications.clone();
+            let completion_cell = completion_cell.clone();
             let cwd_cell = cwd_cell.clone();
             let osc_cwd_seen = osc_cwd_seen.clone();
             let progress_cell = progress_cell.clone();
@@ -5194,34 +5384,55 @@ impl Terminal {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
-                                // Terminator parity (logger.py): per-pane log
-                                // tap. A full disk or vanished mount must not
-                                // stop this parser from draining the PTY, so the
-                                // lock covers bounded queue admission only.
-                                if log_active.load(std::sync::atomic::Ordering::Relaxed)
-                                    && let Ok(mut guard) = session_log.lock()
-                                    && let Some(writer) = guard.as_mut()
-                                {
-                                    let strip = log_strip_ansi.lock().map(|g| *g).unwrap_or(false);
-                                    let generation = log_generation.load(Ordering::Acquire);
-                                    let bytes =
-                                        session_log_filter.filter(&buffer, generation, strip);
-                                    if writer.try_write(bytes).is_err() {
-                                        log_generation.fetch_add(1, Ordering::AcqRel);
-                                        log_active.store(false, Ordering::Release);
-                                    }
-                                }
-                                // Ship raw PTY bytes to the
-                                // App via the output_tx sidechannel
-                                // (if any plugin subscriber is listening).
-                                // Skips the alloc entirely when no
-                                // subscriber. The sender's explicit policy
-                                // determines whether a full queue drops this
-                                // chunk or applies lossless backpressure.
-                                if let Some(tx) = &output_tx {
-                                    tx.send(buffer.clone());
-                                }
+                                // Evaluated once per PTY read. If logging starts
+                                // while a bounded control string is in flight,
+                                // the extractor publishes the complete sequence
+                                // when its terminator arrives instead of a
+                                // malformed suffix.
+                                let tap_raw = log_active
+                                    .load(std::sync::atomic::Ordering::Relaxed)
+                                    || output_tx.is_some();
+                                extractor.set_raw_tap(tap_raw);
                                 extractor.feed_with(&buffer, |extractor, chunk| {
+                                    let mut publish_raw = |bytes: &[u8]| {
+                                        // Raw consumers receive the complete PTY stream except
+                                        // Kettle's private completion metadata. A full disk or
+                                        // slow subscriber must not corrupt parser ordering.
+                                        if log_active.load(Ordering::Relaxed)
+                                            && let Ok(mut guard) = session_log.lock()
+                                            && let Some(writer) = guard.as_mut()
+                                        {
+                                            let strip = log_strip_ansi
+                                                .lock()
+                                                .map(|value| *value)
+                                                .unwrap_or(false);
+                                            let generation =
+                                                log_generation.load(Ordering::Acquire);
+                                            let filtered = session_log_filter.filter(
+                                                bytes,
+                                                generation,
+                                                strip,
+                                            );
+                                            if writer.try_write(filtered).is_err() {
+                                                log_generation.fetch_add(1, Ordering::AcqRel);
+                                                log_active.store(false, Ordering::Release);
+                                            }
+                                        }
+                                        if let Some(tx) = &output_tx {
+                                            tx.send(bytes.to_vec());
+                                        }
+                                    };
+                                    let chunk = match chunk {
+                                        Chunk::Raw(bytes) => {
+                                            publish_raw(&bytes);
+                                            return;
+                                        }
+                                        Chunk::Pass(bytes) => {
+                                            publish_raw(&bytes);
+                                            Chunk::Pass(bytes)
+                                        }
+                                        chunk => chunk,
+                                    };
                                     let graphics_related = chunk_needs_graphics_gate(&chunk);
                                     let _graphics_guard = graphics_related.then(|| {
                                         graphics_gate
@@ -5242,7 +5453,7 @@ impl Terminal {
                                         }
                                     }
                                     match chunk {
-                                        Chunk::Pass(bytes) => {
+                                        Chunk::Pass(bytes) | Chunk::Terminal(bytes) => {
                                             let mut sync_graphics = SyncGraphicsContext {
                                                 active_alternate: &mut active_alternate,
                                                 deferred: &mut deferred_graphics,
@@ -5705,6 +5916,12 @@ impl Terminal {
                                             }
                                         }
                                         Chunk::Prompt(PromptKind::PromptStart) => {
+                                            // A nested/local shell starts its completion
+                                            // generation at one. PromptStart is an ordered PTY
+                                            // lifecycle boundary, so retire the prior shell's
+                                            // generation before accepting the new prompt's
+                                            // completion stream.
+                                            reset_completion_session(&completion_cell);
                                             if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
                                                     alacritty_terminal::term::TermMode::ALT_SCREEN,
@@ -5741,6 +5958,10 @@ impl Terminal {
                                         // the timestamp so the matching CommandEnd (D)
                                         // can compute the elapsed duration.
                                         Chunk::Prompt(PromptKind::OutputStart) => {
+                                            if let Ok(mut completion) = completion_cell.lock() {
+                                                completion.list = None;
+                                                completion.hide_after = None;
+                                            }
                                             if let Ok(mut t) = output_started_at.lock() {
                                                 *t = Some(std::time::Instant::now());
                                             }
@@ -5791,6 +6012,10 @@ impl Terminal {
                                         // CommandFinished is pushed (B is not a
                                         // command end).
                                         Chunk::Prompt(PromptKind::CommandStart) => {
+                                            if let Ok(mut completion) = completion_cell.lock() {
+                                                completion.list = None;
+                                                completion.hide_after = None;
+                                            }
                                             if let Ok(mut t) = output_started_at.lock() {
                                                 *t = None;
                                             }
@@ -5820,6 +6045,16 @@ impl Terminal {
                                                 }
                                                 q.push(ProtocolNotification { title, body });
                                             }
+                                        }
+                                        Chunk::Completion(update) => {
+                                            apply_completion_update(&completion_cell, update);
+                                        }
+                                        Chunk::Raw(_) => {
+                                            // Published and returned above. A
+                                            // future refactor that routes one
+                                            // here must still degrade to an
+                                            // ignored duplicate, not take a
+                                            // debug build's pane down.
                                         }
                                     }
                                 });
@@ -5912,6 +6147,7 @@ impl Terminal {
             output_started_at,
             command_finished,
             protocol_notifications,
+            completion: completion_cell,
             cwd: cwd_cell,
             native_cwd: native_cwd_cell,
             osc_cwd_seen: osc_cwd_seen_for_struct,
@@ -6309,6 +6545,49 @@ impl Terminal {
             .lock()
             .map(|mut q| std::mem::take(&mut *q))
             .unwrap_or_default()
+    }
+
+    /// The completion list to draw right now, or `None` once a pending
+    /// grace-hide has lapsed with no refresh from the shell.
+    pub fn completion(&self) -> Option<CompletionList> {
+        let now = std::time::Instant::now();
+        self.completion
+            .lock()
+            .ok()
+            .and_then(|slot| completion_visible(&slot, now).cloned())
+    }
+
+    /// Hide the current shell completion list without rewinding its protocol
+    /// generation. A delayed older update must not resurrect after input.
+    pub fn clear_completion(&self) {
+        if let Ok(mut completion) = self.completion.lock() {
+            completion.list = None;
+            completion.hide_after = None;
+        }
+    }
+
+    /// Keep the current list visible a moment longer because the input just
+    /// sent (Tab / Shift-Tab) is expected to replace it. Clearing outright
+    /// instead blinks the card off once per cycle step for the PTY round-trip.
+    pub fn defer_completion_hide(&self) {
+        if let Ok(mut completion) = self.completion.lock()
+            && completion.list.is_some()
+        {
+            completion.hide_after = Some(std::time::Instant::now() + COMPLETION_HIDE_GRACE);
+        }
+    }
+
+    /// Expire a grace-hidden completion or report how long the event loop must
+    /// wait before checking again. Returning the redraw edge separately keeps
+    /// an idle, non-blinking terminal asleep after the one erase frame.
+    pub fn poll_completion_hide(
+        &self,
+        now: std::time::Instant,
+    ) -> (bool, Option<std::time::Duration>) {
+        let Ok(mut completion) = self.completion.lock() else {
+            return (false, None);
+        };
+        poll_completion_hide_slot(&mut completion, now)
     }
 
     /// Live cursor-blink state. Defaults to whatever the config seeded at
@@ -9152,12 +9431,12 @@ mod home_dir_tests {
     fn session_log_parser_tap_only_uses_bounded_worker_admission() {
         let source = super::production_source();
         let tap = source
-            .split("// Terminator parity (logger.py): per-pane log")
+            .split("extractor.set_raw_tap(tap_raw);")
             .nth(1)
-            .and_then(|body| body.split("// Ship raw PTY bytes").next())
+            .and_then(|body| body.split("image_pruner.prune_if_changed").next())
             .expect("session-log parser tap");
         assert!(
-            tap.contains("writer.try_write(bytes)"),
+            tap.contains("writer.try_write(filtered)"),
             "the parser must hand log chunks to the shared persistence worker"
         );
         assert!(

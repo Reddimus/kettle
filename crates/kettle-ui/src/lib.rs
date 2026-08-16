@@ -39,6 +39,7 @@ mod gpu_diagnostics;
 mod input;
 mod lua;
 mod mux;
+mod native_material;
 mod notifications;
 mod paste_image;
 mod runtime_diagnostics;

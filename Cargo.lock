@@ -2021,6 +2021,7 @@ dependencies = [
  "accesskit_winit",
  "anyhow",
  "arboard",
+ "block2 0.5.1",
  "crossbeam-channel",
  "errno",
  "image",

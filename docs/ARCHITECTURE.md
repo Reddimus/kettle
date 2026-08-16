@@ -1314,7 +1314,9 @@ text, so its bitmap is already resident).
 `alacritty_terminal` has no image/graphics support and ignores OSC 7/133. The
 `Extractor` is a small state machine that pulls Sixel (DCS), kitty (APC `G`)
 and iTerm2 (`OSC 1337`) image sequences, plus OSC 7 (cwd) and OSC 133 (shell
-integration), out of the byte stream and forwards everything else
+integration), out of the byte stream. It also consumes Kettle's bounded private
+OSC 777 completion metadata before the VT engine or raw recorder can see it.
+Everything else is forwarded
 **byte-for-byte** (terminator preserved: BEL vs ST) so the engine still sees a
 correct, untouched VT stream. This keeps us on a battle-tested engine while
 adding modern features it lacks.

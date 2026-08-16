@@ -57,6 +57,15 @@ and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
 
+The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
+field truncation and custom-binding preservation in all four snippets. A real
+interactive Fish PTY proves default and Vi-insert Tab behavior, reverse cycling,
+and cursor-move invalidation, and asserts that a completion `show` remains the
+last metadata event instead of being erased by a repaint-triggered prompt hook.
+PowerShell runs its native PSReadLine fixture on Windows. Parser and terminal
+tests separately reject oversized or control-bearing fields, stale generations,
+and completion metadata leaking into the raw PTY tap.
+
 Modified-Enter auto detection has an additional native Unix PTY regression. It
 starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
 editor's prompt is noncanonical while the shell's own process group still owns

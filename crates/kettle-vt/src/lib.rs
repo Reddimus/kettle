@@ -31,6 +31,7 @@
 //! - [`placeholder`] — Unicode-placeholder (`U+10EEEE` + zero-width
 //!   diacritics) decode path for kitty `U=1` virtual placements.
 
+pub mod completion;
 pub mod extract;
 pub mod graphics_limits;
 pub mod image;
@@ -39,6 +40,7 @@ pub mod kitty;
 pub mod placeholder;
 pub mod sixel;
 
+pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
 pub use extract::{Chunk, DeferredGraphics, Extractor, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
 pub use image::{ImageData, Placed, PlacementParams};
