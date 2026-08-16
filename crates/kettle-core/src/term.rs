@@ -3963,9 +3963,9 @@ fn default_prog() -> CommandBuilder {
 /// lets the tab track `cd` for a stock PowerShell — whose `Set-Location` does
 /// NOT update the OS process cwd, so it is unreadable from outside the process.
 ///
-/// On Windows, pwsh/powershell are launched `-NoExit -EncodedCommand
-/// <base64(kettle.ps1)>`: the user's `$PROFILE` still loads FIRST, then kettle's
-/// hook wraps the resulting prompt (preserving oh-my-posh / posh-git / starship).
+/// On Windows, pwsh/powershell are launched with a short ASCII bootstrap that
+/// decodes the embedded UTF-8 integration. The user's `$PROFILE` still loads
+/// first, then kettle's hook wraps the resulting prompt.
 /// cmd.exe is left untouched — its process cwd already tracks `cd` (read by the
 /// native poll). `inject = false` (config `shell-integration = off`) reproduces
 /// the bare [`default_prog`]. Unix-shell rc-hook injection is a follow-up; on
@@ -4002,27 +4002,43 @@ fn is_powershell(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// v2.29.1: launch PowerShell with kettle's integration auto-loaded via
-/// `-NoExit -EncodedCommand <base64(UTF-16LE kettle.ps1)>`. `-EncodedCommand`
-/// (vs `-Command`) sidesteps all quoting of the multi-line script; the user's
-/// `$PROFILE` still loads BEFORE it (no `-NoProfile`), so kettle's hook wraps
-/// their existing prompt rather than replacing it. `-NoExit` keeps the session
-/// interactive after the hook installs.
+/// Windows limits a process command line to 32,767 UTF-16 code units.
+/// `-EncodedCommand` base64-encodes UTF-16LE, so the integration crossed that
+/// limit when completion support was added. Encoding the source as UTF-8 and
+/// decoding it in a fixed ASCII bootstrap keeps the same quoting safety while
+/// using roughly half the command line. The compile-time cap leaves room for
+/// the executable path, quoting, and future arguments.
 #[cfg(windows)]
 fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
     let mut c = CommandBuilder::new(path);
     c.arg("-NoExit");
-    c.arg("-EncodedCommand");
-    c.arg(encode_utf16le_base64(POWERSHELL_INTEGRATION));
+    c.arg("-Command");
+    c.arg(powershell_integration_bootstrap(POWERSHELL_INTEGRATION));
     c
 }
 
-/// Base64 of the UTF-16LE encoding of `s` — the form PowerShell's
-/// `-EncodedCommand` expects.
 #[cfg(windows)]
-fn encode_utf16le_base64(s: &str) -> String {
-    let utf16: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
-    base64_standard(&utf16)
+const POWERSHELL_BOOTSTRAP_PREFIX: &str =
+    "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
+#[cfg(windows)]
+const POWERSHELL_BOOTSTRAP_SUFFIX: &str = "'))))";
+#[cfg(windows)]
+const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 24_000;
+
+// Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
+// ceiling. The payload is ASCII, so bytes and UTF-16 code units are identical.
+#[cfg(windows)]
+const _: () = assert!(
+    POWERSHELL_BOOTSTRAP_PREFIX.len()
+        + POWERSHELL_INTEGRATION.len().div_ceil(3) * 4
+        + POWERSHELL_BOOTSTRAP_SUFFIX.len()
+        <= POWERSHELL_BOOTSTRAP_MAX_CHARS
+);
+
+#[cfg(windows)]
+fn powershell_integration_bootstrap(script: &str) -> String {
+    let encoded = base64_standard(script.as_bytes());
+    format!("{POWERSHELL_BOOTSTRAP_PREFIX}{encoded}{POWERSHELL_BOOTSTRAP_SUFFIX}")
 }
 
 /// Minimal standard-alphabet base64 encoder (padded). Self-contained so
@@ -11861,8 +11877,8 @@ mod teardown_tests {
         // Empty argv → default shell (pwsh); shell_integration = true → inject.
         // Spawn with cwd = None so `current_dir()` starts None — it can ONLY
         // become Some via a parsed OSC 7 from the injected integration's prompt.
-        // That proves the whole pipeline end-to-end: inject `-EncodedCommand
-        // kettle.ps1` -> the prompt emits OSC 7 -> kettle parses + accepts it
+        // That proves the whole pipeline end-to-end: inject the embedded
+        // kettle.ps1 -> the prompt emits OSC 7 -> kettle parses + accepts it
         // (host validation passes). No typed input, so there's no PSReadLine
         // input-timing race. (cd tracking uses the very same per-prompt OSC 7.)
         let term = match Terminal::new_with_env_and_output(
@@ -12773,8 +12789,10 @@ mod login_flag_tests {
 #[cfg(all(test, windows))]
 mod default_shell_tests {
     use super::{
-        POWERSHELL_INTEGRATION, base64_standard, encode_utf16le_base64, is_powershell,
-        merge_windows_paths, overlay_windows_parent_env, pick_windows_default_shell,
+        POWERSHELL_BOOTSTRAP_MAX_CHARS, POWERSHELL_BOOTSTRAP_PREFIX, POWERSHELL_BOOTSTRAP_SUFFIX,
+        POWERSHELL_INTEGRATION, base64_standard, is_powershell, merge_windows_paths,
+        overlay_windows_parent_env, pick_windows_default_shell, powershell_integration_bootstrap,
+        powershell_integration_command,
     };
     use portable_pty::CommandBuilder;
     use std::ffi::{OsStr, OsString};
@@ -12794,25 +12812,31 @@ mod default_shell_tests {
         assert_eq!(base64_standard(b"hi"), "aGk=");
     }
 
-    /// v2.29.1: `-EncodedCommand` wants base64 of UTF-16LE — `"A"` → bytes
-    /// `[0x41,0x00]` → `"QQA="`.
     #[test]
-    fn encode_utf16le_base64_is_powershell_encodedcommand_form() {
-        assert_eq!(encode_utf16le_base64("A"), "QQA=");
-        // Non-empty + decodable round-shape: the embedded integration encodes to
-        // a non-empty, padded base64 string (length a multiple of 4).
-        let enc = encode_utf16le_base64(POWERSHELL_INTEGRATION);
-        assert!(!enc.is_empty());
+    fn powershell_bootstrap_is_utf8_safe_and_below_the_windows_limit() {
+        let bootstrap = powershell_integration_bootstrap("Aé");
         assert_eq!(
-            enc.len() % 4,
-            0,
-            "base64 output is padded to a multiple of 4"
+            bootstrap,
+            format!("{POWERSHELL_BOOTSTRAP_PREFIX}QcOp{POWERSHELL_BOOTSTRAP_SUFFIX}")
+        );
+
+        let bootstrap = powershell_integration_bootstrap(POWERSHELL_INTEGRATION);
+        assert!(bootstrap.len() <= POWERSHELL_BOOTSTRAP_MAX_CHARS);
+        assert_eq!(
+            bootstrap.matches(POWERSHELL_BOOTSTRAP_PREFIX).count(),
+            1,
+            "the fixed decoder must appear exactly once"
         );
         assert!(
-            enc.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='),
-            "only the standard base64 alphabet"
+            bootstrap.is_ascii(),
+            "the CreateProcessW payload must stay one UTF-16 unit per byte"
         );
+
+        let command = powershell_integration_command(Path::new(PWSH));
+        let argv = command.get_argv();
+        assert_eq!(argv[1], "-NoExit");
+        assert_eq!(argv[2], "-Command");
+        assert_eq!(argv[3], bootstrap);
     }
 
     /// v2.29.1: PowerShell executables are recognized by basename; cmd / bash are not.
