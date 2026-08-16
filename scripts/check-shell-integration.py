@@ -324,10 +324,27 @@ def check_fish(executable: str) -> None:
                 break
         return bytes(output)
 
+    def drain_until_completion(seconds: float) -> tuple[bytes, float]:
+        started = time.monotonic()
+        deadline = started + seconds
+        output = bytearray()
+        pattern = re.compile(rb"\x1b\]777;kettle-completion;[^\x07]*\x07")
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                output.extend(os.read(master, 65536))
+            except OSError:
+                break
+            if pattern.search(output):
+                break
+        return bytes(output), time.monotonic() - started
+
     try:
         startup = drain(1.0)
         os.write(master, b"git ch\t")
-        after_tab = drain(1.0)
+        after_tab, initial_elapsed = drain_until_completion(2.0)
         sequences = re.findall(
             rb"\x1b\]777;kettle-completion;[^\x07]*\x07", startup + after_tab
         )
@@ -336,15 +353,27 @@ def check_fish(executable: str) -> None:
                 "Fish Tab did not leave its completion list visible: "
                 f"{sequences[-3:]!r}"
             )
+        if initial_elapsed > 0.75:
+            raise RuntimeError(
+                f"Fish Tab took {initial_elapsed:.2f}s to publish completions"
+            )
 
         os.write(master, b"\x1b[Z")
         reverse = re.findall(
             rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.5)
         )
+        reverse_fields = reverse[-1][2:-1].split(b";") if reverse else []
+        reverse_count = max(0, (len(reverse_fields) - 8) // 2)
+        reverse_selected = (
+            int(reverse_fields[6])
+            if len(reverse_fields) >= 8 and reverse_fields[6].isdigit()
+            else -1
+        )
         if (
             not reverse
             or b";update;" not in reverse[-1]
-            or b";completion;2;fish;" not in reverse[-1]
+            or reverse_count < 2
+            or reverse_selected != reverse_count - 1
         ):
             raise RuntimeError(
                 "Fish Shift-Tab did not start at the final candidate: "
@@ -356,25 +385,35 @@ def check_fish(executable: str) -> None:
         os.write(master, b"fish_vi_key_bindings; source " + str(INTEGRATION / "kettle.fish").encode() + b"\n")
         drain(0.75)
         os.write(master, b"git ch\t")
+        vi_output, vi_elapsed = drain_until_completion(2.0)
         vi_sequences = re.findall(
-            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.75)
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", vi_output
         )
         if not vi_sequences or b";show;" not in vi_sequences[-1]:
             raise RuntimeError(
                 "Fish Vi insert-mode Tab did not publish completions: "
-                f"{vi_sequences[-3:]!r}"
+                f"{vi_sequences[-3:]!r}; output tail={vi_output[-512:]!r}"
+            )
+        if vi_elapsed > 0.75:
+            raise RuntimeError(
+                f"Fish Vi insert-mode Tab took {vi_elapsed:.2f}s to publish completions"
             )
 
         os.write(master, b"\x1b[D")
         drain(0.2)
         os.write(master, b"\t")
+        moved_output, moved_elapsed = drain_until_completion(2.0)
         moved_cursor = re.findall(
-            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", drain(0.5)
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", moved_output
         )
         if not moved_cursor or b";show;" not in moved_cursor[-1]:
             raise RuntimeError(
                 "Fish reused a completion cycle after the cursor moved: "
-                f"{moved_cursor[-3:]!r}"
+                f"{moved_cursor[-3:]!r}; output tail={moved_output[-512:]!r}"
+            )
+        if moved_elapsed > 0.75:
+            raise RuntimeError(
+                f"Fish Tab after a cursor move took {moved_elapsed:.2f}s"
             )
     finally:
         try:
@@ -387,7 +426,11 @@ def check_fish(executable: str) -> None:
             process.terminate()
             process.wait(timeout=2)
         os.close(master)
-    print("Fish interactive completion binding fixture: PASS")
+    print(
+        "Fish interactive completion binding fixture: PASS "
+        f"(default {initial_elapsed:.2f}s, Vi {vi_elapsed:.2f}s, "
+        f"moved cursor {moved_elapsed:.2f}s)"
+    )
 
 
 def check_powershell(executable: str) -> None:

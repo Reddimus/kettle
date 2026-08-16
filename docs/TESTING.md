@@ -1843,8 +1843,10 @@ name the shape of bug each pass caught.
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
 - Native shell-integration fixtures: stock interactive `zsh -f` and system
-  Bash 3.2 on macOS, Fish OSC 133/OSC 7 behavior on Linux, plus PowerShell
-  prompt/Enter behavior on Windows.
+  Bash 3.2 on macOS, Fish 3.7/4.2/4.8 behavior on Linux, plus PowerShell
+  prompt/Enter behavior on Windows. The Fish leg drives real Emacs and Vi key
+  maps, requires the completion card within 750 ms, and pins release archives
+  by SHA-256.
 - The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
   Markdown targets, and PNG/SFNT structural checks.
 - The macOS comparator score self-test and the mandatory Kettle-owned portion of

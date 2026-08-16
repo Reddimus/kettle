@@ -48,7 +48,18 @@ end
 # rules. Ambiguous lists stay out of Fish's full-width pager: the first Tab
 # completes the common prefix, then Tab / Shift-Tab cycle the compact card.
 function __kettle_completion_field --argument value limit
-    set -l encoded
+    # Most fields already fit. Encode and count them in two bulk builtin calls;
+    # the scalar-by-scalar path below is only for actual truncation. This keeps
+    # completion responsive on Fish releases where command substitutions carry
+    # noticeably more overhead.
+    set -l encoded (string escape --style=url -- $value)
+    set -l encoded_bytes (string length -- (string replace --all --regex '%[0-9A-Fa-f]{2}' x -- $encoded))
+    if test $encoded_bytes -le $limit
+        printf '%s' $encoded
+        return
+    end
+
+    set encoded ''
     set -l bytes 0
     for character in (string split '' -- $value)
         set -l part (string escape --style=url -- $character)
@@ -76,6 +87,11 @@ end
 # step when no user or plugin completion is already registered. Fish 4 does
 # not need this, but the check makes it a no-op there.
 function __kettle_completion_prime
+    set -l major (string split . -- $version)[1]
+    if string match --regex --quiet '^[0-9]+$' -- "$major"; and test "$major" -ge 4
+        return
+    end
+
     set -l words (commandline -opc)
     set -l command $words[1]
     if test -z "$command"
@@ -255,18 +271,48 @@ if status is-interactive; and test "$TERM_PROGRAM" = kettle; and test "$KETTLE_C
     # Emacs edits in `default`; Vi edits in `insert`. Replace the stock
     # completion binding in either map, but leave every user/plugin binding
     # alone. Re-sourcing is idempotent because our own binding is recognized.
+    # Query Tab by its byte. Fish 3.7 treats the name `tab` as three literal
+    # letters, while Fish 4.2 prints the same byte back as the symbolic name.
+    set -l __kettle_tab (printf '\t')
+    set -l __kettle_backtab (printf '\e[Z')
+    set -l __kettle_fish_version (string split . -- $version)
+    set -l __kettle_fish_major $__kettle_fish_version[1]
+    set -l __kettle_fish_minor $__kettle_fish_version[2]
     for __kettle_mode in default insert
-        # Query the byte sequence, not the named key. Fish 3.7 treats `tab`
-        # here as the three literal letters; newer Fish accepts both forms.
-        set -l __kettle_user_tab (bind --user -M $__kettle_mode \t 2>/dev/null | string collect)
-        set -l __kettle_preset_tab (bind --preset -M $__kettle_mode \t 2>/dev/null | string collect)
-        if string match --quiet '* __kettle_complete' "$__kettle_user_tab"; or begin
-                test -z "$__kettle_user_tab"; and string match --regex --quiet ' complete$' "$__kettle_preset_tab"
+        set -l __kettle_user_tab (bind --user -M $__kettle_mode "$__kettle_tab" 2>/dev/null | string collect)
+        set -l __kettle_preset_tab (bind --preset -M $__kettle_mode "$__kettle_tab" 2>/dev/null | string collect)
+        set -l __kettle_user_ctrl_i (bind --user -M $__kettle_mode ctrl-i 2>/dev/null | string collect)
+        set -l __kettle_preset_ctrl_i (bind --preset -M $__kettle_mode ctrl-i 2>/dev/null | string collect)
+        set -l __kettle_owns_tab 0
+        if string match --quiet '* __kettle_complete' "$__kettle_user_tab"; or string match --quiet '* __kettle_complete' "$__kettle_user_ctrl_i"
+            set __kettle_owns_tab 1
+        else if test -z "$__kettle_user_tab"; and test -z "$__kettle_user_ctrl_i"
+            # Fish 4.0 through 4.2 expose the same Vi insert-mode byte as both
+            # `ctrl-i` and `tab`. A user binding for either leaves the other
+            # stock entry ahead of it; binding both adds a one-second sequence
+            # delay. Remove only the duplicate stock alias, then install one
+            # byte binding. Fish 4.3 fixed the aliasing.
+            if test "$__kettle_mode" = insert; and test "$__kettle_fish_major" = 4; and test "$__kettle_fish_minor" -le 2; and string match --regex --quiet ' complete$' "$__kettle_preset_ctrl_i"
+                bind --erase --preset -M $__kettle_mode ctrl-i
             end
-            bind -M $__kettle_mode \t __kettle_complete
-            set -l __kettle_user_backtab (bind --user -M $__kettle_mode \e\[Z 2>/dev/null | string collect)
+            if string match --regex --quiet ' complete$' "$__kettle_preset_tab"
+                bind -M $__kettle_mode "$__kettle_tab" __kettle_complete
+                set __kettle_owns_tab 1
+            end
+        end
+
+        if test $__kettle_owns_tab = 1
+
+            # Fish 4 resolves CSI Z to the symbolic `shift-tab` binding. Fish
+            # 3.7 needs the raw sequence. Install both spellings, but only at a
+            # spelling the user has not claimed.
+            set -l __kettle_user_backtab (bind --user -M $__kettle_mode "$__kettle_backtab" 2>/dev/null | string collect)
             if test -z "$__kettle_user_backtab"; or string match --quiet '* __kettle_complete_previous' "$__kettle_user_backtab"
-                bind -M $__kettle_mode \e\[Z __kettle_complete_previous
+                bind -M $__kettle_mode "$__kettle_backtab" __kettle_complete_previous
+            end
+            set -l __kettle_user_shift_tab (bind --user -M $__kettle_mode shift-tab 2>/dev/null | string collect)
+            if test -z "$__kettle_user_shift_tab"; or string match --quiet '* __kettle_complete_previous' "$__kettle_user_shift_tab"
+                bind -M $__kettle_mode shift-tab __kettle_complete_previous
             end
         end
     end
