@@ -2886,6 +2886,174 @@ pub struct Terminal {
     out_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
+/// Command state reported by OSC 133 shell integration.
+///
+/// `Unknown` is deliberately distinct from `Running`: without a complete
+/// integration Kettle must not infer either that a shell is idle or that a
+/// modified-key fallback is safe to send.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellActivity {
+    Unknown,
+    Idle,
+    Running,
+}
+
+fn classify_shell_activity(
+    seen_prompts: bool,
+    tracks_commands: bool,
+    running: Option<bool>,
+) -> ShellActivity {
+    if !seen_prompts || !tracks_commands {
+        return ShellActivity::Unknown;
+    }
+    match running {
+        Some(true) => ShellActivity::Running,
+        Some(false) => ShellActivity::Idle,
+        None => ShellActivity::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod shell_activity_tests {
+    use super::{ShellActivity, classify_shell_activity};
+
+    #[test]
+    fn incomplete_integration_never_claims_idle_or_running() {
+        for (prompts, tracking) in [(false, false), (true, false), (false, true)] {
+            for running in [Some(false), Some(true), None] {
+                assert_eq!(
+                    classify_shell_activity(prompts, tracking, running),
+                    ShellActivity::Unknown
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complete_integration_distinguishes_prompt_and_command() {
+        assert_eq!(
+            classify_shell_activity(true, true, Some(false)),
+            ShellActivity::Idle
+        );
+        assert_eq!(
+            classify_shell_activity(true, true, Some(true)),
+            ShellActivity::Running
+        );
+        assert_eq!(
+            classify_shell_activity(true, true, None),
+            ShellActivity::Unknown
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod foreground_job_tests {
+    use super::*;
+
+    fn wait_for_screen(
+        terminal: &Terminal,
+        events: &crossbeam_channel::Receiver<TermEvent>,
+        needle: &str,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if terminal
+                .screen_text(0)
+                .is_some_and(|screen| screen.text.contains(needle))
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn wait_for_job_state(
+        terminal: &Terminal,
+        events: &crossbeam_channel::Receiver<TermEvent>,
+        foreground_job: bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if matches!(terminal.input_is_canonical(), Ok(false))
+                && matches!(
+                    terminal.foreground_job_is_running(),
+                    Ok(observed) if observed == foreground_job
+                )
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// The exact Unix regression: zsh ZLE and Bash Readline are noncanonical at
+    /// their prompts, so termios alone classifies either as a TUI and leaks
+    /// `;2;13~`. Foreground job control is what distinguishes the shell's own
+    /// editor from the raw command it launches.
+    #[test]
+    fn raw_shell_editor_is_not_a_foreground_job_but_a_raw_child_is() {
+        #[cfg(target_os = "macos")]
+        let argv = vec!["/bin/zsh".to_string(), "-f".to_string()];
+        #[cfg(not(target_os = "macos"))]
+        let argv = vec![
+            "/bin/bash".to_string(),
+            "--noprofile".to_string(),
+            "--norc".to_string(),
+        ];
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = Arc::new(|| {});
+        let terminal = match Terminal::new(
+            &argv,
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                eprintln!("skipping shell job-control test: no PTY ({error})");
+                return;
+            }
+        };
+
+        terminal.write(b"printf 'SHELL_PROMPT_READY\\n'\r");
+        assert!(wait_for_screen(&terminal, &rx, "SHELL_PROMPT_READY"));
+        assert!(
+            wait_for_job_state(&terminal, &rx, false),
+            "the shell line editor did not regain a raw foreground prompt"
+        );
+
+        terminal.write(
+            b"/bin/sh -c 'stty raw -echo; printf RAW_JOB_READY; dd bs=1 count=1 >/dev/null 2>&1; stty sane'\r",
+        );
+        assert!(wait_for_screen(&terminal, &rx, "RAW_JOB_READY"));
+        assert!(
+            wait_for_job_state(&terminal, &rx, true),
+            "the raw child did not take the PTY foreground process group"
+        );
+        terminal.write(b"x");
+    }
+}
+
 /// Pick Windows' default shell when the user configured no
 /// `command` / `shell`. Prefers PowerShell 7+ (`pwsh.exe`), then Windows
 /// PowerShell 5.1 (`powershell.exe`); returns `None` to let the caller fall
@@ -5787,6 +5955,76 @@ impl Terminal {
         term.set_options(self.term_config.clone());
     }
 
+    /// Whether the live Unix PTY line discipline is in canonical mode.
+    ///
+    /// Interactive TUIs switch the slave to raw/noncanonical mode, but that
+    /// signal is not sufficient by itself: zsh ZLE and Bash Readline can also
+    /// edit a prompt in noncanonical mode. Callers combine this snapshot with
+    /// the foreground process group before encoding modified Enter, and fail
+    /// closed when either observation is unavailable.
+    #[cfg(unix)]
+    pub fn input_is_canonical(&self) -> Result<bool> {
+        let fd = self
+            .master
+            .as_ref()
+            .context("PTY master is unavailable")?
+            .as_raw_fd()
+            .context("PTY master has no Unix file descriptor")?;
+        let mut attrs = unsafe { std::mem::zeroed::<libc::termios>() };
+        if unsafe { libc::tcgetattr(fd, &mut attrs) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("cannot read live PTY termios for key encoding");
+        }
+        Ok(attrs.c_lflag & libc::ICANON != 0)
+    }
+
+    /// Whether a foreground job other than Kettle's directly spawned child
+    /// currently owns the Unix PTY.
+    ///
+    /// Job-control shells keep their own process group in the foreground while
+    /// editing a prompt (even when zsh's line editor uses noncanonical mode),
+    /// then transfer the PTY to the command's process group. This is the
+    /// missing half of the modified-Enter auto decision: termios alone cannot
+    /// distinguish zsh ZLE from a raw TUI.
+    #[cfg(unix)]
+    pub fn foreground_job_is_running(&self) -> Result<bool> {
+        let fd = self
+            .master
+            .as_ref()
+            .context("PTY master is unavailable")?
+            .as_raw_fd()
+            .context("PTY master has no Unix file descriptor")?;
+        let foreground = unsafe { libc::tcgetpgrp(fd) };
+        if foreground < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("cannot read the PTY foreground process group");
+        }
+        let child_pid = self
+            .child_pid()
+            .context("PTY child has no process id for job-control detection")?
+            as libc::pid_t;
+        let child_group = unsafe { libc::getpgid(child_pid) };
+        if child_group < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("cannot read the PTY child's process group");
+        }
+        Ok(foreground != child_group)
+    }
+
+    /// Current command state when OSC 133 supplies enough information to know.
+    pub fn shell_activity(&self) -> ShellActivity {
+        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
+        let tracks_commands = self
+            .output_start_seen
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let running = self
+            .output_started_at
+            .lock()
+            .ok()
+            .map(|state| state.is_some());
+        classify_shell_activity(seen_prompts, tracks_commands, running)
+    }
+
     /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's
     /// shell sitting IDLE at a prompt? True only when shell integration has
     /// been observed (≥1 OSC 133 prompt mark) AND no command is currently
@@ -5796,20 +6034,7 @@ impl Terminal {
     /// behavior is byte-identical for plain shells; a command whose
     /// CommandEnd never arrives stays "running", which errs toward asking.
     pub fn shell_idle(&self) -> bool {
-        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
-        // Review fix: prompt marks alone never authorize an idle verdict —
-        // the pane must ALSO have a working OutputStart source, or a
-        // command could be running invisibly (integration emits A/B/D but
-        // never C) while we report "nothing to lose".
-        let tracks_commands = self
-            .output_start_seen
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let running = self
-            .output_started_at
-            .lock()
-            .map(|s| s.is_some())
-            .unwrap_or(true);
-        seen_prompts && tracks_commands && !running
+        self.shell_activity() == ShellActivity::Idle
     }
 
     /// Install a path whose secure open/create is deferred to the persistence

@@ -1954,6 +1954,7 @@ mod tests {
         use winit::keyboard::{Key, NamedKey};
         let no = ModifiersState::empty();
         let ctrl = ModifiersState::CONTROL;
+        let alt = ModifiersState::ALT;
         let shift = ModifiersState::SHIFT;
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
         let mode = TermMode::empty();
@@ -1968,6 +1969,11 @@ mod tests {
             encode(&Key::Named(NamedKey::ArrowRight), None, ctrl, mode),
             Some(b"\x1b[1;5C".to_vec()),
             "Ctrl+ArrowRight must be CSI 1;5C (xterm modifyCursorKeys)"
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowUp), None, alt, mode),
+            Some(b"\x1b[1;3A".to_vec()),
+            "an edge-fallen-through Alt+Up must retain the xterm Alt modifier"
         );
         assert_eq!(
             encode(&Key::Named(NamedKey::ArrowLeft), None, ctrl_shift, mode),

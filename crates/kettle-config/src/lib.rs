@@ -292,9 +292,12 @@ impl MacosOptionAsAlt {
 /// Ctrl+I into a distinct sequence for clients which still expect Tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModifyOtherKeysMode {
-    /// Preserve modified Enter until an application negotiates a protocol.
+    /// Preserve modified Enter only while the pane is running an interactive
+    /// program that can consume the fallback.
     #[default]
-    Enter,
+    Auto,
+    /// Preserve modified Enter until an application negotiates a protocol.
+    Always,
     /// Do not add Kettle's fallback; negotiated protocols are still honored.
     Off,
 }
@@ -302,7 +305,8 @@ pub enum ModifyOtherKeysMode {
 impl ModifyOtherKeysMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Enter => "enter",
+            Self::Auto => "auto",
+            Self::Always => "always",
             Self::Off => "off",
         }
     }
@@ -2633,7 +2637,7 @@ impl Default for Config {
             bell: BellMode::Both,
             osc52: Osc52::Copy,
             macos_option_as_alt: MacosOptionAsAlt::None,
-            modify_other_keys: ModifyOtherKeysMode::Enter,
+            modify_other_keys: ModifyOtherKeysMode::Auto,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             record: RecordMode::Off,
@@ -3727,7 +3731,7 @@ impl Config {
                 ),
                 "modify-other-keys" | "modify_other_keys" => matches!(
                     v.to_ascii_lowercase().as_str(),
-                    "enter" | "off"
+                    "auto" | "always" | "enter" | "off"
                 ),
                 "paste-files" | "paste-images" | "paste-image" => {
                     parse_paste_policy(v).is_some()
@@ -4358,8 +4362,9 @@ impl Config {
                 }
                 "modify-other-keys" | "modify_other_keys" => {
                     cfg.modify_other_keys = match e.value.to_ascii_lowercase().as_str() {
+                        "always" | "enter" => ModifyOtherKeysMode::Always,
                         "off" => ModifyOtherKeysMode::Off,
-                        _ => ModifyOtherKeysMode::Enter,
+                        _ => ModifyOtherKeysMode::Auto,
                     }
                 }
                 "paste-files" => {
@@ -5651,7 +5656,7 @@ allow-bold = false\n\
 bold-is-bright = true\n\
 clear-select-on-copy = true\n\
 invert-search = true\n\
-modify-other-keys = enter\n\
+modify-other-keys = auto\n\
 macos-option-as-alt = none\n\
 backspace-binding = ascii-del\n\
 delete-binding = escape-sequence\n\
@@ -7009,11 +7014,19 @@ cell-height = 1.2\n";
     fn modify_other_keys_policy_parsing_validation_and_default() {
         assert_eq!(
             Config::default().modify_other_keys,
-            ModifyOtherKeysMode::Enter
+            ModifyOtherKeysMode::Auto
         );
         assert_eq!(
             Config::parse_text("modify-other-keys = ENTER").modify_other_keys,
-            ModifyOtherKeysMode::Enter
+            ModifyOtherKeysMode::Always
+        );
+        assert_eq!(
+            Config::parse_text("modify-other-keys = ALWAYS").modify_other_keys,
+            ModifyOtherKeysMode::Always
+        );
+        assert_eq!(
+            Config::parse_text("modify-other-keys = auto").modify_other_keys,
+            ModifyOtherKeysMode::Auto
         );
         assert_eq!(
             Config::parse_text("modify_other_keys = off").modify_other_keys,
@@ -7021,8 +7034,10 @@ cell-height = 1.2\n";
         );
         assert_eq!(
             Config::parse_text("modify-other-keys = bogus").modify_other_keys,
-            ModifyOtherKeysMode::Enter
+            ModifyOtherKeysMode::Auto
         );
+        assert!(Config::detect_malformed_values("modify-other-keys = auto\n").is_empty());
+        assert!(Config::detect_malformed_values("modify-other-keys = always\n").is_empty());
         assert!(Config::detect_malformed_values("modify-other-keys = enter\n").is_empty());
         assert_eq!(
             Config::detect_malformed_values("modify-other-keys = sometimes\n").len(),
@@ -8439,8 +8454,8 @@ split_horiz = <Control><Shift>j
             ("text_renderer", "grid"),
             ("macos-option-as-alt", "none"),
             ("macos_option_as_alt", "left"),
-            ("modify-other-keys", "enter"),
-            ("modify_other_keys", "enter"),
+            ("modify-other-keys", "auto"),
+            ("modify_other_keys", "always"),
             // The three F2 background-image placement enums (+ snake_case).
             ("background-image-mode", "scale"),
             ("background_image_mode", "scale"),

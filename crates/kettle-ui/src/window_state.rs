@@ -42,6 +42,14 @@ pub(crate) fn track_consumed_key_release(
         ElementState::Pressed => {
             if press_consumed {
                 suppressed.insert(physical_key);
+            } else {
+                // A held key can change ownership between auto-repeat presses:
+                // adaptive Alt+Arrow consumes while a neighbour exists, then
+                // reaches the PTY after focus arrives at the edge. Clear the
+                // earlier UI press here so that terminal-owned repeat receives
+                // its matching release. If this press is consumed later in the
+                // dispatch, the second call below re-inserts it.
+                suppressed.remove(&physical_key);
             }
             false
         }
@@ -1330,6 +1338,36 @@ mod tests {
             ElementState::Pressed,
             false
         ));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            key,
+            ElementState::Released,
+            false
+        ));
+    }
+
+    #[test]
+    fn terminal_owned_repeat_clears_an_earlier_consumed_press() {
+        let mut suppressed = std::collections::HashSet::new();
+        let key = PhysicalKey::Code(KeyCode::ArrowUp);
+
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            key,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(suppressed.contains(&key));
+
+        // Adaptive focus can consume the first press, move to the edge, then
+        // pass the next auto-repeat press through to the terminal.
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            key,
+            ElementState::Pressed,
+            false
+        ));
+        assert!(!suppressed.contains(&key));
         assert!(!track_consumed_key_release(
             &mut suppressed,
             key,

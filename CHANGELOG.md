@@ -8,6 +8,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **`Alt+Up` could not reach terminal applications on Linux and Windows.** The
+  default chord always ran Kettle's `FocusUp` action, even at the top edge where
+  it could not move anywhere, colliding with Codex's previous-message editor
+  and similar CLI bindings. The four default `Alt+Arrow` focus chords are now
+  adaptive: they move to a real neighboring pane and otherwise pass the
+  original key event through to the terminal. Custom actions and macOS's
+  `Ctrl+Cmd+Arrow` focus map keep their explicit behavior.
+- **Shift+Enter could print `;2;13~` after leaving an interactive CLI.** Kettle
+  sent its compatibility encoding before any keyboard-protocol negotiation even
+  at an ordinary shell prompt. Some line editors consumed the escape prefix as
+  a function key and inserted the remaining bytes literally. The new default
+  `modify-other-keys = auto` enables that fallback only for a raw foreground
+  Unix/macOS job distinct from the shell (zsh's own editor is also raw), or a
+  known-running/direct Windows command; `always` (`enter` alias) preserves
+  the former behavior, and negotiated xterm/Kitty modes still take precedence.
+  Shell `.exe` names plus session, privilege, namespace, sandbox, and container
+  launchers fail closed so an inner prompt cannot be mistaken for a direct TUI.
+  GUI, control-plane, and broadcast input now use the same per-pane decision.
 - **The app icon used two competing rounded shapes on macOS.** The inner dark
   terminal face and the system-owned outer mask could not stay optically
   parallel at every Dock scale, and a literal teapot replacement became noisy

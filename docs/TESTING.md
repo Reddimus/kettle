@@ -57,6 +57,14 @@ and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
 
+Modified-Enter auto detection has an additional native Unix PTY regression. It
+starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
+editor's prompt is noncanonical while the shell's own process group still owns
+the PTY, then starts a raw child and proves job control transfers the foreground
+group. The portable policy test covers the same prompt/TUI and Windows OSC 133
+matrix on every host; a live `kettle ctl send_keys` check remains useful because
+it exercises the GUI/control encoding path against the actual pane.
+
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
 but do not run package-owned unit targets. A separate validation workspace and
@@ -1859,6 +1867,15 @@ name the shape of bug each pass caught.
   rounded face or line that can collapse at the corners. Then run the native
   macOS Dock and rounded-window check in
   [RELEASING.md](RELEASING.md#macos-appearance-gate).
+- The adaptive directional-focus matrix pins all four exact
+  `Alt+Arrow`/`Focus*` pairs, rejects extra modifiers and mismatched customized
+  actions, and keeps the macOS policy disabled. Mux geometry tests separately
+  prove both real-neighbour selection and each outside-edge no-op; together
+  they cover the two branches in the physical keyboard route without making a
+  synthetic window event the source of pane geometry. The key-release state
+  test also reproduces an auto-repeat that is consumed while moving through a
+  split and then reaches the terminal at the outer edge; its eventual release
+  must follow the terminal-owned repeat rather than a stale consumed press.
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale
   PowerShell launcher arguments, upgrades it, and verifies the shortcut target,

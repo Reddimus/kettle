@@ -131,7 +131,7 @@ The panel covers the most-used options; kettle has many more config keys
 For those, edit the config file directly — the full reference is in
 [CONFIG.md](CONFIG.md). You can jump straight to it from kettle with
 **right-click → Preferences ▸ Advanced… (open config with default app)**.
-The pre-negotiation Enter fallback `modify-other-keys = enter|off` is one of
+The pre-negotiation Enter fallback `modify-other-keys = auto|always|off` is one of
 these config-only options; edits still reload immediately for every open pane.
 
 **Live theme preview (v2.24.0):** in **right-click → Theme**, hovering (or

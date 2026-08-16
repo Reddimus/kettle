@@ -1264,9 +1264,21 @@ text, so its bitmap is already resident).
 - **Broadcast fan-out** (via the `BroadcastScope` enum) is App-side
   target selection: on every keystroke the App
   walks `compute_broadcast_targets(scope, focus, in_tab, all)` and
-  queues the encoded bytes to each target pane's input worker. The reader
+  computes each target's effective keyboard mode independently before encoding.
+  In particular, the pre-negotiation modified-Enter policy samples that pane's
+  live Unix PTY line discipline plus foreground process group, or Windows OSC
+  133 command state; a raw foreground TUI and the shell's own raw/canonical line
+  editor in the same broadcast group therefore receive the safe
+  encoding for their own context rather than the focused pane's encoding. The
+  App then queues the encoded bytes to each target pane's input worker. The reader
   threads of the receiving panes pick up the echo through their
   normal byte-stream path.
+- **Adaptive directional focus** is decided only for a physical non-macOS
+  `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
+  edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
+  chord and receives focus, while an outside-edge press stays unconsumed and is
+  encoded for the PTY. Menu, automation, customized-action, and macOS
+  `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
 - **Allocation hot-paths**: `App::drain_events`
   has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
   Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the

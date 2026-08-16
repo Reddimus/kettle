@@ -441,9 +441,13 @@ fn initial_pane_title(argv: &[String]) -> String {
         .unwrap_or(arg0);
     // Shells are intentionally placeholders: the cwd-basename fallback
     // (`~/repos/kettle` → `kettle`) is more useful than the literal "bash".
-    // List covers POSIX shells + common alt-shells; case-sensitive because
-    // argv comes through unchanged on Unix and Windows shells go by other
-    // names (cmd.exe, powershell.exe).
+    if is_known_shell(base) {
+        return "kettle".into();
+    }
+    base.to_string()
+}
+
+fn is_known_shell(program: &str) -> bool {
     const SHELLS: &[&str] = &[
         "sh",
         "bash",
@@ -464,10 +468,67 @@ fn initial_pane_title(argv: &[String]) -> String {
         "powershell.exe",
         "pwsh.exe",
     ];
-    if SHELLS.contains(&base) {
-        return "kettle".into();
+    SHELLS.contains(&program)
+}
+
+/// Whether an explicit launch is a program rather than a shell/session
+/// transport. Shells, remote/session transports, privilege and namespace
+/// wrappers, sandboxes, and container launchers fail closed because their
+/// foreground process can expose an inner line editor whose activity Kettle
+/// cannot observe separately.
+#[cfg(any(unix, windows, test))]
+fn argv_is_direct_program(argv: &[String]) -> bool {
+    if argv.is_empty() {
+        return false;
     }
-    base.to_string()
+    // Shared with split/WSL classification: handles both path separators,
+    // case-folds, and strips Windows' `.exe`. Reimplementing only the native
+    // platform's basename rules made `C:\Program Files\Git\bin\bash.exe`
+    // look like a direct TUI and re-enabled modified Enter at its prompt.
+    let base = argv0_base_lower(argv);
+    !is_known_shell(&base)
+        && !matches!(
+            base.as_str(),
+            "ssh"
+                | "autossh"
+                | "telnet"
+                | "wsl"
+                | "tmux"
+                | "screen"
+                | "mosh"
+                | "zellij"
+                | "byobu"
+                | "dtach"
+                | "abduco"
+                | "script"
+                | "sudo"
+                | "doas"
+                | "pkexec"
+                | "su"
+                | "runuser"
+                | "setpriv"
+                | "login"
+                | "env"
+                | "nix-shell"
+                | "chroot"
+                | "nsenter"
+                | "unshare"
+                | "setsid"
+                | "systemd-run"
+                | "bwrap"
+                | "firejail"
+                | "proot"
+                | "docker"
+                | "podman"
+                | "nerdctl"
+                | "kubectl"
+                | "distrobox"
+                | "distrobox-enter"
+                | "toolbox"
+                | "lxc"
+                | "machinectl"
+                | "flatpak-spawn"
+        )
 }
 
 /// Map the kettle config cursor style to the engine's seed shape. `Bar` and
@@ -484,7 +545,7 @@ fn engine_cursor_shape(s: CursorStyle) -> CursorShape {
 }
 
 fn unnegotiated_modified_enter(mode: ModifyOtherKeysMode) -> bool {
-    mode == ModifyOtherKeysMode::Enter
+    mode == ModifyOtherKeysMode::Always
 }
 
 use crate::session::{MAX_RESTORE_PANES, SNode, STab, Session};
@@ -621,6 +682,65 @@ pub struct Pane {
 }
 
 impl Pane {
+    /// Live terminal mode adjusted by Kettle's pre-negotiation modified-Enter
+    /// policy for this pane. Protocol bits selected by the application remain
+    /// untouched and therefore retain precedence in the encoder.
+    pub(crate) fn effective_key_mode(
+        &self,
+        policy: ModifyOtherKeysMode,
+        sample_automatic_context: bool,
+    ) -> kettle_core::TermMode {
+        let enable_fallback = match policy {
+            ModifyOtherKeysMode::Always => true,
+            ModifyOtherKeysMode::Off => false,
+            ModifyOtherKeysMode::Auto if sample_automatic_context => {
+                modified_enter_fallback(policy, self.modified_enter_context())
+            }
+            ModifyOtherKeysMode::Auto => false,
+        };
+        let mut mode = self
+            .term
+            .term
+            .lock()
+            .ok()
+            .map(|term| *term.mode())
+            .unwrap_or_else(kettle_core::TermMode::empty);
+        mode.set(
+            kettle_core::TermMode::UNNEGOTIATED_MODIFIED_ENTER,
+            enable_fallback,
+        );
+        mode
+    }
+
+    fn modified_enter_context(&self) -> ModifiedEnterContext {
+        #[cfg(unix)]
+        {
+            // A TUI switches the slave to raw/noncanonical input and, when it
+            // was launched by a shell, owns a different foreground process
+            // group. zsh's own ZLE is also noncanonical, so termios without
+            // job control repeats the exact prompt leak this guards. Any
+            // failed snapshot returns false: plain CR is fail-closed.
+            let context = ModifiedEnterContext::UnixPty {
+                canonical: self.term.input_is_canonical().ok(),
+                foreground_job: self.term.foreground_job_is_running().ok(),
+                direct_program: argv_is_direct_program(&self.argv),
+            };
+            log::trace!("modified-Enter auto context: {context:?}");
+            context
+        }
+        #[cfg(windows)]
+        {
+            ModifiedEnterContext::WindowsShell {
+                activity: self.term.shell_activity(),
+                direct_program: argv_is_direct_program(&self.argv),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            ModifiedEnterContext::Unsupported
+        }
+    }
+
     /// Terminator parity: write user-originated input (keystroke /
     /// paste / IME / drag-drop / send-text) to the PTY, honoring the read-only
     /// toggle. Returns the explicit enqueue outcome. VTE
@@ -657,6 +777,59 @@ impl Pane {
 
     pub fn pty_input_failed(&self) -> bool {
         self.pty_input.failed()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModifiedEnterContext {
+    #[cfg(any(unix, test))]
+    UnixPty {
+        canonical: Option<bool>,
+        foreground_job: Option<bool>,
+        direct_program: bool,
+    },
+    #[cfg(any(windows, test))]
+    WindowsShell {
+        activity: kettle_core::ShellActivity,
+        direct_program: bool,
+    },
+    #[cfg(any(not(any(unix, windows)), test))]
+    Unsupported,
+}
+
+fn modified_enter_fallback(policy: ModifyOtherKeysMode, context: ModifiedEnterContext) -> bool {
+    match policy {
+        ModifyOtherKeysMode::Always => true,
+        ModifyOtherKeysMode::Off => false,
+        ModifyOtherKeysMode::Auto => match context {
+            #[cfg(any(unix, test))]
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: Some(true),
+                ..
+            }
+            | ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                direct_program: true,
+                ..
+            } => true,
+            #[cfg(any(windows, test))]
+            ModifiedEnterContext::WindowsShell {
+                activity: kettle_core::ShellActivity::Running,
+                ..
+            } => true,
+            #[cfg(any(windows, test))]
+            ModifiedEnterContext::WindowsShell {
+                activity: kettle_core::ShellActivity::Unknown,
+                direct_program: true,
+            } => true,
+            #[cfg(any(unix, test))]
+            ModifiedEnterContext::UnixPty { .. } => false,
+            #[cfg(any(windows, test))]
+            ModifiedEnterContext::WindowsShell { .. } => false,
+            #[cfg(any(not(any(unix, windows)), test))]
+            ModifiedEnterContext::Unsupported => false,
+        },
     }
 }
 
@@ -3258,6 +3431,8 @@ impl Mux {
 
     pub(crate) fn broadcast_encoded<F>(
         &mut self,
+        policy: ModifyOtherKeysMode,
+        sample_automatic_context: bool,
         scroll_to_bottom: bool,
         encode: F,
     ) -> PaneInputDelivery
@@ -3265,12 +3440,20 @@ impl Mux {
         F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.broadcast_target_ids();
-        self.write_encoded_into(ids, scroll_to_bottom, encode)
+        self.write_encoded_into(
+            ids,
+            policy,
+            sample_automatic_context,
+            scroll_to_bottom,
+            encode,
+        )
     }
 
     pub(crate) fn broadcast_encoded_foreign<F>(
         &mut self,
         scope: &BroadcastScope,
+        policy: ModifyOtherKeysMode,
+        sample_automatic_context: bool,
         scroll_to_bottom: bool,
         encode: F,
     ) -> PaneInputDelivery
@@ -3278,12 +3461,20 @@ impl Mux {
         F: FnMut(kettle_core::TermMode) -> Option<Vec<u8>>,
     {
         let ids = self.foreign_target_ids(scope);
-        self.write_encoded_into(ids, scroll_to_bottom, encode)
+        self.write_encoded_into(
+            ids,
+            policy,
+            sample_automatic_context,
+            scroll_to_bottom,
+            encode,
+        )
     }
 
     fn write_encoded_into<F>(
         &mut self,
         ids: Vec<u64>,
+        policy: ModifyOtherKeysMode,
+        sample_automatic_context: bool,
         scroll_to_bottom: bool,
         encode: F,
     ) -> PaneInputDelivery
@@ -3292,13 +3483,7 @@ impl Mux {
     {
         let target_modes = ids.into_iter().filter_map(|id| {
             let pane = self.panes.get(&id)?;
-            let mode = pane
-                .term
-                .term
-                .lock()
-                .ok()
-                .map(|term| *term.mode())
-                .unwrap_or_else(kettle_core::TermMode::empty);
+            let mode = pane.effective_key_mode(policy, sample_automatic_context);
             Some((id, mode))
         });
         let encoded = encode_target_modes(target_modes, encode);
@@ -5818,8 +6003,155 @@ mod node_tests {
 
     #[test]
     fn modify_other_keys_config_controls_only_the_enter_fallback() {
-        assert!(unnegotiated_modified_enter(ModifyOtherKeysMode::Enter));
+        assert!(!unnegotiated_modified_enter(ModifyOtherKeysMode::Auto));
+        assert!(unnegotiated_modified_enter(ModifyOtherKeysMode::Always));
         assert!(!unnegotiated_modified_enter(ModifyOtherKeysMode::Off));
+    }
+
+    #[test]
+    fn automatic_modified_enter_distinguishes_raw_shell_editor_from_tui() {
+        use kettle_core::ShellActivity;
+
+        let auto = ModifyOtherKeysMode::Auto;
+        // zsh ZLE is raw but keeps the shell's own process group in front. It
+        // must receive CR, not the sequence whose tail appeared in the prompt.
+        assert!(!modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: Some(false),
+                direct_program: false,
+            }
+        ));
+        assert!(modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: Some(true),
+                direct_program: false,
+            }
+        ));
+        // An explicitly launched TUI is itself the direct foreground child.
+        assert!(modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: Some(false),
+                direct_program: true,
+            }
+        ));
+        assert!(!modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(true),
+                foreground_job: Some(true),
+                direct_program: true,
+            }
+        ));
+        assert!(!modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: None,
+                foreground_job: Some(true),
+                direct_program: true,
+            }
+        ));
+        assert!(!modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: None,
+                direct_program: false,
+            }
+        ));
+        assert!(modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::WindowsShell {
+                activity: ShellActivity::Running,
+                direct_program: false,
+            }
+        ));
+        assert!(modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::WindowsShell {
+                activity: ShellActivity::Unknown,
+                direct_program: true,
+            }
+        ));
+        for activity in [ShellActivity::Idle, ShellActivity::Unknown] {
+            assert!(!modified_enter_fallback(
+                auto,
+                ModifiedEnterContext::WindowsShell {
+                    activity,
+                    direct_program: false,
+                }
+            ));
+        }
+        assert!(modified_enter_fallback(
+            ModifyOtherKeysMode::Always,
+            ModifiedEnterContext::Unsupported
+        ));
+        assert!(!modified_enter_fallback(
+            ModifyOtherKeysMode::Off,
+            ModifiedEnterContext::UnixPty {
+                canonical: Some(false),
+                foreground_job: Some(true),
+                direct_program: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn direct_program_detection_fails_closed_for_shell_transports() {
+        assert!(argv_is_direct_program(&["codex".into()]));
+        assert!(argv_is_direct_program(&["/usr/bin/htop".into()]));
+        for program in [
+            "zsh",
+            "pwsh.exe",
+            "C:\\Program Files\\Git\\bin\\bash.exe",
+            "ssh",
+            "autossh",
+            "telnet",
+            "wsl.exe",
+            "tmux",
+            "screen",
+            "mosh",
+            "zellij",
+            "byobu",
+            "dtach",
+            "abduco",
+            "script",
+            "sudo",
+            "doas",
+            "pkexec",
+            "su",
+            "runuser",
+            "setpriv",
+            "login",
+            "env",
+            "nix-shell",
+            "chroot",
+            "nsenter",
+            "/usr/bin/unshare",
+            "setsid",
+            "systemd-run",
+            "bwrap",
+            "firejail",
+            "proot",
+            "docker",
+            "podman.exe",
+            "nerdctl",
+            "kubectl",
+            "distrobox",
+            "distrobox-enter",
+            "toolbox",
+            "lxc",
+            "machinectl",
+            "FLATPAK-SPAWN",
+        ] {
+            assert!(!argv_is_direct_program(&[program.into()]), "{program}");
+        }
+        assert!(!argv_is_direct_program(&[]));
     }
 
     #[test]

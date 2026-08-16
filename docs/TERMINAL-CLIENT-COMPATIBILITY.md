@@ -146,18 +146,35 @@ Plain keys are unchanged at every level. In particular, plain Enter is always
 
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|
-| No keyboard negotiation; `modify-other-keys = enter` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| No negotiation; `auto` at a canonical/unknown shell prompt | `0D` | `0D` | `0D` | `0D` |
+| No negotiation; `auto` in a raw/running TUI, or `always` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Negotiated xterm level 0 | `0D` | `0D` | `0D` | `0D` |
 | Negotiated xterm level 1 | `0D` | `0D` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Negotiated xterm level 2 | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
 
-`modify-other-keys = enter` is the default and controls only the first row. It
-preserves the shipped multiline-input chords used by clients that negotiate
-nothing without claiming an xterm level. `off` removes that fallback; it does
-not block an application's xterm request or Kitty CSI-u, either of which can
-still distinguish Enter chords. This separation matters because assuming level
-two globally would also stop Ctrl+I from acting as Tab for every legacy client.
+`modify-other-keys = auto` is the default and controls only the first two rows.
+On Unix/macOS it reads both the live PTY line discipline and foreground process
+group immediately before each modified Enter. The fallback requires
+noncanonical/raw input plus a foreground job distinct from the shell, or a
+direct non-shell launch. The process-group check is load-bearing because zsh's
+own ZLE prompt is also noncanonical. A shell prompt or failed snapshot gets plain
+`CR`. On Windows, OSC 133 command state enables the fallback while a command is
+running; a direct non-shell launch also enables it, while idle/unknown shells do
+not. Shell executables and launchers that can expose an inner prompt (SSH/WSL,
+tmux/screen, privilege or namespace wrappers, sandboxes, and container
+launchers) are not treated as direct programs. `always` preserves the former unconditional fallback for uninstrumented
+SSH/WSL/custom shells (`enter` remains an accepted compatibility alias), and
+`off` removes it. GUI typing, control-plane `send_keys`, and each broadcast
+target make this decision from that target pane's live state.
+
+None of these settings blocks an application's xterm request or Kitty CSI-u,
+either of which can still distinguish Enter chords and takes precedence. This
+separation matters because assuming level two globally would also stop Ctrl+I
+from acting as Tab for every legacy client. It also prevents an unsolicited
+`ESC [ 27;2;13~` from reaching an ordinary line editor, where `ESC [ 27` can be
+consumed as a function-key prefix and the remainder appears literally as
+`;2;13~`.
 
 This progressive behavior matters for shells and older TUIs: enabling support
 does not force CSI-u on applications that never request it. A key press consumed
