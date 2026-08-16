@@ -4027,7 +4027,7 @@ fn default_prog_with_integration(inject: bool) -> CommandBuilder {
 
 /// v2.29.1: the kettle PowerShell shell-integration body, embedded so the
 /// spawned pwsh can be launched already wired (no `$PROFILE` edit needed).
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const POWERSHELL_INTEGRATION: &str = include_str!("../../../shell-integration/kettle.ps1");
 
 /// v2.29.1: is `path` a PowerShell (pwsh / powershell) executable, by basename?
@@ -4059,17 +4059,17 @@ fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
     c
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const POWERSHELL_BOOTSTRAP_PREFIX: &str =
     "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('";
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const POWERSHELL_BOOTSTRAP_SUFFIX: &str = "'))))";
-#[cfg(windows)]
-const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 24_000;
+#[cfg(any(windows, test))]
+const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 25_000;
 
 // Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
 // ceiling. The payload is ASCII, so bytes and UTF-16 code units are identical.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const _: () = assert!(
     POWERSHELL_BOOTSTRAP_PREFIX.len()
         + POWERSHELL_INTEGRATION.len().div_ceil(3) * 4
