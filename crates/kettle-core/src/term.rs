@@ -12836,7 +12836,7 @@ mod default_shell_tests {
         let argv = command.get_argv();
         assert_eq!(argv[1], "-NoExit");
         assert_eq!(argv[2], "-Command");
-        assert_eq!(argv[3], bootstrap);
+        assert_eq!(argv[3], OsStr::new(&bootstrap));
     }
 
     /// v2.29.1: PowerShell executables are recognized by basename; cmd / bash are not.
