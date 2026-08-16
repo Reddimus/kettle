@@ -2727,6 +2727,10 @@ pub struct Terminal {
     /// underneath a newer live handle.
     #[cfg(unix)]
     stdin_lease_phase: Arc<Mutex<PtyStdinLeasePhase>>,
+    /// Immutable process id captured before the child handle is shared with
+    /// the teardown reaper. Input classification must never take `child`: the
+    /// reaper deliberately holds that mutex across a blocking `wait()`.
+    child_pid: Option<u32>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     reader_thread: Option<JoinHandle<()>>,
     /// Published before the reader's sole raw-output sender is dropped, so a
@@ -2985,11 +2989,16 @@ mod foreground_job_tests {
                     terminal.write(reply.as_bytes());
                 }
             }
+            let observed = terminal
+                .foreground_process_group()
+                .ok()
+                .and_then(|foreground| {
+                    let child_pid = terminal.child_pid()? as libc::pid_t;
+                    let child_group = unsafe { libc::getpgid(child_pid) };
+                    (child_group >= 0).then_some(foreground != child_group as u32)
+                });
             if matches!(terminal.input_is_canonical(), Ok(false))
-                && matches!(
-                    terminal.foreground_job_is_running(),
-                    Ok(observed) if observed == foreground_job
-                )
+                && observed == Some(foreground_job)
             {
                 return true;
             }
@@ -3035,7 +3044,9 @@ mod foreground_job_tests {
             }
         };
 
-        terminal.write(b"printf 'SHELL_PROMPT_READY\\n'\r");
+        // Split the marker in the command text so the shell's own echo cannot
+        // satisfy `wait_for_screen` before `printf` actually runs.
+        terminal.write(b"printf 'SHELL_PROMPT''_READY\\n'\r");
         assert!(wait_for_screen(&terminal, &rx, "SHELL_PROMPT_READY"));
         assert!(
             wait_for_job_state(&terminal, &rx, false),
@@ -3043,7 +3054,7 @@ mod foreground_job_tests {
         );
 
         terminal.write(
-            b"/bin/sh -c 'stty raw -echo; printf RAW_JOB_READY; dd bs=1 count=1 >/dev/null 2>&1; stty sane'\r",
+            b"/bin/sh -c 'stty raw -echo; printf RAW_JOB''_READY; dd bs=1 count=1 >/dev/null 2>&1; stty sane'\r",
         );
         assert!(wait_for_screen(&terminal, &rx, "RAW_JOB_READY"));
         assert!(
@@ -5842,11 +5853,11 @@ impl Terminal {
         // the guard armed across the final value construction so an unwind
         // cannot strand a running child that no returned Terminal owns.
         let mut spawned = SpawnedChildGuard::arm(child.clone_killer());
+        let child_pid = child.process_id();
         #[cfg(unix)]
         {
-            let child_pid = child
-                .process_id()
-                .context("Unix PTY child has no process id for startup guarding")?;
+            let child_pid =
+                child_pid.context("Unix PTY child has no process id for startup guarding")?;
             let lifecycle_watcher = UnixPtyWatcher::new(child_pid, reader_poll_fd);
             startup_slave_tx
                 .send((pair.slave, lifecycle_watcher))
@@ -5880,6 +5891,7 @@ impl Terminal {
             writer: Arc::new(Mutex::new(writer)),
             #[cfg(unix)]
             stdin_lease_phase: Arc::new(Mutex::new(PtyStdinLeasePhase::Available)),
+            child_pid,
             child: Arc::new(Mutex::new(child)),
             reader_thread: Some(reader_thread),
             pty_read_progress,
@@ -5978,16 +5990,13 @@ impl Terminal {
         Ok(attrs.c_lflag & libc::ICANON != 0)
     }
 
-    /// Whether a foreground job other than Kettle's directly spawned child
-    /// currently owns the Unix PTY.
+    /// Current Unix PTY foreground process group id.
     ///
-    /// Job-control shells keep their own process group in the foreground while
-    /// editing a prompt (even when zsh's line editor uses noncanonical mode),
-    /// then transfer the PTY to the command's process group. This is the
-    /// missing half of the modified-Enter auto decision: termios alone cannot
-    /// distinguish zsh ZLE from a raw TUI.
+    /// This is a single `tcgetpgrp` snapshot over the master descriptor. It
+    /// does not inspect the child handle and therefore cannot wait behind the
+    /// asynchronous child reaper during pane teardown.
     #[cfg(unix)]
-    pub fn foreground_job_is_running(&self) -> Result<bool> {
+    pub fn foreground_process_group(&self) -> Result<u32> {
         let fd = self
             .master
             .as_ref()
@@ -5999,16 +6008,7 @@ impl Terminal {
             return Err(std::io::Error::last_os_error())
                 .context("cannot read the PTY foreground process group");
         }
-        let child_pid = self
-            .child_pid()
-            .context("PTY child has no process id for job-control detection")?
-            as libc::pid_t;
-        let child_group = unsafe { libc::getpgid(child_pid) };
-        if child_group < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("cannot read the PTY child's process group");
-        }
-        Ok(foreground != child_group)
+        u32::try_from(foreground).context("PTY foreground process group is out of range")
     }
 
     /// Current command state when OSC 133 supplies enough information to know.
@@ -6184,19 +6184,14 @@ impl Terminal {
 
     /// Terminator parity (phase 1 of
     /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)):
-    /// PTY child PID accessor. Returns the OS pid of the shell that
-    /// kettle spawned at pane creation. None means either:
-    ///   - lock contention (extremely rare; the child mutex is held only
-    ///     briefly by `child_exited`'s `try_wait` from `Mux::reap` and, on
-    ///     teardown, by the detached `kettle-pty-reaper` thread's `wait` — the
-    ///     reader thread does NOT touch the child)
-    ///   - the platform doesn't expose pids for this Child type
-    ///     (Windows fallback path)
+    /// PTY child PID accessor. Returns the immutable OS pid captured when the
+    /// pane was spawned. `None` means the platform does not expose a pid for
+    /// this Child type (the Windows fallback path).
     ///
     /// Used by the upcoming remote-session detector to root the
     /// process-tree walk. Read-only — does not consume the Child.
     pub fn child_pid(&self) -> Option<u32> {
-        self.child.lock().ok().and_then(|c| c.process_id())
+        self.child_pid
     }
 
     /// Observe an exited Unix child without consuming its wait status.

@@ -72,8 +72,10 @@ See the full list any time with `kettle --list-keybinds`, or press
 On Linux and Windows, the focus chord is edge-aware: if no split exists in the
 arrow's direction, Kettle passes `Alt+Arrow` to the program instead. This keeps
 terminal-app shortcuts such as Codex's `Alt+Up` previous-message editor usable
-without giving up fast split navigation. macOS uses `Ctrl+Cmd+Arrow` for split
-focus and already leaves `Option+Arrow` to terminal applications.
+without giving up fast split navigation. A zoom that hides sibling panes keeps
+the chord with Kettle as a no-op; a one-pane tab passes it through. macOS uses
+`Ctrl+Cmd+Arrow` for split focus and already leaves `Option+Arrow` to terminal
+applications.
 
 ## 5. Search screen and scrollback
 

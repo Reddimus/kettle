@@ -1267,18 +1267,26 @@ text, so its bitmap is already resident).
   computes each target's effective keyboard mode independently before encoding.
   In particular, the pre-negotiation modified-Enter policy samples that pane's
   live Unix PTY line discipline plus foreground process group, or Windows OSC
-  133 command state; a raw foreground TUI and the shell's own raw/canonical line
-  editor in the same broadcast group therefore receive the safe
-  encoding for their own context rather than the focused pane's encoding. The
-  App then queues the encoded bytes to each target pane's input worker. The reader
-  threads of the receiving panes pick up the echo through their
+  133 command state, and pairs it with the bounded background process snapshot.
+  Only a narrow allowlist of known agent composers receives the unnegotiated
+  fallback; nested shells, readline clients, unknown process trees, and stale
+  Unix snapshots fail closed to plain Enter. A composer and the shell's own line
+  editor in the same broadcast group therefore receive the safe encoding for
+  their own context rather than the focused pane's encoding. The App then queues
+  the encoded bytes to each target pane's input worker. The reader threads of
+  the receiving panes pick up the echo through their
   normal byte-stream path.
 - **Adaptive directional focus** is decided only for a physical non-macOS
   `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
   edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
   chord and receives focus, while an outside-edge press stays unconsumed and is
-  encoded for the PTY. Menu, automation, customized-action, and macOS
-  `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
+  encoded for the PTY. A zoom that hides sibling panes keeps the chord
+  application-owned as a no-op; a one-leaf tab passes it through even if its
+  persisted zoom bit remains set. A two-set press/release ledger ensures that
+  once any repeated press reaches the PTY, terminal ownership stays sticky
+  through its release; otherwise the UI-owned press suppresses that release.
+  Menu, automation, customized-action, and macOS `Ctrl+Cmd+Arrow` dispatch
+  remain explicit application actions.
 - **Allocation hot-paths**: `App::drain_events`
   has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
   Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the

@@ -61,9 +61,12 @@ Modified-Enter auto detection has an additional native Unix PTY regression. It
 starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
 editor's prompt is noncanonical while the shell's own process group still owns
 the PTY, then starts a raw child and proves job control transfers the foreground
-group. The portable policy test covers the same prompt/TUI and Windows OSC 133
-matrix on every host; a live `kettle ctl send_keys` check remains useful because
-it exercises the GUI/control encoding path against the actual pane.
+group through the same `foreground_process_group` API the UI samples. Portable
+tests separately pin the recognized-composer allowlist, reject stale Unix pid
+snapshots, prove the Windows breadth-first scan chooses a composer before its
+forked helpers, and cover the policy matrix. A live `kettle ctl send_keys` check
+remains useful because it exercises the GUI/control encoding path against the
+actual pane.
 
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
@@ -1872,10 +1875,20 @@ name the shape of bug each pass caught.
   actions, and keeps the macOS policy disabled. Mux geometry tests separately
   prove both real-neighbour selection and each outside-edge no-op; together
   they cover the two branches in the physical keyboard route without making a
-  synthetic window event the source of pane geometry. The key-release state
-  test also reproduces an auto-repeat that is consumed while moving through a
-  split and then reaches the terminal at the outer edge; its eventual release
-  must follow the terminal-owned repeat rather than a stale consumed press.
+  synthetic window event the source of pane geometry. A zoom hiding sibling
+  panes is pinned to the consumed/no-op branch, while a one-leaf tab with the
+  zoom bit set still falls through. Key-release state tests reproduce
+  auto-repeat in both directions across the consume/pass-through boundary; the
+  eventual release must follow the terminal-owned repeat rather than a stale
+  consumed press, and a later UI-owned repeat cannot reclaim it.
+- The modified-Enter matrix pairs the live line-discipline result with a
+  recognized foreground composer, rejects nested/raw shell and readline cases,
+  and exercises direct versus shell-hosted Windows clients. Process-snapshot
+  tests prove the Windows breadth-first scan selects the closest recognized
+  composer before its helper children even when that subtree forks, and rejects
+  ambiguous sibling branches directly under the shell. Native PTY readiness
+  markers are assembled from separate shell words so the shell's own input echo
+  cannot satisfy the assertion before the child actually prints them.
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale
   PowerShell launcher arguments, upgrades it, and verifies the shortcut target,

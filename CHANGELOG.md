@@ -13,19 +13,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   it could not move anywhere, colliding with Codex's previous-message editor
   and similar CLI bindings. The four default `Alt+Arrow` focus chords are now
   adaptive: they move to a real neighboring pane and otherwise pass the
-  original key event through to the terminal. Custom actions and macOS's
-  `Ctrl+Cmd+Arrow` focus map keep their explicit behavior.
+  original key event through to the terminal. A zoom that actually hides
+  sibling panes keeps the chord as a no-op; a one-pane tab passes it through
+  even if its persisted zoom bit remains set. Custom actions and macOS's
+  `Ctrl+Cmd+Arrow` focus map keep their explicit behavior, and key-release
+  ownership follows whichever side received the last repeated press.
 - **Shift+Enter could print `;2;13~` after leaving an interactive CLI.** Kettle
   sent its compatibility encoding before any keyboard-protocol negotiation even
   at an ordinary shell prompt. Some line editors consumed the escape prefix as
   a function key and inserted the remaining bytes literally. The new default
-  `modify-other-keys = auto` enables that fallback only for a raw foreground
-  Unix/macOS job distinct from the shell (zsh's own editor is also raw), or a
-  known-running/direct Windows command; `always` (`enter` alias) preserves
-  the former behavior, and negotiated xterm/Kitty modes still take precedence.
-  Shell `.exe` names plus session, privilege, namespace, sandbox, and container
-  launchers fail closed so an inner prompt cannot be mistaken for a direct TUI.
-  GUI, control-plane, and broadcast input now use the same per-pane decision.
+  `modify-other-keys = auto` enables that fallback only for a known agent
+  composer (Codex, Claude Code, Gemini, or OpenCode). Unix/macOS pairs a fresh
+  noncanonical PTY sample and foreground process-group id with either the
+  direct launch identity or the background process snapshot; Windows requires
+  the observed composer to be running, or to have been launched directly.
+  Nested shells, readline/libedit programs, SSH/WSL transports, wrappers, and
+  snapshots without a recognized composer fail closed to plain Enter. `always`
+  (`enter` alias) is the explicit escape hatch for an unrecognized client, and
+  negotiated xterm/Kitty modes still take precedence. GUI, control-plane, and
+  broadcast input use the same per-pane decision.
 - **The app icon used two competing rounded shapes on macOS.** The inner dark
   terminal face and the system-owned outer mask could not stay optically
   parallel at every Dock scale, and a literal teapot replacement became noisy

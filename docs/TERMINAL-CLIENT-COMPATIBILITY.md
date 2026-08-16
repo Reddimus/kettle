@@ -147,26 +147,35 @@ Plain keys are unchanged at every level. In particular, plain Enter is always
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|
 | No negotiation; `auto` at a canonical/unknown shell prompt | `0D` | `0D` | `0D` | `0D` |
-| No negotiation; `auto` in a raw/running TUI, or `always` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
+| No negotiation; `auto` in a recognized agent composer, or `always` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Negotiated xterm level 0 | `0D` | `0D` | `0D` | `0D` |
 | Negotiated xterm level 1 | `0D` | `0D` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Negotiated xterm level 2 | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
 
 `modify-other-keys = auto` is the default and controls only the first two rows.
-On Unix/macOS it reads both the live PTY line discipline and foreground process
-group immediately before each modified Enter. The fallback requires
-noncanonical/raw input plus a foreground job distinct from the shell, or a
-direct non-shell launch. The process-group check is load-bearing because zsh's
-own ZLE prompt is also noncanonical. A shell prompt or failed snapshot gets plain
-`CR`. On Windows, OSC 133 command state enables the fallback while a command is
-running; a direct non-shell launch also enables it, while idle/unknown shells do
-not. Shell executables and launchers that can expose an inner prompt (SSH/WSL,
-tmux/screen, privilege or namespace wrappers, sandboxes, and container
-launchers) are not treated as direct programs. `always` preserves the former unconditional fallback for uninstrumented
-SSH/WSL/custom shells (`enter` remains an accepted compatibility alias), and
-`off` removes it. GUI typing, control-plane `send_keys`, and each broadcast
-target make this decision from that target pane's live state.
+It recognizes Codex, Claude Code, Gemini, and OpenCode rather than assuming that
+every raw-mode application accepts Kettle's legacy xterm fallback. On
+Unix/macOS Kettle reads the live PTY line discipline and foreground process
+group immediately before each modified Enter, then matches that pid to the
+direct launch identity or the bounded background process snapshot. Both
+noncanonical input and a recognized foreground composer are required. This is
+deliberately narrower than "foreground job": zsh ZLE, nested shells, Python,
+psql, gdb, and other readline/libedit clients can also use noncanonical mode. A
+stale, missing, or ambiguous snapshot gets plain `CR`.
+
+On Windows, an observed recognized composer must coincide with OSC 133's
+running-command state. The shell must have one unambiguous direct child branch;
+helper forks below the composer are allowed, while multiple shell-child branches
+fail closed because ConPTY cannot identify foreground versus background. A
+directly launched recognized composer is also accepted because no shell prompt
+can inherit the pane. Idle and unknown shells receive plain Enter. SSH/WSL
+transports and session, privilege, namespace, sandbox, and container wrappers
+are intentionally not unwrapped: Kettle cannot prove which inner client owns
+their input. Use `always` for such a client or for an unrecognized composer
+(`enter` remains its compatibility alias), and use `off` to remove the fallback.
+GUI typing, control-plane `send_keys`, and each broadcast target make this
+decision from that target pane's live state.
 
 None of these settings blocks an application's xterm request or Kitty CSI-u,
 either of which can still distinguish Enter chords and takes precedence. This

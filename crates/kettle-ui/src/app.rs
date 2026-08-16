@@ -38,7 +38,7 @@ use crate::mux::{
 };
 use crate::window_state::{
     DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
-    track_consumed_key_release,
+    track_consumed_key_release, track_terminal_key_press,
 };
 
 const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
@@ -3382,8 +3382,13 @@ fn update_window_remote_contexts(
         let Some(probe) = snapshot.probes.get(&pid) else {
             continue;
         };
-        let probe_changed = stage_applied_remote_probe(applied, pane_id, pid, probe);
-        if probe_changed {
+        let context_changed = applied.get(&(pane_id, pid)).is_none_or(|previous| {
+            previous.remote != probe.remote
+                || previous.native_cwd != probe.native_cwd
+                || previous.foreground_shell != probe.foreground_shell
+        });
+        stage_applied_remote_probe(applied, pane_id, pid, probe);
+        if context_changed {
             pane.term.set_native_cwd(probe.native_cwd.clone());
         }
         if probe.remote != pane.remote_context {
@@ -3397,7 +3402,12 @@ fn update_window_remote_contexts(
             pane.remote_context = probe.remote.clone();
             changed = true;
         }
-        changed |= probe_changed;
+        if probe.foreground_process != pane.foreground_process {
+            pane.foreground_process = probe.foreground_process.clone();
+        }
+        // Foreground argv drives input policy but has no visual representation;
+        // changing commands must not schedule a title sync and redraw at 5 Hz.
+        changed |= context_changed;
     }
     changed
 }
@@ -3526,8 +3536,13 @@ fn argv_is_nonlocal_client(argv: &[String]) -> bool {
 }
 
 fn remote_probe_target(pane: &crate::mux::Pane) -> Option<kettle_remote::RemoteProbeTarget> {
+    #[cfg(unix)]
+    let foreground_pid = pane.term.foreground_process_group().ok();
+    #[cfg(not(unix))]
+    let foreground_pid = None;
     Some(kettle_remote::RemoteProbeTarget {
         pid: pane.term.child_pid()?,
+        foreground_pid,
         allow_native_cwd: !argv_is_nonlocal_client(&pane.argv),
     })
 }
@@ -20720,6 +20735,18 @@ fn adaptive_alt_focus_direction(
     }
 }
 
+fn adaptive_alt_focus_falls_through(
+    trigger: Trigger,
+    action: &Action,
+    enabled: bool,
+    zoom_hides_siblings: bool,
+    neighbor_exists: bool,
+) -> bool {
+    !zoom_hides_siblings
+        && !neighbor_exists
+        && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
+}
+
 fn parse_ctl_mods(
     value: Option<&serde_json::Value>,
 ) -> std::result::Result<ModifiersState, String> {
@@ -25132,6 +25159,7 @@ impl App {
                     // a later unrelated release cannot be mistaken for the
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
+                    ws.terminal_owned_key_releases.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
@@ -25290,6 +25318,7 @@ impl App {
                     || ws.ime_preedit.is_some();
                 if track_consumed_key_release(
                     &mut ws.suppressed_key_releases,
+                    &mut ws.terminal_owned_key_releases,
                     event.physical_key,
                     event.state,
                     ui_owns_key,
@@ -25586,14 +25615,22 @@ impl App {
                     Some(&event.physical_key),
                     ws.mods,
                 ) {
+                    let adaptive_direction =
+                        adaptive_alt_focus_direction(trigger, &act, !cfg!(target_os = "macos"));
                     let adaptive_focus_falls_through =
-                        adaptive_alt_focus_direction(trigger, &act, !cfg!(target_os = "macos"))
-                            .is_some_and(|(dx, dy)| {
-                                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_none()
-                            });
+                        adaptive_direction.is_some_and(|(dx, dy)| {
+                            adaptive_alt_focus_falls_through(
+                                trigger,
+                                &act,
+                                true,
+                                ws.mux.zoom_hides_siblings(),
+                                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
+                            )
+                        });
                     if !adaptive_focus_falls_through {
                         track_consumed_key_release(
                             &mut ws.suppressed_key_releases,
+                            &mut ws.terminal_owned_key_releases,
                             event.physical_key,
                             event.state,
                             true,
@@ -25603,6 +25640,11 @@ impl App {
                     }
                 }
 
+                track_terminal_key_press(
+                    &mut ws.suppressed_key_releases,
+                    &mut ws.terminal_owned_key_releases,
+                    event.physical_key,
+                );
                 self.write_terminal_key_event(ws, &event, true);
             }
             WindowEvent::RedrawRequested => self.redraw(ws),
@@ -27902,6 +27944,7 @@ mod tests {
         let target = |pid| {
             Some(kettle_remote::RemoteProbeTarget {
                 pid,
+                foreground_pid: Some(pid),
                 allow_native_cwd: true,
             })
         };
@@ -27933,11 +27976,13 @@ mod tests {
             remote: None,
             native_cwd: Some("old".into()),
             foreground_shell: None,
+            foreground_process: None,
         };
         let new = kettle_remote::RemoteProbe {
             remote: None,
             native_cwd: Some("new".into()),
             foreground_shell: None,
+            foreground_process: None,
         };
         let mut applied = std::collections::HashMap::from([((70, 7), old)]);
 
@@ -30323,7 +30368,7 @@ mod tests {
 
     #[test]
     fn adaptive_alt_focus_matches_only_the_default_directional_pairs() {
-        use super::adaptive_alt_focus_direction;
+        use super::{adaptive_alt_focus_direction, adaptive_alt_focus_falls_through};
         use kettle_config::{Action, Key as KKey, Mods, Trigger};
 
         for (key, action, direction) in [
@@ -30365,6 +30410,29 @@ mod tests {
             None,
             "macOS leaves Option+Arrow to the PTY and uses Ctrl+Cmd for focus"
         );
+
+        let trigger = Trigger::new(Mods::ALT, KKey::Up);
+        assert!(adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            false,
+            false,
+        ));
+        assert!(!adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            true,
+            false,
+        ));
+        assert!(!adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            false,
+            true,
+        ));
     }
 
     /// v2.20.0 (`vim-menu-nav`) drift guards: (1) the vim layer must run

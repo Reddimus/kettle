@@ -322,7 +322,9 @@ commands, environment values, or user paths. `RUST_LOG` controls both `log` and
 
 On Linux and Windows, `Alt+Arrow` moves focus only when a split exists in that
 direction. At the outside edge it is sent to the terminal instead, so CLI
-bindings such as Codex's `Alt+Up` previous-message editor remain available.
+bindings such as Codex's `Alt+Up` previous-message editor remain available. A
+zoom that hides sibling panes still owns the focus chord as a no-op; a one-pane
+tab passes it through.
 
 On macOS, native Cmd chords are additive; every portable `Ctrl+Shift` default
 above remains bound too. Where Apple Terminal's meaning differs from kettle's

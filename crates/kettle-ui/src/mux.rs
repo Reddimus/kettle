@@ -471,64 +471,34 @@ fn is_known_shell(program: &str) -> bool {
     SHELLS.contains(&program)
 }
 
-/// Whether an explicit launch is a program rather than a shell/session
-/// transport. Shells, remote/session transports, privilege and namespace
-/// wrappers, sandboxes, and container launchers fail closed because their
-/// foreground process can expose an inner line editor whose activity Kettle
-/// cannot observe separately.
+/// Whether a foreground argv identifies a composer known to understand
+/// Kettle's pre-negotiation modified-Enter fallback.
+///
+/// This is deliberately an allowlist, not "anything that is not a shell".
+/// Python, psql, gdb, and countless other readline/libedit programs also put
+/// the PTY in noncanonical mode and would print the tail of an unsolicited
+/// xterm sequence. Unknown programs get plain Enter until they negotiate a
+/// standard xterm/Kitty keyboard protocol; `modify-other-keys = always`
+/// remains the explicit compatibility escape hatch.
 #[cfg(any(unix, windows, test))]
-fn argv_is_direct_program(argv: &[String]) -> bool {
-    if argv.is_empty() {
-        return false;
-    }
-    // Shared with split/WSL classification: handles both path separators,
-    // case-folds, and strips Windows' `.exe`. Reimplementing only the native
-    // platform's basename rules made `C:\Program Files\Git\bin\bash.exe`
-    // look like a direct TUI and re-enabled modified Enter at its prompt.
-    let base = argv0_base_lower(argv);
-    !is_known_shell(&base)
-        && !matches!(
-            base.as_str(),
-            "ssh"
-                | "autossh"
-                | "telnet"
-                | "wsl"
-                | "tmux"
-                | "screen"
-                | "mosh"
-                | "zellij"
-                | "byobu"
-                | "dtach"
-                | "abduco"
-                | "script"
-                | "sudo"
-                | "doas"
-                | "pkexec"
-                | "su"
-                | "runuser"
-                | "setpriv"
-                | "login"
-                | "env"
-                | "nix-shell"
-                | "chroot"
-                | "nsenter"
-                | "unshare"
-                | "setsid"
-                | "systemd-run"
-                | "bwrap"
-                | "firejail"
-                | "proot"
-                | "docker"
-                | "podman"
-                | "nerdctl"
-                | "kubectl"
-                | "distrobox"
-                | "distrobox-enter"
-                | "toolbox"
-                | "lxc"
-                | "machinectl"
-                | "flatpak-spawn"
-        )
+fn argv_accepts_unnegotiated_modified_enter(argv: &[String]) -> bool {
+    kettle_remote::argv_accepts_unnegotiated_modified_enter(argv)
+}
+
+#[cfg(any(unix, test))]
+fn unix_foreground_program_acceptance(
+    foreground_pid: Option<u32>,
+    child_pid: Option<u32>,
+    launch_argv: &[String],
+    snapshot: Option<&kettle_remote::ForegroundProcess>,
+) -> Option<bool> {
+    let pid = foreground_pid?;
+    snapshot
+        .filter(|process| process.pid == pid)
+        .map(|process| argv_accepts_unnegotiated_modified_enter(&process.argv))
+        .or_else(|| {
+            (child_pid == Some(pid)).then(|| argv_accepts_unnegotiated_modified_enter(launch_argv))
+        })
 }
 
 /// Map the kettle config cursor style to the engine's seed shape. `Bar` and
@@ -669,6 +639,10 @@ pub struct Pane {
     /// pane title shows `format_remote_title(...)` and the right-
     /// click menu exposes a "Clone session" entry.
     pub remote_context: Option<kettle_remote::RemoteContext>,
+    /// Latest bounded process-scan result for the program currently attached
+    /// to the PTY. Unix input policy accepts it only when its pid still matches
+    /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
+    pub foreground_process: Option<kettle_remote::ForegroundProcess>,
     /// Agent-first: set while an agent control connection has
     /// targeted this pane (a mutating method or `subscribe`). Drives the
     /// titlebar agent badge; cleared when the last attached connection drops.
@@ -715,15 +689,20 @@ impl Pane {
     fn modified_enter_context(&self) -> ModifiedEnterContext {
         #[cfg(unix)]
         {
-            // A TUI switches the slave to raw/noncanonical input and, when it
-            // was launched by a shell, owns a different foreground process
-            // group. zsh's own ZLE is also noncanonical, so termios without
-            // job control repeats the exact prompt leak this guards. Any
-            // failed snapshot returns false: plain CR is fail-closed.
+            // Noncanonical mode alone is not evidence of a TUI: zsh, nested
+            // shells, and readline REPLs all use it too. Pair a fresh
+            // foreground process-group id with the bounded background process
+            // snapshot, and accept only a known composer. A stale or missing
+            // snapshot returns plain CR.
+            let foreground_program = unix_foreground_program_acceptance(
+                self.term.foreground_process_group().ok(),
+                self.term.child_pid(),
+                &self.argv,
+                self.foreground_process.as_ref(),
+            );
             let context = ModifiedEnterContext::UnixPty {
                 canonical: self.term.input_is_canonical().ok(),
-                foreground_job: self.term.foreground_job_is_running().ok(),
-                direct_program: argv_is_direct_program(&self.argv),
+                foreground_program,
             };
             log::trace!("modified-Enter auto context: {context:?}");
             context
@@ -732,7 +711,11 @@ impl Pane {
         {
             ModifiedEnterContext::WindowsShell {
                 activity: self.term.shell_activity(),
-                direct_program: argv_is_direct_program(&self.argv),
+                foreground_program: self
+                    .foreground_process
+                    .as_ref()
+                    .map(|process| argv_accepts_unnegotiated_modified_enter(&process.argv)),
+                launch_program: argv_accepts_unnegotiated_modified_enter(&self.argv),
             }
         }
         #[cfg(not(any(unix, windows)))]
@@ -785,13 +768,13 @@ enum ModifiedEnterContext {
     #[cfg(any(unix, test))]
     UnixPty {
         canonical: Option<bool>,
-        foreground_job: Option<bool>,
-        direct_program: bool,
+        foreground_program: Option<bool>,
     },
     #[cfg(any(windows, test))]
     WindowsShell {
         activity: kettle_core::ShellActivity,
-        direct_program: bool,
+        foreground_program: Option<bool>,
+        launch_program: bool,
     },
     #[cfg(any(not(any(unix, windows)), test))]
     Unsupported,
@@ -805,23 +788,18 @@ fn modified_enter_fallback(policy: ModifyOtherKeysMode, context: ModifiedEnterCo
             #[cfg(any(unix, test))]
             ModifiedEnterContext::UnixPty {
                 canonical: Some(false),
-                foreground_job: Some(true),
-                ..
-            }
-            | ModifiedEnterContext::UnixPty {
-                canonical: Some(false),
-                direct_program: true,
-                ..
+                foreground_program: Some(true),
             } => true,
             #[cfg(any(windows, test))]
             ModifiedEnterContext::WindowsShell {
                 activity: kettle_core::ShellActivity::Running,
+                foreground_program: Some(true),
                 ..
             } => true,
             #[cfg(any(windows, test))]
             ModifiedEnterContext::WindowsShell {
-                activity: kettle_core::ShellActivity::Unknown,
-                direct_program: true,
+                launch_program: true,
+                ..
             } => true,
             #[cfg(any(unix, test))]
             ModifiedEnterContext::UnixPty { .. } => false,
@@ -1780,6 +1758,7 @@ impl Mux {
                 last_output_generation: None,
                 argv: argv.to_vec(),
                 remote_context: None,
+                foreground_process: None,
                 agent_attached: false,
                 read_only: false,
                 bell: false,
@@ -2462,6 +2441,18 @@ impl Mux {
             .get(self.active)
             .map(|t| t.zoomed)
             .unwrap_or(false)
+    }
+
+    /// Whether zoom currently hides at least one sibling pane.
+    ///
+    /// The persisted zoom bit can remain set after a split collapses to one
+    /// leaf, and users can toggle zoom on a one-pane tab. Input routing must
+    /// distinguish that inert state from a real zoom whose hidden panes still
+    /// own directional-focus chords.
+    pub fn zoom_hides_siblings(&self) -> bool {
+        self.tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.zoomed && !matches!(tab.root, Node::Leaf(_)))
     }
 
     pub fn active_focus(&self) -> Option<u64> {
@@ -4896,10 +4887,23 @@ mod node_tests {
         let mut m = Mux::new();
         push_tab(&mut m, screenshot_tree(), 6);
         m.tabs[0].zoomed = true; // layout returns only the focused pane
+        assert!(m.zoom_hides_siblings());
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
             m.focus_dir(AREA, dx, dy);
             assert_eq!(m.tabs[0].focus, 6, "zoomed: focus_dir must be a no-op");
         }
+
+        let mut single = Mux::new();
+        push_tab(&mut single, Node::Leaf(7), 7);
+        single.tabs[0].zoomed = true;
+        assert!(
+            single.is_zoomed(),
+            "the persisted zoom bit remains truthful"
+        );
+        assert!(
+            !single.zoom_hides_siblings(),
+            "one pane has no hidden focus target, even with zoom toggled"
+        );
     }
 
     /// Drift guard. When a saved split-tree partially
@@ -6009,73 +6013,69 @@ mod node_tests {
     }
 
     #[test]
-    fn automatic_modified_enter_distinguishes_raw_shell_editor_from_tui() {
+    fn automatic_modified_enter_requires_a_known_foreground_composer() {
         use kettle_core::ShellActivity;
 
         let auto = ModifyOtherKeysMode::Auto;
-        // zsh ZLE is raw but keeps the shell's own process group in front. It
-        // must receive CR, not the sequence whose tail appeared in the prompt.
+        // Nested shells and readline/libedit REPLs can be noncanonical too.
+        // They must receive CR, not the tail of an unsolicited xterm sequence.
         assert!(!modified_enter_fallback(
             auto,
             ModifiedEnterContext::UnixPty {
                 canonical: Some(false),
-                foreground_job: Some(false),
-                direct_program: false,
+                foreground_program: Some(false),
             }
         ));
         assert!(modified_enter_fallback(
             auto,
             ModifiedEnterContext::UnixPty {
                 canonical: Some(false),
-                foreground_job: Some(true),
-                direct_program: false,
-            }
-        ));
-        // An explicitly launched TUI is itself the direct foreground child.
-        assert!(modified_enter_fallback(
-            auto,
-            ModifiedEnterContext::UnixPty {
-                canonical: Some(false),
-                foreground_job: Some(false),
-                direct_program: true,
+                foreground_program: Some(true),
             }
         ));
         assert!(!modified_enter_fallback(
             auto,
             ModifiedEnterContext::UnixPty {
                 canonical: Some(true),
-                foreground_job: Some(true),
-                direct_program: true,
+                foreground_program: Some(true),
             }
         ));
         assert!(!modified_enter_fallback(
             auto,
             ModifiedEnterContext::UnixPty {
                 canonical: None,
-                foreground_job: Some(true),
-                direct_program: true,
+                foreground_program: Some(true),
             }
         ));
         assert!(!modified_enter_fallback(
             auto,
             ModifiedEnterContext::UnixPty {
                 canonical: Some(false),
-                foreground_job: None,
-                direct_program: false,
+                foreground_program: None,
             }
         ));
         assert!(modified_enter_fallback(
             auto,
             ModifiedEnterContext::WindowsShell {
                 activity: ShellActivity::Running,
-                direct_program: false,
+                foreground_program: Some(true),
+                launch_program: false,
+            }
+        ));
+        assert!(!modified_enter_fallback(
+            auto,
+            ModifiedEnterContext::WindowsShell {
+                activity: ShellActivity::Running,
+                foreground_program: Some(false),
+                launch_program: false,
             }
         ));
         assert!(modified_enter_fallback(
             auto,
             ModifiedEnterContext::WindowsShell {
                 activity: ShellActivity::Unknown,
-                direct_program: true,
+                foreground_program: None,
+                launch_program: true,
             }
         ));
         for activity in [ShellActivity::Idle, ShellActivity::Unknown] {
@@ -6083,7 +6083,8 @@ mod node_tests {
                 auto,
                 ModifiedEnterContext::WindowsShell {
                     activity,
-                    direct_program: false,
+                    foreground_program: Some(true),
+                    launch_program: false,
                 }
             ));
         }
@@ -6095,17 +6096,33 @@ mod node_tests {
             ModifyOtherKeysMode::Off,
             ModifiedEnterContext::UnixPty {
                 canonical: Some(false),
-                foreground_job: Some(true),
-                direct_program: false,
+                foreground_program: Some(true),
             }
         ));
     }
 
     #[test]
-    fn direct_program_detection_fails_closed_for_shell_transports() {
-        assert!(argv_is_direct_program(&["codex".into()]));
-        assert!(argv_is_direct_program(&["/usr/bin/htop".into()]));
+    fn automatic_program_detection_is_a_narrow_allowlist() {
+        assert!(argv_accepts_unnegotiated_modified_enter(&["codex".into()]));
+        assert!(argv_accepts_unnegotiated_modified_enter(&[
+            "C:\\Users\\me\\bin\\Codex.exe".into()
+        ]));
+        assert!(argv_accepts_unnegotiated_modified_enter(&[
+            "/usr/local/bin/claude".into()
+        ]));
+        assert!(argv_accepts_unnegotiated_modified_enter(&[
+            "node".into(),
+            "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js".into(),
+        ]));
         for program in [
+            "htop",
+            "python",
+            "python3",
+            "node",
+            "psql",
+            "sqlite3",
+            "gdb",
+            "lldb",
             "zsh",
             "pwsh.exe",
             "C:\\Program Files\\Git\\bin\\bash.exe",
@@ -6149,9 +6166,60 @@ mod node_tests {
             "machinectl",
             "FLATPAK-SPAWN",
         ] {
-            assert!(!argv_is_direct_program(&[program.into()]), "{program}");
+            assert!(
+                !argv_accepts_unnegotiated_modified_enter(&[program.into()]),
+                "{program}"
+            );
         }
-        assert!(!argv_is_direct_program(&[]));
+        assert!(!argv_accepts_unnegotiated_modified_enter(&[]));
+        assert!(!argv_accepts_unnegotiated_modified_enter(&[
+            "python".into(),
+            "codex".into(),
+        ]));
+        assert!(!argv_accepts_unnegotiated_modified_enter(&[
+            "node".into(),
+            "/tmp/server.js".into(),
+            "codex".into(),
+        ]));
+        assert!(!argv_accepts_unnegotiated_modified_enter(&[
+            "node".into(),
+            "/home/me/src/codex/scripts/repl.js".into(),
+        ]));
+    }
+
+    #[test]
+    fn unix_foreground_matching_rejects_stale_process_snapshots() {
+        let codex = kettle_remote::ForegroundProcess {
+            pid: 20,
+            argv: vec!["codex".into()],
+        };
+        let python = kettle_remote::ForegroundProcess {
+            pid: 21,
+            argv: vec!["python3".into()],
+        };
+
+        assert_eq!(
+            unix_foreground_program_acceptance(Some(20), Some(10), &["zsh".into()], Some(&codex)),
+            Some(true)
+        );
+        assert_eq!(
+            unix_foreground_program_acceptance(Some(21), Some(10), &["zsh".into()], Some(&python)),
+            Some(false)
+        );
+        assert_eq!(
+            unix_foreground_program_acceptance(Some(22), Some(10), &["zsh".into()], Some(&codex)),
+            None,
+            "a snapshot for the previous foreground pid must fail closed"
+        );
+        assert_eq!(
+            unix_foreground_program_acceptance(Some(10), Some(10), &["codex".into()], None),
+            Some(true),
+            "a directly launched composer is identified by its immutable child pid"
+        );
+        assert_eq!(
+            unix_foreground_program_acceptance(None, Some(10), &["codex".into()], Some(&codex)),
+            None
+        );
     }
 
     #[test]

@@ -292,8 +292,8 @@ impl MacosOptionAsAlt {
 /// Ctrl+I into a distinct sequence for clients which still expect Tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModifyOtherKeysMode {
-    /// Preserve modified Enter only while the pane is running an interactive
-    /// program that can consume the fallback.
+    /// Preserve modified Enter only while the pane is running a recognized
+    /// foreground composer that can consume the fallback.
     #[default]
     Auto,
     /// Preserve modified Enter until an application negotiates a protocol.

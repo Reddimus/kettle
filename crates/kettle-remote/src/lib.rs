@@ -385,6 +385,41 @@ impl RemoteScanner {
         find_foreground_shell_in_index(child_pid, self.tree(), &self.index)
     }
 
+    /// Argv for an exact process from the latest bounded snapshot.
+    pub fn process(&self, pid: u32) -> Option<ForegroundProcess> {
+        let argv = self.tree().argv_of(pid).filter(|argv| !argv.is_empty())?;
+        Some(ForegroundProcess { pid, argv })
+    }
+
+    /// Closest recognized agent composer beneath a pane root.
+    ///
+    /// Windows ConPTY does not expose the foreground process group. A composer
+    /// often owns the keyboard while also running several helper children, so
+    /// choosing the deepest leaf is both ambiguous and wrong. Breadth-first
+    /// selection finds the shell's direct composer before any of its helpers.
+    /// Multiple direct shell children remain ambiguous and fail closed; the UI
+    /// also requires OSC 133 to say a command is running.
+    pub fn foreground_composer(&mut self, child_pid: u32) -> Option<ForegroundProcess> {
+        self.detect_queue.clear();
+        self.detect_visited.clear();
+        self.detect_visited.reserve(self.index.len());
+        #[cfg(target_os = "linux")]
+        let tree: &dyn ProcessTree = if self.use_procfs {
+            &self.procfs
+        } else {
+            &self.sys
+        };
+        #[cfg(not(target_os = "linux"))]
+        let tree: &dyn ProcessTree = &self.sys;
+        find_foreground_composer_in_index_with_scratch(
+            child_pid,
+            tree,
+            &self.index,
+            &mut self.detect_queue,
+            &mut self.detect_visited,
+        )
+    }
+
     /// v2.29.0: the cwd of the pane's foreground process — the DEEPEST live
     /// descendant of `child_pid` (e.g. `pwsh → git status`), or `child_pid`
     /// itself when it has no children (a shell idling at a prompt; its own
@@ -419,6 +454,10 @@ impl RemoteScanner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteProbeTarget {
     pub pid: u32,
+    /// Exact PTY foreground process-group leader when the native platform can
+    /// report it. `None` asks the worker for the closest recognized composer
+    /// beneath the pane root (used by Windows ConPTY).
+    pub foreground_pid: Option<u32>,
     /// False for launch shapes whose host cwd is meaningless (for example
     /// `wsl.exe` or `ssh.exe`).
     pub allow_native_cwd: bool,
@@ -430,6 +469,7 @@ pub struct RemoteProbe {
     pub remote: Option<RemoteContext>,
     pub native_cwd: Option<String>,
     pub foreground_shell: Option<ShellLaunch>,
+    pub foreground_process: Option<ForegroundProcess>,
 }
 
 /// Latest complete background scan.
@@ -486,6 +526,10 @@ impl RemoteScanWorker {
                         for target in targets {
                             let remote = scanner.detect_root(target.pid);
                             let foreground_shell = scanner.foreground_shell(target.pid);
+                            let foreground_process = match target.foreground_pid {
+                                Some(pid) => scanner.process(pid),
+                                None => scanner.foreground_composer(target.pid),
+                            };
                             let nested_wsl = foreground_shell.as_ref().is_some_and(|shell| {
                                 shell
                                     .argv
@@ -504,6 +548,7 @@ impl RemoteScanWorker {
                                     remote,
                                     native_cwd,
                                     foreground_shell,
+                                    foreground_process,
                                 },
                             );
                         }
@@ -546,6 +591,9 @@ fn normalize_probe_targets(targets: &mut Vec<RemoteProbeTarget>) {
     for read in 0..targets.len() {
         if write != 0 && targets[write - 1].pid == targets[read].pid {
             targets[write - 1].allow_native_cwd &= targets[read].allow_native_cwd;
+            if targets[write - 1].foreground_pid != targets[read].foreground_pid {
+                targets[write - 1].foreground_pid = None;
+            }
         } else {
             targets.swap(write, read);
             write += 1;
@@ -1008,6 +1056,64 @@ pub struct ShellLaunch {
     pub cwd: Option<String>,
 }
 
+/// Process identity and argv captured from the bounded background snapshot.
+/// Unix pairs this pid with a fresh PTY foreground-group read before using it,
+/// while Windows' snapshot selects the closest recognized composer and the UI
+/// separately requires a running OSC 133 command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundProcess {
+    pub pid: u32,
+    pub argv: Vec<String>,
+}
+
+/// Whether an argv identifies a composer known to accept Kettle's
+/// pre-negotiation modified-Enter fallback.
+///
+/// Kept beside the process scanner so the Windows BFS and the UI's direct
+/// launch check share one allowlist. Unknown programs fail closed to plain
+/// Enter until they negotiate a standard keyboard protocol.
+pub fn argv_accepts_unnegotiated_modified_enter(argv: &[String]) -> bool {
+    let Some(argv0) = argv.first() else {
+        return false;
+    };
+    let known_composer = |name: &str| {
+        matches!(
+            name,
+            "codex" | "claude" | "claude-code" | "gemini" | "gemini-cli" | "opencode"
+        )
+    };
+    if known_composer(&argv0_basename(argv0)) {
+        return true;
+    }
+
+    // Some distributions are JavaScript entrypoints. Inspect only the
+    // runtime's entrypoint, never later command arguments. A named parent is
+    // accepted only for generic package entry leaves (`claude-code/cli.js`),
+    // so an unrelated `codex/scripts/repl.js` remains rejected.
+    let runtime = argv0_basename(argv0);
+    let entrypoint = match runtime.as_str() {
+        "node" | "bun" => argv.get(1),
+        "deno" if argv.get(1).is_some_and(|arg| arg == "run") => argv.get(2),
+        _ => None,
+    };
+    entrypoint.is_some_and(|entrypoint| {
+        let normalized = entrypoint.replace('\\', "/");
+        let mut components = normalized.rsplit('/');
+        let leaf = components.next().unwrap_or("").to_ascii_lowercase();
+        let leaf = leaf
+            .strip_suffix(".js")
+            .or_else(|| leaf.strip_suffix(".mjs"))
+            .or_else(|| leaf.strip_suffix(".cjs"))
+            .unwrap_or(&leaf);
+        known_composer(leaf)
+            || (matches!(leaf, "cli" | "index" | "main" | "bin")
+                && components
+                    .take(2)
+                    .map(|component| component.to_ascii_lowercase())
+                    .any(|component| known_composer(&component)))
+    })
+}
+
 /// Is `prog` (an argv[0]) a known interactive shell a split should
 /// reproduce? Matched on the basename (path- and `.exe`-insensitive, via
 /// [`argv0_basename`]). Deliberately an allowlist — a split should clone
@@ -1194,6 +1300,64 @@ fn find_foreground_shell_in_index<T: ProcessTree + ?Sized>(
         cwd: tree.cwd_of(pid),
         argv,
     })
+}
+
+#[cfg(test)]
+fn find_foreground_composer_in_index(
+    root: u32,
+    tree: &dyn ProcessTree,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+) -> Option<ForegroundProcess> {
+    let mut queue = std::collections::VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+    find_foreground_composer_in_index_with_scratch(
+        root,
+        tree,
+        children_by_parent,
+        &mut queue,
+        &mut visited,
+    )
+}
+
+fn find_foreground_composer_in_index_with_scratch(
+    root: u32,
+    tree: &dyn ProcessTree,
+    children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
+    queue: &mut std::collections::VecDeque<u32>,
+    visited: &mut std::collections::HashSet<u32>,
+) -> Option<ForegroundProcess> {
+    queue.clear();
+    visited.clear();
+    visited.reserve(children_by_parent.len());
+    visited.insert(root);
+    if let Some(argv) = tree.argv_of(root).filter(|argv| !argv.is_empty())
+        && argv_accepts_unnegotiated_modified_enter(&argv)
+    {
+        return Some(ForegroundProcess { pid: root, argv });
+    }
+    let [first] = children_by_parent.get(&root).map(Vec::as_slice)? else {
+        // With no native foreground pid, sibling branches cannot be ordered as
+        // foreground/background. Refuse to let a background composer opt an
+        // unrelated foreground readline program into modified Enter.
+        return None;
+    };
+    visited.insert(*first);
+    queue.push_back(*first);
+    while let Some(pid) = queue.pop_front() {
+        if let Some(argv) = tree.argv_of(pid).filter(|argv| !argv.is_empty())
+            && argv_accepts_unnegotiated_modified_enter(&argv)
+        {
+            return Some(ForegroundProcess { pid, argv });
+        }
+        if let Some(children) = children_by_parent.get(&pid) {
+            for child in children {
+                if visited.insert(*child) {
+                    queue.push_back(*child);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// v2.29.0: the deepest live descendant pid of `root` — but ONLY along a LINEAR
@@ -4632,6 +4796,68 @@ mod tests {
         assert_eq!(deepest_descendant_in_index(20, &idx), None);
     }
 
+    #[test]
+    fn foreground_composer_wins_before_its_forked_helpers() {
+        let mut tree = MockProcessTree::new();
+        tree.add(1, None, &["pwsh.exe"]);
+        let index = build_children_index(&tree);
+        assert_eq!(find_foreground_composer_in_index(1, &tree, &index), None);
+
+        tree.add(2, Some(1), &["codex"]);
+        let index = build_children_index(&tree);
+        assert_eq!(
+            find_foreground_composer_in_index(1, &tree, &index),
+            Some(ForegroundProcess {
+                pid: 2,
+                argv: vec!["codex".into()],
+            })
+        );
+
+        tree.add(4, Some(2), &["codex-code-mode-host"]);
+        tree.add(5, Some(2), &["node_repl"]);
+        let index = build_children_index(&tree);
+        assert_eq!(
+            find_foreground_composer_in_index(1, &tree, &index),
+            Some(ForegroundProcess {
+                pid: 2,
+                argv: vec!["codex".into()],
+            }),
+            "helper forks do not replace the closest composer that owns input"
+        );
+
+        tree.add(3, Some(1), &["sleep", "30"]);
+        let index = build_children_index(&tree);
+        assert_eq!(
+            find_foreground_composer_in_index(1, &tree, &index),
+            None,
+            "multiple shell branches cannot identify foreground versus background"
+        );
+    }
+
+    #[test]
+    fn composer_argv_allowlist_matches_entrypoints_not_parent_project_names() {
+        let accepts = |argv: &[&str]| {
+            argv_accepts_unnegotiated_modified_enter(
+                &argv
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(accepts(&["Codex.exe"]));
+        assert!(accepts(&[
+            "node",
+            "/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+        ]));
+        assert!(accepts(&[
+            "node",
+            "/usr/local/lib/node_modules/@google/gemini-cli/dist/index.js"
+        ]));
+        assert!(!accepts(&["node", "/home/me/src/codex/scripts/repl.js"]));
+        assert!(!accepts(&["node", "/tmp/server.js", "codex"]));
+        assert!(!accepts(&["python3"]));
+    }
+
     /// v2.32.0 (audit, medium): once the tree FORKS, "deepest descendant" is no
     /// longer a valid foreground signal — a background job in another branch can
     /// be deeper than the real foreground. So a root with >1 child returns None,
@@ -5000,11 +5226,13 @@ mod tests {
         let mut targets = (1..=(MAX_REMOTE_PROBE_TARGETS as u32 + 10))
             .map(|pid| RemoteProbeTarget {
                 pid,
+                foreground_pid: Some(pid),
                 allow_native_cwd: true,
             })
             .collect::<Vec<_>>();
         targets.push(RemoteProbeTarget {
             pid: 7,
+            foreground_pid: None,
             allow_native_cwd: false,
         });
         targets.reverse();
@@ -5016,6 +5244,7 @@ mod tests {
             targets.iter().find(|target| target.pid == 7),
             Some(&RemoteProbeTarget {
                 pid: 7,
+                foreground_pid: None,
                 allow_native_cwd: false,
             })
         );
@@ -5027,6 +5256,7 @@ mod tests {
         let pid = std::process::id();
         worker.submit(vec![RemoteProbeTarget {
             pid,
+            foreground_pid: Some(pid),
             allow_native_cwd: false,
         }]);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
