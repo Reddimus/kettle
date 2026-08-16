@@ -29,25 +29,12 @@ kettle \- fast, cross-platform, GPU-accelerated terminal emulator
 .
 .SH DESCRIPTION
 .B kettle
-is a Rust-based terminal emulator combining the best ideas of
-.BR Ghostty ,
-.BR Terminator ,
-.BR kitty ,
-.B Alacritty
-and
-.B WezTerm
-into one tool. Cross-platform (Linux, macOS, Windows), GPU-accelerated
-via
-.BR wgpu ,
-and built on the battle-tested
-.B alacritty_terminal
-VT engine.
+is a fast GPU terminal workspace for Linux, macOS, and Windows.
 .PP
-Features include split panes (Terminator-style binary tree),
+Features include split panes,
 multiple tabs with drag-to-reorder, live tear-off into a new
 window (running programs move untouched), + activity / silence /
-bell indicators, inline images (sixel, kitty graphics, iTerm2
-inline image protocols), OSC 8 hyperlinks, OSC 133
+bell indicators, inline images, OSC 8 hyperlinks, OSC 133
 shell-integration jump-to-prompt, ligatures, byte- and line-bounded scrollback,
 fuzzy-search overlays (command palette, themes, SSH-host
 launcher), strict-regex scrollback search, undo close tab, duplicate tab/pane, per-window accent
@@ -118,8 +105,7 @@ use on this machine. Useful for "blank window" / "no GPU adapter"
 bug reports.
 .TP
 .B \-\-list-themes
-Print every bundled theme name (>500 themes, sourced from the
-Ghostty + iTerm2-Color-Schemes sets).
+Print every bundled theme name.
 .TP
 .B \-\-list-actions
 Print every recognized keybind action name, including every alias, one
@@ -150,7 +136,7 @@ Launch one with
 .BR "\-\-profile NAME" .
 .TP
 .B \-m ", " \-\-maximise ", " \-\-maximize
-Maximise the window at launch (Terminator parity). Overrides the
+Maximise the window at launch. Overrides the
 .B window-state
 config for this launch.
 .TP
@@ -276,8 +262,7 @@ Default is the per-user state dir; useful when running multiple
 kettle instances each with their own remote-control endpoint.
 .TP
 .B \-\-toggle
-Show / hide the running kettle window (Yakuake / Tilda / Ghostty
-quick-terminal parity). Bind a compositor / DE / OS
+Show or hide the running kettle window. Bind a compositor, desktop, or OS
 global hotkey to
 .B kettle \-\-toggle
 for one-key drop-down access.
@@ -393,7 +378,7 @@ as a single caption along the bottom of the
 .B \-\-screenshot
 /
 .B \-\-screenshot\-menu
-output (iTerm2 "annotated screenshot" parity). A single non-repeatable bottom
+output. This is a single non-repeatable bottom
 caption \(em not a per-cell annotation.
 .TP
 .B \-\-write\-default\-config
@@ -594,10 +579,10 @@ performs the same live move from the keyboard.
 .SS Splits / panes
 .TP
 .B Ctrl+Shift+O
-split top/bottom (Terminator-exact)
+split top/bottom
 .TP
 .B Ctrl+Shift+E
-split left/right (Terminator-exact)
+split left/right
 .TP
 .B Ctrl+Shift+A
 auto-split (longest axis)
@@ -638,7 +623,7 @@ config entry if you want a hotkey).
 command palette (fuzzy actions)
 .TP
 .B Ctrl+Shift+F
-open the Terminator-style scrollback-search bar. Patterns use strict Rust regex
+open the scrollback search bar. Patterns use strict Rust regex
 syntax and are capped at 4096 UTF-8 bytes. The bar provides Previous, Next,
 Wrap, Case (Smart / Match / Ignore), Invert, and Close. Enter / Shift+Enter
 search in the default / opposite direction; F3 / Shift+F3 always search next /
@@ -681,7 +666,7 @@ jump to next OSC 133 prompt
 .TP
 .B Ctrl+Shift+Up/Down
 scroll one line
-.SS Vi-mode (Alacritty parity)
+.SS Vi-mode
 Enter vi-mode for the focused pane's scrollback. A magenta hollow
 block marks the vi cursor; the terminal cursor stays in place so
 you can see both. Movement, visual selection, and yank all live
@@ -719,12 +704,12 @@ yank visual selection to clipboard, exit vi-mode
 .TP
 .B Esc
 exit vi-mode
-.SS Quake / dropdown mode
+.SS Dropdown mode
 .TP
 .B kettle \-\-toggle
 flip the running window's visibility, sent via the remote-control
-IPC. Bind your compositor / DE / OS global hotkey to this for
-Quake / Yakuake / Tilda dropdown UX.
+IPC. Bind your compositor, desktop, or OS global hotkey to this for
+quick dropdown access.
 .SS Group / broadcast
 .TP
 .B Super+G
@@ -775,7 +760,7 @@ path, not
 .IR ~/Library ),
 or
 .IR %APPDATA%\\kettle\\config
-(Windows). Format is Ghostty-style
+(Windows). The format uses
 .RI """ key " = " value """
 lines. A
 .B #
@@ -904,9 +889,7 @@ kettle --screenshot /tmp/kettle.png
 .
 .SH SEE ALSO
 .BR ssh (1),
-.BR tmux (1),
-.BR alacritty (1),
-.BR xterm (1)
+.BR tmux (1)
 .PP
 Project home:
 .UR https://github.com/Reddimus/kettle

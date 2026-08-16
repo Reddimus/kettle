@@ -1,10 +1,6 @@
-//! Data model for the in-app **Settings overlay** — a
-//! keyboard-navigable, non-technical-friendly settings panel (Terminator
-//! parity, but native to kettle's overlay architecture). The overlay presents
-//! the most-used config keys grouped into categories; changing a field writes
-//! the value straight to the user's config file via `App::persist_pref` and
-//! reloads it live (the same persist path the right-click Preferences submenu
-//! uses), so edits take effect immediately without hand-editing the file.
+//! Data model for the keyboard-accessible Settings overlay. It groups common
+//! options and writes changes through `App::persist_pref`, so they reload
+//! immediately.
 //!
 //! This module is the **pure** half: the category/field catalogue plus the
 //! logic to read a field's current value from a [`Config`] and to compute the
@@ -215,7 +211,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     // `cursor-shape` back-compat alias, so the overlay persists
                     // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
                     // agree. `beam` stays as the user-facing value (accepted as
-                    // the Alacritty alias for `bar`).
+                    // the legacy alias for `bar`).
                     "Cursor shape",
                     "cursor-style",
                     &["block", "beam", "underline"],

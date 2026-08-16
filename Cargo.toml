@@ -43,7 +43,7 @@ repository = "https://github.com/Reddimus/kettle"
 homepage = "https://github.com/Reddimus/kettle"
 readme = "README.md"
 authors = ["kettle contributors"]
-description = "A fast, cross-platform GPU terminal emulator combining the best of Ghostty, Terminator, kitty, Alacritty and WezTerm"
+description = "A fast, cross-platform GPU terminal workspace with tabs, splits, and automation"
 keywords = ["terminal", "terminal-emulator", "tui", "gpu", "wgpu"]
 categories = ["command-line-utilities"]
 
@@ -98,7 +98,7 @@ regex-automata = "0.4"
 getrandom = "0.3"
 unicode-width = "0.2"
 unicode-segmentation = "1.13.2"
-# Lua scripting (WezTerm parity foundation).
+# Lua scripting.
 # `vendored` builds Lua 5.4 from bundled C source — no system
 # liblua dependency, deterministic across OSes. `send` makes the
 # `Lua` handle Send+Sync so it can be parked on App's struct
@@ -136,7 +136,7 @@ todo = "deny"
 unimplemented = "deny"
 
 [patch.crates-io]
-# alacritty_terminal 0.26.0 evicts from `title_stack` when Kitty's keyboard
+# alacritty_terminal 0.26.0 evicts from `title_stack` when the keyboard
 # mode stack reaches its depth cap. That can panic with an empty title stack
 # and corrupts unrelated title state. Its active-mode query/screen bookkeeping
 # also loses direct flag changes. Kettle additionally needs correct DEC

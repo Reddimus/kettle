@@ -9,7 +9,7 @@ authors.workspace = true
 # See `kettle-config/Cargo.toml`: each crate's `description` overrides the
 # workspace default because that default describes the `kettle` binary, not
 # the library sub-crates.
-description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlays (search/palette/themes), session save/restore"
+description = "Kettle windowing, tabs, splits, overlays, and session restore"
 
 [lints]
 workspace = true
@@ -53,15 +53,12 @@ kettle-ctl.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
 kettle-update.workspace = true
-# SSH / Docker / Podman / kubectl session detection, per
-# TERMINATOR-REMOTE-DESIGN.md. Carries the sysinfo dep into kettle-ui
-# where the App's poll loop will live; non-UI consumers stay isolated.
+# SSH, Docker, Podman, and kubectl session detection. The UI owns the polling
+# loop while non-UI consumers remain isolated from the sysinfo dependency.
 kettle-remote.workspace = true
 log.workspace = true
-# Lua scripting foundation. The `--lua-script PATH`
-# CLI flag executes a Lua file at startup with a `kettle`
-# namespace exposing the introspection surface. WezTerm parity.
-# Future work adds send_text + event hooks.
+# The `--lua-script PATH` flag runs a startup script with a `kettle`
+# introspection namespace. Future work adds text input and event hooks.
 mlua.workspace = true
 notify = "8.2.0"
 notify-rust.workspace = true
@@ -122,10 +119,9 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11rb = "0.13"
 
-# ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
-# Windows Terminal parity — `Write-Progress` + `winget` drive the taskbar
-# button). The `windows` crate gives safe COM wrappers; 0.62 is already in
-# the workspace lockfile, and the feature set is narrow + Windows-only, so
+# ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
+# drive the taskbar button. The `windows` crate gives safe COM wrappers and is
+# already in the workspace lockfile. The feature set is narrow and Windows-only,
 # Linux/macOS builds are unaffected.
 # `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
