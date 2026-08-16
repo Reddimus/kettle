@@ -52,19 +52,25 @@ first appear after a tag.
 Shell-integration changes also run `just shell-integration-check`. Unlike the
 CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
 interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
-Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report,
-and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
+Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
+A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
+the oldest supported completion binding cannot drift with `ubuntu-latest`.
+Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
 
 The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
-field truncation and custom-binding preservation in all four snippets. A real
-interactive Fish PTY proves default and Vi-insert Tab behavior, reverse cycling,
+field truncation and custom-binding preservation in all four snippets. The Zsh
+fixture also emits the maximum 64-row payload under a time bound, catching a
+per-byte subshell regression. A real interactive Fish PTY proves default and
+Vi-insert Tab behavior, reverse cycling,
 and cursor-move invalidation, and asserts that a completion `show` remains the
 last metadata event instead of being erased by a repaint-triggered prompt hook.
-PowerShell runs its native PSReadLine fixture on Windows. Parser and terminal
-tests separately reject oversized or control-bearing fields, stale generations,
-and completion metadata leaking into the raw PTY tap.
+PowerShell pins both stock-direction bindings and its quoted-directory edit on
+every installed host; native Windows exercises the same script with PSReadLine.
+Parser and terminal tests separately bound malformed control strings, skip an
+unsafe row without losing safe siblings, reject stale replies after unrelated
+input, and keep completion metadata out of logs and output hooks.
 
 Modified-Enter auto detection has an additional native Unix PTY regression. It
 starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell

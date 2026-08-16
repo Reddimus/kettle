@@ -10862,13 +10862,13 @@ impl App {
             && ws.confirm_dialog.is_none()
             && ws.editing_title.is_none()
             && !ws.search.open;
-        let completion = (terminal_surface
-            && ws.window_focused
-            && ws.ime_preedit.is_none()
-            && self.cfg.completion_overlay == kettle_config::CompletionOverlayMode::Auto)
+        let completion = (terminal_surface && ws.window_focused && ws.ime_preedit.is_none())
             .then(|| {
                 let pane_id = ws.mux.active_focus()?;
                 let pane = ws.mux.panes.get(&pane_id)?;
+                if !pane.completion_overlay {
+                    return None;
+                }
                 let (mode, display_offset, columns, rows) = {
                     let term = pane.term.term.lock().ok()?;
                     (
@@ -10881,6 +10881,7 @@ impl App {
                 if !completion_surface_available(mode, display_offset) {
                     return None;
                 }
+                let command_rows = pane.term.completion_command_rows()?;
                 let list = pane.term.completion()?;
                 let pane_rect = self.focused_rect(ws, self.area(ws))?;
                 let titlebar =
@@ -10904,6 +10905,7 @@ impl App {
                         columns as f32 * renderer.cell_w,
                         rows as f32 * renderer.cell_h,
                     ),
+                    command_rows,
                     kind: kind.to_string(),
                     source: list.source,
                     selected: list.selected,
@@ -12740,6 +12742,13 @@ impl App {
                 } else {
                     Some(active_line)
                 }
+            } else if active.name == "Appearance" {
+                Some(
+                    "Blur needs opacity below 100%; surface changes apply to new windows"
+                        .to_string(),
+                )
+            } else if ws.settings_restart_pending {
+                Some("Restart Kettle or open a new window to apply pending changes".to_string())
             } else {
                 None
             },
@@ -19925,7 +19934,8 @@ impl App {
         }
         // Notify if the Settings change can't
         // be written — it's live this session but lost on restart.
-        if !self.persist_pref(key_str, &new_val) {
+        let saved = self.persist_pref(key_str, &new_val);
+        if !saved {
             fire_notify(
                 "kettle: setting not saved",
                 "Applied for this session — couldn't write it to your config file.",
@@ -19950,10 +19960,24 @@ impl App {
         }
         // v2.23.0: the remaining GPU policy keys (power preference / backend /
         // force-software) also only take effect on restart.
-        if matches!(
-            key_str,
-            "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
-        ) {
+        if saved
+            && matches!(
+                key_str,
+                "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
+            )
+        {
+            ws.settings_restart_pending = true;
+        }
+        if saved
+            && matches!(
+                key_str,
+                "background-opacity" | "background-type" | "window-blur"
+            )
+        {
+            // Winit's alpha-capable window attribute is fixed at creation.
+            // Renderer colors reload immediately, but crossing the opaque /
+            // translucent boundary or enabling native material needs a fresh
+            // window before the OS compositor can show the result.
             ws.settings_restart_pending = true;
         }
         self.reload_config(ws);
@@ -21783,7 +21807,9 @@ impl App {
             // one only when this window can actually expose the desktop or a
             // native material. A runtime toggle takes full effect in newly
             // opened windows, as documented by the setting itself.
-            .with_transparent(self.cfg.background_opacity < 1.0 || self.cfg.window_blur)
+            .with_transparent(
+                kettle_render::window_requires_alpha_surface(&self.cfg) || self.cfg.window_blur,
+            )
             // Show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
             .with_window_icon(load_window_icon())
@@ -22098,12 +22124,13 @@ impl App {
                 };
                 let id = accessibility_completion_row_id(index);
                 row_ids.push(id);
-                let mut row = Node::new(Role::ListItem);
+                let mut row = Node::new(Role::ListBoxOption);
                 row.set_label(if candidate.description.is_empty() {
                     candidate.label.clone()
                 } else {
                     format!("{}, {}", candidate.label, candidate.description)
                 });
+                row.set_position_in_set(index + 1);
                 if completion.selected == Some(index) {
                     row.set_selected(true);
                 }
@@ -22115,9 +22142,10 @@ impl App {
                 ));
                 nodes.push((id, row));
             }
-            let mut list = Node::new(Role::List);
+            let mut list = Node::new(Role::ListBox);
             list.set_label(format!("{} from {}", completion.kind, completion.source));
             list.set_children(row_ids);
+            list.set_size_of_set(completion.candidates.len());
             list.set_live(accesskit::Live::Polite);
             if let Some((x, y, width, height)) =
                 kettle_render::completion_overlay_rect(&completion, cell)
@@ -22186,16 +22214,13 @@ impl App {
                 .hash(&mut hasher);
             ws.search.focused_control.hash(&mut hasher);
         }
-        if let Some(pane) = ws
-            .mux
-            .active_focus()
-            .and_then(|pane_id| ws.mux.panes.get(&pane_id))
-            && let Some(completion) = pane.term.completion()
-        {
-            completion.generation.hash(&mut hasher);
+        let projected_completion = self.overlay(ws, false).completion;
+        projected_completion.is_some().hash(&mut hasher);
+        if let Some(completion) = projected_completion {
             completion.source.hash(&mut hasher);
             completion.selected.hash(&mut hasher);
-            std::mem::discriminant(&completion.kind).hash(&mut hasher);
+            completion.kind.hash(&mut hasher);
+            completion.command_rows.hash(&mut hasher);
             for candidate in completion.candidates {
                 candidate.label.hash(&mut hasher);
                 candidate.description.hash(&mut hasher);
@@ -30675,6 +30700,40 @@ mod tests {
                 && arm.contains("fire_notify("),
             "settings_restart_pending must only be set when the writes actually succeeded, \
              and a failure must be surfaced via fire_notify"
+        );
+    }
+
+    #[test]
+    fn surface_restart_hint_requires_a_successful_config_write() {
+        let src = production_source();
+        let arm = src
+            .split("let saved = self.persist_pref(key_str, &new_val);")
+            .nth(1)
+            .and_then(|rest| rest.split("self.reload_config(ws);").next())
+            .expect("settings persistence arm");
+        assert!(
+            arm.contains("if saved")
+                && arm.contains("\"background-opacity\" | \"background-type\" | \"window-blur\"",)
+                && arm.contains("ws.settings_restart_pending = true;"),
+            "a failed surface-setting write must not promise that a new window will apply it"
+        );
+    }
+
+    #[test]
+    fn accessibility_hashes_the_visible_completion_projection() {
+        let src = production_source();
+        let body = src
+            .split("fn accessibility_key(&self, ws: &WindowState) -> u64")
+            .nth(1)
+            .and_then(|rest| rest.split("fn publish_accessibility_if_due").next())
+            .expect("accessibility_key body");
+        assert!(
+            body.contains("self.overlay(ws, false).completion"),
+            "accessibility invalidation must use the focus/modal/viewport-gated projection"
+        );
+        assert!(
+            !body.contains("pane.term.completion()"),
+            "raw completion state keeps hidden rows cached after a modal or focus change"
         );
     }
 

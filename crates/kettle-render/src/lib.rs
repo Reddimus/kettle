@@ -473,6 +473,25 @@ fn prepared_text_areas_damage_key(areas: &[TextArea<'_>]) -> u64 {
     hash.finish()
 }
 
+/// Text overlays whose content can change without a structural damage key.
+/// Completion rows are deliberately absent: their text-area key below catches
+/// open, close, content, selection, theme, and geometry edges, so a static list
+/// does not re-shape every visible glyph on each cursor blink.
+fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
+    overlay.search.is_some()
+        || overlay.search_query.is_some()
+        || !overlay.hint_labels.is_empty()
+        || overlay.ime_preedit.is_some()
+        || overlay.ssh_query.is_some()
+        || overlay.palette_query.is_some()
+        || overlay.layout_picker_query.is_some()
+        || overlay.edit_title.is_some()
+        || overlay.confirm_dialog.is_some()
+        || overlay.settings.is_some()
+        || overlay.resize_overlay.is_some()
+        || overlay.update_available.is_some()
+}
+
 /// Disabled / secondary menu text: blend the foreground toward the panel
 /// background (~55% mute) without alpha-blending through to whatever lives
 /// under the panel.
@@ -711,6 +730,10 @@ pub struct CompletionOverlay {
     /// pane title bar. The completion panel is centered near the top of this
     /// grid so it stays separate from the command line.
     pub grid_rect: (f32, f32, f32, f32),
+    /// Inclusive screen-row span from OSC 133 prompt start through the shell
+    /// cursor. Geometry must stay outside it, including multiline prompts and
+    /// wrapped input.
+    pub command_rows: (usize, usize),
     pub kind: String,
     pub source: String,
     pub selected: Option<usize>,
@@ -969,10 +992,13 @@ fn completion_panel_geometry(
         return None;
     }
     let wanted_rows = overlay.candidates.len().min(MAX_COMPLETION_ROWS);
-    // Reserve one grid row above and below the panel. The top inset keeps it
-    // visually detached from pane chrome; the lower inset prevents a nearly
-    // full-height card in a very short split.
-    let capacity = (((bottom - top) / row_h).floor() as usize).saturating_sub(2);
+    let total_rows = ((bottom - top) / row_h).floor() as usize;
+    let command_start = overlay.command_rows.0.min(total_rows.saturating_sub(1));
+    // The card is an upper-pane surface, never a cursor popup. Reserve one row
+    // below pane chrome and one row above the prompt. A command that begins too
+    // close to the top has no valid detached lane, so hide the card instead of
+    // moving it beside or below the user's typing.
+    let capacity = command_start.saturating_sub(2);
     let rows = wanted_rows.min(capacity);
     if rows == 0 {
         return None;
@@ -7224,19 +7250,7 @@ impl Renderer {
         // without a following prepare would clear the in-use set and let a
         // later prepare evict still-displayed glyphs out from under the cached
         // vertices.
-        let non_context_text_overlay_open = overlay.search.is_some()
-            || overlay.search_query.is_some()
-            || !overlay.hint_labels.is_empty()
-            || overlay.ime_preedit.is_some()
-            || overlay.completion.is_some()
-            || overlay.ssh_query.is_some()
-            || overlay.palette_query.is_some()
-            || overlay.layout_picker_query.is_some()
-            || overlay.edit_title.is_some()
-            || overlay.confirm_dialog.is_some()
-            || overlay.settings.is_some()
-            || overlay.resize_overlay.is_some()
-            || overlay.update_available.is_some();
+        let non_context_text_overlay_open = text_overlay_requires_continuous_prepare(overlay);
         let overlay_open = non_context_text_overlay_open || overlay.context_menu.is_some();
         let chrome_hash = {
             use std::hash::{Hash, Hasher};
@@ -7250,6 +7264,12 @@ impl Renderer {
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);
+            // Completion buffers are retained while the card is static. Their
+            // menu-area identity, bounds, and colors change on open, selection,
+            // content, geometry, theme, and close edges; an unrelated cursor
+            // blink does not. Hashing them avoids re-preparing the whole glyph
+            // atlas on every blink while a list is sitting open.
+            prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -11481,6 +11501,14 @@ fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     }
 }
 
+/// Whether the window itself must support non-opaque presentation for the
+/// configured background. Kept shared with window creation so wgpu never
+/// selects an alpha mode for pixels the OS window was created unable to show.
+pub fn window_requires_alpha_surface(cfg: &kettle_config::Config) -> bool {
+    composed_bg_alpha(cfg) < 1.0
+        || matches!(cfg.background_type, kettle_config::BackgroundType::Image)
+}
+
 fn background_has_wallpaper(cfg: &kettle_config::Config) -> bool {
     matches!(
         cfg.background_type,
@@ -11517,9 +11545,7 @@ fn desired_alpha_mode(
     cfg: &kettle_config::Config,
     supported: &[wgpu::CompositeAlphaMode],
 ) -> wgpu::CompositeAlphaMode {
-    let preferred = if composed_bg_alpha(cfg) < 1.0
-        || matches!(cfg.background_type, kettle_config::BackgroundType::Image)
-    {
+    let preferred = if window_requires_alpha_surface(cfg) {
         [
             wgpu::CompositeAlphaMode::PreMultiplied,
             wgpu::CompositeAlphaMode::PostMultiplied,
@@ -16026,8 +16052,9 @@ mod search_bar_tests {
 #[cfg(test)]
 mod completion_panel_tests {
     use super::{
-        CompletionOverlay, CompletionOverlayRow, MAX_COMPLETION_ROWS, completion_overlay_row_rects,
-        completion_panel_geometry, solid_blend,
+        CompletionOverlay, CompletionOverlayRow, MAX_COMPLETION_ROWS, Overlay,
+        completion_overlay_row_rects, completion_panel_geometry, solid_blend,
+        text_overlay_requires_continuous_prepare,
     };
     use kettle_config::Rgb;
 
@@ -16035,6 +16062,7 @@ mod completion_panel_tests {
         CompletionOverlay {
             pane_rect: (100.0, 40.0, 900.0, 700.0),
             grid_rect: (108.0, 70.0, 884.0, 656.0),
+            command_rows: (20, 20),
             kind: "Completions".to_string(),
             source: "fish".to_string(),
             selected,
@@ -16086,6 +16114,27 @@ mod completion_panel_tests {
     }
 
     #[test]
+    fn card_never_overlaps_a_multiline_command() {
+        let mut completion = overlay(None, 8);
+        completion.command_rows = (3, 5);
+        let top = completion_panel_geometry(&completion, (8.0, 16.0)).unwrap();
+        assert_eq!(top.rows, 1);
+        assert!(top.rect.1 + top.rect.3 <= 70.0 + 2.0 * 16.0);
+
+        completion.command_rows = (0, 2);
+        assert!(
+            completion_panel_geometry(&completion, (8.0, 16.0)).is_none(),
+            "a top-edge prompt must not move the card beside or below the input"
+        );
+
+        completion.command_rows = (0, 39);
+        assert!(
+            completion_panel_geometry(&completion, (8.0, 16.0)).is_none(),
+            "a command spanning the pane leaves no safe detached lane"
+        );
+    }
+
+    #[test]
     fn card_declines_a_pane_too_small_for_one_row() {
         let mut completion = overlay(None, 1);
         completion.pane_rect = (0.0, 0.0, 60.0, 28.0);
@@ -16103,6 +16152,18 @@ mod completion_panel_tests {
             solid_blend(Rgb::new(0, 0, 0), Rgb::new(255, 255, 255), 7),
             Rgb::new(237, 237, 237)
         );
+    }
+
+    #[test]
+    fn a_static_completion_card_does_not_force_continuous_text_prepare() {
+        let mut frame = Overlay {
+            completion: Some(overlay(Some(0), 3)),
+            ..Overlay::default()
+        };
+        assert!(!text_overlay_requires_continuous_prepare(&frame));
+
+        frame.search_query = Some(String::new());
+        assert!(text_overlay_requires_continuous_prepare(&frame));
     }
 }
 
@@ -17001,7 +17062,7 @@ mod attributed_foreground_tests {
 mod background_darkness_tests {
     use super::{
         composed_bg_alpha, desired_alpha_mode, final_scene_is_uniformly_opaque,
-        needs_postmultiplied_presentation,
+        needs_postmultiplied_presentation, window_requires_alpha_surface,
     };
     use kettle_config::{BackgroundType, Config};
 
@@ -17085,6 +17146,21 @@ mod background_darkness_tests {
             desired_alpha_mode(&transparent, &macos_modes),
             wgpu::CompositeAlphaMode::PostMultiplied,
             "effective opacity, not background-opacity alone, must select the surface mode"
+        );
+        assert!(
+            window_requires_alpha_surface(&transparent),
+            "transparent backgrounds must create an alpha-capable OS window"
+        );
+
+        let image = Config {
+            background_type: BackgroundType::Image,
+            background_opacity: 1.0,
+            background_darkness: 1.0,
+            ..Config::default()
+        };
+        assert!(
+            window_requires_alpha_surface(&image),
+            "wallpaper alpha is not known until decode, so image windows must be alpha-capable"
         );
 
         let reloaded = Config {

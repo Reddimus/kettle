@@ -70,16 +70,23 @@ second implementation from this guide; updates then stay in one place.
 ## Completion list
 
 `completion-overlay = auto` lets the bundled integration present the shell's
-own candidates in a compact list at the top of the active pane. It never covers
-or follows the command line. Kettle does not complete a word itself. It does
-not quote, insert, cycle, or execute a candidate; the active shell remains the
-source of truth for all of those operations.
+own candidates in a compact list above the active command. If the prompt is too
+close to the top to leave a detached lane, Kettle hides the list rather than
+moving it beside or below the input. It never follows or covers the command
+line. Kettle does not complete a word itself; the active shell still owns
+matching, quoting, insertion, cycling, and execution.
 
 Fish and PowerShell install the list automatically only when Tab still has the
 shell's stock completion binding. A custom user or plugin binding is never
-replaced. Fish supports its default and Vi insert key maps. PowerShell uses
-`TabExpansion2` and PSReadLine's existing `TabCompleteNext` action. The list is
-cleared when the command line is accepted or a new prompt starts.
+replaced. Fish supports its default and Vi insert key maps. PowerShell queries
+`TabExpansion2` once per cycle, then uses that same cached result for both the
+PSReadLine edit and the visible row. Tab and Shift Tab cycle the same list. The
+list is cleared when the command line is accepted or a new prompt starts.
+
+Automatic bindings stay off inside tmux and screen because those multiplexers
+can consume the private metadata while still passing the capability variable
+to a nested shell. Existing shells keep the mode negotiated when they started;
+changing `completion-overlay` applies to newly opened shells.
 
 Bash and Zsh integrations expose a cooperative bridge instead of claiming
 their many completion-widget variants. A widget can call:
@@ -92,8 +99,8 @@ kettle_completion_clear
 
 `selected` is empty or a zero-based row. The bridge is bounded to 64 rows and
 percent-encodes text before it enters the terminal stream. Set
-`completion-overlay = off` to advertise no capability and retain the shell's
-ordinary Tab behavior.
+`completion-overlay = off` to advertise no capability to new shells and retain
+their ordinary Tab behavior.
 
 The snippets also report the working directory at each prompt. This keeps tab
 titles current and lets new tabs and splits inherit the right directory.

@@ -76,10 +76,10 @@ which file is active and `kettle --check-config` to validate it.
 * A local control API plus an MCP server, both disabled by default
 * 500+ themes and a bundled JetBrains Mono Nerd Font
 
-The completion panel never inserts or runs text itself. Fish and PowerShell can
-use it automatically when their stock Tab binding is still active. Bash, Zsh,
-and customized shells can publish their existing candidates through the small
-bridge described in [Shell integration](docs/SHELL-INTEGRATION.md).
+The completion panel stays in a detached lane above the active command and
+never inserts or runs text itself. Fish and PowerShell can use it automatically
+when their stock Tab binding is still active. Bash, Zsh, and customized shells
+can publish existing candidates through [Shell integration](docs/SHELL-INTEGRATION.md).
 
 Native window material is opt in. Combine a translucent background with blur:
 

@@ -21,6 +21,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fish-3-7-shell-integration:
+    name: Fish 3.7 shell integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the oldest supported Fish minor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish
+          fish --version | grep -E '^fish, version 3\.7\.'
+      - name: Run native shell integration fixtures
+        run: python3 scripts/check-shell-integration.py
+
   macos-26-release-icon:
     name: macOS 26 release icon toolchain
     runs-on: macos-26

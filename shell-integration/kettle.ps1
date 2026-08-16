@@ -160,6 +160,7 @@ if (-not $global:__kettle_prompt_installed) {
     }
 
     function global:__kettle_completion_clear {
+        __kettle_completion_reset_cycle
         $global:__kettle_completion_generation =
             [uint64]$global:__kettle_completion_generation + 1
         [Console]::Write(
@@ -168,17 +169,16 @@ if (-not $global:__kettle_prompt_installed) {
         )
     }
 
-    function global:__kettle_completion_emit($Result, $Selected) {
-        $global:__kettle_completion_generation =
-            [uint64]$global:__kettle_completion_generation + 1
+    function global:__kettle_completion_emit($Result, $Selected, $Operation = 'show') {
         if ($null -eq $Result -or $Result.CompletionMatches.Count -eq 0) {
             __kettle_completion_clear
             return
         }
-        $selectedField = if ($null -eq $Selected) { '' } else { [string]$Selected }
-        $payload = '777;kettle-completion;1;show;' +
-            $global:__kettle_completion_generation +
-            ';completion;' + $selectedField + ';powershell'
+        $global:__kettle_completion_generation =
+            [uint64]$global:__kettle_completion_generation + 1
+        $base = '777;kettle-completion;1;' + $Operation + ';' +
+            $global:__kettle_completion_generation + ';completion;;powershell'
+        $body = ''
         $count = 0
         foreach ($match in $Result.CompletionMatches) {
             if ($count -ge 64) { break }
@@ -186,16 +186,141 @@ if (-not $global:__kettle_prompt_installed) {
             if ([string]::IsNullOrEmpty($label)) { continue }
             $description = __kettle_completion_field ([string]$match.ToolTip) 256
             $addition = ";$label;$description"
-            if (($payload.Length + $addition.Length) -gt 30000) { break }
-            $payload += $addition
+            if (($base.Length + $body.Length + $addition.Length) -gt 30000) { break }
+            $body += $addition
             $count++
         }
         if ($count -eq 0) {
             __kettle_completion_clear
         } else {
+            $selectedField = ''
+            if ($null -ne $Selected -and
+                [int]$Selected -ge 0 -and
+                [int]$Selected -lt $count) {
+                $selectedField = [string][int]$Selected
+            }
+            $payload = '777;kettle-completion;1;' + $Operation + ';' +
+                $global:__kettle_completion_generation +
+                ';completion;' + $selectedField + ';powershell' + $body
             [Console]::Write([char]27 + ']' + $payload + [char]7)
         }
     }
+
+    function global:__kettle_completion_reset_cycle {
+        $global:__kettle_completion_result = $null
+        $global:__kettle_completion_index = -1
+        $global:__kettle_completion_replacement_index = 0
+        $global:__kettle_completion_replacement_length = 0
+        $global:__kettle_completion_last_line = $null
+        $global:__kettle_completion_last_cursor = -1
+    }
+
+    function global:__kettle_completion_replacement($Match) {
+        $text = [string]$Match.CompletionText
+        $cursorAdjustment = 0
+        if ([string]$Match.ResultType -eq 'ProviderContainer') {
+            $separator = [string][IO.Path]::DirectorySeparatorChar
+            if (-not $text.EndsWith($separator)) {
+                if ($text.EndsWith($separator + "'") -or
+                    $text.EndsWith($separator + '"')) {
+                    $cursorAdjustment = -1
+                } elseif ($text.EndsWith("'") -or $text.EndsWith('"')) {
+                    $text = $text.Substring(0, $text.Length - 1) +
+                        $separator + $text.Substring($text.Length - 1)
+                    $cursorAdjustment = -1
+                } else {
+                    $text += $separator
+                }
+            }
+        }
+        return @($text, $cursorAdjustment)
+    }
+
+    function global:__kettle_completion_cycle([int]$Direction) {
+        $line = $null
+        $cursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+            [ref]$line,
+            [ref]$cursor
+        )
+        $continues = $null -ne $global:__kettle_completion_result -and
+            $line -ceq $global:__kettle_completion_last_line -and
+            $cursor -eq $global:__kettle_completion_last_cursor
+        if (-not $continues) {
+            try {
+                $global:__kettle_completion_result =
+                    TabExpansion2 -inputScript $line -cursorColumn $cursor
+            } catch {
+                # Let the key handler fall back to PSReadLine's stock action.
+                throw
+            }
+            $global:__kettle_completion_index = -1
+            if ($null -ne $global:__kettle_completion_result) {
+                $global:__kettle_completion_replacement_index =
+                    [int]$global:__kettle_completion_result.ReplacementIndex
+                $global:__kettle_completion_replacement_length =
+                    [int]$global:__kettle_completion_result.ReplacementLength
+            }
+        }
+
+        $result = $global:__kettle_completion_result
+        if ($null -eq $result -or $result.CompletionMatches.Count -eq 0) {
+            __kettle_completion_clear
+            return
+        }
+        $operation = if ($continues) { 'update' } else { 'show' }
+        if ($global:__kettle_completion_index -lt 0 -and $Direction -lt 0) {
+            $global:__kettle_completion_index = $result.CompletionMatches.Count - 1
+        } else {
+            $global:__kettle_completion_index =
+                ($global:__kettle_completion_index + $Direction +
+                    $result.CompletionMatches.Count) % $result.CompletionMatches.Count
+        }
+        $replacement = __kettle_completion_replacement `
+            $result.CompletionMatches[$global:__kettle_completion_index]
+        [Microsoft.PowerShell.PSConsoleReadLine]::Replace(
+            $global:__kettle_completion_replacement_index,
+            $global:__kettle_completion_replacement_length,
+            [string]$replacement[0]
+        )
+        $global:__kettle_completion_replacement_length =
+            ([string]$replacement[0]).Length
+        if ([int]$replacement[1] -ne 0) {
+            [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition(
+                $global:__kettle_completion_replacement_index +
+                $global:__kettle_completion_replacement_length +
+                [int]$replacement[1]
+            )
+        }
+
+        $after = $null
+        $afterCursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
+            [ref]$after,
+            [ref]$afterCursor
+        )
+        $global:__kettle_completion_last_line = $after
+        $global:__kettle_completion_last_cursor = $afterCursor
+        __kettle_completion_emit `
+            $result $global:__kettle_completion_index $operation
+
+        # PSReadLine deliberately re-queries a single directory match on the
+        # next Tab so completion can continue inside it. Retain a cycle only
+        # when there is actually another candidate to visit.
+        if ($result.CompletionMatches.Count -eq 1) {
+            $global:__kettle_completion_result = $null
+        }
+    }
+
+    function global:__kettle_completion_cycle_next {
+        __kettle_completion_cycle 1
+    }
+
+    function global:__kettle_completion_cycle_previous {
+        __kettle_completion_cycle -1
+    }
+
+    __kettle_completion_reset_cycle
 
     # C = command started executing. PSReadLine (the default in
     # PowerShell 5.1+ since Windows 10 1809; bundled with PS 7) fires
@@ -221,44 +346,34 @@ if (-not $global:__kettle_prompt_installed) {
             $tabHandler = Get-PSReadLineKeyHandler -Bound |
                 Where-Object { $_.Key -eq 'Tab' } |
                 Select-Object -First 1
+            $backtabHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Shift+Tab' } |
+                Select-Object -First 1
             if ($env:KETTLE_COMPLETION_OVERLAY -eq '1' -and
+                [string]::IsNullOrEmpty($env:TMUX) -and
+                [string]::IsNullOrEmpty($env:STY) -and
                 $null -ne $tabHandler -and
                 $tabHandler.Function -eq 'TabCompleteNext') {
                 Set-PSReadLineKeyHandler -Key Tab -ScriptBlock {
-                    $line = $null
-                    $cursor = 0
-                    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-                        [ref]$line,
-                        [ref]$cursor
-                    )
                     try {
-                        $result = TabExpansion2 -inputScript $line -cursorColumn $cursor
-                    } catch {
-                        $result = $null
-                    }
-                    [Microsoft.PowerShell.PSConsoleReadLine]::TabCompleteNext()
-                    $after = $null
-                    $afterCursor = 0
-                    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState(
-                        [ref]$after,
-                        [ref]$afterCursor
-                    )
-                    $selected = $null
-                    if ($null -ne $result) {
-                        for ($index = 0; $index -lt $result.CompletionMatches.Count; $index++) {
-                            $candidate = $line.Substring(0, $result.ReplacementIndex) +
-                                $result.CompletionMatches[$index].CompletionText +
-                                $line.Substring($result.ReplacementIndex + $result.ReplacementLength)
-                            if ($candidate -eq $after) {
-                                $selected = $index
-                                break
-                            }
-                        }
-                    }
-                    try {
-                        __kettle_completion_emit $result $selected
+                        __kettle_completion_cycle_next
                     } catch {
                         __kettle_completion_clear
+                        # A completion-side-channel bug must never eat Tab.
+                        # Fall back to PSReadLine's stock action after clearing
+                        # the card so the shell remains usable.
+                        [Microsoft.PowerShell.PSConsoleReadLine]::TabCompleteNext()
+                    }
+                }
+                if ($null -ne $backtabHandler -and
+                    $backtabHandler.Function -eq 'TabCompletePrevious') {
+                    Set-PSReadLineKeyHandler -Chord Shift+Tab -ScriptBlock {
+                        try {
+                            __kettle_completion_cycle_previous
+                        } catch {
+                            __kettle_completion_clear
+                            [Microsoft.PowerShell.PSConsoleReadLine]::TabCompletePrevious()
+                        }
                     }
                 }
             }

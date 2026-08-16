@@ -122,7 +122,7 @@ x11rb = "0.13"
 # ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
 # drive the taskbar button. The `windows` crate gives safe COM wrappers and is
 # already in the workspace lockfile. The feature set is narrow and Windows-only,
-# Linux/macOS builds are unaffected.
+# so Linux and macOS builds are unaffected.
 # `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
 # taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).

@@ -68,24 +68,33 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     if !remaining.len().is_multiple_of(2) || remaining.len() / 2 > MAX_CANDIDATES {
         return None;
     }
+    let mut normalized_selected = None;
     let mut candidates = Vec::with_capacity(remaining.len() / 2);
-    for pair in remaining.chunks_exact(2) {
-        let label = decode_field(pair[0], MAX_LABEL_BYTES)?;
-        if label.is_empty() {
-            return None;
+    for (original_index, pair) in remaining.chunks_exact(2).enumerate() {
+        // A single filesystem entry can legally contain a newline or bidi
+        // control on Unix. It is not safe to put that entry in terminal-owned
+        // UI, but it must not suppress every other completion in the message.
+        // Keep structural errors fail-closed above and skip only the unsafe
+        // candidate here.
+        let Some(label) = decode_field(pair[0], MAX_LABEL_BYTES).filter(|label| !label.is_empty())
+        else {
+            continue;
+        };
+        let Some(description) = decode_field(pair[1], MAX_DESCRIPTION_BYTES) else {
+            continue;
+        };
+        if selected == Some(original_index) {
+            normalized_selected = Some(candidates.len());
         }
-        candidates.push(CompletionCandidate {
-            label,
-            description: decode_field(pair[1], MAX_DESCRIPTION_BYTES)?,
-        });
+        candidates.push(CompletionCandidate { label, description });
     }
-    if candidates.is_empty() || selected.is_some_and(|index| index >= candidates.len()) {
+    if candidates.is_empty() {
         return None;
     }
     let list = CompletionList {
         generation,
         kind,
-        selected,
+        selected: normalized_selected,
         source,
         candidates,
     };
@@ -192,17 +201,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_controls_bad_selection_and_unbounded_lists() {
-        assert!(parse(b"777;kettle-completion;1;show;1;completion;2;fish;a;").is_none());
-        assert!(parse(b"777;kettle-completion;1;show;1;completion;;fish;a%0Aevil;").is_none());
-        assert!(
-            parse(b"777;kettle-completion;1;show;1;completion;;fish;safe%E2%80%AEtxt;").is_none(),
-            "bidi overrides must not reorder terminal-owned UI"
-        );
+    fn rejects_structural_errors_and_unbounded_lists() {
+        assert!(parse(b"777;kettle-completion;1;show;1;completion;two;fish;a;").is_none());
         let mut payload = b"777;kettle-completion;1;show;1;completion;;fish".to_vec();
         for index in 0..=MAX_CANDIDATES {
             payload.extend_from_slice(format!(";item{index};").as_bytes());
         }
         assert!(parse(&payload).is_none());
+    }
+
+    #[test]
+    fn skips_only_unsafe_rows_and_remaps_the_selection() {
+        let update = parse(
+            b"777;kettle-completion;1;show;1;completion;2;fish;safe;first;\
+              a%0Aevil;newline;chosen;third;safe%E2%80%AEtxt;bidi",
+        )
+        .expect("safe rows around unsafe candidates must survive");
+        let CompletionUpdate::Show(list) = update else {
+            panic!("expected show");
+        };
+        assert_eq!(list.candidates.len(), 2);
+        assert_eq!(list.candidates[0].label, "safe");
+        assert_eq!(list.candidates[1].label, "chosen");
+        assert_eq!(list.selected, Some(1));
+
+        let CompletionUpdate::Show(list) =
+            parse(b"777;kettle-completion;1;show;2;completion;8;fish;only;row")
+                .expect("an out-of-range selection must not hide valid rows")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.selected, None);
     }
 }

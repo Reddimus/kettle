@@ -2,9 +2,8 @@
 #
 # Source from your ~/.bashrc to enable prompt-mark navigation
 # (`Ctrl+Up` / `Ctrl+Down` jump between prompt starts in kettle).
-# If you already use Starship / kitty / iTerm2 shell integration,
-# you don't need this — those already emit OSC 133 and kettle
-# picks them up automatically.
+# If your prompt already emits OSC 133, Kettle picks it up automatically and
+# this snippet is unnecessary.
 #
 # One-line install:
 #
@@ -77,7 +76,11 @@ __kettle_completion_encode() {
     done
     (( i += need ))
   done
-  printf '%s' "$out"
+  if [[ -n "${3-}" ]]; then
+    printf -v "$3" '%s' "$out"
+  else
+    printf '%s' "$out"
+  fi
 }
 
 # Cooperative bridge for Bash completion frameworks. Call with
@@ -87,23 +90,33 @@ __kettle_completion_encode() {
 kettle_completion_show() {
   local LC_ALL=C kind="${1:-completion}" source="${2:-bash}" selected="$3"
   shift 3 || return
-  local payload label description addition count=0
+  local payload body='' label description addition count=0
+  case "$kind" in
+    completion|prediction) ;;
+    *) kind=completion ;;
+  esac
+  if [[ ! "$selected" =~ ^[0-9][0-9]?$ ]] || (( 10#$selected >= 64 )); then
+    selected=''
+  fi
   __kettle_completion_generation=$(( ${__kettle_completion_generation:-0} + 1 ))
-  source="$(__kettle_completion_encode "$source" 64)"
-  payload="777;kettle-completion;1;show;$__kettle_completion_generation;$kind;$selected;$source"
+  __kettle_completion_encode "$source" 64 source
   while (( $# >= 2 && count < 64 )); do
-    label="$(__kettle_completion_encode "$1" 64)"
-    description="$(__kettle_completion_encode "$2" 256)"
+    __kettle_completion_encode "$1" 64 label
+    __kettle_completion_encode "$2" 256 description
     shift 2
     [[ -n "$label" ]] || continue
     addition=";$label;$description"
-    (( ${#payload} + ${#addition} <= 30000 )) || break
-    payload+="$addition"
+    (( 128 + ${#source} + ${#body} + ${#addition} <= 30000 )) || break
+    body+="$addition"
     (( count++ ))
   done
   if (( count == 0 )); then
     kettle_completion_clear
   else
+    if [[ -n "$selected" ]] && (( 10#$selected >= count )); then
+      selected=''
+    fi
+    payload="777;kettle-completion;1;show;$__kettle_completion_generation;$kind;$selected;$source$body"
     printf '\033]%s\007' "$payload"
   fi
 }

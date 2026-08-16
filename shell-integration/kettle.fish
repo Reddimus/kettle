@@ -2,9 +2,8 @@
 #
 # Source from your ~/.config/fish/config.fish to enable prompt-mark
 # navigation (`Ctrl+Up` / `Ctrl+Down` jump between prompt starts in
-# kettle). If you already use Starship / kitty / iTerm2 shell
-# integration, you don't need this — those already emit OSC 133
-# and kettle picks them up automatically.
+# kettle). If your prompt already emits OSC 133, Kettle picks it up
+# automatically and this snippet is unnecessary.
 #
 # One-line install:
 #
@@ -127,7 +126,7 @@ function __kettle_completion_emit_rows --argument operation selected
         return
     end
 
-    set -l payload "777;kettle-completion;1;$operation;$__kettle_completion_generation;completion;$selected;fish"
+    set -l body
     set -l count 0
     for row in $rows
         test $count -ge 64; and break
@@ -139,13 +138,17 @@ function __kettle_completion_emit_rows --argument operation selected
             set description (__kettle_completion_field $pair[2] 256)
         end
         set -l addition ";$label;$description"
-        test (string length "$payload$addition") -le 30000; or break
-        set payload "$payload$addition"
+        test (math 128 + (string length "$body$addition")) -le 30000; or break
+        set body "$body$addition"
         set count (math $count + 1)
     end
     if test $count -eq 0
         printf '\e]777;kettle-completion;1;clear;%d\a' $__kettle_completion_generation
     else
+        if not string match --regex --quiet '^[0-9]+$' -- "$selected"; or test "$selected" -ge $count
+            set selected ''
+        end
+        set -l payload "777;kettle-completion;1;$operation;$__kettle_completion_generation;completion;$selected;fish$body"
         printf '\e]%s\a' $payload
     end
 end
@@ -248,7 +251,7 @@ end
 # ownership and can call `__kettle_completion_emit` cooperatively. The terminal
 # sets the capability variable from `completion-overlay`, so `off` leaves Fish
 # byte-for-byte stock rather than installing an invisible interaction.
-if status is-interactive; and test "$TERM_PROGRAM" = kettle; and test "$KETTLE_COMPLETION_OVERLAY" = 1
+if status is-interactive; and test "$TERM_PROGRAM" = kettle; and test "$KETTLE_COMPLETION_OVERLAY" = 1; and test -z "$TMUX"; and test -z "$STY"
     # Emacs edits in `default`; Vi edits in `insert`. Replace the stock
     # completion binding in either map, but leave every user/plugin binding
     # alone. Re-sourcing is idempotent because our own binding is recognized.

@@ -41,7 +41,7 @@ pub mod placeholder;
 pub mod sixel;
 
 pub use completion::{CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate};
-pub use extract::{Chunk, DeferredGraphics, Extractor, Progress, PromptKind};
+pub use extract::{Chunk, DeferredGraphics, Extractor, PrivateOutputFilter, Progress, PromptKind};
 pub use graphics_limits::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
 pub use image::{ImageData, Placed, PlacementParams};
 

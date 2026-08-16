@@ -37,7 +37,10 @@ const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
 fn completion_refresh_input(bytes: &[u8]) -> bool {
-    matches!(bytes, b"\t" | b"\x1b[Z")
+    matches!(
+        bytes,
+        b"\t" | b"\x1b[Z" | b"\x1b[9;2u" | b"\x1b[9;2:1u" | b"\x1b[9;2:2u" | b"\x1b[9;2:3u"
+    )
 }
 
 fn pane_environment(config: &Config) -> Vec<(String, String)> {
@@ -673,6 +676,10 @@ pub struct Pane {
     /// can't be typed into. Toggled via `Action::TogglePaneReadOnly` or the
     /// right-click "Read only" item; shown as `[RO]` in the titlebar.
     pub read_only: bool,
+    /// Completion integration is negotiated when this shell starts. Config
+    /// reloads affect new panes only, so an existing Fish/PowerShell wrapper
+    /// never keeps intercepting Tab while its visible card disappears.
+    pub completion_overlay: bool,
 }
 
 impl Pane {
@@ -1789,6 +1796,8 @@ impl Mux {
                 foreground_process: None,
                 agent_attached: false,
                 read_only: false,
+                completion_overlay: cfg.completion_overlay
+                    == kettle_config::CompletionOverlayMode::Auto,
                 bell: false,
             },
         );
@@ -7728,6 +7737,17 @@ mod node_tests {
     fn only_tab_navigation_gets_the_completion_grace_window() {
         assert!(super::completion_refresh_input(b"\t"));
         assert!(super::completion_refresh_input(b"\x1b[Z"));
+        for kitty in [
+            b"\x1b[9;2u".as_slice(),
+            b"\x1b[9;2:1u",
+            b"\x1b[9;2:2u",
+            b"\x1b[9;2:3u",
+        ] {
+            assert!(
+                super::completion_refresh_input(kitty),
+                "Fish 4 enables Kitty keyboard reporting and receives Shift-Tab in this form"
+            );
+        }
         for input in [b"x".as_slice(), b"\r", b"\x1b[A", b"\x1b[1;2Z"] {
             assert!(!super::completion_refresh_input(input), "{input:?}");
         }
@@ -7745,5 +7765,19 @@ mod node_tests {
         config.completion_overlay = kettle_config::CompletionOverlayMode::Off;
         let environment = super::pane_environment(&config);
         assert_eq!(environment.last().unwrap().1, "0");
+    }
+
+    #[test]
+    fn completion_visibility_is_snapshotted_with_the_shell_capability() {
+        let src = production_source();
+        let spawn = src
+            .split("self.panes.insert(")
+            .nth(1)
+            .and_then(|rest| rest.split("Ok(id)").next())
+            .expect("pane insertion");
+        assert!(
+            spawn.contains("completion_overlay: cfg.completion_overlay"),
+            "a config reload must not hide the card from a shell whose wrapper still owns Tab"
+        );
     }
 }

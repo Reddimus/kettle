@@ -269,7 +269,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["hidden", "auto", "always"],
                 ),
                 choice(
-                    "Completion overlay",
+                    "Completion overlay (new shells)",
                     "completion-overlay",
                     &["auto", "off"],
                     &["automatic", "off"],

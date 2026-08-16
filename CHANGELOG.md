@@ -12,9 +12,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   pane.** Fish and PowerShell publish their stock completion results
   automatically when Tab has not been customized. Bash, Zsh, and customized
   shells can use the cooperative bridge. The shell still owns matching,
-  quoting, insertion, selection, and execution; Kettle only displays a bounded
-  list away from the command line. `completion-overlay = off` leaves Tab
-  untouched.
+  quoting, insertion, selection, and execution. Kettle uses a lane above the
+  active command and hides the card if no detached upper lane fits.
+  Automatic bindings stay off inside tmux/screen. Mode changes apply to new
+  shells so a live wrapper never loses its visible UI.
 - **Application windows can use native background material behind translucent
   terminal content.** Set `background-opacity` below `1.0` and
   `window-blur = true`.
@@ -23,6 +24,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Unsupported systems keep ordinary alpha transparency.
 
 ### Fixed
+
+- **Completion replies could outlive the command that requested them.** Any
+  unrelated input now disarms publication before it reaches the PTY. Malformed
+  private metadata has bounded recovery, unsafe rows no longer hide safe
+  siblings, and logs/output hooks receive one byte-exact filtered message per
+  PTY read instead of one message per parser chunk.
+- **Transparent startup used the wrong window-surface test.** Window creation
+  now uses effective composed alpha and wallpaper state. Settings name the
+  new-window requirement, and failed config writes no longer claim a restart
+  will apply a change that was never saved.
 
 - **`Alt+Up` could not reach terminal applications on Linux and Windows.** The
   default chord always ran Kettle's `FocusUp` action, even at the top edge where

@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from urllib.parse import quote
 
 
@@ -111,6 +112,42 @@ def check_zsh(executable: str) -> None:
     )
     assert_completion_field(completion, "zsh Unicode completion field fixture")
     print("zsh Unicode completion field fixture: PASS")
+
+    # Exercise the maximum displayed list with maximum field sizes. The first
+    # encoder used `$(printf ...)` once per byte, turning this bounded 20 KiB
+    # payload into tens of thousands of subshells and multi-second Tab presses.
+    rows = []
+    for index in range(64):
+        rows.extend((f"item-{index:02d}-" + "x" * 56, "y" * 256))
+    started = time.monotonic()
+    maximum = run(
+        [
+            executable,
+            "-f",
+            "-c",
+            'source "$1" >/dev/null; shift; '
+            "kettle_completion_show completion perf 63 \"$@\"",
+            "kettle-completion-maximum",
+            str(INTEGRATION / "kettle.zsh"),
+            *rows,
+        ],
+        "zsh maximum completion payload fixture",
+        announce=False,
+    )
+    elapsed = time.monotonic() - started
+    sequences = re.findall(rb"\x1b\]777;kettle-completion;[^\x07]*\x07", maximum)
+    if not sequences or b";completion;63;perf;" not in sequences[-1]:
+        raise RuntimeError(f"zsh maximum payload was malformed: {sequences[-1:]!r}")
+    fields = sequences[-1][2:-1].split(b";")
+    if len(fields) != 8 + 64 * 2:
+        raise RuntimeError(
+            f"zsh maximum payload kept {(len(fields) - 8) // 2} rows instead of 64"
+        )
+    if elapsed > 4.0:
+        raise RuntimeError(
+            f"zsh maximum payload took {elapsed:.2f}s; encoding likely forks per byte"
+        )
+    print(f"zsh maximum completion payload fixture: PASS ({elapsed:.2f}s)")
 
 
 def check_bash(executable: str, require_32: bool) -> None:
@@ -406,6 +443,18 @@ def check_powershell(executable: str) -> None:
     )
     if b"KETTLE_POWERSHELL_COMPLETION_OK" not in completion_output:
         raise RuntimeError("PowerShell completion fixture omitted its success sentinel")
+
+    enabled_output = run(
+        [
+            *common,
+            str(FIXTURES / "powershell-completion-enabled.ps1"),
+            "-IntegrationPath",
+            str(INTEGRATION / "kettle.ps1"),
+        ],
+        f"{Path(executable).name} completion binding fixture",
+    )
+    if b"KETTLE_POWERSHELL_COMPLETION_ENABLED_OK" not in enabled_output:
+        raise RuntimeError("PowerShell enabled completion fixture omitted its success sentinel")
 
 
 def main() -> int:

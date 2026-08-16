@@ -22,7 +22,8 @@ use anyhow::{Context, Result};
 use kettle_vt::kitty::{Delete as KittyDelete, DeleteTarget as KittyDeleteTarget, PlacementKey};
 use kettle_vt::placeholder::{self, CellDiacritics, RawCell};
 use kettle_vt::{
-    Chunk, CompletionList, CompletionUpdate, DeferredGraphics, Extractor, Progress, PromptKind,
+    Chunk, CompletionList, CompletionUpdate, DeferredGraphics, Extractor, PrivateOutputFilter,
+    Progress, PromptKind,
 };
 use portable_pty::{CommandBuilder, PtySize};
 
@@ -2244,6 +2245,10 @@ pub const COMPLETION_HIDE_GRACE: std::time::Duration = std::time::Duration::from
 struct CompletionSlot {
     generation: u64,
     list: Option<CompletionList>,
+    /// Armed only by a Tab/Shift-Tab input. Unrelated input disarms publication
+    /// before it enters the PTY, so a response already buffered by the shell
+    /// cannot reopen a list for the command line that replaced it.
+    accept_updates: bool,
     /// Set when input that is expected to refresh the list was sent. The list
     /// stays visible until this passes, so a Tab that re-publishes the same
     /// candidates does not blink the card off for the round-trip.
@@ -2277,13 +2282,26 @@ fn poll_completion_hide_slot(
     (slot.list.take().is_some(), None)
 }
 
+fn arm_completion_refresh_slot(slot: &mut CompletionSlot, now: std::time::Instant) {
+    slot.accept_updates = true;
+    if slot.list.is_some() {
+        slot.hide_after = Some(now + COMPLETION_HIDE_GRACE);
+    }
+}
+
+fn clear_completion_slot(slot: &mut CompletionSlot) {
+    slot.list = None;
+    slot.hide_after = None;
+    slot.accept_updates = false;
+}
+
 fn apply_completion_update(cell: &Mutex<CompletionSlot>, update: CompletionUpdate) {
     let Ok(mut current) = cell.lock() else {
         return;
     };
     match update {
         CompletionUpdate::Show(list) | CompletionUpdate::Update(list)
-            if list.generation >= current.generation =>
+            if current.accept_updates && list.generation >= current.generation =>
         {
             current.generation = list.generation;
             current.list = Some(list);
@@ -2294,6 +2312,7 @@ fn apply_completion_update(cell: &Mutex<CompletionSlot>, update: CompletionUpdat
             current.generation = generation;
             current.list = None;
             current.hide_after = None;
+            current.accept_updates = false;
         }
         CompletionUpdate::Show(_)
         | CompletionUpdate::Update(_)
@@ -2310,7 +2329,8 @@ fn reset_completion_session(cell: &Mutex<CompletionSlot>) {
 #[cfg(test)]
 mod completion_state_tests {
     use super::{
-        COMPLETION_HIDE_GRACE, CompletionSlot, apply_completion_update, completion_visible,
+        COMPLETION_HIDE_GRACE, CompletionSlot, apply_completion_update,
+        arm_completion_refresh_slot, clear_completion_slot, completion_visible,
         poll_completion_hide_slot, reset_completion_session,
     };
     use kettle_vt::{CompletionKind, CompletionList, CompletionUpdate};
@@ -2333,8 +2353,10 @@ mod completion_state_tests {
     #[test]
     fn a_new_prompt_accepts_a_nested_shells_fresh_generation() {
         let slot = Mutex::new(CompletionSlot::default());
+        arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(42)));
         reset_completion_session(&slot);
+        arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(1)));
 
         let current = slot.lock().unwrap();
@@ -2345,6 +2367,7 @@ mod completion_state_tests {
     #[test]
     fn a_clear_keeps_older_updates_from_resurrecting() {
         let slot = Mutex::new(CompletionSlot::default());
+        arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(7)));
         apply_completion_update(&slot, CompletionUpdate::Clear { generation: 8 });
         apply_completion_update(&slot, CompletionUpdate::Update(list(7)));
@@ -2360,6 +2383,7 @@ mod completion_state_tests {
         let mut slot = CompletionSlot {
             generation: 3,
             list: Some(list(3)),
+            accept_updates: true,
             hide_after: Some(now + COMPLETION_HIDE_GRACE),
         };
         assert!(completion_visible(&slot, now).is_some());
@@ -2378,11 +2402,28 @@ mod completion_state_tests {
     }
 
     #[test]
+    fn unrelated_input_rejects_a_response_already_in_flight() {
+        let cell = Mutex::new(CompletionSlot::default());
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Show(list(5)));
+        clear_completion_slot(&mut cell.lock().unwrap());
+
+        // The shell generated this after the preceding Tab, but it arrived
+        // after the user had already typed a different character.
+        apply_completion_update(&cell, CompletionUpdate::Update(list(6)));
+        let slot = cell.lock().unwrap();
+        assert_eq!(slot.generation, 5);
+        assert!(slot.list.is_none());
+        assert!(!slot.accept_updates);
+    }
+
+    #[test]
     fn grace_expiry_requests_exactly_one_erase_frame() {
         let now = Instant::now();
         let mut slot = CompletionSlot {
             generation: 3,
             list: Some(list(3)),
+            accept_updates: true,
             hide_after: Some(now + COMPLETION_HIDE_GRACE),
         };
         assert_eq!(
@@ -2407,6 +2448,7 @@ mod completion_state_tests {
         let cell = Mutex::new(CompletionSlot {
             generation: 9,
             list: None,
+            accept_updates: true,
             hide_after: Some(deadline),
         });
         apply_completion_update(&cell, CompletionUpdate::Update(list(8)));
@@ -5114,6 +5156,7 @@ impl Terminal {
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
                     let mut extractor = Extractor::new();
+                    let mut private_output_filter = PrivateOutputFilter::default();
                     let mut active_alternate = false;
                     let mut observed_reflow_generation = 0;
                     let mut session_log_filter = SessionLogFilter::default();
@@ -5393,6 +5436,33 @@ impl Terminal {
                         };
                         match received {
                             None => {
+                                let tap_raw = log_active.load(Ordering::Relaxed)
+                                    || output_tx.is_some();
+                                let final_raw = private_output_filter.finish(tap_raw);
+                                if !final_raw.is_empty() {
+                                    if log_active.load(Ordering::Relaxed)
+                                        && let Ok(mut guard) = session_log.lock()
+                                        && let Some(writer) = guard.as_mut()
+                                    {
+                                        let strip = log_strip_ansi
+                                            .lock()
+                                            .map(|value| *value)
+                                            .unwrap_or(false);
+                                        let generation = log_generation.load(Ordering::Acquire);
+                                        let filtered = session_log_filter.filter(
+                                            &final_raw,
+                                            generation,
+                                            strip,
+                                        );
+                                        if writer.try_write(filtered).is_err() {
+                                            log_generation.fetch_add(1, Ordering::AcqRel);
+                                            log_active.store(false, Ordering::Release);
+                                        }
+                                    }
+                                    if let Some(tx) = &output_tx {
+                                        tx.send(final_raw);
+                                    }
+                                }
                                 proxy.send_event_exit();
                                 break;
                             }
@@ -5408,45 +5478,42 @@ impl Terminal {
                                 let tap_raw = log_active
                                     .load(std::sync::atomic::Ordering::Relaxed)
                                     || output_tx.is_some();
-                                extractor.set_raw_tap(tap_raw);
+                                let raw_output = private_output_filter.feed(&buffer, tap_raw);
+                                if !raw_output.is_empty() {
+                                    // Publish at most once per PTY read. OSC-heavy output can
+                                    // produce thousands of parser chunks, while the logger and
+                                    // recorder queues are intentionally bounded in read-sized
+                                    // messages. Kettle's private completion OSC is the only data
+                                    // removed by `PrivateOutputFilter`.
+                                    if log_active.load(Ordering::Relaxed)
+                                        && let Ok(mut guard) = session_log.lock()
+                                        && let Some(writer) = guard.as_mut()
+                                    {
+                                        let strip = log_strip_ansi
+                                            .lock()
+                                            .map(|value| *value)
+                                            .unwrap_or(false);
+                                        let generation = log_generation.load(Ordering::Acquire);
+                                        let filtered = session_log_filter.filter(
+                                            &raw_output,
+                                            generation,
+                                            strip,
+                                        );
+                                        if writer.try_write(filtered).is_err() {
+                                            log_generation.fetch_add(1, Ordering::AcqRel);
+                                            log_active.store(false, Ordering::Release);
+                                        }
+                                    }
+                                    if let Some(tx) = &output_tx {
+                                        tx.send(raw_output);
+                                    }
+                                }
+                                // Raw consumers are handled once above; parser chunks now serve
+                                // only the terminal and semantic side channels.
+                                extractor.set_raw_tap(false);
                                 extractor.feed_with(&buffer, |extractor, chunk| {
-                                    let mut publish_raw = |bytes: &[u8]| {
-                                        // Raw consumers receive the complete PTY stream except
-                                        // Kettle's private completion metadata. A full disk or
-                                        // slow subscriber must not corrupt parser ordering.
-                                        if log_active.load(Ordering::Relaxed)
-                                            && let Ok(mut guard) = session_log.lock()
-                                            && let Some(writer) = guard.as_mut()
-                                        {
-                                            let strip = log_strip_ansi
-                                                .lock()
-                                                .map(|value| *value)
-                                                .unwrap_or(false);
-                                            let generation =
-                                                log_generation.load(Ordering::Acquire);
-                                            let filtered = session_log_filter.filter(
-                                                bytes,
-                                                generation,
-                                                strip,
-                                            );
-                                            if writer.try_write(filtered).is_err() {
-                                                log_generation.fetch_add(1, Ordering::AcqRel);
-                                                log_active.store(false, Ordering::Release);
-                                            }
-                                        }
-                                        if let Some(tx) = &output_tx {
-                                            tx.send(bytes.to_vec());
-                                        }
-                                    };
                                     let chunk = match chunk {
-                                        Chunk::Raw(bytes) => {
-                                            publish_raw(&bytes);
-                                            return;
-                                        }
-                                        Chunk::Pass(bytes) => {
-                                            publish_raw(&bytes);
-                                            Chunk::Pass(bytes)
-                                        }
+                                        Chunk::Raw(_) => return,
                                         chunk => chunk,
                                     };
                                     let graphics_related = chunk_needs_graphics_gate(&chunk);
@@ -5975,8 +6042,7 @@ impl Terminal {
                                         // can compute the elapsed duration.
                                         Chunk::Prompt(PromptKind::OutputStart) => {
                                             if let Ok(mut completion) = completion_cell.lock() {
-                                                completion.list = None;
-                                                completion.hide_after = None;
+                                                clear_completion_slot(&mut completion);
                                             }
                                             if let Ok(mut t) = output_started_at.lock() {
                                                 *t = Some(std::time::Instant::now());
@@ -6573,12 +6639,12 @@ impl Terminal {
             .and_then(|slot| completion_visible(&slot, now).cloned())
     }
 
-    /// Hide the current shell completion list without rewinding its protocol
-    /// generation. A delayed older update must not resurrect after input.
+    /// Hide the current shell completion list and disarm publication until the
+    /// next Tab/Shift-Tab. This is the local input boundary the shell's protocol
+    /// generation cannot express.
     pub fn clear_completion(&self) {
         if let Ok(mut completion) = self.completion.lock() {
-            completion.list = None;
-            completion.hide_after = None;
+            clear_completion_slot(&mut completion);
         }
     }
 
@@ -6586,10 +6652,8 @@ impl Terminal {
     /// sent (Tab / Shift-Tab) is expected to replace it. Clearing outright
     /// instead blinks the card off once per cycle step for the PTY round-trip.
     pub fn defer_completion_hide(&self) {
-        if let Ok(mut completion) = self.completion.lock()
-            && completion.list.is_some()
-        {
-            completion.hide_after = Some(std::time::Instant::now() + COMPLETION_HIDE_GRACE);
+        if let Ok(mut completion) = self.completion.lock() {
+            arm_completion_refresh_slot(&mut completion, std::time::Instant::now());
         }
     }
 
@@ -6647,6 +6711,43 @@ impl Terminal {
                 marks.iter().copied().collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Visible row span occupied by the active prompt and command line.
+    ///
+    /// Completion UI uses the OSC 133 prompt start rather than guessing from
+    /// the cursor alone: a two-line prompt or wrapped input occupies every row
+    /// between these endpoints and must not be painted over. `None` means the
+    /// current prompt start is not retained and no overlap-safe projection can
+    /// be proven.
+    pub fn completion_command_rows(&self) -> Option<(usize, usize)> {
+        let term = self.term.lock().ok()?;
+        if term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
+        {
+            return None;
+        }
+        let grid = term.grid();
+        let visible_top = grid
+            .history_origin()
+            .saturating_add(grid.history_size() as u64)
+            .saturating_sub(grid.display_offset() as u64);
+        let cursor = stable_grid_line_id(
+            grid.history_origin(),
+            grid.history_size(),
+            grid.cursor.point.line.0,
+        );
+        let screen_lines = grid.screen_lines();
+        let prompts = self.prompts.lock().ok()?;
+        let prompt = prompts
+            .iter()
+            .rev()
+            .copied()
+            .find(|mark| *mark >= visible_top && *mark <= cursor)?;
+        let prompt_row = usize::try_from(prompt - visible_top).ok()?;
+        let cursor_row = usize::try_from(cursor - visible_top).ok()?;
+        (cursor_row < screen_lines && prompt_row <= cursor_row).then_some((prompt_row, cursor_row))
     }
 
     /// Scroll to the adjacent retained OSC 133 prompt.
@@ -9444,20 +9545,20 @@ mod home_dir_tests {
     }
 
     #[test]
-    fn session_log_parser_tap_only_uses_bounded_worker_admission() {
+    fn session_log_raw_publisher_only_uses_bounded_worker_admission() {
         let source = super::production_source();
-        let tap = source
-            .split("extractor.set_raw_tap(tap_raw);")
+        let publisher = source
+            .split("let raw_output = private_output_filter.feed(&buffer, tap_raw);")
             .nth(1)
-            .and_then(|body| body.split("image_pruner.prune_if_changed").next())
-            .expect("session-log parser tap");
+            .and_then(|body| body.split("extractor.set_raw_tap(false);").next())
+            .expect("per-read raw-output publisher");
         assert!(
-            tap.contains("writer.try_write(filtered)"),
-            "the parser must hand log chunks to the shared persistence worker"
+            publisher.contains("writer.try_write(filtered)"),
+            "the PTY reader must hand log chunks to the shared persistence worker"
         );
         assert!(
-            !tap.contains("write_all") && !tap.contains(".flush("),
-            "filesystem write and flush calls must stay off the parser thread"
+            !publisher.contains("write_all") && !publisher.contains(".flush("),
+            "filesystem write and flush calls must stay off the PTY reader"
         );
     }
 
