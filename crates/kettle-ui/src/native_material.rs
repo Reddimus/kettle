@@ -4,14 +4,38 @@ use std::sync::Arc;
 use winit::window::Window;
 
 #[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MacosMaterialPolicy {
+    effect_visible: bool,
+    window_opaque: bool,
+    titlebar_transparent: bool,
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn macos_material_policy(
     window_blur: bool,
     alpha_surface_required: bool,
     reduce_transparency: bool,
-) -> (bool, bool) {
-    let effect_visible = window_blur && !reduce_transparency;
-    let translucent = !reduce_transparency && (window_blur || alpha_surface_required);
-    (effect_visible, !translucent)
+) -> MacosMaterialPolicy {
+    let translucent = !reduce_transparency && alpha_surface_required;
+    let effect_visible = window_blur && translucent;
+    MacosMaterialPolicy {
+        effect_visible,
+        window_opaque: !translucent,
+        // A transparent native titlebar needs either the theme-colored window
+        // background or the frame-wide material behind it. With plain alpha
+        // transparency it would otherwise become a fully clear desktop strip
+        // above a tinted terminal, so let AppKit draw its standard backdrop.
+        titlebar_transparent: !alpha_surface_required || window_blur || reduce_transparency,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn macos_native_effect_supported(borderless: bool) -> bool {
+    // A sibling NSVisualEffectView works with AppKit's decorated frame view.
+    // In a borderless NSWindow it composites over Winit's CAMetalLayer and
+    // hides the terminal, so preserve visible sharp alpha instead of blur.
+    !borderless
 }
 
 pub(crate) struct NativeMaterial {
@@ -23,7 +47,7 @@ pub(crate) struct NativeMaterial {
     #[cfg(target_os = "macos")]
     last_background: std::cell::Cell<Option<kettle_config::Rgb>>,
     #[cfg(target_os = "macos")]
-    last_alpha_surface_required: std::cell::Cell<Option<bool>>,
+    alpha_surface_required: bool,
     #[cfg(target_os = "macos")]
     checked_at: std::cell::Cell<std::time::Instant>,
     #[cfg(target_os = "macos")]
@@ -38,14 +62,22 @@ impl NativeMaterial {
     pub(crate) fn install(window: &Arc<Window>, config: &kettle_config::Config) -> Self {
         #[cfg(target_os = "macos")]
         {
+            // The window and wgpu surface choose their transparency at creation.
+            // Keep the native titlebar on that same decision until a new window
+            // is opened, even if a live config reload changes opacity later.
+            let alpha_surface_required = kettle_render::window_requires_alpha_surface(config);
             let (notification_center, notification_observer, accessibility_display_dirty) =
                 observe_macos_accessibility_display(window);
             let material = Self {
                 last_blur: std::cell::Cell::new(None),
-                effect: install_macos_effect(window),
+                effect: if macos_native_effect_supported(config.borderless) {
+                    install_macos_effect(window)
+                } else {
+                    None
+                },
                 last_reduce_transparency: std::cell::Cell::new(None),
                 last_background: std::cell::Cell::new(None),
-                last_alpha_surface_required: std::cell::Cell::new(None),
+                alpha_surface_required,
                 checked_at: std::cell::Cell::new(
                     std::time::Instant::now() - std::time::Duration::from_secs(1),
                 ),
@@ -92,6 +124,9 @@ impl NativeMaterial {
 
     #[cfg(target_os = "macos")]
     fn sync_macos(&self, window: &Window, config: &kettle_config::Config) {
+        let Some(main_thread) = objc2_foundation::MainThreadMarker::new() else {
+            return;
+        };
         let now = std::time::Instant::now();
         let accessibility_changed = self
             .accessibility_display_dirty
@@ -100,37 +135,31 @@ impl NativeMaterial {
             now.duration_since(self.checked_at.get()) >= std::time::Duration::from_millis(500);
         let blur_changed = self.last_blur.get() != Some(config.window_blur);
         let background_changed = self.last_background.get() != Some(config.theme.background);
-        let alpha_surface_required = kettle_render::window_requires_alpha_surface(config);
-        let alpha_requirement_changed =
-            self.last_alpha_surface_required.get() != Some(alpha_surface_required);
-        if !accessibility_changed
-            && !due
-            && !blur_changed
-            && !background_changed
-            && !alpha_requirement_changed
-        {
+        if !accessibility_changed && !due && !blur_changed && !background_changed {
             return;
         }
         self.checked_at.set(now);
-        let reduce = macos_reduce_transparency();
+        let reduce = macos_reduce_transparency(&main_thread);
         if !blur_changed
             && !background_changed
-            && !alpha_requirement_changed
             && self.last_reduce_transparency.get() == Some(reduce)
         {
             return;
         }
         self.last_blur.set(Some(config.window_blur));
         self.last_background.set(Some(config.theme.background));
-        self.last_alpha_surface_required
-            .set(Some(alpha_surface_required));
         self.last_reduce_transparency.set(Some(reduce));
-        let (active, opaque) =
-            macos_material_policy(config.window_blur, alpha_surface_required, reduce);
+        let policy = macos_material_policy(config.window_blur, self.alpha_surface_required, reduce);
         if let Some(effect) = &self.effect {
-            effect.setHidden(!active);
+            effect.setHidden(!policy.effect_visible);
         }
-        set_macos_opaque_background(window, config.theme.background, opaque);
+        sync_macos_window_background(
+            window,
+            config.theme.background,
+            policy.window_opaque,
+            policy.titlebar_transparent,
+            &main_thread,
+        );
         window.request_redraw();
     }
 }
@@ -162,6 +191,9 @@ fn observe_macos_accessibility_display(
     use std::ptr::NonNull;
 
     let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
+        return (None, None, dirty);
+    };
     let dirty_for_observer = dirty.clone();
     let weak_window = Arc::downgrade(window);
     let workspace = unsafe { NSWorkspace::sharedWorkspace() };
@@ -200,13 +232,18 @@ fn install_macos_effect(
     let RawWindowHandle::AppKit(appkit) = handle.as_raw() else {
         return None;
     };
+    let main_thread = objc2_foundation::MainThreadMarker::new()?;
     let content: &NSView = unsafe { &*appkit.ns_view.as_ptr().cast::<NSView>() };
     content.window()?;
     // SAFETY: winit's live content view is attached to AppKit's frame view
     // while the window exists, and this runs on the main thread during setup.
     let frame_view = unsafe { content.superview()? };
-    let frame = content.frame();
-    let main_thread = objc2_foundation::MainThreadMarker::new()?;
+    // The frame view includes macOS's native title bar; WinitView's frame does
+    // not. Sizing the material from the content view therefore left the area
+    // behind the traffic lights completely clear while the terminal below was
+    // blurred. Fill the frame view and keep WinitView above it so one material
+    // backs both regions without covering the Metal surface or title controls.
+    let frame = frame_view.bounds();
     let effect = unsafe {
         NSVisualEffectView::initWithFrame(main_thread.alloc::<NSVisualEffectView>(), frame)
     };
@@ -238,13 +275,19 @@ fn install_macos_effect(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_reduce_transparency() -> bool {
+fn macos_reduce_transparency(_main_thread: &objc2_foundation::MainThreadMarker) -> bool {
     use objc2_app_kit::NSWorkspace;
     unsafe { NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceTransparency() }
 }
 
 #[cfg(target_os = "macos")]
-fn set_macos_opaque_background(window: &Window, color: kettle_config::Rgb, opaque: bool) {
+fn sync_macos_window_background(
+    window: &Window,
+    color: kettle_config::Rgb,
+    opaque: bool,
+    titlebar_transparent: bool,
+    _main_thread: &objc2_foundation::MainThreadMarker,
+) {
     use objc2_app_kit::{NSColor, NSView};
     use winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
 
@@ -268,6 +311,7 @@ fn set_macos_opaque_background(window: &Window, color: kettle_config::Rgb, opaqu
     };
     ns_window.setOpaque(opaque);
     ns_window.setBackgroundColor(Some(&background));
+    ns_window.setTitlebarAppearsTransparent(titlebar_transparent);
 }
 
 #[cfg(target_os = "windows")]
@@ -304,17 +348,159 @@ fn sync_windows_backdrop(window: &Window, enabled: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::macos_material_policy;
+    use super::{MacosMaterialPolicy, macos_material_policy, macos_native_effect_supported};
     use kettle_config::{BackgroundType, Config};
 
     #[test]
+    fn macos_material_covers_the_native_titlebar() {
+        let source = kettle_test_support::production_source(include_str!("native_material.rs"));
+        let install = source
+            .split("fn install_macos_effect(")
+            .nth(1)
+            .and_then(|body| body.split("fn macos_reduce_transparency").next())
+            .expect("install_macos_effect body");
+        let normalized = install.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            install.contains("let frame = frame_view.bounds();"),
+            "the effect must use native frame bounds so it continues behind the titlebar"
+        );
+        assert!(
+            !install.contains("content.frame()"),
+            "content bounds exclude the native titlebar and make it fully transparent"
+        );
+        assert!(
+            normalized.contains(
+                "NSVisualEffectView::initWithFrame(main_thread.alloc::<NSVisualEffectView>(), frame)"
+            ),
+            "the frame-view bounds must be the rectangle passed to the material view"
+        );
+        assert!(
+            normalized.contains(
+                "effect.setAutoresizingMask( NSAutoresizingMaskOptions::NSViewWidthSizable | NSAutoresizingMaskOptions::NSViewHeightSizable, );"
+            ),
+            "the material must keep covering the titlebar after a window resize"
+        );
+        assert!(
+            normalized.contains(
+                "frame_view.addSubview_positioned_relativeTo( &effect, NSWindowOrderingMode::NSWindowBelow, Some(content),"
+            ),
+            "the material must stay below the Metal content and native controls"
+        );
+        assert_eq!(
+            source.matches("effect.setAutoresizingMask(").count(),
+            1,
+            "the material's autoresizing policy must be assigned exactly once"
+        );
+        for setter in [
+            "effect.setFrame(",
+            "effect.setFrameSize(",
+            "effect.setFrameOrigin(",
+            "effect.setBounds(",
+            "effect.setBoundsSize(",
+            "effect.setBoundsOrigin(",
+        ] {
+            assert!(
+                !source.contains(setter),
+                "a later {setter} call could silently restore the transparent strip"
+            );
+        }
+    }
+
+    #[test]
+    fn borderless_macos_windows_keep_visible_alpha_instead_of_covering_metal() {
+        assert!(macos_native_effect_supported(false));
+        assert!(
+            !macos_native_effect_supported(true),
+            "borderless AppKit composition must fall back instead of hiding Winit's Metal view"
+        );
+        let source = kettle_test_support::production_source(include_str!("native_material.rs"));
+        assert!(
+            source.contains("if macos_native_effect_supported(config.borderless)"),
+            "NativeMaterial::install must apply the borderless safety policy"
+        );
+    }
+
+    #[test]
+    fn macos_material_keeps_the_window_creation_alpha_decision() {
+        let source = kettle_test_support::production_source(include_str!("native_material.rs"));
+        assert_eq!(
+            source
+                .matches("kettle_render::window_requires_alpha_surface(config)")
+                .count(),
+            1,
+            "surface transparency must be captured once when the window is installed"
+        );
+        let sync = source
+            .split("fn sync_macos(")
+            .nth(1)
+            .and_then(|body| body.split("\n    }").next())
+            .expect("sync_macos body");
+        let normalized = sync.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains(
+                "macos_material_policy(config.window_blur, self.alpha_surface_required, reduce)"
+            ),
+            "live sync must use the alpha decision made with the native window and surface"
+        );
+        assert!(
+            !sync.contains("window_requires_alpha_surface"),
+            "an opacity reload cannot change an existing window's surface capabilities"
+        );
+    }
+
+    #[test]
     fn macos_material_distinguishes_blur_alpha_and_accessibility_fallback() {
-        assert_eq!(macos_material_policy(false, false, false), (false, true));
-        assert_eq!(macos_material_policy(false, true, false), (false, false));
-        assert_eq!(macos_material_policy(true, false, false), (true, false));
+        assert_eq!(
+            macos_material_policy(false, false, false),
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            }
+        );
+        assert_eq!(
+            macos_material_policy(false, true, false),
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: false,
+                titlebar_transparent: false,
+            },
+            "plain alpha uses AppKit's backdrop instead of a fully clear titlebar"
+        );
+        assert_eq!(
+            macos_material_policy(true, false, false),
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            },
+            "blur cannot show through a surface whose renderer is fully opaque"
+        );
+        assert_eq!(
+            macos_material_policy(true, true, false),
+            MacosMaterialPolicy {
+                effect_visible: true,
+                window_opaque: false,
+                titlebar_transparent: true,
+            },
+            "the documented blur-plus-alpha path needs the material behind a transparent titlebar"
+        );
+        assert_eq!(
+            macos_material_policy(false, true, true),
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            },
+            "Reduce Transparency restores the theme-colored opaque titlebar without blur"
+        );
         assert_eq!(
             macos_material_policy(true, true, true),
-            (false, true),
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            },
             "Reduce Transparency must disable both blur and translucency"
         );
     }
@@ -331,12 +517,16 @@ mod tests {
         assert!(alpha_required);
         assert_eq!(
             macos_material_policy(false, alpha_required, false),
-            (false, false)
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: false,
+                titlebar_transparent: false,
+            }
         );
     }
 
     #[test]
-    fn starfield_stays_opaque_but_can_opt_into_native_material() {
+    fn starfield_stays_opaque_without_a_titlebar_only_material_seam() {
         let config = Config {
             background_type: BackgroundType::Starfield,
             background_opacity: 0.4,
@@ -347,12 +537,20 @@ mod tests {
         assert!(!alpha_required, "the starfield shader fills the surface");
         assert_eq!(
             macos_material_policy(false, alpha_required, false),
-            (false, true)
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            }
         );
         assert_eq!(
             macos_material_policy(true, alpha_required, false),
-            (true, false),
-            "explicit blur enables native material even for an opaque scene"
+            MacosMaterialPolicy {
+                effect_visible: false,
+                window_opaque: true,
+                titlebar_transparent: true,
+            },
+            "an opaque scene must not expose material only in its native titlebar"
         );
     }
 }

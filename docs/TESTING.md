@@ -49,6 +49,20 @@ future Xcode preview from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
+The macOS material policy has portable tests for opaque, plain-alpha, blurred,
+and Reduce Transparency states. A source guard pins the AppKit-only seam: the
+effect is initialized from the native frame bounds, remains width/height
+sizable, stays below Winit's Metal view, and has no competing geometry setter
+in the module. Portable policy tests keep the effect out of borderless windows,
+where it would cover the Metal view, and out of an otherwise opaque window,
+where it would create a titlebar-only seam. Those checks cannot prove AppKit
+presentation. The release
+appearance gate therefore records
+a native decorated window with blur on and off, checks resize and full-screen on
+the blurred window, repeats the style transition while borderless, and toggles
+Reduce Transparency live. It verifies the titlebar seam, rounded corners,
+traffic lights, drag region, and first content row by sight.
+
 Shell-integration changes also run `just shell-integration-check`. Unlike the
 CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
 interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while

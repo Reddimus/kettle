@@ -89,9 +89,11 @@ window-blur = true
 ```
 
 On macOS, Kettle uses the native window material and follows Reduce
-Transparency immediately. Other platforms use the compositor support exposed
-by the operating system. If blur is unavailable, ordinary alpha transparency
-still works.
+Transparency immediately. Plain alpha without blur keeps AppKit's standard
+titlebar backdrop instead of a fully clear strip. Other platforms use the
+compositor support exposed by the operating system. If blur is unavailable,
+ordinary alpha transparency still works. Borderless macOS windows use that
+sharp-alpha fallback so terminal content stays visible.
 
 ## Common keys
 

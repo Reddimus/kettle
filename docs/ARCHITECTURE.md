@@ -357,12 +357,22 @@ silently shortened.
 ## In-process multi-window
 
 On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
-shadow, and rounded window mask. The titlebar material is transparent so the
-NSWindow background shows through it, and that native background is synchronized
-to the active Kettle theme's exact sRGB background color on every palette
-change. The content view is deliberately *not* full-size: tabs, terminal cells,
-pointer hit-testing, and ctl geometry all stay below the traffic lights without
-a platform-specific synthetic inset. Extending the renderer under the titlebar
+shadow, and rounded window mask. Native blur is a sibling behind Winit's Metal
+view and fills the complete AppKit frame, so one material reaches through the
+titlebar without covering the renderer or native controls. The effect is shown
+only when the renderer's creation-time surface is translucent; otherwise blur
+would appear in the titlebar alone above opaque terminal content. Opaque
+windows keep the titlebar transparent over the theme-synchronized NSWindow
+background. Plain alpha transparency without blur restores AppKit's standard
+titlebar backdrop instead of leaving a fully clear strip above tinted terminal
+content. Reduce Transparency makes the window opaque again. Borderless macOS
+windows do not install the effect: without AppKit's decorated frame, the
+sibling material composites over Winit's Metal layer. They keep ordinary alpha
+transparency so terminal content remains visible.
+
+The content view is deliberately *not* full-size: tabs, terminal cells, pointer
+hit-testing, and ctl geometry all stay below the traffic lights without a
+platform-specific synthetic inset. Extending the renderer under the titlebar
 would require compensating every one of those coordinate systems for AppKit's
 content layout rect; no such hidden geometry shift is introduced for a cosmetic
 fix.

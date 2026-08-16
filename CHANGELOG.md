@@ -27,6 +27,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **macOS translucent windows could leave the native titlebar completely
+  clear.** With blur enabled, the AppKit material now fills the complete native
+  frame instead of stopping at the terminal content view. Plain alpha without
+  blur uses AppKit's standard titlebar backdrop. Borderless windows retain
+  sharp alpha transparency because placing the native effect in their view
+  hierarchy covers the Metal surface. Fully opaque render surfaces do not show
+  titlebar-only material, and live opacity edits keep the window's creation-time
+  surface decision until a new window opens. The renderer and pointer geometry
+  remain below the native controls.
 - **Completion replies could outlive the command that requested them.** Any
   unrelated input now disarms publication before it reaches the PTY. Malformed
   private metadata has bounded recovery, unsafe rows no longer hide safe
