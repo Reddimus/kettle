@@ -9,11 +9,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Added
 
 - **Shell completions can appear in a compact panel at the top of the active
-  pane.** Fish and PowerShell publish their stock completion results
-  automatically when Tab has not been customized. Bash, Zsh, and customized
-  shells can use the cooperative bridge. The shell still owns matching,
-  quoting, insertion, selection, and execution. Kettle uses a lane above the
-  active command and hides the card if no detached upper lane fits.
+  pane.** Fish and PowerShell publish their shell completion results
+  automatically when Tab has not been customized. Bash and Zsh can use the
+  cooperative bridge. Customized Fish and PowerShell bindings stay unchanged
+  and do not publish a detached list. The shell supplies matching and quoting;
+  the bundled adapters preserve its insertion and cycling semantics.
+  Kettle uses a lane above the active command and hides the card if no detached
+  upper lane fits.
   Automatic bindings stay off inside tmux/screen. Mode changes apply to new
   shells so a live wrapper never loses its visible UI.
 - **Application windows can use native background material behind translucent
@@ -29,11 +31,47 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   unrelated input now disarms publication before it reaches the PTY. Malformed
   private metadata has bounded recovery, unsafe rows no longer hide safe
   siblings, and logs/output hooks receive one byte-exact filtered message per
-  PTY read instead of one message per parser chunk.
+  PTY read instead of one message per parser chunk. Managed Fish and PowerShell
+  adapters identify the prompt session and every Tab request on shows, updates,
+  and clears. Requests advance atomically with PTY queue admission and retain
+  individual key boundaries in remote batches. The active shell keymap declares
+  which Tab directions Kettle owns, counters fail closed before losing integer
+  precision, and prompt metadata already queued at focus loss stays quarantined.
+  Delayed output, custom bindings, focus loss, and backpressure therefore cannot
+  desynchronize the shell and terminal. Legacy
+  cooperative publishers remain quarantined until the next prompt after that
+  boundary.
 - **Transparent startup used the wrong window-surface test.** Window creation
   now uses effective composed alpha and wallpaper state. Settings name the
   new-window requirement, and failed config writes no longer claim a restart
   will apply a change that was never saved.
+- **Completion cards could show stale or mismatched rows.** Retained text now
+  invalidates when labels change. Both adapters retain a count- and byte-bounded
+  prefix and page it through detached messages. Fish inserts a captured
+  singleton without a second provider query, so a changing result cannot open
+  the stock inline pager. Fish's escaped provider form now preserves native
+  replacement and quoting semantics, including expandable `~user` results;
+  ordinary unique results still receive their trailing space, while native
+  no-space continuations remain open. Leading-dash candidates such as `--help`
+  are treated as completion data rather than abbreviation options. An
+  ambiguous first Tab does not edit a common prefix into the command line. A
+  PowerShell provider error also clears the detached state instead of reviving
+  PSReadLine's inline list. Bash preserves complete UTF-8 labels, and
+  structurally valid Kitty Tab forms refresh the card. The terminal parser and
+  raw-output filter now resume public output at the same bounded recovery
+  boundary for malformed or oversized private metadata, including after a
+  stray escape.
+- **Starfield windows unnecessarily requested transparent surfaces on every
+  platform.** `background-type = starfield` now stays opaque regardless of
+  `background-opacity` and `background-darkness`, because its shader covers the
+  full surface. Other backgrounds still select transparency from their
+  effective composed alpha.
+- **macOS native material could disagree with the renderer's alpha policy.** It
+  now follows the same effective-surface decision and updates when that decision
+  changes.
+- **Completion cards let pointer presses reach obscured terminal content.** A
+  press on the card now dismisses it without selecting hidden text, opening a
+  hidden link, or forwarding a mouse report to the foreground program.
 
 - **`Alt+Up` could not reach terminal applications on Linux and Windows.** The
   default chord always ran Kettle's `FocusUp` action, even at the top edge where

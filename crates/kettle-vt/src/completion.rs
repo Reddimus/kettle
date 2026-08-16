@@ -1,10 +1,14 @@
 //! Bounded parser for Kettle's shell completion side channel.
 
 pub const PREFIX: &[u8] = b"777;kettle-completion;";
-pub const MAX_MESSAGE_BYTES: usize = 32 * 1024;
+pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const MAX_CANDIDATES: usize = 64;
+pub const MAX_TOTAL_CANDIDATES: usize = 2048;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
+pub const KEY_TAB: u8 = 1;
+pub const KEY_BACKTAB: u8 = 2;
+const KEY_MASK: u8 = KEY_TAB | KEY_BACKTAB;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionKind {
@@ -16,22 +20,47 @@ pub enum CompletionKind {
 pub struct CompletionCandidate {
     pub label: String,
     pub description: String,
+    /// Zero-based position in the shell's complete result, not merely this
+    /// bounded wire page.
+    pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletionList {
+    /// Prompt session that produced this list. Protocol v1/v2 publishers do
+    /// not carry one.
+    pub session: Option<u64>,
     pub generation: u64,
+    /// The Tab/Shift-Tab request that produced this list. Protocol v1/v2
+    /// publishers do not carry one.
+    pub request: Option<u64>,
     pub kind: CompletionKind,
     pub selected: Option<usize>,
+    pub total: usize,
     pub source: String,
     pub candidates: Vec<CompletionCandidate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompletionUpdate {
+    /// Start a request-numbered completion session at the current prompt.
+    Sync {
+        session: u64,
+        keys: u8,
+    },
+    /// Change which raw completion keys the active shell keymap assigned to
+    /// Kettle without resetting the prompt session or request counter.
+    Keymap {
+        session: u64,
+        keys: u8,
+    },
     Show(CompletionList),
     Update(CompletionList),
-    Clear { generation: u64 },
+    Clear {
+        session: Option<u64>,
+        generation: u64,
+        request: Option<u64>,
+    },
 }
 
 pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
@@ -40,20 +69,55 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     }
     let text = std::str::from_utf8(&payload[PREFIX.len()..]).ok()?;
     let mut fields = text.split(';');
-    if fields.next()? != "1" {
+    let version = fields.next()?;
+    if !matches!(version, "1" | "2" | "3") {
         return None;
     }
     let operation = fields.next()?;
-    let generation = fields.next()?.parse::<u64>().ok()?;
-    if operation == "clear" {
+    if version == "3" && operation == "sync" {
+        let session = fields.next()?.parse::<u64>().ok()?;
+        let keys = fields.next()?.parse::<u8>().ok()?;
         return fields
             .next()
             .is_none()
-            .then_some(CompletionUpdate::Clear { generation });
+            .then_some(CompletionUpdate::Sync { session, keys })
+            .filter(|_| keys & !KEY_MASK == 0);
+    }
+    if version == "3" && operation == "keymap" {
+        let session = fields.next()?.parse::<u64>().ok()?;
+        let keys = fields.next()?.parse::<u8>().ok()?;
+        return fields
+            .next()
+            .is_none()
+            .then_some(CompletionUpdate::Keymap { session, keys })
+            .filter(|_| keys & !KEY_MASK == 0);
+    }
+    let session = if version == "3" {
+        Some(fields.next()?.parse::<u64>().ok()?)
+    } else {
+        None
+    };
+    let generation = fields.next()?.parse::<u64>().ok()?;
+    if operation == "clear" {
+        let request = if version == "3" {
+            Some(fields.next()?.parse::<u64>().ok()?)
+        } else {
+            None
+        };
+        return fields.next().is_none().then_some(CompletionUpdate::Clear {
+            session,
+            generation,
+            request,
+        });
     }
     if !matches!(operation, "show" | "update") {
         return None;
     }
+    let request = if version == "3" {
+        Some(fields.next()?.parse::<u64>().ok()?)
+    } else {
+        None
+    };
     let kind = match fields.next()? {
         "completion" => CompletionKind::Completion,
         "prediction" => CompletionKind::Prediction,
@@ -64,8 +128,21 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
         value => Some(value.parse::<usize>().ok()?),
     };
     let source = decode_field(fields.next()?, 64)?;
+    let (offset, total) = if matches!(version, "2" | "3") {
+        (
+            fields.next()?.parse::<usize>().ok()?,
+            fields.next()?.parse::<usize>().ok()?,
+        )
+    } else {
+        (0, usize::MAX)
+    };
     let remaining: Vec<&str> = fields.collect();
     if !remaining.len().is_multiple_of(2) || remaining.len() / 2 > MAX_CANDIDATES {
+        return None;
+    }
+    let raw_count = remaining.len() / 2;
+    let total = if version == "1" { raw_count } else { total };
+    if total == 0 || total > MAX_TOTAL_CANDIDATES || offset.checked_add(raw_count)? > total {
         return None;
     }
     let mut normalized_selected = None;
@@ -86,15 +163,31 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
         if selected == Some(original_index) {
             normalized_selected = Some(candidates.len());
         }
-        candidates.push(CompletionCandidate { label, description });
+        let position = if version == "1" {
+            candidates.len()
+        } else {
+            offset.checked_add(original_index)?
+        };
+        candidates.push(CompletionCandidate {
+            label,
+            description,
+            position,
+        });
     }
     if candidates.is_empty() {
         return None;
     }
     let list = CompletionList {
+        session,
         generation,
+        request,
         kind,
         selected: normalized_selected,
+        total: if version == "1" {
+            candidates.len()
+        } else {
+            total
+        },
         source,
         candidates,
     };
@@ -140,7 +233,11 @@ fn unsafe_display_scalar(value: char) -> bool {
     value.is_control()
         || matches!(
             value,
-            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            '\u{061c}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
         )
 }
 
@@ -168,10 +265,84 @@ mod tests {
         };
         assert_eq!(list.generation, 7);
         assert_eq!(list.selected, Some(1));
+        assert_eq!(list.total, 2);
+        assert_eq!(list.candidates[1].position, 1);
         assert_eq!(list.candidates[1].description, "search text");
         assert_eq!(
             parse(b"777;kettle-completion;1;clear;8"),
-            Some(CompletionUpdate::Clear { generation: 8 })
+            Some(CompletionUpdate::Clear {
+                session: None,
+                generation: 8,
+                request: None,
+            })
+        );
+    }
+
+    #[test]
+    fn version_two_pages_keep_absolute_positions_and_total() {
+        let CompletionUpdate::Update(list) = parse(
+            b"777;kettle-completion;2;update;8;completion;1;fish;64;130;item64;first;item65;second",
+        )
+        .expect("version two page") else {
+            panic!("expected update");
+        };
+        assert_eq!(list.total, 130);
+        assert_eq!(list.selected, Some(1));
+        assert_eq!(list.candidates[0].position, 64);
+        assert_eq!(list.candidates[1].position, 65);
+
+        assert!(
+            parse(b"777;kettle-completion;2;show;1;completion;0;fish;64;64;item;row").is_none(),
+            "a page cannot extend beyond the declared result"
+        );
+    }
+
+    #[test]
+    fn version_three_carries_the_tab_request_and_syncs_sessions() {
+        assert_eq!(
+            parse(b"777;kettle-completion;3;sync;12;3"),
+            Some(CompletionUpdate::Sync {
+                session: 12,
+                keys: KEY_TAB | KEY_BACKTAB,
+            })
+        );
+        assert_eq!(
+            parse(b"777;kettle-completion;3;keymap;12;1"),
+            Some(CompletionUpdate::Keymap {
+                session: 12,
+                keys: KEY_TAB,
+            })
+        );
+        let CompletionUpdate::Show(list) =
+            parse(b"777;kettle-completion;3;show;12;9;4;completion;0;fish;64;65;item;row")
+                .expect("version three page")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.generation, 9);
+        assert_eq!(list.session, Some(12));
+        assert_eq!(list.request, Some(4));
+        assert_eq!(list.total, 65);
+        assert_eq!(list.candidates[0].position, 64);
+        assert_eq!(
+            parse(b"777;kettle-completion;3;clear;12;10;4"),
+            Some(CompletionUpdate::Clear {
+                session: Some(12),
+                generation: 10,
+                request: Some(4),
+            })
+        );
+        assert!(
+            parse(b"777;kettle-completion;3;sync").is_none(),
+            "a sync without a prompt-session identity must fail closed"
+        );
+        assert!(
+            parse(b"777;kettle-completion;3;sync;12;4").is_none(),
+            "a sync with unknown key bits must fail closed"
+        );
+        assert!(
+            parse(b"777;kettle-completion;3;clear;12;10").is_none(),
+            "a sequenced clear without its request identity must fail closed"
         );
     }
 
@@ -208,6 +379,11 @@ mod tests {
             payload.extend_from_slice(format!(";item{index};").as_bytes());
         }
         assert!(parse(&payload).is_none());
+        assert!(
+            parse(b"777;kettle-completion;3;show;1;1;1;completion;0;fish;0;2049;item;row")
+                .is_none(),
+            "the accessibility result size must stay inside the retained-state cap"
+        );
     }
 
     #[test]
@@ -224,6 +400,8 @@ mod tests {
         assert_eq!(list.candidates[0].label, "safe");
         assert_eq!(list.candidates[1].label, "chosen");
         assert_eq!(list.selected, Some(1));
+        assert_eq!(list.total, 2);
+        assert_eq!(list.candidates[1].position, 1);
 
         let CompletionUpdate::Show(list) =
             parse(b"777;kettle-completion;1;show;2;completion;8;fish;only;row")
@@ -232,5 +410,27 @@ mod tests {
             panic!("expected show");
         };
         assert_eq!(list.selected, None);
+
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;1;show;3;completion;;fish;safe;row;bad%E2%80%A8line;separator;bad%E2%80%A9paragraph;separator",
+        )
+        .expect("Unicode line separators must skip only their own rows")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.candidates.len(), 1);
+        assert_eq!(list.candidates[0].label, "safe");
+
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;2;show;4;completion;2;fish;64;130;safe;first;bad%0Arow;newline;chosen;third",
+        )
+        .expect("a version two page must retain its absolute coordinates")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.total, 130);
+        assert_eq!(list.selected, Some(1));
+        assert_eq!(list.candidates[0].position, 64);
+        assert_eq!(list.candidates[1].position, 66);
     }
 }

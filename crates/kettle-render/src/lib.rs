@@ -473,10 +473,18 @@ fn prepared_text_areas_damage_key(areas: &[TextArea<'_>]) -> u64 {
     hash.finish()
 }
 
+fn completion_text_damage_key(labels: &[String], descriptions: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::hash::DefaultHasher::new();
+    labels.hash(&mut hash);
+    descriptions.hash(&mut hash);
+    hash.finish()
+}
+
 /// Text overlays whose content can change without a structural damage key.
-/// Completion rows are deliberately absent: their text-area key below catches
-/// open, close, content, selection, theme, and geometry edges, so a static list
-/// does not re-shape every visible glyph on each cursor blink.
+/// Completion rows are deliberately absent: their geometry and source-string
+/// keys catch each meaningful edge without reshaping on a cursor blink.
 fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
     overlay.search.is_some()
         || overlay.search_query.is_some()
@@ -737,6 +745,8 @@ pub struct CompletionOverlay {
     pub kind: String,
     pub source: String,
     pub selected: Option<usize>,
+    /// Total rows in the shell result; `candidates` is one bounded page.
+    pub total: usize,
     pub candidates: Vec<CompletionOverlayRow>,
 }
 
@@ -744,6 +754,8 @@ pub struct CompletionOverlay {
 pub struct CompletionOverlayRow {
     pub label: String,
     pub description: String,
+    /// Zero-based position in the complete shell result.
+    pub position: usize,
 }
 
 impl Default for SearchOverlay {
@@ -7264,12 +7276,14 @@ impl Renderer {
             self.resize_overlay_text.hash(&mut h);
             self.ime_text.hash(&mut h);
             prepared_text_areas_damage_key(&areas).hash(&mut h);
-            // Completion buffers are retained while the card is static. Their
-            // menu-area identity, bounds, and colors change on open, selection,
-            // content, geometry, theme, and close edges; an unrelated cursor
-            // blink does not. Hashing them avoids re-preparing the whole glyph
-            // atlas on every blink while a list is sitting open.
+            // Completion buffers are retained while the card is static. Hash
+            // both their geometry and their shaped source strings: glyphon
+            // keeps each buffer at the same address when a same-size candidate
+            // list changes, so the text-area identity alone cannot detect new
+            // labels or descriptions.
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
+            completion_text_damage_key(&self.completion_texts, &self.completion_description_texts)
+                .hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -11505,8 +11519,16 @@ fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
 /// configured background. Kept shared with window creation so wgpu never
 /// selects an alpha mode for pixels the OS window was created unable to show.
 pub fn window_requires_alpha_surface(cfg: &kettle_config::Config) -> bool {
-    composed_bg_alpha(cfg) < 1.0
-        || matches!(cfg.background_type, kettle_config::BackgroundType::Image)
+    use kettle_config::BackgroundType;
+
+    match cfg.background_type {
+        BackgroundType::Solid | BackgroundType::Transparent => composed_bg_alpha(cfg) < 1.0,
+        // Image alpha is unknown until decode. Starfield is different: its
+        // back-most shader writes alpha 1 across the full surface, regardless
+        // of the tint darkness used for terminal cells above it.
+        BackgroundType::Image => true,
+        BackgroundType::Starfield => false,
+    }
 }
 
 fn background_has_wallpaper(cfg: &kettle_config::Config) -> bool {
@@ -11524,10 +11546,15 @@ fn final_scene_is_uniformly_opaque(
     cfg: &kettle_config::Config,
     opaque_wallpaper_covers_surface: bool,
 ) -> bool {
-    if background_has_wallpaper(cfg) {
-        opaque_wallpaper_covers_surface
-    } else {
-        composed_bg_alpha(cfg) >= 1.0
+    match cfg.background_type {
+        // The procedural wallpaper is a fullscreen oversized triangle whose
+        // fragment shader always writes alpha 1. Unlike an image, there is no
+        // decoded source alpha or cover-mode geometry to prove at runtime.
+        kettle_config::BackgroundType::Starfield => true,
+        kettle_config::BackgroundType::Image => opaque_wallpaper_covers_surface,
+        kettle_config::BackgroundType::Solid | kettle_config::BackgroundType::Transparent => {
+            composed_bg_alpha(cfg) >= 1.0
+        }
     }
 }
 
@@ -15016,6 +15043,39 @@ mod pane_buffer_lifecycle_tests {
     }
 
     #[test]
+    fn same_shape_completion_text_changes_invalidate_retained_vertices() {
+        let labels = vec!["checkout".to_string(), "cherry-pick".to_string()];
+        let descriptions = vec!["switch branch".to_string(), "apply commit".to_string()];
+        let baseline = super::completion_text_damage_key(&labels, &descriptions);
+
+        let changed_labels = vec!["clean-up".to_string(), "cherry-pick".to_string()];
+        assert_ne!(
+            baseline,
+            super::completion_text_damage_key(&changed_labels, &descriptions),
+            "same-sized label edits must prepare new completion glyphs"
+        );
+
+        let changed_descriptions = vec!["switch branch".to_string(), "pick commit".to_string()];
+        assert_ne!(
+            baseline,
+            super::completion_text_damage_key(&labels, &changed_descriptions),
+            "same-sized description edits must prepare new completion glyphs"
+        );
+
+        let src = super::production_source();
+        let refresh = src
+            .find("if self.completion_texts[line_index] != line")
+            .expect("completion label buffers are refreshed");
+        let damage = src
+            .find("completion_text_damage_key(&self.completion_texts")
+            .expect("completion source strings enter the retained-text damage key");
+        assert!(
+            refresh < damage,
+            "completion strings must be refreshed before their retained-text damage key is computed"
+        );
+    }
+
+    #[test]
     fn context_menu_hover_preserves_text_damage_key() {
         let mut menu = super::ContextMenu {
             anchor: (20.0, 30.0),
@@ -16066,10 +16126,12 @@ mod completion_panel_tests {
             kind: "Completions".to_string(),
             source: "fish".to_string(),
             selected,
+            total: count,
             candidates: (0..count)
                 .map(|index| CompletionOverlayRow {
                     label: format!("item-{index}"),
                     description: String::new(),
+                    position: index,
                 })
                 .collect(),
         }
@@ -17163,6 +17225,17 @@ mod background_darkness_tests {
             "wallpaper alpha is not known until decode, so image windows must be alpha-capable"
         );
 
+        let starfield = Config {
+            background_type: BackgroundType::Starfield,
+            background_opacity: 1.0,
+            background_darkness: 0.5,
+            ..Config::default()
+        };
+        assert!(
+            !window_requires_alpha_surface(&starfield),
+            "the starfield shader covers every surface pixel with alpha 1"
+        );
+
         let reloaded = Config {
             background_type: BackgroundType::Solid,
             background_opacity: 0.5,
@@ -17230,6 +17303,21 @@ mod background_darkness_tests {
             !needs_postmultiplied_presentation(wgpu::CompositeAlphaMode::PreMultiplied, false),
             "a PreMultiplied surface consumes the scene directly even when translucent"
         );
+
+        let starfield = Config {
+            background_type: BackgroundType::Starfield,
+            background_opacity: 0.2,
+            background_darkness: 0.0,
+            ..Config::default()
+        };
+        assert!(
+            final_scene_is_uniformly_opaque(&starfield, false),
+            "starfield opacity is a shader invariant, not an image-cover result"
+        );
+        assert!(!needs_postmultiplied_presentation(
+            post,
+            final_scene_is_uniformly_opaque(&starfield, false)
+        ));
     }
 }
 

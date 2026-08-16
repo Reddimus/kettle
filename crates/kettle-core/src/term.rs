@@ -921,8 +921,8 @@ impl PtyReadProgressState {
             });
     }
 
-    fn mark_chunk_read(&self) {
-        let _ = self
+    fn mark_chunk_read(&self) -> u64 {
+        let previous = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 let pending = (state & Self::PENDING_MASK) >> Self::PENDING_SHIFT;
@@ -931,7 +931,9 @@ impl PtyReadProgressState {
                     "PTY pending-chunk counter overflowed"
                 );
                 Some(state.wrapping_add(Self::GENERATION_ONE + Self::PENDING_ONE))
-            });
+            })
+            .expect("PTY progress update is infallible");
+        (previous >> Self::GENERATION_SHIFT).wrapping_add(1)
     }
 
     fn mark_chunk_handled(&self) {
@@ -2240,15 +2242,43 @@ fn chunk_needs_graphics_gate(chunk: &Chunk) -> bool {
 /// How long a completion list stays on screen after a keystroke that is about
 /// to refresh it. The card only has to survive the PTY round-trip of one Tab.
 pub const COMPLETION_HIDE_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+// Fish represents counters through its exact-integer `math` range. Staying at
+// 2^52 - 1 gives every bundled adapter and Rust the same rollover point.
+const MAX_COMPLETION_REQUEST: u64 = (1_u64 << 52) - 1;
 
 #[derive(Default)]
 struct CompletionSlot {
+    /// Prompt session announced by a managed adapter. Every v3 reply must
+    /// carry this value so a delayed control message cannot cross prompts.
+    session: Option<u64>,
     generation: u64,
     list: Option<CompletionList>,
     /// Armed only by a Tab/Shift-Tab input. Unrelated input disarms publication
     /// before it enters the PTY, so a response already buffered by the shell
     /// cannot reopen a list for the command line that replaced it.
     accept_updates: bool,
+    /// Managed shell adapters number every Tab/Shift-Tab request. Keeping the
+    /// expected number here prevents output buffered for an earlier keypress
+    /// from crossing an input or focus boundary.
+    sequenced: bool,
+    /// Raw completion keys the active shell keymap assigned to Kettle. A
+    /// preserved custom binding must clear the card without consuming a
+    /// request number that the shell adapter never advances.
+    managed_keys: u8,
+    /// A managed session may be established only immediately after OSC 133 A.
+    /// Focus invalidation consumes this permission, so a buffered old `sync`
+    /// cannot lift the quarantine when the window regains focus.
+    sync_expected: bool,
+    /// Ignore prompt resets from PTY chunks the pump had already admitted when
+    /// focus was lost. The reader may process those chunks later, but they
+    /// still belong to the pre-focus stream and cannot lift quarantine.
+    ignore_sync_through_read: Option<u64>,
+    next_request: u64,
+    expected_request: Option<u64>,
+    /// Legacy cooperative publishers have no request number. After focus loss
+    /// they stay quarantined until the next prompt rather than risking a stale
+    /// card; request-numbered adapters can resume immediately.
+    legacy_quarantined: bool,
     /// Set when input that is expected to refresh the list was sent. The list
     /// stays visible until this passes, so a Tab that re-publishes the same
     /// candidates does not blink the card off for the round-trip.
@@ -2282,7 +2312,180 @@ fn poll_completion_hide_slot(
     (slot.list.take().is_some(), None)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionInputEffect {
+    Ignore,
+    Refresh(u8),
+    Clear,
+}
+
+fn completion_input_effect(bytes: &[u8]) -> CompletionInputEffect {
+    if bytes.is_empty() {
+        return CompletionInputEffect::Ignore;
+    }
+    if bytes == b"\t" {
+        return CompletionInputEffect::Refresh(kettle_vt::completion::KEY_TAB);
+    }
+    if bytes == b"\x1b[Z" {
+        return CompletionInputEffect::Refresh(kettle_vt::completion::KEY_BACKTAB);
+    }
+    let Some(parameters) = bytes
+        .strip_prefix(b"\x1b[9")
+        .and_then(|rest| rest.strip_suffix(b"u"))
+    else {
+        return CompletionInputEffect::Clear;
+    };
+    if parameters.is_empty() {
+        return CompletionInputEffect::Refresh(kettle_vt::completion::KEY_TAB);
+    }
+    let Some(modifiers) = parameters.strip_prefix(b";") else {
+        return CompletionInputEffect::Clear;
+    };
+    if modifiers.is_empty()
+        || !modifiers
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b':' | b';'))
+    {
+        return CompletionInputEffect::Clear;
+    }
+    let mut key_fields = modifiers
+        .split(|byte| *byte == b';')
+        .next()
+        .unwrap_or_default()
+        .split(|byte| *byte == b':');
+    let modifier = key_fields.next().unwrap_or_default();
+    if modifier.is_empty() || !modifier.iter().all(u8::is_ascii_digit) {
+        return CompletionInputEffect::Clear;
+    }
+    let event = key_fields.next();
+    if key_fields.next().is_some() {
+        return CompletionInputEffect::Clear;
+    }
+    let Some(modifier) = std::str::from_utf8(modifier)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+    else {
+        return CompletionInputEffect::Clear;
+    };
+    let Some(modifiers) = modifier.checked_sub(1) else {
+        return CompletionInputEffect::Clear;
+    };
+    // Caps Lock and Num Lock do not change which completion direction the
+    // shell sees. Every other modifier does: Fish and PSReadLine do not run
+    // Kettle's stock Tab handlers for Alt/Ctrl/Super combinations, so counting
+    // one here would advance only the terminal side of the request sequence.
+    let key = match modifiers & !(64 | 128) {
+        0 => kettle_vt::completion::KEY_TAB,
+        1 => kettle_vt::completion::KEY_BACKTAB,
+        _ => return CompletionInputEffect::Clear,
+    };
+    match event {
+        Some(b"3") => CompletionInputEffect::Ignore,
+        Some(b"1") | Some(b"2") | None => CompletionInputEffect::Refresh(key),
+        _ => CompletionInputEffect::Clear,
+    }
+}
+
+fn for_each_completion_input_effect(bytes: &[u8], mut visit: impl FnMut(CompletionInputEffect)) {
+    if bytes.is_empty() {
+        return;
+    }
+    // A bracketed paste is one editor insertion even when its payload contains
+    // Tab bytes. Counting those as key bindings would advance the terminal's
+    // request number while the shell deliberately does not. Paste admission
+    // passes the complete bracketed frame as one input boundary; if that ever
+    // becomes chunked, the caller must carry paste state across those chunks.
+    if bytes.starts_with(b"\x1b[200~") && bytes.ends_with(b"\x1b[201~") {
+        visit(CompletionInputEffect::Clear);
+        return;
+    }
+
+    let mut index = 0usize;
+    let mut pending_clear = false;
+    while index < bytes.len() {
+        let remaining = &bytes[index..];
+        let special = if remaining.starts_with(b"\t") {
+            Some((
+                1,
+                CompletionInputEffect::Refresh(kettle_vt::completion::KEY_TAB),
+            ))
+        } else if remaining.starts_with(b"\x1b[Z") {
+            Some((
+                3,
+                CompletionInputEffect::Refresh(kettle_vt::completion::KEY_BACKTAB),
+            ))
+        } else if remaining.starts_with(b"\x1b[9") {
+            remaining
+                .iter()
+                .take(64)
+                .position(|byte| *byte == b'u')
+                .and_then(|end| {
+                    let consumed = end + 1;
+                    let effect = completion_input_effect(&remaining[..consumed]);
+                    (effect != CompletionInputEffect::Clear).then_some((consumed, effect))
+                })
+        } else {
+            None
+        };
+
+        if let Some((consumed, effect)) = special {
+            if pending_clear {
+                visit(CompletionInputEffect::Clear);
+                pending_clear = false;
+            }
+            visit(effect);
+            index += consumed;
+        } else {
+            pending_clear = true;
+            index += 1;
+        }
+    }
+    if pending_clear {
+        visit(CompletionInputEffect::Clear);
+    }
+}
+
+fn apply_completion_input_effect(
+    slot: &mut CompletionSlot,
+    effect: CompletionInputEffect,
+    now: std::time::Instant,
+) {
+    match effect {
+        CompletionInputEffect::Ignore => {}
+        CompletionInputEffect::Refresh(key) if !slot.sequenced || slot.managed_keys & key != 0 => {
+            arm_completion_refresh_slot(slot, now)
+        }
+        CompletionInputEffect::Refresh(_) => clear_completion_slot(slot),
+        CompletionInputEffect::Clear => clear_completion_slot(slot),
+    }
+}
+
+fn with_completion_input_admission_slot<R>(
+    slot: &mut CompletionSlot,
+    inputs: &[&[u8]],
+    now: std::time::Instant,
+    admit: impl FnOnce() -> (R, bool),
+) -> R {
+    let (result, accepted) = admit();
+    if accepted {
+        for input in inputs {
+            for_each_completion_input_effect(input, |effect| {
+                apply_completion_input_effect(slot, effect, now);
+            });
+        }
+    }
+    result
+}
+
 fn arm_completion_refresh_slot(slot: &mut CompletionSlot, now: std::time::Instant) {
+    if slot.sequenced {
+        if slot.next_request >= MAX_COMPLETION_REQUEST {
+            clear_completion_slot(slot);
+            return;
+        }
+        slot.next_request += 1;
+        slot.expected_request = Some(slot.next_request);
+    }
     slot.accept_updates = true;
     if slot.list.is_some() {
         slot.hide_after = Some(now + COMPLETION_HIDE_GRACE);
@@ -2293,6 +2496,14 @@ fn clear_completion_slot(slot: &mut CompletionSlot) {
     slot.list = None;
     slot.hide_after = None;
     slot.accept_updates = false;
+    slot.expected_request = None;
+}
+
+fn invalidate_completion_slot(slot: &mut CompletionSlot, read_generation: u64) {
+    clear_completion_slot(slot);
+    slot.legacy_quarantined = true;
+    slot.sync_expected = false;
+    slot.ignore_sync_through_read = Some(read_generation);
 }
 
 fn apply_completion_update(cell: &Mutex<CompletionSlot>, update: CompletionUpdate) {
@@ -2300,38 +2511,90 @@ fn apply_completion_update(cell: &Mutex<CompletionSlot>, update: CompletionUpdat
         return;
     };
     match update {
+        CompletionUpdate::Sync { session, keys } if current.sync_expected => {
+            *current = CompletionSlot {
+                session: Some(session),
+                sequenced: true,
+                managed_keys: keys,
+                ..CompletionSlot::default()
+            };
+        }
+        CompletionUpdate::Keymap { session, keys }
+            if current.sequenced && current.session == Some(session) =>
+        {
+            clear_completion_slot(&mut current);
+            current.managed_keys = keys;
+        }
         CompletionUpdate::Show(list) | CompletionUpdate::Update(list)
-            if current.accept_updates && list.generation >= current.generation =>
+            if current.accept_updates
+                && list.generation >= current.generation
+                && match (list.session, list.request) {
+                    (Some(session), Some(request)) => {
+                        current.sequenced
+                            && current.session == Some(session)
+                            && current.expected_request == Some(request)
+                    }
+                    (None, None) => !current.sequenced && !current.legacy_quarantined,
+                    _ => false,
+                } =>
         {
             current.generation = list.generation;
             current.list = Some(list);
             // The refresh the grace window was waiting for arrived.
             current.hide_after = None;
         }
-        CompletionUpdate::Clear { generation } if generation >= current.generation => {
+        CompletionUpdate::Clear {
+            session,
+            generation,
+            request,
+        } if generation >= current.generation
+            && match (session, request) {
+                (Some(session), Some(request)) => {
+                    current.sequenced
+                        && current.session == Some(session)
+                        && current.expected_request == Some(request)
+                }
+                (None, None) => !current.sequenced && !current.legacy_quarantined,
+                _ => false,
+            } =>
+        {
             current.generation = generation;
             current.list = None;
             current.hide_after = None;
             current.accept_updates = false;
         }
-        CompletionUpdate::Show(_)
+        CompletionUpdate::Sync { .. }
+        | CompletionUpdate::Keymap { .. }
+        | CompletionUpdate::Show(_)
         | CompletionUpdate::Update(_)
         | CompletionUpdate::Clear { .. } => {}
     }
 }
 
-fn reset_completion_session(cell: &Mutex<CompletionSlot>) {
+fn reset_completion_session(cell: &Mutex<CompletionSlot>, read_generation: u64) {
     if let Ok(mut current) = cell.lock() {
-        *current = CompletionSlot::default();
+        if current
+            .ignore_sync_through_read
+            .is_some_and(|boundary| read_generation <= boundary)
+        {
+            clear_completion_slot(&mut current);
+            current.sync_expected = false;
+            return;
+        }
+        *current = CompletionSlot {
+            sync_expected: true,
+            ..CompletionSlot::default()
+        };
     }
 }
 
 #[cfg(test)]
 mod completion_state_tests {
     use super::{
-        COMPLETION_HIDE_GRACE, CompletionSlot, apply_completion_update,
-        arm_completion_refresh_slot, clear_completion_slot, completion_visible,
-        poll_completion_hide_slot, reset_completion_session,
+        COMPLETION_HIDE_GRACE, CompletionSlot, MAX_COMPLETION_REQUEST, apply_completion_update,
+        arm_completion_refresh_slot, clear_completion_slot, completion_input_effect,
+        completion_visible, invalidate_completion_slot, poll_completion_hide_slot,
+        reset_completion_session, with_completion_input_admission_slot,
     };
     use kettle_vt::{CompletionKind, CompletionList, CompletionUpdate};
     use std::sync::Mutex;
@@ -2339,14 +2602,26 @@ mod completion_state_tests {
 
     fn list(generation: u64) -> CompletionList {
         CompletionList {
+            session: None,
             generation,
+            request: None,
             kind: CompletionKind::Completion,
             selected: None,
+            total: 1,
             source: "test".to_string(),
             candidates: vec![kettle_vt::CompletionCandidate {
                 label: "candidate".to_string(),
                 description: String::new(),
+                position: 0,
             }],
+        }
+    }
+
+    fn sequenced_list(session: u64, generation: u64, request: u64) -> CompletionList {
+        CompletionList {
+            session: Some(session),
+            request: Some(request),
+            ..list(generation)
         }
     }
 
@@ -2355,7 +2630,7 @@ mod completion_state_tests {
         let slot = Mutex::new(CompletionSlot::default());
         arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(42)));
-        reset_completion_session(&slot);
+        reset_completion_session(&slot, 0);
         arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(1)));
 
@@ -2369,7 +2644,14 @@ mod completion_state_tests {
         let slot = Mutex::new(CompletionSlot::default());
         arm_completion_refresh_slot(&mut slot.lock().unwrap(), Instant::now());
         apply_completion_update(&slot, CompletionUpdate::Show(list(7)));
-        apply_completion_update(&slot, CompletionUpdate::Clear { generation: 8 });
+        apply_completion_update(
+            &slot,
+            CompletionUpdate::Clear {
+                session: None,
+                generation: 8,
+                request: None,
+            },
+        );
         apply_completion_update(&slot, CompletionUpdate::Update(list(7)));
 
         let slot = slot.lock().unwrap();
@@ -2385,6 +2667,7 @@ mod completion_state_tests {
             list: Some(list(3)),
             accept_updates: true,
             hide_after: Some(now + COMPLETION_HIDE_GRACE),
+            ..CompletionSlot::default()
         };
         assert!(completion_visible(&slot, now).is_some());
         assert!(
@@ -2418,6 +2701,284 @@ mod completion_state_tests {
     }
 
     #[test]
+    fn a_request_from_before_focus_loss_cannot_reopen_after_rearming() {
+        let cell = Mutex::new(CompletionSlot::default());
+        reset_completion_session(&cell, 0);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 7,
+                keys: kettle_vt::completion::KEY_TAB | kettle_vt::completion::KEY_BACKTAB,
+            },
+        );
+
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        let first = sequenced_list(7, 1, 1);
+        apply_completion_update(&cell, CompletionUpdate::Show(first.clone()));
+        invalidate_completion_slot(&mut cell.lock().unwrap(), 0);
+
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Update(first));
+        assert!(
+            cell.lock().unwrap().list.is_none(),
+            "request 1 was buffered before focus loss and must not satisfy request 2"
+        );
+
+        let second = sequenced_list(7, 2, 2);
+        apply_completion_update(&cell, CompletionUpdate::Update(second));
+        let current = cell.lock().unwrap();
+        assert_eq!(current.list.as_ref().and_then(|list| list.request), Some(2));
+    }
+
+    #[test]
+    fn stale_sequenced_clear_and_sync_cannot_cross_a_focus_boundary() {
+        let cell = Mutex::new(CompletionSlot::default());
+        reset_completion_session(&cell, 0);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 7,
+                keys: kettle_vt::completion::KEY_TAB | kettle_vt::completion::KEY_BACKTAB,
+            },
+        );
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Show(sequenced_list(7, 1, 1)));
+        invalidate_completion_slot(&mut cell.lock().unwrap(), 0);
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Clear {
+                session: Some(7),
+                generation: 99,
+                request: Some(1),
+            },
+        );
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 8,
+                keys: kettle_vt::completion::KEY_TAB,
+            },
+        );
+        apply_completion_update(&cell, CompletionUpdate::Show(sequenced_list(7, 2, 2)));
+
+        let current = cell.lock().unwrap();
+        assert_eq!(current.session, Some(7));
+        assert_eq!(current.generation, 2);
+        assert_eq!(current.list.as_ref().and_then(|list| list.request), Some(2));
+    }
+
+    #[test]
+    fn a_prompt_already_in_the_reader_queue_cannot_lift_focus_quarantine() {
+        let cell = Mutex::new(CompletionSlot::default());
+        reset_completion_session(&cell, 4);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 7,
+                keys: kettle_vt::completion::KEY_TAB,
+            },
+        );
+        invalidate_completion_slot(&mut cell.lock().unwrap(), 10);
+
+        // The pump admitted generation 10 before focus was lost, but its
+        // PromptStart and sync were still waiting on the parser thread.
+        reset_completion_session(&cell, 10);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 8,
+                keys: kettle_vt::completion::KEY_TAB,
+            },
+        );
+        assert_eq!(cell.lock().unwrap().session, Some(7));
+
+        // A later PTY read is a new ordered boundary and may establish the
+        // shell's next prompt session.
+        reset_completion_session(&cell, 11);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Sync {
+                session: 9,
+                keys: kettle_vt::completion::KEY_TAB,
+            },
+        );
+        assert_eq!(cell.lock().unwrap().session, Some(9));
+    }
+
+    #[test]
+    fn input_requests_advance_only_after_admission_and_keep_key_boundaries() {
+        let mut slot = CompletionSlot {
+            session: Some(3),
+            sequenced: true,
+            managed_keys: kettle_vt::completion::KEY_TAB | kettle_vt::completion::KEY_BACKTAB,
+            ..CompletionSlot::default()
+        };
+        let now = Instant::now();
+        let rejected = with_completion_input_admission_slot(&mut slot, &[b"\t"], now, || {
+            ("backpressured", false)
+        });
+        assert_eq!(rejected, "backpressured");
+        assert_eq!(slot.next_request, 0);
+        assert_eq!(slot.expected_request, None);
+
+        with_completion_input_admission_slot(&mut slot, &[b"\t", b"\x1b[Z"], now, || ((), true));
+        assert_eq!(slot.next_request, 2);
+        assert_eq!(slot.expected_request, Some(2));
+        assert!(slot.accept_updates);
+
+        with_completion_input_admission_slot(&mut slot, &[b"\x1b[9;1:3u"], now, || ((), true));
+        assert_eq!(slot.next_request, 2, "a Kitty Tab release is not a request");
+        assert_eq!(slot.expected_request, Some(2));
+        assert_eq!(
+            completion_input_effect(b"\x1b[9;1:2u"),
+            super::CompletionInputEffect::Refresh(kettle_vt::completion::KEY_TAB),
+            "a Kitty key repeat invokes the shell binding and is a request"
+        );
+
+        slot.managed_keys = kettle_vt::completion::KEY_TAB;
+        with_completion_input_admission_slot(&mut slot, &[b"\x1b[Z"], now, || ((), true));
+        assert_eq!(
+            slot.next_request, 2,
+            "a preserved custom Shift-Tab must not consume the shell's request id"
+        );
+        assert!(!slot.accept_updates);
+        let cell = Mutex::new(slot);
+        apply_completion_update(
+            &cell,
+            CompletionUpdate::Keymap {
+                session: 3,
+                keys: kettle_vt::completion::KEY_TAB | kettle_vt::completion::KEY_BACKTAB,
+            },
+        );
+        let mut slot = cell.into_inner().unwrap();
+        with_completion_input_admission_slot(&mut slot, &[b"\x1b[Z"], now, || ((), true));
+        assert_eq!(
+            slot.next_request, 3,
+            "the active keymap may re-enable Shift-Tab"
+        );
+    }
+
+    #[test]
+    fn raw_batches_count_tabs_in_order_but_keep_bracketed_paste_opaque() {
+        let now = Instant::now();
+        let mut slot = CompletionSlot {
+            session: Some(3),
+            sequenced: true,
+            managed_keys: kettle_vt::completion::KEY_TAB | kettle_vt::completion::KEY_BACKTAB,
+            ..CompletionSlot::default()
+        };
+
+        with_completion_input_admission_slot(&mut slot, &[b"x\t\t"], now, || ((), true));
+        assert_eq!(slot.next_request, 2);
+        assert_eq!(slot.expected_request, Some(2));
+        assert!(slot.accept_updates, "the final byte was a completion key");
+
+        with_completion_input_admission_slot(&mut slot, &[b"\tword"], now, || ((), true));
+        assert_eq!(slot.next_request, 3);
+        assert_eq!(slot.expected_request, None);
+        assert!(!slot.accept_updates, "text after Tab retires its response");
+
+        with_completion_input_admission_slot(
+            &mut slot,
+            &[b"\x1b[200~pasted\t\ttext\x1b[201~"],
+            now,
+            || ((), true),
+        );
+        assert_eq!(slot.next_request, 3, "paste payload Tabs are not bindings");
+        assert_eq!(slot.expected_request, None);
+    }
+
+    #[test]
+    fn request_exhaustion_fails_closed_until_the_next_prompt() {
+        let now = Instant::now();
+        let mut slot = CompletionSlot {
+            session: Some(9),
+            sequenced: true,
+            next_request: MAX_COMPLETION_REQUEST - 1,
+            ..CompletionSlot::default()
+        };
+        arm_completion_refresh_slot(&mut slot, now);
+        assert_eq!(slot.expected_request, Some(MAX_COMPLETION_REQUEST));
+
+        arm_completion_refresh_slot(&mut slot, now);
+        assert_eq!(slot.next_request, MAX_COMPLETION_REQUEST);
+        assert_eq!(slot.expected_request, None);
+        assert!(!slot.accept_updates);
+    }
+
+    #[test]
+    fn only_tab_presses_and_repeats_refresh_completion() {
+        use super::CompletionInputEffect::{Clear, Ignore, Refresh};
+
+        for input in [
+            b"\t".as_slice(),
+            b"\x1b[9u",
+            b"\x1b[9;1u",
+            b"\x1b[9;1:1u",
+            b"\x1b[9;1:2u",
+            b"\x1b[9;65u",
+            b"\x1b[9;129u",
+        ] {
+            assert_eq!(
+                completion_input_effect(input),
+                Refresh(kettle_vt::completion::KEY_TAB),
+                "{input:?}"
+            );
+        }
+        for input in [
+            b"\x1b[Z".as_slice(),
+            b"\x1b[9;2:1u",
+            b"\x1b[9;2:2;9u",
+            b"\x1b[9;66u",
+            b"\x1b[9;130u",
+        ] {
+            assert_eq!(
+                completion_input_effect(input),
+                Refresh(kettle_vt::completion::KEY_BACKTAB),
+                "{input:?}"
+            );
+        }
+        for release in [b"\x1b[9;1:3u".as_slice(), b"\x1b[9;2:3u"] {
+            assert_eq!(completion_input_effect(release), Ignore, "{release:?}");
+        }
+        assert_eq!(completion_input_effect(b""), Ignore);
+        for input in [
+            b"x".as_slice(),
+            b"\r",
+            b"\x1b[A",
+            b"\x1b[1;2Z",
+            b"\x1b[9;0u",
+            b"\x1b[9;3u",
+            b"\x1b[9;5u",
+            b"\x1b[9;6u",
+            b"\x1b[9;9u",
+            b"\x1b[90u",
+            b"\x1b[9;u",
+            b"\x1b[9;2Xu",
+        ] {
+            assert_eq!(completion_input_effect(input), Clear, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_publishers_stay_quarantined_after_focus_loss_until_a_prompt() {
+        let cell = Mutex::new(CompletionSlot::default());
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Show(list(1)));
+        invalidate_completion_slot(&mut cell.lock().unwrap(), 0);
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Show(list(2)));
+        assert!(cell.lock().unwrap().list.is_none());
+
+        reset_completion_session(&cell, 1);
+        arm_completion_refresh_slot(&mut cell.lock().unwrap(), Instant::now());
+        apply_completion_update(&cell, CompletionUpdate::Show(list(1)));
+        assert!(cell.lock().unwrap().list.is_some());
+    }
+
+    #[test]
     fn grace_expiry_requests_exactly_one_erase_frame() {
         let now = Instant::now();
         let mut slot = CompletionSlot {
@@ -2425,6 +2986,7 @@ mod completion_state_tests {
             list: Some(list(3)),
             accept_updates: true,
             hide_after: Some(now + COMPLETION_HIDE_GRACE),
+            ..CompletionSlot::default()
         };
         assert_eq!(
             poll_completion_hide_slot(&mut slot, now),
@@ -2450,6 +3012,7 @@ mod completion_state_tests {
             list: None,
             accept_updates: true,
             hide_after: Some(deadline),
+            ..CompletionSlot::default()
         });
         apply_completion_update(&cell, CompletionUpdate::Update(list(8)));
 
@@ -2678,8 +3241,9 @@ enum PtyPumpSend {
 /// short timed wait preserves bounded backpressure during normal operation
 /// while making teardown observation independent of parser progress.
 fn forward_pty_buffer_or_drain(
-    raw_tx: &crossbeam_channel::Sender<Option<Vec<u8>>>,
+    raw_tx: &crossbeam_channel::Sender<Option<(u64, Vec<u8>)>>,
     drain_output: &AtomicBool,
+    generation: u64,
     mut buffer: Vec<u8>,
 ) -> PtyPumpSend {
     loop {
@@ -2687,9 +3251,12 @@ fn forward_pty_buffer_or_drain(
             return PtyPumpSend::Drain(buffer);
         }
 
-        match raw_tx.send_timeout(Some(buffer), std::time::Duration::from_millis(10)) {
+        match raw_tx.send_timeout(
+            Some((generation, buffer)),
+            std::time::Duration::from_millis(10),
+        ) {
             Ok(()) => return PtyPumpSend::Forwarded,
-            Err(crossbeam_channel::SendTimeoutError::Timeout(Some(returned))) => {
+            Err(crossbeam_channel::SendTimeoutError::Timeout(Some((_, returned)))) => {
                 buffer = returned;
             }
             Err(crossbeam_channel::SendTimeoutError::Timeout(None)) => {
@@ -2706,9 +3273,9 @@ fn forward_pty_buffer_or_drain(
 /// of ready data, and flushing immediately when EOF makes a terminator impossible.
 fn receive_pty_chunk(
     processor: &mut Processor,
-    raw_rx: &crossbeam_channel::Receiver<Option<Vec<u8>>>,
+    raw_rx: &crossbeam_channel::Receiver<Option<(u64, Vec<u8>)>>,
     context: &mut SyncFlushContext<'_>,
-) -> Option<Vec<u8>> {
+) -> Option<(u64, Vec<u8>)> {
     loop {
         match processor.sync_timeout().sync_timeout() {
             Some(deadline) => {
@@ -4065,10 +4632,12 @@ const POWERSHELL_BOOTSTRAP_PREFIX: &str =
 #[cfg(any(windows, test))]
 const POWERSHELL_BOOTSTRAP_SUFFIX: &str = "'))))";
 #[cfg(any(windows, test))]
-const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 25_000;
+const POWERSHELL_BOOTSTRAP_MAX_CHARS: usize = 32_767 - 5_000;
 
 // Keep the embedded command comfortably below CreateProcessW's 32,767-code-unit
-// ceiling. The payload is ASCII, so bytes and UTF-16 code units are identical.
+// ceiling. Five thousand code units remain for the executable path, argument
+// quoting, and future fixed arguments. The payload is ASCII, so bytes and
+// UTF-16 code units are identical.
 #[cfg(any(windows, test))]
 const _: () = assert!(
     POWERSHELL_BOOTSTRAP_PREFIX.len()
@@ -5165,8 +5734,9 @@ impl Terminal {
                     // the handoff and recycle buffers: under output flood this
                     // applies backpressure instead of retaining an unbounded
                     // queue of fresh 64 KiB allocations.
-                    let (raw_tx, raw_rx) =
-                        crossbeam_channel::bounded::<Option<Vec<u8>>>(PTY_PUMP_QUEUE_DEPTH);
+                    let (raw_tx, raw_rx) = crossbeam_channel::bounded::<
+                        Option<(u64, Vec<u8>)>,
+                    >(PTY_PUMP_QUEUE_DEPTH);
                     let (recycle_tx, recycle_rx) =
                         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
                     {
@@ -5341,10 +5911,11 @@ impl Terminal {
                                             // either the parser queue or a lossless raw-output
                                             // subscriber. ConPTY completion must not treat that
                                             // hidden work as a quiet transport.
-                                            pump_progress.mark_chunk_read();
+                                            let read_generation = pump_progress.mark_chunk_read();
                                             match forward_pty_buffer_or_drain(
                                                 &raw_tx,
                                                 &pump_drain_output,
+                                                read_generation,
                                                 buffer,
                                             ) {
                                                 PtyPumpSend::Forwarded => {}
@@ -5466,7 +6037,7 @@ impl Terminal {
                                 proxy.send_event_exit();
                                 break;
                             }
-                            Some(buffer) => {
+                            Some((read_generation, buffer)) => {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
@@ -6004,7 +6575,10 @@ impl Terminal {
                                             // lifecycle boundary, so retire the prior shell's
                                             // generation before accepting the new prompt's
                                             // completion stream.
-                                            reset_completion_session(&completion_cell);
+                                            reset_completion_session(
+                                                &completion_cell,
+                                                read_generation,
+                                            );
                                             if let Ok(t) = term.lock()
                                                 && !t.mode().contains(
                                                     alacritty_terminal::term::TermMode::ALT_SCREEN,
@@ -6639,22 +7213,47 @@ impl Terminal {
             .and_then(|slot| completion_visible(&slot, now).cloned())
     }
 
-    /// Hide the current shell completion list and disarm publication until the
-    /// next Tab/Shift-Tab. This is the local input boundary the shell's protocol
-    /// generation cannot express.
+    /// Dismiss a visible completion card after a pointer press on the card.
     pub fn clear_completion(&self) {
         if let Ok(mut completion) = self.completion.lock() {
             clear_completion_slot(&mut completion);
         }
     }
 
-    /// Keep the current list visible a moment longer because the input just
-    /// sent (Tab / Shift-Tab) is expected to replace it. Clearing outright
-    /// instead blinks the card off once per cycle step for the PTY round-trip.
-    pub fn defer_completion_hide(&self) {
+    /// Clear completion UI across an application-focus boundary. Legacy
+    /// unnumbered publishers remain blocked until the next prompt; managed
+    /// request-numbered adapters can safely resume on the next Tab.
+    pub fn invalidate_completion(&self) {
         if let Ok(mut completion) = self.completion.lock() {
-            arm_completion_refresh_slot(&mut completion, std::time::Instant::now());
+            let read_generation = self.pty_read_progress.load().generation;
+            invalidate_completion_slot(&mut completion, read_generation);
         }
+    }
+
+    /// Apply completion state changes atomically with admission to the PTY
+    /// input queue. The completion lock stays held across the non-blocking
+    /// enqueue and the state commit, so a fast shell reply cannot apply before
+    /// its request is armed. A rejected enqueue changes nothing, so
+    /// backpressure cannot consume a request number the shell never received.
+    ///
+    /// `inputs` preserves key boundaries for batched control input. A remote
+    /// `send_keys` request can contain several Tab presses in one queue item;
+    /// the shell observes each key and increments once per key, so Kettle must
+    /// do the same rather than classifying only the concatenated byte string.
+    pub fn with_completion_input_admission<R>(
+        &self,
+        inputs: &[&[u8]],
+        admit: impl FnOnce() -> (R, bool),
+    ) -> R {
+        let Ok(mut completion) = self.completion.lock() else {
+            return admit().0;
+        };
+        with_completion_input_admission_slot(
+            &mut completion,
+            inputs,
+            std::time::Instant::now(),
+            admit,
+        )
     }
 
     /// Expire a grace-hidden completion or report how long the event loop must
@@ -12142,7 +12741,7 @@ mod teardown_tests {
     fn full_pump_queue_yields_to_teardown_drain() {
         let (raw_tx, raw_rx) = crossbeam_channel::bounded(1);
         raw_tx
-            .send(Some(vec![1]))
+            .send(Some((1, vec![1])))
             .expect("fill bounded parser handoff");
 
         let drain_output = std::sync::Arc::new(AtomicBool::new(false));
@@ -12152,7 +12751,7 @@ mod teardown_tests {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let pump = std::thread::spawn(move || {
             pump_start.wait();
-            let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, vec![2]);
+            let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, 2, vec![2]);
             done_tx.send(result).expect("publish pump handoff result");
         });
 
@@ -12168,7 +12767,7 @@ mod teardown_tests {
         assert_eq!(drained, PtyPumpSend::Drain(vec![2]));
         assert_eq!(
             raw_rx.recv().expect("original queued parser chunk"),
-            Some(vec![1])
+            Some((1, vec![1]))
         );
         pump.join().expect("pump handoff model thread");
     }
@@ -13793,7 +14392,7 @@ mod sync_update_flush_guard {
         );
 
         let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
-        tx.send(Some(b"next chunk".to_vec())).unwrap();
+        tx.send(Some((7, b"next chunk".to_vec()))).unwrap();
         let generation = AtomicU64::new(0);
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_for_callback = wakes.clone();
@@ -13816,7 +14415,7 @@ mod sync_update_flush_guard {
 
         let chunk = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
             .expect("queued chunk is preserved after the flush");
-        assert_eq!(chunk, b"next chunk");
+        assert_eq!(chunk, (7, b"next chunk".to_vec()));
         assert!(processor.sync_timeout().sync_timeout().is_none());
         assert_eq!(generation.load(Ordering::Acquire), 1);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
@@ -13934,7 +14533,7 @@ mod sync_update_flush_guard {
             processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hupdated");
         }
         let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
-        tx.send(Some(b"\x1b[?2026l".to_vec())).unwrap();
+        tx.send(Some((8, b"\x1b[?2026l".to_vec()))).unwrap();
         let generation = AtomicU64::new(0);
         let waker: Waker = Arc::new(|| panic!("no timeout wake expected"));
         let output_wake = OutputWakeGate::new(waker);
@@ -13951,8 +14550,9 @@ mod sync_update_flush_guard {
             output_wake: &output_wake,
         };
 
-        let close = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
+        let (read_generation, close) = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
             .expect("close sequence received");
+        assert_eq!(read_generation, 8);
         processor.advance(&mut *term.lock().unwrap(), &close);
 
         assert!(processor.sync_timeout().sync_timeout().is_none());

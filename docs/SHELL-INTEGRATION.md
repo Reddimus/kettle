@@ -73,15 +73,48 @@ second implementation from this guide; updates then stay in one place.
 own candidates in a compact list above the active command. If the prompt is too
 close to the top to leave a detached lane, Kettle hides the list rather than
 moving it beside or below the input. It never follows or covers the command
-line. Kettle does not complete a word itself; the active shell still owns
-matching, quoting, insertion, cycling, and execution.
+line. Kettle never invents matches: the active shell supplies candidates and
+quoting rules, and still owns execution. The bundled Fish and PowerShell
+adapters preserve their shells' quoting and insertion rules while the detached
+card is active. Fish inserts a captured singleton directly rather than querying
+the provider a second time, so a changing provider cannot reopen the stock
+pager beside the command line. The escaped result returned by Fish supplies the
+exact editor spelling, including expandable `~user` and variable completions.
+Kettle restores the ordinary unique-result space and leaves Fish's native
+no-space continuations open.
+
+The list appears only for the focused pane at an ordinary shell prompt with
+enough rows above the command. It stays hidden in alternate-screen programs,
+scrollback, input-method composition, short splits, and while Kettle has a
+modal open. Clicking the card dismisses it without acting on terminal content
+hidden underneath. Tab still works when the list is hidden. Prompt and command-line
+changes discard stale replies. Losing window focus clears pending requests in
+every in-process pane, including panes armed by broadcast input, while scrolling
+away from the live command hides the card until the viewport returns. Fish and
+PowerShell identify every prompt session and completion keypress, including
+clear replies. Kettle advances that request only after the key enters the PTY
+queue and preserves individual keys in remote batches, so delayed output or
+backpressure cannot desynchronize the shell and terminal. Each prompt also
+advertises which Tab directions Kettle owns; Fish updates that mask when its Vi
+keymap changes, so a custom binding never consumes an adapter request. Counter
+exhaustion disables the side channel instead of reusing an identity. A legacy
+cooperative publisher without these identities stays hidden until the next
+prompt after focus loss.
 
 Fish and PowerShell install the list automatically only when Tab still has the
 shell's stock completion binding. A custom user or plugin binding is never
-replaced. Fish supports its default and Vi insert key maps. PowerShell queries
+replaced and does not publish a detached list, because Kettle cannot safely
+sequence requests for a handler it does not own. Fish supports its default and
+Vi insert key maps. PowerShell queries
 `TabExpansion2` once per cycle, then uses that same cached result for both the
 PSReadLine edit and the visible row. Tab and Shift Tab cycle the same list. The
-list is cleared when the command line is accepted or a new prompt starts.
+list is cleared when the command line is accepted or a new prompt starts. Both
+automatic adapters retain a bounded prefix: at most 2048 candidates, 16 KiB per
+source row, and 256 KiB in aggregate. They publish only the 64-row page around
+the current selection. Larger or oversized results stop at that bounded prefix
+instead of invoking an inline shell pager. For a multi-candidate Fish result,
+the first Tab opens only the detached list and leaves the command line unchanged;
+later Tab or Shift Tab presses select from that retained result.
 
 Automatic bindings stay off inside tmux and screen because those multiplexers
 can consume the private metadata while still passing the capability variable

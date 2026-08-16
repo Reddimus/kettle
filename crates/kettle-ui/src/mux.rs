@@ -36,13 +36,6 @@ const MAX_QUEUED_USER_INPUT_BYTES: usize = MAX_USER_INPUT_MESSAGE_BYTES + 64 * 1
 const MAX_PROTOCOL_REPLY_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_QUEUED_PROTOCOL_REPLY_BYTES: usize = 2 * 1024 * 1024;
 
-fn completion_refresh_input(bytes: &[u8]) -> bool {
-    matches!(
-        bytes,
-        b"\t" | b"\x1b[Z" | b"\x1b[9;2u" | b"\x1b[9;2:1u" | b"\x1b[9;2:2u" | b"\x1b[9;2:3u"
-    )
-}
-
 fn pane_environment(config: &Config) -> Vec<(String, String)> {
     let mut environment = config.env.clone();
     // Append after user env so the runtime capability is authoritative. The
@@ -772,12 +765,37 @@ impl Pane {
         if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
             return result;
         }
-        if completion_refresh_input(bytes.as_ref()) {
-            self.term.defer_completion_hide();
-        } else {
-            self.term.clear_completion();
+        let input = bytes.as_ref();
+        self.term.with_completion_input_admission(&[input], || {
+            let result = self.pty_input.enqueue_user(bytes.clone());
+            (result, result.is_queued())
+        })
+    }
+
+    /// Admit an already validated synthetic key batch as one queue item while
+    /// retaining each key boundary for completion request accounting.
+    pub fn feed_key_inputs(&self, inputs: &[Vec<u8>]) -> PaneInputResult {
+        if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
+            return result;
         }
-        self.pty_input.enqueue_user(bytes)
+        let Some(total) = inputs
+            .iter()
+            .try_fold(0usize, |total, input| total.checked_add(input.len()))
+        else {
+            return PaneInputResult::Oversize;
+        };
+        if total > MAX_USER_INPUT_MESSAGE_BYTES {
+            return PaneInputResult::Oversize;
+        }
+        let mut joined = Vec::with_capacity(total);
+        for input in inputs {
+            joined.extend_from_slice(input);
+        }
+        let boundaries: Vec<&[u8]> = inputs.iter().map(Vec::as_slice).collect();
+        self.term.with_completion_input_admission(&boundaries, || {
+            let result = self.pty_input.enqueue_user(Arc::from(joined));
+            (result, result.is_queued())
+        })
     }
 
     /// Queue a terminal-protocol reply or report irrespective of read-only
@@ -7731,26 +7749,6 @@ mod node_tests {
         let a = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let b = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         assert!(b > a, "monotonic process-wide allocation");
-    }
-
-    #[test]
-    fn only_tab_navigation_gets_the_completion_grace_window() {
-        assert!(super::completion_refresh_input(b"\t"));
-        assert!(super::completion_refresh_input(b"\x1b[Z"));
-        for kitty in [
-            b"\x1b[9;2u".as_slice(),
-            b"\x1b[9;2:1u",
-            b"\x1b[9;2:2u",
-            b"\x1b[9;2:3u",
-        ] {
-            assert!(
-                super::completion_refresh_input(kitty),
-                "Fish 4 enables Kitty keyboard reporting and receives Shift-Tab in this form"
-            );
-        }
-        for input in [b"x".as_slice(), b"\r", b"\x1b[A", b"\x1b[1;2Z"] {
-            assert!(!super::completion_refresh_input(input), "{input:?}");
-        }
     }
 
     #[test]

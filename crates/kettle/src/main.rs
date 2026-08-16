@@ -3182,7 +3182,12 @@ mod tests {
         for copied_body in [
             "__kettle_pc() {",
             "__kettle_osc7() {",
+            "kettle_completion_show() {",
+            "kettle_completion_clear() {",
             "function __kettle_prompt",
+            "function __kettle_completion_cycle",
+            "function global:__kettle_completion_emit",
+            "function global:__kettle_completion_cycle",
         ] {
             assert!(
                 !doc.contains(copied_body),
@@ -3218,15 +3223,14 @@ mod tests {
             diags.is_empty(),
             "embedded example config emits diagnostics: {diags:?}"
         );
-        // Drift guard: the example config MUST document the
-        // Terminator-parity surface. If a
+        // Drift guard: the example config must document the extended
+        // configuration surface. If a
         // future contributor strips the section, this test catches it
         // before users see a stripped-down `--print-default-config`
         // output.
         //
-        // Later extended with accent-color (peacock
-        // parity), force-no-bell (Terminator force_no_bell
-        // parity), and trigger (regex-on-output → action).
+        // This includes window accents, a global bell override, and output
+        // triggers.
         for key in &[
             "window-state",
             "borderless",
@@ -3243,8 +3247,7 @@ mod tests {
         ] {
             assert!(
                 embedded.contains(key),
-                "embedded example config missing Terminator-parity key {key:?}; \
-                 the Terminator-parity passes documented it"
+                "embedded example config missing extended key {key:?}"
             );
         }
     }

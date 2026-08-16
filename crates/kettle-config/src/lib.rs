@@ -5769,34 +5769,28 @@ cell-height = 1.2\n";
             "main CONFIG.md Keys table has duplicate primary rows: {duplicates:?}"
         );
 
-        // Keep the Terminator-parity reference as one Markdown table. Prose
+        // Keep the extended-key reference as one Markdown table. Prose
         // inserted between rows silently closes a CommonMark table, leaving
         // every later `| key | ... |` line rendered as plain text.
-        let parity = config_md
-            .split("### Terminator-parity keys")
+        let extended = config_md
+            .split("### Extended keys")
             .nth(1)
-            .and_then(|s| {
-                s.split("### Terminator-parity config keys by disposition")
-                    .next()
-            })
-            .expect("Terminator-parity keys section");
+            .and_then(|s| s.split("### Extended key status").next())
+            .expect("extended keys section");
         let mut table_started = false;
         let mut table_closed = false;
-        for line in parity.lines() {
+        for line in extended.lines() {
             if line.starts_with('|') {
                 assert!(
                     !table_closed,
-                    "CONFIG.md Terminator-parity table resumes after prose: {line}"
+                    "CONFIG.md extended-key table resumes after prose: {line}"
                 );
                 table_started = true;
             } else if table_started {
                 table_closed = true;
             }
         }
-        assert!(
-            table_started,
-            "CONFIG.md Terminator-parity table is missing"
-        );
+        assert!(table_started, "CONFIG.md extended-key table is missing");
     }
 
     #[test]

@@ -37,7 +37,8 @@ __kettle_osc7() {
 }
 
 __kettle_completion_encode() {
-  local LC_ALL=C p="$1" out='' i=0 j ch byte need valid len=${#1} limit=$2
+  local LC_ALL=C
+  local p="$1" out='' i=0 j ch byte need valid len=${#1} limit=$2
   while (( i < len && i < limit )); do
     ch="${p:i:1}"
     printf -v byte '%d' "'$ch"

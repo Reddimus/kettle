@@ -1,6 +1,6 @@
 # Configuration reference
 
-kettle uses the **Ghostty `key = value` grammar**: one entry per line, the
+Kettle uses a simple **`key = value` grammar**: one entry per line, the
 first `=` splits key and value, surrounding whitespace is trimmed, only
 full-line `#` comments are allowed (a `#` inside a value is part of the value,
 so hex colors work), and some keys may repeat.
@@ -39,10 +39,9 @@ line out (a `#` inside a value is part of the value, so hex colours work).
 Keys may be written with `-` or `_`; the two are the same key, so
 `scroll-on-output` and `scroll_on_output` both work.
 
-**One matched pair of surrounding quotes is stripped from a value.** Terminator's
-own manual writes quoted values (`background_color = "#1a1b26"`,
-`scrollback_lines = '500'`), and without this the quote became part of the text
-and every such line was silently discarded by the value parsers. Only the
+**One matched pair of surrounding quotes is stripped from a value.** This lets
+quoted colors and numbers parse as expected instead of treating the quote as
+part of the value. Only the
 outermost pair goes, and only when both ends are the same character — so
 `"a'` is left alone and inner quotes survive for values that legitimately
 contain them, such as a shell command. If you need a value that really does
@@ -76,10 +75,10 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
 | `cell-width` / `cell-height` | float 0.5–3.0 | `1.0` | Multiplier applied to measured terminal cell width / height. Values are clamped at parse time and reload live with font metric changes |
-| `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` (default) is cell-locked rendering: every glyph is pinned to its terminal cell (`col × cell_w`), the way Alacritty/kitty/WezTerm/Ghostty render — so fallback-font glyphs (CJK, color emoji, some symbols) and ligatures can't drift off the grid that selection / cursor / mouse hit-testing use. `legacy` restores the pre-2.25.0 continuous layout as a rollback escape hatch. Leave it on `grid` unless you are isolating a renderer regression |
+| `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` pins every glyph to its terminal cell (`col × cell_w`) so fallback-font glyphs, emoji, symbols, and ligatures cannot drift away from selection, cursor, or mouse hit testing. `legacy` restores the pre-2.25.0 continuous layout for diagnosing renderer regressions |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
-| `cursor-color` | color | from theme | The cursor BLOCK color. `cursor-bg-color` (Terminator `cursor_bg_color`) is an alias |
-| `cursor-fg-color` | color | from theme | The color of the glyph UNDER the cursor (Terminator `cursor_fg_color`). A focused block cursor renders solid in the block color with the glyph recolored to this — the standard inverted-cursor model |
+| `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
+| `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
 | `selection-background` / `selection-foreground` | color | from theme | |
 | `palette` | `N=#RRGGBB` | from theme | Repeatable, `N` = 0..15 |
 | `search-foreground` / `search-background` | color | from theme | Search-match + quick-select highlight. Default derives from the active theme (`search-background` → the theme's yellow `palette[3]`, `search-foreground` → the theme background), so it matches whatever theme is set; override with an explicit color |
@@ -88,9 +87,9 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
 | `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. If only one dimension is set, the other uses Kettle's startup baseline (`100x36`). Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
-| `background-opacity` | float | `1.0` | 0..1. Values below `1.0` request an alpha-capable window surface. Combine with `window-blur = true` for a native material instead of sharp see-through content |
+| `background-opacity` | float | `1.0` | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. Combine a translucent result with `window-blur = true` for native material instead of sharp see-through content |
 | `window-blur` | bool | `false` | Ask the window system to blur content behind Kettle. macOS uses the native under-window material and becomes opaque when Reduce Transparency is enabled; Windows requests the system transient-window backdrop; supported Linux compositors receive the standard blur hint. Unsupported compositors keep ordinary alpha transparency. Opt-in, and a newly opened window is required when changing from an opaque startup surface |
-| `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` accepted as Alacritty-spelled alias for `bar` |
+| `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` is an alias for `bar` |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read. Target `c` uses the regular clipboard; target `p`/`s` uses Linux PRIMARY without cross-target fallback (platforms without a separate selection use their one clipboard). DA1 advertises clipboard extension `52` only when writes are enabled and the platform clipboard is available; live reload updates that advertisement for existing panes |
@@ -109,7 +108,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch). Applied with **sub-notch precision**: precision touchpads and high-resolution wheels report a fraction of a notch per event, and the remainder is carried across events instead of being rounded away, so slow gestures scroll smoothly and proportionally. Small multipliers stay usable for the same reason — at `0.1` a notch is 0.3 lines, which accumulates over three notches rather than vanishing |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
-| `smart-copy` | bool | `true` | `true` (default + Terminator default): `Action::Copy` preserves the existing clipboard when there's no selection. `false`: clobber the clipboard with empty text on every Ctrl+Shift+C — for users who prefer "Copy means the clipboard now reflects the current selection, even when empty" over the smart heuristic. Distinct from `copy-on-select` (which controls auto-copy when text selection completes) |
+| `smart-copy` | bool | `true` | `true` preserves the existing clipboard when there is no selection. `false` replaces it with empty text on every Ctrl+Shift+C. This is separate from `copy-on-select`, which controls automatic copying after selection |
 | `menu-item` (repeatable, `menu-item = LABEL = CMD`) | string | none | Add a row to the right-click context menu that writes `CMD\n` to the focused pane's PTY when clicked. Repeatable — each `menu-item = …` line appends one row. Use `menu-item = Clear screen = clear`, `menu-item = Open editor = $EDITOR ~/.bashrc`, etc. For richer behavior (Lua callbacks, conditional rows) use `kettle.add_menu_item(label, callback)` from `init.lua` — see [`docs/examples/init.lua`](examples/init.lua) |
 | `handle-size` | int -1–50 px | `-1` | Split-divider stroke width. `-1` = use the theme default (1 px). Higher values give a chunkier divider — useful on high-DPI displays where 1 px is hard to see |
 | `geometry-hinting` | bool | `false` | When `true`, request an approximate 8×16 logical-pixel resize increment. This is not recomputed from the active font metrics, so it does not guarantee integral terminal rows/columns and does not track font zoom. X11 honors the hint; Wayland support varies by compositor; macOS ignores it, and Kettle does not currently apply a native Windows increment |
@@ -122,8 +121,8 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `split-divider-color` | color | theme `palette[8]` | Pane border/divider color for *inactive* panes |
 | `focused-split-color` (`split-divider-color-focused`) | color | theme `palette[4]` | Border color for the *focused* pane — the "here am I" accent. While **broadcast mode** is on (`Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, or `Super+G` elsewhere), this is temporarily overridden by theme `palette[3]` (yellow) to signal the active state; the configured color is restored when broadcast turns off |
 | `cursor-blink-interval` | int ms | `530` | Cursor blink half-period |
-| `tab-silence-threshold-ms` (`tab-silence-threshold`) | int ms | `10000` | An inactive tab whose unseen output went quiet for this long transitions from the cyan `Output` dot to the dim `Silent` dot (Terminator's Silence Watcher). Clamped `[1000, 600_000]` |
-| `command-notify-threshold-ms` (`command-notify-threshold`) | int ms | `5000` | Minimum command duration before kettle fires a desktop notification when an OSC 133 D (CommandEnd) event arrives **while the window is unfocused**. `0` disables. Requires shell integration (`kettle --shell-integration bash >> ~/.bashrc` or equivalent) — without OSC 133 the shell never emits the event. Clamped `[0, 86_400_000]` (0..1 day). Terminator parity: `command_notify.py` plugin |
+| `tab-silence-threshold-ms` (`tab-silence-threshold`) | int ms | `10000` | An inactive tab whose unseen output went quiet for this long transitions from the cyan `Output` dot to the dim `Silent` dot. Clamped `[1000, 600_000]` |
+| `command-notify-threshold-ms` (`command-notify-threshold`) | int ms | `5000` | Minimum command duration before Kettle fires a desktop notification when an OSC 133 D (CommandEnd) event arrives **while the window is unfocused**. `0` disables. Requires shell integration because the shell emits the event. Clamped `[0, 86_400_000]` |
 | `copy-on-select` | bool | `true` | Auto-copy the selection to the clipboard on release |
 | `update-policy` | `off`\|`notify`\|`auto` | `auto` | Stable-channel behavior after the first-launch privacy skip: no automatic request, a passive banner, or an authenticated background install used after the next restart. **`auto` is the default** (kettle keeps itself current, oh-my-zsh style); set `off` to opt out. Official installer ownership is required for installation. See [UPDATES.md](UPDATES.md) |
 | `update-check-interval-hours` | int hours | `24` | How often the background check may contact the release feed. Default 24 (daily); floored at 1. `update-policy = off` disables checking regardless |
@@ -131,27 +130,27 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `restore-session` (`restore_session`) | bool | `false` | Reopen the previous session (tabs, splits, working dirs) on launch. **Off by default** — like every mainstream terminal, a new window/instance opens fresh (a single pane in the default cwd). The session is always *saved* on exit only when this is on (or `--restore` is passed), so a fresh window never clobbers a saved layout. `--restore` is the one-shot equivalent; `--layout NAME` restores a named workspace independently |
 | `agent-server` | `off`\|`read-only`\|`full` | `off` | The agent control server mode. **Off by default.** When enabled, kettle starts a local-IPC control server that an AI agent / `kettle ctl` / `kettle mcp` can use to read the screen and drive panes (`read-only` reads / lists / subscribes; `full` also sends text + runs commands). Security: local-only — a Unix domain socket (mode `0600`) or a Windows named pipe (current-user DACL); no TCP. `--agent-server <mode>` is the per-launch override. See [docs/AGENT.md](AGENT.md) |
 | `agent-badge` | string | `"[agent] "` | The per-pane titlebar prefix shown while an agent connection has the pane attached. Set to any glyph you like (`agent-badge = 🤖 `); empty disables it |
-| `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back (Alacritty `scrolling.history.scroll_on_input`) |
-| `scroll-on-output` | bool | `false` | Jump back to the bottom when new output arrives while scrolled back. Off by default so reading old output isn't interrupted by a chatty background job (Alacritty `scrolling.history.scroll_on_output`) |
-| `mouse-hide-while-typing` (`mouse-hide`) | bool | `true` | Hide the OS mouse cursor while the user is typing; re-shown on the next mouse movement (Alacritty `mouse.hide_when_typing`, kitty `hide_mouse_when_typing`) |
-| `word-delimiters` (`selection-word-chars`, `semantic-escape-chars`) | string | engine default | Characters that delimit a "word" for double-click selection. Empty = engine default (`,│\`\|:\"' ()[]{}<>\t`). Override to e.g. `()[]{}` to make `/` part of a word so URLs/paths are picked up whole (Alacritty `selection.semantic_escape_chars`) |
+| `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back |
+| `scroll-on-output` | bool | `false` | Jump back to the bottom when new output arrives while scrolled back. Off by default so a chatty background job does not interrupt reading old output |
+| `mouse-hide-while-typing` (`mouse-hide`) | bool | `true` | Hide the OS mouse cursor while typing and show it again on mouse movement |
+| `word-delimiters` (`selection-word-chars`, `semantic-escape-chars`) | string | engine default | Characters that delimit a word for double-click selection. Leave empty for the engine default. For example, `()[]{}` makes `/` part of a word so paths and URLs select as one unit |
 | `font-feature` | string | — | OpenType feature(s), repeatable / comma-list. Forms: `liga`, `+calt`, `-liga`, `liga off`, `ss01`, `cv01=2`, `zero 1`. Applied on top of the ligature toggle |
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
-| `keybind` | `trigger=action` | Terminator set | Repeatable |
+| `keybind` | `trigger=action` | built in map | Repeatable |
 | `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default since v2.18) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
-| `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | iTerm2 / kitty parity — show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default so the row isn't subtracted from the pane grid unless the user wants it. Aliases: `none` / `false` = off, `on` / `true` = bottom |
-| `trigger` | regex \[`:: cmd args`\] | — | iTerm2 parity — repeatable. Each match against PTY output in an unfocused pane fires `window.request_user_attention(Critical)` (Wayland notification counter / X11 WM_HINTS urgency / macOS dock bounce / Windows taskbar flash). 2 s throttle so a build-script error storm pulses once, not 100×. Patterns are the whole value before an optional ` :: ` — alternation like `(BUILD SUCCESSFUL\|FAILED)` survives intact. With ` :: cmd args`, the command is spawned instead (argv form, **no shell**); since v2.20, `{0}`/`{1}`… in the argv substitute the match's capture groups (Terminator `run_cmd_on_match` parity — substitution can only change an argument's *value*, never add arguments) |
-| `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | v2.20, Ghostty parity — a transient centered `cols×rows` chip while the window is being resized. `after-first` shows it on every resize except the initial window placement; `never` disables |
+| `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | Show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default. Aliases: `none` / `false` = off, `on` / `true` = bottom |
+| `trigger` | regex \[`:: cmd args`\] | — | Repeatable. A match against output in an unfocused pane requests attention. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
+| `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing. `after-first` skips the initial window placement; `never` disables it |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference via winit when the platform reports one. If `theme-schedule` is set, the schedule owns the switch instead |
 | `light-theme` / `dark-theme` | string | — (falls back to `theme`) | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`) |
 | `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
 | `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
-| `allow-bold` | bool | `true` | When `false`, the SGR bold attribute is suppressed — useful on fonts without a bold companion (Terminator `allow_bold`) |
+| `allow-bold` | bool | `true` | When `false`, suppress the SGR bold attribute. Useful with fonts that have no bold face |
 | `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
 | `clear-select-on-copy` | bool | `false` | When `true`, the selection highlight is cleared right after a copy (some users prefer the selection to disappear once captured) |
-| `invert-search` | bool | `false` | Terminator parity. Flip the search bar's default step direction: `Enter` searches backward and `Shift+Enter` forward. The explicit Previous / Next controls and `Shift+F3` / `F3` keep their literal directions |
-| `search-wrap` | bool | `true` | Terminator parity. When `true` (default), scrollback search wraps around (past the last match → the first). When `false`, Next stops at the last match and Previous at the first |
+| `invert-search` | bool | `false` | Flip the search bar's default step direction: `Enter` searches backward and `Shift+Enter` forward. Previous, Next, `Shift+F3`, and `F3` keep their literal directions |
+| `search-wrap` | bool | `true` | Wrap from the last match to the first and back. When `false`, navigation stops at the buffer ends |
 | `vim-menu-nav` | bool | `true` | Vim-style navigation in kettle's menus/overlays. List overlays (context menu, new-tab dropdown, settings) take `j`/`k` (wrapping), `g`/`G`, `Ctrl+d`/`Ctrl+u` (half page); in the context menu / new-tab dropdown `h` = back/close and `l` = drill in/activate, while in the settings panel `h`/`l` step the highlighted row's value (same as `←`/`→`); confirm dialogs take `y`/`n`; text-input overlays with a selection (palette, search, layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so letters keep typing. Menu mnemonics skip the nav letters while enabled; type-to-search keeps working. `false` restores plain arrow-key navigation |
 | `backspace-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `ascii-del` | Byte(s) the Backspace key sends. `ascii-del` = `0x7f` (the modern default); `control-h` = `0x08` for hosts expecting the old binding |
 | `delete-binding` | `ascii-del`\|`control-h`\|`escape-sequence`\|`auto` | `escape-sequence` | Byte(s) the Delete key sends. `escape-sequence` = the standard `CSI 3~` |
@@ -164,7 +163,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 
 ### Scrollback search
 
-`Ctrl+Shift+F` opens a responsive Terminator-style bar at the bottom of the
+`Ctrl+Shift+F` opens a responsive search bar at the bottom of the
 window. Its controls are Editor, Previous, Next, Wrap, Case, Invert, and Close;
 `search-wrap`, `search-case-sensitive`, and `invert-search` are also available
 in **Settings → Search**. Changes made from either surface persist to the config.
@@ -286,12 +285,10 @@ PowerShell to see your installed distro names.
 > instead of opening a shell. To get a Linux *login* shell, ask for it
 > inside the distro: `command = wsl.exe -d Ubuntu -- bash -l`.
 
-### Terminator-parity keys
+### Extended keys
 
-Both kebab-case (kettle convention) and underscore form (Terminator's
-own form, e.g. `show_titlebar`) are accepted for every key in this
-table. See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the
-per-key audit against Terminator's source.
+Both kebab-case and underscore spellings are accepted for every key in this
+table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
@@ -321,18 +318,18 @@ per-key audit against Terminator's source.
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
 | `background-blur` | bool | `false` | CPU-side 3-pass separable box blur at decode (approximates Gaussian) |
-| `background-darkness` | float 0..1 | `0.5` | How opaque the terminal's own background colour is where it covers a `transparent` / `image` / `starfield` backdrop. **`0.0` = fully see-through** (the backdrop shows at full strength), **`1.0` = fully covered** (the backdrop is hidden behind the terminal background); default `0.5`. Matches Terminator, which assigns this straight to the background colour's alpha — lower it for more transparency. Only applies when `background-type` is not `solid`. *(This row previously described the scale backwards.)* |
-| `inactive-color-offset` / `inactive-bg-color-offset` | float 0..1 | `0.8` / `1.0` | How far an unfocused pane recedes. Both are read, together with `unfocused-split-opacity`, and the strongest of the three wins — setting two does not dim twice as hard as either alone. Not Terminator's exact model (it rescales the foreground palette per glyph); kettle composites an overlay, which reproduces the intent without re-shaping every unfocused pane on each frame |
-| `exit-action` | enum | `close` | What happens when the shell exits: `close` (default) \| `hold` (keep dead-pane visible) \| `restart` (re-spawn shell — spawns the same argv + cwd in a new tab, deduped so alacritty's `Exit` + `ChildExit` emit pair counts once) |
-| `broadcast-default` | `all`\|`group`\|`off` | `group` | Which scope the broadcast chord (`Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, or `Super+G` elsewhere) turns on. `group` — the panes of the active tab, kettle's long-standing behaviour. `all` — every pane in the window. `off` — the chord cannot enable broadcast at all. Terminator stores this as the *initial* mode instead; kettle waits to be asked, because a window that started in `all` would mirror every keystroke everywhere before you touched anything. Their default behaves identically either way, since Terminator's `group` mode with no groups assigned types only into the focused pane |
+| `background-darkness` | float 0..1 | `0.5` | Opacity of the terminal background over a transparent, image, or starfield backdrop. `0.0` is fully see-through; `1.0` hides the backdrop. Only applies when `background-type` is not `solid` |
+| `inactive-color-offset` / `inactive-bg-color-offset` | float 0..1 | `0.8` / `1.0` | How far an unfocused pane recedes. Both are read with `unfocused-split-opacity`, and the strongest value wins. Kettle composites one overlay rather than reshaping each glyph |
+| `exit-action` | enum | `close` | What happens when the shell exits: `close`, `hold` the dead pane, or `restart` the same argv and working directory in a new tab. Duplicate child-exit notifications are coalesced |
+| `broadcast-default` | `all`\|`group`\|`off` | `group` | Scope enabled by the broadcast chord. `group` targets the active tab, `all` targets every pane in the window, and `off` prevents the chord from enabling broadcast. Kettle waits for the chord instead of starting a window in an input-mirroring state |
 | `split-to-group` | bool | `false` | A new split joins the broadcast group of the pane it came from, so splitting a grouped pane widens the group instead of quietly dropping out of it |
-| `autoclean-groups` | bool | `true` | Forget a broadcast group once its last pane closes. Terminator prunes an explicit group list; kettle's groups are just the names its panes carry, so what this clears is a broadcast still aimed at a group nobody is in — which would otherwise keep the titlebar claiming it and sweep up the next pane given that name. Set `false` to keep the aim |
-| `always-split-with-profile` | bool | `false` | A new split repeats the parent pane's launch command instead of falling back to a shell. Only changes *direct* launches (`kettle -e vim`, an agent CLI) — an ordinary shell is cloned either way. Off, splitting an editor gives you somewhere to work; on, it gives you a second editor, which is what a Terminator profile with a custom command does |
-| `force-no-bell` | bool | `false` | Terminator `force_no_bell` parity. Silences EVERY bell flavor regardless of the `bell` mode — visual flash, audible (none today), window-attention, and the `tab_bar.bell` activity dot. Use when running in a meeting / library / next-to-a-baby setup |
-| `visible-bell` / `urgent-bell` | bool / bool | `—` | Terminator compat aliases for the unified `bell` key. Terminator splits the bell into two orthogonal bools; kettle's `bell = both` is `visible_bell + urgent_bell`, `bell = visual` is `visible_bell` alone, `bell = attention` is `urgent_bell` alone. The two arms compose at end-of-parse so file order doesn't matter. **Precedence:** if you set the canonical `bell = …` key explicitly, the Terminator aliases are ignored — canonical wins over alias on hybrid configs |
+| `autoclean-groups` | bool | `true` | Forget a broadcast group after its last pane closes. This prevents a stale group target from claiming a later pane that reuses the same name |
+| `always-split-with-profile` | bool | `false` | Repeat the parent pane's direct launch command in a new split instead of opening a shell. Ordinary shell panes are cloned either way |
+| `force-no-bell` | bool | `false` | Silence every bell path regardless of `bell`: visual flash, window attention, and the tab activity dot |
+| `visible-bell` / `urgent-bell` | bool / bool | `—` | Legacy aliases for the unified `bell` key. Together they map to `both`; individually they map to `visual` or `attention`. An explicit `bell = …` setting wins regardless of file order |
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
-| `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | See the `light-theme` / `dark-theme` row in the **Keys** table above — same fields. Terminator `auto_theme` parity: `Action::ToggleLightDark` swaps between the two (case-insensitive bundled-name lookup; an empty value no-ops that side of the swap and falls back to `theme`) |
-| `search-case-sensitive` | enum | `smart` | Terminator `case_sensitive` parity. Scrollback-search case-sensitivity. `smart` (bar label **Smart**; case-insensitive until any uppercase), `always` / `sensitive` (bar label **Match**; force sensitive even for lowercase patterns — matches Terminator's default), `never` / `insensitive` (bar label **Ignore**; force insensitive even for mixed-case). The Terminator-spelled `case-sensitive = true/false` is also accepted (`true` ⇒ always, `false` ⇒ never) |
+| `light-theme` / `dark-theme` | theme name | `""` (falls back to `theme`) | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive; an empty side falls back to `theme` |
+| `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
 | `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click) |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `clipboard-paste-protection` | bool | `true` | Confirm multi-line pastes when any writable target would receive raw, non-bracketed paste. Single-line pastes and panes that enabled bracketed paste (editors/agent CLIs) paste immediately |
@@ -342,7 +339,7 @@ per-key audit against Terminator's source.
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to close-window, close-tab, and close-pane actions; panes sitting idle at an integrated-shell prompt do not count as work to lose |
-| `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` — `kettle.send_text` and `kettle.exec_action` refuse, so a plugin can observe, notify and restyle but cannot drive the terminal; use it for a plugin you have not read. `safe` (default) — nils `os.execute` / `os.exit` / `io.open` / `io.popen` etc, **but a plugin can still run commands by typing them**, since `send_text` reaches the shell and a newline submits the line (the shipped example clears the screen that way). Safe mode guards against a careless plugin, not a hostile one. `trusted` — full stdlib. See [`docs/examples/init.lua`](examples/init.lua) for the `kettle.*` Lua API surface (URL handlers, event hooks, menu items) with Launchpad / APT URL handlers ported from Terminator's `url_handlers.py` |
+| `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` enables the full library. Read any plugin before enabling it. See [`docs/examples/init.lua`](examples/init.lua) |
 
 The automatically discovered `<config-dir>/init.lua` uses the same trusted
 directory and leaf checks as the default config because even `safe` Lua can type
@@ -367,12 +364,11 @@ adapter versions, fault type, recovery escalation, and outcome. It never records
 terminal text, commands, environment variables, or working directories. Each
 incident is capped at 256 KiB and the newest ten are retained.
 
-### Terminator-parity config keys by disposition
+### Extended key status
 
-The Terminator config grammar has a few dozen keys kettle's parser
-accepts (so copying a Terminator config to kettle doesn't error
-on unknown keys) but where the runtime behavior differs from
-Terminator's. Each key falls into one of three buckets:
+Kettle accepts several legacy keys so older configuration files do not fail on
+unknown names. Some already map to current behavior; others remain parsed but
+inert so the compatibility boundary is explicit.
 
 #### Effectively wired — kettle's behavior already matches the documented setting
 
@@ -380,18 +376,19 @@ Terminator's. Each key falls into one of three buckets:
 |---|---|
 | `sticky` (X11 _NET_WM_STATE_STICKY) | **macOS is fully wired** — `sticky = true` calls `app.rs::set_visible_on_all_spaces`, which sets `NSWindowCollectionBehavior::CanJoinAllSpaces \| Stationary` on the underlying NSWindow, pinning the window to every Space. **X11 / Wayland are not wired** — winit 0.30 exposes no portable "stick to all workspaces" API (the X11 `_NET_WM_STATE_STICKY` hint has no winit binding and Wayland has no equivalent), so on those platforms the key is logged (not silently dropped) and `always-on-top` is the closest available cross-platform substitute |
 
-#### Won't implement — by-design divergence from Terminator
+#### Won't implement
 
 | Key | Rationale |
 |---|---|
-| `cursor-color-default` | Terminator's two-key design (`cursor-color = X` + `cursor-color-default = true` overrides to ignore the X) is confusing. kettle's design: set `cursor-color = …` to override, REMOVE the line to revert to theme — no separate boolean needed |
-| `http-proxy` | Parsed for Terminator/plugin compatibility but not consumed today. Kettle's authenticated self-updater does make HTTPS requests, but its feed is process-wide and intentionally does not inherit this per-profile terminal setting |
+| `cursor-color-default` | Kettle uses one setting: set `cursor-color` to override it or remove the line to return to the theme |
+| `http-proxy` | Parsed but not consumed. Update traffic is process-wide and does not inherit a per-profile terminal proxy |
 
 #### Genuine future work — parsed for forward-compat
 
-The remaining keys parse cleanly but are not yet wired. A future cycle wiring any of them moves the row into the main `Terminator-parity keys` table above; the parser arm doesn't change.
+The remaining keys parse cleanly but are not yet wired. A future implementation
+moves a key into the main table without changing its parser arm.
 
-| Key | What Terminator does with it | Why it's future-work |
+| Key | Intended behavior | Why it is future work |
 |---|---|---|
 | `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
@@ -463,7 +460,7 @@ into a bare-key binding.
 `move_tab_left`, `move_tab_right`, `goto_tab:N` (1-based, N is the tab
 number — `goto_tab:1` is the first tab), `new_tab_shell_N` (1-based —
 open the Nth entry of the new-tab `▾` dropdown; `Ctrl+Shift+1..9` by
-default, Windows Terminal's profile shortcuts), `undo_close_tab` (also
+default), `undo_close_tab` (also
 `reopen_tab` / `restore_tab` — restore the most recently-closed tab
 from a bounded LIFO ring of 10), `duplicate_tab` (clone the focused
 pane's argv + cwd into a new tab — `ssh prod` clones to a second
@@ -478,12 +475,11 @@ focused pane's exact argv + cwd into a right-side split.
 
 **Focus + resize**: `focus_next`, `focus_prev`,
 `goto_split:{up,down,left,right}`, `resize_{up,down,left,right}`,
-`move_split:{up,down,left,right}` (move the focused pane to sit beside its
-neighbour in that direction — the keyboard route to the rearrangement
-Terminator offers by dragging a terminal),
+`move_split:{up,down,left,right}` (move the focused pane beside its neighbour
+in that direction),
 `toggle_zoom` (also `toggle_split_zoom`), `rotate_cw` / `rotate_ccw`
-(turn the whole tab's split layout a quarter turn, the way Terminator does —
-every pane moves to where turning the screen would have put it, and the two
+(turn the whole tab's split layout a quarter turn; every pane moves to where
+turning the screen would have put it, and the two
 directions undo each other).
 
 **Window**: `new_window` (opens another window **in this process** since
@@ -522,12 +518,11 @@ is `broadcast_tab`, which **toggles** —
 pressing it again turns broadcast off, so you never have to reach for a second
 chord to stop. Which scope it turns *on* is `broadcast-default`.
 
-A second kettle *process* is its own broadcast domain. Terminator is
-single-process and has no equivalent, so this is not a gap against it — use one
-kettle with several windows if you want a group to span them.
+A second Kettle process is its own broadcast domain. Use one process with
+several windows when a group needs to span those windows.
 
-**Grouping** is separate from broadcasting, as it is in Terminator: you put
-panes in a group, and then choose whether to broadcast to that group.
+**Grouping** is separate from broadcasting: first put panes in a group, then
+choose whether to broadcast to that group.
 `group_all` / `ungroup_all` / `group_all_toggle` put every pane into the group
 named `All`; `group_tab` and `group_win` assign a named group to the focused
 tab or window (prompting for the name), while `group_tab_toggle` and

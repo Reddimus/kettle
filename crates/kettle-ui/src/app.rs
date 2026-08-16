@@ -52,6 +52,56 @@ const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+fn accessibility_completion_geometry_key(
+    completion: &kettle_render::CompletionOverlay,
+    cell: (f32, f32),
+) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    fn hash_rect(rect: kettle_render::Rect4, hasher: &mut impl std::hash::Hasher) {
+        for component in [rect.0, rect.1, rect.2, rect.3] {
+            component.to_bits().hash(hasher);
+        }
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if let Some(rect) = kettle_render::completion_overlay_rect(completion, cell) {
+        true.hash(&mut hasher);
+        hash_rect(rect, &mut hasher);
+    } else {
+        false.hash(&mut hasher);
+    }
+    for (index, rect) in kettle_render::completion_overlay_row_rects(completion, cell) {
+        index.hash(&mut hasher);
+        hash_rect(rect, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn completion_overlay_hit_test(
+    completion: Option<&kettle_render::CompletionOverlay>,
+    cell: (f32, f32),
+    point: (f32, f32),
+) -> bool {
+    completion
+        .and_then(|completion| kettle_render::completion_overlay_rect(completion, cell))
+        .is_some_and(|(x, y, width, height)| {
+            point.0 >= x && point.0 < x + width && point.1 >= y && point.1 < y + height
+        })
+}
+
+fn clear_completions_on_focus_loss<T>(
+    focused: bool,
+    panes: impl IntoIterator<Item = T>,
+    mut clear: impl FnMut(T),
+) {
+    if !focused {
+        for pane in panes {
+            clear(pane);
+        }
+    }
+}
+
 fn apply_pane_exit_action(
     action: kettle_config::ExitAction,
     pane_id: u64,
@@ -410,8 +460,8 @@ fn accessibility_text_id(pane_id: u64) -> NodeId {
     NodeId::from(ACCESSIBILITY_TEXT_ID_MASK | pane_id)
 }
 
-fn accessibility_completion_row_id(index: usize) -> NodeId {
-    NodeId(ACCESSIBILITY_COMPLETION_ID_MASK | (index as u64 + 1))
+fn accessibility_completion_row_id(position: usize) -> NodeId {
+    NodeId(ACCESSIBILITY_COMPLETION_ID_MASK | (position as u64 + 1))
 }
 
 fn accessibility_search_control_id(control: kettle_render::SearchControl) -> NodeId {
@@ -10909,12 +10959,14 @@ impl App {
                     kind: kind.to_string(),
                     source: list.source,
                     selected: list.selected,
+                    total: list.total,
                     candidates: list
                         .candidates
                         .into_iter()
                         .map(|candidate| kettle_render::CompletionOverlayRow {
                             label: candidate.label,
                             description: candidate.description,
+                            position: candidate.position,
                         })
                         .collect(),
                 })
@@ -11383,10 +11435,6 @@ impl App {
                 }
             }
             self.update_search(ws);
-            // Search status/focus are semantic accessibility state. Publish only
-            // after the scan has settled for this frame, and defer (rather than
-            // drop) an update that lands inside the terminal-content rate limit.
-            self.publish_accessibility_if_due(ws);
             self.update_links(ws);
             // Link set may have changed (scroll, output, mode flip) — re-sync
             // the cursor icon so a URL scrolling out from under a held Ctrl
@@ -11396,6 +11444,12 @@ impl App {
             self.sync_cursor_icon(ws);
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
+        // Search and completion state are semantic accessibility state. Reuse
+        // the exact projection this frame will draw instead of rebuilding the
+        // full overlay twice for the accessibility key and tree. Snapshot reuse
+        // skips pane maintenance, not semantic publication: a pending update
+        // must not be stranded by a run of context-menu hover frames.
+        self.publish_accessibility_if_due(ws, &overlay);
         let area = self.area(ws);
         let tabbar = self.tab_bar(ws);
         // Build status bar BEFORE the &mut renderer borrow
@@ -12744,7 +12798,7 @@ impl App {
                 }
             } else if active.name == "Appearance" {
                 Some(
-                    "Blur needs opacity below 100%; surface changes apply to new windows"
+                    "Blur: enable Window blur; alpha backgrounds need opacity below 100% (new windows)"
                         .to_string(),
                 )
             } else if ws.settings_restart_pending {
@@ -18163,6 +18217,7 @@ impl App {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
         let mut bytes = Vec::new();
+        let mut encoded_keys = Vec::with_capacity(parsed.len());
         for (mods, key) in &parsed {
             // The live mode decides the byte form (app-cursor arrows etc.).
             // Only modified Enter needs the termios/OSC 133 context sample.
@@ -18181,11 +18236,12 @@ impl App {
                 if let Err(message) = extend_ctl_send_key_bytes(&mut bytes, &b) {
                     return Response::err(req.id, ec::BAD_PARAMS, message);
                 }
+                encoded_keys.push(b);
             }
         }
         // The per-pane read-only toggle blocks agents
         // like any other input, with an explicit error.
-        if let Some((code, message)) = ctl_input_error(p.feed_input(&bytes)) {
+        if let Some((code, message)) = ctl_input_error(p.feed_key_inputs(&encoded_keys)) {
             return Response::err(req.id, code, message);
         }
         log::info!(
@@ -21972,7 +22028,7 @@ impl App {
         )
     }
 
-    fn accessibility_tree(&self, ws: &WindowState) -> TreeUpdate {
+    fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay) -> TreeUpdate {
         let area = self.area(ws);
         let layout = ws.mux.layout(ws.mux.active, area);
         let focused = ws.mux.active_focus();
@@ -22114,15 +22170,18 @@ impl App {
             search.set_bounds(bounds(geometry.rect));
             nodes.push((ACCESSIBILITY_SEARCH_CONTAINER_ID, search));
         }
-        if let Some(completion) = self.overlay(ws, false).completion {
+        if let Some(completion) = overlay.completion.as_ref()
+            && let Some((x, y, width, height)) =
+                kettle_render::completion_overlay_rect(completion, self.menu_cell(ws))
+        {
             let cell = self.menu_cell(ws);
-            let visible_rows = kettle_render::completion_overlay_row_rects(&completion, cell);
+            let visible_rows = kettle_render::completion_overlay_row_rects(completion, cell);
             let mut row_ids = Vec::with_capacity(visible_rows.len());
             for (index, (x, y, width, height)) in visible_rows {
                 let Some(candidate) = completion.candidates.get(index) else {
                     continue;
                 };
-                let id = accessibility_completion_row_id(index);
+                let id = accessibility_completion_row_id(candidate.position);
                 row_ids.push(id);
                 let mut row = Node::new(Role::ListBoxOption);
                 row.set_label(if candidate.description.is_empty() {
@@ -22130,7 +22189,7 @@ impl App {
                 } else {
                     format!("{}, {}", candidate.label, candidate.description)
                 });
-                row.set_position_in_set(index + 1);
+                row.set_position_in_set(candidate.position + 1);
                 if completion.selected == Some(index) {
                     row.set_selected(true);
                 }
@@ -22145,18 +22204,14 @@ impl App {
             let mut list = Node::new(Role::ListBox);
             list.set_label(format!("{} from {}", completion.kind, completion.source));
             list.set_children(row_ids);
-            list.set_size_of_set(completion.candidates.len());
+            list.set_size_of_set(completion.total);
             list.set_live(accesskit::Live::Polite);
-            if let Some((x, y, width, height)) =
-                kettle_render::completion_overlay_rect(&completion, cell)
-            {
-                list.set_bounds(accesskit::Rect::new(
-                    f64::from(x),
-                    f64::from(y),
-                    f64::from(x + width),
-                    f64::from(y + height),
-                ));
-            }
+            list.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            ));
             children.push(ACCESSIBILITY_COMPLETION_CONTAINER_ID);
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
@@ -22189,7 +22244,7 @@ impl App {
         }
     }
 
-    fn accessibility_key(&self, ws: &WindowState) -> u64 {
+    fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64 {
         use std::hash::{Hash as _, Hasher as _};
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -22214,14 +22269,17 @@ impl App {
                 .hash(&mut hasher);
             ws.search.focused_control.hash(&mut hasher);
         }
-        let projected_completion = self.overlay(ws, false).completion;
+        let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
         if let Some(completion) = projected_completion {
             completion.source.hash(&mut hasher);
             completion.selected.hash(&mut hasher);
+            completion.total.hash(&mut hasher);
             completion.kind.hash(&mut hasher);
             completion.command_rows.hash(&mut hasher);
-            for candidate in completion.candidates {
+            accessibility_completion_geometry_key(completion, self.menu_cell(ws)).hash(&mut hasher);
+            for candidate in &completion.candidates {
+                candidate.position.hash(&mut hasher);
                 candidate.label.hash(&mut hasher);
                 candidate.description.hash(&mut hasher);
             }
@@ -22242,8 +22300,8 @@ impl App {
         hasher.finish()
     }
 
-    fn publish_accessibility_if_due(&self, ws: &mut WindowState) {
-        let key = self.accessibility_key(ws);
+    fn publish_accessibility_if_due(&self, ws: &mut WindowState, overlay: &Overlay) {
+        let key = self.accessibility_key(ws, overlay);
         if ws.accessibility_key == Some(key) {
             ws.accessibility_pending = false;
             return;
@@ -22262,7 +22320,7 @@ impl App {
         let mut published = false;
         adapter.update_if_active(|| {
             published = true;
-            self.accessibility_tree(ws)
+            self.accessibility_tree(ws, overlay)
         });
         ws.accessibility = Some(adapter);
         ws.accessibility_pending = false;
@@ -24863,6 +24921,29 @@ impl App {
                     }
                     return;
                 }
+                // The detached card covers terminal cells but is not a shell
+                // editor. A press dismisses it and stops here so selecting text,
+                // opening a link, or forwarding mouse tracking cannot act on
+                // content the card hid.
+                let completion_hit = {
+                    let overlay = self.overlay(ws, true);
+                    completion_overlay_hit_test(
+                        overlay.completion.as_ref(),
+                        self.menu_cell(ws),
+                        (px, py),
+                    )
+                };
+                if completion_hit {
+                    if let Some(pane_id) = ws.mux.active_focus()
+                        && let Some(pane) = ws.mux.panes.get(&pane_id)
+                    {
+                        pane.term.clear_completion();
+                    }
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 let area = self.area(ws);
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
                 //
@@ -25286,6 +25367,19 @@ impl App {
                         "kettle:focus_out"
                     });
                 }
+                // Broadcast Tab arms every target pane, including named-group
+                // targets in other windows. Disarm the whole in-process fleet
+                // together so a reply buffered before this focus boundary
+                // cannot reopen when any sibling is focused later. The next
+                // Tab explicitly arms a fresh generation.
+                let completion_panes = ws.mux.panes.values().chain(
+                    self.windows
+                        .values()
+                        .flat_map(|window| window.mux.panes.values()),
+                );
+                clear_completions_on_focus_loss(f, completion_panes, |pane| {
+                    pane.term.invalidate_completion();
+                });
                 // A focus loss can swallow the button-UP that
                 // ends an in-progress drag (the release lands on whatever window
                 // took focus), latching `selecting` / `scrollbar_drag_offset` /
@@ -30060,8 +30154,11 @@ mod tests {
             focused_arm.contains("if ws.selecting && self.cfg.copy_on_select {")
                 && focused_arm.contains("clear_selection_gesture(ws);")
                 && focused_arm.contains("ws.search.dragging_editor = false;")
+                && focused_arm.contains("ws.mux.panes.values().chain(")
+                && focused_arm.contains("self.windows\n                        .values()")
+                && focused_arm.contains("pane.term.invalidate_completion();")
                 && focused_arm.contains("ws.tab_drag_active = false;\n                    ws.tab_drag_press = None;\n                    ws.tab_pressed_idx = None;\n                    // A focus loss also ends any split-divider drag.\n                    ws.dragging_split = None;\n                    ws.mouse_btn = None;"),
-            "the Focused `!f` arm must disarm the latched drag flags"
+            "the Focused `!f` arm must disarm the latched drag and completion state"
         );
         // 3. Side-button dismisses a lone context menu instead of leaking SGR.
         assert!(
@@ -30372,6 +30469,21 @@ mod tests {
         let mut bytes = vec![b'x'; super::MAX_CTL_SEND_KEY_BYTES];
         assert!(super::extend_ctl_send_key_bytes(&mut bytes, b"y").is_err());
         assert_eq!(bytes.len(), super::MAX_CTL_SEND_KEY_BYTES);
+
+        let src = production_source();
+        let body = src
+            .split("fn ctl_send_keys(")
+            .nth(1)
+            .and_then(|body| body.split("\n    /// Resolve the `pane` param").next())
+            .expect("ctl_send_keys body");
+        assert!(
+            body.contains("p.feed_key_inputs(&encoded_keys)"),
+            "send_keys must preserve per-key boundaries so every Tab advances one request"
+        );
+        assert!(
+            !body.contains("p.feed_input(&bytes)"),
+            "a flattened key batch hides Tab boundaries from completion sequencing"
+        );
     }
 
     /// v2.20.0 (agent plane): the encoded bytes must match what a human
@@ -30722,18 +30834,117 @@ mod tests {
     #[test]
     fn accessibility_hashes_the_visible_completion_projection() {
         let src = production_source();
+        let tree = src
+            .split("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+            .nth(1)
+            .and_then(|rest| rest.split("fn accessibility_key").next())
+            .expect("accessibility_tree body");
+        assert!(
+            tree.contains("row.set_position_in_set(candidate.position + 1)")
+                && tree.contains("list.set_size_of_set(completion.total)")
+                && tree.contains("completion_overlay_rect(completion, self.menu_cell(ws))"),
+            "assistive technology must hear each visible row's absolute position and the full set size"
+        );
         let body = src
-            .split("fn accessibility_key(&self, ws: &WindowState) -> u64")
+            .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
             .nth(1)
             .and_then(|rest| rest.split("fn publish_accessibility_if_due").next())
             .expect("accessibility_key body");
         assert!(
-            body.contains("self.overlay(ws, false).completion"),
-            "accessibility invalidation must use the focus/modal/viewport-gated projection"
+            body.contains("overlay.completion.as_ref()"),
+            "accessibility invalidation must use the frame's focus/modal/viewport-gated projection"
         );
         assert!(
-            !body.contains("pane.term.completion()"),
-            "raw completion state keeps hidden rows cached after a modal or focus change"
+            body.contains("accessibility_completion_geometry_key(completion, self.menu_cell(ws))"),
+            "accessibility invalidation must include the exact visible completion geometry"
+        );
+        assert!(
+            !body.contains("self.overlay(") && !body.contains("pane.term.completion()"),
+            "accessibility must neither rebuild the overlay nor read hidden raw completion state"
+        );
+
+        let draw = src
+            .split("let overlay = self.overlay(ws, reuse_pane_snapshots);")
+            .nth(1)
+            .and_then(|rest| rest.split("let area = self.area(ws);").next())
+            .expect("overlay publication block");
+        assert!(
+            draw.contains("self.publish_accessibility_if_due(ws, &overlay);")
+                && !draw.contains("if !reuse_pane_snapshots"),
+            "snapshot-only hover redraws must not strand a pending accessibility update"
+        );
+    }
+
+    #[test]
+    fn completion_accessibility_geometry_key_tracks_layout_and_cell_metrics() {
+        let completion = kettle_render::CompletionOverlay {
+            pane_rect: (20.0, 30.0, 800.0, 500.0),
+            grid_rect: (28.0, 46.0, 784.0, 468.0),
+            command_rows: (20, 21),
+            kind: "Completions".to_string(),
+            source: "fish".to_string(),
+            selected: Some(0),
+            total: 2,
+            candidates: vec![
+                kettle_render::CompletionOverlayRow {
+                    label: "alpha".to_string(),
+                    description: "first".to_string(),
+                    position: 0,
+                },
+                kettle_render::CompletionOverlayRow {
+                    label: "beta".to_string(),
+                    description: "second".to_string(),
+                    position: 1,
+                },
+            ],
+        };
+        let baseline = super::accessibility_completion_geometry_key(&completion, (9.0, 18.0));
+        let rect = kettle_render::completion_overlay_rect(&completion, (9.0, 18.0))
+            .expect("completion card geometry");
+        assert!(super::completion_overlay_hit_test(
+            Some(&completion),
+            (9.0, 18.0),
+            (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0),
+        ));
+        assert!(!super::completion_overlay_hit_test(
+            Some(&completion),
+            (9.0, 18.0),
+            (rect.0 - 1.0, rect.1),
+        ));
+        assert!(!super::completion_overlay_hit_test(
+            None,
+            (9.0, 18.0),
+            (rect.0, rect.1),
+        ));
+        assert_ne!(
+            baseline,
+            super::accessibility_completion_geometry_key(&completion, (10.0, 20.0)),
+            "font and cell-size changes must invalidate accessible row bounds"
+        );
+
+        let mut moved = completion.clone();
+        moved.grid_rect.0 += 13.0;
+        moved.grid_rect.1 += 7.0;
+        assert_ne!(
+            baseline,
+            super::accessibility_completion_geometry_key(&moved, (9.0, 18.0)),
+            "pane and grid movement must invalidate accessible row bounds"
+        );
+    }
+
+    #[test]
+    fn every_armed_pane_is_cleared_only_on_focus_loss() {
+        let mut cleared = Vec::new();
+        super::clear_completions_on_focus_loss(true, [10, 20, 30], |pane| cleared.push(pane));
+        assert!(
+            cleared.is_empty(),
+            "gaining focus must not discard a fresh completion"
+        );
+        super::clear_completions_on_focus_loss(false, [10, 20, 30], |pane| cleared.push(pane));
+        assert_eq!(
+            cleared,
+            [10, 20, 30],
+            "losing focus must disarm every pane reached by broadcast input"
         );
     }
 

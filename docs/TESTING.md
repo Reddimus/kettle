@@ -62,15 +62,30 @@ and print explicit skips for native legs that belong to the CI matrix.
 The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
 field truncation and custom-binding preservation in all four snippets. The Zsh
 fixture also emits the maximum 64-row payload under a time bound, catching a
-per-byte subshell regression. A real interactive Fish PTY proves default and
-Vi-insert Tab behavior, reverse cycling,
-and cursor-move invalidation, and asserts that a completion `show` remains the
-last metadata event instead of being erased by a repaint-triggered prompt hook.
-PowerShell pins both stock-direction bindings and its quoted-directory edit on
-every installed host; native Windows exercises the same script with PSReadLine.
-Parser and terminal tests separately bound malformed control strings, skip an
-unsafe row without losing safe siblings, reject stale replies after unrelated
-input, and keep completion metadata out of logs and output hooks.
+per-byte subshell regression; Bash also proves a full non-ASCII label is not
+shortened by locale-sensitive character counts. A real interactive Fish PTY
+proves default and Vi-insert Tab behavior, keymap ownership changes, reverse
+cycling, cursor-move invalidation, paging beyond 64 candidates, and that Fish's
+pager stays closed.
+It also pins the count, per-field, and aggregate retained-state caps and keeps
+the selected row in a bounded wide-character wire page. Ordinary and
+bounded-prefix singletons are inserted from the captured result without a
+second provider query, proving neither path can re-open the stock pager. A real
+Fish editor round trip pins the ordinary singleton's trailing space and an
+expandable, unquoted `~user` completion. The deterministic fixture keeps native
+no-space results open, treats leading-dash candidates as data, and counts
+exactly one provider call. Request-numbered parser/state tests cover prompt
+sessions, clear, re-arm, delayed old replies, rejected queue admission, Kitty
+key releases, rejection of Alt/Ctrl/Super Tab, custom Tab directions, counter
+exhaustion, pump-buffered prompt boundaries, and multi-key remote batches; only
+an admitted current Tab may restore the card. PowerShell pins both stock-direction
+bindings, its quoted-directory edit, multi-page absolute positions, the 64 KiB
+wire cap, and the same source-memory limits. Native Windows runs that fixture
+with PSReadLine. Parser and terminal tests bound malformed control strings,
+compare every split of private metadata through the screen and raw-output
+filters, sweep private-message starts around the exact recovery boundary, keep
+absolute positions when unsafe rows are skipped, and reject stale replies after
+unrelated input or focus loss.
 
 Modified-Enter auto detection has an additional native Unix PTY regression. It
 starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
@@ -337,7 +352,7 @@ sample design, margins, and limitations.
 
 **900+ tests across the workspace** — see
 [CHANGELOG.md](../CHANGELOG.md) for the full history of additions
-(feature sweeps, Terminator-parity work, production-polish passes,
+(feature sweeps, compatibility work, production-polish passes,
 resource-cap defense-in-depth sweeps, etc.). The workspace grows by 1–3
 tests per feature landed, so per-crate counts below are
 range-stable phrasings rather than exact figures — run
@@ -409,10 +424,10 @@ discipline here.
 
 - **kettle-config** (190+ tests): TokyoNight Night is the verified shipped
   default theme (the self-contained `Theme::default()` fallback palette is
-  Catppuccin Mocha); Ghostty `key = value` overrides, repeats, `palette`
+  Catppuccin Mocha); `key = value` overrides, repeats, `palette`
   (0..=15 + out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
-  Night"; Terminator default keybinds and trigger parsing; the
+  Night"; default keybinds and trigger parsing; the
   `from_name` ↔ `action_names` round-trip drift guard; the
   `defaults_has_no_shadow_collisions` audit (no
   HashMap-shadowed bindings); the palette-completeness drift
@@ -1845,8 +1860,10 @@ name the shape of bug each pass caught.
 - Native shell-integration fixtures: stock interactive `zsh -f` and system
   Bash 3.2 on macOS, Fish 3.7/4.2/4.8 behavior on Linux, plus PowerShell
   prompt/Enter behavior on Windows. The Fish leg drives real Emacs and Vi key
-  maps, requires the completion card within 750 ms, and pins release archives
-  by SHA-256.
+  maps, requires the private completion OSC within 750 ms, and pins release
+  archives by SHA-256. Geometry and renderer tests cover the detached card;
+  pointer hit tests ensure a click dismisses it instead of acting on obscured
+  terminal content. This shell fixture does not claim a live card was drawn.
 - The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
   Markdown targets, and PNG/SFNT structural checks.
 - The macOS comparator score self-test and the mandatory Kettle-owned portion of

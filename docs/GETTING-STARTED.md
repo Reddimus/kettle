@@ -51,7 +51,7 @@ to edit. For the handful of advanced options not in the panel, the
 
 ## 4. Splits, tabs, and getting around
 
-kettle uses **Terminator-style** keys:
+Kettle starts with these pane and tab keys:
 
 | Do this | Press |
 |---|---|

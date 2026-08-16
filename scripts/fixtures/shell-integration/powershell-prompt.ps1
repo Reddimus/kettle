@@ -113,4 +113,34 @@ if ($capture.ToString() -notmatch '\]133;D;1') {
     throw 'a failed cmdlet with no native exit code must report D;1, not D;0'
 }
 
+# A prompt boundary must advance the managed completion session and publish
+# the exact v3 sync the terminal will use for subsequent Tab request IDs.
+$sessionBefore = [uint64]$global:__kettle_completion_session
+$capture = [System.IO.StringWriter]::new()
+[Console]::SetOut($capture)
+try { $null = prompt } finally { [Console]::SetOut($stdout) }
+$expectedSession = [uint64]($sessionBefore + [uint64]1)
+if ([uint64]$global:__kettle_completion_session -ne $expectedSession -or
+    -not $capture.ToString().Contains(
+        "]777;kettle-completion;3;sync;$expectedSession;0$([char]7)"
+    )) {
+    throw 'prompt did not advance and publish its v3 completion session'
+}
+
+# Session rollover must disable only the side channel, not overflow into an
+# imprecise number or break the user's prompt.
+$global:__kettle_completion_enabled = $true
+$global:__kettle_completion_generation = [uint64]0
+$global:__kettle_completion_session = $global:__kettle_completion_counter_max
+$capture = [System.IO.StringWriter]::new()
+[Console]::SetOut($capture)
+try { $rendered = prompt } finally { [Console]::SetOut($stdout) }
+if ($rendered -notmatch 'USER-PROMPT' -or
+    $global:__kettle_completion_enabled -or
+    [uint64]$global:__kettle_completion_session -ne
+        $global:__kettle_completion_counter_max -or
+    $capture.ToString() -match 'kettle-completion;3;sync') {
+    throw 'session rollover did not fail the completion side channel closed'
+}
+
 Write-Output 'KETTLE_POWERSHELL_PROMPT_OK'

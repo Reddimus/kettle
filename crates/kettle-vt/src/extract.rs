@@ -154,6 +154,15 @@ const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 /// ground state. This bounds desynchronization when a producer never emits a
 /// terminator without immediately exposing the rejected payload downstream.
 const MAX_SEQ_RESYNC_BYTES: usize = 64 * 1024;
+const PRIVATE_OSC_START_LEN: usize = 2 + completion::PREFIX.len();
+
+fn private_osc_start_byte(index: usize) -> u8 {
+    match index {
+        0 => 0x1b,
+        1 => b']',
+        _ => completion::PREFIX[index - 2],
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum OutputFilterMode {
@@ -164,7 +173,8 @@ enum OutputFilterMode {
         matched: usize,
     },
     Completion {
-        remaining: usize,
+        message_bytes: usize,
+        discard_remaining: Option<usize>,
         escape: bool,
     },
 }
@@ -181,6 +191,11 @@ enum OutputFilterMode {
 #[derive(Default)]
 pub struct PrivateOutputFilter {
     mode: OutputFilterMode,
+    private_tail: [u8; 3],
+    private_tail_len: u8,
+    discard_utf8_continuations: u8,
+    recovery_private_prefix: u8,
+    recovery_private_started: bool,
 }
 
 impl PrivateOutputFilter {
@@ -194,6 +209,39 @@ impl PrivateOutputFilter {
         }
         let mut index = 0usize;
         while index < input.len() {
+            if matches!(self.mode, OutputFilterMode::Ground) && self.recovery_private_prefix > 0 {
+                let matched = self.recovery_private_prefix as usize;
+                let byte = input[index];
+                if byte == private_osc_start_byte(matched) {
+                    index += 1;
+                    let next = matched + 1;
+                    if next == PRIVATE_OSC_START_LEN {
+                        self.recovery_private_prefix = 0;
+                        self.mode = OutputFilterMode::Completion {
+                            message_bytes: completion::PREFIX.len(),
+                            discard_remaining: None,
+                            escape: false,
+                        };
+                    } else {
+                        self.recovery_private_prefix = next as u8;
+                    }
+                    continue;
+                }
+                // The bytes before the boundary remain discarded. Reprocess
+                // this first non-matching byte in Ground so an ESC can begin a
+                // fresh control string rather than being emitted literally.
+                self.recovery_private_prefix = 0;
+                continue;
+            }
+            if self.discard_utf8_continuations > 0 {
+                let byte = input[index];
+                if (0x80..=0xbf).contains(&byte) {
+                    self.discard_utf8_continuations -= 1;
+                    index += 1;
+                    continue;
+                }
+                self.discard_utf8_continuations = 0;
+            }
             match self.mode {
                 OutputFilterMode::Ground => match memchr::memchr(0x1b, &input[index..]) {
                     Some(offset) => {
@@ -228,9 +276,10 @@ impl PrivateOutputFilter {
                     if completion::PREFIX.get(matched) == Some(&byte) {
                         let next = matched + 1;
                         self.mode = if next == completion::PREFIX.len() {
+                            self.private_tail_len = 0;
                             OutputFilterMode::Completion {
-                                remaining: completion::MAX_MESSAGE_BYTES
-                                    .saturating_add(MAX_SEQ_RESYNC_BYTES),
+                                message_bytes: completion::PREFIX.len(),
+                                discard_remaining: None,
                                 escape: false,
                             }
                         } else {
@@ -256,45 +305,248 @@ impl PrivateOutputFilter {
                     }
                 }
                 OutputFilterMode::Completion {
-                    mut remaining,
+                    mut message_bytes,
+                    mut discard_remaining,
                     escape,
                 } => {
-                    if remaining == 0 {
+                    if escape {
+                        let byte = input[index];
+                        index += 1;
+                        if matches!(byte, b'\\' | 0x18 | 0x1a) {
+                            self.private_tail_len = 0;
+                            self.clear_recovery_tracking();
+                            self.mode = OutputFilterMode::Ground;
+                            continue;
+                        }
+                        let pair = [0x1b, byte];
+                        let recovering = discard_remaining.is_some();
+                        let consumed = if let Some(remaining) = discard_remaining.as_mut() {
+                            let consumed = pair.len().min(*remaining);
+                            *remaining -= consumed;
+                            consumed
+                        } else {
+                            message_bytes = message_bytes.saturating_add(pair.len());
+                            if message_bytes > completion::MAX_MESSAGE_BYTES {
+                                self.clear_recovery_tracking();
+                                discard_remaining = Some(MAX_SEQ_RESYNC_BYTES);
+                            }
+                            pair.len()
+                        };
+                        if recovering {
+                            self.note_recovery_private(&pair[..consumed]);
+                        }
+                        self.note_private_tail(&pair[..consumed]);
+                        if discard_remaining == Some(0) {
+                            self.finish_bounded_recovery();
+                            if consumed < pair.len() {
+                                // `byte` came from this input while the leading
+                                // ESC was withheld from the previous turn.
+                                // Reprocess that suffix through the boundary
+                                // matcher; emitting it here leaks `]777;...`
+                                // when the private introducer straddles the
+                                // exact recovery edge.
+                                index -= pair.len() - consumed;
+                            }
+                        } else if consumed < pair.len() {
+                            self.private_tail_len = 0;
+                            self.clear_recovery_tracking();
+                            self.mode = OutputFilterMode::Ground;
+                            index -= pair.len() - consumed;
+                        } else {
+                            self.mode = OutputFilterMode::Completion {
+                                message_bytes,
+                                discard_remaining,
+                                escape: false,
+                            };
+                        }
+                        continue;
+                    }
+
+                    let hay = &input[index..];
+                    let terminator = memchr::memchr3(0x1b, 0x9c, 0x07, hay);
+                    let cancel = memchr::memchr2(0x18, 0x1a, hay);
+                    let stop = match (terminator, cancel) {
+                        (Some(t), Some(c)) => Some(t.min(c)),
+                        (t, c) => t.or(c),
+                    };
+                    let run_len = stop.unwrap_or(hay.len());
+                    let recovering = discard_remaining.is_some();
+                    let consumed = if let Some(remaining) = discard_remaining.as_mut() {
+                        let consumed = run_len.min(*remaining);
+                        *remaining -= consumed;
+                        consumed
+                    } else {
+                        message_bytes = message_bytes.saturating_add(run_len);
+                        if message_bytes > completion::MAX_MESSAGE_BYTES {
+                            // Match `Extractor`: the bulk run that crosses the
+                            // message cap is private in full, then recovery is
+                            // counted from the next byte or PTY read.
+                            self.clear_recovery_tracking();
+                            discard_remaining = Some(MAX_SEQ_RESYNC_BYTES);
+                        }
+                        run_len
+                    };
+                    index += consumed;
+                    if recovering {
+                        self.note_recovery_private(&hay[..consumed]);
+                    }
+                    self.note_private_tail(&hay[..consumed]);
+                    if discard_remaining == Some(0) {
+                        self.finish_bounded_recovery();
+                        continue;
+                    }
+                    if consumed < run_len {
+                        self.private_tail_len = 0;
+                        self.clear_recovery_tracking();
                         self.mode = OutputFilterMode::Ground;
                         continue;
                     }
-                    let byte = input[index];
-                    index += 1;
-                    remaining -= 1;
-                    if escape {
-                        self.mode = match byte {
-                            b'\\' | 0x18 | 0x1a => OutputFilterMode::Ground,
-                            b']' => OutputFilterMode::CompletionPrefix { matched: 0 },
-                            _ => {
-                                if capture {
-                                    output.extend_from_slice(&[0x1b, byte]);
+                    if let Some(offset) = stop {
+                        debug_assert_eq!(offset, run_len);
+                        let byte = input[index];
+                        if byte == 0x9c && self.private_utf8_continuations_owed() > 0 {
+                            index += 1;
+                            let one = [byte];
+                            let recovering = discard_remaining.is_some();
+                            let consumed = if let Some(remaining) = discard_remaining.as_mut() {
+                                let consumed = usize::from(*remaining > 0);
+                                *remaining = remaining.saturating_sub(consumed);
+                                consumed
+                            } else {
+                                message_bytes = message_bytes.saturating_add(1);
+                                if message_bytes > completion::MAX_MESSAGE_BYTES {
+                                    self.clear_recovery_tracking();
+                                    discard_remaining = Some(MAX_SEQ_RESYNC_BYTES);
                                 }
-                                OutputFilterMode::Ground
+                                1
+                            };
+                            if recovering {
+                                self.note_recovery_private(&one[..consumed]);
                             }
-                        };
-                    } else {
-                        self.mode = match byte {
-                            0x07 | 0x9c | 0x18 | 0x1a => OutputFilterMode::Ground,
-                            0x1b => OutputFilterMode::Completion {
-                                remaining,
+                            self.note_private_tail(&one[..consumed]);
+                            if discard_remaining == Some(0) {
+                                self.finish_bounded_recovery();
+                            } else {
+                                self.mode = OutputFilterMode::Completion {
+                                    message_bytes,
+                                    discard_remaining,
+                                    escape: false,
+                                };
+                            }
+                            continue;
+                        }
+                        index += 1;
+                        if matches!(byte, 0x07 | 0x9c | 0x18 | 0x1a) {
+                            self.private_tail_len = 0;
+                            self.clear_recovery_tracking();
+                            self.mode = OutputFilterMode::Ground;
+                        } else {
+                            self.mode = OutputFilterMode::Completion {
+                                message_bytes,
+                                discard_remaining,
                                 escape: true,
-                            },
-                            _ if remaining == 0 => OutputFilterMode::Ground,
-                            _ => OutputFilterMode::Completion {
-                                remaining,
-                                escape: false,
-                            },
+                            };
+                        }
+                    } else {
+                        self.mode = OutputFilterMode::Completion {
+                            message_bytes,
+                            discard_remaining,
+                            escape: false,
                         };
                     }
                 }
             }
         }
         output
+    }
+
+    fn note_recovery_private(&mut self, consumed: &[u8]) {
+        if self.recovery_private_started {
+            return;
+        }
+        for &byte in consumed {
+            let matched = self.recovery_private_prefix as usize;
+            if byte == private_osc_start_byte(matched) {
+                let next = matched + 1;
+                if next == PRIVATE_OSC_START_LEN {
+                    self.recovery_private_prefix = 0;
+                    self.recovery_private_started = true;
+                    return;
+                }
+                self.recovery_private_prefix = next as u8;
+            } else {
+                self.recovery_private_prefix = u8::from(byte == 0x1b);
+            }
+        }
+    }
+
+    fn clear_recovery_tracking(&mut self) {
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
+    }
+
+    fn finish_bounded_recovery(&mut self) {
+        let continuations = self.private_utf8_continuations_owed();
+        let nested_private = self.recovery_private_started;
+        self.private_tail_len = 0;
+        self.recovery_private_started = false;
+        if nested_private {
+            self.recovery_private_prefix = 0;
+            self.discard_utf8_continuations = 0;
+            self.mode = OutputFilterMode::Completion {
+                message_bytes: completion::PREFIX.len(),
+                discard_remaining: None,
+                escape: false,
+            };
+        } else {
+            self.discard_utf8_continuations = if self.recovery_private_prefix == 0 {
+                continuations
+            } else {
+                0
+            };
+            self.mode = OutputFilterMode::Ground;
+        }
+    }
+
+    fn note_private_tail(&mut self, consumed: &[u8]) {
+        if consumed.is_empty() {
+            return;
+        }
+        let tail_len = self.private_tail.len();
+        if consumed.len() >= tail_len {
+            self.private_tail
+                .copy_from_slice(&consumed[consumed.len() - tail_len..]);
+            self.private_tail_len = tail_len as u8;
+        } else {
+            let keep = (tail_len - consumed.len()).min(self.private_tail_len as usize);
+            let start = self.private_tail_len as usize - keep;
+            self.private_tail
+                .copy_within(start..self.private_tail_len as usize, 0);
+            self.private_tail[keep..keep + consumed.len()].copy_from_slice(consumed);
+            self.private_tail_len = (keep + consumed.len()) as u8;
+        }
+    }
+
+    fn private_utf8_continuations_owed(&self) -> u8 {
+        let tail = &self.private_tail[..self.private_tail_len as usize];
+        let mut continuations = 0usize;
+        for &byte in tail.iter().rev() {
+            if (0x80..=0xbf).contains(&byte) {
+                continuations += 1;
+            } else {
+                break;
+            }
+        }
+        if continuations >= tail.len() {
+            return 0;
+        }
+        let needed: usize = match tail[tail.len() - 1 - continuations] {
+            0xc2..=0xdf => 1,
+            0xe0..=0xef => 2,
+            0xf0..=0xf4 => 3,
+            _ => return 0,
+        };
+        needed.saturating_sub(continuations) as u8
     }
 
     /// Flush a non-private prefix held across reads when the PTY reaches EOF.
@@ -314,6 +566,10 @@ impl PrivateOutputFilter {
             Vec::new()
         };
         self.mode = OutputFilterMode::Ground;
+        self.private_tail_len = 0;
+        self.discard_utf8_continuations = 0;
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
         output
     }
 }
@@ -389,7 +645,16 @@ pub struct Extractor {
     /// recovery boundary. They belong to the swallowed lead even though the
     /// control-string state has already returned to pass-through.
     discard_utf8_continuations: u8,
+    /// Prefix of a second private OSC seen while recovering from an oversized
+    /// sequence. It may straddle the exact recovery boundary, so it cannot be
+    /// reclassified as public input until the prefix either completes or
+    /// mismatches.
+    recovery_private_prefix: u8,
+    recovery_private_started: bool,
     raw_tap: bool,
+    /// Once the full private namespace prefix is known, malformed ESC
+    /// followers must not make its remaining payload visible.
+    private_completion: bool,
     /// Rolling tail (≤3 bytes) of the active control string's payload, kept
     /// even while discarding, so a raw `0x9c` can be classified as either a
     /// standalone C1 ST or a UTF-8 continuation byte of an in-progress
@@ -434,7 +699,10 @@ impl Extractor {
             discarding_seq: false,
             discard_remaining: 0,
             discard_utf8_continuations: 0,
+            recovery_private_prefix: 0,
+            recovery_private_started: false,
             raw_tap: false,
+            private_completion: false,
             seq_tail: [0; 3],
             seq_tail_len: 0,
         }
@@ -560,6 +828,25 @@ impl Extractor {
         let mut out: Vec<Chunk> = Vec::with_capacity(1);
         let mut i = 0usize;
         while i < input.len() {
+            if self.mode == Mode::Pass && self.recovery_private_prefix > 0 {
+                let matched = self.recovery_private_prefix as usize;
+                let byte = input[i];
+                if byte == private_osc_start_byte(matched) {
+                    i += 1;
+                    let next = matched + 1;
+                    if next == PRIVATE_OSC_START_LEN {
+                        self.start_private_completion();
+                    } else {
+                        self.recovery_private_prefix = next as u8;
+                    }
+                    continue;
+                }
+                // The pre-boundary prefix stays discarded. Let Pass inspect
+                // this first mismatching byte again so it can begin a fresh
+                // escape sequence if necessary.
+                self.recovery_private_prefix = 0;
+                continue;
+            }
             if self.discard_utf8_continuations > 0 {
                 if matches!(input[i], 0x80..=0xbf) {
                     self.discard_utf8_continuations -= 1;
@@ -612,6 +899,30 @@ impl Extractor {
                         if b == 0x18 || b == 0x1a {
                             i += 1;
                             self.cancel_seq();
+                            continue;
+                        }
+                        if self.private_completion {
+                            // A malformed ESC follower does not declassify a
+                            // private completion payload. Count both bytes as
+                            // payload and stay private until a real terminator
+                            // or the bounded recovery window. If recovery lands
+                            // between them, only the unconsumed suffix becomes
+                            // ordinary terminal input.
+                            i += 1;
+                            let pair = [0x1b, b];
+                            let consumed = self.consume_seq_bytes(&pair);
+                            match consumed {
+                                0 => self.dispatch_escape_follower(b, &mut out),
+                                1 if self.mode == Mode::Pass
+                                    && self.recovery_private_prefix > 0 =>
+                                {
+                                    i -= 1;
+                                }
+                                1 if b == 0x1b => self.esc_pending = true,
+                                1 => self.pass.push(b),
+                                _ => {}
+                            }
+                            self.handle_pending_chunks(&mut out, &mut handle);
                             continue;
                         }
                         // OSC, DCS passthrough, and APC strings all leave their
@@ -749,7 +1060,10 @@ impl Extractor {
         self.discarding_seq = false;
         self.discard_remaining = 0;
         self.discard_utf8_continuations = 0;
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
         self.seq_tail_len = 0;
+        self.private_completion = false;
     }
 
     fn append_seq(&mut self, bytes: &[u8]) -> bool {
@@ -805,11 +1119,11 @@ impl Extractor {
                 self.bail(room);
             } else if self.append_seq(bytes) {
                 self.note_seq_tail(bytes);
-                if self.mode == Mode::Osc
-                    && self.seq.starts_with(completion::PREFIX)
-                    && self.seq.len() > completion::MAX_MESSAGE_BYTES
-                {
-                    self.bail_private();
+                if self.mode == Mode::Osc && self.seq.starts_with(completion::PREFIX) {
+                    self.private_completion = true;
+                    if self.seq.len() > completion::MAX_MESSAGE_BYTES {
+                        self.bail_private();
+                    }
                 }
                 return bytes.len();
             }
@@ -873,14 +1187,50 @@ impl Extractor {
 
     fn consume_discard_bytes(&mut self, bytes: &[u8]) -> usize {
         let consumed = bytes.len().min(self.discard_remaining);
+        self.note_recovery_private(&bytes[..consumed]);
         self.note_seq_tail(&bytes[..consumed]);
         self.discard_remaining -= consumed;
         if self.discard_remaining == 0 {
             let continuations = self.seq_utf8_continuations_owed();
+            let prefix = self.recovery_private_prefix;
+            let nested_private = self.recovery_private_started;
             self.reset_discard();
-            self.discard_utf8_continuations = continuations;
+            if nested_private {
+                self.start_private_completion();
+            } else {
+                self.recovery_private_prefix = prefix;
+                self.discard_utf8_continuations = if prefix == 0 { continuations } else { 0 };
+            }
         }
         consumed
+    }
+
+    fn note_recovery_private(&mut self, consumed: &[u8]) {
+        if self.recovery_private_started {
+            return;
+        }
+        for &byte in consumed {
+            let matched = self.recovery_private_prefix as usize;
+            if byte == private_osc_start_byte(matched) {
+                let next = matched + 1;
+                if next == PRIVATE_OSC_START_LEN {
+                    self.recovery_private_prefix = 0;
+                    self.recovery_private_started = true;
+                    return;
+                }
+                self.recovery_private_prefix = next as u8;
+            } else {
+                self.recovery_private_prefix = u8::from(byte == 0x1b);
+            }
+        }
+    }
+
+    fn start_private_completion(&mut self) {
+        self.mode = Mode::Osc;
+        self.begin_seq();
+        let consumed = self.consume_seq_bytes(completion::PREFIX);
+        debug_assert_eq!(consumed, completion::PREFIX.len());
+        debug_assert!(self.private_completion);
     }
 
     /// Drop an over-budget graphics/control string. The downstream VT engine
@@ -891,6 +1241,8 @@ impl Extractor {
         // `clear` alone would retain up to 16 MiB without an active lease.
         self.seq = Vec::new();
         self.seq_reservation = None;
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
         self.discarding_seq = true;
         let recovery = self
             .budget
@@ -903,6 +1255,8 @@ impl Extractor {
     fn bail_private(&mut self) {
         self.seq = Vec::new();
         self.seq_reservation = None;
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
         self.discarding_seq = true;
         // Keep malformed private metadata out of the grid, but do not let a
         // producer that exits without BEL/ST swallow the pane forever. The
@@ -917,9 +1271,12 @@ impl Extractor {
         self.discarding_seq = false;
         self.discard_remaining = 0;
         self.discard_utf8_continuations = 0;
+        self.recovery_private_prefix = 0;
+        self.recovery_private_started = false;
         self.st_pending = false;
         self.term = SeqTerminator::EscSt;
         self.mode = Mode::Pass;
+        self.private_completion = false;
     }
 
     /// CAN (0x18) / SUB (0x1a) abandon the control string in progress.
@@ -947,6 +1304,7 @@ impl Extractor {
         self.seq = Vec::new();
         let _seq_reservation = self.seq_reservation.take();
         self.mode = Mode::Pass;
+        self.private_completion = false;
         self.st_pending = false;
         self.term = SeqTerminator::EscSt;
     }
@@ -959,6 +1317,7 @@ impl Extractor {
         let mut seq = std::mem::take(&mut self.seq);
         let _seq_reservation = self.seq_reservation.take();
         let mode = std::mem::replace(&mut self.mode, Mode::Pass);
+        self.private_completion = false;
 
         // Kettle completion messages are private UI metadata. Consume every
         // namespaced message, including malformed or unsupported versions, so
@@ -1897,7 +2256,10 @@ mod tests {
         );
     }
 
-    use super::{Chunk, Extractor, MAX_SEQ_RESYNC_BYTES, PrivateOutputFilter, PromptKind};
+    use super::{
+        Chunk, Extractor, MAX_SEQ_RESYNC_BYTES, PRIVATE_OSC_START_LEN, PrivateOutputFilter,
+        PromptKind,
+    };
     use crate::kitty::PlacementKey;
 
     #[test]
@@ -1992,6 +2354,47 @@ mod tests {
     }
 
     #[test]
+    fn private_output_filter_keeps_malformed_escape_suffixes_private() {
+        let mut filter = PrivateOutputFilter::default();
+        let input = b"before\x1b]777;kettle-completion;1;show;1;completion;;fish;secret;path\x1bXstill-secret\x07after";
+        assert_eq!(filter.feed(input, true), b"beforeafter");
+    }
+
+    #[test]
+    fn parser_and_raw_filter_declassify_the_same_bytes() {
+        let cases: &[&[u8]] = &[
+            b"before\x1b]777;kettle-completion;1;show;1;completion;;fish;secret;path\x1b\\after",
+            b"before\x1b]777;kettle-completion;private\x1bXstill-private\x07after",
+            b"before\x1b]777;kettle-completion;private\x1b]not-a-prefix\x07after",
+            b"before\x1b]777;kettle-completion;private;\xe2\x9c\xb3;still-private\x07after",
+            b"before\x1b]777;kettle-completion;private\x18after",
+            b"before\x1b]777;kettle-other;visible\x07after",
+        ];
+        for input in cases {
+            for split in 0..=input.len() {
+                let mut extractor = Extractor::default();
+                extractor.set_raw_tap(true);
+                let mut filter = PrivateOutputFilter::default();
+                let mut parsed = Vec::new();
+                let mut filtered = Vec::new();
+                for part in [&input[..split], &input[split..]] {
+                    filtered.extend(filter.feed(part, true));
+                    parsed.extend(tapped(&extractor.feed(part)));
+                }
+                assert_eq!(
+                    filtered, parsed,
+                    "parser/filter privacy drift at split {split} for {input:?}"
+                );
+                assert_eq!(
+                    filter.finish(true),
+                    Vec::<u8>::new(),
+                    "complete inputs must leave no withheld prefix"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn private_output_filter_flushes_only_non_private_eof_prefixes() {
         let mut filter = PrivateOutputFilter::default();
         assert_eq!(filter.feed(b"tail\x1b]777;kettle-com", true), b"tail");
@@ -2024,12 +2427,110 @@ mod tests {
         assert!(filter.feed(&start, true).is_empty());
         let mut filtered_recovery = vec![b'x'; MAX_SEQ_RESYNC_BYTES];
         filtered_recovery.extend_from_slice(b"visible");
-        let recovered = filter.feed(&filtered_recovery, true);
-        assert!(recovered.ends_with(b"visible"));
-        assert!(
-            recovered.len() <= start.len() + b"visible".len(),
-            "bounded recovery exposed an unbounded private suffix"
+        assert_eq!(filter.feed(&filtered_recovery, true), b"visible");
+
+        let mut extractor = Extractor::default();
+        extractor.set_raw_tap(true);
+        let mut filter = PrivateOutputFilter::default();
+        assert_eq!(filter.feed(&start, true), tapped(&extractor.feed(&start)));
+        assert_eq!(
+            filter.feed(&filtered_recovery, true),
+            tapped(&extractor.feed(&filtered_recovery)),
+            "the screen and logs must resume on the same byte after bounded recovery"
         );
+    }
+
+    #[test]
+    fn every_recovery_boundary_offset_keeps_the_next_private_message_private() {
+        let mut start = b"\x1b]777;kettle-completion;1;show;1;completion;;fish;".to_vec();
+        start.extend(std::iter::repeat_n(
+            b'x',
+            crate::completion::MAX_MESSAGE_BYTES + 1,
+        ));
+        let next_private =
+            b"\x1b]777;kettle-completion;1;show;2;completion;;fish;secret;path\x07visible";
+
+        let first_offset = MAX_SEQ_RESYNC_BYTES - PRIVATE_OSC_START_LEN - 8;
+        let last_offset = MAX_SEQ_RESYNC_BYTES + 8;
+        for private_offset in first_offset..=last_offset {
+            let mut recovery = vec![b'x'; private_offset];
+            recovery.extend_from_slice(next_private);
+            let expected_prefix = vec![b'x'; private_offset.saturating_sub(MAX_SEQ_RESYNC_BYTES)];
+            let mut expected = expected_prefix;
+            expected.extend_from_slice(b"visible");
+
+            for split_at_boundary in [false, true] {
+                let mut extractor = Extractor::default();
+                extractor.set_raw_tap(true);
+                let mut filter = PrivateOutputFilter::default();
+                assert_eq!(filter.feed(&start, true), tapped(&extractor.feed(&start)));
+
+                let split = if split_at_boundary {
+                    MAX_SEQ_RESYNC_BYTES.min(recovery.len())
+                } else {
+                    recovery.len()
+                };
+                let mut filtered = Vec::new();
+                let mut parsed = Vec::new();
+                for part in [&recovery[..split], &recovery[split..]] {
+                    filtered.extend(filter.feed(part, true));
+                    parsed.extend(tapped(&extractor.feed(part)));
+                }
+                assert_eq!(
+                    filtered, expected,
+                    "private OSC leaked with start offset {private_offset}, split={split_at_boundary}"
+                );
+                assert_eq!(
+                    parsed, expected,
+                    "terminal parser leaked with start offset {private_offset}, split={split_at_boundary}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_nested_private_terminator_ends_recovery_immediately() {
+        let mut start = b"\x1b]777;kettle-completion;1;show;1;completion;;fish;".to_vec();
+        start.extend(std::iter::repeat_n(
+            b'x',
+            crate::completion::MAX_MESSAGE_BYTES + 1,
+        ));
+        let nested = b"\x1b]777;kettle-completion;1;show;2;completion;;fish;secret;path";
+
+        for terminator in [
+            &b"\x07"[..],
+            &b"\x1b\\"[..],
+            &b"\x9c"[..],
+            &b"\x18"[..],
+            &b"\x1a"[..],
+        ] {
+            let mut recovery = vec![b'x'; 32];
+            recovery.extend_from_slice(nested);
+            recovery.extend_from_slice(terminator);
+            recovery.extend_from_slice(b"public");
+
+            for split in 0..=recovery.len() {
+                let mut extractor = Extractor::default();
+                extractor.set_raw_tap(true);
+                let mut filter = PrivateOutputFilter::default();
+                assert_eq!(filter.feed(&start, true), tapped(&extractor.feed(&start)));
+
+                let mut filtered = Vec::new();
+                let mut parsed = Vec::new();
+                for part in [&recovery[..split], &recovery[split..]] {
+                    filtered.extend(filter.feed(part, true));
+                    parsed.extend(tapped(&extractor.feed(part)));
+                }
+                assert_eq!(
+                    filtered, b"public",
+                    "raw filter stayed private after {terminator:?} at split {split}"
+                );
+                assert_eq!(
+                    parsed, b"public",
+                    "terminal parser stayed private after {terminator:?} at split {split}"
+                );
+            }
+        }
     }
 
     /// Everything a raw output subscriber (session log, Lua output hook) would

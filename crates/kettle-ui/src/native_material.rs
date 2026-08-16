@@ -6,11 +6,11 @@ use winit::window::Window;
 #[cfg(any(target_os = "macos", test))]
 fn macos_material_policy(
     window_blur: bool,
-    background_opacity: f32,
+    alpha_surface_required: bool,
     reduce_transparency: bool,
 ) -> (bool, bool) {
     let effect_visible = window_blur && !reduce_transparency;
-    let translucent = !reduce_transparency && (window_blur || background_opacity < 1.0);
+    let translucent = !reduce_transparency && (window_blur || alpha_surface_required);
     (effect_visible, !translucent)
 }
 
@@ -23,7 +23,7 @@ pub(crate) struct NativeMaterial {
     #[cfg(target_os = "macos")]
     last_background: std::cell::Cell<Option<kettle_config::Rgb>>,
     #[cfg(target_os = "macos")]
-    last_opacity_bits: std::cell::Cell<Option<u32>>,
+    last_alpha_surface_required: std::cell::Cell<Option<bool>>,
     #[cfg(target_os = "macos")]
     checked_at: std::cell::Cell<std::time::Instant>,
     #[cfg(target_os = "macos")]
@@ -45,7 +45,7 @@ impl NativeMaterial {
                 effect: install_macos_effect(window),
                 last_reduce_transparency: std::cell::Cell::new(None),
                 last_background: std::cell::Cell::new(None),
-                last_opacity_bits: std::cell::Cell::new(None),
+                last_alpha_surface_required: std::cell::Cell::new(None),
                 checked_at: std::cell::Cell::new(
                     std::time::Instant::now() - std::time::Duration::from_secs(1),
                 ),
@@ -100,13 +100,14 @@ impl NativeMaterial {
             now.duration_since(self.checked_at.get()) >= std::time::Duration::from_millis(500);
         let blur_changed = self.last_blur.get() != Some(config.window_blur);
         let background_changed = self.last_background.get() != Some(config.theme.background);
-        let opacity_changed =
-            self.last_opacity_bits.get() != Some(config.background_opacity.to_bits());
+        let alpha_surface_required = kettle_render::window_requires_alpha_surface(config);
+        let alpha_requirement_changed =
+            self.last_alpha_surface_required.get() != Some(alpha_surface_required);
         if !accessibility_changed
             && !due
             && !blur_changed
             && !background_changed
-            && !opacity_changed
+            && !alpha_requirement_changed
         {
             return;
         }
@@ -114,18 +115,18 @@ impl NativeMaterial {
         let reduce = macos_reduce_transparency();
         if !blur_changed
             && !background_changed
-            && !opacity_changed
+            && !alpha_requirement_changed
             && self.last_reduce_transparency.get() == Some(reduce)
         {
             return;
         }
         self.last_blur.set(Some(config.window_blur));
         self.last_background.set(Some(config.theme.background));
-        self.last_opacity_bits
-            .set(Some(config.background_opacity.to_bits()));
+        self.last_alpha_surface_required
+            .set(Some(alpha_surface_required));
         self.last_reduce_transparency.set(Some(reduce));
         let (active, opaque) =
-            macos_material_policy(config.window_blur, config.background_opacity, reduce);
+            macos_material_policy(config.window_blur, alpha_surface_required, reduce);
         if let Some(effect) = &self.effect {
             effect.setHidden(!active);
         }
@@ -304,16 +305,54 @@ fn sync_windows_backdrop(window: &Window, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::macos_material_policy;
+    use kettle_config::{BackgroundType, Config};
 
     #[test]
     fn macos_material_distinguishes_blur_alpha_and_accessibility_fallback() {
-        assert_eq!(macos_material_policy(false, 1.0, false), (false, true));
-        assert_eq!(macos_material_policy(false, 0.7, false), (false, false));
-        assert_eq!(macos_material_policy(true, 1.0, false), (true, false));
+        assert_eq!(macos_material_policy(false, false, false), (false, true));
+        assert_eq!(macos_material_policy(false, true, false), (false, false));
+        assert_eq!(macos_material_policy(true, false, false), (true, false));
         assert_eq!(
-            macos_material_policy(true, 0.7, true),
+            macos_material_policy(true, true, true),
             (false, true),
             "Reduce Transparency must disable both blur and translucency"
+        );
+    }
+
+    #[test]
+    fn transparent_background_uses_the_shared_surface_alpha_policy() {
+        let config = Config {
+            background_type: BackgroundType::Transparent,
+            background_opacity: 1.0,
+            background_darkness: 0.85,
+            ..Config::default()
+        };
+        let alpha_required = kettle_render::window_requires_alpha_surface(&config);
+        assert!(alpha_required);
+        assert_eq!(
+            macos_material_policy(false, alpha_required, false),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn starfield_stays_opaque_but_can_opt_into_native_material() {
+        let config = Config {
+            background_type: BackgroundType::Starfield,
+            background_opacity: 0.4,
+            background_darkness: 0.2,
+            ..Config::default()
+        };
+        let alpha_required = kettle_render::window_requires_alpha_surface(&config);
+        assert!(!alpha_required, "the starfield shader fills the surface");
+        assert_eq!(
+            macos_material_policy(false, alpha_required, false),
+            (false, true)
+        );
+        assert_eq!(
+            macos_material_policy(true, alpha_required, false),
+            (true, false),
+            "explicit blur enables native material even for an opaque scene"
         );
     }
 }
