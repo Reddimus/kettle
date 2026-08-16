@@ -603,7 +603,11 @@ split left/right (Terminator-exact)
 auto-split (longest axis)
 .TP
 .B Alt+arrow
-focus pane up / down / left / right
+focus pane up / down / left / right when a split exists in that
+direction; at an outer edge, send the chord to the terminal program
+instead. A zoom that hides sibling panes keeps the chord as a no-op; a
+one-pane tab passes it through (Linux and Windows; macOS uses
+Ctrl+Cmd+arrow for pane focus)
 .TP
 .B Ctrl+Shift+N
 focus next pane (DFS order)

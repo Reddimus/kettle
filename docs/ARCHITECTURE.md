@@ -369,14 +369,24 @@ fix.
 
 The application icon is one native Icon Composer asset rather than a static
 bundle icon plus a runtime override. The generated `AppIcon.icon` holds a
-Kettle-blue system background and one vector foreground layer for the terminal
-face, prompt and caret. The face has an explicit optical safe area whose inset
-and radius remain concentric with Xcode 26's compiled native mask; the prompt
-and caret remain on the 200% foreground layer so widening that frame does not
-make the terminal mark look small. The macOS caret is deliberately narrower
-than the compatibility artwork, adding right-side breathing room without
-moving the prompt; Linux, Windows, and the legacy iconset keep their existing
-geometry. The artwork deliberately bakes neither an outer mask nor a shadow.
+TokyoNight Night system background and one vector foreground layer for a
+literal `>(_)~` terminal-kettle mark. Its five font-independent strokes are
+shared with Linux, Windows, and the compatibility iconset at normal sizes. The
+fixed-size Linux and Windows assets plus the retained iconset use a two-stroke
+`>_` optical-size raster at 16 px, where five punctuation strokes cannot remain
+distinct. The native Icon Composer vector retains the full mark in every
+rendition. The full prompt remains angular, the underscore is square-ended and
+raised clear of the parenthesis terminals, and the parentheses and tilde are
+true cubic Bézier paths rather than rounded line-segment
+approximations. All strokes stay opaque for small-size contrast. The renderer's
+light review variant is the exact two-color inverse of the dark design, so
+geometry and hierarchy cannot drift between the two reviewed variants. It is
+covered by tests but is not emitted as a package asset. The checked-in Icon
+Composer document currently ships the shared dark appearance on every system
+appearance. Its 200% foreground occupies a little over half of the compiled
+icon width while retaining generous clear space.
+The artwork deliberately bakes in neither an inner face, an outer mask, nor a
+shadow.
 Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
 metadata, and a loose previous-release `.icns` for the macOS 11 deployment
 target. Finder, the closed and running Dock item, and the app switcher therefore
@@ -1254,9 +1264,29 @@ text, so its bitmap is already resident).
 - **Broadcast fan-out** (via the `BroadcastScope` enum) is App-side
   target selection: on every keystroke the App
   walks `compute_broadcast_targets(scope, focus, in_tab, all)` and
-  queues the encoded bytes to each target pane's input worker. The reader
-  threads of the receiving panes pick up the echo through their
+  computes each target's effective keyboard mode independently before encoding.
+  In particular, the pre-negotiation modified-Enter policy samples that pane's
+  live Unix PTY line discipline plus foreground process group, or Windows OSC
+  133 command state, and pairs it with the bounded background process snapshot.
+  Only a narrow allowlist of known agent composers receives the unnegotiated
+  fallback; nested shells, readline clients, unknown process trees, and stale
+  Unix snapshots fail closed to plain Enter. A composer and the shell's own line
+  editor in the same broadcast group therefore receive the safe encoding for
+  their own context rather than the focused pane's encoding. The App then queues
+  the encoded bytes to each target pane's input worker. The reader threads of
+  the receiving panes pick up the echo through their
   normal byte-stream path.
+- **Adaptive directional focus** is decided only for a physical non-macOS
+  `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
+  edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
+  chord and receives focus, while an outside-edge press stays unconsumed and is
+  encoded for the PTY. A zoom that hides sibling panes keeps the chord
+  application-owned as a no-op; a one-leaf tab passes it through even if its
+  persisted zoom bit remains set. A two-set press/release ledger ensures that
+  once any repeated press reaches the PTY, terminal ownership stays sticky
+  through its release; otherwise the UI-owned press suppresses that release.
+  Menu, automation, customized-action, and macOS `Ctrl+Cmd+Arrow` dispatch
+  remain explicit application actions.
 - **Allocation hot-paths**: `App::drain_events`
   has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
   Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the

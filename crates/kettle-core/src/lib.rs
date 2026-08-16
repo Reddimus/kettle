@@ -66,7 +66,8 @@ pub use search::{
 pub use term::{
     CommandFinished, ProtocolNotification, PtyEofProgress, PtyGeometry, PtyInputTail,
     PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
-    SessionLogFailure, SharedTerm, Terminal, TerminalCapabilities, WorkingDirectoryPolicy,
+    SessionLogFailure, SharedTerm, ShellActivity, Terminal, TerminalCapabilities,
+    WorkingDirectoryPolicy,
 };
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).

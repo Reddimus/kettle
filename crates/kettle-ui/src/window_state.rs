@@ -34,19 +34,36 @@ use crate::search_input::SearchState;
 /// would leave applications with an impossible input sequence.
 pub(crate) fn track_consumed_key_release(
     suppressed: &mut std::collections::HashSet<PhysicalKey>,
+    terminal_owned: &mut std::collections::HashSet<PhysicalKey>,
     physical_key: PhysicalKey,
     state: ElementState,
     press_consumed: bool,
 ) -> bool {
     match state {
         ElementState::Pressed => {
-            if press_consumed {
+            if press_consumed && !terminal_owned.contains(&physical_key) {
                 suppressed.insert(physical_key);
             }
             false
         }
-        ElementState::Released => suppressed.remove(&physical_key),
+        ElementState::Released => {
+            terminal_owned.remove(&physical_key);
+            suppressed.remove(&physical_key)
+        }
     }
+}
+
+/// Record the point where a press is actually forwarded to the PTY. Routing
+/// is decided after the preliminary modal check, so an unconsumed preliminary
+/// pass cannot claim terminal ownership. Once a repeat reaches the PTY its
+/// release must also reach the PTY, even if focus geometry changes again.
+pub(crate) fn track_terminal_key_press(
+    suppressed: &mut std::collections::HashSet<PhysicalKey>,
+    terminal_owned: &mut std::collections::HashSet<PhysicalKey>,
+    physical_key: PhysicalKey,
+) {
+    suppressed.remove(&physical_key);
+    terminal_owned.insert(physical_key);
 }
 
 const FRAME_RETRY_BASE: std::time::Duration = std::time::Duration::from_millis(16);
@@ -496,6 +513,10 @@ pub(crate) struct WindowState {
     /// matching release must not leak to a Kitty-protocol client after the UI
     /// state that consumed the press has already closed.
     pub(crate) suppressed_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
+    /// Physical keys for which at least one press/repeat reached the PTY. This
+    /// prevents a later geometry or modal transition from swallowing the
+    /// matching release and leaving a Kitty-protocol client with a stuck key.
+    pub(crate) terminal_owned_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
     /// Active input-method composition and its byte-indexed selection range.
     /// Committed text is written to the PTY and this preedit is cleared.
     pub(crate) ime_preedit: Option<(String, Option<(usize, usize)>)>,
@@ -822,6 +843,7 @@ impl WindowState {
             #[cfg(target_os = "macos")]
             macos_right_option_pressed: false,
             suppressed_key_releases: std::collections::HashSet::new(),
+            terminal_owned_key_releases: std::collections::HashSet::new(),
             ime_preedit: None,
             ime_preedit_owner: None,
             ime_focus_generation: 0,
@@ -1289,11 +1311,13 @@ mod tests {
     #[test]
     fn consumed_press_swallows_exactly_its_matching_release() {
         let mut suppressed = std::collections::HashSet::new();
+        let mut terminal_owned = std::collections::HashSet::new();
         let consumed = PhysicalKey::Code(KeyCode::KeyK);
         let unrelated = PhysicalKey::Code(KeyCode::KeyJ);
 
         assert!(!track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             consumed,
             ElementState::Pressed,
             true
@@ -1301,12 +1325,14 @@ mod tests {
         assert!(suppressed.contains(&consumed));
         assert!(!track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             unrelated,
             ElementState::Released,
             false
         ));
         assert!(track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             consumed,
             ElementState::Released,
             false
@@ -1314,6 +1340,7 @@ mod tests {
         assert!(!suppressed.contains(&consumed));
         assert!(!track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             consumed,
             ElementState::Released,
             false
@@ -1323,18 +1350,76 @@ mod tests {
     #[test]
     fn unconsumed_press_does_not_suppress_release() {
         let mut suppressed = std::collections::HashSet::new();
+        let mut terminal_owned = std::collections::HashSet::new();
         let key = PhysicalKey::Code(KeyCode::KeyA);
         assert!(!track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             key,
             ElementState::Pressed,
             false
         ));
         assert!(!track_consumed_key_release(
             &mut suppressed,
+            &mut terminal_owned,
             key,
             ElementState::Released,
             false
         ));
+    }
+
+    #[test]
+    fn terminal_owned_repeat_clears_an_earlier_consumed_press() {
+        let mut suppressed = std::collections::HashSet::new();
+        let mut terminal_owned = std::collections::HashSet::new();
+        let key = PhysicalKey::Code(KeyCode::ArrowUp);
+
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal_owned,
+            key,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(suppressed.contains(&key));
+
+        // Adaptive focus can consume the first press, move to the edge, then
+        // pass the next auto-repeat press through to the terminal.
+        track_terminal_key_press(&mut suppressed, &mut terminal_owned, key);
+        assert!(!suppressed.contains(&key));
+        assert!(terminal_owned.contains(&key));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal_owned,
+            key,
+            ElementState::Released,
+            false
+        ));
+        assert!(!terminal_owned.contains(&key));
+    }
+
+    #[test]
+    fn ui_repeat_cannot_swallow_a_terminal_owned_release() {
+        let mut suppressed = std::collections::HashSet::new();
+        let mut terminal_owned = std::collections::HashSet::new();
+        let key = PhysicalKey::Code(KeyCode::ArrowUp);
+
+        track_terminal_key_press(&mut suppressed, &mut terminal_owned, key);
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal_owned,
+            key,
+            ElementState::Pressed,
+            true,
+        ));
+        assert!(!suppressed.contains(&key));
+        assert!(!track_consumed_key_release(
+            &mut suppressed,
+            &mut terminal_owned,
+            key,
+            ElementState::Released,
+            false,
+        ));
+        assert!(!terminal_owned.contains(&key));
     }
 }

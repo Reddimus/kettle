@@ -57,6 +57,17 @@ and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
 
+Modified-Enter auto detection has an additional native Unix PTY regression. It
+starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
+editor's prompt is noncanonical while the shell's own process group still owns
+the PTY, then starts a raw child and proves job control transfers the foreground
+group through the same `foreground_process_group` API the UI samples. Portable
+tests separately pin the recognized-composer allowlist, reject stale Unix pid
+snapshots, prove the Windows breadth-first scan chooses a composer before its
+forked helpers, and cover the policy matrix. A live `kettle ctl send_keys` check
+remains useful because it exercises the GUI/control encoding path against the
+actual pane.
+
 The three patched crates under `vendor/` are explicitly excluded from the
 product workspace, so the root gates exercise their public Kettle integration
 but do not run package-owned unit targets. A separate validation workspace and
@@ -1848,14 +1859,36 @@ name the shape of bug each pass caught.
   Source guards pin that production no longer mutates the application icon at
   runtime and that window creation plus palette changes still synchronize the
   native titlebar background. These checks prove wiring and input assets; they
-  also pin the macOS face's centered safe area, minimum accent rim, concentric
-  radius, and glyph padding. They do not prove AppKit's visual treatment.
-  Before release, compile the asset with Xcode 26 and inspect the 256 px
-  fallback plus a normal-size Dock item: the dark face should occupy about
-  `52..203` inside the native mask's `26..229`, leaving an even blue frame that
-  does not collapse at the corners. Then run the native macOS Dock and
-  rounded-window check in
+  also pin one shared, borderless kettle foreground, its optical safe area, the
+  two distinct strokes of the fixed-size compact `>_` mark at 16 px, and all
+  five distinct strokes of the full `>(_)~` mark at 24 px. The native Icon
+  Composer vector retains the full mark at every rendition, so the compact-mark
+  assertion does not cover its 16 px fallback. These checks
+  do not prove AppKit's visual treatment. Before release, compile the asset with
+  Xcode 26 and inspect the 256 px fallback plus a normal-size Dock item: the
+  TokyoNight background should reach the system-owned mask with no inner
+  rounded face or line that can collapse at the corners. Then run the native
+  macOS Dock and rounded-window check in
   [RELEASING.md](RELEASING.md#macos-appearance-gate).
+- The adaptive directional-focus matrix pins all four exact
+  `Alt+Arrow`/`Focus*` pairs, rejects extra modifiers and mismatched customized
+  actions, and keeps the macOS policy disabled. Mux geometry tests separately
+  prove both real-neighbour selection and each outside-edge no-op; together
+  they cover the two branches in the physical keyboard route without making a
+  synthetic window event the source of pane geometry. A zoom hiding sibling
+  panes is pinned to the consumed/no-op branch, while a one-leaf tab with the
+  zoom bit set still falls through. Key-release state tests reproduce
+  auto-repeat in both directions across the consume/pass-through boundary; the
+  eventual release must follow the terminal-owned repeat rather than a stale
+  consumed press, and a later UI-owned repeat cannot reclaim it.
+- The modified-Enter matrix pairs the live line-discipline result with a
+  recognized foreground composer, rejects nested/raw shell and readline cases,
+  and exercises direct versus shell-hosted Windows clients. Process-snapshot
+  tests prove the Windows breadth-first scan selects the closest recognized
+  composer before its helper children even when that subtree forks, and rejects
+  ambiguous sibling branches directly under the shell. Native PTY readiness
+  markers are assembled from separate shell words so the shell's own input echo
+  cannot satisfy the assertion before the child actually prints them.
 - The Windows installer smoke covers both portable install/uninstall and an
   isolated default install. It seeds a pre-existing Start shortcut with stale
   PowerShell launcher arguments, upgrades it, and verifies the shortcut target,

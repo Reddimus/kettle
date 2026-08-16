@@ -6,6 +6,50 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Alt+Up` could not reach terminal applications on Linux and Windows.** The
+  default chord always ran Kettle's `FocusUp` action, even at the top edge where
+  it could not move anywhere, colliding with Codex's previous-message editor
+  and similar CLI bindings. The four default `Alt+Arrow` focus chords are now
+  adaptive: they move to a real neighboring pane and otherwise pass the
+  original key event through to the terminal. A zoom that actually hides
+  sibling panes keeps the chord as a no-op; a one-pane tab passes it through
+  even if its persisted zoom bit remains set. Custom actions and macOS's
+  `Ctrl+Cmd+Arrow` focus map keep their explicit behavior, and key-release
+  ownership follows whichever side received the last repeated press.
+- **Shift+Enter could print `;2;13~` after leaving an interactive CLI.** Kettle
+  sent its compatibility encoding before any keyboard-protocol negotiation even
+  at an ordinary shell prompt. Some line editors consumed the escape prefix as
+  a function key and inserted the remaining bytes literally. The new default
+  `modify-other-keys = auto` enables that fallback only for a known agent
+  composer (Codex, Claude Code, Gemini, or OpenCode). Unix/macOS pairs a fresh
+  noncanonical PTY sample and foreground process-group id with either the
+  direct launch identity or the background process snapshot; Windows requires
+  the observed composer to be running, or to have been launched directly.
+  Nested shells, readline/libedit programs, SSH/WSL transports, wrappers, and
+  snapshots without a recognized composer fail closed to plain Enter. `always`
+  (`enter` alias) is the explicit escape hatch for an unrecognized client, and
+  negotiated xterm/Kitty modes still take precedence. GUI, control-plane, and
+  broadcast input use the same per-pane decision.
+- **The app icon used two competing rounded shapes on macOS.** The inner dark
+  terminal face and the system-owned outer mask could not stay optically
+  parallel at every Dock scale, and a literal teapot replacement became noisy
+  at taskbar sizes. Every platform now shares one font-independent `>(_)~`
+  terminal-kettle mark at normal sizes. The fixed-size Linux and Windows assets
+  plus the retained compatibility iconset use a crisp `>_` optical-size variant
+  at 16 px instead of fusing five strokes into two blobs; the native macOS
+  vector retains the full mark in every rendition. True Bézier parentheses and
+  steam replace the bulbous segmented approximation; the raised square-ended
+  underscore avoids
+  closing the mark into a horseshoe, and every stroke is opaque so no character
+  looks disabled at taskbar size. The generator defines and tests an exact
+  two-color inverse for design review; the shipped native macOS document uses
+  one shared dark appearance. macOS has no inner face or border, leaving the
+  system as the sole owner of the curve; the compiled foreground occupies a
+  little over half of the icon so it remains legible without crowding the
+  native mask.
+
 ## [3.0.1] — 2026-08-13
 
 ### Fixed

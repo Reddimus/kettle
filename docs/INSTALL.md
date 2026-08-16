@@ -487,10 +487,23 @@ drivers). The workspace also contains native PTY/ConPTY lifecycle tests. See
 ## Regenerating the app icons (contributors)
 
 `scripts/gen-icons.py` is the single source of truth for the icon geometry. It
-emits the transparent compatible treatment used by Linux/Windows and the
-foreground for `packaging/macos/AppIcon.icon`. The native macOS document owns
-the Kettle-blue background while the system owns the only outer mask; Xcode
-generates its previous-release fallback for the macOS 11 deployment target.
+emits one custom `>(_)~` terminal-kettle mark for Linux, Windows, and the
+foreground of `packaging/macos/AppIcon.icon`. The punctuation is drawn as five
+font-independent, fully opaque vector strokes on the default TokyoNight
+background at normal sizes. The 16 px fixed-size Linux and Windows assets plus
+the retained compatibility iconset use a simplified `>_` optical-size mark
+because five punctuation strokes merge at that physical limit. The native
+Icon Composer vector retains the full mark in every rendition. Parentheses and
+steam in the full mark use true cubic curves; the raised,
+square-ended underscore keeps the full-size mark from completing a U-shaped
+outline. All five are distinct in the generated 24 px raster. The renderer's
+light review variant swaps the dark face and Kettle-blue mark colors exactly
+while retaining identical geometry; tests cover it, but the generator does not
+write it as a package asset and the native macOS document does not currently
+ship it as a separate appearance. There is no inner rounded face or border
+whose curve can fight the platform mask. The system owns the only outer mask,
+and Xcode generates the previous-release fallback for the macOS 11 deployment
+target.
 The generator also writes the fixed-size hicolor PNGs (`kettle-16.png` …
 `kettle-256.png`), the retained compatibility iconset, and the Windows `.ico`:
 

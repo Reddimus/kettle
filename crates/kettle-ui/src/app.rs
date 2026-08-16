@@ -38,7 +38,7 @@ use crate::mux::{
 };
 use crate::window_state::{
     DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
-    track_consumed_key_release,
+    track_consumed_key_release, track_terminal_key_press,
 };
 
 const ACCESSIBILITY_ROOT_ID: NodeId = NodeId(0);
@@ -3382,8 +3382,13 @@ fn update_window_remote_contexts(
         let Some(probe) = snapshot.probes.get(&pid) else {
             continue;
         };
-        let probe_changed = stage_applied_remote_probe(applied, pane_id, pid, probe);
-        if probe_changed {
+        let context_changed = applied.get(&(pane_id, pid)).is_none_or(|previous| {
+            previous.remote != probe.remote
+                || previous.native_cwd != probe.native_cwd
+                || previous.foreground_shell != probe.foreground_shell
+        });
+        stage_applied_remote_probe(applied, pane_id, pid, probe);
+        if context_changed {
             pane.term.set_native_cwd(probe.native_cwd.clone());
         }
         if probe.remote != pane.remote_context {
@@ -3397,7 +3402,12 @@ fn update_window_remote_contexts(
             pane.remote_context = probe.remote.clone();
             changed = true;
         }
-        changed |= probe_changed;
+        if probe.foreground_process != pane.foreground_process {
+            pane.foreground_process = probe.foreground_process.clone();
+        }
+        // Foreground argv drives input policy but has no visual representation;
+        // changing commands must not schedule a title sync and redraw at 5 Hz.
+        changed |= context_changed;
     }
     changed
 }
@@ -3526,8 +3536,13 @@ fn argv_is_nonlocal_client(argv: &[String]) -> bool {
 }
 
 fn remote_probe_target(pane: &crate::mux::Pane) -> Option<kettle_remote::RemoteProbeTarget> {
+    #[cfg(unix)]
+    let foreground_pid = pane.term.foreground_process_group().ok();
+    #[cfg(not(unix))]
+    let foreground_pid = None;
     Some(kettle_remote::RemoteProbeTarget {
         pid: pane.term.child_pid()?,
+        foreground_pid,
         allow_native_cwd: !argv_is_nonlocal_client(&pane.argv),
     })
 }
@@ -7126,11 +7141,12 @@ impl App {
         event: &winit::event::KeyEvent,
         prepare_input: bool,
     ) {
+        let modified_enter = key_is_modified_enter(&event.logical_key, ws.mods);
         if !ws.mux.is_broadcast_on() {
             let mode = ws
                 .mux
                 .focused()
-                .and_then(|pane| pane.term.term.lock().ok().map(|term| *term.mode()))
+                .map(|pane| pane.effective_key_mode(self.cfg.modify_other_keys, modified_enter))
                 .unwrap_or_else(kettle_core::TermMode::empty);
             let Some(bytes) = encode_key_event_for_mode(&self.cfg, event, ws.mods, mode) else {
                 return;
@@ -7154,20 +7170,24 @@ impl App {
         let scope = ws.mux.broadcast.clone();
         let cfg = &self.cfg;
         let mods = ws.mods;
-        let mut delivery = ws.mux.broadcast_encoded(scroll_to_bottom, |mode| {
-            encode_key_event_for_mode(cfg, event, mods, mode)
-        });
+        let mut delivery = ws.mux.broadcast_encoded(
+            self.cfg.modify_other_keys,
+            modified_enter,
+            scroll_to_bottom,
+            |mode| encode_key_event_for_mode(cfg, event, mods, mode),
+        );
         if let Some(input_time) = input_time {
             stamp_accepted_input(&mut ws.last_typed, delivery, input_time);
         }
         if Mux::scope_crosses_windows(&scope) {
             for other in self.windows.values_mut() {
-                let foreign =
-                    other
-                        .mux
-                        .broadcast_encoded_foreign(&scope, scroll_to_bottom, |mode| {
-                            encode_key_event_for_mode(cfg, event, mods, mode)
-                        });
+                let foreign = other.mux.broadcast_encoded_foreign(
+                    &scope,
+                    self.cfg.modify_other_keys,
+                    modified_enter,
+                    scroll_to_bottom,
+                    |mode| encode_key_event_for_mode(cfg, event, mods, mode),
+                );
                 if let Some(input_time) = input_time {
                     stamp_accepted_input(&mut other.last_typed, foreign, input_time);
                 }
@@ -18095,16 +18115,14 @@ impl App {
         let Some(p) = Self::ctl_pane_ref(ws, &self.windows, pane) else {
             return Response::err(req.id, ec::NO_SUCH_PANE, "pane vanished");
         };
-        // The live mode decides the byte form (app-cursor arrows etc.).
-        let mode = p
-            .term
-            .term
-            .lock()
-            .ok()
-            .map(|t| *t.mode())
-            .unwrap_or_else(kettle_core::TermMode::empty);
         let mut bytes = Vec::new();
         for (mods, key) in &parsed {
+            // The live mode decides the byte form (app-cursor arrows etc.).
+            // Only modified Enter needs the termios/OSC 133 context sample.
+            let mode = p.effective_key_mode(
+                self.cfg.modify_other_keys,
+                key_is_modified_enter(key, *mods),
+            );
             if let Some(b) = crate::input::encode_key_press(key, *mods, mode) {
                 // Review fix: honor the user's backspace-binding /
                 // delete-binding remap, exactly like the GUI key path.
@@ -20424,6 +20442,11 @@ fn encode_key_event_for_mode(
     Some(bytes)
 }
 
+fn key_is_modified_enter(key: &Key, mods: ModifiersState) -> bool {
+    matches!(key, Key::Named(NamedKey::Enter))
+        && (mods.shift_key() || mods.control_key() || mods.alt_key() || mods.super_key())
+}
+
 fn parse_ctl_send_key_batch(
     keys: &[serde_json::Value],
 ) -> std::result::Result<Vec<(ModifiersState, Key)>, String> {
@@ -20682,6 +20705,46 @@ fn resolve_keybind_action(
                 .cloned()
                 .map(|action| (trigger, action))
         })
+}
+
+/// The non-macOS default `Alt+Arrow` focus chords are adaptive at the edge of
+/// a split tree. When a neighbour exists, the keybind owns the chord and moves
+/// focus. When no pane exists in that direction, the original key event falls
+/// through to the PTY, preserving application bindings such as Codex's
+/// `Alt+Up` previous-message editor.
+///
+/// Match the trigger and action as a pair. A user who deliberately binds
+/// `Alt+Up` to some other action must get that action, not an implicit terminal
+/// fallback, and actions invoked from menus or automation have no physical
+/// chord to reinterpret. macOS keeps its `Ctrl+Cmd+Arrow` focus map and leaves
+/// Option+Arrow entirely to the terminal.
+fn adaptive_alt_focus_direction(
+    trigger: Trigger,
+    action: &Action,
+    enabled: bool,
+) -> Option<(i32, i32)> {
+    if !enabled || trigger.mods != Mods::ALT {
+        return None;
+    }
+    match (trigger.key, action) {
+        (KKey::Up, Action::FocusUp) => Some((0, -1)),
+        (KKey::Down, Action::FocusDown) => Some((0, 1)),
+        (KKey::Left, Action::FocusLeft) => Some((-1, 0)),
+        (KKey::Right, Action::FocusRight) => Some((1, 0)),
+        _ => None,
+    }
+}
+
+fn adaptive_alt_focus_falls_through(
+    trigger: Trigger,
+    action: &Action,
+    enabled: bool,
+    zoom_hides_siblings: bool,
+    neighbor_exists: bool,
+) -> bool {
+    !zoom_hides_siblings
+        && !neighbor_exists
+        && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
 }
 
 fn parse_ctl_mods(
@@ -25096,6 +25159,7 @@ impl App {
                     // a later unrelated release cannot be mistaken for the
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
+                    ws.terminal_owned_key_releases.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
@@ -25254,6 +25318,7 @@ impl App {
                     || ws.ime_preedit.is_some();
                 if track_consumed_key_release(
                     &mut ws.suppressed_key_releases,
+                    &mut ws.terminal_owned_key_releases,
                     event.physical_key,
                     event.state,
                     ui_owns_key,
@@ -25544,22 +25609,42 @@ impl App {
                     return;
                 }
 
-                if let Some((_trigger, act)) = resolve_keybind_action(
+                if let Some((trigger, act)) = resolve_keybind_action(
                     &self.cfg.keybinds,
                     Some(&event.logical_key),
                     Some(&event.physical_key),
                     ws.mods,
                 ) {
-                    track_consumed_key_release(
-                        &mut ws.suppressed_key_releases,
-                        event.physical_key,
-                        event.state,
-                        true,
-                    );
-                    self.handle_action(ws, act, event_loop);
-                    return;
+                    let adaptive_direction =
+                        adaptive_alt_focus_direction(trigger, &act, !cfg!(target_os = "macos"));
+                    let adaptive_focus_falls_through =
+                        adaptive_direction.is_some_and(|(dx, dy)| {
+                            adaptive_alt_focus_falls_through(
+                                trigger,
+                                &act,
+                                true,
+                                ws.mux.zoom_hides_siblings(),
+                                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
+                            )
+                        });
+                    if !adaptive_focus_falls_through {
+                        track_consumed_key_release(
+                            &mut ws.suppressed_key_releases,
+                            &mut ws.terminal_owned_key_releases,
+                            event.physical_key,
+                            event.state,
+                            true,
+                        );
+                        self.handle_action(ws, act, event_loop);
+                        return;
+                    }
                 }
 
+                track_terminal_key_press(
+                    &mut ws.suppressed_key_releases,
+                    &mut ws.terminal_owned_key_releases,
+                    event.physical_key,
+                );
                 self.write_terminal_key_event(ws, &event, true);
             }
             WindowEvent::RedrawRequested => self.redraw(ws),
@@ -26442,12 +26527,12 @@ mod tests {
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
-        input_rejection_message, local_paste_within_limit, macos_effective_modifiers,
-        modal_swallows_pointer, osc52_clipboard_channel, output_generation_advanced,
-        output_wakeup_needs_paint, pane_cursor_blinking_with, pane_snapshot_keys_match,
-        parse_remote_command_batch, paste_paths_into_target, paste_text_into_target,
-        production_source, rank_layouts, sanitize_native_window_title, sanitize_title,
-        selection_kind, session_sweep_due, should_notify_input_rejection,
+        input_rejection_message, key_is_modified_enter, local_paste_within_limit,
+        macos_effective_modifiers, modal_swallows_pointer, osc52_clipboard_channel,
+        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
+        pane_snapshot_keys_match, parse_remote_command_batch, paste_paths_into_target,
+        paste_text_into_target, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
         should_reveal_before_first_surface_frame, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
@@ -27304,6 +27389,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_modified_enter_requests_a_live_context_sample() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let enter = Key::Named(NamedKey::Enter);
+        assert!(key_is_modified_enter(&enter, ModifiersState::SHIFT));
+        assert!(key_is_modified_enter(&enter, ModifiersState::CONTROL));
+        assert!(!key_is_modified_enter(&enter, ModifiersState::empty()));
+        assert!(!key_is_modified_enter(
+            &Key::Named(NamedKey::Tab),
+            ModifiersState::SHIFT
+        ));
+    }
+
     /// Backspace's binding has the same contract, and the same trap one level
     /// down: its level-0 forms vary with control and alt, but a
     /// `modifyOtherKeys` level-2 `Shift+Backspace` is a `CSI 27;2;8~` that the
@@ -27845,6 +27944,7 @@ mod tests {
         let target = |pid| {
             Some(kettle_remote::RemoteProbeTarget {
                 pid,
+                foreground_pid: Some(pid),
                 allow_native_cwd: true,
             })
         };
@@ -27876,11 +27976,13 @@ mod tests {
             remote: None,
             native_cwd: Some("old".into()),
             foreground_shell: None,
+            foreground_process: None,
         };
         let new = kettle_remote::RemoteProbe {
             remote: None,
             native_cwd: Some("new".into()),
             foreground_shell: None,
+            foreground_process: None,
         };
         let mut applied = std::collections::HashMap::from([((70, 7), old)]);
 
@@ -30261,6 +30363,109 @@ mod tests {
                 ctrl,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn adaptive_alt_focus_matches_only_the_default_directional_pairs() {
+        use super::{adaptive_alt_focus_direction, adaptive_alt_focus_falls_through};
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+
+        for (key, action, direction) in [
+            (KKey::Up, Action::FocusUp, (0, -1)),
+            (KKey::Down, Action::FocusDown, (0, 1)),
+            (KKey::Left, Action::FocusLeft, (-1, 0)),
+            (KKey::Right, Action::FocusRight, (1, 0)),
+        ] {
+            assert_eq!(
+                adaptive_alt_focus_direction(Trigger::new(Mods::ALT, key), &action, true),
+                Some(direction)
+            );
+        }
+
+        assert_eq!(
+            adaptive_alt_focus_direction(
+                Trigger::new(Mods::ALT, KKey::Up),
+                &Action::FocusDown,
+                true,
+            ),
+            None,
+            "a customized mismatched action must stay an application keybind"
+        );
+        assert_eq!(
+            adaptive_alt_focus_direction(
+                Trigger::new(Mods::CTRL | Mods::ALT, KKey::Up),
+                &Action::FocusUp,
+                true,
+            ),
+            None,
+            "extra modifiers are not the adaptive default chord"
+        );
+        assert_eq!(
+            adaptive_alt_focus_direction(
+                Trigger::new(Mods::ALT, KKey::Up),
+                &Action::FocusUp,
+                false,
+            ),
+            None,
+            "macOS leaves Option+Arrow to the PTY and uses Ctrl+Cmd for focus"
+        );
+
+        let trigger = Trigger::new(Mods::ALT, KKey::Up);
+        assert!(adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            false,
+            false,
+        ));
+        assert!(!adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            true,
+            false,
+        ));
+        assert!(!adaptive_alt_focus_falls_through(
+            trigger,
+            &Action::FocusUp,
+            true,
+            false,
+            true,
+        ));
+    }
+
+    /// The adaptive edge case deliberately bypasses `handle_action` and falls
+    /// through to normal terminal input. Pin the production wiring as well as
+    /// the two pure helpers: once a repeated press reaches the PTY, the shared
+    /// ownership ledger must be updated before its encoded bytes are queued so
+    /// the eventual release cannot be swallowed by later geometry changes.
+    #[test]
+    fn adaptive_alt_focus_fallthrough_records_terminal_ownership_before_writing() {
+        let src = production_source();
+        let routing = src
+            .split("let adaptive_direction =")
+            .nth(1)
+            .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
+            .expect("adaptive keyboard routing block");
+        let fallthrough = routing
+            .find("if !adaptive_focus_falls_through")
+            .expect("adaptive focus must retain its application-owned branch");
+        let terminal_ownership = routing
+            .find("track_terminal_key_press(")
+            .expect("fall-through input must record terminal key ownership");
+        let terminal_write = routing
+            .find("self.write_terminal_key_event(ws, &event, true)")
+            .expect("fall-through input must reach the terminal");
+        assert!(
+            fallthrough < terminal_ownership && terminal_ownership < terminal_write,
+            "adaptive focus must decide the UI branch first, then record PTY \
+             ownership before writing the fall-through press"
+        );
+        assert_eq!(
+            routing.matches("track_terminal_key_press(").count(),
+            1,
+            "the keyboard fall-through path must have one shared ownership update"
         );
     }
 
