@@ -9,7 +9,7 @@ authors.workspace = true
 # See `kettle-config/Cargo.toml`: each crate's `description` overrides the
 # workspace default because that default describes the `kettle` binary, not
 # the library sub-crates.
-description = "Kettle windowing, tabs, splits, overlays, and session restore"
+description = "kettle: windowing, tabs, splits, overlays, and session restore"
 
 [lints]
 workspace = true
