@@ -38,11 +38,10 @@ that unit and image tests cannot establish:
   while the traffic lights, drag region, first terminal row, and pointer targets
   remain in their native positions; switch once between a light and dark theme
   to prove the NSWindow background follows a palette change;
-- the running, closed, Finder and app-switcher icons agree; the blue accent
-  reaches the system mask without a second transparent gutter or an inner
-  pre-rounded outline; the blue frame remains visibly even through all four
-  corners instead of collapsing to a hairline; and the terminal face, prompt
-  and caret remain legible at normal and magnified Dock sizes.
+- the running, closed, Finder and app-switcher icons agree; the TokyoNight
+  background reaches the system mask without a second transparent gutter,
+  inner rounded face, or outline; and the blue `>(_)~` terminal-kettle mark
+  remains centered and legible at normal and magnified Dock sizes.
 
 The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
 pipeline with a macOS 11 deployment target. The emitted asset catalog and loose

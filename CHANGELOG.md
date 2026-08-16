@@ -6,6 +6,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The app icon used two competing rounded shapes on macOS.** The inner dark
+  terminal face and the system-owned outer mask could not stay optically
+  parallel at every Dock scale, and a literal teapot replacement became noisy
+  at taskbar sizes. Every platform now shares one font-independent `>(_)~`
+  terminal-kettle mark at normal sizes. The fixed-size Linux and Windows assets
+  plus the retained compatibility iconset use a crisp `>_` optical-size variant
+  at 16 px instead of fusing five strokes into two blobs; the native macOS
+  vector retains the full mark in every rendition. True Bézier parentheses and
+  steam replace the bulbous segmented approximation; the raised square-ended
+  underscore avoids
+  closing the mark into a horseshoe, and every stroke is opaque so no character
+  looks disabled at taskbar size. The generator defines and tests an exact
+  two-color inverse for design review; the shipped native macOS document uses
+  one shared dark appearance. macOS has no inner face or border, leaving the
+  system as the sole owner of the curve; the compiled foreground occupies a
+  little over half of the icon so it remains legible without crowding the
+  native mask.
+
 ## [3.0.1] — 2026-08-13
 
 ### Fixed

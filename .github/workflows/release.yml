@@ -299,8 +299,9 @@ jobs:
           # Assets.car for current systems and a loose AppIcon.icns generated
           # for the deployment target, so Finder, the closed and running Dock
           # item, and the app switcher never disagree. Icon Composer and macOS
-          # own the blue canvas and outer mask; Kettle's SVG contains only its
-          # terminal face and prompt, avoiding the double-rounded gutter.
+          # own the TokyoNight canvas and outer mask; Kettle's SVG contains only
+          # its borderless terminal-kettle mark, avoiding the double-rounded
+          # gutter.
           ICON_OUT="$RUNNER_TEMP/kettle-app-icon"
           mkdir -p "$ICON_OUT"
           scripts/compile-macos-app-icon.sh "$ICON_OUT"
