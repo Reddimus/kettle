@@ -72,6 +72,45 @@ function __kettle_completion_reset
     set -g __kettle_completion_cycle_index -1
 end
 
+# Fish 3.7 does not autoload a command's completion file for `complete -C`.
+# Its stock Tab path does that before querying candidates, so mirror that one
+# step when no user or plugin completion is already registered. Fish 4 does
+# not need this, but the check makes it a no-op there.
+function __kettle_completion_prime
+    set -l words (commandline -opc)
+    set -l command $words[1]
+    if test -z "$command"
+        set command (commandline -ct)
+    end
+    test -n "$command"; or return
+    string match --quiet '*/*' -- $command; and return
+    test -z (complete -c $command 2>/dev/null | string collect); or return
+
+    set -l completion_path $fish_complete_path
+    if test (count $completion_path) -eq 0
+        # Fish 3.7 has the component directories but not the combined public
+        # path variable. Keep its normal user, system, vendor, bundled order.
+        set completion_path \
+            "$__fish_config_dir/completions" \
+            "$__fish_sysconf_dir/completions" \
+            "$__fish_data_dir/vendor_completions.d" \
+            "$__fish_data_dir/completions" \
+            "$__fish_user_data_dir/generated_completions"
+    end
+    for directory in $completion_path
+        set -l completion "$directory/$command.fish"
+        if test -r "$completion"
+            source "$completion"
+            return
+        end
+    end
+end
+
+function __kettle_completion_rows
+    __kettle_completion_prime
+    complete -C (commandline -cp | string collect) 2>/dev/null
+end
+
 function __kettle_completion_clear
     __kettle_completion_reset
     set -q __kettle_completion_generation; or set -g __kettle_completion_generation 0
@@ -115,7 +154,7 @@ end
 # different list after the commandline has changed.
 function __kettle_completion_capture
     __kettle_completion_reset
-    set -l rows (complete -C (commandline -cp | string collect) 2>/dev/null)
+    set -l rows (__kettle_completion_rows)
     set -l count 0
     for row in $rows
         test $count -ge 64; and break
@@ -133,7 +172,7 @@ function __kettle_completion_capture
 end
 
 function __kettle_completion_emit
-    set -l rows (complete -C (commandline -cp | string collect) 2>/dev/null)
+    set -l rows (__kettle_completion_rows)
     __kettle_completion_emit_rows show '' $rows
 end
 
@@ -214,8 +253,10 @@ if status is-interactive; and test "$TERM_PROGRAM" = kettle; and test "$KETTLE_C
     # completion binding in either map, but leave every user/plugin binding
     # alone. Re-sourcing is idempotent because our own binding is recognized.
     for __kettle_mode in default insert
-        set -l __kettle_user_tab (bind --user -M $__kettle_mode tab 2>/dev/null | string collect)
-        set -l __kettle_preset_tab (bind --preset -M $__kettle_mode tab 2>/dev/null | string collect)
+        # Query the byte sequence, not the named key. Fish 3.7 treats `tab`
+        # here as the three literal letters; newer Fish accepts both forms.
+        set -l __kettle_user_tab (bind --user -M $__kettle_mode \t 2>/dev/null | string collect)
+        set -l __kettle_preset_tab (bind --preset -M $__kettle_mode \t 2>/dev/null | string collect)
         if string match --quiet '* __kettle_complete' "$__kettle_user_tab"; or begin
                 test -z "$__kettle_user_tab"; and string match --regex --quiet ' complete$' "$__kettle_preset_tab"
             end
