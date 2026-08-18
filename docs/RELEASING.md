@@ -34,13 +34,14 @@ native macOS 26 or later desktop and record screenshots containing a decorated
 Kettle window plus the running and closed-but-pinned Dock icon. Check the window
 treatment and icon details that unit and image tests cannot establish:
 
-- with the default opaque background and blur disabled, the active theme
-  reaches both rounded top corners without a clear or mismatched strip;
-- with alpha transparency and native blur enabled, one material reaches both
-  rounded top corners
+- with the default 86% background opacity and native blur enabled, one material
+  reaches both rounded top corners
   without a clear strip or seam; resize the window and round-trip full screen,
   then confirm the traffic lights, drag region, first terminal row, and pointer
   targets remain in their native positions;
+- set `background-opacity = 1.0` and `window-blur = false`, then confirm the
+  active theme reaches both rounded top corners without a clear or mismatched
+  strip;
 - repeat the full-screen round trip with `borderless = true`; the terminal must
   remain visible through the documented sharp-alpha fallback instead of being
   covered by a material view;

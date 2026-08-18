@@ -82,19 +82,25 @@ PowerShell can use it automatically when their stock Tab binding is still
 active. Bash, Zsh, and customized shells can publish existing candidates
 through [Shell integration](docs/SHELL-INTEGRATION.md).
 
-The portable default is fully opaque. To opt into native material on macOS or
-supported Windows versions:
+Native material is enabled by default. macOS and Windows use subtle
+translucency; Linux stays at 99% opacity whether compositor blur is available
+or not:
 
 ```ini
+# macOS and Windows default
 background-opacity = 0.86
 window-blur = true
+
+# Linux default
+background-opacity = 0.99
 ```
 
 Kettle follows macOS Reduce Transparency immediately. Linux compositors may
 ignore the blur hint; Kettle detects that case and raises only the live scene to
 99% opacity so text stays readable without changing screenshots or your config.
 Windows matches its DWM caption to the active theme. macOS keeps AppKit's
-caption opaque and follows the selected light or dark appearance.
+caption opaque and follows the selected light or dark appearance. Set opacity
+to `1.0` and blur to `false` for a fully opaque window.
 
 ## Common keys
 
@@ -129,7 +135,6 @@ Kettle uses a plain `key = value` file:
 theme = TokyoNight Night
 font-family = JetBrainsMono Nerd Font
 font-size = 13
-background-opacity = 1.0
 completion-overlay = auto
 cursor-style = block
 keybind = ctrl+shift+t=new_tab
