@@ -202,7 +202,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     kettle_config::Theme::POPULAR,
                 ),
                 number("Font size", "font-size", 6, 72, 1, "pt"),
-                number("Background opacity", "background-opacity", 20, 100, 5, "%"),
+                number("Background opacity", "background-opacity", 20, 100, 1, "%"),
                 toggle("Window blur", "window-blur"),
                 number("Window padding", "window-padding-x", 0, 40, 2, "px"),
                 choice(
@@ -1115,9 +1115,9 @@ mod tests {
         // Config-valid values outside the catalogue's convenient range step
         // normally; neither arrow may snap them to the nearest boundary.
         cfg.background_opacity = 0.10;
-        let opacity = number("Background opacity", "background-opacity", 20, 100, 5, "%");
-        assert_eq!(next_value(&cfg, &opacity, -1), "0.05");
-        assert_eq!(next_value(&cfg, &opacity, 1), "0.15");
+        let opacity = number("Background opacity", "background-opacity", 20, 100, 1, "%");
+        assert_eq!(next_value(&cfg, &opacity, -1), "0.09");
+        assert_eq!(next_value(&cfg, &opacity, 1), "0.11");
 
         cfg.scrollback = 500_000;
         let scrollback = number("Scrollback lines", "scrollback", 0, 100_000, 1_000, "");
@@ -1145,10 +1145,13 @@ mod tests {
     #[test]
     fn opacity_round_trips_percent_to_float() {
         let mut cfg = Config::default();
-        cfg.background_opacity = 0.85;
-        let f = number("Background opacity", "background-opacity", 20, 100, 5, "%");
-        assert_eq!(read(&cfg, &f), "85%");
-        // 85% + 5% step -> 0.90 on disk
-        assert_eq!(next_value(&cfg, &f, 1), "0.90");
+        cfg.background_opacity = 0.99;
+        let f = number("Background opacity", "background-opacity", 20, 100, 1, "%");
+        assert_eq!(read(&cfg, &f), "99%");
+        assert_eq!(next_value(&cfg, &f, -1), "0.98");
+        assert_eq!(next_value(&cfg, &f, 1), "1.00");
+
+        cfg.background_opacity = 1.0;
+        assert_eq!(next_value(&cfg, &f, -1), "0.99");
     }
 }
