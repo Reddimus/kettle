@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-08-17
+
 ### Added
 
 - **Shell completions can appear in an IDE style card above the active
