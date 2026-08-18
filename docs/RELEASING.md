@@ -35,13 +35,10 @@ Kettle window plus the running and closed-but-pinned Dock icon. Check the window
 treatment and icon details that unit and image tests cannot establish:
 
 - with the default 86% background opacity and native blur enabled, one material
-  reaches both rounded top corners
-  without a clear strip or seam; resize the window and round-trip full screen,
-  then confirm the traffic lights, drag region, first terminal row, and pointer
-  targets remain in their native positions;
-- set `background-opacity = 1.0` and `window-blur = false`, then confirm the
-  active theme reaches both rounded top corners without a clear or mismatched
-  strip;
+  reaches both rounded top corners without a clear strip or seam; resize the
+  window and round-trip full screen, then confirm the traffic lights, drag
+  region, first terminal row, and pointer targets remain in their native
+  positions;
 - repeat the full-screen round trip with `borderless = true`; the terminal must
   remain visible through the documented sharp-alpha fallback instead of being
   covered by a material view;
@@ -53,6 +50,9 @@ treatment and icon details that unit and image tests cannot establish:
 - toggle Reduce Transparency while the blurred window is open; the material
   must disappear immediately, the theme background must become opaque, and both
   must return when the setting is restored;
+- set `background-opacity = 1.0` and `window-blur = false`, then confirm the
+  active theme reaches both rounded top corners without a clear or mismatched
+  strip;
 - the running, closed, Finder and app-switcher icons agree; both 256 px
   appearances keep the system mask and inset face parallel with clear rim
   space; and the `>_` mark remains centered and legible at normal and magnified

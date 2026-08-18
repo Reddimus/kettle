@@ -83,21 +83,26 @@ active. Bash, Zsh, and customized shells can publish existing candidates
 through [Shell integration](docs/SHELL-INTEGRATION.md).
 
 Native material is enabled by default. macOS and Windows use subtle
-translucency; Linux stays at 99% opacity whether compositor blur is available
-or not:
+translucency; Linux and other targets stay at 99% opacity whether compositor
+blur is available or not.
+
+macOS and Windows:
 
 ```ini
-# macOS and Windows default
 background-opacity = 0.86
 window-blur = true
+```
 
-# Linux default
+Linux and other targets:
+
+```ini
 background-opacity = 0.99
+window-blur = true
 ```
 
 Kettle follows macOS Reduce Transparency immediately. Linux compositors may
-ignore the blur hint; Kettle detects that case and raises only the live scene to
-99% opacity so text stays readable without changing screenshots or your config.
+ignore the blur hint; Kettle keeps explicitly lower live opacity at a 99% floor
+in that case so text stays readable without changing screenshots or your config.
 Windows matches its DWM caption to the active theme. macOS keeps AppKit's
 caption opaque and follows the selected light or dark appearance. Set opacity
 to `1.0` and blur to `false` for a fully opaque window.

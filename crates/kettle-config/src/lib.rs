@@ -58,15 +58,25 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+/// Largest accepted per-pane scrollback byte budget.
+pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
+const NEAR_OPAQUE_BACKGROUND_OPACITY: f32 = 0.99;
+const NATIVE_MATERIAL_BACKGROUND_OPACITY: f32 = 0.86;
+
+const fn default_background_opacity(native_material_target: bool) -> f32 {
+    if native_material_target {
+        NATIVE_MATERIAL_BACKGROUND_OPACITY
+    } else {
+        NEAR_OPAQUE_BACKGROUND_OPACITY
+    }
+}
+
 /// Default terminal background opacity for the current target.
 ///
-/// Linux stays nearly opaque whether native compositor blur is available or
-/// not. macOS and Windows use a more visible native material treatment.
-#[cfg(target_os = "linux")]
-pub const DEFAULT_BACKGROUND_OPACITY: f32 = 0.99;
-#[cfg(not(target_os = "linux"))]
-pub const DEFAULT_BACKGROUND_OPACITY: f32 = 0.86;
-pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
+/// macOS and Windows use a visible native material treatment. Other targets
+/// stay nearly opaque whether native compositor blur is available or not.
+pub const DEFAULT_BACKGROUND_OPACITY: f32 =
+    default_background_opacity(cfg!(any(target_os = "macos", target_os = "windows")));
 
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
 /// keep accidental huge/silly configs diagnostic instead of silently spawning
@@ -7937,10 +7947,12 @@ cell-height = 1.2\n";
             defaults.window_blur,
             "native material is enabled by default"
         );
+        assert_eq!(default_background_opacity(true), 0.86);
+        assert_eq!(default_background_opacity(false), 0.99);
         assert_eq!(defaults.background_opacity, DEFAULT_BACKGROUND_OPACITY);
-        #[cfg(target_os = "linux")]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(defaults.background_opacity, 0.99);
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert_eq!(
             defaults.background_opacity, 0.86,
             "native material remains visible by default"
@@ -7952,6 +7964,11 @@ cell-height = 1.2\n";
         assert_eq!(configured.completion_overlay, CompletionOverlayMode::Off);
         assert!(!configured.window_blur);
         assert_eq!(configured.background_opacity, 1.0);
+
+        let custom_material = Config::parse_text("window-blur = on\nbackground-opacity = 0.72\n");
+        assert!(Config::detect_malformed_values("window-blur = on\n").is_empty());
+        assert!(custom_material.window_blur);
+        assert_eq!(custom_material.background_opacity, 0.72);
         assert!(
             Config::detect_malformed_values("completion-overlay = maybe\nwindow-blur = perhaps\n")
                 .len()
