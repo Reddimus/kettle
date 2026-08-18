@@ -1055,6 +1055,15 @@ pub enum ResizeOverlayMode {
     AfterFirst,
 }
 
+/// Whether shell-provided completion candidates may appear at the top of the
+/// active pane. `Off` is a full opt-out: the shell integration leaves every
+/// stock key binding alone and Kettle draws nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionOverlayMode {
+    Auto,
+    Off,
+}
+
 /// One OpenType feature override: a 4-byte tag (space-padded, e.g. `liga`,
 /// `calt`, `ss01`, `zero`, `cv01`) and its value (`0` = off, `1` = on, or a
 /// font-specific alternate index).
@@ -1148,6 +1157,13 @@ pub struct Config {
     pub padding_x: f32,
     pub padding_y: f32,
     pub background_opacity: f32,
+    /// Ask the window system to blur content behind Kettle. Unsupported Linux
+    /// sessions use a live-only 99% opaque underlay instead of leaving sharp
+    /// alpha transparency visible. A window only receives an alpha-capable
+    /// surface when this or a sub-1.0 composed background alpha asks for one,
+    /// so turning it on takes full effect in windows opened afterwards.
+    pub window_blur: bool,
+    pub completion_overlay: CompletionOverlayMode,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
     pub bell: BellMode,
@@ -2632,6 +2648,12 @@ impl Default for Config {
             padding_x: 8.0,
             padding_y: 8.0,
             background_opacity: 1.0,
+            // Opt-in. Blur needs an alpha-capable surface, costs battery, and
+            // on a compositor with no blur protocol (X11) it would only make
+            // the window translucent. An existing install keeps its opaque
+            // window until the material is explicitly asked for.
+            window_blur: false,
+            completion_overlay: CompletionOverlayMode::Auto,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
             bell: BellMode::Both,
@@ -3219,6 +3241,8 @@ impl Config {
         "gpu_force_software",
         "background-blur",
         "background_blur",
+        "window-blur",
+        "window_blur",
         "bold-is-bright",
         "bold_is_bright",
         "borderless",
@@ -3672,6 +3696,10 @@ impl Config {
                 "chrome-background" | "chrome_background" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "theme" | "auto" | "black" | "white"
+                ),
+                "completion-overlay" | "completion_overlay" => matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "auto" | "on" | "true" | "yes" | "off" | "false" | "no" | "none"
                 ),
                 "lua-sandbox" | "lua_sandbox" => {
                     matches!(
@@ -4292,6 +4320,12 @@ impl Config {
                     {
                         cfg.background_opacity = v.clamp(0.0, 1.0);
                     }
+                }
+                "completion-overlay" | "completion_overlay" => {
+                    cfg.completion_overlay = match e.value.to_ascii_lowercase().as_str() {
+                        "off" | "false" | "no" | "none" => CompletionOverlayMode::Off,
+                        _ => CompletionOverlayMode::Auto,
+                    };
                 }
                 "cursor-style" | "cursor-shape" | "cursor_shape" => {
                     // Terminator parity: Terminator's
@@ -5033,6 +5067,11 @@ impl Config {
                         cfg.background_blur = b;
                     }
                 }
+                "window-blur" | "window_blur" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.window_blur = value;
+                    }
+                }
                 "background-darkness" | "background_darkness" => {
                     if let Ok(v) = e.value.parse::<f32>()
                         && v.is_finite()
@@ -5730,34 +5769,28 @@ cell-height = 1.2\n";
             "main CONFIG.md Keys table has duplicate primary rows: {duplicates:?}"
         );
 
-        // Keep the Terminator-parity reference as one Markdown table. Prose
+        // Keep the extended-key reference as one Markdown table. Prose
         // inserted between rows silently closes a CommonMark table, leaving
         // every later `| key | ... |` line rendered as plain text.
-        let parity = config_md
-            .split("### Terminator-parity keys")
+        let extended = config_md
+            .split("### Extended keys")
             .nth(1)
-            .and_then(|s| {
-                s.split("### Terminator-parity config keys by disposition")
-                    .next()
-            })
-            .expect("Terminator-parity keys section");
+            .and_then(|s| s.split("### Extended key status").next())
+            .expect("extended keys section");
         let mut table_started = false;
         let mut table_closed = false;
-        for line in parity.lines() {
+        for line in extended.lines() {
             if line.starts_with('|') {
                 assert!(
                     !table_closed,
-                    "CONFIG.md Terminator-parity table resumes after prose: {line}"
+                    "CONFIG.md extended-key table resumes after prose: {line}"
                 );
                 table_started = true;
             } else if table_started {
                 table_closed = true;
             }
         }
-        assert!(
-            table_started,
-            "CONFIG.md Terminator-parity table is missing"
-        );
+        assert!(table_started, "CONFIG.md extended-key table is missing");
     }
 
     #[test]
@@ -7886,6 +7919,26 @@ cell-height = 1.2\n";
         assert_eq!(
             Config::parse_text("exit-action = wat").exit_action,
             ExitAction::Close
+        );
+    }
+
+    #[test]
+    fn completion_and_window_material_are_explicit_and_round_trip() {
+        let defaults = Config::default();
+        assert_eq!(defaults.completion_overlay, CompletionOverlayMode::Auto);
+        assert!(!defaults.window_blur, "native material is opt-in");
+        assert_eq!(defaults.background_opacity, 1.0, "the default stays opaque");
+
+        let configured = Config::parse_text(
+            "completion-overlay = off\nwindow-blur = on\nbackground-opacity = 0.72\n",
+        );
+        assert_eq!(configured.completion_overlay, CompletionOverlayMode::Off);
+        assert!(configured.window_blur);
+        assert_eq!(configured.background_opacity, 0.72);
+        assert!(
+            Config::detect_malformed_values("completion-overlay = maybe\nwindow-blur = perhaps\n")
+                .len()
+                == 2
         );
     }
 

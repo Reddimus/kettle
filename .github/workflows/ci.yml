@@ -21,6 +21,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fish-shell-integration:
+    name: Fish 3.7, 4.2, and 4.8 shell integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the oldest supported Fish minor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fish
+          fish --version | grep -E '^fish, version 3\.7\.'
+      - name: Run native shell integration fixtures
+        run: python3 scripts/check-shell-integration.py
+      - name: Run Fish 4 compatibility fixtures
+        run: |
+          install_fish() {
+            version="$1"
+            digest="$2"
+            archive="fish-${version}-linux-x86_64.tar.xz"
+            url="https://github.com/fish-shell/fish-shell/releases/download/${version}/${archive}"
+            curl --fail --location --retry 3 --output "$archive" "$url"
+            printf '%s  %s\n' "$digest" "$archive" | sha256sum --check
+            mkdir ".fish-${version}"
+            tar -xJf "$archive" -C ".fish-${version}"
+            PATH="$PWD/.fish-${version}:$PATH" fish --version | grep -F "fish, version ${version}"
+            PATH="$PWD/.fish-${version}:$PATH" python3 scripts/check-shell-integration.py
+          }
+
+          # 4.2 has two names for the Vi insert-mode Tab byte; 4.3 fixed that
+          # alias. Keep both sides of that boundary in the required gate.
+          install_fish 4.2.1 19b88f3a255105226a660a771c81c99196a54f9057567f6dbfcfed68865acdb0
+          install_fish 4.8.1 39cab35242ab77bfdbce73b473000c3b045aaf2fe0951b042199bb7fdba3df78
+
   macos-26-release-icon:
     name: macOS 26 release icon toolchain
     runs-on: macos-26

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- light artwork for AppIcon.icon. macOS supplies the outer mask. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="0" y="0" width="512" height="512" rx="0" fill="#1a1b26"/>
+  <rect x="48" y="48" width="416" height="416" rx="48" fill="#7aa2f7"/>
+  <polyline points="128,172 228,256 128,340" fill="none" stroke="#1a1b26" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="270,320 387,320" fill="none" stroke="#1a1b26" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

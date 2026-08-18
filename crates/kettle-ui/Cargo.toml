@@ -9,7 +9,7 @@ authors.workspace = true
 # See `kettle-config/Cargo.toml`: each crate's `description` overrides the
 # workspace default because that default describes the `kettle` binary, not
 # the library sub-crates.
-description = "kettle: winit app, tab/pane mux, Terminator-style splits, overlays (search/palette/themes), session save/restore"
+description = "kettle: windowing, tabs, splits, overlays, and session restore"
 
 [lints]
 workspace = true
@@ -53,15 +53,12 @@ kettle-ctl.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
 kettle-update.workspace = true
-# SSH / Docker / Podman / kubectl session detection, per
-# TERMINATOR-REMOTE-DESIGN.md. Carries the sysinfo dep into kettle-ui
-# where the App's poll loop will live; non-UI consumers stay isolated.
+# SSH, Docker, Podman, and kubectl session detection. The UI owns the polling
+# loop while non-UI consumers remain isolated from the sysinfo dependency.
 kettle-remote.workspace = true
 log.workspace = true
-# Lua scripting foundation. The `--lua-script PATH`
-# CLI flag executes a Lua file at startup with a `kettle`
-# namespace exposing the introspection surface. WezTerm parity.
-# Future work adds send_text + event hooks.
+# The `--lua-script PATH` flag runs a startup script with a `kettle`
+# introspection namespace. Future work adds text input and event hooks.
 mlua.workspace = true
 notify = "8.2.0"
 notify-rust.workspace = true
@@ -122,11 +119,16 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11rb = "0.13"
 
-# ITaskbarList3 for OSC 9;4 taskbar progress (PowerShell 7 /
-# Windows Terminal parity — `Write-Progress` + `winget` drive the taskbar
-# button). The `windows` crate gives safe COM wrappers; 0.62 is already in
-# the workspace lockfile, and the feature set is narrow + Windows-only, so
-# Linux/macOS builds are unaffected.
+# Winit's Wayland blur hint is implemented only through KWin's private blur
+# protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
+# near-opaque fallback instead of silently showing sharp, washed-out alpha.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = "0.31"
+
+# ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
+# drive the taskbar button. The `windows` crate gives safe COM wrappers and is
+# already in the workspace lockfile. The feature set is narrow and Windows-only,
+# so Linux and macOS builds are unaffected.
 # `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
 # taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
@@ -159,11 +161,12 @@ tempfile = "3"
 # no extra major version enters the lockfile. macOS-only — other platforms
 # never see these.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.5"
 objc2 = "0.5"
 # Class features must be opted into (objc2-app-kit ships none by default).
 # NSView + NSWindow support sticky windows; NSColor synchronizes the native
 # titlebar background with Kettle's palette. The application icon is compiled
 # into the bundle by Xcode's asset pipeline, so runtime AppKit icon mutation is
 # deliberately not enabled here.
-objc2-app-kit = { version = "0.2", features = ["NSColor", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.2", features = ["NSThread"] }
+objc2-app-kit = { version = "0.2", features = ["NSAccessibility", "NSColor", "NSGraphics", "NSLayoutAnchor", "NSLayoutConstraint", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.2", features = ["block2", "NSNotification", "NSOperation", "NSString", "NSThread"] }

@@ -41,6 +41,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which now **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
 | Window padding | `window-padding-x` | 0–40 px |
 | Cursor shape | `cursor-style` | block · beam · underline |
 | Cursor blink | `cursor-blink` | on / off |
@@ -62,6 +63,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Option | Config key | Notes |
 |---|---|---|
 | Scrollbar | `scrollbar` | hidden · auto · always |
+| Completion overlay (new shells) | `completion-overlay` | automatic · off; applies to shells started afterwards |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
 | Bell | `bell` | off · visual · attention · both |
 | Scrollback lines | `scrollback` | 0–100000 |

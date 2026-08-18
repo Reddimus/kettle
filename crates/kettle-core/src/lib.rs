@@ -72,4 +72,7 @@ pub use term::{
 // OSC 9;4 taskbar-progress state, surfaced by `Terminal::progress`
 // (re-exported so the UI can name it without depending on kettle-vt directly).
 pub use kettle_vt::Progress;
-pub use kettle_vt::{GraphicsBudget, GraphicsLimits, GraphicsReservation};
+pub use kettle_vt::{
+    CompletionCandidate, CompletionKind, CompletionList, CompletionUpdate, GraphicsBudget,
+    GraphicsLimits, GraphicsReservation,
+};

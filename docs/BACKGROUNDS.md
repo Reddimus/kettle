@@ -82,15 +82,15 @@ the way. The look people actually keep (and the reason the starfield was chosen)
   theme. Bright, high-detail loops (nebulae, photos, accretion disks) wash out
   text — avoid them, or pair them with `background-blur = true` and a low
   `background-darkness`.
-- **Slow + subtle.** Gentle motion reads as "alive," not distracting (WezTerm
-  users routinely slow GIFs to 0.2×). A calm twinkle beats a fast clip.
+- **Slow + subtle.** Gentle motion reads as alive rather than distracting. A
+  calm twinkle beats a fast clip.
 - **Aspect-agnostic.** A uniform/abstract field (stars, particles, soft
   gradients) survives stretching to any screen; a recognizable scene distorts.
 
 ## How it composites (v2.23.0)
 
 The wallpaper is drawn at the very back, and **everything else paints opaquely on
-top of it** — the standard kitty / WezTerm / Alacritty layering:
+top of it**:
 
 ```
 window clear → wallpaper → cell backgrounds → chrome (tabs/status/titlebars) → text

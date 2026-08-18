@@ -1,70 +1,22 @@
-# kettle shell integration (OSC 133) — PowerShell
-#
-# Source from your $PROFILE to enable prompt-mark navigation
-# (Ctrl+Up / Ctrl+Down jump between prompt starts in kettle).
-# If you already use Starship / oh-my-posh / posh-git, those tools
-# emit OSC 133 themselves and this snippet is a no-op (the prompt
-# wrapper preserves your existing prompt).
-#
-# One-line install (PowerShell 5.1+ on Windows, PowerShell Core 7+ on
-# any OS):
-#
+# Kettle shell integration for PowerShell 5.1 and 7+. Install with:
 #     kettle.exe --shell-integration powershell >> $PROFILE
-#
-# Marks emitted:
-#   OSC 133;A    prompt start (used for jump targets)
-#   OSC 133;B    end of prompt / input start
-#   OSC 133;C    command started executing
-#   OSC 133;D;N  command finished (exit code N)
-#
-# Idempotency: re-sourcing $PROFILE (e.g. after a config tweak) is a
-# no-op. The $global:__kettle_prompt_installed flag prevents stacking
-# multiple prompt wrappers.
 
 if (-not $global:__kettle_prompt_installed) {
-    # Stash the user's pre-existing `prompt` function so the kettle
-    # wrapper calls into it instead of replacing it. Without this,
-    # sourcing this snippet would clobber starship / oh-my-posh /
-    # posh-git / etc.
-    #
-    # CRITICAL: capture the `.ScriptBlock` (a snapshot of the body), NOT the
-    # `FunctionInfo` itself. Invoking a captured `FunctionInfo` with `&`
-    # RE-RESOLVES the live `prompt` function — which, after we redefine it
-    # below, is THIS wrapper, so `& $info` recurses into itself, throws, and
-    # PowerShell re-invokes the throwing prompt forever (an infinite prompt
-    # loop: the shell shows no prompt and accepts no input). A ScriptBlock is
-    # a frozen copy of the original body, so `& $sb` always runs the original.
+    $global:__kettle_completion_session = [uint64]0
+    $global:__kettle_completion_request = [uint64]0
+    $global:__kettle_completion_generation = [uint64]0
+    $global:__kettle_completion_counter_max = [uint64]4503599627370495
+    $global:__kettle_completion_enabled = $true
+    # Capture the body, not FunctionInfo: the latter re-resolves the live
+    # `prompt` after this wrapper replaces it and recurses forever.
     $global:__kettle_original_prompt = (Get-Item function:prompt -ErrorAction SilentlyContinue).ScriptBlock
 
     function global:prompt {
-        # Capture BOTH failure indicators before any other statement runs.
-        #
-        # `$?` reflects only the immediately preceding statement, so it must be
-        # read first. `$LASTEXITCODE` must be read first too: the user's prompt
-        # (starship, oh-my-posh, posh-git) routinely runs native commands, and
-        # each one overwrites it. Reading it *after* rendering therefore
-        # reported the prompt's own exit code — a command that failed with 37
-        # followed by a prompt that shelled out successfully emitted `D;0`, so
-        # command notifications and ctl/MCP `run_command` reported success for
-        # a failed command.
-        #
-        # An array literal evaluates `$?` before the assignment resets it, so a
-        # single statement captures both without either clobbering the other.
-        # Every local here is `__kettle_`-prefixed on purpose. PowerShell
-        # resolves variables dynamically through the call stack, so a plainly
-        # named local (`$code`) declared before the user's prompt is invoked
-        # would shadow a variable of that name inside their prompt.
+        # Capture status before a dynamically scoped prompt can overwrite it.
         $__kettle_state = @($?, $global:LASTEXITCODE)
         $__kettle_ok = $__kettle_state[0]
 
-        # `$LASTEXITCODE` is written only by NATIVE commands. A failed *cmdlet*
-        # leaves it untouched, so reporting it verbatim mislabels both
-        # directions: a failed `Get-Item` after a clean native command would
-        # report success, and a successful cmdlet after `sh -c 'exit 37'` would
-        # report 37. `$?` is the only indicator that tracks cmdlets, so it
-        # decides success or failure; the numeric code is consulted only when
-        # `$?` already says the command failed, and a failure with no native
-        # code of its own reports 1.
+        # `$?` covers cmdlets; `$LASTEXITCODE` supplies native numeric status.
         $__kettle_code = if ($__kettle_ok) {
             0
         } elseif ($__kettle_state[1]) {
@@ -73,18 +25,7 @@ if (-not $global:__kettle_prompt_installed) {
             1
         }
 
-        # Hand the user's prompt the same `$?` an unwrapped prompt would see.
-        # `$?` is read-only; failing a statement is the only way to set it
-        # False, so this must be the LAST statement before the prompt runs.
-        #
-        # `-ErrorAction Ignore`, not `SilentlyContinue`: both set `$?`, but
-        # `SilentlyContinue` also pushes a record onto `$Error`, so a prompt
-        # that inspects `$Error[0]` — posh-git does — would read kettle's
-        # synthetic error instead of the user's real one, and a long session
-        # would push real errors out of the capped list. `Ignore` records
-        # nothing, so there is nothing to clean up afterwards. Either form
-        # overrides a profile-wide `$ErrorActionPreference = 'Stop'`, so this
-        # cannot become a terminating error and break the prompt.
+        # `$?` is read-only. Ignore restores failure without polluting `$Error`.
         if (-not $__kettle_ok) {
             Write-Error 'kettle: propagating command failure' -ErrorAction Ignore
         }
@@ -99,46 +40,424 @@ if (-not $global:__kettle_prompt_installed) {
 
         $esc = [char]27
         $bel = [char]7
-        # D = last command's exit code, A = this prompt's start.
-        # Emitted together at the top of the prompt function.
+        __kettle_completion_clear
+        # OSC 133: D is the prior exit; A starts this prompt.
         [Console]::Write("$esc]133;D;$__kettle_code$bel$esc]133;A$bel")
-        # OSC 7 cwd report (v2.20): powers new-tab/split cwd inheritance and
-        # "Open folder" in kettle. Windows paths travel in URL form
-        # (`file://HOST/C:/Users/...`, forward slashes, each segment
-        # percent-encoded); kettle normalizes the drive-letter form back.
-        # Only filesystem locations report (a registry/cert PSDrive cwd is
-        # not a directory another pane could start in).
+        if ($global:__kettle_completion_enabled -and
+            $global:__kettle_completion_session -lt $global:__kettle_completion_counter_max) {
+            $global:__kettle_completion_session =
+                [uint64]([uint64]$global:__kettle_completion_session + [uint64]1)
+            $global:__kettle_completion_request = [uint64]0
+            $__kettle_keys = __kettle_completion_key_mask
+            [Console]::Write(
+                "$esc]777;kettle-completion;4;sync;$global:__kettle_completion_session;$__kettle_keys$bel"
+            )
+        } else {
+            $global:__kettle_completion_enabled = $false
+            __kettle_completion_reset_cycle
+        }
+        # Report only filesystem locations for new-tab/split cwd inheritance.
+        # Windows paths use file://HOST/C:/... with encoded segments.
         $loc = $ExecutionContext.SessionState.Path.CurrentLocation
         if ($loc.Provider.Name -eq 'FileSystem') {
             $segs = $loc.ProviderPath -replace '\\', '/' -split '/'
             $enc = ($segs | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
-            # Drive paths ("C:/…") need the URL path slash prepended; a UNC
-            # path ("//server/share/…") already starts with one — prepending
-            # again would yield file://HOST///server/… (host-relative parse
-            # breaks and cwd inheritance dies on network shares).
+            # Drive paths need a leading slash; UNC paths already have one.
             if (-not $enc.StartsWith('/')) { $enc = "/$enc" }
             [Console]::Write("$esc]7;file://$env:COMPUTERNAME$enc$bel")
         }
-        # Restore the exit code the user's own last command left, undoing any
-        # native call the rendered prompt made. Without this, `$LASTEXITCODE`
-        # typed at the next prompt reports the prompt's internals rather than
-        # the command the user actually ran.
+        # Do not let the prompt renderer replace the user's native exit code.
         $global:LASTEXITCODE = $__kettle_state[1]
-        # B = end of prompt / input start. Emitted after the rendered
-        # prompt text so the marker lands right where the user starts
-        # typing. Returning it with the prompt is necessary: Console.Write
-        # runs before PowerShell displays the function's returned text.
+        # Return B with the prompt so it lands where input begins.
         return "$rendered$esc]133;B$bel"
     }
 
-    # C = command started executing. PSReadLine (the default in
-    # PowerShell 5.1+ since Windows 10 1809; bundled with PS 7) fires
-    # AcceptLine when the user hits Enter — hook the stock binding to emit
-    # OSC 133;C right before the command runs. PSReadLine reports a custom
-    # binding's name but cannot return its ScriptBlock, so replacing one
-    # would be irreversible; leave every non-stock Enter binding untouched.
-    # Silently skipped if PSReadLine isn't loaded (rare; the user would have
-    # disabled it on purpose).
+    function global:__kettle_completion_field([string]$Value, [int]$Limit) {
+        if ($null -eq $Value) { return '' }
+        try {
+            # Bound UTF-8 without cutting a surrogate pair or grapheme.
+            $starts = [Globalization.StringInfo]::ParseCombiningCharacters($Value)
+            $end = 0
+            $bytes = 0
+            for ($index = 0; $index -lt $starts.Count; $index++) {
+                $next = if ($index + 1 -lt $starts.Count) {
+                    $starts[$index + 1]
+                } else {
+                    $Value.Length
+                }
+                $part = $Value.Substring($starts[$index], $next - $starts[$index])
+                $partBytes = [Text.Encoding]::UTF8.GetByteCount($part)
+                if ($bytes + $partBytes -gt $Limit) { break }
+                $bytes += $partBytes
+                $end = $next
+            }
+            return [uri]::EscapeDataString($Value.Substring(0, $end))
+        } catch {
+            return ''
+        }
+    }
+
+    function global:__kettle_completion_begin_generation {
+        if (-not $global:__kettle_completion_enabled -or
+            $global:__kettle_completion_generation -ge $global:__kettle_completion_counter_max) {
+            $global:__kettle_completion_enabled = $false
+            __kettle_completion_reset_cycle
+            return $false
+        }
+        $global:__kettle_completion_generation =
+            [uint64]([uint64]$global:__kettle_completion_generation + [uint64]1)
+        return $true
+    }
+
+    function global:__kettle_completion_hide {
+        if (-not (__kettle_completion_begin_generation)) { return }
+        [Console]::Write(
+            [char]27 + ']777;kettle-completion;4;clear;' +
+            $global:__kettle_completion_session + ';' +
+            $global:__kettle_completion_generation + ';' +
+            $global:__kettle_completion_request + [char]7
+        )
+    }
+
+    function global:__kettle_completion_clear {
+        __kettle_completion_reset_cycle
+        __kettle_completion_hide
+    }
+
+    function global:__kettle_completion_emit($Selected, $Operation = 'show') {
+        $candidates = $global:__kettle_completion_matches
+        if ($null -eq $candidates -or $candidates.Count -eq 0) {
+            __kettle_completion_clear
+            return
+        }
+        if (-not (__kettle_completion_begin_generation)) { return }
+        $count = $candidates.Count
+        if ($count -eq 0) {
+            __kettle_completion_clear
+        } else {
+            $offset = 0
+            if ($null -ne $Selected) {
+                $offset = [Math]::Floor([int]$Selected / 64) * 64
+            }
+            # Build against the parser's actual wire cap. Per-field limits make
+            # 64 rows fit today, but keeping the aggregate check here prevents a
+            # later label-width change from silently dropping the whole reply.
+            $token = __kettle_completion_field $global:__kettle_completion_token 128
+            $prefix = __kettle_completion_field $global:__kettle_completion_prefix 1024
+            $pageAttempts = 0
+            while ($pageAttempts -lt 2) {
+                $pageAttempts++
+                $last = [Math]::Min($offset + 63, $count - 1)
+                $page = [Collections.Generic.List[string]]::new()
+                $bodyLength = 0
+                for ($index = $offset; $index -le $last; $index++) {
+                    $row = $global:__kettle_completion_rows[$index]
+                    if (256 + $token.Length + $prefix.Length +
+                        $bodyLength + $row.Length -gt 65000) { break }
+                    $page.Add($row)
+                    $bodyLength += $row.Length
+                }
+                if ($null -eq $Selected -or
+                    [int]$Selected -lt $offset + $page.Count) {
+                    break
+                }
+                # Keep the selected row visible if a future wider field makes
+                # the original 64-row page exceed the wire budget.
+                $offset = [int]$Selected
+            }
+            if ($page.Count -eq 0) {
+                __kettle_completion_clear
+                return
+            }
+            if ($null -ne $Selected -and
+                [int]$Selected -ge $offset + $page.Count) {
+                __kettle_completion_clear
+                return
+            }
+            $body = $page -join ''
+            $selectedField = ''
+            if ($null -ne $Selected -and
+                [int]$Selected -ge 0 -and
+                [int]$Selected -lt $count) {
+                $selectedField = [string]([int]$Selected - $offset)
+            }
+            $payload = '777;kettle-completion;4;' + $Operation + ';' +
+                $global:__kettle_completion_session + ';' +
+                $global:__kettle_completion_generation +
+                ';' + $global:__kettle_completion_request +
+                ';completion;' + $selectedField + ';powershell;' +
+                $token + ';' + $prefix + ';' + $offset + ';' + $count + $body
+            [Console]::Write([char]27 + ']' + $payload + [char]7)
+        }
+    }
+
+    function global:__kettle_completion_capture_result($Result) {
+        $global:__kettle_completion_result = $null
+        $global:__kettle_completion_matches = @()
+        $global:__kettle_completion_rows = @()
+        $global:__kettle_completion_token = $null
+        if ($null -eq $Result) { return $true }
+        # Keep the indexed collection: `@(...)` would copy every provider
+        # result before the 2048-row retained-memory limit can apply.
+        $candidates = $Result.CompletionMatches
+        $retained = [Collections.Generic.List[object]]::new()
+        $rows = [Collections.Generic.List[string]]::new()
+        $sourceBytes = 0
+        $last = [Math]::Min($candidates.Count, 2048)
+        for ($index = 0; $index -lt $last; $index++) {
+            $candidate = $candidates[$index]
+            $text = [string]$candidate.CompletionText
+            $tooltip = [string]$candidate.ToolTip
+            # Reject huge provider objects before scanning their UTF-8 bytes.
+            if ($text.Length -gt 4096 -or $tooltip.Length -gt 16384) { break }
+            $textBytes = [Text.Encoding]::UTF8.GetByteCount($text)
+            $tooltipBytes = [Text.Encoding]::UTF8.GetByteCount($tooltip)
+            $rowBytes = $textBytes + $tooltipBytes
+            if ($textBytes -gt 4096 -or $tooltipBytes -gt 16384 -or
+                $rowBytes -gt 16384 -or $sourceBytes + $rowBytes -gt 262144) {
+                break
+            }
+            $label = __kettle_completion_field $text 64
+            if ([string]::IsNullOrEmpty($label)) {
+                break
+            }
+            $description = __kettle_completion_field $tooltip 256
+            $row = ";$label;$description"
+            $retained.Add([pscustomobject]@{
+                CompletionText = $text
+                ToolTip = $tooltip
+                ResultType = $candidate.ResultType
+            })
+            $rows.Add($row)
+            $sourceBytes += $rowBytes
+        }
+        $global:__kettle_completion_result = [pscustomobject]@{
+            ReplacementIndex = [int]$Result.ReplacementIndex
+            ReplacementLength = [int]$Result.ReplacementLength
+        }
+        $global:__kettle_completion_matches = $retained.ToArray()
+        $global:__kettle_completion_rows = $rows.ToArray()
+        return $true
+    }
+
+    function global:__kettle_completion_reset_cycle {
+        $global:__kettle_completion_result = $null
+        $global:__kettle_completion_matches = @()
+        $global:__kettle_completion_rows = @()
+        $global:__kettle_completion_token = $null
+        $global:__kettle_completion_prefix = $null
+        $global:__kettle_completion_index = -1
+        $global:__kettle_completion_replacement_index = 0
+        $global:__kettle_completion_replacement_length = 0
+        $global:__kettle_completion_last_line = $null
+        $global:__kettle_completion_last_cursor = -1
+    }
+
+    function global:__kettle_completion_begin_request {
+        if (-not $global:__kettle_completion_enabled -or
+            [uint64]$global:__kettle_completion_request -ge $global:__kettle_completion_counter_max) {
+            # Never reuse an id; the next prompt resets the session.
+            __kettle_completion_reset_cycle
+            return $false
+        }
+        $global:__kettle_completion_request =
+            [uint64]([uint64]$global:__kettle_completion_request + [uint64]1)
+        return $true
+    }
+
+    function global:__kettle_completion_key_mask {
+        try {
+            $handlers = Get-PSReadLineKeyHandler -Bound
+            $tab = $handlers | Where-Object { $_.Key -eq 'Tab' } | Select-Object -First 1
+            $backtab = $handlers | Where-Object { $_.Key -eq 'Shift+Tab' } | Select-Object -First 1
+            $mask = 0
+            if ($null -ne $tab -and $tab.Function -eq 'KettleCompleteNext') { $mask += 1 }
+            if ($null -ne $backtab -and $backtab.Function -eq 'KettleCompletePrevious') { $mask += 2 }
+            return $mask
+        } catch {
+            return 0
+        }
+    }
+
+    # Narrow editor boundary used by production and the portable fixture.
+    function global:__kettle_completion_editor_state {
+        $line = $null
+        $cursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        return [pscustomobject]@{ Line = $line; Cursor = $cursor }
+    }
+
+    function global:__kettle_completion_capture_prefix(
+        [string]$Line,
+        [int]$Cursor
+    ) {
+        if ($null -eq $Line -or $Cursor -lt 0 -or $Cursor -gt $Line.Length) {
+            return ''
+        }
+        $prefix = $Line.Substring(0, $Cursor)
+        $lastBreak = [Math]::Max($prefix.LastIndexOf("`n"), $prefix.LastIndexOf("`r"))
+        if ($lastBreak -ge 0) {
+            $prefix = $prefix.Substring($lastBreak + 1)
+        }
+        # `__kettle_completion_field` performs grapheme-safe encoding. Reject
+        # an implausibly large editor line before it allocates one index per
+        # text element merely to produce the protocol's 1 KiB prefix hint.
+        if ($prefix.Length -gt 16384) { return '' }
+        return $prefix
+    }
+
+    function global:__kettle_completion_capture_token(
+        [string]$Line,
+        [int]$Index,
+        [int]$Length
+    ) {
+        if ($null -eq $Line -or $Index -lt 0 -or $Length -lt 0 -or
+            $Index -gt $Line.Length -or $Length -gt $Line.Length - $Index -or
+            $Length -gt 4096) {
+            return ''
+        }
+        # Bound before the wire encoder indexes every grapheme.
+        return $Line.Substring($Index, $Length)
+    }
+
+    function global:__kettle_completion_expand([string]$Line, [int]$Cursor) {
+        return TabExpansion2 -inputScript $Line -cursorColumn $Cursor
+    }
+
+    function global:__kettle_completion_apply_replacement([int]$Index, [int]$Length, [string]$Text) {
+        [Microsoft.PowerShell.PSConsoleReadLine]::Replace($Index, $Length, $Text)
+    }
+
+    function global:__kettle_completion_set_cursor([int]$Position) {
+        [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition($Position)
+    }
+
+    function global:__kettle_completion_replacement($Match) {
+        $text = [string]$Match.CompletionText
+        $cursorAdjustment = 0
+        if ([string]$Match.ResultType -eq 'ProviderContainer') {
+            $separator = [string][IO.Path]::DirectorySeparatorChar
+            if (-not $text.EndsWith($separator)) {
+                if ($text.EndsWith($separator + "'") -or
+                    $text.EndsWith($separator + '"')) {
+                    $cursorAdjustment = -1
+                } elseif ($text.EndsWith("'") -or $text.EndsWith('"')) {
+                    $text = $text.Substring(0, $text.Length - 1) +
+                        $separator + $text.Substring($text.Length - 1)
+                    $cursorAdjustment = -1
+                } else {
+                    $text += $separator
+                }
+            }
+        }
+        return @($text, $cursorAdjustment)
+    }
+
+    function global:__kettle_completion_cycle([int]$Direction) {
+        if (-not (__kettle_completion_begin_request)) { return $true }
+        $editor = __kettle_completion_editor_state
+        $line = [string]$editor.Line
+        $cursor = [int]$editor.Cursor
+        $continues = $null -ne $global:__kettle_completion_result -and
+            $line -ceq $global:__kettle_completion_last_line -and
+            $cursor -eq $global:__kettle_completion_last_cursor
+        if (-not $continues) {
+            $global:__kettle_completion_prefix =
+                __kettle_completion_capture_prefix $line $cursor
+            try {
+                $expanded = __kettle_completion_expand $line $cursor
+                __kettle_completion_capture_result $expanded | Out-Null
+            } catch {
+                # Let the handler clear the card without invoking PSReadLine's
+                # inline completion UI.
+                throw
+            }
+            $global:__kettle_completion_index = -1
+            if ($null -ne $global:__kettle_completion_result) {
+                $global:__kettle_completion_replacement_index =
+                    [int]$global:__kettle_completion_result.ReplacementIndex
+                $global:__kettle_completion_replacement_length =
+                    [int]$global:__kettle_completion_result.ReplacementLength
+                $tokenIndex = $global:__kettle_completion_replacement_index
+                $tokenLength = $global:__kettle_completion_replacement_length
+                $global:__kettle_completion_token =
+                    __kettle_completion_capture_token $line $tokenIndex $tokenLength
+            }
+        }
+
+        $result = $global:__kettle_completion_result
+        $candidates = $global:__kettle_completion_matches
+        if ($null -eq $result -or $candidates.Count -eq 0) {
+            __kettle_completion_clear
+            return $true
+        }
+        $operation = if ($continues) { 'update' } else { 'show' }
+        if ($global:__kettle_completion_index -lt 0 -and $Direction -lt 0) {
+            $global:__kettle_completion_index = $candidates.Count - 1
+        } else {
+            $global:__kettle_completion_index =
+                ($global:__kettle_completion_index + $Direction +
+                    $candidates.Count) % $candidates.Count
+        }
+        $replacement = __kettle_completion_replacement `
+            $candidates[$global:__kettle_completion_index]
+        __kettle_completion_apply_replacement `
+            $global:__kettle_completion_replacement_index `
+            $global:__kettle_completion_replacement_length `
+            ([string]$replacement[0])
+        $global:__kettle_completion_replacement_length =
+            ([string]$replacement[0]).Length
+        if ([int]$replacement[1] -ne 0) {
+            __kettle_completion_set_cursor (
+                $global:__kettle_completion_replacement_index +
+                $global:__kettle_completion_replacement_length +
+                [int]$replacement[1]
+            )
+        }
+
+        $after = __kettle_completion_editor_state
+        $global:__kettle_completion_last_line = [string]$after.Line
+        $global:__kettle_completion_last_cursor = [int]$after.Cursor
+        __kettle_completion_emit $global:__kettle_completion_index $operation
+
+        # PSReadLine deliberately re-queries a single directory match on the
+        # next Tab so completion can continue inside it. Retain a cycle only
+        # when there is actually another candidate to visit.
+        if ($candidates.Count -eq 1) {
+            $global:__kettle_completion_result = $null
+        }
+        return $true
+    }
+
+    function global:__kettle_completion_cycle_next {
+        __kettle_completion_cycle 1
+    }
+
+    function global:__kettle_completion_cycle_previous {
+        __kettle_completion_cycle -1
+    }
+
+    function global:__kettle_completion_handle_next {
+        try {
+            __kettle_completion_cycle_next | Out-Null
+        } catch {
+            # Never fall back to PSReadLine's inline completion UI.
+            __kettle_completion_clear
+        }
+    }
+
+    function global:__kettle_completion_handle_previous {
+        try {
+            __kettle_completion_cycle_previous | Out-Null
+        } catch {
+            __kettle_completion_clear
+        }
+    }
+
+    __kettle_completion_reset_cycle
+
+    # Emit C from PSReadLine's stock AcceptLine binding. Custom handlers cannot
+    # be recovered as ScriptBlocks, so leave them untouched.
     if (Get-Module -ListAvailable PSReadLine) {
         & {
             $enterHandler = Get-PSReadLineKeyHandler -Bound |
@@ -146,8 +465,31 @@ if (-not $global:__kettle_prompt_installed) {
                 Select-Object -First 1
             if ($null -ne $enterHandler -and $enterHandler.Function -eq 'AcceptLine') {
                 Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+                    __kettle_completion_clear
                     [Console]::Write([char]27 + ']133;C' + [char]7)
                     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+                }
+            }
+
+            $tabHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Tab' } |
+                Select-Object -First 1
+            $backtabHandler = Get-PSReadLineKeyHandler -Bound |
+                Where-Object { $_.Key -eq 'Shift+Tab' } |
+                Select-Object -First 1
+            if ($env:KETTLE_COMPLETION_OVERLAY -eq '1' -and
+                [string]::IsNullOrEmpty($env:TMUX) -and
+                [string]::IsNullOrEmpty($env:STY) -and
+                $null -ne $tabHandler -and
+                $tabHandler.Function -eq 'TabCompleteNext') {
+                Set-PSReadLineKeyHandler -Key Tab -BriefDescription KettleCompleteNext -Description 'Kettle detached completion' -ScriptBlock {
+                    __kettle_completion_handle_next
+                }
+                if ($null -ne $backtabHandler -and
+                    $backtabHandler.Function -eq 'TabCompletePrevious') {
+                    Set-PSReadLineKeyHandler -Chord Shift+Tab -BriefDescription KettleCompletePrevious -Description 'Kettle detached completion' -ScriptBlock {
+                        __kettle_completion_handle_previous
+                    }
                 }
             }
         }

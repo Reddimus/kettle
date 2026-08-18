@@ -1,10 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Compatible pre-rounded source for Linux, Windows and macOS 11-15. Geometry below is generated from icon_primitives. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <rect x="32" y="32" width="448" height="448" rx="92" fill="#1a1b26"/>
-  <polyline points="82,218 116,256 82,294" fill="none" stroke="#7aa2f7" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M 198 188 C 166 216 166 296 198 324" fill="none" stroke="#7aa2f7" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline points="210,292 290,292" fill="none" stroke="#7aa2f7" stroke-width="28" stroke-linecap="butt" stroke-linejoin="round"/>
-  <path d="M 304 188 C 336 216 336 296 304 324" fill="none" stroke="#7aa2f7" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M 374 256 C 382 218 396 218 404 256 C 412 294 426 294 434 256" fill="none" stroke="#7aa2f7" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="32" y="32" width="448" height="448" rx="92" fill="#7aa2f7"/>
+  <rect x="54" y="54" width="404" height="404" rx="70" fill="#1a1b26"/>
+  <polyline points="128,172 228,256 128,340" fill="none" stroke="#7aa2f7" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="270,320 387,320" fill="none" stroke="#7aa2f7" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

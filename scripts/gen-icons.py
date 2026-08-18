@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """kettle — regenerate every icon source and raster from one geometry model.
 
-This script owns the shared literal terminal-kettle mark and emits the compatible
-pre-rounded Linux/Windows vector plus the borderless native Icon Composer
-foreground that Apple's asset compiler masks for every macOS surface. It then
+This script owns the shared ``>_`` terminal mark and emits the compatible
+pre-rounded Linux/Windows vector plus native light and dark Icon Composer
+artwork that Apple's asset compiler masks for every macOS surface. It then
 renders the committed platform rasters with Pillow at 4x
 supersampling (2048 px canvas, LANCZOS downscale) and writes:
 
   - packaging/linux/kettle.svg                            (generated source)
-  - packaging/macos/AppIcon.icon/{icon.json,Assets/kettle.svg}
+  - packaging/macos/AppIcon.icon/{icon.json,Assets/kettle-{light,dark}.svg}
+    plus Assets/kettle.svg as an unreferenced dark compatibility alias
   - packaging/linux/kettle-{16,24,32,48,64,128,256}.png  (hicolor theme +
     the `include_bytes!` embedded winit window icon, which needs a binary
     rebuild to pick up)
@@ -50,21 +51,27 @@ LINUX = ROOT / "packaging" / "linux"
 ICONSET = ROOT / "packaging" / "macos" / "kettle.iconset"
 ICO = ROOT / "packaging" / "windows" / "kettle.ico"
 
-# One two-color identity, inverted exactly for the light preview.
-DARK_BACKGROUND = (0x1A, 0x1B, 0x26, 255)
+# One two-color identity. Light appearance is the exact color swap.
+DARK_FACE = (0x1A, 0x1B, 0x26, 255)
 DARK_ACCENT = (0x7A, 0xA2, 0xF7, 255)
-LIGHT_BACKGROUND = DARK_ACCENT
-LIGHT_ACCENT = DARK_BACKGROUND
+LIGHT_FACE = DARK_ACCENT
+LIGHT_ACCENT = DARK_FACE
 
 S = 4  # supersample factor over the 512 viewBox → 2048 px canvas
 
 CANVAS = 512
 OUTER_BOX = (32, 32, 480, 480)
 OUTER_RADIUS = 92
-# Icon Composer measures this as a multiplier over its conservative default
-# foreground scale. At 2x the mark occupies a little over half of the compiled
-# icon while retaining generous clear space. The previous double-rounded tile—
-# not this scale—was what collided optically with the Dock mask.
+FACE_BOX = (54, 54, 458, 458)
+FACE_RADIUS = 70
+MAC_FACE_BOX = (48, 48, 464, 464)
+MAC_FACE_RADIUS = 48
+PROMPT_POINTS = ((128, 172), (228, 256), (128, 340))
+PROMPT_STROKE = 38
+CARET_BOX = (270, 320, 387, 352)
+# Icon Composer maps SVG layers into a conservative foreground safe area. At
+# 2x the inset face lands 24 px inside the system-owned 256 px mask; its 24 px
+# rendered radius follows the same offset from the outer continuous corner.
 ICON_COMPOSER_SCALE = 2
 
 
@@ -83,84 +90,27 @@ class PolylinePrimitive:
     linecap: str = "round"
 
 
-Point = tuple[int, int]
-CubicSegment = tuple[Point, Point, Point]
-
-
-@dataclass(frozen=True)
-class CubicPrimitive:
-    start: Point
-    segments: tuple[CubicSegment, ...]
-    stroke: tuple[int, int, int, int]
-    stroke_width: int
-    linecap: str = "round"
-
-
-MarkPrimitive = PolylinePrimitive | CubicPrimitive
-Primitive = RectPrimitive | MarkPrimitive
-
-
-def sampled_cubic_points(
-    primitive: CubicPrimitive, steps_per_segment: int = 32
-) -> tuple[tuple[float, float], ...]:
-    """Sample one SVG cubic path for Pillow and geometry measurements."""
-    points: list[tuple[float, float]] = [primitive.start]
-    x0, y0 = primitive.start
-    for control1, control2, end in primitive.segments:
-        x1, y1 = control1
-        x2, y2 = control2
-        x3, y3 = end
-        for step in range(1, steps_per_segment + 1):
-            t = step / steps_per_segment
-            inverse = 1 - t
-            points.append(
-                (
-                    inverse**3 * x0
-                    + 3 * inverse**2 * t * x1
-                    + 3 * inverse * t**2 * x2
-                    + t**3 * x3,
-                    inverse**3 * y0
-                    + 3 * inverse**2 * t * y1
-                    + 3 * inverse * t**2 * y2
-                    + t**3 * y3,
-                )
-            )
-        x0, y0 = end
-    return tuple(points)
+Primitive = RectPrimitive | PolylinePrimitive
 
 
 def primitive_bounds(
-    primitives: tuple[MarkPrimitive, ...],
+    primitives: tuple[PolylinePrimitive, ...],
 ) -> tuple[int, int, int, int]:
     """Return pixel-conservative bounds for supplied foreground strokes."""
     xs: list[int] = []
     ys: list[int] = []
     for primitive in primitives:
-        if isinstance(primitive, PolylinePrimitive):
-            half = primitive.stroke_width // 2
-            xs.extend(
-                coordinate
-                for x, _ in primitive.points
-                for coordinate in (x - half, x + half)
-            )
-            ys.extend(
-                coordinate
-                for _, y in primitive.points
-                for coordinate in (y - half, y + half)
-            )
-        else:
-            half = primitive.stroke_width / 2
-            points = sampled_cubic_points(primitive, steps_per_segment=64)
-            xs.extend(
-                coordinate
-                for x, _ in points
-                for coordinate in (x - half, x + half)
-            )
-            ys.extend(
-                coordinate
-                for _, y in points
-                for coordinate in (y - half, y + half)
-            )
+        half = primitive.stroke_width // 2
+        xs.extend(
+            coordinate
+            for x, _ in primitive.points
+            for coordinate in (x - half, x + half)
+        )
+        ys.extend(
+            coordinate
+            for _, y in primitive.points
+            for coordinate in (y - half, y + half)
+        )
     if not xs:
         raise ValueError("cannot measure an empty primitive set")
     return (
@@ -171,61 +121,26 @@ def primitive_bounds(
     )
 
 
-def kettle_primitives(
+def terminal_primitives(
     accent: tuple[int, int, int, int] | None = None,
-) -> tuple[MarkPrimitive, ...]:
-    """The literal ``>(_)~`` terminal-kettle mark shared at 24 px and above.
-
-    These are vector strokes rather than font glyphs, so the mark has identical
-    metrics on macOS, Linux and Windows. Real cubic curves keep the parentheses
-    and tilde typographic instead of turning them into a segmented, bulbous
-    vessel. Every glyph stays opaque because partial alpha blurred small-size
-    gaps and made half of the mark look disabled.
-    """
+) -> tuple[PolylinePrimitive, ...]:
+    """The historical ``>_`` mark, drawn as geometry rather than a font."""
     accent = DARK_ACCENT if accent is None else accent
     return (
-        # Prompt chevron.
-        PolylinePrimitive(((82, 218), (116, 256), (82, 294)), accent, 36),
-        # Literal left parenthesis: a real cubic, not a seven-segment arc.
-        CubicPrimitive(
-            (198, 188),
-            (((166, 216), (166, 296), (198, 324)),),
+        PolylinePrimitive(PROMPT_POINTS, accent, PROMPT_STROKE),
+        PolylinePrimitive(
+            ((CARET_BOX[0], CARET_BOX[1]), (CARET_BOX[2], CARET_BOX[1])),
             accent,
-            32,
-        ),
-        # Keep the underscore well above the parenthesis terminals so the
-        # three strokes remain separate rather than fusing into a horseshoe.
-        PolylinePrimitive(((210, 292), (290, 292)), accent, 28, "butt"),
-        # Literal right parenthesis.
-        CubicPrimitive(
-            (304, 188),
-            (((336, 216), (336, 296), (304, 324)),),
-            accent,
-            32,
-        ),
-        # Literal tilde: two cubic phases form one continuous typographic wave.
-        CubicPrimitive(
-            (374, 256),
-            (
-                ((382, 218), (396, 218), (404, 256)),
-                ((412, 294), (426, 294), (434, 256)),
-            ),
-            accent,
-            28,
+            CARET_BOX[3] - CARET_BOX[1],
+            "round",
         ),
     )
 
 
 def compact_terminal_primitives(
     accent: tuple[int, int, int, int] | None = None,
-) -> tuple[MarkPrimitive, ...]:
-    """A two-stroke ``>_`` optical-size mark for the 16 px raster only.
-
-    Five punctuation strokes cannot remain distinct in a sixteen-pixel tile;
-    antialiasing fuses ``>(_)~`` into two blobs. The conventional terminal mark
-    preserves the identity at that physical limit. Every 24 px and larger
-    output retains the full kettle spelling.
-    """
+) -> tuple[PolylinePrimitive, ...]:
+    """Thicker, wider ``>_`` strokes for 16 px and 24 px rasters."""
     accent = DARK_ACCENT if accent is None else accent
     return (
         PolylinePrimitive(((160, 208), (202, 256), (160, 304)), accent, 42),
@@ -235,35 +150,38 @@ def compact_terminal_primitives(
 
 def compact_icon_primitives() -> tuple[Primitive, ...]:
     return (
-        RectPrimitive(OUTER_BOX, OUTER_RADIUS, DARK_BACKGROUND),
-        *compact_terminal_primitives(),
+        RectPrimitive(OUTER_BOX, OUTER_RADIUS, DARK_ACCENT),
+        RectPrimitive(FACE_BOX, FACE_RADIUS, DARK_FACE),
+        *compact_terminal_primitives(DARK_ACCENT),
     )
 
 
 def icon_primitives() -> tuple[Primitive, ...]:
     """Return the compatible geometry consumed by Linux/Windows outputs."""
     return (
-        RectPrimitive(OUTER_BOX, OUTER_RADIUS, DARK_BACKGROUND),
-        *kettle_primitives(DARK_ACCENT),
+        RectPrimitive(OUTER_BOX, OUTER_RADIUS, DARK_ACCENT),
+        RectPrimitive(FACE_BOX, FACE_RADIUS, DARK_FACE),
+        *terminal_primitives(DARK_ACCENT),
     )
 
 
 def light_icon_primitives() -> tuple[Primitive, ...]:
     """Return an exact color inversion of the dark shared geometry."""
     return (
-        RectPrimitive(OUTER_BOX, OUTER_RADIUS, LIGHT_BACKGROUND),
-        *kettle_primitives(LIGHT_ACCENT),
+        RectPrimitive(OUTER_BOX, OUTER_RADIUS, LIGHT_ACCENT),
+        RectPrimitive(FACE_BOX, FACE_RADIUS, LIGHT_FACE),
+        *terminal_primitives(LIGHT_ACCENT),
     )
 
 
-def icon_composer_primitives() -> tuple[Primitive, ...]:
-    """Artwork above Icon Composer's TokyoNight Night background.
-
-    The document owns the full canvas fill and macOS owns the outer mask.
-    Keeping both out of this SVG prevents the old double-rounded treatment and
-    lets Finder, the Dock and the running application render one asset.
-    """
-    return kettle_primitives(DARK_ACCENT)
+def icon_composer_primitives(dark: bool) -> tuple[Primitive, ...]:
+    """Adaptive field, inset face and mark; macOS supplies only the mask."""
+    outer, face = (DARK_ACCENT, DARK_FACE) if dark else (LIGHT_ACCENT, LIGHT_FACE)
+    return (
+        RectPrimitive((0, 0, CANVAS, CANVAS), 0, outer),
+        RectPrimitive(MAC_FACE_BOX, MAC_FACE_RADIUS, face),
+        *terminal_primitives(outer),
+    )
 
 
 def color_hex(color: tuple[int, int, int, int]) -> str:
@@ -287,21 +205,9 @@ def primitive_svg(primitive: Primitive) -> str:
             f'fill="{color_hex(primitive.fill)}"',
         ]
         return f"  <rect {' '.join(attributes)}/>"
-    if isinstance(primitive, PolylinePrimitive):
-        points = " ".join(f"{x},{y}" for x, y in primitive.points)
-        return (
-            f'  <polyline points="{points}" fill="none" '
-            f'stroke="{color_hex(primitive.stroke)}" '
-            f'stroke-width="{primitive.stroke_width}" '
-            f'stroke-linecap="{primitive.linecap}" stroke-linejoin="round"/>'
-        )
-    commands = [f"M {primitive.start[0]} {primitive.start[1]}"]
-    commands.extend(
-        f"C {control1[0]} {control1[1]} {control2[0]} {control2[1]} {end[0]} {end[1]}"
-        for control1, control2, end in primitive.segments
-    )
+    points = " ".join(f"{x},{y}" for x, y in primitive.points)
     return (
-        f'  <path d="{" ".join(commands)}" fill="none" '
+        f'  <polyline points="{points}" fill="none" '
         f'stroke="{color_hex(primitive.stroke)}" '
         f'stroke-width="{primitive.stroke_width}" '
         f'stroke-linecap="{primitive.linecap}" stroke-linejoin="round"/>'
@@ -322,12 +228,14 @@ def svg_source() -> str:
     )
 
 
-def icon_composer_svg_source() -> str:
-    body = [primitive_svg(primitive) for primitive in icon_composer_primitives()]
+def icon_composer_svg_source(dark: bool) -> str:
+    body = [
+        primitive_svg(primitive) for primitive in icon_composer_primitives(dark)
+    ]
+    appearance = "dark" if dark else "light"
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<!-- Foreground for AppIcon.icon. Icon Composer supplies the dark '
-        'background and macOS supplies the outer mask. -->\n'
+        f'<!-- {appearance} artwork for AppIcon.icon. macOS supplies the outer mask. -->\n'
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS}" '
         f'height="{CANVAS}" viewBox="0 0 {CANVAS} {CANVAS}">\n'
         + "\n".join(body)
@@ -338,14 +246,22 @@ def icon_composer_svg_source() -> str:
 def icon_composer_json_source() -> str:
     return f"""{{
   "fill" : {{
-    "solid" : "{srgb_source(DARK_BACKGROUND)}"
+    "solid" : "{srgb_source(LIGHT_ACCENT)}"
   }},
   "groups" : [
     {{
       "layers" : [
         {{
           "hidden" : false,
-          "image-name" : "kettle.svg",
+          "image-name-specializations" : [
+            {{
+              "value" : "kettle-light.svg"
+            }},
+            {{
+              "appearance" : "dark",
+              "value" : "kettle-dark.svg"
+            }}
+          ],
           "name" : "Kettle Terminal",
           "position" : {{
             "scale" : {ICON_COMPOSER_SCALE},
@@ -390,12 +306,7 @@ def render_primitives(primitives: tuple[Primitive, ...]) -> Image.Image:
                 fill=primitive.fill,
             )
         else:
-            source_points = (
-                primitive.points
-                if isinstance(primitive, PolylinePrimitive)
-                else sampled_cubic_points(primitive)
-            )
-            points = [(round(x * S), round(y * S)) for x, y in source_points]
+            points = [(round(x * S), round(y * S)) for x, y in primitive.points]
             width = primitive.stroke_width * S
             d.line(
                 points,
@@ -530,10 +441,24 @@ def emit(
     icon_composer = iconset_dir.parent / "AppIcon.icon"
     composer_assets = icon_composer / "Assets"
     composer_assets.mkdir(parents=True, exist_ok=True)
-    composer_svg = composer_assets / "kettle.svg"
-    composer_svg.write_bytes(icon_composer_svg_source().encode("utf-8"))
+    for appearance in ("light", "dark"):
+        composer_svg = composer_assets / f"kettle-{appearance}.svg"
+        composer_svg.write_bytes(
+            icon_composer_svg_source(appearance == "dark").encode("utf-8")
+        )
+        written.append(
+            (
+                composer_svg,
+                f"packaging/macos/AppIcon.icon/Assets/kettle-{appearance}.svg",
+            )
+        )
+    legacy_composer_svg = composer_assets / "kettle.svg"
+    legacy_composer_svg.write_bytes(icon_composer_svg_source(True).encode("utf-8"))
     written.append(
-        (composer_svg, "packaging/macos/AppIcon.icon/Assets/kettle.svg")
+        (
+            legacy_composer_svg,
+            "packaging/macos/AppIcon.icon/Assets/kettle.svg",
+        )
     )
     composer_json = icon_composer / "icon.json"
     composer_json.write_bytes(icon_composer_json_source().encode("utf-8"))
@@ -545,6 +470,12 @@ def emit(
         written.append((path, f"packaging/linux/kettle-{px}.png"))
         if not quiet:
             print(f"wrote {path}")
+
+    light_path = linux_dir / "kettle-light-256.png"
+    scaled(render_light_master(), 256).save(light_path)
+    written.append((light_path, "packaging/linux/kettle-light-256.png"))
+    if not quiet:
+        print(f"wrote {light_path}")
 
     iconset_dir.mkdir(parents=True, exist_ok=True)
     for base in ICONSET_BASES:

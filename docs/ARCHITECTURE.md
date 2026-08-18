@@ -357,41 +357,43 @@ silently shortened.
 ## In-process multi-window
 
 On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
-shadow, and rounded window mask. The titlebar material is transparent so the
-NSWindow background shows through it, and that native background is synchronized
-to the active Kettle theme's exact sRGB background color on every palette
-change. The content view is deliberately *not* full-size: tabs, terminal cells,
-pointer hit-testing, and ctl geometry all stay below the traffic lights without
-a platform-specific synthetic inset. Extending the renderer under the titlebar
+shadow, and rounded window mask. Native blur is a sibling behind Winit's Metal
+view and is constrained to the content rect below the caption. AppKit owns the
+opaque titlebar and follows Kettle's selected light or dark appearance. Kettle's
+background color backs the content during resize. The effect is shown only when
+the renderer's creation-time surface is translucent. Reduce Transparency makes
+the window opaque again. Borderless macOS
+windows do not install the effect: without AppKit's decorated frame, the
+sibling material composites over Winit's Metal layer. They keep ordinary alpha
+transparency so terminal content remains visible.
+
+Windows applies the same raised surface and a contrast-checked text color
+through DWM while requesting its system backdrop. Linux probes the live
+Wayland registry before enabling Winit's KWin blur path. X11 and Wayland
+compositors without that protocol get a 99% opacity floor on the live underlay
+and replacing pane-base pass. That floor is applied only to the swapchain
+render, so offscreen screenshots retain the configured alpha and config files
+are never rewritten.
+
+The content view is deliberately *not* full-size: tabs, terminal cells, pointer
+hit-testing, and ctl geometry all stay below the traffic lights without a
+platform-specific synthetic inset. Extending the renderer under the titlebar
 would require compensating every one of those coordinate systems for AppKit's
 content layout rect; no such hidden geometry shift is introduced for a cosmetic
 fix.
 
-The application icon is one native Icon Composer asset rather than a static
-bundle icon plus a runtime override. The generated `AppIcon.icon` holds a
-TokyoNight Night system background and one vector foreground layer for a
-literal `>(_)~` terminal-kettle mark. Its five font-independent strokes are
-shared with Linux, Windows, and the compatibility iconset at normal sizes. The
-fixed-size Linux and Windows assets plus the retained iconset use a two-stroke
-`>_` optical-size raster at 16 px, where five punctuation strokes cannot remain
-distinct. The native Icon Composer vector retains the full mark in every
-rendition. The full prompt remains angular, the underscore is square-ended and
-raised clear of the parenthesis terminals, and the parentheses and tilde are
-true cubic Bézier paths rather than rounded line-segment
-approximations. All strokes stay opaque for small-size contrast. The renderer's
-light review variant is the exact two-color inverse of the dark design, so
-geometry and hierarchy cannot drift between the two reviewed variants. It is
-covered by tests but is not emitted as a package asset. The checked-in Icon
-Composer document currently ships the shared dark appearance on every system
-appearance. Its 200% foreground occupies a little over half of the compiled
-icon width while retaining generous clear space.
-The artwork deliberately bakes in neither an inner face, an outer mask, nor a
-shadow.
+The generated application icon uses the historical, font-independent `>_`
+mark on every platform. Dark appearance uses a TokyoNight blue system-masked
+field, an inset dark face, and a blue mark; light appearance swaps those two
+colors exactly. The inset is 24 px in the 256 px macOS rendition and its 24 px
+radius follows the system mask instead of competing with it. Icon Composer
+owns the adaptive outer mask and lighting. Linux and Windows retain compatible
+pre-rounded assets; their live Windows/X11 icon switches with the active theme.
+The 16 px raster uses a thicker optical-size version of the same two strokes.
 Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
 metadata, and a loose previous-release `.icns` for the macOS 11 deployment
 target. Finder, the closed and running Dock item, and the app switcher therefore
-resolve the same asset, while macOS owns the only outer mask. This removes both
-the twice-rounded current-system icon and the old running-versus-closed split.
+resolve the same adaptive asset. This removes the old running-versus-closed split.
 The native visual result remains a release gate rather than something inferred
 from SVG source or a Linux generator test.
 
@@ -1311,13 +1313,50 @@ text, so its bitmap is already resident).
 
 ## Why the extractor sits *in front of* the VT engine
 
-`alacritty_terminal` has no image/graphics support and ignores OSC 7/133. The
-`Extractor` is a small state machine that pulls Sixel (DCS), kitty (APC `G`)
-and iTerm2 (`OSC 1337`) image sequences, plus OSC 7 (cwd) and OSC 133 (shell
-integration), out of the byte stream and forwards everything else
+The vendored VT engine has no image/graphics support and ignores OSC 7/133. The
+`Extractor` is a small state machine that pulls Sixel (DCS), APC `G`, and OSC
+1337 image sequences, plus OSC 7 (cwd) and OSC 133 (shell
+integration), out of the byte stream. It also consumes Kettle's bounded private
+OSC 777 completion metadata before the VT engine can see it. A separate bounded
+filter removes only that private sequence from logs and output hooks once per
+PTY read; parser chunking can therefore never flood their bounded queues.
+Everything else is forwarded
 **byte-for-byte** (terminator preserved: BEL vs ST) so the engine still sees a
 correct, untouched VT stream. This keeps us on a battle-tested engine while
 adding modern features it lacks.
+
+Completion protocol v4 adds two bounded presentation hints to the v3 sequenced
+envelope. Fish and PowerShell capture the replacement token and current-line
+input prefix before their first replacement, then retain both while cycling.
+The VT parser bounds token hints at 128 bytes and prefix hints at 1024 bytes.
+Unsafe, malformed, or oversized presentation hints degrade to no emphasis or
+alignment instead of hiding safe candidates. The renderer may emphasize the
+first ASCII case-insensitive label occurrence (or exact non-ASCII occurrence)
+and derive the command's start column, but
+neither hint can filter, rank, quote, insert, or execute a candidate. Versions
+1 through 3 keep their existing wire shape and render without emphasis from the
+grid edge.
+Unsafe candidate labels are omitted. An unsafe optional description is reduced
+to an empty string instead of removing its safe label, so the shell's selected
+candidate stays the selected row in Kettle's card.
+
+The completion card uses one geometry function for paint, pointer blocking, and
+AccessKit. It prefers to grow upward from the editable command column with its
+bottom edge a half cell above the first prompt row. When the upper lane cannot
+fit the requested page and the lower lane can show more, it flips below the
+final wrapped command row without leaving the terminal grid. The terminal pairs
+a request's captured cursor with that reply's input prefix. Ordinary cycling
+keeps the pair stable. UI-only dismissal across Ctrl-L, focus changes, shell clears, pointer
+dismissal, or a grace timeout hides the card without discarding that pair, so a
+same-prefix reply cannot jump to a cursor moved by candidate insertion. A real
+editor mutation or command boundary retires both halves. A shell that
+re-captures completion after a singleton replacement updates both halves
+together. Geometry clamps the card back inside the grid near the right edge.
+The header is part of the list container, not an option.
+Candidate bounds begin below it, the selected row retains one row of lookahead,
+and a prompt without enough space suppresses the card rather than covering
+terminal input. A text-and-Tab remote batch discards its stale pre-typing cursor
+anchor and uses the safe grid-edge fallback.
 
 Only the 7-bit introducers (`ESC P` / `ESC _` / `ESC ]`) open a control string.
 The 8-bit C1 equivalents `0x90` / `0x9f` / `0x9d` are passed through as text,
@@ -1347,7 +1386,10 @@ evicted or cleared; Kettle combines it with the current history size and row to
 form a stable document-row id. Prompt navigation converts retained ids back to
 display offsets, prunes only ids older than the current origin, clears marks on
 reset/reflow where identity cannot be preserved, and leaves normal-screen
-marks untouched while the alternate screen is active.
+marks untouched while the alternate screen is active. A resize may rebase the
+latest active prompt when it is provably a single row: widening is safe, while
+narrowing is safe only if the cursor remains on the same row. Other reflows
+still clear the ring rather than guessing which history row survived.
 
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and

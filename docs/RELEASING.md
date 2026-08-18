@@ -31,17 +31,31 @@ notarizes, staples, and Gatekeeper-assesses the app before creating its ZIP.
 
 Before merging the release-cut pull request, run its universal `.app` on a
 native macOS 26 or later desktop and record screenshots containing a decorated
-Kettle window plus the running and closed-but-pinned Dock icon. Check two things
-that unit and image tests cannot establish:
+Kettle window plus the running and closed-but-pinned Dock icon. Check the window
+treatment and icon details that unit and image tests cannot establish:
 
-- the active theme reaches both rounded top corners without a mismatched strip,
-  while the traffic lights, drag region, first terminal row, and pointer targets
-  remain in their native positions; switch once between a light and dark theme
-  to prove the NSWindow background follows a palette change;
-- the running, closed, Finder and app-switcher icons agree; the TokyoNight
-  background reaches the system mask without a second transparent gutter,
-  inner rounded face, or outline; and the blue `>(_)~` terminal-kettle mark
-  remains centered and legible at normal and magnified Dock sizes.
+- with the default opaque background and blur disabled, the active theme
+  reaches both rounded top corners without a clear or mismatched strip;
+- with alpha transparency and native blur enabled, one material reaches both
+  rounded top corners
+  without a clear strip or seam; resize the window and round-trip full screen,
+  then confirm the traffic lights, drag region, first terminal row, and pointer
+  targets remain in their native positions;
+- repeat the full-screen round trip with `borderless = true`; the terminal must
+  remain visible through the documented sharp-alpha fallback instead of being
+  covered by a material view;
+- with alpha transparency still enabled, disable native blur and confirm AppKit
+  draws its standard titlebar backdrop instead of exposing a fully clear desktop
+  strip; return to an opaque surface, leave blur enabled once to confirm it does
+  not create a titlebar-only material seam, and switch between a light and dark
+  theme to prove the NSWindow background follows palette changes;
+- toggle Reduce Transparency while the blurred window is open; the material
+  must disappear immediately, the theme background must become opaque, and both
+  must return when the setting is restored;
+- the running, closed, Finder and app-switcher icons agree; both 256 px
+  appearances keep the system mask and inset face parallel with clear rim
+  space; and the `>_` mark remains centered and legible at normal and magnified
+  Dock sizes.
 
 The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
 pipeline with a macOS 11 deployment target. The emitted asset catalog and loose

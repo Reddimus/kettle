@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        kettle's design is "borrow the best from Ghostty / Terminator /
-        kitty / Alacritty / WezTerm." If a feature already exists in one
-        of those, link to its docs — that gives us the spec to match.
+        Describe the user problem first. If a published standard or prior
+        implementation defines the behavior, link to it so the expected
+        contract is testable.
 
   - type: textarea
     id: problem
@@ -31,8 +31,8 @@ body:
     attributes:
       label: Prior art
       description: |
-        How do Ghostty / Terminator / kitty / Alacritty / WezTerm /
-        iTerm2 / xterm handle this? Links welcome.
+        Link to a standard, protocol, or implementation that already defines
+        the behavior. Include the useful part of the reference, not just a name.
     validations:
       required: false
 

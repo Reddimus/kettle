@@ -49,13 +49,79 @@ future Xcode preview from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
+The macOS material policy has portable tests for opaque, plain-alpha, blurred,
+and Reduce Transparency states. A source guard pins the AppKit-only seam: the
+effect is initialized from the content frame, constrains all four edges to the
+Winit content view, stays below its Metal layer, stops below an opaque native
+titlebar, and has no competing geometry setter. Portable policy tests keep the effect out of
+borderless windows, where it would cover the Metal view, and out of an otherwise
+opaque window, where it would create a titlebar-only seam. Windows tests pin DWM
+color byte order and minimum caption-text contrast. Linux tests require both a
+Wayland handle and the KWin blur global, cache that registry probe per process,
+and prove the 99% fallback is Linux-only; renderer tests prove the fallback
+survives the replacing pane-base pass in the live window but does not change
+screenshots. Those checks cannot prove native presentation. The release
+appearance gate therefore records
+a native decorated window with blur on and off, checks resize and full-screen on
+the blurred window, repeats the style transition while borderless, and toggles
+Reduce Transparency live. It verifies the titlebar seam, rounded corners,
+traffic lights, drag region, and first content row by sight.
+
 Shell-integration changes also run `just shell-integration-check`. Unlike the
 CLI smoke's source-text checks, this executes the shipped snippets: macOS uses
 interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
-Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report,
-and Windows runs the PowerShell prompt-status and PSReadLine binding fixture
+Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
+A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
+the oldest supported completion binding cannot drift with `ubuntu-latest`.
+Windows runs the PowerShell prompt-status and PSReadLine binding fixture
 under each installed PowerShell host. Other hosts run the interpreters they have
 and print explicit skips for native legs that belong to the CI matrix.
+
+The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
+field truncation and custom-binding preservation in all four snippets. The Zsh
+fixture also emits the maximum 64-row payload under a time bound, catching a
+per-byte subshell regression; Bash also proves a full non-ASCII label is not
+shortened by locale-sensitive character counts. A real interactive Fish PTY
+proves default and Vi-insert Tab behavior, keymap ownership changes, reverse
+cycling, cursor-move invalidation, paging beyond 64 candidates, and that Fish's
+pager stays closed.
+It also pins the count, per-field, and aggregate retained-state caps and keeps
+the selected row in a bounded wide-character wire page. Ordinary and
+bounded-prefix singletons are inserted from the captured result without a
+second provider query, proving neither path can re-open the stock pager. A real
+Fish editor round trip pins the ordinary singleton's trailing space and an
+expandable, unquoted `~user` completion. It also proves protocol v4 retains the
+original typed token and current-line input prefix across forward and reverse
+cycling. The PowerShell fixture pins the same replacement-span retention.
+Parser tests keep v1 through v3 compatible, require both v4 presentation fields,
+and degrade unsafe or oversized hint values without hiding safe candidates.
+Terminal and renderer tests pin one stable command-column anchor across
+candidate insertion, UI-only dismissal, Ctrl-L redraw, focus loss, Unicode
+display-width math, and right-edge clamping. A same-prefix reply after the card
+was hidden must retain the cursor captured with that prefix; a changed prefix
+must replace both halves, and real editor input must clear them. The
+deterministic fixture keeps native no-space results open, treats leading-dash
+candidates as data, and counts exactly one provider call. Request-numbered
+parser/state tests cover prompt sessions, duplicate same-row Fish prompt marks,
+the reader-thread prompt-ring bridge, screen-clearing commands that reuse a
+prompt row, a transient startup resize that preserves a single-row active
+prompt, clear, re-arm, delayed old replies, rejected queue admission, Kitty
+key releases, rejection of Alt/Ctrl/Super Tab, custom Tab directions, counter
+exhaustion, pump-buffered prompt boundaries, and multi-key remote batches; only
+an admitted current Tab may restore the card. UI guards keep DEC focus reports
+in the chronological input lane without consuming that admission. A real Fish
+Ctrl-L round trip
+proves a moved prompt keeps publishing on its current session, while terminal
+state tests prove that session remains accepted and a fresh sync may replace
+it. PowerShell pins both stock-direction bindings, its quoted-directory edit,
+multi-page absolute positions, the 64 KiB wire cap, and the same source-memory
+limits. Its prefix and replacement token are rejected before grapheme indexing
+when an editor line exceeds their presentation bounds. Native Windows runs
+that fixture with PSReadLine. Parser and terminal tests bound malformed control strings,
+compare every split of private metadata through the screen and raw-output
+filters, sweep private-message starts around the exact recovery boundary, keep
+absolute positions when unsafe rows are skipped, and reject stale replies after
+unrelated input or focus loss.
 
 Modified-Enter auto detection has an additional native Unix PTY regression. It
 starts stock `zsh -f` on macOS or unconfigured Bash on Linux, proves the shell
@@ -322,7 +388,7 @@ sample design, margins, and limitations.
 
 **900+ tests across the workspace** — see
 [CHANGELOG.md](../CHANGELOG.md) for the full history of additions
-(feature sweeps, Terminator-parity work, production-polish passes,
+(feature sweeps, compatibility work, production-polish passes,
 resource-cap defense-in-depth sweeps, etc.). The workspace grows by 1–3
 tests per feature landed, so per-crate counts below are
 range-stable phrasings rather than exact figures — run
@@ -394,10 +460,10 @@ discipline here.
 
 - **kettle-config** (190+ tests): TokyoNight Night is the verified shipped
   default theme (the self-contained `Theme::default()` fallback palette is
-  Catppuccin Mocha); Ghostty `key = value` overrides, repeats, `palette`
+  Catppuccin Mocha); `key = value` overrides, repeats, `palette`
   (0..=15 + out-of-range diagnostic), `infinite` scrollback,
   `ssh-host`; the bundled theme set has >400 entries incl. "TokyoNight
-  Night"; Terminator default keybinds and trigger parsing; the
+  Night"; default keybinds and trigger parsing; the
   `from_name` ↔ `action_names` round-trip drift guard; the
   `defaults_has_no_shadow_collisions` audit (no
   HashMap-shadowed bindings); the palette-completeness drift
@@ -1828,8 +1894,20 @@ name the shape of bug each pass caught.
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
 - Native shell-integration fixtures: stock interactive `zsh -f` and system
-  Bash 3.2 on macOS, Fish OSC 133/OSC 7 behavior on Linux, plus PowerShell
-  prompt/Enter behavior on Windows.
+  Bash 3.2 on macOS, Fish 3.7/4.2/4.8 behavior on Linux, plus PowerShell
+  prompt/Enter behavior on Windows. The Fish leg drives real Emacs and Vi key
+  maps, requires the private completion OSC within 750 ms, and pins release
+  archives by SHA-256. Geometry and renderer tests cover prompt-relative
+  anchoring to the editable command column, right-edge clamping, the header
+  lane, lookahead, scroll math, content-fit width,
+  middle-ellipsized paths, readable theme colors, and bounded token emphasis;
+  pointer hit tests ensure a click dismisses it instead of acting on obscured
+  terminal content. Parser coverage also pins selection when an otherwise safe
+  PowerShell row carries a multiline tooltip. Fish fixtures require ambiguous
+  leading-dash candidates to publish without option-parser noise, re-page from
+  a selected row that crosses the wire budget, and preserve absolute positions
+  across an omitted unsafe label. This shell fixture does not claim a live card
+  was drawn.
 - The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
   Markdown targets, and PNG/SFNT structural checks.
 - The macOS comparator score self-test and the mandatory Kettle-owned portion of
@@ -1856,18 +1934,15 @@ name the shape of bug each pass caught.
   all seven ICO resolutions. The macOS leg compiles the Icon Composer document
   and requires `Assets.car`, `AppIcon.icns`, `CFBundleIconName`, and
   `CFBundleIconFile`; the Windows leg validates and embeds the existing `.ico`.
-  Source guards pin that production no longer mutates the application icon at
-  runtime and that window creation plus palette changes still synchronize the
-  native titlebar background. These checks prove wiring and input assets; they
-  also pin one shared, borderless kettle foreground, its optical safe area, the
-  two distinct strokes of the fixed-size compact `>_` mark at 16 px, and all
-  five distinct strokes of the full `>(_)~` mark at 24 px. The native Icon
-  Composer vector retains the full mark at every rendition, so the compact-mark
-  assertion does not cover its 16 px fallback. These checks
+  Source guards pin that window creation plus palette changes synchronize the
+  native titlebar and Windows/X11 icon. These checks prove wiring and input
+  assets; they pin the two strokes of `>_` at 16 and 24 px, exact dark/light
+  palette inversion, separate adaptive Icon Composer sources, and the inset
+  face geometry. These checks
   do not prove AppKit's visual treatment. Before release, compile the asset with
-  Xcode 26 and inspect the 256 px fallback plus a normal-size Dock item: the
-  TokyoNight background should reach the system-owned mask with no inner
-  rounded face or line that can collapse at the corners. Then run the native
+  Xcode 26 and inspect both 256 px appearances plus a normal-size Dock item:
+  the system mask and inset face should remain parallel with clear rim space.
+  Then run the native
   macOS Dock and rounded-window check in
   [RELEASING.md](RELEASING.md#macos-appearance-gate).
 - The adaptive directional-focus matrix pins all four exact

@@ -10,7 +10,7 @@ authors.workspace = true
 # description is the binary's blurb ("…GPU terminal emulator…") —
 # correct for `kettle` itself but misleading on every library
 # sub-crate. Each library crate overrides with what *it* does.
-description = "kettle: Ghostty-compatible config parsing, bundled theme set, embedded Nerd Font, keybinds, fuzzy matcher"
+description = "kettle: configuration parsing, themes, key bindings, and fuzzy matching"
 
 [lints]
 workspace = true

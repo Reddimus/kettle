@@ -7,7 +7,15 @@
       "layers" : [
         {
           "hidden" : false,
-          "image-name" : "kettle.svg",
+          "image-name-specializations" : [
+            {
+              "value" : "kettle-light.svg"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "kettle-dark.svg"
+            }
+          ],
           "name" : "Kettle Terminal",
           "position" : {
             "scale" : 2,
