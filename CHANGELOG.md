@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-08-18
+
 ### Changed
 
 - **Native window material is now the cross-platform default.** New macOS and
