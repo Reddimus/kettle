@@ -62,7 +62,7 @@ Pin a specific version (recommended for reproducible installs):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh \
-  | KETTLE_VERSION=v3.1.0 sh
+  | KETTLE_VERSION=v3.1.1 sh
 ```
 
 System-wide install (writes to a custom prefix; needs the
@@ -406,14 +406,14 @@ one-shot, the `kettle ctl` control client, `kettle mcp`) and its threat model.
 
 ### Verifying a download (SHA-256)
 
-Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v3.1.0)
+Every release from **v1.3.4** onward ships a `.sha256` sidecar (current latest: v3.1.1)
 generated on the same CI runner as the artifact. Verify a tarball
 before extracting it:
 
 ```sh
 # Linux / WSL
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v3.1.0/kettle-linux-x86_64.tar.gz
-curl -fLO https://github.com/Reddimus/kettle/releases/download/v3.1.0/kettle-linux-x86_64.tar.gz.sha256
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v3.1.1/kettle-linux-x86_64.tar.gz
+curl -fLO https://github.com/Reddimus/kettle/releases/download/v3.1.1/kettle-linux-x86_64.tar.gz.sha256
 sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 # → kettle-linux-x86_64.tar.gz: OK
 ```
