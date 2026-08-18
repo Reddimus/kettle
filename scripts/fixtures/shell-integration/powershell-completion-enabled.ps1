@@ -25,6 +25,21 @@ if ($null -eq $backtabHandler -or $backtabHandler.Function -ne 'KettleCompletePr
 if ($null -eq (Get-Command __kettle_completion_cycle_next -ErrorAction SilentlyContinue)) {
     throw 'completion cycle helper was not installed'
 }
+if ((__kettle_completion_capture_prefix ('x' * 16385) 16385) -ne '') {
+    throw 'an oversized editor prefix reached grapheme-safe wire encoding'
+}
+if ((__kettle_completion_capture_prefix "old`nGet-I" 9) -ne 'Get-I') {
+    throw 'the completion prefix did not stay on the current editor line'
+}
+if ((__kettle_completion_capture_token ('x' * 4097) 0 4097) -ne '') {
+    throw 'an oversized replacement token reached grapheme-safe wire encoding'
+}
+if ((__kettle_completion_capture_token ('x' * 4096) 0 4096).Length -ne 4096) {
+    throw 'the replacement-token character cap was not inclusive'
+}
+if ((__kettle_completion_capture_token 'Get-I' 0 5) -ne 'Get-I') {
+    throw 'a bounded replacement token was not retained for emphasis'
+}
 
 $tooManyMatches = @(
     1..66 | ForEach-Object {
@@ -70,13 +85,20 @@ if (-not (__kettle_completion_capture_result $wireLimitResult)) {
 }
 $stdout = [Console]::Out
 $wireCapture = [System.IO.StringWriter]::new()
+$global:__kettle_completion_prefix = ' ' * 1024
 [Console]::SetOut($wireCapture)
 try { __kettle_completion_emit 63 'update' } finally { [Console]::SetOut($stdout) }
 $wirePayload = $wireCapture.ToString()
+$encodedPrefix = '%20' * 1024
 if ($wirePayload.Length -gt 65538 -or
-    $wirePayload -notmatch ';completion;63;powershell;0;64;') {
-    throw 'the PowerShell page exceeded the parser cap or lost its selected row'
+    -not $wirePayload.Contains(
+        ";completion;63;powershell;;$encodedPrefix;0;64;")) {
+    $fields = $wirePayload.Trim([char]27, ']', [char]7).Split(';')
+    throw "the PowerShell page exceeded the parser cap or lost its selected row: " +
+        "wire=$($wirePayload.Length), selected=$($fields[8]), " +
+        "prefix=$($fields[11].Length), offset=$($fields[12]), total=$($fields[13])"
 }
+$global:__kettle_completion_prefix = $null
 
 $unboundedResult = [pscustomobject]@{
     CompletionMatches = @(1..2049 | ForEach-Object {
@@ -213,7 +235,7 @@ $firstCycleWire = $capture.ToString()
 if ($global:__fixture_line -ne 'Get-Item' -or
     [uint64]$global:__kettle_completion_request -ne 1 -or
     $firstCycleWire -notmatch
-        '\]777;kettle-completion;3;show;21;[0-9]+;1;completion;0;powershell;0;2;Get-Item;Gets%20an%20item') {
+        '\]777;kettle-completion;4;show;21;[0-9]+;1;completion;0;powershell;Get-I;Get-I;0;2;Get-Item;Gets%20an%20item') {
     throw 'the first real completion cycle did not edit and publish request 1'
 }
 
@@ -224,7 +246,7 @@ $secondCycleWire = $capture.ToString()
 if ($global:__fixture_line -ne 'Get-ItemProperty' -or
     [uint64]$global:__kettle_completion_request -ne 2 -or
     $secondCycleWire -notmatch
-        '\]777;kettle-completion;3;update;21;[0-9]+;2;completion;1;powershell;0;2;') {
+        '\]777;kettle-completion;4;update;21;[0-9]+;2;completion;1;powershell;Get-I;Get-I;0;2;') {
     throw 'the second real completion cycle did not edit and publish request 2'
 }
 

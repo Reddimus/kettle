@@ -50,7 +50,7 @@ if (-not $global:__kettle_prompt_installed) {
             $global:__kettle_completion_request = [uint64]0
             $__kettle_keys = __kettle_completion_key_mask
             [Console]::Write(
-                "$esc]777;kettle-completion;3;sync;$global:__kettle_completion_session;$__kettle_keys$bel"
+                "$esc]777;kettle-completion;4;sync;$global:__kettle_completion_session;$__kettle_keys$bel"
             )
         } else {
             $global:__kettle_completion_enabled = $false
@@ -112,7 +112,7 @@ if (-not $global:__kettle_prompt_installed) {
     function global:__kettle_completion_hide {
         if (-not (__kettle_completion_begin_generation)) { return }
         [Console]::Write(
-            [char]27 + ']777;kettle-completion;3;clear;' +
+            [char]27 + ']777;kettle-completion;4;clear;' +
             $global:__kettle_completion_session + ';' +
             $global:__kettle_completion_generation + ';' +
             $global:__kettle_completion_request + [char]7
@@ -142,6 +142,8 @@ if (-not $global:__kettle_prompt_installed) {
             # Build against the parser's actual wire cap. Per-field limits make
             # 64 rows fit today, but keeping the aggregate check here prevents a
             # later label-width change from silently dropping the whole reply.
+            $token = __kettle_completion_field $global:__kettle_completion_token 128
+            $prefix = __kettle_completion_field $global:__kettle_completion_prefix 1024
             $pageAttempts = 0
             while ($pageAttempts -lt 2) {
                 $pageAttempts++
@@ -150,7 +152,8 @@ if (-not $global:__kettle_prompt_installed) {
                 $bodyLength = 0
                 for ($index = $offset; $index -le $last; $index++) {
                     $row = $global:__kettle_completion_rows[$index]
-                    if (256 + $bodyLength + $row.Length -gt 65000) { break }
+                    if (256 + $token.Length + $prefix.Length +
+                        $bodyLength + $row.Length -gt 65000) { break }
                     $page.Add($row)
                     $bodyLength += $row.Length
                 }
@@ -178,12 +181,12 @@ if (-not $global:__kettle_prompt_installed) {
                 [int]$Selected -lt $count) {
                 $selectedField = [string]([int]$Selected - $offset)
             }
-            $payload = '777;kettle-completion;3;' + $Operation + ';' +
+            $payload = '777;kettle-completion;4;' + $Operation + ';' +
                 $global:__kettle_completion_session + ';' +
                 $global:__kettle_completion_generation +
                 ';' + $global:__kettle_completion_request +
                 ';completion;' + $selectedField + ';powershell;' +
-                $offset + ';' + $count + $body
+                $token + ';' + $prefix + ';' + $offset + ';' + $count + $body
             [Console]::Write([char]27 + ']' + $payload + [char]7)
         }
     }
@@ -192,6 +195,7 @@ if (-not $global:__kettle_prompt_installed) {
         $global:__kettle_completion_result = $null
         $global:__kettle_completion_matches = @()
         $global:__kettle_completion_rows = @()
+        $global:__kettle_completion_token = $null
         if ($null -eq $Result) { return $true }
         # Keep the indexed collection: `@(...)` would copy every provider
         # result before the 2048-row retained-memory limit can apply.
@@ -240,6 +244,8 @@ if (-not $global:__kettle_prompt_installed) {
         $global:__kettle_completion_result = $null
         $global:__kettle_completion_matches = @()
         $global:__kettle_completion_rows = @()
+        $global:__kettle_completion_token = $null
+        $global:__kettle_completion_prefix = $null
         $global:__kettle_completion_index = -1
         $global:__kettle_completion_replacement_index = 0
         $global:__kettle_completion_replacement_length = 0
@@ -279,6 +285,39 @@ if (-not $global:__kettle_prompt_installed) {
         $cursor = 0
         [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
         return [pscustomobject]@{ Line = $line; Cursor = $cursor }
+    }
+
+    function global:__kettle_completion_capture_prefix(
+        [string]$Line,
+        [int]$Cursor
+    ) {
+        if ($null -eq $Line -or $Cursor -lt 0 -or $Cursor -gt $Line.Length) {
+            return ''
+        }
+        $prefix = $Line.Substring(0, $Cursor)
+        $lastBreak = [Math]::Max($prefix.LastIndexOf("`n"), $prefix.LastIndexOf("`r"))
+        if ($lastBreak -ge 0) {
+            $prefix = $prefix.Substring($lastBreak + 1)
+        }
+        # `__kettle_completion_field` performs grapheme-safe encoding. Reject
+        # an implausibly large editor line before it allocates one index per
+        # text element merely to produce the protocol's 1 KiB prefix hint.
+        if ($prefix.Length -gt 16384) { return '' }
+        return $prefix
+    }
+
+    function global:__kettle_completion_capture_token(
+        [string]$Line,
+        [int]$Index,
+        [int]$Length
+    ) {
+        if ($null -eq $Line -or $Index -lt 0 -or $Length -lt 0 -or
+            $Index -gt $Line.Length -or $Length -gt $Line.Length - $Index -or
+            $Length -gt 4096) {
+            return ''
+        }
+        # Bound before the wire encoder indexes every grapheme.
+        return $Line.Substring($Index, $Length)
     }
 
     function global:__kettle_completion_expand([string]$Line, [int]$Cursor) {
@@ -323,6 +362,8 @@ if (-not $global:__kettle_prompt_installed) {
             $line -ceq $global:__kettle_completion_last_line -and
             $cursor -eq $global:__kettle_completion_last_cursor
         if (-not $continues) {
+            $global:__kettle_completion_prefix =
+                __kettle_completion_capture_prefix $line $cursor
             try {
                 $expanded = __kettle_completion_expand $line $cursor
                 __kettle_completion_capture_result $expanded | Out-Null
@@ -337,6 +378,10 @@ if (-not $global:__kettle_prompt_installed) {
                     [int]$global:__kettle_completion_result.ReplacementIndex
                 $global:__kettle_completion_replacement_length =
                     [int]$global:__kettle_completion_result.ReplacementLength
+                $tokenIndex = $global:__kettle_completion_replacement_index
+                $tokenLength = $global:__kettle_completion_replacement_length
+                $global:__kettle_completion_token =
+                    __kettle_completion_capture_token $line $tokenIndex $tokenLength
             }
         }
 

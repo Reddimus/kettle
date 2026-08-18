@@ -2049,6 +2049,7 @@ dependencies = [
  "tempfile",
  "unicode-segmentation",
  "unicode-width",
+ "wayland-client",
  "windows 0.62.2",
  "winit",
  "x11rb",

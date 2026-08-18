@@ -399,7 +399,7 @@ def check_fish(executable: str) -> None:
     if (
         not paged_sequences
         or b";update;" not in paged_sequences[-1]
-        or b";completion;0;fish;64;70;item-64;description-64"
+        or b";completion;0;fish;;;64;70;item-64;description-64"
         not in paged_sequences[-1]
         or b"item-00" in paged_sequences[-1]
     ):
@@ -416,6 +416,7 @@ def check_fish(executable: str) -> None:
             "--no-config",
             "-c",
             "source $argv[1] >/dev/null; "
+            "set -g __kettle_completion_cycle_prefix (string repeat -n 1024 a); "
             "set -g __kettle_completion_cycle_rows $argv[2..-1]; "
             "__kettle_completion_emit_cycle update 127",
             str(INTEGRATION / "kettle.fish"),
@@ -427,9 +428,15 @@ def check_fish(executable: str) -> None:
     wide_sequences = re.findall(
         rb"\x1b\]777;kettle-completion;[^\x07]*\x07", wide
     )
+    wide_fields = wide_sequences[-1][2:-1].split(b";") if wide_sequences else []
     if (
         not wide_sequences
-        or b";completion;63;fish;64;128;" not in wide_sequences[-1]
+        or len(wide_fields) < 14
+        or wide_fields[8] != b"63"
+        or wide_fields[9] != b"fish"
+        or wide_fields[10] != b""
+        or wide_fields[11] != b"a" * 1024
+        or wide_fields[12:14] != [b"64", b"128"]
         or b"item-127" not in wide_sequences[-1]
         or len(wide_sequences[-1]) > 65538
     ):
@@ -438,6 +445,81 @@ def check_fish(executable: str) -> None:
             f"{wide_sequences[-1:]!r}"
         )
     print("Fish completion wire-budget paging fixture: PASS")
+
+    saturated_rows = [
+        f"{'😀' * (16 if index < 63 else 15)}{'Z' if index == 63 else ''}\t{'😀' * 64}"
+        for index in range(64)
+    ]
+    saturated = run(
+        [
+            executable,
+            "--no-config",
+            "-c",
+            "source $argv[1] >/dev/null; "
+            "set -g __kettle_completion_cycle_token "
+            "(__kettle_completion_field (string repeat -n 32 😀) 128); "
+            "set -g __kettle_completion_cycle_prefix "
+            "(__kettle_completion_field (string repeat -n 256 😀) 1024); "
+            "set -g __kettle_completion_cycle_rows $argv[2..-1]; "
+            "__kettle_completion_emit_cycle update 63",
+            str(INTEGRATION / "kettle.fish"),
+            *saturated_rows,
+        ],
+        "Fish selected-row wire-budget retry fixture",
+        announce=False,
+    )
+    saturated_sequences = re.findall(
+        rb"\x1b\]777;kettle-completion;[^\x07]*\x07", saturated
+    )
+    saturated_fields = (
+        saturated_sequences[-1][2:-1].split(b";") if saturated_sequences else []
+    )
+    if (
+        not saturated_sequences
+        or len(saturated_fields) < 16
+        or saturated_fields[8] != b"0"
+        or saturated_fields[12:14] != [b"63", b"64"]
+        or b"Z" not in saturated_sequences[-1]
+        or len(saturated_sequences[-1]) > 65538
+    ):
+        raise RuntimeError(
+            "Fish did not re-page from a selected row dropped by the wire budget: "
+            f"{saturated_sequences[-1:]!r}"
+        )
+    print("Fish selected-row wire-budget retry fixture: PASS")
+
+    placeholders = run(
+        [
+            executable,
+            "--no-config",
+            "-c",
+            "source $argv[1] >/dev/null; "
+            "__kettle_completion_emit_rows show 1 20 22 1 "
+            "(string join \\t -- '' dropped) (string join \\t -- safe kept)",
+            str(INTEGRATION / "kettle.fish"),
+        ],
+        "Fish skipped-label position fixture",
+        announce=False,
+    )
+    placeholder_sequences = re.findall(
+        rb"\x1b\]777;kettle-completion;[^\x07]*\x07", placeholders
+    )
+    placeholder_fields = (
+        placeholder_sequences[-1][2:-1].split(b";")
+        if placeholder_sequences
+        else []
+    )
+    if (
+        len(placeholder_fields) < 18
+        or placeholder_fields[8] != b"1"
+        or placeholder_fields[12:14] != [b"20", b"22"]
+        or placeholder_fields[14:18] != [b"", b"dropped", b"safe", b"kept"]
+    ):
+        raise RuntimeError(
+            "Fish did not preserve absolute positions across an omitted label: "
+            f"{placeholder_sequences[-1:]!r}"
+        )
+    print("Fish skipped-label position fixture: PASS")
 
     captured = run(
         [
@@ -719,7 +801,7 @@ def check_fish(executable: str) -> None:
     try:
         startup = drain(1.0)
         if not re.search(
-            rb"\x1b\]777;kettle-completion;3;sync;[0-9]+;3\x07", startup
+            rb"\x1b\]777;kettle-completion;4;sync;[0-9]+;3\x07", startup
         ):
             raise RuntimeError(
                 "Fish prompt did not advertise Kettle-owned Tab and Shift-Tab: "
@@ -732,6 +814,14 @@ def check_fish(executable: str) -> None:
             b"end; bind \\cg __kettle_probe_keep\n",
         )
         startup += drain(0.5)
+        syncs_before_clear = re.findall(
+            rb"\x1b\]777;kettle-completion;4;sync;([0-9]+);3\x07", startup
+        )
+        if not syncs_before_clear:
+            raise RuntimeError("Fish setup prompt did not establish a managed session")
+        session_before_clear = syncs_before_clear[-1]
+        os.write(master, b"\x0c")
+        after_clear = drain(0.5)
         os.write(master, b"git ch\t")
         after_tab, initial_elapsed = drain_until_completion(2.0)
         # The private OSC is emitted before Fish has finished its complete key
@@ -741,10 +831,22 @@ def check_fish(executable: str) -> None:
         sequences = re.findall(
             rb"\x1b\]777;kettle-completion;[^\x07]*\x07", startup + after_tab
         )
-        if not sequences or b";show;" not in sequences[-1] or b";checkout;" not in sequences[-1]:
+        if (
+            not sequences
+            or b";show;" not in sequences[-1]
+            or b";fish;ch;git%20ch;" not in sequences[-1]
+            or b";checkout;" not in sequences[-1]
+        ):
             raise RuntimeError(
                 "Fish Tab did not leave its completion list visible: "
                 f"{sequences[-3:]!r}; output tail={(startup + after_tab)[-512:]!r}"
+            )
+        show_fields = sequences[-1][2:-1].split(b";")
+        if len(show_fields) < 5 or show_fields[4] != session_before_clear:
+            raise RuntimeError(
+                "Fish Ctrl-L changed the prompt without preserving the managed session: "
+                f"before={session_before_clear!r}, show={sequences[-1]!r}, "
+                f"clear_tail={after_clear[-512:]!r}"
             )
         if initial_elapsed > 0.75:
             raise RuntimeError(
@@ -772,9 +874,13 @@ def check_fish(executable: str) -> None:
         )
         reverse_fields = reverse[-1][2:-1].split(b";") if reverse else []
         version = reverse_fields[2] if len(reverse_fields) > 2 else b""
-        reverse_header = 12 if version == b"3" else (10 if version == b"2" else 8)
+        reverse_header = {
+            b"4": 14,
+            b"3": 12,
+            b"2": 10,
+        }.get(version, 8)
         reverse_count = max(0, (len(reverse_fields) - reverse_header) // 2)
-        selected_index = 8 if version == b"3" else 6
+        selected_index = 8 if version in {b"3", b"4"} else 6
         selected_field = (
             reverse_fields[selected_index]
             if len(reverse_fields) > selected_index
@@ -788,6 +894,7 @@ def check_fish(executable: str) -> None:
         if (
             not reverse
             or b";update;" not in reverse[-1]
+            or b";fish;ch;git%20ch;" not in reverse[-1]
             or reverse_count < 2
             or reverse_selected != reverse_count - 1
         ):
@@ -844,6 +951,37 @@ def check_fish(executable: str) -> None:
                 "Fish treated a leading-dash completion as an abbr option: "
                 f"{option_output[-1024:]!r}"
             )
+        if b";show;" not in option_output or b"string length:" in option_output:
+            raise RuntimeError(
+                "Fish did not publish a leading-dash completion cleanly: "
+                f"{option_output[-1024:]!r}"
+            )
+
+        os.write(master, b"\x03")
+        drain(0.25)
+        os.write(
+            master,
+            b"function kettle-options; end; "
+            b"complete -c kettle-options -f -a '--help --hidden'\n",
+        )
+        drain(0.25)
+        os.write(master, b"kettle-options --h\t")
+        option_list, _ = drain_until_completion(2.0)
+        option_list += drain(0.25)
+        option_sequences = re.findall(
+            rb"\x1b\]777;kettle-completion;[^\x07]*\x07", option_list
+        )
+        if (
+            not option_sequences
+            or b";show;" not in option_sequences[-1]
+            or b";--help;" not in option_sequences[-1]
+            or b";--hidden;" not in option_sequences[-1]
+            or b"string length:" in option_list
+        ):
+            raise RuntimeError(
+                "Fish did not publish an ambiguous leading-dash completion list: "
+                f"{option_list[-1024:]!r}"
+            )
 
         # Fish marks ~user completions DONT_ESCAPE_TILDES + NO_SPACE. Its
         # public provider output hides those flags, so this live editor check
@@ -868,7 +1006,7 @@ def check_fish(executable: str) -> None:
         os.write(master, b"fish_vi_key_bindings; source " + str(INTEGRATION / "kettle.fish").encode() + b"\n")
         vi_setup = drain(0.75)
         if not re.search(
-            rb"\x1b\]777;kettle-completion;3;sync;[0-9]+;3\x07", vi_setup
+            rb"\x1b\]777;kettle-completion;4;sync;[0-9]+;3\x07", vi_setup
         ):
             raise RuntimeError(
                 "Fish Vi insert mode did not advertise its owned completion keys: "
@@ -881,7 +1019,7 @@ def check_fish(executable: str) -> None:
         )
         custom_mode = drain(0.75)
         if not re.search(
-            rb"\x1b\]777;kettle-completion;3;keymap;[0-9]+;0\x07", custom_mode
+            rb"\x1b\]777;kettle-completion;4;keymap;[0-9]+;0\x07", custom_mode
         ):
             raise RuntimeError(
                 "Fish custom mode did not withdraw Kettle's completion keys: "
@@ -890,7 +1028,7 @@ def check_fish(executable: str) -> None:
         os.write(master, b"x")
         insert_mode = drain(0.4)
         if not re.search(
-            rb"\x1b\]777;kettle-completion;3;keymap;[0-9]+;3\x07", insert_mode
+            rb"\x1b\]777;kettle-completion;4;keymap;[0-9]+;3\x07", insert_mode
         ):
             raise RuntimeError(
                 "Fish Vi insert mode did not restore Kettle's completion keys: "
@@ -980,12 +1118,12 @@ def check_powershell(executable: str) -> None:
     if b"KETTLE_POWERSHELL_PROMPT_OK" not in prompt_output:
         raise RuntimeError("PowerShell prompt fixture omitted its success sentinel")
     syncs = re.findall(
-        rb"\x1b\]777;kettle-completion;3;sync;([0-9]+);([0-3])\x07",
+        rb"\x1b\]777;kettle-completion;4;sync;([0-9]+);([0-3])\x07",
         prompt_output,
     )
     if not syncs or any(int(session) <= 0 for session, _keys in syncs):
         raise RuntimeError(
-            "PowerShell prompt omitted a valid v3 completion-session sync: "
+            "PowerShell prompt omitted a valid v4 completion-session sync: "
             f"{prompt_output!r}"
         )
 
@@ -1030,7 +1168,7 @@ def check_powershell(executable: str) -> None:
     expected_update = [
         b"777",
         b"kettle-completion",
-        b"3",
+        b"4",
         b"update",
         b"12",
         b"1",
@@ -1038,6 +1176,8 @@ def check_powershell(executable: str) -> None:
         b"completion",
         b"1",
         b"powershell",
+        b"",
+        b"",
         b"64",
         b"66",
         b"item-65",
@@ -1054,7 +1194,7 @@ def check_powershell(executable: str) -> None:
     lifecycle = {
         (fields[3], fields[4], fields[6])
         for fields in page_fields
-        if len(fields) >= 7 and fields[2] == b"3" and fields[3] in {b"show", b"update"}
+        if len(fields) >= 7 and fields[2] == b"4" and fields[3] in {b"show", b"update"}
     }
     if (b"show", b"21", b"1") not in lifecycle or (
         b"update",

@@ -710,8 +710,9 @@ fn production_source() -> String {
 #[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MacosTitlebarPolicy {
-    /// Keep AppKit's geometry and controls, but let its material match Kettle.
-    TransparentNative,
+    /// Keep AppKit's geometry and controls on an opaque native surface whose
+    /// light or dark appearance follows Kettle's theme hint.
+    ThemeMatchedNative,
     /// Borderless windows have no native titlebar to configure.
     NotApplicable,
 }
@@ -721,7 +722,7 @@ fn macos_titlebar_policy(borderless: bool) -> MacosTitlebarPolicy {
     if borderless {
         MacosTitlebarPolicy::NotApplicable
     } else {
-        MacosTitlebarPolicy::TransparentNative
+        MacosTitlebarPolicy::ThemeMatchedNative
     }
 }
 
@@ -733,7 +734,9 @@ fn apply_macos_window_chrome(
     use winit::platform::macos::WindowAttributesExtMacOS as _;
 
     match macos_titlebar_policy(borderless) {
-        MacosTitlebarPolicy::TransparentNative => attrs.with_titlebar_transparent(true),
+        // Create the caption opaque from the first frame. The material effect
+        // stays inside the content rect below it.
+        MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false),
         MacosTitlebarPolicy::NotApplicable => attrs.with_decorations(false),
     }
 }
@@ -745,10 +748,21 @@ mod macos_chrome_policy_tests {
     };
 
     #[test]
-    fn decorated_windows_use_transparent_native_chrome() {
+    fn decorated_windows_use_theme_matched_native_chrome() {
         assert_eq!(
             macos_titlebar_policy(false),
-            MacosTitlebarPolicy::TransparentNative
+            MacosTitlebarPolicy::ThemeMatchedNative
+        );
+        let src = production_source();
+        assert!(
+            src.contains(
+                "MacosTitlebarPolicy::ThemeMatchedNative => attrs.with_titlebar_transparent(false)"
+            ),
+            "decorated macOS windows must start with an opaque caption"
+        );
+        assert!(
+            !src.contains("with_titlebar_transparent(true)"),
+            "a transparent creation hint can expose the desktop before native material syncs"
         );
     }
 
@@ -822,7 +836,7 @@ mod macos_chrome_policy_tests {
             apply_macos_window_chrome(winit::window::Window::default_attributes(), false);
         let debug = format!("{decorated:?}");
         assert!(decorated.decorations);
-        assert!(debug.contains("titlebar_transparent: true"), "{debug}");
+        assert!(debug.contains("titlebar_transparent: false"), "{debug}");
         assert!(debug.contains("fullsize_content_view: false"), "{debug}");
 
         let borderless =
@@ -1067,9 +1081,11 @@ pub enum UserEvent {
 /// icon unset rather than aborting startup. No-op on Wayland (uses the
 /// `.desktop` app_id) and macOS (uses the `.app` bundle icon); effective on
 /// Windows and X11.
-fn load_window_icon() -> Option<winit::window::Icon> {
-    const ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-256.png");
-    let img = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
+fn load_window_icon(dark: bool) -> Option<winit::window::Icon> {
+    const DARK_ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-256.png");
+    const LIGHT_ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-light-256.png");
+    let icon_png = if dark { DARK_ICON_PNG } else { LIGHT_ICON_PNG };
+    let img = image::load_from_memory(icon_png).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
@@ -5481,6 +5497,11 @@ pub struct App {
     /// at redraw (vs. per-mutation-site calls) can't drift when a new
     /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
     native_theme_synced: Option<Option<WindowTheme>>,
+    /// Last palette variant installed as the live Windows/X11 window icon.
+    /// macOS and Wayland ignore this winit hook and use their bundle/desktop
+    /// assets, but keeping one lazy theme-sync path makes native platforms that
+    /// do expose it change immediately with the rest of the chrome.
+    window_icon_dark_synced: Option<bool>,
     /// Window ids awaiting removal after their checked-out dispatch finishes.
     /// This must be keyed by window: a process-global boolean can be set while
     /// ctl/Lua dispatches into one mapped window and then consumed by another
@@ -5827,9 +5848,13 @@ fn completion_surface_available(mode: kettle_core::TermMode, display_offset: usi
     !mode.contains(kettle_core::TermMode::ALT_SCREEN) && display_offset == 0
 }
 
+fn completion_anchor_col(cursor_col: usize, input_prefix: &str) -> usize {
+    cursor_col.saturating_sub(unicode_width::UnicodeWidthStr::width(input_prefix))
+}
+
 #[cfg(test)]
 mod completion_surface_tests {
-    use super::completion_surface_available;
+    use super::{completion_anchor_col, completion_surface_available};
 
     #[test]
     fn completion_stays_on_the_live_primary_screen() {
@@ -5845,6 +5870,17 @@ mod completion_surface_tests {
             kettle_core::TermMode::empty(),
             1
         ));
+    }
+
+    #[test]
+    fn completion_anchor_uses_display_columns_not_unicode_scalar_count() {
+        assert_eq!(completion_anchor_col(12, "git ch"), 6);
+        assert_eq!(completion_anchor_col(12, "界 ch"), 7);
+        assert_eq!(
+            completion_anchor_col(3, "an unexpectedly wide prefix"),
+            0,
+            "malformed or stale geometry must clamp rather than underflow"
+        );
     }
 }
 
@@ -6389,6 +6425,7 @@ impl App {
             gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
             native_theme_synced: None,
+            window_icon_dark_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
             recorder: None,
@@ -10932,7 +10969,10 @@ impl App {
                     return None;
                 }
                 let command_rows = pane.term.completion_command_rows()?;
-                let list = pane.term.completion()?;
+                let (list, completion_cursor_col) = pane.term.completion_projection()?;
+                let anchor_col = completion_cursor_col
+                    .zip(list.input_prefix.as_deref())
+                    .map(|(cursor, prefix)| completion_anchor_col(cursor, prefix));
                 let pane_rect = self.focused_rect(ws, self.area(ws))?;
                 let titlebar =
                     self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
@@ -10956,10 +10996,12 @@ impl App {
                         rows as f32 * renderer.cell_h,
                     ),
                     command_rows,
+                    anchor_col,
                     kind: kind.to_string(),
                     source: list.source,
                     selected: list.selected,
                     total: list.total,
+                    token: list.token,
                     candidates: list
                         .candidates
                         .into_iter()
@@ -11634,8 +11676,12 @@ impl App {
                 },
             )
             .collect();
-        // Status bar built BEFORE the &mut renderer borrow
-        // (the helper reads `ws.mux` immutably). Cheap when off.
+        let live_opacity_floor = ws
+            .native_material
+            .as_ref()
+            .and_then(|material| material.live_opacity_floor());
+        // Status bar and native fallback state are built BEFORE the &mut
+        // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
             drop(panes);
             ws.pane_snapshots = snaps;
@@ -11662,6 +11708,7 @@ impl App {
             live_decorated,
             live_fullscreen,
         ));
+        renderer.set_live_background_opacity_floor(live_opacity_floor);
         let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
             &tabbar,
@@ -15543,8 +15590,8 @@ impl App {
         )
     }
 
-    /// v2.34.0: push the native window-theme hint to every live window when
-    /// it changed since the last sync. Called at the top of `redraw` — every
+    /// Push the native theme and compatible live icon to every window when
+    /// either changed since the last sync. Called at the top of `redraw` — every
     /// theme mutation ends in a repaint, so one lazy chokepoint covers all
     /// mutation sites (actions, context menu, Lua, settings persist+reload,
     /// schedule, OS auto-switch) without each needing to remember a call.
@@ -15559,6 +15606,17 @@ impl App {
                 .filter_map(|s| s.window.as_ref())
             {
                 w.set_theme(hint);
+            }
+        }
+        let icon_dark = self.cfg.theme.is_dark();
+        if self.window_icon_dark_synced != Some(icon_dark) {
+            self.window_icon_dark_synced = Some(icon_dark);
+            let icon = load_window_icon(icon_dark);
+            for w in std::iter::once(ws)
+                .chain(self.windows.values())
+                .filter_map(|s| s.window.as_ref())
+            {
+                w.set_window_icon(icon.clone());
             }
         }
     }
@@ -21868,7 +21926,7 @@ impl App {
             )
             // Show kettle's icon in the title bar / taskbar / Alt-Tab
             // for the running window (winit leaves it unset by default).
-            .with_window_icon(load_window_icon())
+            .with_window_icon(load_window_icon(self.cfg.theme.is_dark()))
             // v2.34.0: seed the native titlebar (Windows DWM caption, Wayland
             // Adwaita CSD) to match the active palette from the first frame;
             // runtime changes go through `maybe_sync_native_theme`.
@@ -21886,8 +21944,9 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         {
-            // Keep AppKit's title, traffic lights, rounded mask and drag region,
-            // but let its material show the window's native theme beneath it.
+            // Keep AppKit's title, traffic lights, rounded mask and drag region.
+            // Native material stays below this caption; AppKit draws the
+            // opaque control strip in the selected light or dark appearance.
             // Full-size content would instead put tabs and cells under the
             // traffic lights, changing geometry and pointer hit-testing.
             attrs = apply_macos_window_chrome(attrs, self.cfg.borderless);
@@ -22276,6 +22335,7 @@ impl App {
             completion.selected.hash(&mut hasher);
             completion.total.hash(&mut hasher);
             completion.kind.hash(&mut hasher);
+            completion.token.hash(&mut hasher);
             completion.command_rows.hash(&mut hasher);
             accessibility_completion_geometry_key(completion, self.menu_cell(ws)).hash(&mut hasher);
             for candidate in &completion.candidates {
@@ -25446,7 +25506,7 @@ impl App {
                     .contains(kettle_core::TermMode::FOCUS_IN_OUT)
                     && let Some(pane) = ws.mux.focused()
                 {
-                    let result = pane.feed_input(if f { b"\x1b[I" } else { b"\x1b[O" });
+                    let result = pane.feed_focus_report(f);
                     if !result.is_queued() {
                         self.report_input_result(result);
                     }
@@ -30206,8 +30266,17 @@ mod tests {
             .nth(1)
             .and_then(|body| body.split("WindowEvent::").next())
             .expect("focus event arm");
-        assert!(focus.contains("let result = pane.feed_input(if f"));
+        assert!(focus.contains("let result = pane.feed_focus_report(f);"));
         assert!(!focus.contains("queue_protocol_reply"));
+
+        let mux = include_str!("mux.rs").replace("\r\n", "\n");
+        let focus_sender = mux
+            .split("pub fn feed_focus_report(")
+            .nth(1)
+            .and_then(|body| body.split("\n    pub fn ").next())
+            .expect("focus-report sender");
+        assert!(focus_sender.contains("enqueue_user"));
+        assert!(!focus_sender.contains("with_completion_input_admission"));
 
         let terminal_replies = source
             .split("TermEvent::PtyWrite(s) => {")
@@ -30881,10 +30950,12 @@ mod tests {
             pane_rect: (20.0, 30.0, 800.0, 500.0),
             grid_rect: (28.0, 46.0, 784.0, 468.0),
             command_rows: (20, 21),
+            anchor_col: None,
             kind: "Completions".to_string(),
             source: "fish".to_string(),
             selected: Some(0),
             total: 2,
+            token: Some("al".to_string()),
             candidates: vec![
                 kettle_render::CompletionOverlayRow {
                     label: "alpha".to_string(),
@@ -30929,6 +31000,55 @@ mod tests {
             baseline,
             super::accessibility_completion_geometry_key(&moved, (9.0, 18.0)),
             "pane and grid movement must invalidate accessible row bounds"
+        );
+    }
+
+    /// The card grew a header. It belongs to the list container, so no exposed
+    /// row may start at the top of the card or overlap the header band, and the
+    /// header press must still dismiss rather than reach terminal content.
+    #[test]
+    fn completion_rows_start_below_the_header_band() {
+        let completion = kettle_render::CompletionOverlay {
+            pane_rect: (20.0, 30.0, 800.0, 500.0),
+            grid_rect: (28.0, 46.0, 784.0, 468.0),
+            command_rows: (20, 21),
+            anchor_col: None,
+            kind: "Completions".to_string(),
+            source: "fish".to_string(),
+            selected: Some(1),
+            total: 2,
+            token: None,
+            candidates: vec![
+                kettle_render::CompletionOverlayRow {
+                    label: "alpha".to_string(),
+                    description: "first".to_string(),
+                    position: 0,
+                },
+                kettle_render::CompletionOverlayRow {
+                    label: "beta".to_string(),
+                    description: "second".to_string(),
+                    position: 1,
+                },
+            ],
+        };
+        let cell = (9.0, 18.0);
+        let (x, y, width, height) =
+            kettle_render::completion_overlay_rect(&completion, cell).expect("card geometry");
+        let rows = kettle_render::completion_overlay_row_rects(&completion, cell);
+        assert_eq!(rows.len(), 2);
+        let first_row_top = rows[0].1.1;
+        assert!(
+            first_row_top > y,
+            "the header band must sit above every exposed candidate row"
+        );
+        for (_, row) in &rows {
+            assert!(row.1 >= first_row_top && row.1 + row.3 <= y + height);
+            assert_eq!(row.0, x, "rows span the card so hit targets match paint");
+            assert_eq!(row.2, width);
+        }
+        assert!(
+            super::completion_overlay_hit_test(Some(&completion), cell, (x + width / 2.0, y + 1.0),),
+            "a press on the header dismisses instead of reaching hidden content"
         );
     }
 
@@ -35293,6 +35413,25 @@ mod tests {
             assert_eq!(
                 native_theme_hint(mode, false, false),
                 Some(WindowTheme::Light)
+            );
+        }
+    }
+
+    #[test]
+    fn live_window_icon_uses_the_active_palette_variant() {
+        let src = kettle_test_support::production_source(include_str!("app.rs"));
+        assert!(
+            src.contains(".with_window_icon(load_window_icon(self.cfg.theme.is_dark()))"),
+            "window creation must start with the active theme's icon"
+        );
+        assert!(
+            src.contains("w.set_window_icon(icon.clone());"),
+            "theme changes must update Windows and X11 live icons"
+        );
+        for asset in ["kettle-256.png", "kettle-light-256.png"] {
+            assert!(
+                src.contains(&format!("packaging/linux/{asset}")),
+                "the runtime icon loader must embed {asset}"
             );
         }
     }

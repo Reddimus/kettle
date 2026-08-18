@@ -45,6 +45,7 @@ jobs:
             printf '%s  %s\n' "$digest" "$archive" | sha256sum --check
             mkdir ".fish-${version}"
             tar -xJf "$archive" -C ".fish-${version}"
+            PATH="$PWD/.fish-${version}:$PATH" fish --version | grep -F "fish, version ${version}"
             PATH="$PWD/.fish-${version}:$PATH" python3 scripts/check-shell-integration.py
           }
 

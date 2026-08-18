@@ -63,6 +63,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 | Option | Config key | Notes |
 |---|---|---|
 | Scrollbar | `scrollbar` | hidden · auto · always |
+| Completion overlay (new shells) | `completion-overlay` | automatic · off; applies to shells started afterwards |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
 | Bell | `bell` | off · visual · attention · both |
 | Scrollback lines | `scrollback` | 0–100000 |

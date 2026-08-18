@@ -52,10 +52,10 @@ treatment and icon details that unit and image tests cannot establish:
 - toggle Reduce Transparency while the blurred window is open; the material
   must disappear immediately, the theme background must become opaque, and both
   must return when the setting is restored;
-- the running, closed, Finder and app-switcher icons agree; the TokyoNight
-  background reaches the system mask without a second transparent gutter,
-  inner rounded face, or outline; and the blue `>(_)~` terminal-kettle mark
-  remains centered and legible at normal and magnified Dock sizes.
+- the running, closed, Finder and app-switcher icons agree; both 256 px
+  appearances keep the system mask and inset face parallel with clear rim
+  space; and the `>_` mark remains centered and legible at normal and magnified
+  Dock sizes.
 
 The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
 pipeline with a macOS 11 deployment target. The emitted asset catalog and loose

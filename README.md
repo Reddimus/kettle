@@ -69,31 +69,32 @@ which file is active and `kettle --check-config` to validate it.
 * Tabs, splits, pane movement, broadcast input, and live tab tear off
 * Multiple native windows in one process, with an explicit isolated process mode
 * Search across the screen and bounded scrollback
-* Shell owned completion candidates in a detached panel at the top of the pane
+* Shell owned completion candidates in an IDE style card above the active prompt
 * Sixel, graphics placement, and OSC 1337 inline images
 * Hyperlinks, local file links, drag and drop paths, and quick select hints
 * Optional session restore, recording, SSH profiles, and authenticated updates
 * A local control API plus an MCP server, both disabled by default
 * 500+ themes and a bundled JetBrains Mono Nerd Font
 
-The completion panel stays in a detached lane above the active command and
-never inserts or runs text itself. Fish and PowerShell can use it automatically
-when their stock Tab binding is still active. Bash, Zsh, and customized shells
-can publish existing candidates through [Shell integration](docs/SHELL-INTEGRATION.md).
+The completion panel stays in a detached lane above the active command, aligned
+with the first editable column, and never inserts or runs text itself. Fish and
+PowerShell can use it automatically when their stock Tab binding is still
+active. Bash, Zsh, and customized shells can publish existing candidates
+through [Shell integration](docs/SHELL-INTEGRATION.md).
 
-Native window material is opt in. Combine a translucent background with blur:
+The portable default is fully opaque. To opt into native material on macOS or
+supported Windows versions:
 
 ```ini
-background-opacity = 0.82
+background-opacity = 0.86
 window-blur = true
 ```
 
-On macOS, Kettle uses the native window material and follows Reduce
-Transparency immediately. Plain alpha without blur keeps AppKit's standard
-titlebar backdrop instead of a fully clear strip. Other platforms use the
-compositor support exposed by the operating system. If blur is unavailable,
-ordinary alpha transparency still works. Borderless macOS windows use that
-sharp-alpha fallback so terminal content stays visible.
+Kettle follows macOS Reduce Transparency immediately. Linux compositors may
+ignore the blur hint; Kettle detects that case and raises only the live scene to
+99% opacity so text stays readable without changing screenshots or your config.
+Windows matches its DWM caption to the active theme. macOS keeps AppKit's
+caption opaque and follows the selected light or dark appearance.
 
 ## Common keys
 

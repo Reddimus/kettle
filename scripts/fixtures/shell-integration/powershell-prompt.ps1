@@ -122,9 +122,9 @@ try { $null = prompt } finally { [Console]::SetOut($stdout) }
 $expectedSession = [uint64]($sessionBefore + [uint64]1)
 if ([uint64]$global:__kettle_completion_session -ne $expectedSession -or
     -not $capture.ToString().Contains(
-        "]777;kettle-completion;3;sync;$expectedSession;0$([char]7)"
+        "]777;kettle-completion;4;sync;$expectedSession;0$([char]7)"
     )) {
-    throw 'prompt did not advance and publish its v3 completion session'
+    throw 'prompt did not advance and publish its v4 completion session'
 }
 
 # Session rollover must disable only the side channel, not overflow into an
@@ -139,7 +139,7 @@ if ($rendered -notmatch 'USER-PROMPT' -or
     $global:__kettle_completion_enabled -or
     [uint64]$global:__kettle_completion_session -ne
         $global:__kettle_completion_counter_max -or
-    $capture.ToString() -match 'kettle-completion;3;sync') {
+    $capture.ToString() -match 'kettle-completion;4;sync') {
     throw 'session rollover did not fail the completion side channel closed'
 }
 

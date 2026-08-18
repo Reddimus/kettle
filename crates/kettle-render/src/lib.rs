@@ -473,12 +473,31 @@ fn prepared_text_areas_damage_key(areas: &[TextArea<'_>]) -> u64 {
     hash.finish()
 }
 
-fn completion_text_damage_key(labels: &[String], descriptions: &[String]) -> u64 {
+/// Retained-text damage key for the completion card. Glyphon keeps each buffer
+/// at the same address when a same-size candidate list changes, so text-area
+/// identity alone cannot detect new labels, a new header count, a moved
+/// selection, or a re-tinted emphasis span.
+fn completion_text_damage_key(
+    header: &str,
+    count: &str,
+    labels: &[String],
+    descriptions: &[String],
+    spans: &[Option<(usize, usize)>],
+    selected: &[bool],
+    emphasis_colors: &[Rgb],
+) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hash = std::hash::DefaultHasher::new();
+    header.hash(&mut hash);
+    count.hash(&mut hash);
     labels.hash(&mut hash);
     descriptions.hash(&mut hash);
+    spans.hash(&mut hash);
+    selected.hash(&mut hash);
+    for color in emphasis_colors {
+        (color.r, color.g, color.b).hash(&mut hash);
+    }
     hash.finish()
 }
 
@@ -735,18 +754,26 @@ pub struct SearchOverlay {
 pub struct CompletionOverlay {
     pub pane_rect: (f32, f32, f32, f32),
     /// Exact terminal grid bounds inside `pane_rect`, excluding padding and a
-    /// pane title bar. The completion panel is centered near the top of this
-    /// grid so it stays separate from the command line.
+    /// pane title bar. The completion card stays inside this grid whether it
+    /// opens above or below the active command.
     pub grid_rect: (f32, f32, f32, f32),
     /// Inclusive screen-row span from OSC 133 prompt start through the shell
     /// cursor. Geometry must stay outside it, including multiline prompts and
     /// wrapped input.
     pub command_rows: (usize, usize),
+    /// Stable start column of the editable command, captured before candidate
+    /// insertion moved the cursor. Legacy publishers fall back to the grid
+    /// edge.
+    pub anchor_col: Option<usize>,
     pub kind: String,
     pub source: String,
     pub selected: Option<usize>,
     /// Total rows in the shell result; `candidates` is one bounded page.
     pub total: usize,
+    /// Protocol v4 emphasis hint: the token the shell was completing. Used only
+    /// to tint the first literal occurrence inside a label. Kettle never
+    /// filters, ranks, quotes, or inserts anything from it.
+    pub token: Option<String>,
     pub candidates: Vec<CompletionOverlayRow>,
 }
 
@@ -974,86 +1001,449 @@ pub struct SettingsRow {
 /// Pixel rectangle `(x, y, w, h)`.
 pub type Rect4 = (f32, f32, f32, f32);
 
-const MAX_COMPLETION_ROWS: usize = 8;
+/// Visible candidate rows in one completion card.
+const MAX_COMPLETION_ROWS: usize = 10;
+/// Overall card width in grid columns. The published page picks a content-fit
+/// width inside this band so the card neither shrink-wraps to an unreadable
+/// sliver nor spans a wide pane.
+const COMPLETION_MIN_COLUMNS: usize = 20;
+const COMPLETION_MAX_COLUMNS: usize = 96;
+const COMPLETION_MIN_LABEL_COLUMNS: usize = 8;
+const COMPLETION_MAX_LABEL_COLUMNS: usize = 40;
+const COMPLETION_MAX_DESCRIPTION_COLUMNS: usize = 48;
+/// One column of inner padding on each side of the card.
+const COMPLETION_PAD_COLUMNS: usize = 1;
+/// Two columns between the label and description lanes; the hairline divider
+/// sits on the boundary between them.
+const COMPLETION_DIVIDER_COLUMNS: usize = 2;
+const COMPLETION_BORDER: f32 = 1.0;
+/// Right-edge scroll track/thumb, drawn only when the shell result is longer
+/// than the visible rows.
+const COMPLETION_SCROLL_W: f32 = 2.0;
+/// Leading accent rail on the selected row only.
+const COMPLETION_RAIL_W: f32 = 2.0;
+/// Minimum separation between the selected row's surface and the panel body
+/// before Kettle stops trusting the theme's own selection color.
+const COMPLETION_SELECTION_SEPARATION: f64 = 1.35;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CompletionPanelGeometry {
+    /// The whole card, header and padding included.
     rect: Rect4,
+    /// Header band inside the card. Part of the list container, never a row.
+    header: Rect4,
+    /// Top of the first painted candidate row.
+    list_top: f32,
     row_h: f32,
-    label_w: f32,
     first: usize,
     rows: usize,
+    /// Card width minus its side padding, in columns. The header lanes and the
+    /// candidate lanes are both cut out of this.
+    inner_columns: usize,
+    label_x: f32,
+    label_w: f32,
+    label_columns: usize,
+    /// Divider hairline abscissa; `None` when the page has no descriptions.
+    divider_x: Option<f32>,
+    description_x: f32,
+    description_w: f32,
+    description_columns: usize,
+    placement: CompletionPanelPlacement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionPanelPlacement {
+    Above,
+    Below,
+}
+
+impl CompletionPanelGeometry {
+    /// Band occupied by the painted candidate rows.
+    fn list_rect(&self) -> Rect4 {
+        (
+            self.rect.0,
+            self.list_top,
+            self.rect.2,
+            self.rows as f32 * self.row_h,
+        )
+    }
+}
+
+/// Left header caption, e.g. `Completions · fish`.
+fn completion_header_label(overlay: &CompletionOverlay) -> String {
+    format!("{} · {}", overlay.kind, overlay.source)
+}
+
+/// Right header caption. A selected candidate reports its absolute position in
+/// the shell result; otherwise the result size is spelled out.
+fn completion_header_count(overlay: &CompletionOverlay) -> String {
+    if let Some(selected) = overlay
+        .selected
+        .and_then(|index| overlay.candidates.get(index))
+    {
+        return format!("{}/{}", selected.position.saturating_add(1), overlay.total);
+    }
+    if overlay.total == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{} matches", overlay.total)
+    }
 }
 
 fn completion_panel_geometry(
     overlay: &CompletionOverlay,
     cell: (f32, f32),
 ) -> Option<CompletionPanelGeometry> {
-    if overlay.candidates.is_empty() {
+    let count = overlay.candidates.len();
+    if count == 0 {
+        return None;
+    }
+    let (cw, ch) = cell;
+    if !cw.is_finite() || !ch.is_finite() || cw <= 0.0 || ch <= 0.0 {
         return None;
     }
     let (px, py, pw, ph) = overlay.pane_rect;
     let (gx, gy, gw, gh) = overlay.grid_rect;
-    let pane_left = px.max(gx);
-    let pane_right = (px + pw).min(gx + gw);
-    let available_w = (pane_right - pane_left).max(0.0);
+    let left = px.max(gx);
+    let right = (px + pw).min(gx + gw);
     let top = py.max(gy);
     let bottom = (py + ph).min(gy + gh);
-    let row_h = cell.1;
-    if available_w < cell.0 * 20.0 || bottom - top < cell.1 * 3.0 {
+    let available_w = (right - left).max(0.0);
+    let grid_columns = (available_w / cw).floor().max(0.0) as usize;
+    if grid_columns < COMPLETION_MIN_COLUMNS {
         return None;
     }
-    let wanted_rows = overlay.candidates.len().min(MAX_COMPLETION_ROWS);
-    let total_rows = ((bottom - top) / row_h).floor() as usize;
-    let command_start = overlay.command_rows.0.min(total_rows.saturating_sub(1));
-    // The card is an upper-pane surface, never a cursor popup. Reserve one row
-    // below pane chrome and one row above the prompt. A command that begins too
-    // close to the top has no valid detached lane, so hide the card instead of
-    // moving it beside or below the user's typing.
-    let capacity = command_start.saturating_sub(2);
-    let rows = wanted_rows.min(capacity);
+
+    // Vertical rhythm. A half-cell gap separates the card from the prompt and
+    // from the top of the grid; rows are a little taller than a terminal line
+    // so the labels are not boxed in. Every step is rounded to whole pixels so
+    // the card stays crisp at fractional DPI.
+    let half_cell = (ch * 0.5).round().max(1.0);
+    let gap = half_cell.max(4.0);
+    let row_h = (ch + 4.0).max((ch * 1.35).round());
+    let header_h = row_h;
+    // Restrained padding above and below the candidate rows. Deriving it from
+    // the row's own leading keeps every glyph baseline optically centered: the
+    // header and the first row are separated by exactly the same slack that
+    // centers text inside a row.
+    let list_pad = ((row_h - ch) * 0.5).round().max(2.0);
+    let chrome_h = 2.0 * COMPLETION_BORDER + header_h + 2.0 * list_pad;
+
+    // Prefer the detached lane above the command. If that lane cannot show the
+    // requested page and the lane below can show more, flip the whole card
+    // below the final wrapped row. Both lanes stay inside the terminal grid,
+    // so the card never crosses pane chrome or the window's tab bar.
+    let grid_rows = ((bottom - top) / ch).floor().max(0.0) as usize;
+    if grid_rows == 0 {
+        return None;
+    }
+    let command_start = overlay
+        .command_rows
+        .0
+        .min(overlay.command_rows.1)
+        .min(grid_rows - 1);
+    let command_end = overlay
+        .command_rows
+        .0
+        .max(overlay.command_rows.1)
+        .min(grid_rows - 1);
+    let above_bottom = top + command_start as f32 * ch - gap;
+    let below_top = top + (command_end + 1) as f32 * ch + gap;
+    let above_h = above_bottom - (top + half_cell);
+    let below_h = (bottom - half_cell) - below_top;
+    let capacity = |lane_h: f32| ((lane_h - chrome_h) / row_h).floor().max(0.0) as usize;
+    let above_capacity = capacity(above_h).min(MAX_COMPLETION_ROWS);
+    let below_capacity = capacity(below_h).min(MAX_COMPLETION_ROWS);
+    let wanted_rows = count.min(MAX_COMPLETION_ROWS);
+    let placement = if above_capacity >= wanted_rows {
+        CompletionPanelPlacement::Above
+    } else if below_capacity > above_capacity {
+        CompletionPanelPlacement::Below
+    } else if above_capacity > 0 {
+        CompletionPanelPlacement::Above
+    } else if below_capacity > 0 {
+        CompletionPanelPlacement::Below
+    } else {
+        return None;
+    };
+    let rows = wanted_rows.min(match placement {
+        CompletionPanelPlacement::Above => above_capacity,
+        CompletionPanelPlacement::Below => below_capacity,
+    });
     if rows == 0 {
         return None;
     }
-    let selected = overlay
-        .selected
-        .unwrap_or(0)
-        .min(overlay.candidates.len().saturating_sub(1));
+
+    // Keep one row of lookahead under the selection so the next candidate is
+    // already on screen when the user presses Tab again.
+    let selected = overlay.selected.unwrap_or(0).min(count - 1);
     let first = selected
-        .saturating_add(1)
+        .saturating_add(2)
         .saturating_sub(rows)
-        .min(overlay.candidates.len().saturating_sub(rows));
+        .min(count - rows)
+        .min(selected);
+
+    // Content fit is computed over the whole published page, not just the
+    // visible rows, so cycling inside one page never resizes the card.
     let label_columns = overlay
         .candidates
         .iter()
         .map(|candidate| display_width(&candidate.label))
         .max()
-        .unwrap_or(1)
-        .clamp(1, 24);
+        .unwrap_or(0)
+        .clamp(COMPLETION_MIN_LABEL_COLUMNS, COMPLETION_MAX_LABEL_COLUMNS);
     let description_columns = overlay
         .candidates
         .iter()
         .map(|candidate| display_width(&candidate.description))
         .max()
         .unwrap_or(0)
-        .min(36);
-    let gap_columns = usize::from(description_columns > 0) * 2;
-    let content_columns = (label_columns + gap_columns + description_columns).clamp(16, 62);
-    let horizontal_pad = cell.0;
-    let width = (content_columns as f32 * cell.0 + horizontal_pad * 2.0).min(available_w);
-    let height = rows as f32 * row_h;
-    // Center in whole-cell increments so the card stays crisp at every DPI and
-    // does not wander as the shell cursor moves.
-    let slack_cells = ((available_w - width) / cell.0).floor().max(0.0) as usize;
-    let x = pane_left + (slack_cells / 2) as f32 * cell.0;
-    let y = top + row_h;
+        .min(COMPLETION_MAX_DESCRIPTION_COLUMNS);
+    let divider_columns = if description_columns > 0 {
+        COMPLETION_DIVIDER_COLUMNS
+    } else {
+        0
+    };
+    let padding_columns = 2 * COMPLETION_PAD_COLUMNS;
+    let content_columns = padding_columns + label_columns + divider_columns + description_columns;
+    // The header is part of the card, so it participates in the content fit.
+    let header_columns = padding_columns
+        + display_width(&completion_header_label(overlay))
+        + 2
+        + display_width(&completion_header_count(overlay));
+    let columns = content_columns
+        .max(header_columns)
+        .clamp(COMPLETION_MIN_COLUMNS, COMPLETION_MAX_COLUMNS)
+        .min(grid_columns);
+
+    // Redistribute after the clamp so paint, text preparation, and hit testing
+    // agree on the lane split even when the grid is narrower than the content.
+    let inner_columns = columns - padding_columns;
+    let mut divider_columns = divider_columns.min(inner_columns);
+    let mut label_columns = label_columns.min(inner_columns - divider_columns);
+    let mut description_columns = inner_columns - divider_columns - label_columns;
+    if description_columns == 0 {
+        // A clamped card with no description lane must not keep a detached
+        // hairline and two dead columns at its right edge. Give those columns
+        // back to the label and omit the divider entirely.
+        divider_columns = 0;
+        label_columns = label_columns
+            .saturating_add(COMPLETION_DIVIDER_COLUMNS)
+            .min(inner_columns);
+        description_columns = inner_columns - label_columns;
+    }
+
+    let width = columns as f32 * cw;
+    let height = chrome_h + rows as f32 * row_h;
+    // IDE completion follows the editable command column, not the decorative
+    // prompt. Clamp toward the left only when a right-edge command would push
+    // the content-fitted card outside the grid.
+    let preferred_x = left + overlay.anchor_col.unwrap_or(0).min(grid_columns) as f32 * cw;
+    let x = preferred_x.min((right - width).max(left));
+    let y = match placement {
+        CompletionPanelPlacement::Above => above_bottom - height,
+        CompletionPanelPlacement::Below => below_top,
+    };
+    let label_x = x + COMPLETION_PAD_COLUMNS as f32 * cw;
+    let label_w = label_columns as f32 * cw;
+    // One free column on each side of the hairline keeps the two lanes from
+    // reading as a table rule.
+    let divider_x = (divider_columns > 0).then(|| (label_x + label_w + cw).round());
+    let description_x = x + (COMPLETION_PAD_COLUMNS + label_columns + divider_columns) as f32 * cw;
     Some(CompletionPanelGeometry {
         rect: (x, y, width, height),
+        header: (x, y + COMPLETION_BORDER, width, header_h),
+        list_top: y + COMPLETION_BORDER + header_h + list_pad,
         row_h,
-        label_w: (label_columns as f32 * cell.0).min(width - horizontal_pad * 2.0),
         first,
         rows,
+        inner_columns,
+        label_x,
+        label_w,
+        label_columns,
+        divider_x,
+        description_x,
+        description_w: description_columns as f32 * cw,
+        description_columns,
+        placement,
     })
+}
+
+/// Header lane split in columns: the right-aligned count is served first and
+/// the caption takes what is left, minus one separating column.
+fn completion_header_columns(geometry: &CompletionPanelGeometry, count: &str) -> (usize, usize) {
+    let count_columns = display_width(count).min(geometry.inner_columns);
+    (
+        geometry.inner_columns.saturating_sub(count_columns + 1),
+        count_columns,
+    )
+}
+
+/// Every color the completion card paints. Buffer preparation shapes the
+/// emphasis run with an explicit color, so both passes must derive them from
+/// one place or a selected row would keep the unselected tint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CompletionPalette {
+    panel_bg: Rgb,
+    border: Rgb,
+    divider: Rgb,
+    selection_bg: Rgb,
+    rail: Rgb,
+    header: Rgb,
+    label: Rgb,
+    description: Rgb,
+    emphasis: Rgb,
+    selected_label: Rgb,
+    selected_description: Rgb,
+    selected_emphasis: Rgb,
+    scroll_track: Rgb,
+    scroll_thumb: Rgb,
+}
+
+fn completion_palette(theme: &kettle_config::Theme, accent: Rgb) -> CompletionPalette {
+    let panel_bg = solid_blend(theme.foreground, theme.background, 9);
+    let selection_bg = completion_selection_surface(theme.selection_background, panel_bg, accent);
+    // A blended surface is no longer the pair the theme designed its selection
+    // foreground for, so fall back to the ordinary text color there.
+    let selected_fg = if selection_bg == theme.selection_background {
+        theme.selection_foreground
+    } else {
+        theme.foreground
+    };
+    CompletionPalette {
+        panel_bg,
+        border: solid_blend(theme.foreground, theme.background, 30),
+        divider: solid_blend(theme.foreground, panel_bg, 16),
+        selection_bg,
+        rail: color::with_min_contrast(accent, selection_bg, 2.0),
+        header: color::with_min_contrast(color::dim(theme.foreground, panel_bg), panel_bg, 4.5),
+        label: color::with_min_contrast(theme.foreground, panel_bg, 4.5),
+        description: color::with_min_contrast(
+            color::dim(theme.foreground, panel_bg),
+            panel_bg,
+            4.0,
+        ),
+        emphasis: color::with_min_contrast(accent, panel_bg, 4.5),
+        selected_label: color::with_min_contrast(selected_fg, selection_bg, 4.5),
+        selected_description: color::with_min_contrast(
+            color::dim(selected_fg, selection_bg),
+            selection_bg,
+            4.0,
+        ),
+        selected_emphasis: color::with_min_contrast(accent, selection_bg, 4.5),
+        scroll_track: solid_blend(theme.foreground, panel_bg, 12),
+        scroll_thumb: solid_blend(theme.foreground, panel_bg, 45),
+    }
+}
+
+fn push_completion_selection_quads(
+    quads: &mut Vec<QuadInstance>,
+    selected: bool,
+    geometry: &CompletionPanelGeometry,
+    row_y: f32,
+    scroll_inset: f32,
+    palette: &CompletionPalette,
+) {
+    if !selected {
+        return;
+    }
+    let (x, _, width, _) = geometry.rect;
+    // Rows never touch the card border, so the active surface spans the full
+    // row height with no notch to inset around.
+    quads.push(rect(
+        x + COMPLETION_BORDER,
+        row_y,
+        (width - COMPLETION_BORDER * 2.0 - scroll_inset).max(0.0),
+        geometry.row_h,
+        palette.selection_bg,
+        1.0,
+    ));
+    quads.push(rect(
+        x + COMPLETION_BORDER,
+        row_y,
+        COMPLETION_RAIL_W,
+        geometry.row_h,
+        palette.rail,
+        1.0,
+    ));
+}
+
+/// Top and height of the scroll thumb, or `None` when the whole shell result
+/// already fits the visible rows.
+fn completion_scroll_thumb(
+    overlay: &CompletionOverlay,
+    geometry: &CompletionPanelGeometry,
+) -> Option<(f32, f32)> {
+    let total = overlay.total;
+    if total <= geometry.rows {
+        return None;
+    }
+    let (_, track_y, _, track_h) = geometry.list_rect();
+    if track_h <= 0.0 {
+        return None;
+    }
+    let first_position = overlay
+        .candidates
+        .get(geometry.first)
+        .map(|candidate| candidate.position)
+        .unwrap_or(geometry.first)
+        .min(total.saturating_sub(geometry.rows));
+    let visible = geometry.rows as f32 / total as f32;
+    // Keep a short thumb legible on a very long result.
+    let thumb_h = (track_h * visible)
+        .max(row_thumb_floor(geometry.row_h))
+        .min(track_h);
+    let travel = (track_h - thumb_h).max(0.0);
+    let progress = if total > geometry.rows {
+        first_position as f32 / (total - geometry.rows) as f32
+    } else {
+        0.0
+    };
+    let thumb_y = track_y + (travel * progress.clamp(0.0, 1.0)).round();
+    Some((thumb_y, thumb_h.round().max(1.0)))
+}
+
+fn row_thumb_floor(row_h: f32) -> f32 {
+    (row_h * 0.5).round().max(4.0)
+}
+
+/// Selected-row surface. The theme's own selection color is preferred; a theme
+/// whose selection sits on top of the panel body would erase the active row, so
+/// the window accent is blended in until the two surfaces separate.
+fn completion_selection_surface(theme_selection: Rgb, panel_bg: Rgb, accent: Rgb) -> Rgb {
+    if color::contrast_ratio(theme_selection, panel_bg) >= COMPLETION_SELECTION_SEPARATION {
+        return theme_selection;
+    }
+    for percent in [30_u16, 45, 60, 80, 100] {
+        let blended = solid_blend(accent, panel_bg, percent);
+        if color::contrast_ratio(blended, panel_bg) >= COMPLETION_SELECTION_SEPARATION {
+            return blended;
+        }
+    }
+    // An accent that cannot separate on its own still has to yield a visible
+    // row; drive it toward the reachable endpoint instead.
+    color::with_min_contrast(accent, panel_bg, COMPLETION_SELECTION_SEPARATION)
+}
+
+/// Byte range of the emphasis token inside an already-fitted label.
+///
+/// Kettle never filters, ranks, quotes, or inserts from the token: this is the
+/// only thing it is allowed to do with one. Pure ASCII compares
+/// case-insensitively because shells complete case-insensitively in practice;
+/// anything else needs an exact substring, since case folding a script Kettle
+/// does not analyze can change byte lengths and split a grapheme.
+fn completion_match_span(label: &str, token: &str) -> Option<(usize, usize)> {
+    if token.is_empty() || token.len() > label.len() {
+        return None;
+    }
+    if label.is_ascii() && token.is_ascii() {
+        let haystack = label.as_bytes();
+        let needle = token.as_bytes();
+        return (0..=haystack.len() - needle.len())
+            .find(|start| haystack[*start..*start + needle.len()].eq_ignore_ascii_case(needle))
+            .map(|start| (start, start + needle.len()));
+    }
+    label.find(token).map(|start| (start, start + token.len()))
 }
 
 /// Bounds of the visible completion card. Shared with accessibility so the
@@ -1064,7 +1454,8 @@ pub fn completion_overlay_rect(overlay: &CompletionOverlay, cell: (f32, f32)) ->
 
 /// Candidate index and pixel bounds for each visible completion row. Paint
 /// and accessibility share this geometry so assistive hit targets never point
-/// at clipped or off-screen candidates.
+/// at clipped or off-screen candidates, and so the header — which belongs to
+/// the list container, not to any candidate — is never inside a row.
 pub fn completion_overlay_row_rects(
     overlay: &CompletionOverlay,
     cell: (f32, f32),
@@ -1078,7 +1469,7 @@ pub fn completion_overlay_row_rects(
                 geometry.first + row,
                 (
                     geometry.rect.0,
-                    geometry.rect.1 + row as f32 * geometry.row_h,
+                    geometry.list_top + row as f32 * geometry.row_h,
                     geometry.rect.2,
                     geometry.row_h,
                 ),
@@ -1785,8 +2176,24 @@ pub struct Renderer {
     /// explanation stays visually subordinate.
     completion_buffers: Vec<TextBuffer>,
     completion_texts: Vec<String>,
+    /// Emphasis span shaped into each label buffer, and whether that buffer was
+    /// shaped for the selected surface. Both change the glyph colors without
+    /// changing the label text, so the reshape gate has to see them.
+    completion_spans: Vec<Option<(usize, usize)>>,
+    completion_selected: Vec<bool>,
+    /// Explicit rich-text emphasis color shaped into each label. Unlike the
+    /// surrounding label color, this does not come from `TextArea`, so a live
+    /// theme or accent change must invalidate the row even when its text and
+    /// byte span are unchanged.
+    completion_emphasis_colors: Vec<Rgb>,
     completion_description_buffers: Vec<TextBuffer>,
     completion_description_texts: Vec<String>,
+    /// Card header: `Completions · fish` on the left, the match count on the
+    /// right. Part of the list container, never a candidate row.
+    completion_header_buffer: TextBuffer,
+    completion_header_text: String,
+    completion_count_buffer: TextBuffer,
+    completion_count_text: String,
     tabbar_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
@@ -1821,6 +2228,11 @@ pub struct Renderer {
     status_bar_buffer: TextBuffer,
 
     pane_bases: QuadPipeline,
+    /// Live-window copy of `pane_bases` with the compositor fallback opacity
+    /// applied. Screenshots keep using `pane_bases`, so an unsupported native
+    /// blur backend cannot silently change the alpha the user configured in a
+    /// captured PNG.
+    live_pane_bases: QuadPipeline,
     quads: QuadPipeline,
     /// Rounded pane outlines used only where a decorated native window clips
     /// an outer pane corner. Kept out of `QuadInstance`: cell backgrounds
@@ -1933,6 +2345,10 @@ pub struct Renderer {
     /// Whether the current OS window has rounded content corners. The UI owns
     /// fullscreen/decorations state and refreshes this before every frame.
     rounded_window_corners: bool,
+    /// Live-only base alpha supplied when the OS cannot provide requested
+    /// behind-window blur. The scene is rendered over this near-opaque clear;
+    /// offscreen screenshots deliberately keep their configured alpha.
+    live_background_opacity_floor: Option<f32>,
     /// Phase 3 of
     /// [`TERMINATOR-TERMINALSHOT-DESIGN.md`](../../../docs/TERMINATOR-TERMINALSHOT-DESIGN.md):
     /// when `Some`, the next `render_frame` call renders the prepared scene to
@@ -3971,6 +4387,10 @@ impl Renderer {
         search_buffer.set_wrap(Wrap::None);
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
+        let mut completion_header_buffer = TextBuffer::new(&mut font_system, metrics);
+        completion_header_buffer.set_wrap(Wrap::None);
+        let mut completion_count_buffer = TextBuffer::new(&mut font_system, metrics);
+        completion_count_buffer.set_wrap(Wrap::None);
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
         let (cell_w, cell_h) =
@@ -3984,6 +4404,7 @@ impl Renderer {
         let cell_h = cell_h * cell_scale_h;
 
         let pane_bases = QuadPipeline::new_replace(&device, format);
+        let live_pane_bases = QuadPipeline::new_replace(&device, format);
         let quads = QuadPipeline::new(&device, format);
         let pane_outlines = OutlinePipeline::new(&device, format);
         let overlay_quads = QuadPipeline::new(&device, format);
@@ -4082,8 +4503,15 @@ impl Renderer {
             settings_lines_cache: Vec::new(),
             completion_buffers: Vec::new(),
             completion_texts: Vec::new(),
+            completion_spans: Vec::new(),
+            completion_selected: Vec::new(),
+            completion_emphasis_colors: Vec::new(),
             completion_description_buffers: Vec::new(),
             completion_description_texts: Vec::new(),
+            completion_header_buffer,
+            completion_header_text: String::new(),
+            completion_count_buffer,
+            completion_count_text: String::new(),
             tabbar_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
@@ -4093,6 +4521,7 @@ impl Renderer {
             search_buffer_text: String::new(),
             status_bar_buffer,
             pane_bases,
+            live_pane_bases,
             quads,
             pane_outlines,
             overlay_quads,
@@ -4117,6 +4546,7 @@ impl Renderer {
             scale,
             accent_override: None,
             rounded_window_corners: false,
+            live_background_opacity_floor: None,
             pending_screenshot: None,
             screenshot_worker: None,
         })
@@ -4174,6 +4604,10 @@ impl Renderer {
     /// round exactly the focused/inactive pane corners that meet the window.
     pub fn set_rounded_window_corners(&mut self, rounded: bool) {
         self.rounded_window_corners = rounded;
+    }
+
+    pub fn set_live_background_opacity_floor(&mut self, floor: Option<f32>) {
+        self.live_background_opacity_floor = floor.map(|value| value.clamp(0.0, 1.0));
     }
 
     /// The accent every LIVE chrome element uses (focused-pane border,
@@ -4697,7 +5131,12 @@ impl Renderer {
                 self.settings_texts.clear();
                 self.settings_lines_source = None;
                 self.completion_texts.clear();
+                self.completion_spans.clear();
+                self.completion_selected.clear();
+                self.completion_emphasis_colors.clear();
                 self.completion_description_texts.clear();
+                self.completion_header_text.clear();
+                self.completion_count_text.clear();
                 self.search_buffer_text.clear();
             }
         }
@@ -6478,6 +6917,7 @@ impl Renderer {
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
         {
+            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
             let count = geometry.rows;
             while self.completion_buffers.len() < count {
                 let mut buffer = TextBuffer::new(&mut self.font_system, metrics);
@@ -6486,6 +6926,15 @@ impl Renderer {
             }
             while self.completion_texts.len() < count {
                 self.completion_texts.push(String::new());
+            }
+            while self.completion_spans.len() < count {
+                self.completion_spans.push(None);
+            }
+            while self.completion_selected.len() < count {
+                self.completion_selected.push(false);
+            }
+            while self.completion_emphasis_colors.len() < count {
+                self.completion_emphasis_colors.push(Rgb::new(0, 0, 0));
             }
             while self.completion_description_buffers.len() < count {
                 let mut buffer = TextBuffer::new(&mut self.font_system, metrics);
@@ -6497,35 +6946,108 @@ impl Renderer {
             }
             self.completion_buffers.truncate(count);
             self.completion_texts.truncate(count);
+            self.completion_spans.truncate(count);
+            self.completion_selected.truncate(count);
+            self.completion_emphasis_colors.truncate(count);
             self.completion_description_buffers.truncate(count);
             self.completion_description_texts.truncate(count);
-            let label_columns = (geometry.label_w / cw).floor().max(1.0) as usize;
-            let description_width =
-                (geometry.rect.2 - 2.0 * cw - geometry.label_w - 2.0 * cw).max(0.0);
-            let description_columns = (description_width / cw).floor().max(0.0) as usize;
+
+            let count_source = completion_header_count(completion);
+            let (header_columns, count_columns) =
+                completion_header_columns(&geometry, &count_source);
+            let header_line =
+                fit_single_line_label(&completion_header_label(completion), header_columns);
+            let count_line = fit_single_line_label(&count_source, count_columns);
+            self.completion_header_buffer.set_metrics(metrics);
+            self.completion_header_buffer.set_size(
+                Some((header_columns as f32 * cw).max(1.0)),
+                Some(geometry.header.3),
+            );
+            if self.completion_header_text != header_line {
+                self.completion_header_buffer.set_text(
+                    &header_line,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.completion_header_text = header_line;
+            }
+            self.completion_header_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+            self.completion_count_buffer.set_metrics(metrics);
+            self.completion_count_buffer.set_size(
+                Some((count_columns as f32 * cw).max(1.0)),
+                Some(geometry.header.3),
+            );
+            if self.completion_count_text != count_line {
+                self.completion_count_buffer.set_text(
+                    &count_line,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                self.completion_count_text = count_line;
+            }
+            self.completion_count_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+
             for line_index in 0..count {
                 let candidate_index = geometry.first + line_index;
                 let candidate = &completion.candidates[candidate_index];
-                let line = fit_single_line_label(&candidate.label, label_columns);
+                let selected = completion.selected == Some(candidate_index);
+                // Completion labels are dominated by paths, whose tail is the
+                // discriminating part; keep both ends.
+                let line = middle_ellipsis(&candidate.label, geometry.label_columns);
+                let span = completion
+                    .token
+                    .as_deref()
+                    .and_then(|token| completion_match_span(&line, token));
+                let emphasis_color = if selected {
+                    palette.selected_emphasis
+                } else {
+                    palette.emphasis
+                };
                 let buffer = &mut self.completion_buffers[line_index];
                 buffer.set_metrics(metrics);
                 buffer.set_size(Some(geometry.label_w), Some(geometry.row_h));
-                if self.completion_texts[line_index] != line {
-                    buffer.set_text(
-                        &line,
-                        &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
-                    );
+                if self.completion_texts[line_index] != line
+                    || self.completion_spans[line_index] != span
+                    || self.completion_selected[line_index] != selected
+                    || (span.is_some()
+                        && self.completion_emphasis_colors[line_index] != emphasis_color)
+                {
+                    let base = Attrs::new().family(Family::Name(&family));
+                    match span {
+                        // Only the matched run carries an explicit color. The
+                        // text around it keeps the text area's default, so the
+                        // selected/unselected label color stays in one place.
+                        Some((start, end)) => {
+                            let emphasis = base.clone().color(gc(emphasis_color));
+                            buffer.set_rich_text(
+                                [
+                                    (&line[..start], base.clone()),
+                                    (&line[start..end], emphasis),
+                                    (&line[end..], base.clone()),
+                                ],
+                                &base,
+                                Shaping::Advanced,
+                                None,
+                            );
+                        }
+                        None => buffer.set_text(&line, &base, Shaping::Advanced, None),
+                    }
                     self.completion_texts[line_index] = line;
+                    self.completion_spans[line_index] = span;
+                    self.completion_selected[line_index] = selected;
+                    self.completion_emphasis_colors[line_index] = emphasis_color;
                 }
                 buffer.shape_until_scroll(&mut self.font_system, false);
 
                 let description =
-                    fit_single_line_label(&candidate.description, description_columns);
+                    fit_single_line_label(&candidate.description, geometry.description_columns);
                 let buffer = &mut self.completion_description_buffers[line_index];
                 buffer.set_metrics(metrics);
-                buffer.set_size(Some(description_width), Some(geometry.row_h));
+                buffer.set_size(Some(geometry.description_w.max(1.0)), Some(geometry.row_h));
                 if self.completion_description_texts[line_index] != description {
                     buffer.set_text(
                         &description,
@@ -6656,112 +7178,143 @@ impl Renderer {
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
         {
             let (x, y, width, height) = geometry.rect;
-            let accent = self.ui_accent(cfg, theme);
-            let panel_bg = solid_blend(theme.foreground, theme.background, 9);
-            let border_color = solid_blend(theme.foreground, theme.background, 30);
-            // Selection belongs to the terminal theme, not the per-window
-            // accent pool. Blending a random window accent into a dark panel
-            // produced muddy browns and olives; the theme's selection pair is
-            // already designed as a readable text surface. Keep the window
-            // accent for the slim leading edge, where it identifies which
-            // Kettle window owns the detached panel.
-            let selection_bg = solid_blend(theme.selection_background, panel_bg, 85);
-            let label_color = color::with_min_contrast(theme.foreground, panel_bg, 4.5);
-            let description_color =
-                color::with_min_contrast(color::dim(theme.foreground, panel_bg), panel_bg, 3.0);
-            let selected_label_color =
-                color::with_min_contrast(theme.selection_foreground, selection_bg, 4.5);
-            let selected_description_color = color::with_min_contrast(
-                color::dim(theme.selection_foreground, selection_bg),
-                selection_bg,
-                3.0,
-            );
-            menu_q.push(rect(x, y, width, height, panel_bg, 1.0));
-            let border = 1.0;
-            menu_q.push(rect(x, y, width, border, border_color, 1.0));
+            let palette = completion_palette(theme, self.ui_accent(cfg, theme));
+            let border = COMPLETION_BORDER;
+            // Three restrained steps of pure black. Enough depth to lift the
+            // detached card off similar-colored terminal content without a
+            // blurred halo, and cheap enough to stay in the quad list.
+            for (offset, alpha) in [(1.0_f32, 0.30_f32), (2.0, 0.18), (3.0, 0.10)] {
+                menu_q.push(rect(
+                    x + offset,
+                    y + offset,
+                    width,
+                    height,
+                    Rgb::new(0, 0, 0),
+                    alpha,
+                ));
+            }
+            menu_q.push(rect(x, y, width, height, palette.panel_bg, 1.0));
+            menu_q.push(rect(x, y, width, border, palette.border, 1.0));
             menu_q.push(rect(
                 x,
                 y + height - border,
                 width,
                 border,
-                border_color,
+                palette.border,
                 1.0,
             ));
-            menu_q.push(rect(x, y, border, height, border_color, 1.0));
+            menu_q.push(rect(x, y, border, height, palette.border, 1.0));
             menu_q.push(rect(
                 x + width - border,
                 y,
                 border,
                 height,
-                border_color,
+                palette.border,
                 1.0,
             ));
-            menu_q.push(rect(x, y, 2.0, height, accent, 1.0));
-            let bounds = TextBounds {
-                left: x as i32,
-                top: y as i32,
-                right: (x + width) as i32,
-                bottom: (y + height) as i32,
+            let (_, list_y, _, list_h) = geometry.list_rect();
+            let scroll = completion_scroll_thumb(completion, &geometry);
+            // The indicator stays continuously visible, so the selection
+            // surface stops short of its lane instead of painting over it.
+            let scroll_inset = if scroll.is_some() {
+                COMPLETION_SCROLL_W
+            } else {
+                0.0
+            };
+            if let Some(divider_x) = geometry.divider_x {
+                menu_q.push(rect(divider_x, list_y, 1.0, list_h, palette.divider, 1.0));
+            }
+            let text_dy = ((geometry.row_h - ch) * 0.5).round();
+            let clip = |left: f32, right: f32| TextBounds {
+                left: left.floor() as i32,
+                top: y.floor() as i32,
+                right: right.ceil() as i32,
+                bottom: (y + height).ceil() as i32,
             };
             for row in 0..geometry.rows {
                 let candidate_index = geometry.first + row;
-                let row_y = y + row as f32 * geometry.row_h;
+                let row_y = geometry.list_top + row as f32 * geometry.row_h;
                 let selected = completion.selected == Some(candidate_index);
-                if selected {
-                    let selection_y = row_y + if row == 0 { border } else { 0.0 };
-                    let bottom_inset = if row + 1 == geometry.rows {
-                        border
-                    } else {
-                        0.0
-                    };
-                    menu_q.push(rect(
-                        x + border,
-                        selection_y,
-                        width - border * 2.0,
-                        (geometry.row_h - (selection_y - row_y) - bottom_inset).max(0.0),
-                        selection_bg,
-                        1.0,
-                    ));
-                    // A narrow accent rail makes the active row readable even
-                    // when a theme's selection background is deliberately
-                    // subtle. It does not recolor the text surface, avoiding
-                    // the muddy highlight produced by tinting the whole row.
-                    menu_q.push(rect(
-                        x + border,
-                        selection_y,
-                        2.0,
-                        (geometry.row_h - (selection_y - row_y) - bottom_inset).max(0.0),
-                        accent,
-                        1.0,
-                    ));
-                }
+                push_completion_selection_quads(
+                    &mut menu_q,
+                    selected,
+                    &geometry,
+                    row_y,
+                    scroll_inset,
+                    &palette,
+                );
                 menu_areas.push(TextArea {
                     buffer: &self.completion_buffers[row],
-                    left: x + cw,
-                    top: row_y,
+                    left: geometry.label_x,
+                    top: row_y + text_dy,
                     scale: 1.0,
-                    bounds,
+                    bounds: clip(geometry.label_x, geometry.label_x + geometry.label_w),
                     default_color: gc(if selected {
-                        selected_label_color
+                        palette.selected_label
                     } else {
-                        label_color
+                        palette.label
                     }),
                     custom_glyphs: &[],
                 });
                 menu_areas.push(TextArea {
                     buffer: &self.completion_description_buffers[row],
-                    left: x + cw + geometry.label_w + 2.0 * cw,
-                    top: row_y,
+                    left: geometry.description_x,
+                    top: row_y + text_dy,
                     scale: 1.0,
-                    bounds,
+                    bounds: clip(
+                        geometry.description_x,
+                        geometry.description_x + geometry.description_w,
+                    ),
                     default_color: gc(if selected {
-                        selected_description_color
+                        palette.selected_description
                     } else {
-                        description_color
+                        palette.description
                     }),
                     custom_glyphs: &[],
                 });
             }
+            if let Some((thumb_y, thumb_h)) = scroll {
+                let track_x = (x + width - border - COMPLETION_SCROLL_W).round();
+                menu_q.push(rect(
+                    track_x,
+                    list_y,
+                    COMPLETION_SCROLL_W,
+                    list_h,
+                    palette.scroll_track,
+                    1.0,
+                ));
+                menu_q.push(rect(
+                    track_x,
+                    thumb_y,
+                    COMPLETION_SCROLL_W,
+                    thumb_h,
+                    palette.scroll_thumb,
+                    1.0,
+                ));
+            }
+            let (header_columns, count_columns) =
+                completion_header_columns(&geometry, &completion_header_count(completion));
+            let header_dy = ((geometry.header.3 - ch) * 0.5).round();
+            let header_x = geometry.label_x;
+            let count_x = x + width - (COMPLETION_PAD_COLUMNS + count_columns) as f32 * cw;
+            menu_areas.push(TextArea {
+                buffer: &self.completion_header_buffer,
+                left: header_x,
+                top: geometry.header.1 + header_dy,
+                scale: 1.0,
+                bounds: clip(header_x, header_x + header_columns as f32 * cw),
+                default_color: gc(palette.header),
+                custom_glyphs: &[],
+            });
+            menu_areas.push(TextArea {
+                buffer: &self.completion_count_buffer,
+                left: count_x,
+                top: geometry.header.1 + header_dy,
+                scale: 1.0,
+                bounds: clip(count_x, count_x + count_columns as f32 * cw),
+                default_color: gc(palette.header),
+                custom_glyphs: &[],
+            });
         }
         for (i, pv) in panes.iter().enumerate() {
             let (rx, ry, rw, rh) = pv.rect;
@@ -7282,8 +7835,16 @@ impl Renderer {
             // list changes, so the text-area identity alone cannot detect new
             // labels or descriptions.
             prepared_text_areas_damage_key(&menu_areas).hash(&mut h);
-            completion_text_damage_key(&self.completion_texts, &self.completion_description_texts)
-                .hash(&mut h);
+            completion_text_damage_key(
+                &self.completion_header_text,
+                &self.completion_count_text,
+                &self.completion_texts,
+                &self.completion_description_texts,
+                &self.completion_spans,
+                &self.completion_selected,
+                &self.completion_emphasis_colors,
+            )
+            .hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -7437,6 +7998,17 @@ impl Renderer {
         }
         self.pane_bases
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
+        // `pane_bases` deliberately uses replace blending so overlapping pane
+        // interiors do not compound their configured transparency. That same
+        // replace pass used to erase the unsupported-blur underlay floor,
+        // leaving Linux at the user's raw opacity despite the advertised 99%
+        // fallback. Upload a live-only copy with its final alpha clamped;
+        // offscreen screenshots continue to draw the unmodified buffer above.
+        if let Some(floor) = self.live_background_opacity_floor {
+            apply_quad_alpha_floor(&mut pane_bases, floor);
+            self.live_pane_bases
+                .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
+        }
         self.quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
         self.pane_outlines
@@ -7516,7 +8088,7 @@ impl Renderer {
             match self.create_screenshot_target(target_size) {
                 Ok(capture) => {
                     if let Err(error) =
-                        self.encode_scene_pass(&capture.view, target_size, cfg, &mut encoder)
+                        self.encode_scene_pass(&capture.view, target_size, cfg, false, &mut encoder)
                     {
                         Self::complete_screenshot_error(
                             request,
@@ -7632,7 +8204,7 @@ impl Renderer {
         } else {
             &surface_view
         };
-        self.encode_scene_pass(scene_view, target_size, cfg, &mut encoder)?;
+        self.encode_scene_pass(scene_view, target_size, cfg, true, &mut encoder)?;
         if needs_presentation {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-presentation-pass"),
@@ -7709,15 +8281,22 @@ impl Renderer {
         target: &wgpu::TextureView,
         target_size: [u32; 2],
         cfg: &Config,
+        live_window: bool,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
+        let clear = live_underlay_clear_color(
+            cfg.theme.background,
+            self.live_background_opacity_floor,
+            self.config.alpha_mode,
+            live_window,
+        );
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("kettle-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -7742,7 +8321,11 @@ impl Renderer {
         } else {
             self.bg_imgs.draw(&mut pass);
         }
-        self.pane_bases.draw(&mut pass);
+        if use_live_pane_bases(live_window, self.live_background_opacity_floor) {
+            self.live_pane_bases.draw(&mut pass);
+        } else {
+            self.pane_bases.draw(&mut pass);
+        }
         self.quads.draw(&mut pass);
         self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
@@ -10541,13 +11124,15 @@ fn middle_ellipsis(s: &str, n: usize) -> String {
     }
     let budget = n - 1; // reserve 1 col for the `…`
     // Prefer keeping the trailing path segment (program / leaf) intact.
-    let leaf_start = s.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
-    if leaf_start > 0 {
+    let leaf_separator = s.rfind(['/', '\\']);
+    let leaf_start = leaf_separator.map(|i| i + 1).unwrap_or(0);
+    if let Some(separator_start) = leaf_separator {
         let leaf = &s[leaf_start..];
-        let leaf_w = display_width(leaf);
-        if leaf_w <= budget && leaf_w > 0 {
-            let head = take_cols_front(&s[..leaf_start], budget - leaf_w);
-            return format!("{head}…{leaf}");
+        let separator = &s[separator_start..leaf_start];
+        let tail_w = display_width(separator) + display_width(leaf);
+        if tail_w <= budget && !leaf.is_empty() {
+            let head = take_cols_front(&s[..separator_start], budget - tail_w);
+            return format!("{head}…{separator}{leaf}");
         }
     }
     // Fallback: symmetric middle split.
@@ -11312,6 +11897,31 @@ fn surface_clear_color(bg: Rgb, alpha: f64, mode: wgpu::CompositeAlphaMode) -> w
         b: srgb(bg.b) * scale,
         a: alpha,
     }
+}
+
+fn live_underlay_clear_color(
+    bg: Rgb,
+    floor: Option<f32>,
+    mode: wgpu::CompositeAlphaMode,
+    live_window: bool,
+) -> wgpu::Color {
+    if !live_window {
+        return wgpu::Color::TRANSPARENT;
+    }
+    floor.map_or(wgpu::Color::TRANSPARENT, |alpha| {
+        surface_clear_color(bg, f64::from(alpha), mode)
+    })
+}
+
+fn apply_quad_alpha_floor(quads: &mut [QuadInstance], floor: f32) {
+    let floor = floor.clamp(0.0, 1.0);
+    for quad in quads {
+        quad.color[3] = quad.color[3].max(floor);
+    }
+}
+
+fn use_live_pane_bases(live_window: bool, floor: Option<f32>) -> bool {
+    live_window && floor.is_some()
 }
 
 /// Undo premultiplication on an 8-bit RGBA/BGRA readback, in the space the GPU
@@ -14987,6 +15597,8 @@ mod titlebar_glyph_fallback_tests {
 
 #[cfg(test)]
 mod pane_buffer_lifecycle_tests {
+    use kettle_config::Rgb;
+
     #[test]
     fn prepared_chrome_colors_and_geometry_invalidate_retained_vertices() {
         let mut font_system = super::FontSystem::new();
@@ -15044,22 +15656,123 @@ mod pane_buffer_lifecycle_tests {
 
     #[test]
     fn same_shape_completion_text_changes_invalidate_retained_vertices() {
+        let header = "Completions · fish";
+        let count = "1/2";
         let labels = vec!["checkout".to_string(), "cherry-pick".to_string()];
         let descriptions = vec!["switch branch".to_string(), "apply commit".to_string()];
-        let baseline = super::completion_text_damage_key(&labels, &descriptions);
+        let spans = vec![Some((0, 2)), Some((0, 2))];
+        let selected = vec![true, false];
+        let colors = vec![Rgb::new(10, 20, 30), Rgb::new(40, 50, 60)];
+        let key = |header: &str,
+                   count: &str,
+                   labels: &[String],
+                   descriptions: &[String],
+                   spans: &[Option<(usize, usize)>],
+                   selected: &[bool],
+                   colors: &[Rgb]| {
+            super::completion_text_damage_key(
+                header,
+                count,
+                labels,
+                descriptions,
+                spans,
+                selected,
+                colors,
+            )
+        };
+        let baseline = key(
+            header,
+            count,
+            &labels,
+            &descriptions,
+            &spans,
+            &selected,
+            &colors,
+        );
 
         let changed_labels = vec!["clean-up".to_string(), "cherry-pick".to_string()];
         assert_ne!(
             baseline,
-            super::completion_text_damage_key(&changed_labels, &descriptions),
+            key(
+                header,
+                count,
+                &changed_labels,
+                &descriptions,
+                &spans,
+                &selected,
+                &colors,
+            ),
             "same-sized label edits must prepare new completion glyphs"
         );
 
         let changed_descriptions = vec!["switch branch".to_string(), "pick commit".to_string()];
         assert_ne!(
             baseline,
-            super::completion_text_damage_key(&labels, &changed_descriptions),
+            key(
+                header,
+                count,
+                &labels,
+                &changed_descriptions,
+                &spans,
+                &selected,
+                &colors,
+            ),
             "same-sized description edits must prepare new completion glyphs"
+        );
+        assert_ne!(
+            baseline,
+            key(
+                header,
+                "2/2",
+                &labels,
+                &descriptions,
+                &spans,
+                &selected,
+                &colors,
+            ),
+            "header counters must prepare new completion glyphs"
+        );
+        let changed_colors = vec![Rgb::new(11, 20, 30), Rgb::new(40, 50, 60)];
+        assert_ne!(
+            baseline,
+            key(
+                header,
+                count,
+                &labels,
+                &descriptions,
+                &spans,
+                &selected,
+                &changed_colors,
+            ),
+            "live theme changes must reshape explicit emphasis colors"
+        );
+        let changed_spans = vec![Some((1, 3)), Some((0, 2))];
+        assert_ne!(
+            baseline,
+            key(
+                header,
+                count,
+                &labels,
+                &descriptions,
+                &changed_spans,
+                &selected,
+                &colors,
+            ),
+            "a moved emphasis span must prepare new completion glyphs"
+        );
+        let changed_selection = vec![false, true];
+        assert_ne!(
+            baseline,
+            key(
+                header,
+                count,
+                &labels,
+                &descriptions,
+                &spans,
+                &changed_selection,
+                &colors,
+            ),
+            "selection changes must prepare the selected text colors"
         );
 
         let src = super::production_source();
@@ -15067,7 +15780,7 @@ mod pane_buffer_lifecycle_tests {
             .find("if self.completion_texts[line_index] != line")
             .expect("completion label buffers are refreshed");
         let damage = src
-            .find("completion_text_damage_key(&self.completion_texts")
+            .find("completion_text_damage_key(\n                &self.completion_header_text")
             .expect("completion source strings enter the retained-text damage key");
         assert!(
             refresh < damage,
@@ -16112,21 +16825,39 @@ mod search_bar_tests {
 #[cfg(test)]
 mod completion_panel_tests {
     use super::{
-        CompletionOverlay, CompletionOverlayRow, MAX_COMPLETION_ROWS, Overlay,
-        completion_overlay_row_rects, completion_panel_geometry, solid_blend,
-        text_overlay_requires_continuous_prepare,
+        COMPLETION_MAX_COLUMNS, COMPLETION_MIN_COLUMNS, CompletionOverlay, CompletionOverlayRow,
+        CompletionPanelPlacement, MAX_COMPLETION_ROWS, Overlay, completion_header_columns,
+        completion_header_count, completion_header_label, completion_match_span,
+        completion_overlay_row_rects, completion_palette, completion_panel_geometry,
+        completion_scroll_thumb, completion_selection_surface, display_width, production_source,
+        push_completion_selection_quads, solid_blend, text_overlay_requires_continuous_prepare,
     };
+    use crate::color;
     use kettle_config::Rgb;
+
+    /// A 900x700 pane whose 884x656 grid starts at (108, 70) with an 8x16 cell.
+    /// The prompt begins on visible row 20, so the grid's prompt row starts at
+    /// y = 70 + 320 = 390.
+    const CELL: (f32, f32) = (8.0, 16.0);
+    const PROMPT_TOP: f32 = 390.0;
+    /// `max(4, round(16 * 0.5))`.
+    const GAP: f32 = 8.0;
+    /// `max(16 + 4, round(16 * 1.35))`.
+    const ROW_H: f32 = 22.0;
+    /// Two borders, one header row, and the padding above and below the list.
+    const CHROME_H: f32 = 30.0;
 
     fn overlay(selected: Option<usize>, count: usize) -> CompletionOverlay {
         CompletionOverlay {
             pane_rect: (100.0, 40.0, 900.0, 700.0),
             grid_rect: (108.0, 70.0, 884.0, 656.0),
             command_rows: (20, 20),
+            anchor_col: None,
             kind: "Completions".to_string(),
             source: "fish".to_string(),
             selected,
             total: count,
+            token: None,
             candidates: (0..count)
                 .map(|index| CompletionOverlayRow {
                     label: format!("item-{index}"),
@@ -16137,62 +16868,260 @@ mod completion_panel_tests {
         }
     }
 
-    #[test]
-    fn card_is_bounded_and_keeps_the_selection_visible() {
-        let geometry = completion_panel_geometry(&overlay(Some(19), 20), (8.0, 16.0)).unwrap();
-        assert_eq!(geometry.rows, MAX_COMPLETION_ROWS);
-        assert!(geometry.first <= 19);
-        assert!(19 < geometry.first + geometry.rows);
-        assert!(geometry.rect.0 >= 100.0);
-        assert!(geometry.rect.0 + geometry.rect.2 <= 1000.0);
-        assert!(geometry.rect.1 + geometry.rect.3 <= 740.0);
-
-        let rows = completion_overlay_row_rects(&overlay(Some(19), 20), (8.0, 16.0));
-        assert_eq!(rows.len(), 8);
-        assert_eq!(rows.first().map(|row| row.0), Some(12));
-        assert_eq!(rows.last().map(|row| row.0), Some(19));
-        assert_eq!(rows[1].1.1 - rows[0].1.1, 16.0);
+    fn theme() -> kettle_config::Theme {
+        kettle_config::Theme::default()
     }
 
     #[test]
-    fn card_is_top_centered_and_content_fit_with_stable_width_limits() {
-        let short = completion_panel_geometry(&overlay(None, 2), (8.0, 16.0)).unwrap();
-        assert_eq!(short.rect, (476.0, 86.0, 144.0, 32.0));
+    fn card_hangs_off_the_prompt_and_grows_upward_from_the_grid_left_edge() {
+        let geometry = completion_panel_geometry(&overlay(Some(19), 20), CELL).unwrap();
+        assert_eq!(geometry.placement, CompletionPanelPlacement::Above);
+        assert_eq!(geometry.rows, MAX_COMPLETION_ROWS);
+        assert_eq!(
+            geometry.rect.1 + geometry.rect.3,
+            PROMPT_TOP - GAP,
+            "the lower edge sits exactly a half-cell above the prompt's first row"
+        );
+        assert_eq!(geometry.rect.0, 108.0, "the card aligns with the grid left");
+        assert!(
+            geometry.rect.1 >= 70.0 + 8.0,
+            "a half-cell top margin is preserved"
+        );
+        assert_eq!(geometry.row_h, ROW_H);
+        assert_eq!(geometry.rect.3, CHROME_H + 10.0 * ROW_H);
+
+        // Fewer candidates keep the same lower edge and grow upward only.
+        let short = completion_panel_geometry(&overlay(Some(1), 3), CELL).unwrap();
+        assert_eq!(short.placement, CompletionPanelPlacement::Above);
+        assert_eq!(short.rect.1 + short.rect.3, PROMPT_TOP - GAP);
+        assert_eq!(short.rows, 3);
+        assert!(short.rect.1 > geometry.rect.1);
+    }
+
+    #[test]
+    fn card_aligns_with_the_command_column_and_clamps_at_the_right_edge() {
+        let mut card = overlay(None, 3);
+        card.anchor_col = Some(7);
+        let aligned = completion_panel_geometry(&card, CELL).unwrap();
+        assert_eq!(
+            aligned.rect.0,
+            card.grid_rect.0 + 7.0 * CELL.0,
+            "the card starts where editable input begins, not at the pane edge"
+        );
+
+        card.anchor_col = Some(10_000);
+        let clamped = completion_panel_geometry(&card, CELL).unwrap();
+        assert_eq!(
+            clamped.rect.0 + clamped.rect.2,
+            card.grid_rect.0 + card.grid_rect.2,
+            "a prompt near the right edge keeps the whole card inside the grid"
+        );
+    }
+
+    #[test]
+    fn rows_begin_below_the_header_and_match_the_painted_band() {
+        let card = overlay(Some(0), 4);
+        let geometry = completion_panel_geometry(&card, CELL).unwrap();
+        assert_eq!(geometry.header.1, geometry.rect.1 + 1.0);
+        assert_eq!(geometry.header.3, ROW_H);
+        assert_eq!(
+            geometry.list_top,
+            geometry.header.1 + geometry.header.3 + 3.0,
+            "one restrained pad separates the header from the first row"
+        );
+        let rows = completion_overlay_row_rects(&card, CELL);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].1.1, geometry.list_top);
+        assert_eq!(rows[1].1.1 - rows[0].1.1, ROW_H);
+        assert_eq!(rows[0].1.3, ROW_H);
+        let (_, list_y, _, list_h) = geometry.list_rect();
+        assert_eq!(list_y, geometry.list_top);
+        assert_eq!(list_h, 4.0 * ROW_H);
+        assert_eq!(
+            list_y + list_h + 3.0 + 1.0,
+            geometry.rect.1 + geometry.rect.3,
+            "the same pad and border close the card under the last row"
+        );
+    }
+
+    #[test]
+    fn selection_keeps_one_row_of_lookahead() {
+        // A selection in the middle of a long result leaves exactly one row
+        // visible underneath it.
+        let geometry = completion_panel_geometry(&overlay(Some(14), 40), CELL).unwrap();
+        assert_eq!(geometry.rows, MAX_COMPLETION_ROWS);
+        assert_eq!(geometry.first, 6);
+        assert_eq!(
+            geometry.first + geometry.rows - 1,
+            15,
+            "one candidate after the selection stays on screen"
+        );
+
+        // At the end of the result there is nothing left to look ahead to.
+        let tail = completion_panel_geometry(&overlay(Some(39), 40), CELL).unwrap();
+        assert_eq!(tail.first, 30);
+
+        // The unselected first page starts at the top of the result.
+        let head = completion_panel_geometry(&overlay(None, 40), CELL).unwrap();
+        assert_eq!(head.first, 0);
+        let second = completion_panel_geometry(&overlay(Some(0), 40), CELL).unwrap();
+        assert_eq!(second.first, 0);
+    }
+
+    #[test]
+    fn scroll_indicator_tracks_the_shell_result_not_the_page() {
+        let mut card = overlay(Some(0), 10);
+        assert!(
+            completion_scroll_thumb(&card, &completion_panel_geometry(&card, CELL).unwrap())
+                .is_none(),
+            "a result that fits needs no indicator"
+        );
+
+        card = overlay(Some(0), 40);
+        card.total = 200;
+        for (index, candidate) in card.candidates.iter_mut().enumerate() {
+            candidate.position = index;
+        }
+        let geometry = completion_panel_geometry(&card, CELL).unwrap();
+        let (_, track_y, _, track_h) = geometry.list_rect();
+        let (top, height) = completion_scroll_thumb(&card, &geometry).expect("indicator");
+        assert_eq!(top, track_y, "the first page pins the thumb to the top");
+        assert!(height >= 11.0 && height < track_h);
+
+        // A page deep inside the result moves the thumb down proportionally and
+        // never past the end of the track.
+        card.selected = Some(39);
+        let geometry = completion_panel_geometry(&card, CELL).unwrap();
+        let (deep_top, deep_height) = completion_scroll_thumb(&card, &geometry).expect("indicator");
+        assert!(deep_top > track_y);
+        assert!(deep_top + deep_height <= track_y + track_h + 0.5);
+    }
+
+    #[test]
+    fn width_is_content_fit_inside_the_published_column_band() {
+        let short = completion_panel_geometry(&overlay(None, 2), CELL).unwrap();
+        // `Completions · fish` (18) + gap (2) + `2 matches` (9) + padding (2).
+        assert_eq!(short.rect.2, 31.0 * CELL.0);
+        assert!(short.rect.2 >= COMPLETION_MIN_COLUMNS as f32 * CELL.0);
 
         let mut long = overlay(None, 2);
         long.candidates[0].label = "x".repeat(200);
-        let long = completion_panel_geometry(&long, (8.0, 16.0)).unwrap();
-        assert_eq!(long.rect.2, 208.0, "label width clamps at 24 cells");
-        assert_eq!(long.rect.0, 444.0, "the card remains centered on the grid");
-    }
-
-    #[test]
-    fn card_stays_inside_the_grid_with_a_top_row_inset() {
-        let geometry = completion_panel_geometry(&overlay(None, 3), (8.0, 16.0)).unwrap();
-        assert_eq!(geometry.rect.1, 86.0);
-        assert!(geometry.rect.0 >= 108.0);
-        assert!(geometry.rect.0 + geometry.rect.2 <= 992.0);
-        assert!(geometry.rect.1 + geometry.rect.3 <= 726.0);
-    }
-
-    #[test]
-    fn card_never_overlaps_a_multiline_command() {
-        let mut completion = overlay(None, 8);
-        completion.command_rows = (3, 5);
-        let top = completion_panel_geometry(&completion, (8.0, 16.0)).unwrap();
-        assert_eq!(top.rows, 1);
-        assert!(top.rect.1 + top.rect.3 <= 70.0 + 2.0 * 16.0);
-
-        completion.command_rows = (0, 2);
-        assert!(
-            completion_panel_geometry(&completion, (8.0, 16.0)).is_none(),
-            "a top-edge prompt must not move the card beside or below the input"
+        long.candidates[0].description = "y".repeat(200);
+        let long = completion_panel_geometry(&long, CELL).unwrap();
+        assert_eq!(long.rect.2, 92.0 * CELL.0, "the card stays content-fit");
+        assert!(long.rect.2 <= COMPLETION_MAX_COLUMNS as f32 * CELL.0);
+        assert_eq!(long.label_columns, 40, "labels clamp at 40 columns");
+        assert_eq!(
+            long.description_columns, 48,
+            "descriptions clamp at 48 columns"
         );
+        assert!(long.divider_x.is_some());
+
+        // A pane narrower than the content clamps to the grid instead of
+        // overflowing it, and the lanes are redistributed to match.
+        let mut narrow = overlay(None, 2);
+        narrow.candidates[0].label = "x".repeat(200);
+        narrow.candidates[0].description = "y".repeat(200);
+        narrow.pane_rect = (0.0, 40.0, 300.0, 700.0);
+        narrow.grid_rect = (0.0, 70.0, 300.0, 656.0);
+        let narrow = completion_panel_geometry(&narrow, CELL).unwrap();
+        assert_eq!(narrow.rect.2, 37.0 * CELL.0);
+        assert_eq!(
+            narrow.label_columns + narrow.description_columns,
+            35,
+            "the lanes exactly fill the clamped card"
+        );
+        assert_eq!(narrow.description_columns, 0);
+        assert_eq!(narrow.divider_x, None, "no empty description divider");
+        assert!(narrow.rect.0 + narrow.rect.2 <= 300.0);
+    }
+
+    #[test]
+    fn header_reserves_the_count_lane_and_reports_absolute_positions() {
+        let mut card = overlay(Some(2), 40);
+        card.total = 87;
+        for (index, candidate) in card.candidates.iter_mut().enumerate() {
+            candidate.position = index;
+        }
+        assert_eq!(completion_header_label(&card), "Completions · fish");
+        assert_eq!(completion_header_count(&card), "3/87");
+        card.selected = None;
+        assert_eq!(completion_header_count(&card), "87 matches");
+        card.total = 1;
+        card.candidates.truncate(1);
+        assert_eq!(completion_header_count(&card), "1 match");
+
+        let card = overlay(None, 2);
+        let geometry = completion_panel_geometry(&card, CELL).unwrap();
+        let count = completion_header_count(&card);
+        let (label_columns, count_columns) = completion_header_columns(&geometry, &count);
+        assert_eq!(count_columns, display_width(&count));
+        assert_eq!(
+            label_columns + 1 + count_columns,
+            geometry.inner_columns,
+            "the caption takes what the right-aligned count leaves"
+        );
+        assert!(label_columns >= display_width(&completion_header_label(&card)));
+    }
+
+    #[test]
+    fn card_uses_the_roomier_lane_without_overlapping_a_multiline_command() {
+        let mut completion = overlay(None, 8);
+        // Only one candidate fits above this command while all eight fit below,
+        // so the useful lane wins rather than reducing the card to one row.
+        completion.command_rows = (5, 7);
+        let below = completion_panel_geometry(&completion, CELL).unwrap();
+        assert_eq!(below.placement, CompletionPanelPlacement::Below);
+        assert_eq!(below.rows, 8);
+        assert_eq!(below.rect.1, 70.0 + 8.0 * 16.0 + GAP);
+        assert!(below.rect.1 > 70.0 + 7.0 * 16.0);
+
+        // With no usable upper lane, a prompt at the top receives the same
+        // detached card immediately after its final row.
+        completion.command_rows = (0, 2);
+        let top_edge = completion_panel_geometry(&completion, CELL).unwrap();
+        assert_eq!(top_edge.placement, CompletionPanelPlacement::Below);
+        assert_eq!(top_edge.rect.1, 70.0 + 3.0 * 16.0 + GAP);
+        assert!(
+            top_edge.rect.1 + top_edge.rect.3 <= 70.0 + 656.0 - 8.0,
+            "the lower card keeps the same half-cell grid margin"
+        );
+
+        // A prompt near the bottom has the inverse constraint and keeps the
+        // preferred upper placement.
+        completion.command_rows = (38, 40);
+        let bottom_edge = completion_panel_geometry(&completion, CELL).unwrap();
+        assert_eq!(bottom_edge.placement, CompletionPanelPlacement::Above);
+        assert_eq!(
+            bottom_edge.rect.1 + bottom_edge.rect.3,
+            70.0 + 38.0 * 16.0 - GAP
+        );
+
+        // Reversed metadata is normalized before either lane is measured.
+        completion.command_rows = (3, 5);
+        let forward = completion_panel_geometry(&completion, CELL).unwrap();
+        completion.command_rows = (5, 3);
+        let reversed = completion_panel_geometry(&completion, CELL).unwrap();
+        assert_eq!(forward.rect, reversed.rect);
+        assert_eq!(forward.placement, reversed.placement);
 
         completion.command_rows = (0, 39);
         assert!(
-            completion_panel_geometry(&completion, (8.0, 16.0)).is_none(),
-            "a command spanning the pane leaves no safe detached lane"
+            completion_panel_geometry(&completion, CELL).is_none(),
+            "a command spanning the pane leaves no safe lane on either side"
+        );
+    }
+
+    #[test]
+    fn a_top_edge_card_stays_below_pane_chrome_and_the_tab_bar() {
+        let mut completion = overlay(None, 3);
+        completion.command_rows = (0, 0);
+        let geometry = completion_panel_geometry(&completion, CELL).unwrap();
+        assert_eq!(geometry.placement, CompletionPanelPlacement::Below);
+        assert_eq!(geometry.rect.1, completion.grid_rect.1 + CELL.1 + GAP);
+        assert!(
+            geometry.rect.1 >= completion.grid_rect.1,
+            "placement is clipped to the terminal grid, never pane or tab chrome"
         );
     }
 
@@ -16201,7 +17130,154 @@ mod completion_panel_tests {
         let mut completion = overlay(None, 1);
         completion.pane_rect = (0.0, 0.0, 60.0, 28.0);
         completion.grid_rect = (0.0, 0.0, 60.0, 28.0);
-        assert!(completion_panel_geometry(&completion, (8.0, 16.0)).is_none());
+        assert!(completion_panel_geometry(&completion, CELL).is_none());
+
+        // Tall enough, but narrower than the published minimum width.
+        let mut narrow = overlay(None, 1);
+        narrow.pane_rect = (0.0, 40.0, 152.0, 700.0);
+        narrow.grid_rect = (0.0, 70.0, 152.0, 656.0);
+        assert!(completion_panel_geometry(&narrow, CELL).is_none());
+
+        narrow.pane_rect.2 = 160.0;
+        narrow.grid_rect.2 = 160.0;
+        assert!(
+            completion_panel_geometry(&narrow, CELL).is_some(),
+            "the former 20-column minimum remains usable"
+        );
+    }
+
+    #[test]
+    fn labels_keep_their_discriminating_path_tail() {
+        let source = production_source();
+        assert!(
+            source.contains("middle_ellipsis(&candidate.label, geometry.label_columns)"),
+            "completion labels must shed their middle, not their tail"
+        );
+        assert_eq!(
+            super::middle_ellipsis("/home/kevim/Repos/kettle/crates/kettle-vt/src/lib.rs", 24),
+            "/home/kevim/Repo…/lib.rs"
+        );
+    }
+
+    #[test]
+    fn emphasis_matches_only_the_first_safe_occurrence() {
+        assert_eq!(completion_match_span("checkout", "ch"), Some((0, 2)));
+        assert_eq!(
+            completion_match_span("cherry-pick-cherry", "cherry"),
+            Some((0, 6)),
+            "only the first occurrence is emphasized"
+        );
+        assert_eq!(
+            completion_match_span("CHECKOUT", "ch"),
+            Some((0, 2)),
+            "ASCII compares case-insensitively"
+        );
+        assert_eq!(completion_match_span("git-checkout", "CHECK"), Some((4, 9)));
+        assert_eq!(completion_match_span("checkout", ""), None);
+        assert_eq!(completion_match_span("ch", "checkout"), None);
+        assert_eq!(completion_match_span("checkout", "zz"), None);
+        // Non-ASCII on either side falls back to an exact substring so case
+        // folding cannot desynchronize the span from the shaped bytes.
+        assert_eq!(completion_match_span("Ünïcode", "Ünï"), Some((0, 5)));
+        assert_eq!(completion_match_span("Ünïcode", "ünï"), None);
+        let span = completion_match_span("café-münchen", "münchen").expect("exact tail");
+        assert_eq!(&"café-münchen"[span.0..span.1], "münchen");
+    }
+
+    #[test]
+    fn selection_surface_separates_from_the_panel_in_every_theme() {
+        let panel = solid_blend(Rgb::new(205, 214, 244), Rgb::new(30, 30, 46), 9);
+        let accent = Rgb::new(137, 180, 250);
+        // A theme whose selection is already distinct is used verbatim.
+        let distinct = Rgb::new(69, 71, 90);
+        assert_eq!(
+            completion_selection_surface(distinct, panel, accent),
+            distinct
+        );
+        // A selection indistinguishable from the panel is replaced by an
+        // accent blend that does separate.
+        let flat = completion_selection_surface(panel, panel, accent);
+        assert_ne!(flat, panel);
+        assert!(color::contrast_ratio(flat, panel) >= 1.35);
+
+        for (foreground, background) in [
+            (Rgb::new(205, 214, 244), Rgb::new(30, 30, 46)),
+            (Rgb::new(40, 42, 54), Rgb::new(250, 250, 250)),
+        ] {
+            let mut theme = theme();
+            theme.foreground = foreground;
+            theme.background = background;
+            theme.selection_background = background;
+            theme.selection_foreground = foreground;
+            let palette = completion_palette(&theme, accent);
+            assert!(color::contrast_ratio(palette.selection_bg, palette.panel_bg) >= 1.35);
+            for (name, text, surface) in [
+                ("label", palette.label, palette.panel_bg),
+                ("header", palette.header, palette.panel_bg),
+                ("emphasis", palette.emphasis, palette.panel_bg),
+                (
+                    "selected label",
+                    palette.selected_label,
+                    palette.selection_bg,
+                ),
+                (
+                    "selected emphasis",
+                    palette.selected_emphasis,
+                    palette.selection_bg,
+                ),
+            ] {
+                assert!(
+                    color::contrast_ratio(text, surface) >= 4.49,
+                    "{name} fell under 4.5 contrast"
+                );
+            }
+            for (name, text, surface) in [
+                ("description", palette.description, palette.panel_bg),
+                (
+                    "selected description",
+                    palette.selected_description,
+                    palette.selection_bg,
+                ),
+            ] {
+                assert!(
+                    color::contrast_ratio(text, surface) >= 3.99,
+                    "{name} fell under 4.0 contrast"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_selected_row_carries_an_accent_rail() {
+        let overlay = overlay(Some(0), 3);
+        let geometry = completion_panel_geometry(&overlay, CELL).expect("completion geometry");
+        let palette = completion_palette(&theme(), Rgb::new(137, 180, 250));
+        let mut quads = Vec::new();
+
+        push_completion_selection_quads(
+            &mut quads,
+            false,
+            &geometry,
+            geometry.list_top,
+            0.0,
+            &palette,
+        );
+        assert!(
+            quads.is_empty(),
+            "an unselected row must paint neither a selection surface nor a rail"
+        );
+
+        push_completion_selection_quads(
+            &mut quads,
+            true,
+            &geometry,
+            geometry.list_top,
+            0.0,
+            &palette,
+        );
+        assert_eq!(quads.len(), 2, "selection surface plus one accent rail");
+        assert_eq!(quads[1].size, [super::COMPLETION_RAIL_W, geometry.row_h]);
+        assert_eq!(quads[1].pos[1], geometry.list_top);
     }
 
     #[test]
@@ -17123,10 +18199,63 @@ mod attributed_foreground_tests {
 #[cfg(test)]
 mod background_darkness_tests {
     use super::{
-        composed_bg_alpha, desired_alpha_mode, final_scene_is_uniformly_opaque,
-        needs_postmultiplied_presentation, window_requires_alpha_surface,
+        QuadInstance, apply_quad_alpha_floor, composed_bg_alpha, desired_alpha_mode,
+        final_scene_is_uniformly_opaque, live_underlay_clear_color,
+        needs_postmultiplied_presentation, use_live_pane_bases, window_requires_alpha_surface,
     };
     use kettle_config::{BackgroundType, Config};
+
+    #[test]
+    fn unsupported_blur_floor_applies_only_to_the_live_window_underlay() {
+        let background = kettle_config::Rgb::new(26, 27, 38);
+        let live = live_underlay_clear_color(
+            background,
+            Some(0.99),
+            wgpu::CompositeAlphaMode::PreMultiplied,
+            true,
+        );
+        assert!((live.a - 0.99).abs() < 1e-6);
+        assert!(live.r > 0.0 && live.g > 0.0 && live.b > 0.0);
+
+        for offscreen in [
+            live_underlay_clear_color(
+                background,
+                Some(0.99),
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                false,
+            ),
+            live_underlay_clear_color(
+                background,
+                None,
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                true,
+            ),
+        ] {
+            assert_eq!(offscreen.a, 0.0);
+            assert_eq!(offscreen.r, 0.0);
+            assert_eq!(offscreen.g, 0.0);
+            assert_eq!(offscreen.b, 0.0);
+        }
+    }
+
+    #[test]
+    fn unsupported_blur_floor_survives_the_replacing_pane_base_pass() {
+        let mut bases = [QuadInstance {
+            pos: [0.0, 0.0],
+            size: [100.0, 100.0],
+            color: [0.1, 0.2, 0.3, 0.55],
+        }];
+        apply_quad_alpha_floor(&mut bases, 0.99);
+        assert!((bases[0].color[3] - 0.99).abs() < f32::EPSILON);
+
+        bases[0].color[3] = 1.0;
+        apply_quad_alpha_floor(&mut bases, 0.99);
+        assert_eq!(bases[0].color[3], 1.0, "the floor must never reduce alpha");
+
+        assert!(use_live_pane_bases(true, Some(0.99)));
+        assert!(!use_live_pane_bases(false, Some(0.99)));
+        assert!(!use_live_pane_bases(true, None));
+    }
 
     /// `background-darkness` runs see-through → covered, and the docs must say
     /// so.

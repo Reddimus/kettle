@@ -6,6 +6,14 @@ pub const MAX_CANDIDATES: usize = 64;
 pub const MAX_TOTAL_CANDIDATES: usize = 2048;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_DESCRIPTION_BYTES: usize = 1024;
+/// Protocol v4 emphasis token. Deliberately far smaller than a label: it only
+/// has to carry the word the user actually typed, and it is never used to
+/// filter, rank, quote, or insert anything.
+pub const MAX_TOKEN_BYTES: usize = 128;
+/// Visible command text before the cursor on its current editor line. The
+/// renderer uses this bounded hint only to align the card with the editable
+/// command column; it is never interpreted or executed.
+pub const MAX_INPUT_PREFIX_BYTES: usize = 1024;
 pub const KEY_TAB: u8 = 1;
 pub const KEY_BACKTAB: u8 = 2;
 const KEY_MASK: u8 = KEY_TAB | KEY_BACKTAB;
@@ -38,6 +46,13 @@ pub struct CompletionList {
     pub selected: Option<usize>,
     pub total: usize,
     pub source: String,
+    /// Protocol v4 emphasis hint: the token the shell was completing when the
+    /// user first pressed Tab. Presentation only. Protocol v1-v3 publishers do
+    /// not carry one, and an empty field normalizes to `None`.
+    pub token: Option<String>,
+    /// Protocol v4 presentation hint used to recover the command's stable
+    /// starting column from the cursor position captured at the first Tab.
+    pub input_prefix: Option<String>,
     pub candidates: Vec<CompletionCandidate>,
 }
 
@@ -70,11 +85,14 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     let text = std::str::from_utf8(&payload[PREFIX.len()..]).ok()?;
     let mut fields = text.split(';');
     let version = fields.next()?;
-    if !matches!(version, "1" | "2" | "3") {
+    if !matches!(version, "1" | "2" | "3" | "4") {
         return None;
     }
+    // v4 adds one presentation field to `show`/`update`. Its session, request,
+    // keymap, and clear semantics are v3's, so both versions share this path.
+    let sequenced = matches!(version, "3" | "4");
     let operation = fields.next()?;
-    if version == "3" && operation == "sync" {
+    if sequenced && operation == "sync" {
         let session = fields.next()?.parse::<u64>().ok()?;
         let keys = fields.next()?.parse::<u8>().ok()?;
         return fields
@@ -83,7 +101,7 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
             .then_some(CompletionUpdate::Sync { session, keys })
             .filter(|_| keys & !KEY_MASK == 0);
     }
-    if version == "3" && operation == "keymap" {
+    if sequenced && operation == "keymap" {
         let session = fields.next()?.parse::<u64>().ok()?;
         let keys = fields.next()?.parse::<u8>().ok()?;
         return fields
@@ -92,14 +110,14 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
             .then_some(CompletionUpdate::Keymap { session, keys })
             .filter(|_| keys & !KEY_MASK == 0);
     }
-    let session = if version == "3" {
+    let session = if sequenced {
         Some(fields.next()?.parse::<u64>().ok()?)
     } else {
         None
     };
     let generation = fields.next()?.parse::<u64>().ok()?;
     if operation == "clear" {
-        let request = if version == "3" {
+        let request = if sequenced {
             Some(fields.next()?.parse::<u64>().ok()?)
         } else {
             None
@@ -113,7 +131,7 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     if !matches!(operation, "show" | "update") {
         return None;
     }
-    let request = if version == "3" {
+    let request = if sequenced {
         Some(fields.next()?.parse::<u64>().ok()?)
     } else {
         None
@@ -128,7 +146,20 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
         value => Some(value.parse::<usize>().ok()?),
     };
     let source = decode_field(fields.next()?, 64)?;
-    let (offset, total) = if matches!(version, "2" | "3") {
+    // These are presentation-only hints. Their fields remain structurally
+    // required in v4, but unsafe, malformed, or oversized values degrade to no
+    // emphasis/alignment rather than hiding an otherwise safe candidate page.
+    let token = if version == "4" {
+        decode_field(fields.next()?, MAX_TOKEN_BYTES).filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let input_prefix = if version == "4" {
+        decode_field(fields.next()?, MAX_INPUT_PREFIX_BYTES).filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let (offset, total) = if matches!(version, "2" | "3" | "4") {
         (
             fields.next()?.parse::<usize>().ok()?,
             fields.next()?.parse::<usize>().ok()?,
@@ -149,17 +180,19 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     let mut candidates = Vec::with_capacity(remaining.len() / 2);
     for (original_index, pair) in remaining.chunks_exact(2).enumerate() {
         // A single filesystem entry can legally contain a newline or bidi
-        // control on Unix. It is not safe to put that entry in terminal-owned
+        // control on Unix. It is not safe to put that label in terminal-owned
         // UI, but it must not suppress every other completion in the message.
         // Keep structural errors fail-closed above and skip only the unsafe
-        // candidate here.
+        // label here.
         let Some(label) = decode_field(pair[0], MAX_LABEL_BYTES).filter(|label| !label.is_empty())
         else {
             continue;
         };
-        let Some(description) = decode_field(pair[1], MAX_DESCRIPTION_BYTES) else {
-            continue;
-        };
+        // Descriptions are optional presentation. PowerShell tooltips commonly
+        // contain line breaks; dropping the whole candidate made the detached
+        // card highlight a different row from the command PSReadLine inserted.
+        // Keep the safe label and discard only an unsafe or malformed tooltip.
+        let description = decode_field(pair[1], MAX_DESCRIPTION_BYTES).unwrap_or_default();
         if selected == Some(original_index) {
             normalized_selected = Some(candidates.len());
         }
@@ -189,6 +222,8 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
             total
         },
         source,
+        token,
+        input_prefix,
         candidates,
     };
     Some(if operation == "show" {
@@ -346,6 +381,149 @@ mod tests {
         );
     }
 
+    #[test]
+    fn version_four_carries_bounded_presentation_hints() {
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;4;show;12;9;4;completion;0;fish;ch;git%20ch;64;65;item;row",
+        )
+        .expect("version four page") else {
+            panic!("expected show");
+        };
+        assert_eq!(list.session, Some(12));
+        assert_eq!(list.generation, 9);
+        assert_eq!(list.request, Some(4));
+        assert_eq!(list.token.as_deref(), Some("ch"));
+        assert_eq!(list.input_prefix.as_deref(), Some("git ch"));
+        assert_eq!(list.total, 65);
+        assert_eq!(list.candidates[0].position, 64);
+
+        let CompletionUpdate::Update(list) =
+            parse(b"777;kettle-completion;4;update;12;10;4;completion;;fish;;;0;1;item;row")
+                .expect("empty presentation hints are valid absences")
+        else {
+            panic!("expected update");
+        };
+        assert_eq!(list.token, None);
+        assert_eq!(list.input_prefix, None);
+
+        // v4 reuses v3's sequencing envelope verbatim.
+        assert_eq!(
+            parse(b"777;kettle-completion;4;sync;12;3"),
+            Some(CompletionUpdate::Sync {
+                session: 12,
+                keys: KEY_TAB | KEY_BACKTAB,
+            })
+        );
+        assert_eq!(
+            parse(b"777;kettle-completion;4;keymap;12;1"),
+            Some(CompletionUpdate::Keymap {
+                session: 12,
+                keys: KEY_TAB,
+            })
+        );
+        assert_eq!(
+            parse(b"777;kettle-completion;4;clear;12;10;4"),
+            Some(CompletionUpdate::Clear {
+                session: Some(12),
+                generation: 10,
+                request: Some(4),
+            })
+        );
+    }
+
+    #[test]
+    fn version_four_requires_hint_fields_but_degrades_unsafe_hint_values() {
+        assert!(
+            parse(b"777;kettle-completion;4;show;12;9;4;completion;0;fish;64;65;item;row")
+                .is_none(),
+            "a v4 page without its token field must fail closed"
+        );
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;4;show;12;9;4;completion;0;fish;a%E2%80%AEb;git%20a;64;65;item;row",
+        )
+        .expect("an unsafe emphasis hint must not hide safe candidates")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.token, None);
+        assert_eq!(list.input_prefix.as_deref(), Some("git a"));
+
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;4;show;12;9;4;completion;0;fish;a%09b;git%20a;64;65;item;row",
+        )
+        .expect("a control-bearing emphasis hint must degrade") else {
+            panic!("expected show");
+        };
+        assert_eq!(list.token, None);
+        let oversized = "a".repeat(MAX_TOKEN_BYTES + 1);
+        let CompletionUpdate::Show(list) = parse(
+            format!(
+                "777;kettle-completion;4;show;12;9;4;completion;0;fish;{oversized};git;64;65;item;row"
+            )
+            .as_bytes(),
+        )
+        .expect("an oversized emphasis hint must degrade")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.token, None);
+        let exact = "a".repeat(MAX_TOKEN_BYTES);
+        let CompletionUpdate::Show(list) = parse(
+            format!(
+                "777;kettle-completion;4;show;12;9;4;completion;0;fish;{exact};git;64;65;item;row"
+            )
+            .as_bytes(),
+        )
+        .expect("the token cap is inclusive") else {
+            panic!("expected show");
+        };
+        assert_eq!(list.token.as_deref(), Some(exact.as_str()));
+        let oversized_prefix = "a".repeat(MAX_INPUT_PREFIX_BYTES + 1);
+        let CompletionUpdate::Show(list) = parse(
+            format!(
+                "777;kettle-completion;4;show;12;9;4;completion;0;fish;g;{oversized_prefix};64;65;item;row"
+            )
+            .as_bytes(),
+        )
+        .expect("an oversized alignment hint must degrade")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.input_prefix, None);
+        for unsafe_prefix in ["git%20a%E2%80%AEb", "git%09a"] {
+            let payload = format!(
+                "777;kettle-completion;4;show;12;9;4;completion;0;fish;g;{unsafe_prefix};64;65;item;row"
+            );
+            let CompletionUpdate::Show(list) =
+                parse(payload.as_bytes()).expect("an unsafe alignment hint must degrade")
+            else {
+                panic!("expected show");
+            };
+            assert_eq!(list.input_prefix, None);
+        }
+        assert!(
+            parse(b"777;kettle-completion;5;show;12;9;4;completion;0;fish;g;64;65;item;row")
+                .is_none(),
+            "an unknown protocol version stays unparsed"
+        );
+    }
+
+    #[test]
+    fn legacy_publishers_carry_no_emphasis_token() {
+        for payload in [
+            b"777;kettle-completion;1;show;7;completion;1;fish;git;command".as_slice(),
+            b"777;kettle-completion;2;show;8;completion;0;fish;0;1;git;command".as_slice(),
+            b"777;kettle-completion;3;show;12;9;4;completion;0;fish;0;1;git;command".as_slice(),
+        ] {
+            let (CompletionUpdate::Show(list) | CompletionUpdate::Update(list)) =
+                parse(payload).expect("legacy page")
+            else {
+                panic!("expected show");
+            };
+            assert_eq!(list.token, None, "{payload:?}");
+        }
+    }
+
     /// The shell encoders truncate by characters against these byte caps, so
     /// the exact boundary is load-bearing: one byte over and the whole message
     /// is dropped, taking every candidate with it.
@@ -402,6 +580,18 @@ mod tests {
         assert_eq!(list.selected, Some(1));
         assert_eq!(list.total, 2);
         assert_eq!(list.candidates[1].position, 1);
+
+        let CompletionUpdate::Show(list) = parse(
+            b"777;kettle-completion;3;show;9;2;1;completion;0;powershell;0;2;Get-Acl;Get-Acl%0A%20%20%20%20%20%20%20%20%20%20;Get-AppPackage;safe",
+        )
+        .expect("an unsafe optional tooltip must not remove its safe candidate")
+        else {
+            panic!("expected show");
+        };
+        assert_eq!(list.candidates.len(), 2);
+        assert_eq!(list.candidates[0].label, "Get-Acl");
+        assert_eq!(list.candidates[0].description, "");
+        assert_eq!(list.selected, Some(0));
 
         let CompletionUpdate::Show(list) =
             parse(b"777;kettle-completion;1;show;2;completion;8;fish;only;row")

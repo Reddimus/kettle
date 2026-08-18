@@ -29,7 +29,7 @@ function __kettle_prompt --on-event fish_prompt
     __kettle_completion_clear
     printf '\e]133;A\a'
     if __kettle_completion_begin_session
-        printf '\e]777;kettle-completion;3;sync;%d;%d\a' \
+        printf '\e]777;kettle-completion;4;sync;%d;%d\a' \
             $__kettle_completion_session (__kettle_completion_key_mask)
     end
     __kettle_osc7
@@ -88,6 +88,8 @@ function __kettle_completion_reset
     set -e __kettle_completion_cycle_rows
     set -e __kettle_completion_cycle_labels
     set -e __kettle_completion_cycle_insertions
+    set -e __kettle_completion_cycle_token
+    set -e __kettle_completion_cycle_prefix
     set -e __kettle_completion_cycle_line
     set -e __kettle_completion_cycle_cursor
     set -g __kettle_completion_cycle_index -1
@@ -181,7 +183,7 @@ end
 function __kettle_completion_clear
     __kettle_completion_reset
     __kettle_completion_begin_generation; or return
-    printf '\e]777;kettle-completion;3;clear;%d;%d;%d\a' \
+    printf '\e]777;kettle-completion;4;clear;%d;%d;%d\a' \
         $__kettle_completion_session $__kettle_completion_generation $__kettle_completion_request
 end
 
@@ -190,47 +192,77 @@ function __kettle_completion_emit_rows --argument operation selected offset tota
     __kettle_completion_begin_generation; or return
     set -l rows $argv[6..-1]
     if test (count $rows) -eq 0
-        printf '\e]777;kettle-completion;3;clear;%d;%d;%d\a' \
+        printf '\e]777;kettle-completion;4;clear;%d;%d;%d\a' \
             $__kettle_completion_session $__kettle_completion_generation $__kettle_completion_request
         return
     end
 
+    set -l token
+    set -q __kettle_completion_cycle_token; and set token $__kettle_completion_cycle_token
+    set -l prefix
+    set -q __kettle_completion_cycle_prefix; and set prefix $__kettle_completion_cycle_prefix
+    set -l page_rows $rows
+    set -l page_offset $offset
+    set -l page_selected $selected
     set -l body
     set -l count 0
-    set -l row_index 0
     set -l normalized_selected ''
-    for row in $rows
-        test $count -ge 64; and break
-        set -l pair (string split --max 1 \t -- $row)
-        set -l label (__kettle_completion_field $pair[1] 64)
-        if test -z "$label"
+    set -l page_attempts 0
+    while test $page_attempts -lt 2
+        set page_attempts (math $page_attempts + 1)
+        set body ''
+        set count 0
+        set normalized_selected ''
+        set -l row_index 0
+        for row in $page_rows
+            test $count -ge 64; and break
+            set -l pair (string split --max 1 \t -- $row)
+            set -l label (__kettle_completion_field $pair[1] 64)
+            set -l description
+            if test (count $pair) -gt 1
+                set description (__kettle_completion_field $pair[2] 256)
+            end
+            # Keep an empty label as a structural placeholder. The terminal
+            # omits it from the UI, but its pair preserves the absolute row
+            # positions of every safe candidate that follows.
+            set -l addition ";$label;$description"
+            test (math 192 + (string length -- "$token$prefix$body$addition")) -le 65000; or break
+            if string match --regex --quiet '^[0-9]+$' -- "$page_selected"; and test "$page_selected" -eq $row_index
+                set normalized_selected $count
+            end
+            set body "$body$addition"
+            set count (math $count + 1)
             set row_index (math $row_index + 1)
-            continue
         end
-        set -l description
-        if test (count $pair) -gt 1
-            set description (__kettle_completion_field $pair[2] 256)
+
+        if not string match --regex --quiet '^[0-9]+$' -- "$page_selected"; or test -n "$normalized_selected"
+            break
         end
-        set -l addition ";$label;$description"
-        test (math 192 + (string length "$body$addition")) -le 65000; or break
-        if string match --regex --quiet '^[0-9]+$' -- "$selected"; and test "$selected" -eq $row_index
-            set normalized_selected $count
+        set -l page_start (math $page_selected + 1)
+        if test $page_start -lt 1; or test $page_start -gt (count $page_rows)
+            set count 0
+            break
         end
-        set body "$body$addition"
-        set count (math $count + 1)
-        set row_index (math $row_index + 1)
+        # A future wider field can make the requested 64-row page exceed the
+        # aggregate wire cap. Re-page from the selected row so the command line
+        # and highlighted card can never disagree.
+        set page_rows $page_rows[$page_start..-1]
+        set page_offset (math $page_offset + $page_selected)
+        set page_selected 0
     end
-    if test $count -eq 0
-        printf '\e]777;kettle-completion;3;clear;%d;%d;%d\a' \
+    if test $count -eq 0; or begin
+            string match --regex --quiet '^[0-9]+$' -- "$page_selected"
+            and test -z "$normalized_selected"
+        end
+        printf '\e]777;kettle-completion;4;clear;%d;%d;%d\a' \
             $__kettle_completion_session $__kettle_completion_generation $__kettle_completion_request
     else
         set selected $normalized_selected
-        set -l payload
-        if string match --regex --quiet '^[0-9]+$' -- "$request"
-            set payload "777;kettle-completion;3;$operation;$__kettle_completion_session;$__kettle_completion_generation;$request;completion;$selected;fish;$offset;$total$body"
-        else
-            set payload "777;kettle-completion;2;$operation;$__kettle_completion_generation;completion;$selected;fish;$offset;$total$body"
+        string match --regex --quiet '^[0-9]+$' -- "$request"; or begin
+            __kettle_completion_clear
+            return
         end
+        set -l payload "777;kettle-completion;4;$operation;$__kettle_completion_session;$__kettle_completion_generation;$request;completion;$selected;fish;$token;$prefix;$page_offset;$total$body"
         printf '\e]%s\a' $payload
     end
 end
@@ -242,6 +274,27 @@ end
 # inline pager for an overflow result.
 function __kettle_completion_capture
     __kettle_completion_reset
+    # Capture the editor token before querying the provider or applying any
+    # candidate. It remains fixed while Tab cycles the retained result, so the
+    # card emphasizes what the user typed rather than the last inserted row.
+    set -l token ''
+    set -l prefix ''
+    if status is-interactive
+        set token (commandline -ct | string collect)
+        set -l cursor (commandline -C)
+        set prefix (string sub --start 1 --length $cursor -- (commandline -b | string collect))
+        set prefix (string split \n -- $prefix)[-1]
+    end
+    if test (string length -- "$token") -le 4096
+        set -g __kettle_completion_cycle_token (__kettle_completion_field $token 128)
+    else
+        set -g __kettle_completion_cycle_token ''
+    end
+    if test (string length -- "$prefix") -le 16384
+        set -g __kettle_completion_cycle_prefix (__kettle_completion_field $prefix 1024)
+    else
+        set -g __kettle_completion_cycle_prefix ''
+    end
     set -l rows
     set -l labels
     set -l insertions
@@ -415,7 +468,7 @@ function __kettle_completion_keymap_changed --on-variable fish_bind_mode
     test $__kettle_completion_enabled -eq 1; or return
     test $__kettle_completion_session -gt 0; or return
     __kettle_completion_clear
-    printf '\e]777;kettle-completion;3;keymap;%d;%d\a' \
+    printf '\e]777;kettle-completion;4;keymap;%d;%d\a' \
         $__kettle_completion_session (__kettle_completion_key_mask)
 end
 

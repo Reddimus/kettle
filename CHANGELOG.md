@@ -8,34 +8,67 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
-- **Shell completions can appear in a compact panel at the top of the active
-  pane.** Fish and PowerShell publish their shell completion results
+- **Shell completions can appear in an IDE style card above the active
+  command.** Fish and PowerShell publish their shell completion results
   automatically when Tab has not been customized. Bash and Zsh can use the
   cooperative bridge. Customized Fish and PowerShell bindings stay unchanged
   and do not publish a detached list. The shell supplies matching and quoting;
   the bundled adapters preserve its insertion and cycling semantics.
-  Kettle uses a lane above the active command and hides the card if no detached
-  upper lane fits.
+  Kettle prefers a lane above the active command and flips the card below the
+  final wrapped row when the upper lane cannot fit the requested page. Both
+  placements stay inside the active pane's grid and outside the command and tab
+  bar. The card aligns with the start of editable input rather than the pane
+  edge, with a source/count header, roomier rows, selection lookahead, a scroll
+  indicator, and path-tail preservation.
+  Protocol v4 carries the original bounded Fish or PowerShell replacement
+  token for visual emphasis and the bounded current-line prefix needed for
+  alignment only; v1 through v3 remain compatible. Fish 4's
+  duplicate same-row prompt mark no longer invalidates the managed session
+  between `sync` and the first result, which had suppressed Fish's pager and
+  then silently rejected Kettle's replacement card.
+  Fish's stock Ctrl-L remains untouched, and a redraw that moves the prompt
+  without starting a command now preserves the current managed session while
+  allowing shells that publish a fresh sync to replace it. Narrow 20-column
+  panes remain eligible, and a clamped card no longer paints an orphan divider
+  after its description lane disappears. Path-like labels and pane titles keep
+  the separator before the leaf when shortened, avoiding forms such as
+  `…lib.rs`.
   Automatic bindings stay off inside tmux/screen. Mode changes apply to new
   shells so a live wrapper never loses its visible UI.
 - **Application windows can use native background material behind translucent
   terminal content.** Set `background-opacity` below `1.0` and
   `window-blur = true`.
   macOS follows Reduce Transparency changes immediately, Windows requests its
-  system backdrop, and supported Linux compositors receive a blur hint.
-  Unsupported systems keep ordinary alpha transparency.
+  system backdrop, and Linux enables blur only when Wayland advertises KWin's
+  blur protocol. Unsupported Linux sessions clamp the live scene to 99%
+  opacity so text remains readable without changing screenshots or saved
+  config.
 
 ### Fixed
 
-- **macOS translucent windows could leave the native titlebar completely
-  clear.** With blur enabled, the AppKit material now fills the complete native
-  frame instead of stopping at the terminal content view. Plain alpha without
-  blur uses AppKit's standard titlebar backdrop. Borderless windows retain
-  sharp alpha transparency because placing the native effect in their view
-  hierarchy covers the Metal surface. Fully opaque render surfaces do not show
-  titlebar-only material, and live opacity edits keep the window's creation-time
-  surface decision until a new window opens. The renderer and pointer geometry
-  remain below the native controls.
+- **Unsupported Linux blur could remain as transparent as the configured
+  background.** The fallback clear was 99% opaque, but the pane-base pass used
+  replace blending and wrote the configured alpha over it. Live pane bases now
+  receive the same floor while screenshots retain the requested alpha.
+
+- **Native titlebars could expose the desktop as a fully clear strip.** macOS
+  now keeps material below an opaque AppKit caption that follows the selected
+  light or dark appearance. Windows sets a palette-matched DWM caption and
+  contrast-checked text color. Renderer and pointer geometry remain below
+  native controls.
+- **The first PowerShell completion card could stay hidden after a focus
+  change.** The next Tab now reconciles an in-flight initial sync with managed
+  key counts while rejecting older pre-focus replies. A bare explicit
+  `pwsh[.exe]` or `powershell[.exe]` also receives automatic integration;
+  commands with arguments and wrappers remain literal. DEC focus reports no
+  longer consume the first managed completion request, and a transient startup
+  resize now rebases a single-row active prompt instead of discarding the row
+  anchor the detached card needs. Prompt-input marks hide the previous card
+  without retiring a completion response still crossing the PTY.
+- **The application icon had competing rounded shapes and stale theme colors.**
+  Every platform now uses the two-stroke `>_` identity. macOS gets adaptive,
+  exactly inverted light/dark Icon Composer artwork with a parallel inset;
+  Windows and X11 update the live icon when Kettle's theme changes.
 - **Completion replies could outlive the command that requested them.** Any
   unrelated input now disarms publication before it reaches the PTY. Malformed
   private metadata has bounded recovery, unsafe rows no longer hide safe
@@ -62,11 +95,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   replacement and quoting semantics, including expandable `~user` results;
   ordinary unique results still receive their trailing space, while native
   no-space continuations remain open. Leading-dash candidates such as `--help`
-  are treated as completion data rather than abbreviation options. An
+  are treated as completion data rather than abbreviation or `string` options.
+  A page that reaches the private-message byte cap is re-anchored at its
+  selected row, and omitted unsafe labels keep their structural position, so
+  the card cannot drift from the candidate Fish inserted. An
   ambiguous first Tab does not edit a common prefix into the command line. A
   PowerShell provider error also clears the detached state instead of reviving
-  PSReadLine's inline list. Bash preserves complete UTF-8 labels, and
-  structurally valid Kitty Tab forms refresh the card. The terminal parser and
+  PSReadLine's inline list. PowerShell candidates with multiline tooltips keep
+  their safe labels and selection while the unsafe optional description is
+  discarded; previously the card could highlight a different command from the
+  one PSReadLine inserted.
+  Unsafe optional v4 token/prefix hints now degrade without hiding a safe page.
+  PowerShell rejects oversized input prefixes and replacement tokens before
+  grapheme indexing, so cycling cannot repeatedly scan a pasted multi-megabyte
+  editor token merely to produce a bounded visual hint.
+  A remote text-and-Tab batch also avoids a stale pre-typing cursor anchor.
+  The cursor and prefix that position the card now remain one stable pair when
+  Ctrl-L, focus loss, a shell clear, a pointer dismissal, or the grace timeout
+  hides the list. Reopening the same completion cycle therefore stays aligned
+  to the original editable command instead of jumping to a cursor moved by the
+  selected candidate; actual input or a new prefix still replaces the pair.
+  Bash preserves complete UTF-8 labels, and structurally valid Kitty Tab forms
+  refresh the card. The terminal parser and
   raw-output filter now resume public output at the same bounded recovery
   boundary for malformed or oversized private metadata, including after a
   stray escape.
