@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **Native window material is now the cross-platform default.** New macOS and
+  Windows windows use 86% background opacity with native blur. Linux defaults
+  to 99% opacity whether compositor blur is available or not; supported Linux
+  compositors also receive a blur hint, while unsupported sessions retain the
+  existing 99% live-opacity safety floor for explicit lower values.
+  Set `background-opacity = 1.0` and `window-blur = false` to restore a fully
+  opaque window.
+
 ## [3.1.0] — 2026-08-17
 
 ### Added

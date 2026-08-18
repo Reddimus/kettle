@@ -58,6 +58,14 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+/// Default terminal background opacity for the current target.
+///
+/// Linux stays nearly opaque whether native compositor blur is available or
+/// not. macOS and Windows use a more visible native material treatment.
+#[cfg(target_os = "linux")]
+pub const DEFAULT_BACKGROUND_OPACITY: f32 = 0.99;
+#[cfg(not(target_os = "linux"))]
+pub const DEFAULT_BACKGROUND_OPACITY: f32 = 0.86;
 pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
 
 /// Startup window geometry is specified in terminal cells, not pixels. Bounds
@@ -2647,12 +2655,11 @@ impl Default for Config {
             scrollback_bytes: DEFAULT_SCROLLBACK_BYTES,
             padding_x: 8.0,
             padding_y: 8.0,
-            background_opacity: 1.0,
-            // Opt-in. Blur needs an alpha-capable surface, costs battery, and
-            // on a compositor with no blur protocol (X11) it would only make
-            // the window translucent. An existing install keeps its opaque
-            // window until the material is explicitly asked for.
-            window_blur: false,
+            // Native material is the product default. Linux stays at 99%
+            // whether compositor blur is available or not; the live floor
+            // still protects explicit lower values on unsupported sessions.
+            background_opacity: DEFAULT_BACKGROUND_OPACITY,
+            window_blur: true,
             completion_overlay: CompletionOverlayMode::Auto,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
@@ -7923,18 +7930,28 @@ cell-height = 1.2\n";
     }
 
     #[test]
-    fn completion_and_window_material_are_explicit_and_round_trip() {
+    fn completion_and_window_material_defaults_and_overrides_round_trip() {
         let defaults = Config::default();
         assert_eq!(defaults.completion_overlay, CompletionOverlayMode::Auto);
-        assert!(!defaults.window_blur, "native material is opt-in");
-        assert_eq!(defaults.background_opacity, 1.0, "the default stays opaque");
+        assert!(
+            defaults.window_blur,
+            "native material is enabled by default"
+        );
+        assert_eq!(defaults.background_opacity, DEFAULT_BACKGROUND_OPACITY);
+        #[cfg(target_os = "linux")]
+        assert_eq!(defaults.background_opacity, 0.99);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            defaults.background_opacity, 0.86,
+            "native material remains visible by default"
+        );
 
         let configured = Config::parse_text(
-            "completion-overlay = off\nwindow-blur = on\nbackground-opacity = 0.72\n",
+            "completion-overlay = off\nwindow-blur = off\nbackground-opacity = 1.0\n",
         );
         assert_eq!(configured.completion_overlay, CompletionOverlayMode::Off);
-        assert!(configured.window_blur);
-        assert_eq!(configured.background_opacity, 0.72);
+        assert!(!configured.window_blur);
+        assert_eq!(configured.background_opacity, 1.0);
         assert!(
             Config::detect_malformed_values("completion-overlay = maybe\nwindow-blur = perhaps\n")
                 .len()
