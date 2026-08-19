@@ -7255,10 +7255,197 @@ def screen_text(screen: Dict[str, object]) -> str:
     return str(screen.get("text", screen.get("screen", "")))
 
 
+def wrapped_literal_pattern(value: str) -> str:
+    """A literal token with terminal line-wrap whitespace allowed anywhere."""
+    return r"\s*".join(re.escape(character) for character in value)
+
+
+MANAGED_PASTE_PATH_RE = re.compile(
+    r"(?is)(?:[a-z]\s*:\s*[\\/]\s*|/)"
+    r"(?:[^'\"\r\n]|[\r\n]\s*)*?"
+    + wrapped_literal_pattern("kettle-paste-")
+    + r"\s*\d(?:\s*\d)*\s*-\s*\d(?:\s*\d)*"
+    + r"\s*[\\/]\s*\d(?:\s*\d){3}\s*\.\s*p\s*n\s*g"
+)
+
+
+def redact_managed_paste_paths(value: object) -> object:
+    """Remove private bitmap paths before a live screen enters diagnostics."""
+    if isinstance(value, str):
+        return MANAGED_PASTE_PATH_RE.sub("<managed-image-path>", value)
+    if isinstance(value, list):
+        return [redact_managed_paste_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_managed_paste_paths(item) for key, item in value.items()}
+    return value
+
+
+def contains_managed_paste_marker(value: object) -> bool:
+    """Find the managed marker in raw strings before JSON escapes wraps."""
+    if isinstance(value, str):
+        return "kettle-paste-" in re.sub(r"\s+", "", value)
+    if isinstance(value, list):
+        return any(contains_managed_paste_marker(item) for item in value)
+    if isinstance(value, dict):
+        return any(contains_managed_paste_marker(item) for item in value.values())
+    return False
+
+
+def shell_clear_line_keys(system: str) -> List[str]:
+    """Portable default binding for clearing an unsubmitted shell line."""
+    return ["escape"] if system == "Windows" else ["ctrl+u"]
+
+
+def write_image_receipt_fixture(path: Path, width: int = 640, height: int = 360) -> None:
+    """Write a dependency-free RGBA PNG with visually distinct regions."""
+
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        body = kind + payload
+        return struct.pack(">I", len(payload)) + body + struct.pack(">I", zlib.crc32(body))
+
+    rows = bytearray()
+    colors = ((137, 180, 250, 255), (166, 227, 161, 255), (245, 194, 231, 255))
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            band = min(2, x * 3 // width)
+            r, g, b, a = colors[band]
+            if (x // 32 + y // 32) % 2:
+                r, g, b = max(0, r - 28), max(0, g - 28), max(0, b - 28)
+            rows.extend((r, g, b, a))
+    data = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(bytes(rows), level=6))
+        + chunk(b"IEND", b"")
+    )
+    path.write_bytes(data)
+
+
+def set_bitmap_clipboard(path: Path) -> Optional[subprocess.Popen]:
+    """Replace the desktop clipboard with one PNG bitmap for an explicit smoke."""
+    system = platform.system()
+    if system == "Darwin":
+        require_cmd("osascript")
+        cp = run(
+            [
+                "osascript",
+                "-e",
+                "on run argv",
+                "-e",
+                "set imageFile to POSIX file (item 1 of argv)",
+                "-e",
+                "set the clipboard to (read imageFile as «class PNGf»)",
+                "-e",
+                "end run",
+                str(path),
+            ]
+        )
+    elif system == "Windows":
+        env = os.environ.copy()
+        env["KETTLE_RECEIPT_FIXTURE"] = str(path)
+        cp = run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-STA",
+                "-Command",
+                (
+                    "Add-Type -AssemblyName System.Drawing; "
+                    "Add-Type -AssemblyName System.Windows.Forms; "
+                    "$image=[System.Drawing.Image]::FromFile($env:KETTLE_RECEIPT_FIXTURE); "
+                    "try {[System.Windows.Forms.Clipboard]::SetImage($image)} "
+                    "finally {$image.Dispose()}"
+                ),
+            ],
+            env=env,
+        )
+    elif os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        # Wayland clients own clipboard data and serve it on demand; no server
+        # stores the bytes for them. Keep one provider alive until Kettle reads
+        # the image, then --paste-once makes it exit. The caller retains the
+        # process as a bounded cleanup fallback.
+        source = path.open("rb")
+        try:
+            owner = subprocess.Popen(
+                [
+                    "wl-copy",
+                    "--foreground",
+                    "--paste-once",
+                    "--type",
+                    "image/png",
+                ],
+                stdin=source,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+        finally:
+            source.close()
+        time.sleep(0.1)
+        if owner.poll() not in (None, 0):
+            stderr = (owner.stderr.read() if owner.stderr else b"").decode(
+                "utf-8", errors="replace"
+            )
+            raise SystemExit(
+                "image-paste-receipt smoke: Wayland clipboard provider failed:\n"
+                + stderr
+            )
+        return owner
+    elif os.environ.get("DISPLAY") and shutil.which("xclip"):
+        cp = run(
+            [
+                "xclip",
+                "-selection",
+                "clipboard",
+                "-target",
+                "image/png",
+                "-in",
+                str(path),
+            ]
+        )
+    else:
+        raise SystemExit(
+            "image-paste-receipt smoke: no bitmap clipboard writer; install "
+            "wl-clipboard on Wayland or xclip on X11"
+        )
+    if cp.returncode != 0:
+        raise SystemExit(
+            "image-paste-receipt smoke: could not set bitmap clipboard:\n"
+            f"{cp.stderr}\n{cp.stdout}"
+        )
+    return None
+
+
+def wait_for_image_receipt(
+    live: LiveKettle, *, expanded: Optional[bool], timeout_s: float = 8.0
+) -> Tuple[Dict[str, object], Dict[str, object]]:
+    deadline = time.monotonic() + timeout_s
+    last: Dict[str, object] = {}
+    while time.monotonic() < deadline:
+        geometry = live.json_ctl("ui_geometry")
+        value = geometry.get("image_paste_receipt")
+        if isinstance(value, dict) and (
+            expanded is None or value.get("expanded") is expanded
+        ):
+            return geometry, value
+        last = geometry
+        time.sleep(0.05)
+    raise SystemExit(
+        "image-paste-receipt smoke: timed out waiting for receipt "
+        f"expanded={expanded}: {last.get('image_paste_receipt')!r}"
+    )
+
+
 def live_shell_command(live: LiveKettle, command: str, marker: str, timeout_ms: int = 10000) -> None:
     live.ctl("send_text", params={"text": command})
     live.ctl("send_keys", params={"keys": ["enter"]})
     live.wait_for_text(marker, timeout_ms=timeout_ms, quiet_ms=250)
+
+
+def focus_live_kettle_window(live: LiveKettle) -> None:
+    """Ask the desktop to activate the exact Kettle process under test."""
+    live.json_ctl("perform_action", {"action": "focus_window"})
 
 
 def wait_for_search_result(
@@ -7614,6 +7801,29 @@ def live_helper_selftest() -> None:
     assert not is_parallels_windows_arm("Windows", "AMD64", "Parallels")
     assert not is_parallels_windows_arm("Windows", "ARM64", "Microsoft Corporation")
     assert not is_parallels_windows_arm("Linux", "aarch64", "Parallels")
+
+    with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
+        fixture = Path(temp) / "fixture.png"
+        write_image_receipt_fixture(fixture, 64, 36)
+        width, height, rows = read_rgba_png(fixture)
+        assert (width, height, len(rows)) == (64, 36, 36)
+
+    redacted = redact_managed_paste_paths(
+        {
+            "unix": "'/var/folders/private/T/kettle\n-paste-123-456/0001.png'",
+            "wrapped_unix": "'/private/T/kettle-pa\nste-123-456/0001.png'",
+            "windows": "C:\\Users\\private\\AppData\\Local\\kettle-past\ne-123-456\\0001.png",
+            "keep": "ordinary terminal output",
+        }
+    )
+    assert isinstance(redacted, dict)
+    serialized = json.dumps(redacted)
+    assert not contains_managed_paste_marker(redacted)
+    assert "private" not in serialized
+    assert redacted["keep"] == "ordinary terminal output"
+    assert shell_clear_line_keys("Windows") == ["escape"]
+    assert shell_clear_line_keys("Darwin") == ["ctrl+u"]
+    assert shell_clear_line_keys("Linux") == ["ctrl+u"]
 
     hidden_error = (
         "kettle ctl: server error [busy]: " + HIDDEN_WINDOW_SCREENSHOT_MESSAGE + "\n"
@@ -13860,6 +14070,194 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_image_paste_receipt(kettle: str, root: Path) -> Path:
+    """Drive bitmap clipboard paste through the live UI and capture its states."""
+    out = root / f"image-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "paste-images = on",
+                "paste-image-preview = on",
+                "window-width = 92",
+                "window-height = 28",
+                "window-position-x = 80",
+                "window-position-y = 80",
+            ]
+        )
+        + "\n"
+    )
+    fixture = out / "clipboard-fixture.png"
+    write_image_receipt_fixture(fixture)
+    clipboard_owner = set_bitmap_clipboard(fixture)
+
+    states: List[Dict[str, object]] = []
+    shell_args = (
+        ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+        if platform.system() == "Windows"
+        else ["-e", "bash", "--noprofile", "--norc"]
+    )
+    live_owner = LiveKettle(kettle, cfg, out / "kettle.log", extra_args=shell_args)
+    live: Optional[LiveKettle] = None
+    try:
+        live = live_owner.__enter__()
+        live.wait_for_text(
+            "PS " if platform.system() == "Windows" else "bash-", timeout_ms=12000
+        )
+        resized = live.json_ctl("resize_window", {"width": 900, "height": 600})
+        applied = resized.get("applied", {})
+        expected_surface = (int(applied.get("width", 900)), int(applied.get("height", 600)))
+        resize_deadline = time.monotonic() + 8.0
+        while time.monotonic() < resize_deadline:
+            surface = live.json_ctl("ui_geometry").get("surface", {})
+            if (surface.get("width"), surface.get("height")) == expected_surface:
+                break
+            time.sleep(0.05)
+        else:
+            raise SystemExit(
+                "image-paste-receipt smoke: window did not settle at "
+                f"{expected_surface[0]}x{expected_surface[1]}"
+            )
+        geometry = live.json_ctl("ui_geometry")
+        if geometry.get("window_focused") is not True:
+            focus_live_kettle_window(live)
+            focus_deadline = time.monotonic() + 5.0
+            while time.monotonic() < focus_deadline:
+                if live.json_ctl("ui_geometry").get("window_focused") is True:
+                    break
+                time.sleep(0.05)
+            else:
+                live.screenshot(out / "focus-failed-window.png")
+                raise SystemExit(
+                    "image-paste-receipt smoke: compositor refused to focus the live window"
+                )
+        ready = "KETTLE_IMAGE_RECEIPT_READY"
+        ready_command = (
+            f"Write-Output {ready}"
+            if platform.system() == "Windows"
+            else f"printf '%s\\n' {ready}"
+        )
+        live_shell_command(live, ready_command, ready)
+        dispatched = live.json_ctl("perform_action", {"action": "paste"})
+        (out / "paste.dispatch.json").write_text(json.dumps(dispatched, indent=2) + "\n")
+
+        expanded_geo, expanded = wait_for_image_receipt(live, expanded=True)
+        if (expanded.get("original_width"), expanded.get("original_height")) != (640, 360):
+            raise SystemExit(
+                "image-paste-receipt smoke: receipt lost source dimensions: "
+                f"{expanded!r}"
+            )
+        if any(private in json.dumps(expanded) for private in ("kettle-paste-", ".png")):
+            raise SystemExit(
+                "image-paste-receipt smoke: ui_geometry exposed the retained path"
+            )
+
+        screen = live.json_ctl("read_screen")
+        if not contains_managed_paste_marker(screen):
+            raise SystemExit(
+                "image-paste-receipt smoke: pane did not receive the managed image path"
+            )
+        redacted_screen = redact_managed_paste_paths(screen)
+        if contains_managed_paste_marker(redacted_screen):
+            raise SystemExit(
+                "image-paste-receipt smoke: managed path survived diagnostics redaction"
+            )
+
+        # The receipt owns its own lifetime, so clear the shell line after the
+        # in-memory delivery assertion. Screenshots can then demonstrate the
+        # card without persisting the user's private managed path in pixels.
+        live.ctl("send_keys", params={"keys": shell_clear_line_keys(platform.system())})
+        clear_deadline = time.monotonic() + 3.0
+        while time.monotonic() < clear_deadline:
+            if not contains_managed_paste_marker(live.json_ctl("read_screen")):
+                break
+            time.sleep(0.05)
+        else:
+            raise SystemExit(
+                "image-paste-receipt smoke: managed path remained visible after clearing the shell line"
+            )
+
+        (out / "expanded.geometry.json").write_text(
+            json.dumps(expanded_geo, indent=2) + "\n"
+        )
+        wait_for_image_receipt(live, expanded=True)
+        expanded_shot = out / "expanded.png"
+        live.screenshot(expanded_shot)
+        states.append({"label": "expanded", "screenshot": str(expanded_shot)})
+
+        compact_geo, compact = wait_for_image_receipt(live, expanded=False)
+        (out / "compact.geometry.json").write_text(json.dumps(compact_geo, indent=2) + "\n")
+        compact_shot = out / "compact.png"
+        live.screenshot(compact_shot)
+        states.append({"label": "compact", "screenshot": str(compact_shot)})
+
+        rect = compact.get("rect")
+        if not isinstance(rect, dict):
+            raise SystemExit("image-paste-receipt smoke: compact receipt omitted its rectangle")
+        live.ctl(
+            "send_mouse",
+            params={
+                "event": "move",
+                "x": float(rect["x"]) + float(rect["width"]) / 2.0,
+                "y": float(rect["y"]) + float(rect["height"]) / 2.0,
+            },
+        )
+        hovered_geo, hovered = wait_for_image_receipt(live, expanded=True)
+        (out / "hovered.geometry.json").write_text(json.dumps(hovered_geo, indent=2) + "\n")
+        hovered_shot = out / "hovered.png"
+        live.screenshot(hovered_shot)
+        states.append({"label": "hovered", "screenshot": str(hovered_shot)})
+
+        expanded_pixels = read_rgba_png(expanded_shot)
+        compact_pixels = read_rgba_png(compact_shot)
+        hovered_pixels = read_rgba_png(hovered_shot)
+        if rgba_difference_count(expanded_pixels, compact_pixels) < 500:
+            raise SystemExit(
+                "image-paste-receipt smoke: expanded and compact frames are visually unchanged"
+            )
+        if hovered.get("image_rect") is None:
+            raise SystemExit("image-paste-receipt smoke: hover did not restore the thumbnail")
+        if rgba_difference_count(hovered_pixels, compact_pixels) < 500:
+            raise SystemExit(
+                "image-paste-receipt smoke: hovered and compact frames are visually unchanged"
+            )
+
+        serialized_screen = json.dumps(redacted_screen, indent=2)
+        (out / "screen.json").write_text(serialized_screen + "\n")
+    finally:
+        if live is not None:
+            live_owner.__exit__(*sys.exc_info())
+        if clipboard_owner is not None and clipboard_owner.poll() is None:
+            clipboard_owner.terminate()
+            try:
+                clipboard_owner.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                clipboard_owner.kill()
+                clipboard_owner.wait(timeout=2)
+
+    (out / "analysis.json").write_text(
+        json.dumps(
+            {
+                "platform": platform.platform(),
+                "clipboard_replaced": True,
+                "source_dimensions": [640, 360],
+                "states": states,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return out
+
+
 def exercise_hovered_pane_wheel(live: LiveKettle, out: Path) -> Dict[str, int]:
     """Prove terminal wheel routing follows hover without moving focus."""
     split_geo = live.json_ctl("ui_geometry")
@@ -15479,6 +15877,7 @@ def main() -> int:
             "underline",
             "agent-tui",
             "search-history",
+            "image-paste-receipt",
             "interaction",
             "hover-wheel",
             "window-close-isolation",
@@ -15609,6 +16008,9 @@ def main() -> int:
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
+    if args.case == "image-paste-receipt":
+        out = run_image_paste_receipt(args.kettle, root)
+        print(f"image-paste-receipt smoke: OK artifacts={out}")
     if args.case in ("interaction", "all"):
         out = run_interaction(args.kettle, root)
         print(f"interaction smoke: OK artifacts={out}")

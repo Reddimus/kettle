@@ -925,6 +925,17 @@ interaction-smoke:
 interaction-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release interaction
 
+# Replace the desktop clipboard with a generated bitmap, drive the real Paste
+# action, and capture expanded, compact, and hover-expanded receipt frames.
+# Artifacts land under target/diagnostics/image-paste-receipt-*.
+[unix]
+image-paste-receipt-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
+
+[windows]
+image-paste-receipt-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
+
 # Focus only the cross-pane hover-wheel contract and require no surface-copy
 # support. Useful on virtual GLES adapters that render normally but cannot copy
 # a live swapchain image into the screenshot pipeline.

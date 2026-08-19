@@ -94,6 +94,10 @@ impl PaneInputResult {
 pub(crate) struct PaneInputDelivery {
     pub result: PaneInputResult,
     pub accepted: bool,
+    /// Whether the pane that initiated an image-path paste accepted its own
+    /// bytes. A broadcast can succeed elsewhere while that pane rejects, which
+    /// must not produce contradictory success chrome over the rejection.
+    pub receipt_accepted: bool,
 }
 
 impl PaneInputDelivery {
@@ -101,12 +105,26 @@ impl PaneInputDelivery {
         Self {
             result: PaneInputResult::Queued,
             accepted: false,
+            receipt_accepted: false,
         }
     }
 
     fn record(&mut self, result: PaneInputResult) {
         self.accepted |= result.is_queued();
         self.result = self.result.merge(result);
+    }
+
+    fn record_receipt_target(&mut self, result: PaneInputResult) {
+        self.receipt_accepted |= result.is_queued();
+        self.record(result);
+    }
+
+    pub(crate) fn merge(self, other: Self) -> Self {
+        Self {
+            result: self.result.merge(other.result),
+            accepted: self.accepted || other.accepted,
+            receipt_accepted: self.receipt_accepted || other.receipt_accepted,
+        }
     }
 }
 
@@ -3685,14 +3703,15 @@ impl Mux {
         self.paste_into(ids, text)
     }
 
-    pub fn broadcast_paste_paths(
+    pub(crate) fn broadcast_paste_paths_delivery(
         &mut self,
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> PaneInputResult {
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         let ids = self.broadcast_target_ids();
-        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes)
+        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, receipt_pane)
     }
 
     pub fn broadcast_paste_paths_within_limit(
@@ -3709,15 +3728,15 @@ impl Mux {
         )
     }
 
-    pub fn broadcast_paste_paths_foreign(
+    pub(crate) fn broadcast_paste_paths_foreign_delivery(
         &mut self,
         scope: &BroadcastScope,
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> PaneInputResult {
+    ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
-        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes)
+        self.paste_paths_into(ids, paths, trailing_space, max_text_bytes, None)
     }
 
     pub fn broadcast_paste_paths_foreign_within_limit(
@@ -3825,7 +3844,8 @@ impl Mux {
         paths: &[std::path::PathBuf],
         trailing_space: bool,
         max_text_bytes: usize,
-    ) -> PaneInputResult {
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         let targets = ids
             .iter()
             .filter_map(|id| self.panes.get(id).map(|pane| (*id, pane.argv.as_slice())));
@@ -3835,20 +3855,24 @@ impl Mux {
                 !pane.read_only && !pane.pty_input_failed() && text.len() > max_text_bytes
             })
         }) {
-            return PaneInputResult::Oversize;
+            return PaneInputDelivery {
+                result: PaneInputResult::Oversize,
+                accepted: false,
+                receipt_accepted: false,
+            };
         }
 
-        let mut result = PaneInputResult::Queued;
+        let mut delivery = PaneInputDelivery::new();
         for (id, text) in formatted {
             let Some(pane) = self.panes.get_mut(&id) else {
                 continue;
             };
             if pane.pty_input_failed() {
-                result = result.merge(PaneInputResult::Failed);
+                delivery.record(PaneInputResult::Failed);
                 continue;
             }
             if pane.read_only {
-                result = result.merge(PaneInputResult::ReadOnly);
+                delivery.record(PaneInputResult::ReadOnly);
                 continue;
             }
             let bracketed = pane
@@ -3859,9 +3883,14 @@ impl Mux {
                 .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
                 .unwrap_or(false);
             let bytes = crate::input::paste_payload(&text, bracketed);
-            result = result.merge(pane.feed_input(&bytes));
+            let result = pane.feed_input(&bytes);
+            if receipt_pane == Some(id) {
+                delivery.record_receipt_target(result);
+            } else {
+                delivery.record(result);
+            }
         }
-        result
+        delivery
     }
 
     fn paste_paths_within_limit(

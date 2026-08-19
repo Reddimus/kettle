@@ -729,6 +729,18 @@ discipline here.
   screenshot bytes still land only beneath that descriptor, then replaces a
   saved pathname while retaining the original handle and proves
   descriptor-relative cleanup leaves the replacement untouched.
+  Receipt regressions derive a bounded aspect-preserving thumbnail only from
+  the exact retained image path and require the initiating pane to accept its
+  own paste before showing it. A broadcast accepted only elsewhere cannot put
+  success chrome over a rejecting initiating pane. Geometry stays inside the
+  owning pane and left of its scrollbar, avoids a completion card, budgets the
+  real chrome line height, degrades to a compact chip with a local-path label in
+  short remote panes, and disappears when even that chip cannot fit. Timer
+  tests pin the four-second expansion, 30-second lifetime, and hover pause;
+  paint, pointer, and
+  accessibility all consume the same geometry function. Live UI diagnostics
+  expose the safe geometry and state but not the retained path or thumbnail
+  pixels.
   Crash sweeping is dispatched off the startup thread and independently capped
   by elapsed time, stale attempts, successful removals, root entries, and
   per-session children.
@@ -1804,6 +1816,7 @@ These need a real display and are run by hand (or on real hardware):
   - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
     session run
     `just live-render-smoke`, `just interaction-smoke`, `just hover-wheel-smoke`,
+    `just image-paste-receipt-smoke`,
     `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
@@ -1852,6 +1865,15 @@ These need a real display and are run by hand (or on real hardware):
     `scripts/check-live-ui-smoke.py`; WSL uses the Unix shell scripts. Run those
     platform-local recipes before changing renderer defaults or tab/underline
     interaction code.
+
+    The image-paste receipt run intentionally replaces the desktop clipboard
+    with a generated 640 by 360 bitmap. It requires `wl-copy` on Wayland or
+    `xclip` on X11; macOS and Windows use native clipboard APIs. The run proves
+    the exact source dimensions reach the receipt, the pane receives a managed
+    temporary path, expanded and compact frames differ, hover restores the
+    thumbnail, and `ui_geometry` exposes neither that path nor image pixels.
+    The path is verified in memory, redacted from `screen.json`, and cleared
+    from the live shell line before any receipt screenshot is captured.
 
 Search release evidence is platform-scoped. Run the live interaction/search
 probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and

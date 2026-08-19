@@ -464,6 +464,101 @@ pub(crate) struct ImePreeditSession {
     pub(crate) generation: u64,
 }
 
+const IMAGE_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
+const IMAGE_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Window-local receipt for the exact private PNG whose path Kettle queued.
+/// Keeping the pane id here prevents a focus move from projecting the thumbnail
+/// over an unrelated split.
+pub(crate) struct ImagePasteReceiptState {
+    pub(crate) pane_id: u64,
+    pub(crate) path: std::path::PathBuf,
+    pub(crate) image: kettle_core::ImageData,
+    pub(crate) original_width: u32,
+    pub(crate) original_height: u32,
+    pub(crate) remote: bool,
+    /// Corner chosen when the receipt is created. Latching this keeps output
+    /// that moves the terminal cursor from making the card jump mid-life.
+    pub(crate) prefer_top: bool,
+    expanded_until: std::time::Instant,
+    expires_at: std::time::Instant,
+    hover_started: Option<std::time::Instant>,
+    collapsed: bool,
+}
+
+impl ImagePasteReceiptState {
+    pub(crate) fn new(
+        pane_id: u64,
+        path: std::path::PathBuf,
+        preview: crate::paste_image::PastedImagePreview,
+        remote: bool,
+        prefer_top: bool,
+        now: std::time::Instant,
+    ) -> Self {
+        Self {
+            pane_id,
+            path,
+            image: preview.image,
+            original_width: preview.original_width,
+            original_height: preview.original_height,
+            remote,
+            prefer_top,
+            expanded_until: now + IMAGE_RECEIPT_EXPANDED,
+            expires_at: now + IMAGE_RECEIPT_LIFETIME,
+            hover_started: None,
+            collapsed: false,
+        }
+    }
+
+    pub(crate) fn expanded(&self, now: std::time::Instant) -> bool {
+        self.hover_started.is_some() || (!self.collapsed && now < self.expanded_until)
+    }
+
+    pub(crate) fn live(&self, now: std::time::Instant) -> bool {
+        self.hover_started.is_some() || now < self.expires_at
+    }
+
+    pub(crate) fn set_hover(&mut self, hovered: bool, now: std::time::Instant) -> bool {
+        match (self.hover_started, hovered) {
+            (None, true) => {
+                self.hover_started = Some(now);
+                true
+            }
+            (Some(started), false) => {
+                let paused = now.saturating_duration_since(started);
+                self.expanded_until += paused;
+                self.expires_at += paused;
+                self.hover_started = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn next_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        if self.hover_started.is_some() {
+            return None;
+        }
+        [
+            (!self.collapsed).then_some(self.expanded_until),
+            Some(self.expires_at),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|deadline| *deadline > now)
+        .min()
+    }
+
+    pub(crate) fn mark_collapsed_if_due(&mut self, now: std::time::Instant) -> bool {
+        if self.hover_started.is_none() && !self.collapsed && now >= self.expanded_until {
+            self.collapsed = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API (C8) and used as the map key — never
@@ -484,6 +579,9 @@ pub(crate) struct WindowState {
     pub(crate) accessibility_key: Option<u64>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
     pub(crate) accessibility_pending: bool,
+    /// Short-lived thumbnail for a Kettle-created clipboard bitmap. It is
+    /// projected only while its owning pane remains focused and visible.
+    pub(crate) image_paste_receipt: Option<ImagePasteReceiptState>,
     /// OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
@@ -832,6 +930,7 @@ impl WindowState {
             accessibility_key: None,
             accessibility_updated_at: None,
             accessibility_pending: false,
+            image_paste_receipt: None,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
             mux,
@@ -931,6 +1030,38 @@ impl WindowState {
 mod tests {
     use super::*;
     use winit::keyboard::{KeyCode, PhysicalKey};
+
+    #[test]
+    fn image_receipt_collapses_expires_and_pauses_while_hovered() {
+        let now = std::time::Instant::now();
+        let preview = crate::paste_image::PastedImagePreview {
+            image: kettle_core::ImageData::solid(16, 8, [10, 20, 30, 255]).unwrap(),
+            original_width: 1600,
+            original_height: 800,
+        };
+        let mut receipt = ImagePasteReceiptState::new(
+            7,
+            std::path::PathBuf::from("managed.png"),
+            preview,
+            false,
+            true,
+            now,
+        );
+        assert!(receipt.expanded(now));
+        assert!(!receipt.mark_collapsed_if_due(now + std::time::Duration::from_millis(3_999)));
+        assert!(receipt.mark_collapsed_if_due(now + std::time::Duration::from_secs(4)));
+        assert!(!receipt.expanded(now + std::time::Duration::from_secs(4)));
+
+        assert!(receipt.set_hover(true, now + std::time::Duration::from_secs(10)));
+        assert!(receipt.expanded(now + std::time::Duration::from_secs(35)));
+        assert!(receipt.live(now + std::time::Duration::from_secs(35)));
+        assert!(receipt.set_hover(false, now + std::time::Duration::from_secs(20)));
+        assert!(
+            receipt.live(now + std::time::Duration::from_secs(39)),
+            "ten hovered seconds extend the 30-second lifetime"
+        );
+        assert!(!receipt.live(now + std::time::Duration::from_secs(40)));
+    }
 
     #[test]
     fn output_wake_stays_latched_through_defer_queue_and_one_restore_frame() {

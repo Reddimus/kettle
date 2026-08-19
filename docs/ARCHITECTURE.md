@@ -141,6 +141,21 @@ beneath the sticky or private scratch root. The remaining Unix check/remove
 window is limited to the same effective UID; sticky/private parent policy
 prevents a different principal from replacing the session name.
 
+The UI keeps a separate, bounded renderer copy beside each retained PNG: at
+most 256 by 160 RGBA pixels, scaled once when the paste file is created. A
+receipt can be constructed only by resolving the exact path back through that
+retained-image table, and it is shown only after the initiating pane accepts
+its own path bytes. A broadcast accepted only by another pane cannot put
+success chrome over an initiating pane that rejected the paste. File-list
+paste, ordinary drag and drop, terminal output, and arbitrary path text never
+enter that one-shot lookup. Cancelling or rejecting the bitmap paste discards
+its preview, so reusing the managed path later cannot resurrect a thumbnail.
+Receipt state is window-local and pane-pinned; moving focus never projects it
+over another split. Paint, pointer blocking, and accessibility all use the same
+geometry result, while the image has its own single-instance GPU pipeline so
+terminal glyphs cannot cover the thumbnail and the thumbnail cannot cover its
+labels.
+
 Crash cleanup recognizes only
 `kettle-paste-<canonical-pid>-<canonical-u128-nonce>` directories and canonical
 zero-padded `0001.png` through `0064.png` children. Cleanup runs on a background
@@ -1022,7 +1037,7 @@ shaping sees the complete family. Headless screenshot paths still load the full
 family because they render a single static image and do not benefit from a later
 warm-up frame.
 
-Each frame the renderer issues nine passes (grid mode; eight in legacy) against
+Each frame the renderer issues ten passes (grid mode; nine in legacy) against
 the same wgpu render-pass encoder, in this order. The order matters: a quad pass
 paints over text drawn before it, and text drawn after a quad covers
 that quad's pixels.
@@ -1036,8 +1051,9 @@ flowchart LR
     glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
     text --> overlay["5. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
     overlay --> menuq["6. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> menut["7. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
-    menut --> curg["8. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
+    menuq --> receipt["7. image_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
+    receipt --> menut["8. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
+    menut --> curg["9. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
 
 **Pass 3 (v2.25.0) — cell-locked pane text.** In the default `text-renderer =
@@ -1102,13 +1118,13 @@ tab / field row / outside; `App::settings_mouse` dispatches that into the existi
 adjust). The Background settings page edits the image path through an inline text
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
-Steps 6–7 own the right-click context menu so its labels land **on
+Steps 6 and 8 own the right-click context menu so its labels land **on
 top of** the panel background. Splitting them out fixed the v1.3.0 /
 v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
 step 5 (`overlay_quads`), painting over the menu text that had
 already been rendered.
 
-Step 8 (v2.21.0) draws the inverted glyph **under a focused solid
+Step 9 (v2.21.0) draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad
 (step 1). Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
@@ -1116,7 +1132,7 @@ buffer byte-identical, so the **damage gate** can skip the expensive
 whole-viewport `text_renderer.prepare` (which re-encodes every visible
 glyph's vertices) and its paired `atlas.trim`: `build_pane` reports
 whether any row reshaped, and `prepare` runs only when a pane row
-changed, a chrome label changed, or a text overlay is open. The 6–8
+changed, a chrome label changed, or a text overlay is open. The 6–9
 passes are cheap no-ops while idle (empty/unchanged buffers). The
 `TextRenderer` instances share one `TextAtlas` and `Viewport` —
 glyphon batches glyphs by atlas, not by renderer, so each pass reuses
