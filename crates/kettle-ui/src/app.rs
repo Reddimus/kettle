@@ -7265,10 +7265,7 @@ impl App {
                 .map(|receipt| receipt.path.clone())
             && let Err(error) = open::that_detached(&path)
         {
-            log::warn!(
-                "could not open pasted-image preview {}: {error}",
-                path.display()
-            );
+            log::warn!("could not open a pasted-image preview: {error}");
         }
         true
     }
@@ -24404,10 +24401,7 @@ impl App {
                     .map(|receipt| receipt.path.clone())
                 && let Err(error) = open::that_detached(&path)
             {
-                log::warn!(
-                    "could not open pasted-image preview {}: {error}",
-                    path.display()
-                );
+                log::warn!("could not open a pasted-image preview: {error}");
             }
             return;
         }
