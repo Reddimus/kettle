@@ -1482,7 +1482,29 @@ pub struct ImagePasteReceiptGeometry {
     pub image_rect: Option<Rect4>,
     pub title_rect: Rect4,
     pub detail_rect: Option<Rect4>,
+    pub dismiss_rect: Rect4,
     pub compact: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImagePasteReceiptHit {
+    Open,
+    Dismiss,
+}
+
+impl ImagePasteReceiptGeometry {
+    pub fn hit_test(self, x: f32, y: f32) -> Option<ImagePasteReceiptHit> {
+        let contains = |rect: Rect4| {
+            x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
+        };
+        if contains(self.dismiss_rect) {
+            Some(ImagePasteReceiptHit::Dismiss)
+        } else if contains(self.rect) {
+            Some(ImagePasteReceiptHit::Open)
+        } else {
+            None
+        }
+    }
 }
 
 fn rects_overlap(a: Rect4, b: Rect4) -> bool {
@@ -1584,7 +1606,14 @@ pub fn image_paste_receipt_geometry(
             image_h,
         );
         let text_x = rect.0 + pad + image_box_w + pad;
-        let text_w = rect.0 + rect.2 - pad - text_x;
+        let dismiss_size = 24.0_f32.max(text_line_height * 1.5);
+        let dismiss_rect = (
+            rect.0 + rect.2 - pad - dismiss_size,
+            rect.1 + pad,
+            dismiss_size,
+            dismiss_size,
+        );
+        let text_w = (dismiss_rect.0 - cw * 0.5 - text_x).max(0.0);
         return Some(ImagePasteReceiptGeometry {
             rect,
             image_rect: Some(image_rect),
@@ -1595,6 +1624,7 @@ pub fn image_paste_receipt_geometry(
                 text_w,
                 text_line_height * detail_lines,
             )),
+            dismiss_rect,
             compact: false,
         });
     }
@@ -1609,16 +1639,24 @@ pub fn image_paste_receipt_geometry(
     } else {
         choose_corner(card_w, card_h)?.0
     };
+    let dismiss_size = 24.0_f32.min((card_h - 4.0).max(0.0));
+    let dismiss_rect = (
+        rect.0 + rect.2 - 2.0 - dismiss_size,
+        rect.1 + (card_h - dismiss_size) * 0.5,
+        dismiss_size,
+        dismiss_size,
+    );
     (card_w >= cw * 12.0).then_some(ImagePasteReceiptGeometry {
         rect,
         image_rect: None,
         title_rect: (
             rect.0 + cw,
             rect.1 + (card_h - text_line_height) * 0.5,
-            (card_w - cw * 2.0).max(cw),
+            (dismiss_rect.0 - cw * 0.5 - (rect.0 + cw)).max(cw),
             text_line_height,
         ),
         detail_rect: None,
+        dismiss_rect,
         compact: true,
     })
 }
@@ -2411,6 +2449,7 @@ pub struct Renderer {
     image_receipt_title_text: String,
     image_receipt_detail_buffer: TextBuffer,
     image_receipt_detail_text: String,
+    image_receipt_dismiss_buffer: TextBuffer,
     tabbar_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
@@ -4615,6 +4654,14 @@ impl Renderer {
         image_receipt_title_buffer.set_wrap(Wrap::None);
         let mut image_receipt_detail_buffer = TextBuffer::new(&mut font_system, metrics);
         image_receipt_detail_buffer.set_wrap(Wrap::None);
+        let mut image_receipt_dismiss_buffer = TextBuffer::new(&mut font_system, metrics);
+        image_receipt_dismiss_buffer.set_wrap(Wrap::None);
+        image_receipt_dismiss_buffer.set_text(
+            "×",
+            &Attrs::new().weight(Weight::BOLD),
+            Shaping::Advanced,
+            None,
+        );
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
         let (cell_w, cell_h) =
@@ -4749,6 +4796,7 @@ impl Renderer {
             image_receipt_title_text: String::new(),
             image_receipt_detail_buffer,
             image_receipt_detail_text: String::new(),
+            image_receipt_dismiss_buffer,
             tabbar_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
@@ -7346,6 +7394,12 @@ impl Renderer {
             self.image_receipt_title_buffer
                 .shape_until_scroll(&mut self.font_system, false);
 
+            self.image_receipt_dismiss_buffer.set_metrics(metrics);
+            self.image_receipt_dismiss_buffer
+                .set_size(Some(geometry.dismiss_rect.2), Some(geometry.dismiss_rect.3));
+            self.image_receipt_dismiss_buffer
+                .shape_until_scroll(&mut self.font_system, false);
+
             if let Some(detail_rect) = geometry.detail_rect {
                 self.image_receipt_detail_buffer.set_metrics(metrics);
                 self.image_receipt_detail_buffer
@@ -7512,6 +7566,24 @@ impl Renderer {
             menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
             menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
 
+            let dismiss = geometry.dismiss_rect;
+            menu_q.push(rect(
+                dismiss.0,
+                dismiss.1,
+                dismiss.2,
+                dismiss.3,
+                palette.selection_bg,
+                0.72,
+            ));
+            menu_q.push(rect(
+                dismiss.0,
+                dismiss.1,
+                dismiss.2,
+                1.0,
+                palette.border,
+                1.0,
+            ));
+
             if let Some(image_rect) = geometry.image_rect {
                 // A quiet matte keeps transparent screenshots legible and
                 // makes the thumbnail edge intentional on every theme.
@@ -7554,6 +7626,15 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
+            menu_areas.push(TextArea {
+                buffer: &self.image_receipt_dismiss_buffer,
+                left: dismiss.0 + (dismiss.2 - self.overlay_text_cell_width()).max(0.0) * 0.5,
+                top: dismiss.1 + (dismiss.3 - self.metrics.line_height).max(0.0) * 0.5,
+                scale: 1.0,
+                bounds: text_bounds_for_rect(dismiss),
+                default_color: gc(palette.label),
+                custom_glyphs: &[],
+            });
         }
         if let Some(completion) = &overlay.completion
             && let Some(geometry) = completion_panel_geometry(completion, (cw, ch))
@@ -17217,12 +17298,13 @@ mod search_bar_tests {
 mod completion_panel_tests {
     use super::{
         COMPLETION_MAX_COLUMNS, COMPLETION_MIN_COLUMNS, CompletionOverlay, CompletionOverlayRow,
-        CompletionPanelPlacement, ImagePasteReceiptOverlay, MAX_COMPLETION_ROWS, Overlay,
-        completion_header_columns, completion_header_count, completion_header_label,
-        completion_match_span, completion_overlay_row_rects, completion_palette,
-        completion_panel_geometry, completion_scroll_thumb, completion_selection_surface,
-        display_width, image_paste_receipt_geometry, image_paste_receipt_text, production_source,
-        push_completion_selection_quads, solid_blend, text_overlay_requires_continuous_prepare,
+        CompletionPanelPlacement, ImagePasteReceiptHit, ImagePasteReceiptOverlay,
+        MAX_COMPLETION_ROWS, Overlay, completion_header_columns, completion_header_count,
+        completion_header_label, completion_match_span, completion_overlay_row_rects,
+        completion_palette, completion_panel_geometry, completion_scroll_thumb,
+        completion_selection_surface, display_width, image_paste_receipt_geometry,
+        image_paste_receipt_text, production_source, push_completion_selection_quads, solid_blend,
+        text_overlay_requires_continuous_prepare,
     };
     use crate::color;
     use kettle_config::Rgb;
@@ -17288,6 +17370,23 @@ mod completion_panel_tests {
         assert!(x >= gx && y >= gy && x + w <= gx + gw && y + h <= gy + gh);
         let image = geometry.image_rect.expect("expanded card has thumbnail");
         assert!((image.2 / image.3 - 2.0).abs() < 0.001);
+        assert!(super::rects_overlap(geometry.dismiss_rect, geometry.rect));
+        assert!(geometry.dismiss_rect.2 >= 24.0 && geometry.dismiss_rect.3 >= 24.0);
+        assert!(
+            !super::rects_overlap(geometry.dismiss_rect, geometry.title_rect),
+            "dismiss and title hit targets must not overlap"
+        );
+        assert_eq!(
+            geometry.hit_test(
+                geometry.dismiss_rect.0 + geometry.dismiss_rect.2 * 0.5,
+                geometry.dismiss_rect.1 + geometry.dismiss_rect.3 * 0.5,
+            ),
+            Some(ImagePasteReceiptHit::Dismiss)
+        );
+        assert_eq!(
+            geometry.hit_test(geometry.rect.0 + 4.0, geometry.rect.1 + 4.0),
+            Some(ImagePasteReceiptHit::Open)
+        );
     }
 
     #[test]
@@ -17306,6 +17405,11 @@ mod completion_panel_tests {
         let geometry = image_paste_receipt_geometry(&short, None, CELL, CELL.0, CELL.1).unwrap();
         assert!(geometry.compact, "short panes degrade to a chip");
         assert!(geometry.image_rect.is_none());
+        assert!(geometry.dismiss_rect.2 >= 24.0 && geometry.dismiss_rect.3 >= 24.0);
+        assert!(
+            !super::rects_overlap(geometry.dismiss_rect, geometry.title_rect),
+            "the compact label must leave room for dismissal"
+        );
     }
 
     #[test]

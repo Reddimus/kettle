@@ -14230,6 +14230,26 @@ def run_image_paste_receipt(kettle: str, root: Path) -> Path:
                 "image-paste-receipt smoke: hovered and compact frames are visually unchanged"
             )
 
+        dismiss = hovered.get("dismiss_rect")
+        if not isinstance(dismiss, dict):
+            raise SystemExit("image-paste-receipt smoke: receipt omitted its dismiss target")
+        live.ctl(
+            "send_mouse",
+            params={
+                "event": "click",
+                "button": 0,
+                "x": float(dismiss["x"]) + float(dismiss["width"]) / 2.0,
+                "y": float(dismiss["y"]) + float(dismiss["height"]) / 2.0,
+            },
+        )
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if live.json_ctl("ui_geometry").get("image_paste_receipt") is None:
+                break
+            time.sleep(0.05)
+        else:
+            raise SystemExit("image-paste-receipt smoke: dismiss button left the receipt visible")
+
         serialized_screen = json.dumps(redacted_screen, indent=2)
         (out / "screen.json").write_text(serialized_screen + "\n")
     finally:

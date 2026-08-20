@@ -53,8 +53,9 @@ For Kettle's stable, client-independent path, focus the agent pane and press
 shell-quoted path. The running agent can read that path without needing native
 clipboard-bitmap support. A short-lived thumbnail confirms which image path
 Kettle queued; it deliberately says “Waiting for client” because only the
-client can decide whether to read or attach it. Hover expands the receipt and
-clicking it opens the retained PNG. Set `paste-image-preview = off` to avoid
+client can decide whether to read or attach it. Hover expands the receipt,
+clicking its body opens the retained PNG, and `×` dismisses it. A two-minute
+hard limit removes even a hovered receipt. Set `paste-image-preview = off` to avoid
 creating or retaining preview pixels without changing image paste.
 
 Current local `codex --help` also exposes `-i, --image <FILE>...` for images

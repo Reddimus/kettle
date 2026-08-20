@@ -466,6 +466,7 @@ pub(crate) struct ImePreeditSession {
 
 const IMAGE_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
 const IMAGE_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+const IMAGE_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Window-local receipt for the exact private PNG whose path Kettle queued.
 /// Keeping the pane id here prevents a focus move from projecting the thumbnail
@@ -482,6 +483,7 @@ pub(crate) struct ImagePasteReceiptState {
     pub(crate) prefer_top: bool,
     expanded_until: std::time::Instant,
     expires_at: std::time::Instant,
+    hard_expires_at: std::time::Instant,
     hover_started: Option<std::time::Instant>,
     collapsed: bool,
 }
@@ -505,6 +507,7 @@ impl ImagePasteReceiptState {
             prefer_top,
             expanded_until: now + IMAGE_RECEIPT_EXPANDED,
             expires_at: now + IMAGE_RECEIPT_LIFETIME,
+            hard_expires_at: now + IMAGE_RECEIPT_HARD_LIFETIME,
             hover_started: None,
             collapsed: false,
         }
@@ -515,7 +518,7 @@ impl ImagePasteReceiptState {
     }
 
     pub(crate) fn live(&self, now: std::time::Instant) -> bool {
-        self.hover_started.is_some() || now < self.expires_at
+        now < self.hard_expires_at && (self.hover_started.is_some() || now < self.expires_at)
     }
 
     pub(crate) fn set_hover(&mut self, hovered: bool, now: std::time::Instant) -> bool {
@@ -526,8 +529,8 @@ impl ImagePasteReceiptState {
             }
             (Some(started), false) => {
                 let paused = now.saturating_duration_since(started);
-                self.expanded_until += paused;
-                self.expires_at += paused;
+                self.expanded_until = (self.expanded_until + paused).min(self.hard_expires_at);
+                self.expires_at = (self.expires_at + paused).min(self.hard_expires_at);
                 self.hover_started = None;
                 true
             }
@@ -537,11 +540,12 @@ impl ImagePasteReceiptState {
 
     pub(crate) fn next_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
         if self.hover_started.is_some() {
-            return None;
+            return (self.hard_expires_at > now).then_some(self.hard_expires_at);
         }
         [
             (!self.collapsed).then_some(self.expanded_until),
             Some(self.expires_at),
+            Some(self.hard_expires_at),
         ]
         .into_iter()
         .flatten()
@@ -1061,6 +1065,36 @@ mod tests {
             "ten hovered seconds extend the 30-second lifetime"
         );
         assert!(!receipt.live(now + std::time::Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn image_receipt_hover_cannot_extend_past_the_hard_lifetime() {
+        let now = std::time::Instant::now();
+        let preview = crate::paste_image::PastedImagePreview {
+            image: kettle_core::ImageData::solid(16, 8, [10, 20, 30, 255]).unwrap(),
+            original_width: 1600,
+            original_height: 800,
+        };
+        let mut receipt = ImagePasteReceiptState::new(
+            7,
+            std::path::PathBuf::from("managed.png"),
+            preview,
+            false,
+            true,
+            now,
+        );
+
+        assert!(receipt.set_hover(true, now + std::time::Duration::from_secs(10)));
+        assert!(receipt.live(now + std::time::Duration::from_secs(119)));
+        assert!(
+            !receipt.live(now + std::time::Duration::from_secs(120)),
+            "hover must not leave permanent chrome over terminal cells"
+        );
+        assert_eq!(
+            receipt.next_deadline(now + std::time::Duration::from_secs(10)),
+            Some(now + std::time::Duration::from_secs(120)),
+            "a hovered receipt still needs a wake-up at the hard deadline"
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MA
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_IMAGE_RECEIPT_ID: NodeId = NodeId(1 << 59);
+const ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -7219,7 +7220,13 @@ impl App {
     /// Consume a press over receipt chrome and open the exact retained image
     /// on a primary-button activation. Shared by native and ctl mouse input so
     /// automation cannot click through to terminal content the GUI protects.
-    fn activate_image_paste_receipt_at(&self, ws: &WindowState, x: f32, y: f32, bcode: u8) -> bool {
+    fn activate_image_paste_receipt_at(
+        &self,
+        ws: &mut WindowState,
+        x: f32,
+        y: f32,
+        bcode: u8,
+    ) -> bool {
         let Some((receipt, completion)) = self.image_paste_receipt_projection(ws) else {
             return false;
         };
@@ -7241,10 +7248,17 @@ impl App {
         ) else {
             return false;
         };
-        if !rect_contains(geometry.rect, x, y) {
+        let Some(hit) = geometry.hit_test(x, y) else {
             return false;
-        }
-        if bcode == 0
+        };
+        if bcode == 0 && hit == kettle_render::ImagePasteReceiptHit::Dismiss {
+            ws.image_paste_receipt = None;
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        } else if bcode == 0
+            && hit == kettle_render::ImagePasteReceiptHit::Open
             && let Some(path) = ws
                 .image_paste_receipt
                 .as_ref()
@@ -17293,6 +17307,7 @@ impl App {
                 Some(serde_json::json!({
                     "rect": rect_json(geometry.rect),
                     "image_rect": geometry.image_rect.map(rect_json),
+                    "dismiss_rect": rect_json(geometry.dismiss_rect),
                     "expanded": !geometry.compact,
                     "original_width": receipt.original_width,
                     "original_height": receipt.original_height,
@@ -22647,15 +22662,29 @@ impl App {
             });
             node.set_live(accesskit::Live::Polite);
             node.add_action(AccessibilityAction::Click);
-            let (x, y, width, height) = geometry.rect;
+            let (x, y, _width, height) = geometry.rect;
+            let open_width = (geometry.dismiss_rect.0 - x).max(0.0);
             node.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + open_width),
+                f64::from(y + height),
+            ));
+            children.push(ACCESSIBILITY_IMAGE_RECEIPT_ID);
+            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_ID, node));
+
+            let mut dismiss = Node::new(Role::Button);
+            dismiss.set_label("Dismiss pasted image preview");
+            dismiss.add_action(AccessibilityAction::Click);
+            let (x, y, width, height) = geometry.dismiss_rect;
+            dismiss.set_bounds(accesskit::Rect::new(
                 f64::from(x),
                 f64::from(y),
                 f64::from(x + width),
                 f64::from(y + height),
             ));
-            children.push(ACCESSIBILITY_IMAGE_RECEIPT_ID);
-            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_ID, node));
+            children.push(ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID);
+            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID, dismiss));
         }
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
@@ -22746,6 +22775,10 @@ impl App {
                     geometry.rect.1,
                     geometry.rect.2,
                     geometry.rect.3,
+                    geometry.dismiss_rect.0,
+                    geometry.dismiss_rect.1,
+                    geometry.dismiss_rect.2,
+                    geometry.dismiss_rect.3,
                 ] {
                     component.to_bits().hash(&mut hasher);
                 }
@@ -24352,6 +24385,16 @@ impl App {
     }
 
     fn handle_accessibility_action(&mut self, ws: &mut WindowState, request: ActionRequest) {
+        if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID {
+            if request.action == AccessibilityAction::Click {
+                ws.image_paste_receipt = None;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_ID {
             if request.action == AccessibilityAction::Click
                 && let Some(path) = ws
@@ -27314,29 +27357,30 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_IMAGE_RECEIPT_ID,
-        AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction, ConfirmButton,
-        ConfirmDialogState, ContextMenuItem, GroupBulkScope, MAX_REMOTE_COMMANDS_PER_BATCH,
-        Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
-        PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag, TitleEditScope,
-        accessibility_completion_row_id, apply_bs_del_binding, apply_mux_title_edit,
-        apply_output_generation_outcome, apply_remote_title_transition, argv_is_nonlocal_client,
-        assign_mnemonics, background_is_dark_enough_to_reveal_early, begin_title_edit,
-        broadcast_scope_for_default, cached_pane_cursor_blinking, claim_remote_command_file,
-        clear_stale_title_edit, confirmed_paste_target, context_menu_item_columns,
-        context_menu_max_scroll_offset, context_menu_scroll_for_highlight,
-        context_menu_snapshot_reuse_safe, context_menu_surface_can_fit_row, count_rows_fitting,
-        ctl_input_error, filter_disabled, find_menu_row_y, fit_context_menu_row,
-        group_scope_is_globally_stale, input_rejection_message, key_is_modified_enter,
-        local_paste_within_limit, macos_effective_modifiers, modal_swallows_pointer,
-        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
-        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
-        paste_paths_into_target, paste_text_into_target, production_source, rank_layouts,
-        sanitize_native_window_title, sanitize_title, selection_kind, session_sweep_due,
-        should_notify_input_rejection, should_poll_remote_window, should_restore_session,
-        should_reveal_after_renderer_init, should_reveal_before_first_surface_frame,
-        stage_applied_remote_probe, stage_output_generations_for_frame, stage_remote_targets,
-        stamp_accepted_input, startup_inner_size_px, typeahead_match,
+        ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
+        ACCESSIBILITY_IMAGE_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
+        ConfirmButton, ConfirmDialogState, ContextMenuItem, GroupBulkScope,
+        MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch,
+        PendingLuaCommand, PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
+        TitleEditScope, accessibility_completion_row_id, apply_bs_del_binding,
+        apply_mux_title_edit, apply_output_generation_outcome, apply_remote_title_transition,
+        argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
+        begin_title_edit, broadcast_scope_for_default, cached_pane_cursor_blinking,
+        claim_remote_command_file, clear_stale_title_edit, confirmed_paste_target,
+        context_menu_item_columns, context_menu_max_scroll_offset,
+        context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
+        context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
+        find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
+        input_rejection_message, key_is_modified_enter, local_paste_within_limit,
+        macos_effective_modifiers, modal_swallows_pointer, osc52_clipboard_channel,
+        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
+        pane_snapshot_keys_match, parse_remote_command_batch, paste_paths_into_target,
+        paste_text_into_target, production_source, rank_layouts, sanitize_native_window_title,
+        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
+        should_reveal_before_first_surface_frame, stage_applied_remote_probe,
+        stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
+        startup_inner_size_px, typeahead_match,
     };
     use crate::mux::{
         BroadcastScope, Dir, Mux, PaneInputDelivery, PaneInputResult, PaneTitleOrigin,
@@ -27801,15 +27845,10 @@ mod tests {
         );
 
         let geometry = source
-            .split("let image_paste_receipt = self")
+            .split("// Geometry diagnostics expose only the receipt's presentation state.")
             .nth(1)
             .and_then(|rest| rest.split("Response::ok(").next())
             .expect("ui_geometry receipt projection");
-        assert!(
-            !geometry.contains("\"path\":") && !geometry.contains("rgba"),
-            "ui_geometry must expose bounds and state, never retained paths or pixels"
-        );
-
         let wait = source
             .split("fn about_to_wait_inner(")
             .nth(1)
@@ -27869,8 +27908,16 @@ mod tests {
             .expect("receipt activation body");
         assert!(
             activation.contains("receipt.right_gutter > 0.0")
-                && activation.contains("pane_x + pane_w - receipt.right_gutter"),
-            "receipt activation must preserve the scrollbar gutter without reordering input"
+                && activation.contains("pane_x + pane_w - receipt.right_gutter")
+                && activation.contains("ImagePasteReceiptHit::Dismiss")
+                && activation.contains("ws.image_paste_receipt = None;"),
+            "receipt activation must preserve the scrollbar and honor its dismiss target"
+        );
+        assert!(
+            geometry.contains("\"dismiss_rect\":")
+                && !geometry.contains("\"path\":")
+                && !geometry.contains("rgba"),
+            "ui_geometry must expose safe shared controls, never retained paths or pixels"
         );
 
         let native_press = source
@@ -31641,14 +31688,20 @@ mod tests {
 
     #[test]
     fn image_receipt_accessibility_id_cannot_collide_with_completion_rows() {
+        for receipt in [
+            ACCESSIBILITY_IMAGE_RECEIPT_ID,
+            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
+        ] {
+            assert_ne!(
+                receipt,
+                accessibility_completion_row_id(0),
+                "duplicate child ids make AccessKit panic when both overlays project"
+            );
+            assert_ne!(receipt, ACCESSIBILITY_COMPLETION_CONTAINER_ID);
+        }
         assert_ne!(
             ACCESSIBILITY_IMAGE_RECEIPT_ID,
-            accessibility_completion_row_id(0),
-            "duplicate child ids make AccessKit panic when both overlays project"
-        );
-        assert_ne!(
-            ACCESSIBILITY_IMAGE_RECEIPT_ID,
-            ACCESSIBILITY_COMPLETION_CONTAINER_ID
+            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID
         );
     }
 

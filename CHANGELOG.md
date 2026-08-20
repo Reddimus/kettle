@@ -11,9 +11,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - **Clipboard screenshots now have a visual receipt.** After the initiating
   pane accepts its private temporary PNG path, Kettle shows a bounded thumbnail
   inside that pane without claiming the client attached it. The card contracts
-  after four seconds, expires after 30 seconds, expands while hovered, and opens the exact
-  retained PNG when clicked. It avoids completion cards and pane chrome, warns
-  for remote sessions, and never previews arbitrary terminal paths. Set
+  after four seconds, expires after 30 seconds, and expands while hovered. A
+  two-minute hard limit prevents a hovered card from staying over terminal
+  cells forever. Click the body to open the retained PNG or `×` to dismiss it.
+  It avoids completion cards and pane chrome, warns for remote sessions, and
+  never previews arbitrary terminal paths. Set
   `paste-image-preview = off` to keep bitmap-to-path paste without allocating
   or retaining thumbnail pixels.
 
