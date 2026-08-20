@@ -2434,12 +2434,11 @@ fn decode_utf16_strict(bytes: &[u8], little_endian: bool) -> std::io::Result<Str
             "UTF-16 config has an incomplete code unit",
         ));
     }
-    let units = bytes.chunks_exact(2).map(|pair| {
-        let pair = [pair[0], pair[1]];
+    let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
-            u16::from_le_bytes(pair)
+            u16::from_le_bytes(*pair)
         } else {
-            u16::from_be_bytes(pair)
+            u16::from_be_bytes(*pair)
         }
     });
     std::char::decode_utf16(units)
@@ -2838,15 +2837,19 @@ fn decode_config_text(bytes: &[u8]) -> String {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => {
             let units: Vec<u16> = rest
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             String::from_utf16_lossy(&units)
         }
         [0xFE, 0xFF, rest @ ..] => {
             let units: Vec<u16> = rest
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
                 .collect();
             String::from_utf16_lossy(&units)
         }

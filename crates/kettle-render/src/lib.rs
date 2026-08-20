@@ -3311,7 +3311,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
             .get(start..end)
             .ok_or_else(|| "screenshot mapped buffer is shorter than expected".to_string())?;
         if bgra {
-            for chunk in row_pixels.chunks_exact(4) {
+            for chunk in row_pixels.as_chunks::<4>().0 {
                 rgba.extend_from_slice(&[chunk[2], chunk[1], chunk[0], chunk[3]]);
             }
         } else {
@@ -4055,7 +4055,9 @@ mod live_screenshot_tests {
         assert_eq!((width, height), (2, 2));
         assert_eq!(
             output
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>(),
             [1, 2, 4, 5]
@@ -5320,7 +5322,9 @@ impl Renderer {
                 let opaque = frame
                     .image
                     .rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .all(|pixel| pixel[3] == 255);
                 if let Some(image) = kettle_core::ImageData::new_with_budget(
                     frame.image.width,
@@ -12417,7 +12421,7 @@ fn use_live_pane_bases(live_window: bool, floor: Option<f32>) -> bool {
 /// A fully transparent texel carries no colour to recover, so it stays zeroed;
 /// a fully opaque one is already straight and is left untouched.
 fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
-    for texel in pixels.chunks_exact_mut(4) {
+    for texel in pixels.as_chunks_mut::<4>().0 {
         match texel[3] {
             0 => texel[..3].fill(0),
             u8::MAX => {}

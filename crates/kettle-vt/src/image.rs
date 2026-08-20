@@ -388,7 +388,13 @@ mod tests {
     fn solid_fills_one_color() {
         let s = ImageData::solid(2, 3, [10, 20, 30, 255]).unwrap();
         assert_eq!((s.width, s.height), (2, 3));
-        assert!(s.rgba.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
+        assert!(
+            s.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [10, 20, 30, 255])
+        );
         assert!(ImageData::solid(0, 4, [0; 4]).is_none());
     }
 

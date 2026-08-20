@@ -631,11 +631,10 @@ fn parse_rfc3339_seconds(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read as _, Write as _};
+    use std::io::Write as _;
     use std::net::TcpListener;
     use std::sync::Arc;
 
-    use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey};
 
     use super::*;
