@@ -205,8 +205,10 @@ fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
                     // in any way that matters for an environment block.
                     let mut wide: Vec<u16> = value
                         .bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_ne_bytes(*pair))
                         .collect();
                     // `ExpandEnvironmentStringsW` reads its input until a NUL.
                     // The old code passed whatever the registry held, so a
