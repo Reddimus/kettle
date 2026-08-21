@@ -380,6 +380,10 @@ pub fn encode_app_keypad(
     mods: ModifiersState,
     mode: TermMode,
 ) -> Option<Vec<u8>> {
+    // Shift intentionally remains accepted here. Xterm reports keypad
+    // modifiers only when its separate modifyKeypadKeys resource is enabled,
+    // and Kettle does not model that resource. DECKPAM alone therefore keeps
+    // the traditional SS3 sequence instead of inventing a modified form.
     if !mode.contains(TermMode::APP_KEYPAD)
         || location != KeyLocation::Numpad
         || mods.control_key()
@@ -511,7 +515,8 @@ pub fn encode(
                 //     Without distinguishing it, Ctrl+Backspace was a
                 //     plain Backspace, breaking the muscle memory.
                 return Some(match (ctrl, alt) {
-                    (true, _) => vec![0x08],
+                    (true, true) => vec![0x1b, 0x08],
+                    (true, false) => vec![0x08],
                     (false, true) => vec![0x1b, 0x7f],
                     (false, false) => vec![0x7f],
                 });
@@ -519,15 +524,18 @@ pub fn encode(
             // Shift+Tab is the standard "back-tab" (`CSI Z`) used by
             // readline, fzf, and every TUI form for reverse field nav.
             NamedKey::Tab => {
-                // XKB exposes Shift+Tab as ISO_Left_Tab, an edit key outside
-                // modifyOtherKeys, so its established CSI Z form must win.
-                if !shift
+                // Plain Shift+Tab keeps the established CSI Z form. Additional
+                // modifiers must still reach modifyOtherKeys so xterm levels
+                // one and two can distinguish the chord.
+                if (!shift || ctrl || alt)
                     && let Some(sequence) = modify_other_keys_sequence(9, mods, mode, true, true)
                 {
                     return Some(sequence);
                 }
                 return Some(if shift {
                     b"\x1b[Z".to_vec()
+                } else if alt {
+                    b"\x1b\t".to_vec()
                 } else {
                     vec![b'\t']
                 });
@@ -539,7 +547,7 @@ pub fn encode(
                 {
                     return Some(sequence);
                 }
-                return Some(vec![0x1b]);
+                return Some(if alt { vec![0x1b, 0x1b] } else { vec![0x1b] });
             }
             // The space bar arrives as NamedKey::Space, which
             // returned a literal space BEFORE any modifier was inspected — so
@@ -555,8 +563,8 @@ pub fn encode(
                 {
                     return Some(sequence);
                 }
-                return Some(if ctrl && !alt {
-                    vec![0x00]
+                return Some(if ctrl {
+                    if alt { vec![0x1b, 0x00] } else { vec![0x00] }
                 } else if alt {
                     vec![0x1b, b' ']
                 } else {
@@ -1585,6 +1593,25 @@ mod tests {
                                 escaped_bytes(bytes)
                             );
                         }
+                        // Enter is the one intentional exception: without a
+                        // negotiated modified-key mode or Kettle's fallback,
+                        // its shipped legacy contract remains CR for every
+                        // modifier. Every other emitted Alt chord uses Kettle's
+                        // xterm altSendsEscape-on policy.
+                        if mods.alt_key()
+                            && !mods.super_key()
+                            && !matches!(&key.key, Key::Named(NamedKey::Enter))
+                            && let Some(bytes) = bytes
+                        {
+                            assert_eq!(
+                                bytes.first(),
+                                Some(&0x1b),
+                                "Alt output lacked its ESC prefix from {entry_point}; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(Some(bytes))
+                            );
+                        }
                         if let Some(param) = bytes.and_then(legacy_modifier_param) {
                             assert_eq!(
                                 param,
@@ -2096,12 +2123,120 @@ mod tests {
             encode(&Key::Named(NamedKey::Backspace), None, ctrl, mode),
             Some(vec![0x08])
         );
-        // Ctrl+Alt+Backspace currently follows the ctrl path (BS) — the
-        // combo is rarely bound and going through ctrl matches alacritty.
-        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+    }
+
+    #[test]
+    fn alt_escape_matches_xterm_reference_for_alt_sends_escape() {
+        // xterm ctlseqs, "Alt and Meta Keys": with altSendsEscape enabled,
+        // Alt prefixes the key with ESC. Kettle's legacy Alt policy corresponds
+        // to that resource setting.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
         assert_eq!(
-            encode(&Key::Named(NamedKey::Backspace), None, ctrl_alt, mode),
-            Some(vec![0x08])
+            encode(
+                &Key::Named(NamedKey::Escape),
+                None,
+                ModifiersState::ALT,
+                TermMode::empty(),
+            ),
+            Some(b"\x1b\x1b".to_vec()),
+        );
+    }
+
+    #[test]
+    fn alt_tab_matches_xterm_reference_for_alt_sends_escape() {
+        // xterm ctlseqs, "Alt and Meta Keys": with altSendsEscape enabled,
+        // Alt prefixes the key with ESC when modifyOtherKeys is disabled.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        assert_eq!(
+            encode(
+                &Key::Named(NamedKey::Tab),
+                None,
+                ModifiersState::ALT,
+                TermMode::empty(),
+            ),
+            Some(b"\x1b\t".to_vec()),
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_backspace_matches_xterm_reference_for_alt_sends_escape() {
+        // xterm ctlseqs, "Alt and Meta Keys": altSendsEscape prefixes the
+        // Control result, so Ctrl+Alt+Backspace is ESC followed by BS.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(
+            encode(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                mods,
+                TermMode::empty(),
+            ),
+            Some(b"\x1b\x08".to_vec()),
+        );
+    }
+
+    #[test]
+    fn ctrl_alt_space_matches_xterm_reference_for_alt_sends_escape() {
+        // xterm ctlseqs, "Alt and Meta Keys": altSendsEscape prefixes the
+        // Control result, so Ctrl+Alt+Space is ESC followed by NUL.
+        // https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+        let mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Space), None, mods, TermMode::empty(),),
+            Some(b"\x1b\0".to_vec()),
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_tab_and_alt_shift_tab_match_xterm_reference_matrix() {
+        // xterm's us-pc105 matrix encodes these as CSI 27;6;9~ and
+        // CSI 27;4;9~ once modifyOtherKeys applies. Level zero keeps Kettle's
+        // established CSI Z back-tab fallback.
+        // https://invisible-island.net/xterm/modified-keys-us-pc105.html
+        let tab = Key::Named(NamedKey::Tab);
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        let expected = [
+            (b"\x1b[Z".as_slice(), b"\x1b[Z".as_slice()),
+            (b"\x1b[27;6;9~".as_slice(), b"\x1b[27;4;9~".as_slice()),
+            (b"\x1b[27;6;9~".as_slice(), b"\x1b[27;4;9~".as_slice()),
+        ];
+
+        for (level, (expected_ctrl, expected_alt)) in expected.into_iter().enumerate() {
+            let mode = negotiated_modify_other_keys(level as u8);
+            assert_eq!(
+                encode(&tab, None, ctrl_shift, mode),
+                Some(expected_ctrl.to_vec()),
+                "Ctrl+Shift+Tab at modifyOtherKeys level {level}",
+            );
+            assert_eq!(
+                encode(&tab, None, alt_shift, mode),
+                Some(expected_alt.to_vec()),
+                "Alt+Shift+Tab at modifyOtherKeys level {level}",
+            );
+        }
+
+        assert_eq!(
+            encode(&tab, None, ModifiersState::SHIFT, TermMode::empty(),),
+            Some(b"\x1b[Z".to_vec()),
+            "plain Shift+Tab must remain CSI Z",
+        );
+    }
+
+    #[test]
+    fn shift_numpad5_xterm_reference_is_resource_dependent() {
+        // xterm keeps keypad modifier reporting behind modifyKeypadKeys and
+        // formatKeypadKeys, both separate from DECKPAM. Kettle models neither,
+        // so Shift+Numpad5 retains the traditional SS3 keypad sequence.
+        // https://invisible-island.net/xterm/manpage/xterm.html
+        assert_eq!(
+            encode_app_keypad(
+                &Key::Character("5".into()),
+                KeyLocation::Numpad,
+                ModifiersState::SHIFT,
+                TermMode::APP_KEYPAD,
+            ),
+            Some(b"\x1bOu".to_vec()),
         );
     }
 
