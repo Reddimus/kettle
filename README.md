@@ -6,64 +6,51 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Kettle is a fast GPU accelerated terminal workspace for macOS, Linux, and
-Windows 11. It starts ready to use with a bundled font and themes, then adds
-tabs, splits, multiple windows, search, session restore, and local automation.
+Kettle is a GPU-accelerated terminal workspace for macOS, Linux, and
+Windows 11. It includes tabs, splits, search, session restore, themes, and local
+automation.
 
 ![Kettle with a two pane split and the TokyoNight Night theme](docs/images/kettle-hero.png)
 
 ## Install
 
-Prebuilt packages are available on the
+Download a package from the
 [latest release](https://github.com/Reddimus/kettle/releases/latest).
 
 | Platform | Package | Setup |
 | --- | --- | --- |
-| Linux | `kettle-linux-*.tar.gz` | Run the installer below |
-| macOS 11 or newer | `kettle-macos-universal.zip` | Drag `kettle.app` to Applications |
-| Windows 11 | `kettle-windows-x86_64.zip` | Extract it and run `install.ps1` |
+| Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the command below |
+| macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to Applications |
+| Windows 11 | `kettle-windows-x86_64.zip` | Extract and run `install.ps1` |
 
-### Linux
+Linux installs for the current user under `~/.local`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
 ```
 
-This installs Kettle for the current user under `~/.local`. It does not need
-`sudo` or a Rust toolchain. The installer verifies the signed release manifest
-and archive before changing the install.
+No package needs administrator access. The Linux installer verifies the signed
+release before making changes. See [Installation](docs/INSTALL.md) for Nix,
+older Linux systems, uninstall steps, and source builds.
 
-### macOS
+On Linux and Windows, check with `kettle --check-update` and install with
+`kettle update`. Set `update-policy = off` to disable background checks. macOS
+updates come from the release page.
 
-Download `kettle-macos-universal.zip`, unzip it, and move `kettle.app` to
-`/Applications`. The app contains native Apple Silicon and Intel binaries.
+## Quick start
 
-### Windows 11
-
-Extract `kettle-windows-x86_64.zip`, open PowerShell in that folder, and run:
-
-```powershell
-.\install.ps1
-```
-
-Use `-WithShellIntegration` to install prompt marks too, or `-Uninstall` to
-remove Kettle later. The installer creates a Start menu entry and adds the
-per-user binary directory to `PATH` without administrator access.
-
-For package details, older Linux distributions, Nix, and source builds, see
-[Installation](docs/INSTALL.md).
-
-## Start here
-
-1. Open `kettle` from your app launcher or shell.
+1. Open Kettle from the app launcher or run `kettle`.
 2. Split the pane with `Ctrl+Shift+E` or `Ctrl+Shift+O`.
-3. Open Settings with `Ctrl+,`, or right click a pane for common controls.
-4. Write a starter config with `kettle --write-default-config`.
+3. Open Settings with `Ctrl+,`.
+4. Create a starter config with `kettle --write-default-config`.
+5. On Bash, Zsh, Fish, or an explicitly selected PowerShell, add the one-line
+   [shell integration](docs/SHELL-INTEGRATION.md#one-liner-recommended) for
+   prompt navigation and completion cards.
 
-Kettle reloads config changes when you save. Run `kettle --config-path` to see
-which file is active and `kettle --check-config` to validate it.
+Kettle reloads the config when you save it. Run `kettle --config-path` to find
+the active file and `kettle --check-config` to validate it.
 
-## What is included
+## Highlights
 
 * GPU rendering with damage aware draws and a shared glyph atlas
 * Tabs, splits, pane movement, broadcast input, and live tab tear off
@@ -115,22 +102,21 @@ to `1.0` and blur to `false` for a fully opaque window.
 | Split left or right | `Ctrl+Shift+E` |
 | Split top or bottom | `Ctrl+Shift+O` |
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
-| Directional focus | `Alt+Arrow` |
+| Directional focus, Linux/Windows | `Alt+Arrow` |
+| Directional focus, macOS | `Ctrl+Cmd+Arrow` |
 | Search | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
-| Quick select | `Ctrl+Shift+H` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
 | Zoom pane | `Ctrl+Shift+X` |
 
-On Linux and Windows, `Alt+Arrow` moves to a split only when one exists in that
-direction. At an outer edge, Kettle sends the chord to the running program so
-its own editor shortcuts still work. macOS also provides familiar Command key
-bindings. Bare Option keys remain available for text entry unless
-`macos-option-as-alt` is enabled.
+On Linux and Windows, `Alt+Arrow` moves only when a split exists in that
+direction. At an outer edge, the running program receives the chord. macOS
+keeps bare Option available for text entry unless `macos-option-as-alt` is on.
+macOS also provides `Cmd+T`, `Cmd+C/V`, `Cmd+F`, and `Cmd+,`.
 
-Run `kettle --list-keybinds` for the effective map after your config is applied.
-The full action list is available through `kettle --list-actions`.
+Use `kettle --list-keybinds` for the effective map and
+`kettle --list-actions` for every bindable action.
 
 ## Configuration
 
@@ -138,7 +124,6 @@ Kettle uses a plain `key = value` file:
 
 ```ini
 theme = TokyoNight Night
-font-family = JetBrainsMono Nerd Font
 font-size = 13
 completion-overlay = auto
 cursor-style = block
@@ -154,7 +139,6 @@ kettle --check-config
 kettle --list-themes
 kettle --list-keybinds
 kettle --gpu-info
-kettle --check-update
 ```
 
 See [Configuration](docs/CONFIG.md) for every setting and
@@ -164,14 +148,14 @@ explicit `--check-update` requests still work in every mode.
 
 ## Automation
 
-Kettle can run a command under its terminal engine without opening a window:
+Run a command under Kettle's terminal engine without opening a window:
 
 ```sh
 kettle exec -- echo ok
 ```
 
-It can also expose a local control server to trusted processes running as the
-same operating system user:
+Enable the local control surface only if every process running as your operating
+system user is trusted:
 
 ```sh
 kettle --agent-server read-only
@@ -180,20 +164,10 @@ kettle ctl read_screen
 kettle mcp
 ```
 
-The server is off by default. `read-only` permits inspection; `full` also
-permits input and command execution. Read [Automation and MCP](docs/AGENT.md)
-before enabling write access.
-
-## Performance
-
-The Windows benchmark harness compares Kettle with Windows Terminal,
-Alacritty, WezTerm, Rio, and Tabby using isolated configs where the application
-supports them. Release claims require physical displays, repeated samples, a
-pinned prior Kettle release, and a clean release candidate. Synthetic tests do
-not count as live GPU evidence.
-
-See [Performance methodology](scripts/perf/README.md) for commands, sample
-counts, statistical margins, and publication rules.
+Once enabled, any same-user process can connect without a pairing prompt.
+`read-only` permits inspection. `full` permits input and arbitrary command
+execution as your user. Read [Automation and MCP](docs/AGENT.md) before
+enabling it.
 
 ## Develop
 
@@ -216,8 +190,8 @@ cargo fmt --all --check
 just gauntlet
 ```
 
-Read [Contributing](CONTRIBUTING.md) and [Testing](docs/TESTING.md) for the full
-workflow.
+Read [Contributing](CONTRIBUTING.md), [Testing](docs/TESTING.md), and the
+[performance methodology](scripts/perf/README.md) for the full workflow.
 
 ## Documentation
 
@@ -225,11 +199,10 @@ workflow.
 * [Installation](docs/INSTALL.md)
 * [Configuration](docs/CONFIG.md)
 * [Shell integration](docs/SHELL-INTEGRATION.md)
-* [Automation and MCP](docs/AGENT.md)
 * [Architecture](docs/ARCHITECTURE.md)
 * [Testing](docs/TESTING.md)
 * [Release process](docs/RELEASING.md)
-* [Version history](docs/VERSION-HISTORY.md)
+* [Security and vulnerability reporting](SECURITY.md)
 * [Changelog](CHANGELOG.md)
 
 ## License
