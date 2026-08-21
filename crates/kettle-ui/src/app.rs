@@ -19128,7 +19128,7 @@ impl App {
         };
         let mut bytes = Vec::new();
         let mut encoded_keys = Vec::with_capacity(parsed.len());
-        for (mods, key) in &parsed {
+        for (token, mods, key) in &parsed {
             // The live mode decides the byte form (app-cursor arrows etc.).
             // Only modified Enter needs the termios/OSC 133 context sample.
             let mode = p.effective_key_mode(
@@ -19147,6 +19147,17 @@ impl App {
                     return Response::err(req.id, ec::BAD_PARAMS, message);
                 }
                 encoded_keys.push(b);
+            } else {
+                let message = if mode.intersects(kettle_core::TermMode::KITTY_KEYBOARD_PROTOCOL) {
+                    format!(
+                        "'{token}' has no encoding in this pane's negotiated Kitty keyboard mode"
+                    )
+                } else {
+                    format!(
+                        "'{token}' has no legacy encoding; this pane has not negotiated the Kitty keyboard protocol"
+                    )
+                };
+                return Response::err(req.id, ec::BAD_PARAMS, message);
             }
         }
         // The per-pane read-only toggle blocks agents
@@ -21486,7 +21497,7 @@ fn key_is_modified_enter(key: &Key, mods: ModifiersState) -> bool {
 
 fn parse_ctl_send_key_batch(
     keys: &[serde_json::Value],
-) -> std::result::Result<Vec<(ModifiersState, Key)>, String> {
+) -> std::result::Result<Vec<(String, ModifiersState, Key)>, String> {
     if keys.is_empty() || keys.len() > MAX_CTL_SEND_KEYS {
         return Err(format!(
             "'keys' must contain 1..={MAX_CTL_SEND_KEYS} entries"
@@ -21502,10 +21513,10 @@ fn parse_ctl_send_key_batch(
                 "key tokens must be 1..={MAX_CTL_SEND_KEY_TOKEN_BYTES} bytes"
             ));
         }
-        let Some(key) = parse_send_key(token) else {
+        let Some((mods, key)) = parse_send_key(token) else {
             return Err(format!("unrecognized key token '{token}'"));
         };
-        parsed.push(key);
+        parsed.push((token.to_owned(), mods, key));
     }
     Ok(parsed)
 }
@@ -21534,14 +21545,13 @@ fn extend_ctl_send_key_bytes(
 /// Shift). `None` on an unrecognized token, so the caller can name the bad
 /// token instead of sending wrong bytes. Pure (unit-tested).
 fn parse_send_key(token: &str) -> Option<(ModifiersState, Key)> {
-    parse_key_token(token, false)
+    parse_key_token(token)
 }
 
-/// Parse a Kettle-owned UI key. Unlike PTY `send_keys`, application chrome can
-/// consume Super/Command character chords directly (for example Command+A on
-/// macOS), so this preserves them instead of rejecting an unencodable PTY key.
+/// Parse a Kettle-owned UI key. Application chrome can consume Super/Command
+/// character chords directly (for example Command+A on macOS).
 fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
-    let (mods, key) = parse_key_token(token, true)?;
+    let (mods, key) = parse_key_token(token)?;
     let key = if key == Key::Named(NamedKey::Space) {
         Key::Character(" ".into())
     } else if matches!(
@@ -21566,7 +21576,7 @@ fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
     Some((mods, key))
 }
 
-fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(ModifiersState, Key)> {
+fn parse_key_token(token: &str) -> Option<(ModifiersState, Key)> {
     let parts: Vec<&str> = token.split('+').collect();
     let last = parts.len().checked_sub(1)?;
     let mut mods = ModifiersState::empty();
@@ -21658,16 +21668,11 @@ fn parse_key_token(token: &str, allow_super_character: bool) -> Option<(Modifier
                         if c.is_ascii_uppercase() {
                             mods |= ModifiersState::SHIFT;
                         }
-                        // `super+<char>` has no portable legacy PTY encoding,
-                        // so fail loudly rather than silently dropping the
-                        // modifier. Keep SHIFT on alphabetic chords while
-                        // normalizing their logical character to uppercase:
-                        // the legacy encoder still emits the expected byte,
-                        // while Kitty CSI-u needs the live modifier bit to
-                        // distinguish Ctrl+C from Ctrl+Shift+C.
-                        if mods.contains(ModifiersState::SUPER) && !allow_super_character {
-                            return None;
-                        }
+                        // Keep SHIFT on alphabetic chords while normalizing
+                        // their logical character to uppercase: the legacy
+                        // encoder still emits the expected byte, while Kitty
+                        // CSI-u needs the live modifier bit to distinguish
+                        // Ctrl+C from Ctrl+Shift+C.
                         if mods.contains(ModifiersState::SHIFT) && c.is_ascii_alphabetic() {
                             c = c.to_ascii_uppercase();
                         }
@@ -32070,14 +32075,18 @@ mod tests {
         );
         // Shift+letter normalizes to the uppercase logical character while
         // retaining SHIFT. Legacy encoding still produces the uppercase byte,
-        // while negotiated CSI-u preserves the actual chord. Super+char has no
-        // portable legacy PTY encoding and fails loudly; the chord/CLI
-        // separator characters are reachable via their names.
+        // while negotiated CSI-u preserves the actual chord. Super characters
+        // remain valid tokens because the pane's live mode decides whether
+        // Kitty CSI-u can encode them. The chord/CLI separator characters are
+        // reachable via their names.
         assert_eq!(
             parse_send_key("shift+g"),
             Some((ModifiersState::SHIFT, Key::Character("G".into())))
         );
-        assert_eq!(parse_send_key("super+x"), None, "super+char unencodable");
+        assert_eq!(
+            parse_send_key("super+x"),
+            Some((ModifiersState::SUPER, Key::Character("x".into())))
+        );
         assert_eq!(
             parse_send_key("plus"),
             Some((none, Key::Character("+".into())))
@@ -32155,6 +32164,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ctl_send_keys_rejects_unencodable_super_tokens_before_writing() {
+        let parsed = super::parse_ctl_send_key_batch(&[serde_json::json!("cmd+up")])
+            .expect("cmd+up is a valid mode-dependent token");
+        let (token, mods, key) = &parsed[0];
+        assert_eq!(token, "cmd+up");
+        assert_eq!(
+            crate::input::encode_key_press(key, *mods, kettle_core::TermMode::empty()),
+            None,
+            "cmd+up must be unencodable before Kitty negotiation"
+        );
+
+        let src = production_source();
+        let body = src
+            .split("fn ctl_send_keys(")
+            .nth(1)
+            .and_then(|body| body.split("\n    /// Resolve the `pane` param").next())
+            .expect("ctl_send_keys body");
+        let encode = body
+            .find("encode_key_press(key, *mods, mode)")
+            .expect("send_keys encoder call");
+        let reject = body
+            .find("'{token}' has no legacy encoding")
+            .expect("legacy Super rejection");
+        let feed = body
+            .find("p.feed_key_inputs(&encoded_keys)")
+            .expect("pane input call");
+        assert!(
+            body.contains("for (token, mods, key) in &parsed")
+                && body.contains("has not negotiated the Kitty keyboard protocol")
+                && body.contains("negotiated Kitty keyboard mode")
+                && body[reject..feed].contains("Response::err(req.id, ec::BAD_PARAMS, message)"),
+            "ctl_send_keys must name the token and return BAD_PARAMS for every active mode"
+        );
+        assert!(
+            encode < reject && reject < feed,
+            "ctl_send_keys must reject an unencodable token before writing any parsed key"
+        );
+    }
+
     /// v2.20.0 (agent plane): the encoded bytes must match what a human
     /// pressing the same keys produces — same encoder, same mode handling.
     #[test]
@@ -32175,6 +32224,11 @@ mod tests {
         assert_eq!(enc("up", TermMode::APP_CURSOR), Some(b"\x1bOA".to_vec()));
         assert_eq!(enc("shift+tab", plain), Some(b"\x1b[Z".to_vec()));
         assert_eq!(enc("G", plain), Some(b"G".to_vec()));
+        assert_eq!(enc("cmd+up", plain), None);
+        assert_eq!(
+            enc("cmd+up", TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[1;9A".to_vec())
+        );
         assert_eq!(
             enc("escape", TermMode::DISAMBIGUATE_ESC_CODES),
             Some(b"\x1b[27u".to_vec()),

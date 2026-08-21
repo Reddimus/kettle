@@ -267,12 +267,26 @@ pub fn mouse_encode(
     }
 }
 
-/// xterm "modifyOtherKeys" / "modifyCursorKeys" modifier code: `1` for no
-/// modifiers, otherwise `1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0) +
-/// (super?8:0)`. This is the value apps see in `CSI 1;<m>A`-style cursor
-/// reports, `CSI 5;<m>~` page-up, `CSI 1;<m>P` modified F1, etc. — the
-/// shared encoding xterm/Alacritty/WezTerm/kitty all emit.
-pub fn xterm_modifier(mods: ModifiersState) -> u32 {
+/// Whether the legacy xterm/DEC encodings can represent this chord's
+/// modifiers at all.
+///
+/// Legacy parameterized sequences carry `1 + shift + 2*alt + 4*ctrl`. Bit 8 is
+/// xterm's *Meta*, a distinct X11 modifier Kettle has no key for — it is not
+/// macOS Command or the Windows/Linux Super key. Reporting Super as bit 8
+/// produced `CSI 1;9D` / `CSI 1;11A` parameters that no line editor decodes, so
+/// an unbound Command chord left literal `1D` / `1A` on the user's command line
+/// instead of doing nothing. Super reaches applications only through the Kitty
+/// keyboard protocol, which defines a real super bit (see `kitty_modifier_bits`).
+pub fn legacy_encodes_modifiers(mods: ModifiersState) -> bool {
+    !mods.super_key()
+}
+
+/// Legacy xterm "modifyOtherKeys" / "modifyCursorKeys" modifier code: `1` for
+/// no modifiers, otherwise `1 + shift + 2*alt + 4*ctrl`. This is the value apps
+/// see in `CSI 1;<m>A`-style cursor reports, `CSI 5;<m>~` page-up, and
+/// `CSI 1;<m>P` modified F1. [`legacy_encodes_modifiers`] filters Super before
+/// this legacy-only helper is called.
+pub(crate) fn legacy_xterm_modifier(mods: ModifiersState) -> u32 {
     let mut m = 1;
     if mods.shift_key() {
         m += 1;
@@ -282,9 +296,6 @@ pub fn xterm_modifier(mods: ModifiersState) -> u32 {
     }
     if mods.control_key() {
         m += 4;
-    }
-    if mods.super_key() {
-        m += 8;
     }
     m
 }
@@ -300,7 +311,7 @@ fn modify_other_keys_sequence(
     level_one_encodes: bool,
     level_two_encodes: bool,
 ) -> Option<Vec<u8>> {
-    let modifier = xterm_modifier(mods);
+    let modifier = legacy_xterm_modifier(mods);
     if modifier == 1 {
         return None;
     }
@@ -337,7 +348,7 @@ fn legacy_control_code(c: char) -> Option<u8> {
 }
 
 fn level_one_encodes_ascii(c: char, mods: ModifiersState) -> bool {
-    if mods.alt_key() || mods.super_key() {
+    if mods.alt_key() {
         return true;
     }
     if !mods.control_key() {
@@ -352,7 +363,8 @@ fn level_one_encodes_ascii(c: char, mods: ModifiersState) -> bool {
 }
 
 /// Application-keypad (DECKPAM) encoding for a **numpad** key, or `None` when it
-/// doesn't apply (mode off, not a numpad key, or a Ctrl/Alt modifier is held).
+/// doesn't apply (mode off, not a numpad key, or an unsupported modifier is
+/// held).
 ///
 /// `TermMode::APP_KEYPAD` is set/cleared by DECKPAM (`ESC =`)
 /// / DECKPNM (`ESC >`) in the engine, but the key encoder only ever consulted
@@ -372,6 +384,7 @@ pub fn encode_app_keypad(
         || location != KeyLocation::Numpad
         || mods.control_key()
         || mods.alt_key()
+        || !legacy_encodes_modifiers(mods)
     {
         return None;
     }
@@ -409,11 +422,15 @@ pub fn encode(
     mods: ModifiersState,
     mode: TermMode,
 ) -> Option<Vec<u8>> {
+    if !legacy_encodes_modifiers(mods) {
+        return None;
+    }
+
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
     let shift = mods.shift_key();
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
-    let m = xterm_modifier(mods);
+    let m = legacy_xterm_modifier(mods);
     let modded = m > 1;
 
     // Cursor / navigation keys. Unmodified honors `app-cursor` mode (vim,
@@ -454,7 +471,7 @@ pub fn encode(
     if let Key::Named(n) = key {
         match n {
             NamedKey::Enter => {
-                let level_one_encodes = alt || ctrl || mods.super_key();
+                let level_one_encodes = alt || ctrl;
                 if let Some(sequence) =
                     modify_other_keys_sequence(13, mods, mode, level_one_encodes, true)
                 {
@@ -516,7 +533,7 @@ pub fn encode(
                 });
             }
             NamedKey::Escape => {
-                let level_one_encodes = alt || mods.super_key();
+                let level_one_encodes = alt;
                 if let Some(sequence) =
                     modify_other_keys_sequence(27, mods, mode, level_one_encodes, true)
                 {
@@ -532,7 +549,7 @@ pub fn encode(
             // Key::Character arm, which the space key never reaches.) xterm
             // emits NUL for Ctrl+Space and ESC+space for Alt+Space.
             NamedKey::Space => {
-                let level_one_encodes = alt || mods.super_key();
+                let level_one_encodes = alt;
                 if let Some(sequence) =
                     modify_other_keys_sequence(32, mods, mode, level_one_encodes, true)
                 {
@@ -1180,6 +1197,24 @@ pub fn paste_payload(text: &str, bracketed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// The production source of this file, excluding test-only items.
+    fn production_source() -> String {
+        let production = kettle_test_support::production_source(include_str!("input.rs"));
+        assert!(
+            !production.contains("fn production_source()"),
+            "the production slice retained its own helper"
+        );
+        assert!(
+            !production.contains("#[test]"),
+            "the production slice retained a test function"
+        );
+        assert!(
+            !production.contains("#[cfg(test)]"),
+            "the production slice retained a test-only item"
+        );
+        production
+    }
+
     fn negotiated_modify_other_keys(level: u8) -> TermMode {
         TermMode::MODIFY_OTHER_KEYS_NEGOTIATED
             | match level {
@@ -1226,6 +1261,424 @@ mod tests {
             state,
             repeat,
         )
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Payload {
+        Text,
+        Meta,
+        Ss3,
+        Csi,
+    }
+
+    fn classify(bytes: &[u8]) -> Result<Payload, String> {
+        if !bytes.contains(&0x1b) {
+            return std::str::from_utf8(bytes)
+                .map(|_| Payload::Text)
+                .map_err(|error| format!("non-UTF-8 text payload: {error}"));
+        }
+        if bytes.first() != Some(&0x1b) {
+            return Err("escape byte appears outside the allowed prefix".into());
+        }
+        if bytes.len() <= 2 {
+            return std::str::from_utf8(&bytes[1..])
+                .map(|_| Payload::Meta)
+                .map_err(|error| format!("non-UTF-8 Meta payload: {error}"));
+        }
+        if bytes[1..].contains(&0x1b) {
+            return Err("escape byte appears outside the allowed Meta payload".into());
+        }
+        match bytes[1] {
+            b'O' => {
+                if bytes.len() == 3 && (0x40..=0x7e).contains(&bytes[2]) {
+                    Ok(Payload::Ss3)
+                } else {
+                    Err("malformed SS3 payload".into())
+                }
+            }
+            b'[' => {
+                let Some((&final_byte, params)) = bytes[2..].split_last() else {
+                    return Err("CSI payload has no final byte".into());
+                };
+                if !(0x40..=0x7e).contains(&final_byte) {
+                    return Err(format!("CSI final byte {final_byte:#04x} is out of range"));
+                }
+                if !params
+                    .iter()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
+                {
+                    return Err("CSI parameter bytes contain a non-digit separator".into());
+                }
+                Ok(Payload::Csi)
+            }
+            _ => std::str::from_utf8(&bytes[1..])
+                .map(|_| Payload::Meta)
+                .map_err(|error| format!("non-UTF-8 Meta payload: {error}")),
+        }
+    }
+
+    fn legacy_modifier_param(bytes: &[u8]) -> Option<u32> {
+        if classify(bytes).ok()? != Payload::Csi {
+            return None;
+        }
+        let (&final_byte, params) = bytes[2..].split_last()?;
+        let params = std::str::from_utf8(params).ok()?;
+        let fields: Vec<&str> = params.split(';').collect();
+        match final_byte {
+            b'A' | b'B' | b'C' | b'D' | b'H' | b'F' | b'P' | b'Q' | b'R' | b'S'
+                if fields.len() == 2 && fields[0] == "1" =>
+            {
+                fields[1].parse().ok()
+            }
+            b'~' if fields.len() == 2 && fields[0] != "27" => fields[1].parse().ok(),
+            b'~' if fields.len() == 3 && fields[0] == "27" => fields[1].parse().ok(),
+            _ => None,
+        }
+    }
+
+    fn kitty_modifier_param(bytes: &[u8]) -> Option<u32> {
+        if classify(bytes).ok()? != Payload::Csi {
+            return None;
+        }
+        let (_, params) = bytes[2..].split_last()?;
+        let params = std::str::from_utf8(params).ok()?;
+        let Some((_, modifier_and_rest)) = params.split_once(';') else {
+            return Some(1);
+        };
+        modifier_and_rest.split([';', ':']).next()?.parse().ok()
+    }
+
+    fn escaped_bytes(bytes: Option<&[u8]>) -> String {
+        match bytes {
+            None => "None".into(),
+            Some(bytes) => {
+                let escaped: String = bytes
+                    .iter()
+                    .flat_map(|byte| std::ascii::escape_default(*byte).map(char::from))
+                    .collect();
+                format!("b\"{escaped}\"")
+            }
+        }
+    }
+
+    fn modifier_chord(mods: ModifiersState, key_name: &str) -> String {
+        let mut parts = Vec::new();
+        if mods.control_key() {
+            parts.push("Ctrl");
+        }
+        if mods.alt_key() {
+            parts.push("Alt");
+        }
+        if mods.shift_key() {
+            parts.push("Shift");
+        }
+        if mods.super_key() {
+            parts.push("Super");
+        }
+        parts.push(key_name);
+        parts.join("+")
+    }
+
+    fn assert_well_formed(
+        entry_point: &str,
+        bytes: Option<&[u8]>,
+        chord: &str,
+        key_name: &str,
+        mode: TermMode,
+    ) {
+        if let Some(bytes) = bytes
+            && let Err(reason) = classify(bytes)
+        {
+            panic!(
+                "{entry_point} emitted malformed bytes: {reason}; chord={chord}, key={key_name}, mode_bits={:#010x}, bytes={}",
+                mode.bits(),
+                escaped_bytes(Some(bytes))
+            );
+        }
+    }
+
+    #[test]
+    fn every_legacy_entry_point_consults_the_super_guard() {
+        let src = production_source();
+        for signature in ["pub fn encode(", "pub fn encode_app_keypad("] {
+            let body = src
+                .split(signature)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}").next())
+                .unwrap_or_else(|| panic!("missing production body for {signature}"));
+            assert!(
+                body.contains("legacy_encodes_modifiers(mods)"),
+                "{signature} must reject Super before emitting a legacy sequence"
+            );
+        }
+
+        let kitty_body = src
+            .split("fn kitty_modifier_bits(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("kitty_modifier_bits production body");
+        assert!(
+            kitty_body.contains("mods.super_key()"),
+            "Kitty CSI-u must retain its real Super modifier bit"
+        );
+    }
+
+    #[test]
+    fn legacy_encoding_is_well_formed_for_every_modifier_combination() {
+        #[derive(Clone)]
+        struct SweepKey {
+            name: &'static str,
+            key: Key,
+            location: KeyLocation,
+        }
+
+        let named = |name, key| SweepKey {
+            name,
+            key: Key::Named(key),
+            location: KeyLocation::Standard,
+        };
+        let character = |name, value: &'static str| SweepKey {
+            name,
+            key: Key::Character(value.into()),
+            location: KeyLocation::Standard,
+        };
+        let numpad_character = |name, value: &'static str| SweepKey {
+            name,
+            key: Key::Character(value.into()),
+            location: KeyLocation::Numpad,
+        };
+        let numpad_named = |name, key| SweepKey {
+            name,
+            key: Key::Named(key),
+            location: KeyLocation::Numpad,
+        };
+
+        let keys = vec![
+            named("ArrowUp", NamedKey::ArrowUp),
+            named("ArrowDown", NamedKey::ArrowDown),
+            named("ArrowLeft", NamedKey::ArrowLeft),
+            named("ArrowRight", NamedKey::ArrowRight),
+            named("Home", NamedKey::Home),
+            named("End", NamedKey::End),
+            named("PageUp", NamedKey::PageUp),
+            named("PageDown", NamedKey::PageDown),
+            named("Insert", NamedKey::Insert),
+            named("Delete", NamedKey::Delete),
+            named("F1", NamedKey::F1),
+            named("F2", NamedKey::F2),
+            named("F3", NamedKey::F3),
+            named("F4", NamedKey::F4),
+            named("F5", NamedKey::F5),
+            named("F6", NamedKey::F6),
+            named("F7", NamedKey::F7),
+            named("F8", NamedKey::F8),
+            named("F9", NamedKey::F9),
+            named("F10", NamedKey::F10),
+            named("F11", NamedKey::F11),
+            named("F12", NamedKey::F12),
+            named("Tab", NamedKey::Tab),
+            named("Enter", NamedKey::Enter),
+            named("Backspace", NamedKey::Backspace),
+            named("Escape", NamedKey::Escape),
+            named("Space", NamedKey::Space),
+            character("a", "a"),
+            character("i", "i"),
+            character("z", "z"),
+            character("G", "G"),
+            character("1", "1"),
+            character("2", "2"),
+            character("8", "8"),
+            character("0", "0"),
+            character("[", "["),
+            character("backslash", "\\"),
+            character("]", "]"),
+            character("^", "^"),
+            character("_", "_"),
+            character("/", "/"),
+            character("?", "?"),
+            character("@", "@"),
+            character(",", ","),
+            character("=", "="),
+            character("é", "é"),
+            numpad_character("Numpad0", "0"),
+            numpad_character("Numpad1", "1"),
+            numpad_character("Numpad2", "2"),
+            numpad_character("Numpad3", "3"),
+            numpad_character("Numpad4", "4"),
+            numpad_character("Numpad5", "5"),
+            numpad_character("Numpad6", "6"),
+            numpad_character("Numpad7", "7"),
+            numpad_character("Numpad8", "8"),
+            numpad_character("Numpad9", "9"),
+            numpad_character("Numpad+", "+"),
+            numpad_character("Numpad-", "-"),
+            numpad_character("Numpad*", "*"),
+            numpad_character("Numpad/", "/"),
+            numpad_character("Numpad.", "."),
+            numpad_character("Numpad=", "="),
+            numpad_named("NumpadEnter", NamedKey::Enter),
+            numpad_named("NumpadArrowLeft", NamedKey::ArrowLeft),
+            numpad_named("NumpadHome", NamedKey::Home),
+            numpad_named("NumpadDelete", NamedKey::Delete),
+        ];
+        let legacy_modes = [
+            TermMode::empty(),
+            TermMode::APP_CURSOR,
+            TermMode::APP_KEYPAD,
+            TermMode::APP_CURSOR | TermMode::APP_KEYPAD,
+            negotiated_modify_other_keys(0),
+            negotiated_modify_other_keys(1),
+            negotiated_modify_other_keys(2),
+            TermMode::UNNEGOTIATED_MODIFIED_ENTER,
+            TermMode::UNNEGOTIATED_MODIFIED_ENTER | negotiated_modify_other_keys(0),
+        ];
+        let kitty_modes = [
+            TermMode::DISAMBIGUATE_ESC_CODES,
+            TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES,
+            TermMode::REPORT_ALL_KEYS_AS_ESC,
+            TermMode::REPORT_ALL_KEYS_AS_ESC
+                | TermMode::REPORT_ALTERNATE_KEYS
+                | TermMode::REPORT_ASSOCIATED_TEXT,
+            TermMode::REPORT_EVENT_TYPES,
+        ];
+
+        for mask in 0..16 {
+            let mut mods = ModifiersState::empty();
+            if mask & 1 != 0 {
+                mods |= ModifiersState::SHIFT;
+            }
+            if mask & 2 != 0 {
+                mods |= ModifiersState::ALT;
+            }
+            if mask & 4 != 0 {
+                mods |= ModifiersState::CONTROL;
+            }
+            if mask & 8 != 0 {
+                mods |= ModifiersState::SUPER;
+            }
+            let expected_legacy_modifier = 1
+                + u32::from(mods.shift_key())
+                + 2 * u32::from(mods.alt_key())
+                + 4 * u32::from(mods.control_key());
+
+            for key in &keys {
+                let chord = modifier_chord(mods, key.name);
+                for mode in legacy_modes {
+                    let outputs = [
+                        ("encode", encode(&key.key, key.key.to_text(), mods, mode)),
+                        (
+                            "encode_app_keypad",
+                            encode_app_keypad(&key.key, key.location, mods, mode),
+                        ),
+                        ("encode_key_press", encode_key_press(&key.key, mods, mode)),
+                    ];
+
+                    for (entry_point, output) in &outputs {
+                        let bytes = output.as_deref();
+                        assert_well_formed(entry_point, bytes, &chord, key.name, mode);
+                        if mods.super_key() {
+                            assert!(
+                                output.is_none(),
+                                "Super reached legacy {entry_point}; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(bytes)
+                            );
+                        }
+                        if let Some(param) = bytes.and_then(legacy_modifier_param) {
+                            assert_eq!(
+                                param,
+                                expected_legacy_modifier,
+                                "wrong legacy modifier parameter from {entry_point}; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(bytes)
+                            );
+                            assert!(
+                                (1..=8).contains(&param),
+                                "legacy modifier parameter out of range from {entry_point}; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(bytes)
+                            );
+                            assert_eq!(
+                                (param - 1) & 8,
+                                0,
+                                "legacy modifier offset set xterm's Meta bit from {entry_point}; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(bytes)
+                            );
+                        }
+                    }
+                }
+
+                for mode in kitty_modes {
+                    let event = match &key.key {
+                        Key::Character(text) if key.location == KeyLocation::Standard => {
+                            character_event(
+                                text.as_str(),
+                                text.as_str(),
+                                text.as_str(),
+                                ElementState::Pressed,
+                                false,
+                            )
+                        }
+                        _ => {
+                            let text = key.key.to_text().map(str::to_owned);
+                            protocol_event(
+                                key.key.clone(),
+                                key.key.clone(),
+                                text.as_deref(),
+                                text.as_deref().unwrap_or_default(),
+                                key.location,
+                                ElementState::Pressed,
+                                false,
+                            )
+                        }
+                    };
+                    let uses_kitty = kitty_event_uses_sequence(&event, mods, mode);
+                    let output = encode_kitty_key_event(&event, mods, mode);
+                    let bytes = output.as_deref();
+                    assert_well_formed("encode_kitty_key_event", bytes, &chord, key.name, mode);
+
+                    if uses_kitty {
+                        let Some(bytes) = bytes else {
+                            panic!(
+                                "Kitty selected CSI-u but emitted nothing; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(None)
+                            );
+                        };
+                        let Some(param) = kitty_modifier_param(bytes) else {
+                            panic!(
+                                "Kitty sequence has no effective modifier parameter; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                                key.name,
+                                mode.bits(),
+                                escaped_bytes(Some(bytes))
+                            );
+                        };
+                        assert_eq!(
+                            param - 1,
+                            u32::from(kitty_modifier_bits(mods)),
+                            "wrong Kitty modifier parameter; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                            key.name,
+                            mode.bits(),
+                            escaped_bytes(Some(bytes))
+                        );
+                    } else if mods.super_key() {
+                        assert!(
+                            output.is_none(),
+                            "Kitty fallback leaked Super into legacy encoding; chord={chord}, key={}, mode_bits={:#010x}, bytes={}",
+                            key.name,
+                            mode.bits(),
+                            escaped_bytes(bytes)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1723,7 +2176,8 @@ mod tests {
             Some(b"\x1bOM".to_vec())
         );
 
-        // Not applicable: mode off, not on the numpad, or a Ctrl/Alt modifier.
+        // Not applicable: mode off, not on the numpad, or an unsupported
+        // modifier.
         assert_eq!(
             encode_app_keypad(&ch("5"), np, none, TermMode::empty()),
             None
@@ -1734,6 +2188,10 @@ mod tests {
         );
         assert_eq!(
             encode_app_keypad(&ch("5"), np, ModifiersState::CONTROL, app),
+            None
+        );
+        assert_eq!(
+            encode_app_keypad(&ch("5"), np, ModifiersState::SUPER, app),
             None
         );
         // The plain number row (Standard location) still goes through `encode`.
@@ -1903,22 +2361,27 @@ mod tests {
 
     #[test]
     fn xterm_modifier_table() {
-        // xterm "modifyCursorKeys" encoding: 1 = none, +1 shift, +2 alt,
-        // +4 ctrl, +8 super (cmd/win). The standard table every modern
-        // terminal honors — bash/readline/vim/less/fzf all read it.
-        assert_eq!(xterm_modifier(ModifiersState::empty()), 1);
-        assert_eq!(xterm_modifier(ModifiersState::SHIFT), 2);
-        assert_eq!(xterm_modifier(ModifiersState::ALT), 3);
-        assert_eq!(xterm_modifier(ModifiersState::CONTROL), 5);
+        // xterm's legacy modifier parameter is 1 = none, +1 shift, +2 alt,
+        // +4 ctrl. Its +8 Meta bit is not the Super/Command key.
+        assert_eq!(legacy_xterm_modifier(ModifiersState::empty()), 1);
+        assert_eq!(legacy_xterm_modifier(ModifiersState::SHIFT), 2);
+        assert_eq!(legacy_xterm_modifier(ModifiersState::ALT), 3);
+        assert_eq!(legacy_xterm_modifier(ModifiersState::CONTROL), 5);
         assert_eq!(
-            xterm_modifier(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            legacy_xterm_modifier(ModifiersState::CONTROL | ModifiersState::SHIFT),
             6
         );
         assert_eq!(
-            xterm_modifier(ModifiersState::CONTROL | ModifiersState::ALT),
+            legacy_xterm_modifier(ModifiersState::CONTROL | ModifiersState::ALT),
             7
         );
-        assert_eq!(xterm_modifier(ModifiersState::SUPER), 9);
+        assert_eq!(legacy_xterm_modifier(ModifiersState::SUPER), 1);
+        assert_eq!(
+            legacy_xterm_modifier(
+                ModifiersState::SUPER | ModifiersState::CONTROL | ModifiersState::ALT
+            ),
+            7
+        );
     }
 
     #[test]
@@ -1929,6 +2392,8 @@ mod tests {
         let alt = ModifiersState::ALT;
         let shift = ModifiersState::SHIFT;
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        let super_key = ModifiersState::SUPER;
+        let super_alt = ModifiersState::SUPER | ModifiersState::ALT;
         let mode = TermMode::empty();
 
         // Unmodified arrows keep the legacy `CSI A..D`; modified switch to
@@ -1952,6 +2417,23 @@ mod tests {
             Some(b"\x1b[1;6D".to_vec()),
             "Ctrl+Shift+ArrowLeft must be CSI 1;6D"
         );
+        for (name, key, mods) in [
+            ("Cmd+Up", NamedKey::ArrowUp, super_key),
+            ("Cmd+Option+Up", NamedKey::ArrowUp, super_alt),
+            ("Cmd+Left", NamedKey::ArrowLeft, super_key),
+            ("Cmd+Right", NamedKey::ArrowRight, super_key),
+            ("Cmd+F1", NamedKey::F1, super_key),
+            ("Cmd+Delete", NamedKey::Delete, super_key),
+            ("Cmd+PageUp", NamedKey::PageUp, super_key),
+        ] {
+            for mode in [TermMode::empty(), TermMode::APP_CURSOR] {
+                assert_eq!(
+                    encode(&Key::Named(key), None, mods, mode),
+                    None,
+                    "{name} must not use a legacy xterm sequence in {mode:?}"
+                );
+            }
+        }
 
         // App-cursor mode (DECCKM) only changes the *unmodified* form;
         // modified still uses CSI so vim's arrows-in-insert work.
@@ -2007,6 +2489,190 @@ mod tests {
             Some(b"\x1b[Z".to_vec()),
             "Shift+Tab must be back-tab CSI Z"
         );
+    }
+
+    #[test]
+    fn legacy_encoding_has_no_super_representation() {
+        struct Chord {
+            name: &'static str,
+            key: Key,
+            location: KeyLocation,
+            required_mode: TermMode,
+        }
+
+        let standard = KeyLocation::Standard;
+        let chords = [
+            Chord {
+                name: "Cmd+Option+Up",
+                key: Key::Named(NamedKey::ArrowUp),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Left",
+                key: Key::Named(NamedKey::ArrowLeft),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Right",
+                key: Key::Named(NamedKey::ArrowRight),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+E",
+                key: Key::Character("e".into()),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Enter",
+                key: Key::Named(NamedKey::Enter),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Escape",
+                key: Key::Named(NamedKey::Escape),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Space",
+                key: Key::Named(NamedKey::Space),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Backspace",
+                key: Key::Named(NamedKey::Backspace),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Tab",
+                key: Key::Named(NamedKey::Tab),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+F5",
+                key: Key::Named(NamedKey::F5),
+                location: standard,
+                required_mode: TermMode::empty(),
+            },
+            Chord {
+                name: "Cmd+Numpad5",
+                key: Key::Character("5".into()),
+                location: KeyLocation::Numpad,
+                required_mode: TermMode::APP_KEYPAD,
+            },
+        ];
+
+        for base_mode in [
+            TermMode::empty(),
+            negotiated_modify_other_keys(1),
+            negotiated_modify_other_keys(2),
+        ] {
+            for chord in &chords {
+                let mode = base_mode | chord.required_mode;
+                let mods = if chord.name == "Cmd+Option+Up" {
+                    ModifiersState::SUPER | ModifiersState::ALT
+                } else {
+                    ModifiersState::SUPER
+                };
+                let encoded = encode_app_keypad(&chord.key, chord.location, mods, mode)
+                    .or_else(|| encode(&chord.key, None, mods, mode));
+                assert_eq!(
+                    encoded,
+                    None,
+                    "{} must be silent in legacy mode bits {:#010x}",
+                    chord.name,
+                    mode.bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn super_reaches_applications_only_through_kitty_csi_u() {
+        let super_alt = ModifiersState::SUPER | ModifiersState::ALT;
+        let up = Key::Named(NamedKey::ArrowUp);
+        assert_eq!(
+            encode_key_press(&up, super_alt, TermMode::empty()),
+            None,
+            "Cmd+Option+Up has no legacy representation"
+        );
+        assert_eq!(
+            encode_key_press(&up, super_alt, TermMode::DISAMBIGUATE_ESC_CODES),
+            Some(b"\x1b[1;11A".to_vec())
+        );
+        assert_eq!(
+            encode_key_press(
+                &Key::Character("e".into()),
+                ModifiersState::SUPER,
+                TermMode::DISAMBIGUATE_ESC_CODES,
+            ),
+            Some(b"\x1b[101;9u".to_vec())
+        );
+    }
+
+    #[test]
+    fn enter_quartet_stays_pairwise_distinct_where_the_shipped_table_promises_it() {
+        let enter = Key::Named(NamedKey::Enter);
+        let rows = [
+            (
+                "negotiated xterm level 2",
+                negotiated_modify_other_keys(2),
+                [
+                    b"\r".as_slice(),
+                    b"\x1b[27;2;13~".as_slice(),
+                    b"\x1b[27;5;13~".as_slice(),
+                    b"\x1b[27;3;13~".as_slice(),
+                ],
+            ),
+            (
+                "Kitty disambiguation",
+                TermMode::DISAMBIGUATE_ESC_CODES,
+                [
+                    b"\r".as_slice(),
+                    b"\x1b[13;2u".as_slice(),
+                    b"\x1b[13;5u".as_slice(),
+                    b"\x1b[13;3u".as_slice(),
+                ],
+            ),
+        ];
+        let modifiers = [
+            ModifiersState::empty(),
+            ModifiersState::SHIFT,
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+        ];
+
+        for (row, mode, expected) in rows {
+            let outputs = modifiers.map(|mods| {
+                encode_key_press(&enter, mods, mode).expect("Enter quartet must encode")
+            });
+            assert_eq!(
+                outputs[0], b"\r",
+                "plain Enter must remain CR in the {row} row"
+            );
+            for (index, expected) in expected.into_iter().enumerate() {
+                assert_eq!(
+                    outputs[index], expected,
+                    "Enter table mismatch in the {row} row at modifier index {index}"
+                );
+            }
+            for left in 0..outputs.len() {
+                for right in left + 1..outputs.len() {
+                    assert_ne!(
+                        outputs[left], outputs[right],
+                        "Enter outputs collided in the {row} row at indexes {left} and {right}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
