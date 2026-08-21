@@ -2036,6 +2036,39 @@ name the shape of bug each pass caught.
   auto-repeat in both directions across the consume/pass-through boundary; the
   eventual release must follow the terminal-owned repeat rather than a stale
   consumed press, and a later UI-owned repeat cannot reclaim it.
+- The legacy modifier sweep walks all 16 subsets of Shift/Alt/Control/Super
+  across arrows, navigation, function, editing, keypad and character keys, in
+  legacy, DECCKM, DECKPAM, both `modifyOtherKeys` levels and five Kitty flag
+  combinations. It asserts a shape property rather than a byte table: output is
+  always `None`, plain text/C0, one ESC prefix plus such a payload, a
+  well-formed SS3, or a well-formed CSI whose legacy modifier parameter is
+  exactly `1 + shift + 2*alt + 4*ctrl`. Be precise about its reach: the shape
+  and parameter properties catch any Super bit or any modifier folded into a
+  parameterized sequence, which is the class the Command bug belonged to. They
+  do **not** catch a modifier dropped from a payload that carries no parameter
+  — encoding `Ctrl+A` as a plain `a` still satisfies them — so the per-chord
+  exact-byte tests remain load-bearing rather than decorative. `Alt` implying
+  an ESC prefix holds for every legacy chord it emits, with plain Enter as the
+  one recorded exception. Source
+  drift guards pin that each legacy entry point consults the Super predicate
+  and that the Kitty path still reports Super, so a later cleanup cannot
+  "fix" the protocol that is entitled to it.
+- Confirm-bar contrast is checked against every bundled theme rather than
+  spot-checked, because the failure is per-theme: the bar paints `palette[1]`
+  and the shipped default's foreground sits at roughly 1.6:1 on it. A second
+  test pins that regression directly — the raw foreground fails and the
+  helper's output passes — so the guard cannot be satisfied by a helper that
+  quietly stops lifting.
+- **Cross-platform record for the Super/Command encoder change (2026-08-21).**
+  macOS: `just gauntlet`, plus a live `kettle ctl send_keys` sweep before and
+  after against an isolated debug instance. Linux: the encoder suite was run in
+  a local Ubuntu 26.04 aarch64 VM (48 → 59 tests, all passing); the 34 unrelated
+  failures there are filesystem/XDG tests that fail identically on `main` in the
+  same VM (`session::` 6 failed on both, `paste_image::` 13 failed on both),
+  because the VM runs them as root on tmpfs. Windows: **not run locally** — the
+  Windows 11 VM could not build `ring`'s custom build script for lack of a C/asm
+  toolchain. Windows coverage for this change comes from
+  `build (windows-latest)` in `ci.yml`, not from a local run.
 - The modified-Enter matrix pairs the live line-discipline result with a
   recognized foreground composer, rejects nested/raw shell and readline cases,
   and exercises direct versus shell-hosted Windows clients. Process-snapshot

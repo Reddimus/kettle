@@ -58,6 +58,62 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   same gate. Opening a modal or releasing the button that owns the gesture now
   copies selected text first when copy-on-select is enabled, then ends the
   gesture, including Shift+right-drag.
+- **The titlebar close button closes the window.** `✕` and `Alt+F4` routed
+  through `ask-before-closing` like the close keybinds do, and because a pane
+  without OSC 133 shell integration cannot prove it is idle it counted as busy,
+  so in practice every window with more than one pane asked first. They are OS
+  window-destroy requests rather than Kettle commands, and a terminal owns no
+  unsaved-document state to veto one with, so they now close immediately. The
+  close **actions** — `Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`,
+  middle-clicking a tab — still honor the policy in full, and
+  `ask-before-closing = always` still asks on the titlebar close for anyone who
+  wants it. That policy is now also a radio group under right-click
+  **Preferences ▸**, so it can be changed and reversed in one place instead of
+  only in the config file.
+- **The visual bell flash is dimmer, and now adjustable.** The flash was a
+  hard-coded full-surface wash of the theme foreground at 18% peak alpha. The
+  most frequent bell in practice is an empty Tab completion — a non-event — so
+  the peak now defaults to 10% and is exposed as `bell-flash-intensity`
+  (0 to 1). `0` drops the flash while leaving window attention alone, which
+  also gives photosensitive users a way to opt out of a full-surface flash
+  without silencing the rest of the bell.
+- **Command chords no longer leave stray text on the command line.** Kettle
+  reported Super in the legacy xterm modifier parameter, but bit 8 there is
+  xterm's Meta — a distinct X11 modifier Kettle has no key for, not macOS
+  Command. `Cmd+Option+Up` therefore sent `CSI 1;11 A` and `Cmd+Left` sent
+  `CSI 1;9 D`, parameters no line editor decodes, so the shell echoed the
+  residue as literal `1A` or `1D`. In the other direction the character branch
+  dropped Super silently, so an unbound `Cmd+A` typed a bare `a`, and
+  `Cmd+Numpad` still emitted an application-keypad sequence. A chord holding
+  Super now produces no PTY bytes at all on any platform unless the application
+  has negotiated the Kitty keyboard protocol, which defines a real super bit and
+  is unchanged. Existing keybindings are unaffected — `Ctrl+Cmd+Arrow` pane
+  focus and `Cmd+Up`/`Cmd+Down` prompt jumps are consumed before the encoder.
+  `send_keys` now reports which token could not be encoded, and says whether
+  the pane's mode was the reason, instead of counting a key it silently
+  dropped.
+- **Alt chords that dropped their escape prefix now match xterm.** Mapping the
+  full modifier matrix while fixing the Command-key encoding turned up four
+  more gates that forgot a modifier. `Alt+Escape` sent a bare `ESC`, making it
+  indistinguishable from plain Escape; `Alt+Tab` sent a bare tab;
+  `Ctrl+Alt+Backspace` sent `BS` with the Alt prefix dropped; and
+  `Ctrl+Alt+Space` sent `ESC SP` instead of `ESC NUL`, dropping Control. All
+  four now carry both modifiers. `Ctrl+Shift+Tab` and `Alt+Shift+Tab` also
+  reach `modifyOtherKeys` instead of collapsing to `CSI Z`, so a TUI can tell
+  them apart from plain Shift+Tab — which itself still sends `CSI Z` at every
+  level, as before. `Shift+Numpad5` under DECKPAM is deliberately unchanged:
+  xterm gates keypad modifier reporting behind resources Kettle does not model,
+  so there is no unambiguous encoding to adopt.
+- **The close confirmation could not be read, so it could not be answered.**
+  The bar paints the theme's red `palette[1]`, but drew its prompt, buttons and
+  focus marker in the ordinary theme foreground — a color chosen to contrast
+  with the theme *background*. On the shipped TokyoNight Night default that was
+  light lavender on light red, about 1.6:1. Kettle now lifts the bar's text to
+  WCAG AA against its own background using the same contrast helper the
+  completion panel uses, and a test holds the floor across every bundled theme.
+  The key help also advertises `y`/`n` when `vim-menu-nav` is on, because those
+  answer the question directly while Enter fires the focused button — which is
+  the safe `Cancel` on every close prompt.
 
 ## [3.1.1] — 2026-08-18
 

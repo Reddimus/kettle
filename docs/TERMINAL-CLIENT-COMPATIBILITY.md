@@ -138,6 +138,18 @@ mode, modified navigation keys, and the usual control codes. Cursor, function,
 editing, and keypad keys keep their own xterm encodings; `modifyOtherKeys` does
 not gate those branches.
 
+The legacy modifier parameter carries Shift, Alt, and Control only — it is
+`1 + shift + 2*alt + 4*ctrl`, so it never leaves the range `1..=8`. Bit 8 in
+that parameter is xterm's **Meta**, a distinct X11 modifier Kettle has no key
+for; it is not macOS Command and not the Windows or Linux Super key. A chord
+holding Super therefore has no legacy representation, and Kettle writes **no
+PTY bytes** for one that no keybinding claims, on every platform. Super reaches
+applications only through the Kitty keyboard protocol, which defines a real
+super bit: with `CSI > 1 u` negotiated, `Cmd+Option+Up` is `CSI 1;11A`,
+while the same chord in a legacy pane sends nothing. The agent control plane
+follows the same rule — `send_keys` reports an error for a Super chord the
+target pane cannot encode rather than silently dropping the modifier.
+
 The negotiated `modifyOtherKeys` resource always starts at level zero. An
 application can select levels zero, one, or two with `CSI > 4 ; Pv m`, and
 `CSI ? 4 m` reports only that state as `CSI > 4 ; Pv m`. Omitting `Pv` restores

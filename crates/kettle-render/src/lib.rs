@@ -6573,15 +6573,15 @@ impl Renderer {
         }
 
         // Visual bell: a brief full-surface flash (replaces an audible beep).
-        if overlay.bell > 0.0 {
-            quads.push(rect(
-                0.0,
-                0.0,
-                sw,
-                sh,
-                theme.foreground,
-                overlay.bell * 0.18,
-            ));
+        // `overlay.bell` is the 300 ms decay ramp; `bell-flash-intensity` is
+        // its peak alpha. The peak used to be a hard-coded 0.18, which is a
+        // lot of theme foreground across the whole surface for what is usually
+        // an empty Tab completion — the most frequent bell there is, and a
+        // non-event. `0.0` opts out of the flash while leaving the rest of the
+        // bell (window attention) alone.
+        let bell_alpha = overlay.bell * cfg.bell_flash_intensity;
+        if bell_alpha > 0.0 {
+            quads.push(rect(0.0, 0.0, sw, sh, theme.foreground, bell_alpha));
         }
 
         // Search uses a responsive RESERVED lane. The app subtracts the public
@@ -6591,6 +6591,11 @@ impl Renderer {
         let mut have_search = false;
         let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
         let mut search_text_top = None;
+        // Text color for the shared bottom-bar buffer. `None` means "theme
+        // foreground", which is right for every arm that paints itself on the
+        // ordinary chrome background. The confirm bar is the exception: it
+        // paints a saturated `palette[1]` and has to raise its own contrast.
+        let mut search_text_color = None;
         if let Some(search) = &overlay.search {
             have_search = true;
             let geometry = search_bar_geometry(sw, sh, cw, ch);
@@ -6874,7 +6879,15 @@ impl Renderer {
             // came out greyed under it. A modal question has to be the most
             // legible thing on screen, and the one raised by rebinding onto an
             // already-bound chord is raised from inside that very panel.
-            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
+            // Opaque, and that is load-bearing rather than cosmetic:
+            // `confirm_bar_text_color` guarantees AA against `palette[1]`
+            // itself. At the previous 0.96 the painted background was
+            // `palette[1]` composited over whatever terminal content happened
+            // to sit underneath, so the real ratio drifted with the scrollback
+            // and a valid custom theme could land under the floor the helper
+            // advertises. A destructive question is the one overlay that has
+            // no business being translucent.
+            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
                 if !buttons_label.is_empty() {
@@ -6887,8 +6900,29 @@ impl Renderer {
                 buttons_label.push_str(&btn.label);
                 buttons_label.push(']');
             }
+            // The bar is `palette[1]`, not the chrome background, so the theme
+            // foreground is not guaranteed to be readable on it — on the
+            // shipped TokyoNight Night default it is light lavender (#c0caf5)
+            // on light red (#f7768e), about 1.6:1, which is how a close
+            // confirmation ended up unanswerable. Lift it to WCAG AA the same
+            // way the completion panel does (`confirm_bar_text_color`). The
+            // 0.96 alpha leaves the effective background within a few percent
+            // of `palette[1]`, so measuring against the flat color is right.
+            let bar_fg = confirm_bar_text_color(theme);
+            search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));
             let prompt = format!("  ⚠ {}", dlg.prompt);
-            let help = "  Tab/←→ · Enter · Esc";
+            // `y`/`n` answer the question directly regardless of which button
+            // has focus, while Enter fires the FOCUSED button (which is the
+            // safe `Cancel` on every close prompt). A user who cannot tell
+            // which button is focused needs the unambiguous pair advertised —
+            // but only when it actually works: the App gates `y`/`n` on
+            // `vim-menu-nav`, so advertising them unconditionally would name a
+            // key that does nothing for anyone who turned that off.
+            let help = if cfg.vim_menu_nav {
+                "  Tab/←→ · Enter · Esc · y/n"
+            } else {
+                "  Tab/←→ · Enter · Esc"
+            };
             let label = compose_confirm_bar_label(
                 &prompt,
                 help,
@@ -8180,7 +8214,7 @@ impl Renderer {
                     right: (search_rect.0 + search_rect.2) as i32,
                     bottom: (search_rect.1 + search_rect.3) as i32,
                 },
-                default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                default_color: search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b)),
                 custom_glyphs: &[],
             });
         }
@@ -11593,6 +11627,38 @@ fn search_query_column(query: &str, byte: usize) -> usize {
         byte -= 1;
     }
     display_width(&query[..byte])
+}
+
+/// Minimum contrast the confirm bar's text holds against its own background.
+/// WCAG AA for body text. A destructive question the user cannot read is worse
+/// than no question at all.
+pub const CONFIRM_BAR_MIN_CONTRAST: f64 = 4.5;
+
+/// Text color for the `palette[1]` confirm bar.
+///
+/// The bar was painted with the theme's ordinary foreground, which is chosen to
+/// contrast with the theme BACKGROUND, not with a saturated red. On the shipped
+/// TokyoNight Night default that is `#c0caf5` on `#f7768e` — roughly 1.6:1, far
+/// under any legibility floor, so the close confirmation could not be read and
+/// therefore could not be answered.
+///
+/// Start from the theme's own cursor-text color, which is the same choice the
+/// tab close chip already makes on this same `palette[1]` background, then lift
+/// it to AA. Starting from a theme color rather than flat black keeps the bar
+/// looking like part of the theme; `with_min_contrast` preserves as much of
+/// that tint as the ratio allows. Pure, so the whole bundled theme set can be
+/// checked without a GPU.
+///
+/// This holds only because the bar is painted OPAQUE. A translucent bar
+/// composites `palette[1]` over live terminal content, and the real ratio then
+/// depends on the scrollback underneath — which is exactly the guarantee this
+/// function exists to remove.
+pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
+    color::with_min_contrast(
+        theme.cursor_text,
+        theme.palette[1],
+        CONFIRM_BAR_MIN_CONTRAST,
+    )
 }
 
 /// Maximum monospace columns available to a single-line overlay buffer.
@@ -18310,9 +18376,99 @@ mod completion_panel_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        compose_confirm_bar_label, display_width, fit_pane_titlebar_title, fit_single_line_label,
-        fit_tab_path, fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
+        CONFIRM_BAR_MIN_CONTRAST, color, compose_confirm_bar_label, confirm_bar_text_color,
+        display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
+        fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
+        production_source,
     };
+
+    /// A destructive confirmation has to be readable in EVERY bundled theme,
+    /// not just the ones anyone happened to open.
+    ///
+    /// The bar paints `palette[1]` and used to draw the theme's ordinary
+    /// foreground on it -- a color picked to contrast with the theme
+    /// BACKGROUND. On the shipped TokyoNight Night default that is `#c0caf5`
+    /// on `#f7768e`, about 1.6:1: the prompt, its buttons and its focus marker
+    /// were all effectively invisible, so the question could not be answered
+    /// and the window would not close. Iterate the whole bundled set, because
+    /// the failure is per-theme and a single spot check is what missed it.
+    #[test]
+    fn confirm_bar_text_is_readable_in_every_bundled_theme() {
+        let mut worst: Option<(&str, f64)> = None;
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let fg = confirm_bar_text_color(&theme);
+            let ratio = color::contrast_ratio(fg, theme.palette[1]);
+            assert!(
+                ratio >= CONFIRM_BAR_MIN_CONTRAST,
+                "confirm bar text is unreadable in theme {name:?}: {ratio:.2}:1 \
+                 (fg {fg:?} on palette[1] {:?})",
+                theme.palette[1]
+            );
+            if worst.is_none_or(|(_, w)| ratio < w) {
+                worst = Some((name, ratio));
+            }
+        }
+        let (name, ratio) = worst.expect("the bundled theme set must not be empty");
+        assert!(
+            ratio >= CONFIRM_BAR_MIN_CONTRAST,
+            "worst bundled theme {name:?} at {ratio:.2}:1"
+        );
+    }
+
+    /// The regression this fixes, pinned to the exact shipped default rather
+    /// than to whatever `Theme::default()` happens to be: the raw theme
+    /// foreground fails on the confirm bar, and the helper's output passes.
+    #[test]
+    fn tokyonight_night_confirm_bar_was_unreadable_before_the_lift() {
+        let theme = kettle_config::Theme::by_name("TokyoNight Night");
+        let raw = color::contrast_ratio(theme.foreground, theme.palette[1]);
+        assert!(
+            raw < CONFIRM_BAR_MIN_CONTRAST,
+            "expected the shipped default's raw foreground to fail on palette[1], got {raw:.2}:1"
+        );
+        let lifted = color::contrast_ratio(confirm_bar_text_color(&theme), theme.palette[1]);
+        assert!(
+            lifted >= CONFIRM_BAR_MIN_CONTRAST,
+            "confirm_bar_text_color did not reach AA on the shipped default: {lifted:.2}:1"
+        );
+    }
+
+    /// Wiring guards. The two tests above prove `confirm_bar_text_color` and
+    /// `bell-flash-intensity` compute the right values; neither proves the
+    /// renderer USES them. Reverting the bar's text color to `theme.foreground`
+    /// or hard-coding the bell peak back to a literal would leave every value
+    /// test green, which is precisely the failure mode that shipped the
+    /// unreadable bar in the first place.
+    ///
+    /// The bar's opacity is pinned here too, because the AA guarantee is
+    /// computed against opaque `palette[1]`: a translucent bar composites over
+    /// live terminal content and the real ratio drifts with the scrollback.
+    #[test]
+    fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
+        let src = production_source();
+        assert!(
+            src.contains("let bar_fg = confirm_bar_text_color(theme);"),
+            "the confirm bar must take its text color from confirm_bar_text_color"
+        );
+        assert!(
+            src.contains("search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));"),
+            "the computed bar color must reach the shared bottom-bar text area"
+        );
+        assert!(
+            src.contains("search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b))"),
+            "the text area must prefer the per-overlay color over the theme foreground"
+        );
+        assert!(
+            src.contains("sh - bar_h, sw, bar_h, theme.palette[1], 1.0)"),
+            "the confirm bar must be painted opaque; the AA guarantee is \
+             computed against palette[1] itself"
+        );
+        assert!(
+            src.contains("overlay.bell * cfg.bell_flash_intensity"),
+            "the visual bell peak must come from the config key, not a literal"
+        );
+    }
 
     /// The confirm bar must never clip its own button row.
     ///
