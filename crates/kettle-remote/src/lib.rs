@@ -2400,44 +2400,12 @@ fn apply_short_option(
     if short.consumed_next { 2 } else { 1 }
 }
 
-/// Phase 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): format a
-/// `RemoteContext` as a shell command string the user can re-run.
-/// Drives the right-click "Reconnect to …" / "Re-attach …" menu
-/// entry — clicking writes this string to the focused pane's PTY
-/// (one shell-line away from re-establishing the session).
+/// Build the command behind the Reconnect menu item.
 ///
-/// - `Ssh { user: None, host: "box" }` → `Some("ssh 'box'")`
-/// - `Ssh { user: Some("me"), host: "box" }` → `Some("ssh 'me'@'box'")`
-/// - `Container { Docker, c }` → `Some("docker exec -it 'c' $SHELL")`
-/// - `Container { Kubectl, c }` → `Some("kubectl exec -it 'c' -- $SHELL")`
-///
-/// The endpoint-selecting options detected alongside the host/container are
-/// re-emitted too — `ssh -p '2222' -J 'bastion' 'box'`, `docker --context
-/// 'remote' exec -it 'web' $SHELL` — because the bare name reaches a different
-/// service. When the original session used an option this crate cannot
-/// reproduce (`SshOptions::unreproducible` / `ContainerOptions::unreproducible`)
-/// the answer is `None`: no Reconnect at all beats a Reconnect somewhere else.
-///
-/// Pure — no `&self`, no env. Unit-testable. The "$SHELL"
-/// placeholder leaves shell-choice to the user's environment
-/// (the running pane's shell resolves it at command time).
-///
-/// v2.32.0 (audit H1, SECURITY): the host/user/container fields are
-/// argv-derived (from a descendant process's command line) and the caller
-/// AUTO-EXECUTES this string by writing it to the pane's PTY with a trailing
-/// newline. To keep the data→code boundary safe this function:
-///
-/// 1. POSIX single-quotes (`'…'`) every dynamic field via
-///    `shell_single_quote`, so even a value that slipped past parse-time
-///    validation (`field_is_safe`) is inert (no `;`/`$()`/space splits it);
-/// 2. returns `None` if any field still contains a control char (a newline
-///    would split the auto-exec into extra shell lines) — the caller then
-///    omits the Reconnect menu item rather than emit an unsafe line.
-///
-/// This is layer 2; layer 1 is the parse-time rejection in
-/// `detect_ssh` / `detect_container`. Returning `Option` lets the UI drop
-/// the menu entry entirely when no safe command can be built.
+/// Endpoint-selecting options are retained because dropping one can target a
+/// different service. Unreproducible sessions return `None`. Every dynamic
+/// field is control-free and shell-quoted because the caller writes the result
+/// to a PTY with a trailing newline.
 pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     match ctx {
         RemoteContext::Ssh {

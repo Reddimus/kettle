@@ -155,8 +155,8 @@ struct Cli {
     #[arg(long)]
     list_ssh_hosts: bool,
 
-    /// List saved layouts (`<config-dir>/layouts/*.json`, Terminator parity) and
-    /// exit. Launch one with `kettle --layout NAME`.
+    /// List saved layouts (`<config-dir>/layouts/*.json`) and exit. Launch one
+    /// with `kettle --layout NAME`.
     #[arg(long)]
     list_layouts: bool,
 
@@ -268,11 +268,8 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     screenshot_menu: Option<std::path::PathBuf>,
 
-    /// Caption text to overlay at the bottom of `--screenshot` /
-    /// `--screenshot-menu` output (iTerm2 "annotated screenshot"
-    /// parity). Useful for docs / README hero images / bug
-    /// reports that want a version / repro / env note baked into
-    /// the PNG. Example:
+    /// Caption text to place at the bottom of `--screenshot` or
+    /// `--screenshot-menu` output. Useful for docs and bug reports. Example:
     ///
     ///   kettle --screenshot doc.png --annotate "kettle v1.3.x — TokyoNight Night"
     #[arg(long, value_name = "TEXT", verbatim_doc_comment)]
@@ -311,8 +308,8 @@ struct Cli {
     #[arg(long)]
     new_process: bool,
 
-    /// Launch into a named layout (Terminator parity). Saves +
-    /// restores from `<config-dir>/layouts/<NAME>.json` so a user
+    /// Launch into a named layout. Saves and restores from
+    /// `<config-dir>/layouts/<NAME>.json` so a user
     /// can maintain distinct workspaces ("dev", "ops", "docs")
     /// without each one clobbering the others on close. Example:
     ///
@@ -412,35 +409,30 @@ struct Cli {
     #[arg(long, value_name = "COLOR", verbatim_doc_comment)]
     accent: Option<String>,
 
-    /// Maximise the window at launch (Terminator `-m/--maximise`). Overrides the
-    /// `window-state` config for this launch. `--maximize` is an accepted alias.
+    /// Maximise the window at launch. Overrides the `window-state` config for
+    /// this launch. `--maximize` is an accepted alias.
     #[arg(long = "maximise", short = 'm', visible_alias = "maximize")]
     maximise: bool,
 
-    /// Fullscreen the window at launch (Terminator `-f/--fullscreen`). Overrides
-    /// the `window-state` config for this launch.
+    /// Fullscreen the window at launch. Overrides `window-state` for this launch.
     #[arg(long, short = 'f')]
     fullscreen: bool,
 
-    /// Launch with no window borders/decorations (Terminator `-b/--borderless`).
-    /// Overrides the `borderless` config for this launch.
+    /// Launch without window borders or decorations. Overrides `borderless`.
     #[arg(long, short = 'b')]
     borderless: bool,
 
-    /// Launch hidden (Terminator `-H/--hidden`) — useful for a Quake-style
-    /// dropdown: pair with a global hotkey bound to `kettle --toggle`.
+    /// Launch hidden. Pair with a global hotkey bound to `kettle --toggle` for
+    /// a dropdown window.
     #[arg(long = "hidden", short = 'H')]
     hidden: bool,
 
-    /// Force the window title (Terminator `-T/--title`). Sets the title to this
-    /// literal text for the launch, overriding `window-title-format`.
+    /// Force the window title for this launch, overriding `window-title-format`.
     #[arg(long = "title", short = 'T', value_name = "TEXT")]
     title: Option<String>,
 
-    /// Toggle the running kettle window's visibility (Quake /
-    /// Yakuake / Tilda dropdown UX) via the remote-control IPC and
-    /// exit. Bind this to your compositor / DE / OS global hotkey
-    /// to get a true dropdown terminal:
+    /// Toggle the running Kettle window through local IPC and exit. Bind this
+    /// to a desktop global hotkey for a dropdown window:
     ///
     ///   # GNOME: Settings → Keyboard → Custom Shortcuts → kettle --toggle
     ///   # KDE:   System Settings → Shortcuts → Custom → kettle --toggle
@@ -457,8 +449,8 @@ struct Cli {
 
     /// Send TEXT to a running kettle via the remote-command file
     /// (default `<config-dir>/kettle/remote.cmd`) and exit. Used by
-    /// external scripts to drive an already-open kettle without
-    /// launching a new window (kitty `@ send-text` parity). Example:
+    /// external scripts to drive an already-open Kettle without launching a
+    /// new window. Example:
     ///
     ///   # Bash / zsh (ANSI-C quoting supplies an actual newline):
     ///   kettle --remote-send $'ls -la\n'
@@ -491,8 +483,8 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     remote_file: Option<std::path::PathBuf>,
 
-    /// Execute a Lua script at startup (WezTerm parity; this is the
-    /// The script runs once with a `kettle` global namespace exposing runtime
+    /// Execute a Lua script at startup. The script runs once with a `kettle`
+    /// global namespace exposing runtime
     /// state, event hooks, bounded terminal actions, notifications, menu items,
     /// and URL handlers. Supplying this flag explicitly trusts PATH; the
     /// automatically discovered `<config-dir>/init.lua` instead requires the
@@ -539,6 +531,8 @@ enum AgentServerArg {
 /// returns early from `main` before any winit/GPU work.
 #[derive(clap::Subcommand, Debug)]
 enum Cmd {
+    #[command(name = "__media-preview-worker", hide = true)]
+    MediaPreviewWorker,
     /// Run a command under a real PTY, headlessly, and stream its output to
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
     /// child's exit code; 124 when `--timeout` expires and owned-process
@@ -682,6 +676,18 @@ fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
     let mut args = args.into_iter();
     let _program = args.next();
     args.next().is_none()
+}
+
+fn is_media_preview_worker_argv<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    args.next()
+        .is_some_and(|arg| arg.as_ref() == std::ffi::OsStr::new("__media-preview-worker"))
+        && args.next().is_none()
 }
 
 fn pending_update_exit_code(bare_gui_launch: bool) -> i32 {
@@ -1006,6 +1012,12 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // The isolated poster worker is not an application startup. Dispatch it
+    // before update recovery so a paste cannot contend on install locks or
+    // launch a pending-update helper from a hidden, time-bounded child.
+    if is_media_preview_worker_argv(std::env::args_os()) {
+        std::process::exit(kettle_ui::run_media_preview_worker());
+    }
     let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let (_running_install_guard, startup_update_warning) =
         match kettle_update::prepare_process_start()? {
@@ -1047,6 +1059,12 @@ fn main() -> anyhow::Result<()> {
     // child's, so it must drive `std::process::exit`, not `return Ok(())`.
     if let Some(cmd) = cli.cmd {
         match cmd {
+            Cmd::MediaPreviewWorker => {
+                eprintln!(
+                    "kettle: __media-preview-worker is an internal command and cannot be combined with launcher options"
+                );
+                std::process::exit(2);
+            }
             Cmd::Exec(args) => {
                 let mode = if args.json {
                     exec::OutputMode::Json
@@ -1317,10 +1335,7 @@ fn main() -> anyhow::Result<()> {
             println!("{name}");
         }
         println!("goto_tab:N    (parametric; N is 1-based, 1..=255)");
-        println!(
-            "switch_to_tab_N    (parametric; Terminator's spelling of \
-         goto_tab:N, N is 1-based)"
-        );
+        println!("switch_to_tab_N    (parametric alias for goto_tab:N, N is 1-based)");
         println!(
             "new_tab_shell_N    (parametric; N is 1-based — opens the Nth new-tab \
          dropdown entry, Ctrl+Shift+1..9 by default)"
@@ -1996,34 +2011,11 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
     }
 }
 
-/// Why `--profile NAME` cannot be used, or `None` when it resolves.
+/// Whether this invocation can ignore `--profile` validation.
 ///
-/// A profile that does not resolve previously fell through to
-/// `Config::default()`, so a typo launched kettle with compile-time defaults
-/// instead of the user's settings — everything they had configured, silently
-/// gone. The message names the profiles that DO exist, because the usual cause
-/// is a typo and the fix is one word.
-///
-/// Kept separate from [`config_path_problem`] rather than merged: the failure
-/// modes differ (a name that sanitises to nothing has no path to stat) and the
-/// remedy shown to the user is a list of names, not a filesystem diagnosis.
-/// Does this invocation ignore `--profile` entirely?
-///
-/// These modes print compiled-in information — theme names, action names, the
-/// embedded default config, the shell-integration snippet, completions, and
-/// the profile list itself — and never load a profile's settings. Refusing to
-/// run them over an unrelated `--profile` typo blocks work the profile has no
-/// bearing on, and `--list-profiles` is the worst case: it is the command that
-/// shows the valid names, so a typo left the user with no way to discover the
-/// right one.
-///
-/// Deliberately NOT listed: `--list-keybinds` and `--list-layouts` resolve the
-/// profile's config, so for those a typo really does mean the output is wrong
-/// (the built-in keymap instead of the user's) and refusing is correct.
-///
-/// Written as one predicate rather than a chain of `!cli.foo` at the guard so
-/// that adding an informational mode is a question somebody has to answer here
-/// instead of a condition nobody remembers to extend.
+/// Built-in informational output does not read profiles. Config-derived lists
+/// such as keybinds, layouts, SSH hosts, and config checks do, so a bad profile
+/// must still fail those commands.
 fn ignores_profile(cli: &Cli) -> bool {
     // Any mode that DOES resolve the profile disqualifies the whole
     // invocation, because clap lets several be set at once and only the first
@@ -2352,7 +2344,8 @@ mod window_state_flag_tests {
 #[cfg(test)]
 mod activation_cli_tests {
     use super::{
-        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, pending_update_exit_code,
+        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, is_media_preview_worker_argv,
+        pending_update_exit_code,
     };
     use clap::Parser as _;
 
@@ -2362,6 +2355,45 @@ mod activation_cli_tests {
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
         assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    #[test]
+    fn media_preview_worker_bypasses_application_startup_only_for_its_exact_argv() {
+        assert!(is_media_preview_worker_argv([
+            "kettle",
+            "__media-preview-worker"
+        ]));
+        assert!(!is_media_preview_worker_argv(["kettle"]));
+        assert!(!is_media_preview_worker_argv([
+            "kettle",
+            "__media-preview-worker",
+            "unexpected"
+        ]));
+
+        let parsed = Cli::try_parse_from([
+            "kettle",
+            "--title",
+            "not-a-worker-launch",
+            "__media-preview-worker",
+        ])
+        .expect("clap accepts global launcher options before the hidden subcommand");
+        assert!(matches!(parsed.cmd, Some(super::Cmd::MediaPreviewWorker)));
+
+        let source = super::production_source();
+        let worker = source
+            .find("if is_media_preview_worker_argv(std::env::args_os())")
+            .expect("the hidden worker has an early dispatch");
+        let update = source
+            .find("kettle_update::prepare_process_start()")
+            .expect("normal startup still prepares updates");
+        assert!(
+            worker < update,
+            "poster workers must exit before application update recovery"
+        );
+        assert!(
+            !source.contains("Cmd::MediaPreviewWorker => unreachable!"),
+            "a malformed hidden-worker invocation must fail cleanly, not panic"
+        );
     }
 
     #[test]

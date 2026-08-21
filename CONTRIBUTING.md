@@ -133,9 +133,9 @@ Each change has the same shape:
    exactly which path categories trigger the gauntlet vs which
    skip it; bypass per-commit with `git commit --no-verify`.
 6. **Update docs.** `CHANGELOG.md` gets a paragraph under
-   `[Unreleased]` describing the bug shape and the fix.
-   `docs/ROADMAP.md`'s `Done` list gets a one-paragraph entry of the
-   same shape used by neighboring entries.
+   `[Unreleased]` describing the bug shape and the fix. Keep
+   `docs/ROADMAP.md` for unfinished work; shipped work belongs in the
+   changelog and version history.
 7. **Commit with a body that names the bug.** Commit messages
    follow the shape: subject line is `<crate>: <one-line summary>`
    in the imperative; body has paragraphs for the bug, the fix, and
@@ -238,9 +238,8 @@ Done.
 - **Pick a `_ => {}` arm in the codebase.** Trace what it ignores,
   identify whether the silent fallback is a real bug or
   intentional. If real, that's your change.
-- **Or look at `docs/ROADMAP.md`'s "Next" list.** Some explicit
-  larger features (detachable mux server, native macOS menu bar,
-  broader `vttest` conformance sweep) are listed there.
+- **Or look at `docs/ROADMAP.md`.** Current priorities are small enough to
+  review in one change; larger projects have their own design records.
 
 ## Style
 
@@ -249,13 +248,13 @@ Done.
 - **Comments describe *why*, not *what*.** Git blame gives the
   audit trail; the paragraph explains the bug class. Recent
   drift-guard comments are good templates.
-- **Cite the convention.** If you're matching Alacritty, kitty,
-  WezTerm, Ghostty, or Terminator behavior, say so in the
-  in-code comment (e.g. the `beam` alias for `bar` cites
-  Alacritty's spelling).
+- **Cite external behavior.** When compatibility depends on another
+  implementation or protocol, name the exact source file or specification in
+  the focused code comment.
 - **Tests live next to the code they test** (`#[cfg(test)] mod`),
   not in `tests/`. Workspace-wide tests don't exist; each crate
-  is self-contained.
+  is self-contained. A black-box test that needs a built binary or spans crate
+  boundaries may live under the owning binary crate's `tests/` directory.
 
 ## Mass mechanical changes
 

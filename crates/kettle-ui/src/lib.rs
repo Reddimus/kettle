@@ -10,7 +10,7 @@
 //!   keyboard protocol, F-keys, named-key triggers, bracketed-paste payload
 //!   construction, OSC 52 clamp).
 //! - `mux` — tab/split tree, pane focus, broadcast input
-//!   (`broadcast_write_delivery` / `broadcast_paste`),
+//!   (`broadcast_write_delivery` / `broadcast_paste_delivery`),
 //!   session snapshot/restore wiring, SSH-tab spawning.
 //! - `session` — atomic save + corruption-backup of the tab/split tree to
 //!   `<config-dir>/session.json`.
@@ -51,6 +51,7 @@ mod settings;
 // `kettle` bin reaches the synchronous `--check-update` path via the public
 // `check_for_update_cli` wrapper below.
 mod update_check;
+mod video_preview;
 // OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 
@@ -70,6 +71,11 @@ mod dev_record;
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
 pub use notifications::{flush_desktop_notifications, queue_desktop_notification};
+
+#[doc(hidden)]
+pub fn run_media_preview_worker() -> i32 {
+    video_preview::run_worker()
+}
 
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]

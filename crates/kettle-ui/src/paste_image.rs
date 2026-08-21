@@ -336,6 +336,25 @@ impl PastedImages {
         }
     }
 
+    /// Whether `path` still names the exact private PNG retained by this
+    /// process. Opening through the held directory closes the leaf-symlink and
+    /// replacement races before UI chrome hands the path to another process.
+    pub(crate) fn path_still_matches(&self, path: &Path) -> bool {
+        let Some(directory) = self.directory.as_ref() else {
+            return false;
+        };
+        let Some(image) = self.files.iter().find(|image| image.path == path) else {
+            return false;
+        };
+        if verify_session_directory_path(directory).is_err() {
+            return false;
+        }
+        let Ok(reopened) = open_existing_private_file_in_session(directory, &image.name) else {
+            return false;
+        };
+        same_open_file_identity(&image.file, &reopened).unwrap_or(false)
+    }
+
     /// Remove only the exact PNG objects this process created, then the verified
     /// empty session directory. Best effort: a failure here must never take
     /// down a shutdown path, so it is logged and swallowed.
@@ -1446,6 +1465,31 @@ mod tests {
             "the bounded pixel reservation moves into the receipt instead of \
              living for the rest of the process"
         );
+        assert!(
+            images.path_still_matches(&path),
+            "moving the preview must not release its file identity anchor"
+        );
+        images.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn receipt_open_rejects_a_replaced_image_path() {
+        let dir = scratch("receipt-identity");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let path = images
+            .save_rgba(1, 1, &[10, 20, 30, 255], true)
+            .expect("save managed image");
+        assert!(images.path_still_matches(&path));
+
+        let replacement = dir.join("replacement.png");
+        std::fs::write(&replacement, b"not the retained image").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(
+            !images.path_still_matches(&path),
+            "a replacement must not be handed to the desktop opener"
+        );
+        std::fs::remove_file(&path).unwrap();
         images.cleanup();
     }
 

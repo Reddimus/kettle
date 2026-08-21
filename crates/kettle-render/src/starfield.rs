@@ -1,39 +1,10 @@
-//! Procedural GPU starfield background (v2.24.0). A slow forward-flight field
-//! of soft-glowing, subtly-colored stars rendered entirely in a WGSL fragment
-//! shader — no decoded frames, so it costs ~zero memory (vs the 253 MB an
-//! equivalent 1080p GIF decoded to), loops perfectly, and stays crisp at any
-//! resolution/aspect ratio. It is the base wallpaper layer: drawn opaque before
-//! the chrome + cell-background quads, which composite over it.
+//! Procedural starfield wallpaper. Fixed seed data is computed once, animated
+//! geometry once per frame, and only distance/falloff remains in the fragment
+//! loop. This avoids recomputing pixel-independent hashes, colors, and radial
+//! positions for every surface pixel.
 //!
-//! Look (per the v2.24.0 design): pure-black sky, stars that emerge near the
-//! center and drift outward as the camera moves forward, **fading in as they get
-//! closer**, with a bright core + soft halo and faint stellar color variation
-//! (cool blue-white / white / warm). The motion is deliberately slow; the
-//! event loop repaints it at a low fps cap (~10) so idle CPU stays low, while
-//! the shader's `time` is continuous so each repaint shows the exact position.
-//!
-//! The shader mirrors the screen-space radial model proven in
-//! `scripts/gen-starfield.py`.
-//!
-//! # Where the per-star work happens
-//!
-//! The fragment shader once evaluated the whole model per pixel: the hash, the
-//! angle, the radial ease, the colour, and the sRGB decode all ran inside the
-//! per-star loop, for every pixel on the surface. Almost none of that depends
-//! on the pixel — at 4K it was roughly 456 million star-iterations per frame,
-//! about ten transcendentals apiece, to compute 55 stars' worth of values over
-//! and over.
-//!
-//! Everything pixel-independent is hoisted out. Values fixed for the lifetime
-//! of the field (angle, phase, colour) are computed once in [`StarSeed::all`];
-//! values that change with time or resolution (radial position, radii,
-//! brightness) are computed once per frame in [`build_frame_stars`] and
-//! uploaded. The shader is left with the only part that genuinely varies per
-//! pixel: the distance to each star and the two falloff terms, one `exp`
-//! rather than ten transcendentals.
-//!
-//! The brightness curve lives in [`star_brightness`], which is the function
-//! the tests drive — not a copy of it.
+//! [`star_brightness`] owns the tested brightness curve. The event loop caps
+//! repaint frequency while shader time stays continuous.
 
 use bytemuck::{Pod, Zeroable};
 

@@ -9,3 +9,6 @@ c3236fe59cfcc4f20258d00779f5af1d03b8c01c
 
 # Same scrub across docs, CI workflows, scripts, and packaging.
 4d9336baa79084e850c6ffc38eb036d9111bbd4d
+
+# Comment-only readability pass across Rust sources for the media receipt work.
+5865b778fe7c3851c6befcb818e7b2d9c63562f9

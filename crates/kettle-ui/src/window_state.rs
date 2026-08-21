@@ -464,19 +464,63 @@ pub(crate) struct ImePreeditSession {
     pub(crate) generation: u64,
 }
 
-const IMAGE_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
-const IMAGE_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
-const IMAGE_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
+const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
+const MEDIA_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+const MEDIA_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Window-local receipt for the exact private PNG whose path Kettle queued.
-/// Keeping the pane id here prevents a focus move from projecting the thumbnail
-/// over an unrelated split.
-pub(crate) struct ImagePasteReceiptState {
+pub(crate) struct PendingVideoPasteReceipt {
+    pub(crate) pane_id: u64,
+    pub(crate) generation: u64,
+    pub(crate) request: crate::video_preview::VideoPasteRequest,
+    pub(crate) remote: bool,
+    pub(crate) prefer_top: bool,
+    pub(crate) created_at: std::time::Instant,
+    pub(crate) previous_receipt: Option<MediaPasteReceiptState>,
+}
+
+impl PendingVideoPasteReceipt {
+    pub(crate) fn deadline(&self) -> std::time::Instant {
+        self.created_at + crate::video_preview::PENDING_RECEIPT_TIMEOUT
+    }
+
+    pub(crate) fn expired(&self, now: std::time::Instant) -> bool {
+        now >= self.deadline()
+    }
+
+    pub(crate) fn merge_drop(
+        &mut self,
+        pane_id: u64,
+        request: &crate::video_preview::VideoPasteRequest,
+        now: std::time::Instant,
+    ) -> bool {
+        self.pane_id == pane_id
+            && self
+                .request
+                .merge_drop(request, now.saturating_duration_since(self.created_at))
+    }
+}
+
+pub(crate) enum MediaPasteReceiptKind {
+    Image {
+        original_width: u32,
+        original_height: u32,
+    },
+    Video {
+        candidate: Box<crate::video_preview::VideoPasteCandidate>,
+        generation: u64,
+        preview_pending: bool,
+        created_at: std::time::Instant,
+    },
+}
+
+/// Window-local receipt for the exact media path Kettle queued. Keeping the
+/// pane id here prevents a focus move from projecting the preview over another
+/// split.
+pub(crate) struct MediaPasteReceiptState {
     pub(crate) pane_id: u64,
     pub(crate) path: std::path::PathBuf,
-    pub(crate) image: kettle_core::ImageData,
-    pub(crate) original_width: u32,
-    pub(crate) original_height: u32,
+    pub(crate) image: Option<kettle_core::ImageData>,
+    pub(crate) kind: MediaPasteReceiptKind,
     pub(crate) remote: bool,
     /// Corner chosen when the receipt is created. Latching this keeps output
     /// that moves the terminal cursor from making the card jump mid-life.
@@ -488,8 +532,8 @@ pub(crate) struct ImagePasteReceiptState {
     collapsed: bool,
 }
 
-impl ImagePasteReceiptState {
-    pub(crate) fn new(
+impl MediaPasteReceiptState {
+    pub(crate) fn new_image(
         pane_id: u64,
         path: std::path::PathBuf,
         preview: crate::paste_image::PastedImagePreview,
@@ -500,17 +544,94 @@ impl ImagePasteReceiptState {
         Self {
             pane_id,
             path,
-            image: preview.image,
-            original_width: preview.original_width,
-            original_height: preview.original_height,
+            image: Some(preview.image),
+            kind: MediaPasteReceiptKind::Image {
+                original_width: preview.original_width,
+                original_height: preview.original_height,
+            },
             remote,
             prefer_top,
-            expanded_until: now + IMAGE_RECEIPT_EXPANDED,
-            expires_at: now + IMAGE_RECEIPT_LIFETIME,
-            hard_expires_at: now + IMAGE_RECEIPT_HARD_LIFETIME,
+            expanded_until: now + MEDIA_RECEIPT_EXPANDED,
+            expires_at: now + MEDIA_RECEIPT_LIFETIME,
+            hard_expires_at: now + MEDIA_RECEIPT_HARD_LIFETIME,
             hover_started: None,
             collapsed: false,
         }
+    }
+
+    pub(crate) fn new_video(
+        pane_id: u64,
+        candidate: &crate::video_preview::VideoPasteCandidate,
+        generation: u64,
+        remote: bool,
+        prefer_top: bool,
+        now: std::time::Instant,
+    ) -> Self {
+        Self {
+            pane_id,
+            path: candidate.path().to_path_buf(),
+            image: None,
+            kind: MediaPasteReceiptKind::Video {
+                candidate: Box::new(candidate.clone()),
+                generation,
+                preview_pending: true,
+                created_at: now,
+            },
+            remote,
+            prefer_top,
+            expanded_until: now + MEDIA_RECEIPT_EXPANDED,
+            expires_at: now + MEDIA_RECEIPT_LIFETIME,
+            hard_expires_at: now + MEDIA_RECEIPT_HARD_LIFETIME,
+            hover_started: None,
+            collapsed: false,
+        }
+    }
+
+    pub(crate) fn merge_drop(
+        &mut self,
+        pane_id: u64,
+        candidate: &crate::video_preview::VideoPasteCandidate,
+        now: std::time::Instant,
+    ) -> bool {
+        let MediaPasteReceiptKind::Video {
+            candidate: retained,
+            created_at,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        if self.pane_id != pane_id
+            || retained.source != crate::video_preview::VideoPasteSource::Drop
+            || candidate.source != crate::video_preview::VideoPasteSource::Drop
+            || candidate.path() == self.path
+            || now.saturating_duration_since(*created_at) > std::time::Duration::from_millis(250)
+        {
+            return false;
+        }
+        retained.count = retained.count.saturating_add(candidate.count);
+        true
+    }
+
+    pub(crate) fn finish_video_preview(
+        &mut self,
+        generation: u64,
+        preview: Option<kettle_core::ImageData>,
+    ) -> bool {
+        let MediaPasteReceiptKind::Video {
+            generation: active,
+            preview_pending,
+            ..
+        } = &mut self.kind
+        else {
+            return false;
+        };
+        if *active != generation {
+            return false;
+        }
+        *preview_pending = false;
+        self.image = preview;
+        true
     }
 
     pub(crate) fn expanded(&self, now: std::time::Instant) -> bool {
@@ -585,7 +706,10 @@ pub(crate) struct WindowState {
     pub(crate) accessibility_pending: bool,
     /// Short-lived thumbnail for a Kettle-created clipboard bitmap. It is
     /// projected only while its owning pane remains focused and visible.
-    pub(crate) image_paste_receipt: Option<ImagePasteReceiptState>,
+    pub(crate) media_paste_receipt: Option<MediaPasteReceiptState>,
+    /// Accepted video path awaiting trust validation and poster extraction on
+    /// the bounded background pipeline. It has no visible projection.
+    pub(crate) pending_video_paste_receipt: Option<PendingVideoPasteReceipt>,
     /// OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
@@ -934,7 +1058,8 @@ impl WindowState {
             accessibility_key: None,
             accessibility_updated_at: None,
             accessibility_pending: false,
-            image_paste_receipt: None,
+            media_paste_receipt: None,
+            pending_video_paste_receipt: None,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
             mux,
@@ -1043,7 +1168,7 @@ mod tests {
             original_width: 1600,
             original_height: 800,
         };
-        let mut receipt = ImagePasteReceiptState::new(
+        let mut receipt = MediaPasteReceiptState::new_image(
             7,
             std::path::PathBuf::from("managed.png"),
             preview,
@@ -1075,7 +1200,7 @@ mod tests {
             original_width: 1600,
             original_height: 800,
         };
-        let mut receipt = ImagePasteReceiptState::new(
+        let mut receipt = MediaPasteReceiptState::new_image(
             7,
             std::path::PathBuf::from("managed.png"),
             preview,
@@ -1095,6 +1220,130 @@ mod tests {
             Some(now + std::time::Duration::from_secs(120)),
             "a hovered receipt still needs a wake-up at the hard deadline"
         );
+    }
+
+    #[test]
+    fn video_receipt_batches_only_adjacent_drops_and_ignores_stale_posters() {
+        let dir = crate::test_tempdir();
+        let first_path = dir.path().join("first.mp4");
+        let second_path = dir.path().join("second.webm");
+        let third_path = dir.path().join("third.mov");
+        for (path, bytes) in [
+            (&first_path, b"first".as_slice()),
+            (&second_path, b"second".as_slice()),
+            (&third_path, b"third".as_slice()),
+        ] {
+            std::fs::write(path, bytes).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            }
+        }
+        let first = crate::video_preview::VideoPasteCandidate::from_user_paths(
+            &[first_path],
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let second = crate::video_preview::VideoPasteCandidate::from_user_paths(
+            &[second_path],
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let late = crate::video_preview::VideoPasteCandidate::from_user_paths(
+            std::slice::from_ref(&third_path),
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let clipboard = crate::video_preview::VideoPasteCandidate::from_user_paths(
+            std::slice::from_ref(&third_path),
+            crate::video_preview::VideoPasteSource::Clipboard,
+        )
+        .unwrap();
+        let now = std::time::Instant::now();
+        let mut receipt = MediaPasteReceiptState::new_video(7, &first, 41, false, true, now);
+
+        assert!(receipt.merge_drop(7, &second, now + std::time::Duration::from_millis(100)));
+        let MediaPasteReceiptKind::Video { candidate, .. } = &receipt.kind else {
+            panic!("fixture must remain a video receipt");
+        };
+        assert_eq!(candidate.count, 2);
+        assert_eq!(receipt.path, first.path().to_path_buf());
+        assert!(!receipt.merge_drop(8, &second, now + std::time::Duration::from_millis(150)));
+        let MediaPasteReceiptKind::Video { candidate, .. } = &receipt.kind else {
+            panic!("fixture must remain a video receipt");
+        };
+        assert_eq!(candidate.count, 2, "another pane cannot change this card");
+        assert!(!receipt.merge_drop(7, &late, now + std::time::Duration::from_millis(251)));
+        assert!(!receipt.merge_drop(7, &clipboard, now + std::time::Duration::from_millis(150)));
+        assert!(
+            !receipt.finish_video_preview(40, kettle_core::ImageData::solid(2, 1, [1, 2, 3, 255]),),
+            "a stale worker generation must not replace the first video's poster"
+        );
+        assert!(receipt.image.is_none());
+        assert!(
+            receipt.finish_video_preview(41, kettle_core::ImageData::solid(2, 1, [1, 2, 3, 255]),)
+        );
+        assert!(receipt.image.is_some());
+    }
+
+    #[test]
+    fn pending_video_receipt_coalesces_drop_events_without_file_system_access() {
+        let root = std::env::current_dir().unwrap();
+        let first = crate::video_preview::VideoPasteRequest::from_user_paths(
+            &[root.join("missing-first.mp4")],
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let second = crate::video_preview::VideoPasteRequest::from_user_paths(
+            &[root.join("missing-second.webm")],
+            crate::video_preview::VideoPasteSource::Drop,
+        )
+        .unwrap();
+        let clipboard = crate::video_preview::VideoPasteRequest::from_user_paths(
+            &[root.join("missing-third.mov")],
+            crate::video_preview::VideoPasteSource::Clipboard,
+        )
+        .unwrap();
+        let now = std::time::Instant::now();
+        let mut pending = PendingVideoPasteReceipt {
+            pane_id: 7,
+            generation: 41,
+            request: first,
+            remote: false,
+            prefer_top: true,
+            created_at: now,
+            previous_receipt: None,
+        };
+
+        assert!(pending.merge_drop(7, &second, now + std::time::Duration::from_millis(100)));
+        assert_eq!(pending.request.count, 2);
+        assert!(!pending.merge_drop(8, &second, now + std::time::Duration::from_millis(150)));
+        assert!(!pending.merge_drop(7, &clipboard, now + std::time::Duration::from_millis(150)));
+        assert!(!pending.merge_drop(7, &second, now + std::time::Duration::from_millis(251)));
+    }
+
+    #[test]
+    fn pending_video_receipt_expires_when_a_worker_never_replies() {
+        let root = std::env::current_dir().unwrap();
+        let request = crate::video_preview::VideoPasteRequest::from_user_paths(
+            &[root.join("missing.mp4")],
+            crate::video_preview::VideoPasteSource::Clipboard,
+        )
+        .unwrap();
+        let now = std::time::Instant::now();
+        let pending = PendingVideoPasteReceipt {
+            pane_id: 7,
+            generation: 41,
+            request,
+            remote: false,
+            prefer_top: true,
+            created_at: now,
+            previous_receipt: None,
+        };
+
+        assert!(!pending.expired(pending.deadline() - std::time::Duration::from_nanos(1)));
+        assert!(pending.expired(pending.deadline()));
     }
 
     #[test]

@@ -120,13 +120,18 @@ pub fn tool_specs() -> Vec<Value> {
             "name": "kettle_screenshot",
             "description": "Save a live PNG screenshot from a running kettle. Defaults to the \
                 focused pane crop; pass pane for a specific pane, full_window=true for the whole \
-                window, and path to choose the output file. Requires the agent server in `full` \
-                mode because saving the PNG mutates the filesystem.",
+                window, or all four crop fields for a physical-pixel window region. Use path to \
+                choose the output file. Requires the agent server in `full` mode because saving \
+                the PNG mutates the filesystem.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "pane": {"type": "integer", "description": "pane id (default: focused pane)"},
                     "full_window": {"type": "boolean", "description": "capture the whole target window instead of cropping to a pane"},
+                    "crop_x": {"type": "number", "minimum": 0, "description": "window-relative physical-pixel crop x; requires all four crop fields"},
+                    "crop_y": {"type": "number", "minimum": 0, "description": "window-relative physical-pixel crop y; requires all four crop fields"},
+                    "crop_width": {"type": "number", "exclusiveMinimum": 0, "description": "physical-pixel crop width; requires all four crop fields"},
+                    "crop_height": {"type": "number", "exclusiveMinimum": 0, "description": "physical-pixel crop height; requires all four crop fields"},
                     "path": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "new output PNG leaf beneath an already-existing parent; existing leaves are never overwritten (default: cache/kettle/shots/kettle-<time>-<pid>.png)"}
                 },
                 "additionalProperties": false
@@ -626,6 +631,10 @@ fn tool_argument_fields(name: &str) -> Option<&'static [(&'static str, ArgKind)]
         "kettle_screenshot" => &[
             ("pane", ArgKind::Unsigned),
             ("full_window", ArgKind::Bool),
+            ("crop_x", ArgKind::Number),
+            ("crop_y", ArgKind::Number),
+            ("crop_width", ArgKind::Number),
+            ("crop_height", ArgKind::Number),
             ("path", ArgKind::String),
         ],
         "kettle_send_text" => &[("pane", ArgKind::Unsigned), ("text", ArgKind::String)],
@@ -767,6 +776,12 @@ mod tests {
             screenshot["inputSchema"]["properties"]["path"]["pattern"], "\\S",
             "schema-valid screenshot paths must contain a non-whitespace character"
         );
+        for field in ["crop_x", "crop_y", "crop_width", "crop_height"] {
+            assert_eq!(
+                screenshot["inputSchema"]["properties"][field]["type"], "number",
+                "{field} must remain available to privacy-preserving region captures"
+            );
+        }
     }
 
     #[test]

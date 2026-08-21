@@ -184,7 +184,9 @@ fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
         }
         "screenshot" => {
             let path = result.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            let scope = if result.get("full_window").and_then(|v| v.as_bool()) == Some(true) {
+            let scope = if result.get("crop").is_some_and(|crop| !crop.is_null()) {
+                format!("window {} region", result["window"])
+            } else if result.get("full_window").and_then(|v| v.as_bool()) == Some(true) {
                 format!("window {}", result["window"])
             } else {
                 format!("pane {}", result["pane"])
@@ -321,5 +323,21 @@ mod tests {
         let output = pretty("run_command", &serde_json::json!({}), &result);
         assert!(output.contains("[output truncated]"));
         assert!(output.contains("[exit 1]"));
+    }
+
+    #[test]
+    fn screenshot_pretty_output_names_an_explicit_region() {
+        let result = serde_json::json!({
+            "path": "/tmp/receipt.png",
+            "window": 4,
+            "pane": null,
+            "full_window": false,
+            "crop": [10.0, 20.0, 200.0, 80.0],
+        });
+        let output = pretty("screenshot", &serde_json::json!({}), &result);
+        assert_eq!(
+            output,
+            "saved screenshot of window 4 region to /tmp/receipt.png\n"
+        );
     }
 }

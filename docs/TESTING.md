@@ -1217,6 +1217,11 @@ verify historical and soft-wrapped highlight pixels. Do not substitute
 `send_keys` intentionally targets the PTY; `dispatch_ui_key` is the bounded
 modal-only path and must fail when no supported modal is open.
 
+Media-receipt visual smokes pass the receipt bounds back through the four
+`crop_*` screenshot fields. The renderer crops the GPU readback before it opens
+the output file, and the receipt surface is opaque, so the private command-line
+path never enters the retained PNG.
+
 **Search engine-budget performance probe.** This is a local diagnostic, not a
 CI pass/fail benchmark. On the 2026-07-22 audit machine (i7-1165G7, Rust 1.96.0,
 `regex-automata` 0.4.14, optimized `rustc -O`, pinned to CPU 3), the worst
@@ -1816,7 +1821,7 @@ These need a real display and are run by hand (or on real hardware):
   - **Live renderer/UI diagnostics**: on a Linux desktop or unlocked macOS Aqua
     session run
     `just live-render-smoke`, `just interaction-smoke`, `just hover-wheel-smoke`,
-    `just image-paste-receipt-smoke`,
+    `just image-paste-receipt-smoke`, `just video-paste-receipt-smoke`,
     `just tabbar-click-smoke`,
     `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
     `just split-titlebar-smoke`,
@@ -1872,8 +1877,36 @@ These need a real display and are run by hand (or on real hardware):
     the exact source dimensions reach the receipt, the pane receives a managed
     temporary path, expanded and compact frames differ, hover restores the
     thumbnail, and `ui_geometry` exposes neither that path nor image pixels.
-    The path is verified in memory, redacted from `screen.json`, and cleared
-    from the live shell line before any receipt screenshot is captured.
+    The path is verified in memory and redacted from `screen.json`; saved PNGs
+    are cropped to the receipt lane so the private command-line path never
+    enters the visual artifact. After the visual states are captured, a second
+    paste proves that later key input clears both the shell line and its
+    now-stale receipt.
+
+    `just video-paste-receipt-smoke` copies two generated videos, invokes the
+    real Paste action, and captures the receipt lane in expanded, compact,
+    hover, and dismiss states. It requires `ffmpeg` plus a graphical session, Swift on macOS, and
+    `wl-copy` on Wayland or `xclip` on X11. Windows needs no extra clipboard
+    helper. macOS and Windows exercise their native poster providers. The Linux
+    run seeds a private, metadata-matched Freedesktop cache PNG so the same
+    worker path is covered without adding a video decoder. The smoke rejects
+    leaked paths or pixels, a path-based open action, a lost batch count, a
+    missing poster, unchanged card states, or a dismiss target that does not
+    close the receipt. A final re-paste proves later key input clears both the
+    file-list text and its stale receipt.
+
+    Native CI also runs `video_preview_native`. Every platform leaves worker
+    stdin open and proves the child exits at its own deadline. macOS requires a
+    bounded opaque poster from the checked-in MP4. A missing, failed, or
+    malformed first response is retried once in a fresh worker so a Quick Look
+    service cold start cannot masquerade as missing support. Windows validates
+    the same response when its shell thumbnail
+    provider supports that fixture; set
+    `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
+    missing poster fail. Linux unit coverage invokes its complete Freedesktop
+    cache resolver in an isolated child environment. Portable state tests also
+    prove that a missing worker response expires and that the event loop
+    schedules the cleanup deadline instead of retaining a pending path forever.
 
 Search release evidence is platform-scoped. Run the live interaction/search
 probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and

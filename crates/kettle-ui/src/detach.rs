@@ -1,10 +1,5 @@
-//! Tab tear-off drag state machine (Terminator parity, detachable-tabs).
-//! Lives in its own module so the App's mouse-handler stays small
-//! and the states are unit-testable as a pure FSM.
-//!
-//! Wired live by C6 of the multi-window effort — the tear is an IN-PROCESS
-//! `detach_tab → open_window(AdoptTab)` (live PTYs, nothing respawns), so
-//! the cross-process IPC machinery the original design sketched is gone:
+//! In-process tab tear-off state machine. Live PTYs move between windows
+//! without respawning.
 //!
 //! ```text
 //!   Idle  ──MouseDown on tab──▶  ArmedInside { tab_idx, started_at }
@@ -16,10 +11,7 @@
 //!     │   DraggingInside { tab_idx }
 //!     │      │
 //!     │      ├──cursor leaves the window──▶  DraggingOutside
-//!     │      ├──cursor ≥ 1.5×bar_h from the tab band──▶ TEAR (v2.19.0:
-//!     │      │     the FSM is consumed mid-drag — `maybe_tear_off` opens
-//!     │      │     a live window under the cursor and hands the drag to
-//!     │      │     the OS via `drag_window()`; Chromium model)
+//!     │      ├──cursor ≥ 1.5×bar_h from the tab band──▶ TEAR
 //!     │      └──MouseUp inside──▶  reorder within window → Idle
 //!     │
 //!     │   DraggingOutside { tab_idx }
@@ -32,15 +24,10 @@
 //!     └─────────── (Escape / focus loss → cancel) ─────────┘
 //! ```
 //!
-//! Outside-detection is position-based (window-bounds containment on
-//! CursorMoved): Windows' SetCapture keeps streaming mouse moves to the
-//! window while a button is held but suppresses CursorLeft, so the
-//! CursorLeft/Entered arms are supplementary signals only.
+//! Outside detection uses cursor position because Windows can keep delivering
+//! moves while suppressing leave events during capture.
 
-/// Drag-state machine for detachable tabs. Each variant carries
-/// just the data its transitions need; the App's mouse-handler
-/// uses the type-state pattern to ensure only legal transitions
-/// happen (no "drag from no-armed state" footgun).
+/// Drag state for detachable tabs.
 #[derive(Debug, Clone, Default)]
 pub enum DragState {
     /// No drag in progress.

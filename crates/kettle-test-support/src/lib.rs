@@ -2,39 +2,13 @@
 
 use std::path::Path;
 
-/// Returns `src` with every test-only item removed, so a guard searching it
-/// cannot match its own assertions.
+/// Remove test-only items so source guards cannot match their own assertions.
 ///
-/// An item is removed when its `cfg` predicate cannot hold in a non-test
-/// build — `test`, `all(test, ...)` and so on. An item that merely *mentions*
-/// `test` is kept: `any(unix, test)` compiles on every Unix build and
-/// `not(test)` is production-only.
-///
-/// # Known limitation
-///
-/// An item's body is taken to start at its first top-level `{`. A braced macro
-/// invocation in return-type position — `fn f() -> ty! { () } { .. }` — would
-/// therefore end the item early and leave its real body in the slice. That form
-/// is legal Rust but appears nowhere in this workspace (checked), and handling
-/// it properly needs macro-aware parsing. Recorded rather than implemented; if
-/// such an item is ever added under `cfg(test)`, the wrapper postcondition
-/// asserting the slice contains no `#[test]` is the thing most likely to catch
-/// it.
-///
-/// # Panics
-///
-/// Panics when the source cannot be lexed, **or** when a test-only attribute is
-/// attached to something this helper cannot delimit — a `#[cfg(test)]` struct
-/// field or match arm, say, rather than a whole item. The second case lexes
-/// perfectly well; it is the item-extent step that has no answer, and the
-/// contract covers both.
-///
-/// Failing closed is deliberate. Several callers read another file's source
-/// directly and do not re-assert the slice postconditions, so returning the
-/// input unchanged would hand them the complete file — test module included —
-/// and every guard built on it would quietly go back to satisfying itself. A
-/// panicking test helper is the loud failure; a permissive one is the bug this
-/// whole helper exists to prevent.
+/// Predicates that cannot hold outside tests are removed; mixed predicates such
+/// as `any(unix, test)` remain. The lightweight item parser does not support a
+/// braced macro in return-type position or test attributes on fields/match
+/// arms. It panics on unsupported or unlexable input rather than returning a
+/// slice that may still contain the test module.
 pub fn production_source(src: &str) -> String {
     let normalized = src.replace("\r\n", "\n");
     strip_test_items(&normalized).unwrap_or_else(|()| {

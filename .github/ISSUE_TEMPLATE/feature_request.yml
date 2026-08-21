@@ -41,7 +41,7 @@ body:
     attributes:
       label: Scope check
       options:
-        - label: This isn't already on [docs/ROADMAP.md](../docs/ROADMAP.md) as Done.
+        - label: I checked [CHANGELOG.md](../CHANGELOG.md) and [version history](../docs/VERSION-HISTORY.md) and this is not already shipped.
           required: true
         - label: I searched existing issues + discussions for a duplicate.
           required: true

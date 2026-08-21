@@ -380,6 +380,11 @@ codex -i ./screenshot.png "Inspect this image"
 See [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md) for
 the exact transport and smoke-test boundaries.
 
+Copying or dropping a video pastes its quoted path through the same channel.
+With `paste-video-preview` enabled, Kettle also shows a short-lived poster for
+the exact local file. The poster is informational; the program in the pane
+still decides whether to read the path.
+
 ### AI agents / MCP
 
 kettle ships an opt-in agent surface (`kettle exec` / `kettle ctl` /

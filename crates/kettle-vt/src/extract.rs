@@ -1770,50 +1770,17 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
     }
 }
 
-/// The last gate between a cwd a program CLAIMED and one kettle will act on.
+/// Validate a cwd reported by untrusted terminal output before any filesystem
+/// lookup or reuse. A Windows UNC or NT object-manager path can trigger an
+/// SMB/WebDAV request and credential handshake during a simple existence
+/// check, so this is an allowlist rather than a prefix denylist.
 ///
-/// Both OSC 7 and OSC 9;9 are volunteered by whatever is writing to the pane,
-/// which includes anything a user runs, `cat`s, or is shown over ssh. Kettle
-/// then hands the value to `is_dir`, to a new tab's working directory, and to
-/// "open in file manager".
-///
-/// A **network path** is the sharp one. A UNC server path costs a program one
-/// line of output; on Windows the very next existence check reaches out over
-/// SMB or WebDAV to a host of the attacker's choosing, and the handshake offers
-/// up the machine's credentials before anything has been opened.
-///
-/// This is an ALLOWLIST, and it is one because the denylist it replaced was
-/// wrong. That version refused a path beginning with two separators, which
-/// misses the NT object-manager prefix `\??\` — one separator, and
-/// `\??\UNC\host\share` resolves through the very same redirector. Measured:
-/// that path answered `is_dir` in 69 ms against a share and 0.2 ms against a
-/// local directory, which is the network round-trip the guard exists to
-/// prevent. `\??\GLOBALROOT\Device\...` reaches the rest of the NT namespace
-/// the same way. Enumerating the prefixes that are dangerous cannot work;
-/// naming the two shapes that are legitimate can.
-///
-/// Accepted:
-///   * POSIX-absolute — `/home/me`, and MSYS/Cygwin's `/c/Users/me`. A second
-///     leading separator is not accepted: `//host/share` is the same UNC, and
-///     a leading `//` is implementation-defined even on POSIX.
-///   * Windows drive-rooted — `C:\Users\me` or `C:/Users/me`. Drive-RELATIVE
-///     (`C:proj`) is not a working directory; it resolves against whatever the
-///     drive's current directory happens to be.
-///   * The WSL plan-9 shares `\\wsl$\` and `\\wsl.localhost\`. These are UNC in
-///     spelling only — they are served by the local P9 redirector, with no SMB
-///     handshake and no credentials — and `wslpath -w "$PWD"` is exactly what
-///     Microsoft's documented OSC 9;9 shell integration emits, which is the
-///     integration `parse_osc9_9` exists to harvest. Refusing them silently cost
-///     cwd inheritance for anyone carrying over a Windows Terminal WSL prompt.
-///
-/// Also rejected: an empty path, one carrying a control character (a real path
-/// has none, and they corrupt every place this is later displayed or quoted),
-/// and one longer than any real path.
+/// Accepted forms are one-leading-slash POSIX paths, drive-rooted Windows
+/// paths, and the local `\\wsl$\` / `\\wsl.localhost\` Plan 9 shares. Drive
+/// relative paths, general UNC/NT namespace paths, controls, and oversized
+/// values are rejected.
 fn safe_reported_cwd(path: String) -> Option<String> {
-    // Past Linux's PATH_MAX (4096) with room to spare. Windows' extended-length
-    // limit is larger (32,767), but no shell reports a working directory
-    // anywhere near either, and an unbounded value from untrusted output should
-    // not be stored.
+    // Above common PATH_MAX values while still bounding untrusted output.
     const MAX_REPORTED_CWD_BYTES: usize = 8192;
     // Case-insensitive, because Windows path components are.
     const WSL_P9_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];

@@ -1,42 +1,13 @@
-//! GPU renderer: wgpu surface + glyphon (cosmic-text) glyph atlas for text,
-//! plus an instanced quad pipeline for cell backgrounds, cursor, selection,
-//! search highlights, split dividers, focus borders and the tab bar.
+//! GPU renderer for pane grids, chrome, text, images, and overlays.
 //!
-//! Multiple panes are tiled in a single frame: each pane gets its own
-//! cosmic-text buffer clipped to its rectangle; all backgrounds/UI go through
-//! one instanced quad pass and all text through one glyphon prepare/render.
+//! Draw order is part of the contract: backgrounds and chrome, inline images,
+//! pane text, post-text dimming/scrollbars, then menu chrome and text. Changing
+//! it can break transparency, clipping, or overlay readability. See
+//! `docs/ARCHITECTURE.md` for the full pipeline.
 //!
-//! Pipeline order per frame (matters for transparency + dim overlays):
-//! 1. **Quads + pane outlines** — cell backgrounds, tab-bar chrome, focus borders,
-//!    cursor block / beam / underline / hollow outline. Active-tab + focused-
-//!    pane accents flip to theme `palette[3]` (yellow) while broadcast
-//!    mode is on so the user can see input is fan-out.
-//! 2. **Images** — kitty graphics / Sixel / iTerm2 OSC 1337 placements
-//!    composited per-pane with scrollback-anchored Y coords.
-//! 3. **Text** — glyphon `prepare` + `render`. Per-cell SGR resolution +
-//!    `Flags::DIM` half-blend + WCAG minimum-contrast lift (`minimum-contrast`
-//!    config) all happen here so they compose cleanly against the
-//!    backgrounds laid down by step 1.
-//! 4. **Overlay quads** — a *second* instanced pass for post-text chrome:
-//!    unfocused-pane dimming (theme bg at `1 - unfocused-split-opacity`)
-//!    and the per-pane scrollback scrollbar thumb. Drawn after text so the
-//!    dim actually covers glyphs.
-//!
-//! Modules (private; see source):
-//! - `color` — palette/cube/named-color resolution against the active
-//!   `Theme`, WCAG luminance + contrast-lift, SGR `Dim` half-blend,
-//!   OSC 4/10/11/12 query-reply formatting.
-//! - `quad` — `QuadPipeline` + `QuadInstance`. Reused twice per frame
-//!   (one instance for the main pass, one for the post-text overlay).
-//! - `imgpipe` — sampled-texture image-blit pipeline, used for kitty /
-//!   Sixel / iTerm2 placements.
-//!
-//! Headless paths: [`capture_png`] builds an offscreen device + texture
-//! chain, renders one representative frame, and copies it back via
-//! `copy_texture_to_buffer` — powers `kettle --screenshot`.
-//! [`offscreen_selftest`] compiles the WGSL shaders + sets up a tiny
-//! pipeline without ever creating a Surface, so CI can validate the GPU
-//! path under Xvfb without a real display.
+//! [`capture_png`] renders an offscreen representative frame;
+//! [`offscreen_selftest`] validates shader and pipeline creation without a
+//! window surface.
 
 mod bg_image;
 mod color;
@@ -785,20 +756,38 @@ pub struct CompletionOverlayRow {
     pub position: usize,
 }
 
-/// A short-lived receipt for a clipboard bitmap Kettle materialized and whose
-/// path at least one pane accepted. The path itself deliberately stays in the
-/// UI layer; the renderer receives only bounded pixels and user-facing status.
+/// User-facing media details that are safe to project into the renderer.
+/// Paths remain in the UI layer.
 #[derive(Clone, Debug)]
-pub struct ImagePasteReceiptOverlay {
+pub enum MediaPasteReceiptKind {
+    Image {
+        original_width: u32,
+        original_height: u32,
+    },
+    Video {
+        extension: String,
+        size: u64,
+        count: usize,
+        preview_pending: bool,
+    },
+}
+
+/// A short-lived receipt for media paths accepted by the initiating pane.
+/// The renderer receives bounded pixels and display metadata, never a path.
+#[derive(Clone, Debug)]
+pub struct MediaPasteReceiptOverlay {
     pub pane_rect: Rect4,
     pub grid_rect: Rect4,
     /// Physical pixels reserved for the focused pane's live scrollbar grab
     /// strip. The receipt stays left of this edge instead of painting an
     /// apparently clickable card over another control.
     pub right_gutter: f32,
-    pub image: kettle_core::ImageData,
-    pub original_width: u32,
-    pub original_height: u32,
+    pub image: Option<kettle_core::ImageData>,
+    pub kind: MediaPasteReceiptKind,
+    /// Only Kettle's retained private image copy can be opened from the card.
+    /// Video sources remain informational because native launch APIs take a
+    /// path and cannot be bound to the file handle used for validation.
+    pub openable: bool,
     pub remote: bool,
     pub expanded: bool,
     /// Keep the card away from the live prompt: top when the cursor is in the
@@ -896,7 +885,7 @@ pub struct Overlay {
     /// Shell completion card shown near the top of the focused pane.
     pub completion: Option<CompletionOverlay>,
     /// Visual receipt for the focused pane's most recent clipboard bitmap.
-    pub image_paste_receipt: Option<ImagePasteReceiptOverlay>,
+    pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
     pub ssh_hint: String,
@@ -1475,32 +1464,38 @@ pub fn completion_overlay_rect(overlay: &CompletionOverlay, cell: (f32, f32)) ->
     completion_panel_geometry(overlay, cell).map(|geometry| geometry.rect)
 }
 
-/// Exact paint/input geometry for the pasted-image receipt.
+/// Exact paint/input geometry for the pasted-media receipt.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ImagePasteReceiptGeometry {
+pub struct MediaPasteReceiptGeometry {
     pub rect: Rect4,
-    pub image_rect: Option<Rect4>,
+    pub preview_rect: Option<Rect4>,
     pub title_rect: Rect4,
     pub detail_rect: Option<Rect4>,
     pub dismiss_rect: Rect4,
+    pub openable: bool,
     pub compact: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ImagePasteReceiptHit {
+pub enum MediaPasteReceiptHit {
     Open,
+    Body,
     Dismiss,
 }
 
-impl ImagePasteReceiptGeometry {
-    pub fn hit_test(self, x: f32, y: f32) -> Option<ImagePasteReceiptHit> {
+impl MediaPasteReceiptGeometry {
+    pub fn hit_test(self, x: f32, y: f32) -> Option<MediaPasteReceiptHit> {
         let contains = |rect: Rect4| {
             x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
         };
         if contains(self.dismiss_rect) {
-            Some(ImagePasteReceiptHit::Dismiss)
+            Some(MediaPasteReceiptHit::Dismiss)
         } else if contains(self.rect) {
-            Some(ImagePasteReceiptHit::Open)
+            Some(if self.openable {
+                MediaPasteReceiptHit::Open
+            } else {
+                MediaPasteReceiptHit::Body
+            })
         } else {
             None
         }
@@ -1511,16 +1506,14 @@ fn rects_overlap(a: Rect4, b: Rect4) -> bool {
     a.0 < b.0 + b.2 && a.0 + a.2 > b.0 && a.1 < b.1 + b.3 && a.1 + a.3 > b.1
 }
 
-/// Place the receipt inside its terminal grid. The completion card owns the
-/// first detached lane; the receipt tries the opposite corner and contracts to
-/// a chip before it ever covers the shell menu or crosses pane chrome.
-pub fn image_paste_receipt_geometry(
-    receipt: &ImagePasteReceiptOverlay,
+/// Place the receipt inside its terminal grid without covering completion UI.
+pub fn media_paste_receipt_geometry(
+    receipt: &MediaPasteReceiptOverlay,
     completion: Option<&CompletionOverlay>,
     cell: (f32, f32),
     text_cell_width: f32,
     text_line_height: f32,
-) -> Option<ImagePasteReceiptGeometry> {
+) -> Option<MediaPasteReceiptGeometry> {
     let (cw, ch) = cell;
     if !cw.is_finite()
         || !ch.is_finite()
@@ -1545,8 +1538,12 @@ pub fn image_paste_receipt_geometry(
     let inset_y = (ch * 0.5).round().max(4.0);
     let completion_rect = completion.and_then(|card| completion_overlay_rect(card, cell));
 
-    let rect_for_lane = |card_w: f32, card_h: f32, top_lane: bool| {
-        let x = right - inset_x - card_w;
+    let rect_for_corner = |card_w: f32, card_h: f32, top_lane: bool, right_lane: bool| {
+        let x = if right_lane {
+            right - inset_x - card_w
+        } else {
+            left + inset_x
+        };
         if top_lane {
             (x, top + inset_y, card_w, card_h)
         } else {
@@ -1557,24 +1554,26 @@ pub fn image_paste_receipt_geometry(
         if card_w + inset_x * 2.0 > width || card_h + inset_y * 2.0 > height {
             return None;
         }
-        let upper = (rect_for_lane(card_w, card_h, true), true);
-        let lower = (rect_for_lane(card_w, card_h, false), false);
-        let (first, second) = if receipt.prefer_top {
-            (upper, lower)
+        let right_top = (rect_for_corner(card_w, card_h, true, true), true);
+        let right_bottom = (rect_for_corner(card_w, card_h, false, true), false);
+        let left_top = (rect_for_corner(card_w, card_h, true, false), true);
+        let left_bottom = (rect_for_corner(card_w, card_h, false, false), false);
+        let candidates = if receipt.prefer_top {
+            [right_top, right_bottom, left_top, left_bottom]
         } else {
-            (lower, upper)
+            [right_bottom, right_top, left_bottom, left_top]
         };
-        [first, second].into_iter().find(|(candidate, _)| {
+        candidates.into_iter().find(|(candidate, _)| {
             completion_rect.is_none_or(|other| !rects_overlap(*candidate, other))
         })
     };
 
-    let expanded_w = (cw * 34.0).min(width - inset_x * 2.0);
+    let expanded_w = (cw * 42.0).min(width - inset_x * 2.0);
     let pad = (cw * 0.75).round().max(6.0);
     let detail_lines = if receipt.remote { 4.0 } else { 2.0 };
     let text_height = pad * 2.0 + text_line_height * (1.8 + detail_lines);
     let expanded_h = (ch * if receipt.remote { 8.0 } else { 7.0 }).max(text_height);
-    let image_box_w = (expanded_w * 0.38).max(cw * 7.0);
+    let image_box_w = (expanded_w * 0.40).max(text_cell_width * 8.0);
     let detail_w = expanded_w - pad * 3.0 - image_box_w;
     // The remote warning is safety information, not decorative copy. Admit
     // the full card only when its actual detail box can hold the longest line;
@@ -1589,66 +1588,101 @@ pub fn image_paste_receipt_geometry(
         .flatten();
 
     if receipt.expanded
-        && let Some((rect, _)) = expanded_corner
+        && let Some((rect, top_lane)) = expanded_corner
     {
-        let image_box_h = (expanded_h - pad * 2.0).max(ch * 3.0);
-        let image_aspect = receipt.image.width as f32 / receipt.image.height.max(1) as f32;
-        let box_aspect = image_box_w / image_box_h;
-        let (image_w, image_h) = if image_aspect >= box_aspect {
-            (image_box_w, image_box_w / image_aspect)
+        let preview_box_h = (expanded_h - pad * 2.0).max(ch * 3.0);
+        let preview_aspect = receipt.image.as_ref().map_or(16.0 / 9.0, |image| {
+            image.width as f32 / image.height.max(1) as f32
+        });
+        let box_aspect = image_box_w / preview_box_h;
+        let (preview_w, preview_h) = if preview_aspect >= box_aspect {
+            (image_box_w, image_box_w / preview_aspect)
         } else {
-            (image_box_h * image_aspect, image_box_h)
+            (preview_box_h * preview_aspect, preview_box_h)
         };
-        let image_rect = (
-            rect.0 + pad + (image_box_w - image_w) * 0.5,
-            rect.1 + pad + (image_box_h - image_h) * 0.5,
-            image_w,
-            image_h,
+        let preview_rect = (
+            rect.0 + pad + (image_box_w - preview_w) * 0.5,
+            rect.1 + pad + (preview_box_h - preview_h) * 0.5,
+            preview_w,
+            preview_h,
         );
         let text_x = rect.0 + pad + image_box_w + pad;
         let dismiss_size = 24.0_f32.max(text_line_height * 1.5);
+        let dismiss_inset = 5.0;
         let dismiss_rect = (
-            rect.0 + rect.2 - pad - dismiss_size,
-            rect.1 + pad,
+            rect.0 + rect.2 - dismiss_inset - dismiss_size,
+            if top_lane {
+                rect.1 + dismiss_inset
+            } else {
+                rect.1 + rect.3 - dismiss_inset - dismiss_size
+            },
             dismiss_size,
             dismiss_size,
         );
-        let text_w = (dismiss_rect.0 - cw * 0.5 - text_x).max(0.0);
-        return Some(ImagePasteReceiptGeometry {
+        // Reserve the dismiss column in both lanes. At ordinary sizes the
+        // bottom-lane title sits well above the button, but the supported
+        // minimum font and cell height can make those bands touch.
+        let title_right = dismiss_rect.0 - text_cell_width * 0.5;
+        let title_w = (title_right - text_x).max(0.0);
+        let detail_right = if top_lane {
+            rect.0 + rect.2 - pad
+        } else {
+            dismiss_rect.0 - text_cell_width * 0.5
+        };
+        let detail_box_w = (detail_right - text_x).max(0.0);
+        return Some(MediaPasteReceiptGeometry {
             rect,
-            image_rect: Some(image_rect),
-            title_rect: (text_x, rect.1 + pad, text_w, text_line_height * 1.5),
+            preview_rect: Some(preview_rect),
+            title_rect: (text_x, rect.1 + pad, title_w, text_line_height * 1.5),
             detail_rect: Some((
                 text_x,
                 rect.1 + pad + text_line_height * 1.8,
-                text_w,
+                detail_box_w,
                 text_line_height * detail_lines,
             )),
             dismiss_rect,
+            openable: receipt.openable,
             compact: false,
         });
     }
 
-    let card_w = (cw * 24.0).min(width - inset_x * 2.0);
-    let card_h = (ch * 2.1).max(text_line_height + inset_y);
+    let card_w = (cw * 28.0).min(width - inset_x * 2.0);
+    let card_h = (ch * 2.1).max(text_line_height + inset_y).max(34.0);
     // Compact and expanded states share a lane whenever the full card can be
     // placed. Otherwise moving onto the chip can make the card jump to the
     // opposite corner, immediately lose hover, and oscillate forever.
-    let rect = if let Some((_, top_lane)) = expanded_corner {
-        rect_for_lane(card_w, card_h, top_lane)
+    let (rect, top_lane) = if let Some((expanded_rect, top_lane)) = expanded_corner {
+        (
+            (
+                expanded_rect.0 + expanded_rect.2 - card_w,
+                if top_lane {
+                    expanded_rect.1
+                } else {
+                    expanded_rect.1 + expanded_rect.3 - card_h
+                },
+                card_w,
+                card_h,
+            ),
+            top_lane,
+        )
     } else {
-        choose_corner(card_w, card_h)?.0
+        choose_corner(card_w, card_h)?
     };
-    let dismiss_size = 24.0_f32.min((card_h - 4.0).max(0.0));
+    let dismiss_size = 24.0;
+    let dismiss_inset = 5.0;
     let dismiss_rect = (
-        rect.0 + rect.2 - 2.0 - dismiss_size,
-        rect.1 + (card_h - dismiss_size) * 0.5,
+        rect.0 + rect.2 - dismiss_inset - dismiss_size,
+        if top_lane {
+            rect.1 + dismiss_inset
+        } else {
+            rect.1 + card_h - dismiss_inset - dismiss_size
+        },
         dismiss_size,
         dismiss_size,
     );
-    (card_w >= cw * 12.0).then_some(ImagePasteReceiptGeometry {
+    (card_w >= cw * 12.0).then_some(MediaPasteReceiptGeometry {
         rect,
-        image_rect: None,
+        preview_rect: None,
         title_rect: (
             rect.0 + cw,
             rect.1 + (card_h - text_line_height) * 0.5,
@@ -1657,39 +1691,59 @@ pub fn image_paste_receipt_geometry(
         ),
         detail_rect: None,
         dismiss_rect,
+        openable: receipt.openable,
         compact: true,
     })
 }
 
-fn image_paste_receipt_text(
-    receipt: &ImagePasteReceiptOverlay,
-    geometry: &ImagePasteReceiptGeometry,
+fn media_paste_receipt_text(
+    receipt: &MediaPasteReceiptOverlay,
+    geometry: &MediaPasteReceiptGeometry,
     text_cell_width: f32,
 ) -> (String, String) {
     let title_columns = (geometry.title_rect.2 / text_cell_width).floor().max(0.0) as usize;
-    let title = if geometry.compact {
-        if receipt.remote {
-            format!(
-                "Local path · {}×{}",
-                receipt.original_width, receipt.original_height
-            )
-        } else {
-            format!(
-                "{}×{} · Image pasted",
-                receipt.original_width, receipt.original_height
-            )
+    let title = match (&receipt.kind, geometry.compact, receipt.remote) {
+        (_, true, true) => "Remote · local path only".to_string(),
+        (MediaPasteReceiptKind::Image { .. }, true, false) => "Image path pasted".to_string(),
+        (MediaPasteReceiptKind::Video { count, .. }, true, false) if *count > 1 => {
+            format!("{count} video paths pasted")
         }
-    } else {
-        "Image path pasted".to_string()
+        (MediaPasteReceiptKind::Video { .. }, true, false) => "Video path pasted".to_string(),
+        (MediaPasteReceiptKind::Image { .. }, false, _) => "Image path pasted".to_string(),
+        (MediaPasteReceiptKind::Video { .. }, false, _) => "Video path pasted".to_string(),
     };
     let title = fit_single_line_label(&title, title_columns);
 
     let detail = geometry.detail_rect.map_or_else(String::new, |rect| {
         let columns = (rect.2 / text_cell_width).floor().max(0.0) as usize;
-        let mut lines = vec![
-            format!("{} × {}", receipt.original_width, receipt.original_height),
-            "Waiting for client".to_string(),
-        ];
+        let mut lines = match &receipt.kind {
+            MediaPasteReceiptKind::Image {
+                original_width,
+                original_height,
+            } => vec![
+                format!("{original_width} × {original_height}"),
+                "Path on command line".to_string(),
+            ],
+            MediaPasteReceiptKind::Video {
+                extension,
+                size,
+                count,
+                preview_pending,
+            } => {
+                let mut lines = Vec::with_capacity(4);
+                lines.push(if *count > 1 {
+                    format!("1 of {count} · {extension} · {}", format_media_size(*size))
+                } else {
+                    format!("{extension} · {}", format_media_size(*size))
+                });
+                lines.push(if *preview_pending {
+                    "Preparing poster".to_string()
+                } else {
+                    "Path on command line".to_string()
+                });
+                lines
+            }
+        };
         if receipt.remote {
             lines.push("Remote pane".to_string());
             lines.push("Local path only".to_string());
@@ -1701,6 +1755,22 @@ fn image_paste_receipt_text(
             .join("\n")
     });
     (title, detail)
+}
+
+/// Format a media byte count for receipt chrome and accessibility labels.
+pub fn format_media_size(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const MB: u64 = KB * 1_000;
+    const GB: u64 = MB * 1_000;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// Candidate index and pixel bounds for each visible completion row. Paint
@@ -2445,11 +2515,12 @@ pub struct Renderer {
     completion_header_text: String,
     completion_count_buffer: TextBuffer,
     completion_count_text: String,
-    image_receipt_title_buffer: TextBuffer,
-    image_receipt_title_text: String,
-    image_receipt_detail_buffer: TextBuffer,
-    image_receipt_detail_text: String,
-    image_receipt_dismiss_buffer: TextBuffer,
+    media_receipt_title_buffer: TextBuffer,
+    media_receipt_title_text: String,
+    media_receipt_detail_buffer: TextBuffer,
+    media_receipt_detail_text: String,
+    media_receipt_dismiss_buffer: TextBuffer,
+    media_receipt_badge_buffer: TextBuffer,
     tabbar_buffer: TextBuffer,
     /// The `▾` new-tab dropdown-arrow glyph, in its own buffer
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
@@ -2516,7 +2587,7 @@ pub struct Renderer {
     imgs: imgpipe::ImagePipeline,
     /// Single-instance overlay pipeline drawn between menu chrome and menu
     /// text, so the receipt thumbnail cannot cover its own status labels.
-    image_receipt_img: imgpipe::ImagePipeline,
+    media_receipt_img: imgpipe::ImagePipeline,
     /// v2.23.0: dedicated pipeline for the **background image (wallpaper)**,
     /// drawn at the very back — between the surface clear and the cell/chrome
     /// `quads` pass — so cell backgrounds (selection, syntax, TUI panels),
@@ -4652,14 +4723,22 @@ impl Renderer {
         completion_header_buffer.set_wrap(Wrap::None);
         let mut completion_count_buffer = TextBuffer::new(&mut font_system, metrics);
         completion_count_buffer.set_wrap(Wrap::None);
-        let mut image_receipt_title_buffer = TextBuffer::new(&mut font_system, metrics);
-        image_receipt_title_buffer.set_wrap(Wrap::None);
-        let mut image_receipt_detail_buffer = TextBuffer::new(&mut font_system, metrics);
-        image_receipt_detail_buffer.set_wrap(Wrap::None);
-        let mut image_receipt_dismiss_buffer = TextBuffer::new(&mut font_system, metrics);
-        image_receipt_dismiss_buffer.set_wrap(Wrap::None);
-        image_receipt_dismiss_buffer.set_text(
+        let mut media_receipt_title_buffer = TextBuffer::new(&mut font_system, metrics);
+        media_receipt_title_buffer.set_wrap(Wrap::None);
+        let mut media_receipt_detail_buffer = TextBuffer::new(&mut font_system, metrics);
+        media_receipt_detail_buffer.set_wrap(Wrap::None);
+        let mut media_receipt_dismiss_buffer = TextBuffer::new(&mut font_system, metrics);
+        media_receipt_dismiss_buffer.set_wrap(Wrap::None);
+        media_receipt_dismiss_buffer.set_text(
             "×",
+            &Attrs::new().weight(Weight::BOLD),
+            Shaping::Advanced,
+            None,
+        );
+        let mut media_receipt_badge_buffer = TextBuffer::new(&mut font_system, metrics);
+        media_receipt_badge_buffer.set_wrap(Wrap::None);
+        media_receipt_badge_buffer.set_text(
+            "▶",
             &Attrs::new().weight(Weight::BOLD),
             Shaping::Advanced,
             None,
@@ -4695,7 +4774,7 @@ impl Renderer {
                 .ok_or_else(|| {
                     anyhow!("GPU graphics budget exhausted while creating image pipeline")
                 })?;
-        let image_receipt_img = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
+        let media_receipt_img = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
             &device,
             format,
             graphics_budget.clone(),
@@ -4794,11 +4873,12 @@ impl Renderer {
             completion_header_text: String::new(),
             completion_count_buffer,
             completion_count_text: String::new(),
-            image_receipt_title_buffer,
-            image_receipt_title_text: String::new(),
-            image_receipt_detail_buffer,
-            image_receipt_detail_text: String::new(),
-            image_receipt_dismiss_buffer,
+            media_receipt_title_buffer,
+            media_receipt_title_text: String::new(),
+            media_receipt_detail_buffer,
+            media_receipt_detail_text: String::new(),
+            media_receipt_dismiss_buffer,
+            media_receipt_badge_buffer,
             tabbar_buffer,
             new_tab_arrow_buffer,
             scroll_left_buffer,
@@ -4815,7 +4895,7 @@ impl Renderer {
             menu_quads,
             menu_text_renderer,
             imgs,
-            image_receipt_img,
+            media_receipt_img,
             bg_imgs,
             starfield,
             presentation,
@@ -5441,8 +5521,8 @@ impl Renderer {
                 self.completion_description_texts.clear();
                 self.completion_header_text.clear();
                 self.completion_count_text.clear();
-                self.image_receipt_title_text.clear();
-                self.image_receipt_detail_text.clear();
+                self.media_receipt_title_text.clear();
+                self.media_receipt_detail_text.clear();
                 self.search_buffer_text.clear();
             }
         }
@@ -5611,7 +5691,7 @@ impl Renderer {
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
         let mut over: Vec<QuadInstance> = Vec::with_capacity(panes.len() * 4 + 8);
         let mut img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(16);
-        let mut image_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
+        let mut media_receipt_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
         // The wallpaper is always one retained item in its own back-most pass;
         // tile mode repeats UVs in the sampler instead of rebuilding a quad per
         // tile on every frame.
@@ -5627,7 +5707,7 @@ impl Renderer {
             matches!(cfg.background_type, BackgroundType::Starfield);
         let mut bg_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut inline_live: std::collections::HashSet<usize> = std::collections::HashSet::new();
-        let mut image_receipt_live: std::collections::HashSet<usize> =
+        let mut media_receipt_live: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
 
         // Terminator parity, bg-image: when cfg.background_type = Image +
@@ -7370,8 +7450,8 @@ impl Renderer {
             }
         }
 
-        if let Some(receipt) = &overlay.image_paste_receipt
-            && let Some(geometry) = image_paste_receipt_geometry(
+        if let Some(receipt) = &overlay.media_paste_receipt
+            && let Some(geometry) = media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
                 (cw, ch),
@@ -7380,12 +7460,12 @@ impl Renderer {
             )
         {
             let (title, detail) =
-                image_paste_receipt_text(receipt, &geometry, self.overlay_text_cell_width());
-            self.image_receipt_title_buffer.set_metrics(metrics);
-            self.image_receipt_title_buffer
+                media_paste_receipt_text(receipt, &geometry, self.overlay_text_cell_width());
+            self.media_receipt_title_buffer.set_metrics(metrics);
+            self.media_receipt_title_buffer
                 .set_size(Some(geometry.title_rect.2), Some(geometry.title_rect.3));
-            if self.image_receipt_title_text != title {
-                self.image_receipt_title_buffer.set_text(
+            if self.media_receipt_title_text != title {
+                self.media_receipt_title_buffer.set_text(
                     &title,
                     &Attrs::new()
                         .family(Family::Name(&family))
@@ -7393,38 +7473,48 @@ impl Renderer {
                     Shaping::Advanced,
                     None,
                 );
-                self.image_receipt_title_text = title;
+                self.media_receipt_title_text = title;
             }
-            self.image_receipt_title_buffer
+            self.media_receipt_title_buffer
                 .shape_until_scroll(&mut self.font_system, false);
 
-            self.image_receipt_dismiss_buffer.set_metrics(metrics);
-            self.image_receipt_dismiss_buffer
+            self.media_receipt_dismiss_buffer.set_metrics(metrics);
+            self.media_receipt_dismiss_buffer
                 .set_size(Some(geometry.dismiss_rect.2), Some(geometry.dismiss_rect.3));
-            self.image_receipt_dismiss_buffer
+            self.media_receipt_dismiss_buffer
                 .shape_until_scroll(&mut self.font_system, false);
+
+            if matches!(receipt.kind, MediaPasteReceiptKind::Video { .. }) {
+                self.media_receipt_badge_buffer.set_metrics(metrics);
+                self.media_receipt_badge_buffer.set_size(
+                    geometry.preview_rect.map(|rect| rect.2),
+                    geometry.preview_rect.map(|rect| rect.3),
+                );
+                self.media_receipt_badge_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+            }
 
             if let Some(detail_rect) = geometry.detail_rect {
-                self.image_receipt_detail_buffer.set_metrics(metrics);
-                self.image_receipt_detail_buffer
+                self.media_receipt_detail_buffer.set_metrics(metrics);
+                self.media_receipt_detail_buffer
                     .set_size(Some(detail_rect.2), Some(detail_rect.3));
-                if self.image_receipt_detail_text != detail {
-                    self.image_receipt_detail_buffer.set_text(
+                if self.media_receipt_detail_text != detail {
+                    self.media_receipt_detail_buffer.set_text(
                         &detail,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.image_receipt_detail_text = detail;
+                    self.media_receipt_detail_text = detail;
                 }
-                self.image_receipt_detail_buffer
+                self.media_receipt_detail_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             } else {
-                self.image_receipt_detail_text.clear();
+                self.media_receipt_detail_text.clear();
             }
         } else {
-            self.image_receipt_title_text.clear();
-            self.image_receipt_detail_text.clear();
+            self.media_receipt_title_text.clear();
+            self.media_receipt_detail_text.clear();
         }
 
         // Quick-select hint label glyphs (one buffer per label).
@@ -7540,8 +7630,8 @@ impl Renderer {
                 custom_glyphs: &[],
             });
         }
-        if let Some(receipt) = &overlay.image_paste_receipt
-            && let Some(geometry) = image_paste_receipt_geometry(
+        if let Some(receipt) = &overlay.media_paste_receipt
+            && let Some(geometry) = media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
                 (cw, ch),
@@ -7561,11 +7651,16 @@ impl Renderer {
                     alpha,
                 ));
             }
-            menu_q.push(rect(x, y, width, height, palette.panel_bg, 0.98));
-            // The narrow leading rail is the receipt's only decorative mark:
-            // it reads as a completed transfer without competing with the
-            // screenshot itself.
-            menu_q.push(rect(x, y, 3.0, height, palette.emphasis, 1.0));
+            // The receipt is also captured as a standalone review artifact.
+            // Keep its surface opaque so terminal text beneath the card cannot
+            // bleed into that crop.
+            menu_q.push(rect(x, y, width, height, palette.panel_bg, 1.0));
+            let rail_color = if receipt.remote {
+                color::with_min_contrast(theme.palette[3], palette.panel_bg, 4.5)
+            } else {
+                palette.emphasis
+            };
+            menu_q.push(rect(x + 1.0, y + 1.0, 3.0, height - 2.0, rail_color, 1.0));
             menu_q.push(rect(x, y, width, 1.0, palette.border, 1.0));
             menu_q.push(rect(x, y + height - 1.0, width, 1.0, palette.border, 1.0));
             menu_q.push(rect(x + width - 1.0, y, 1.0, height, palette.border, 1.0));
@@ -7576,8 +7671,8 @@ impl Renderer {
                 dismiss.1,
                 dismiss.2,
                 dismiss.3,
-                palette.selection_bg,
-                0.72,
+                palette.divider,
+                1.0,
             ));
             menu_q.push(rect(
                 dismiss.0,
@@ -7588,30 +7683,84 @@ impl Renderer {
                 1.0,
             ));
 
-            if let Some(image_rect) = geometry.image_rect {
+            if let Some(preview_rect) = geometry.preview_rect {
                 // A quiet matte keeps transparent screenshots legible and
-                // makes the thumbnail edge intentional on every theme.
+                // gives the generic video poster a deliberate frame.
                 menu_q.push(rect(
-                    image_rect.0 - 1.0,
-                    image_rect.1 - 1.0,
-                    image_rect.2 + 2.0,
-                    image_rect.3 + 2.0,
+                    preview_rect.0 - 1.0,
+                    preview_rect.1 - 1.0,
+                    preview_rect.2 + 2.0,
+                    preview_rect.3 + 2.0,
                     theme.background,
                     1.0,
                 ));
-                image_receipt_live.insert(receipt.image.allocation_key());
-                image_receipt_items.push(imgpipe::ImageItem::placement(
-                    [image_rect.0, image_rect.1, image_rect.2, image_rect.3],
-                    receipt.image.clone(),
-                    None,
-                    None,
-                    [x, y, width, height],
-                ));
+                if let Some(image) = receipt.image.as_ref() {
+                    media_receipt_live.insert(image.allocation_key());
+                    media_receipt_items.push(imgpipe::ImageItem::placement(
+                        [
+                            preview_rect.0,
+                            preview_rect.1,
+                            preview_rect.2,
+                            preview_rect.3,
+                        ],
+                        image.clone(),
+                        None,
+                        None,
+                        [x, y, width, height],
+                    ));
+                }
+                if matches!(receipt.kind, MediaPasteReceiptKind::Video { .. }) {
+                    let badge = 36.0_f32
+                        .min(preview_rect.2 * 0.45)
+                        .min(preview_rect.3 * 0.68);
+                    let badge_rect = (
+                        preview_rect.0 + (preview_rect.2 - badge) * 0.5,
+                        preview_rect.1 + (preview_rect.3 - badge) * 0.5,
+                        badge,
+                        badge,
+                    );
+                    if receipt.image.is_none() {
+                        menu_q.push(rect(
+                            badge_rect.0,
+                            badge_rect.1,
+                            badge_rect.2,
+                            badge_rect.3,
+                            palette.divider,
+                            1.0,
+                        ));
+                    }
+                    let badge_left = badge_rect.0
+                        + (badge_rect.2 - self.overlay_text_cell_width()).max(0.0) * 0.5;
+                    let badge_top =
+                        badge_rect.1 + (badge_rect.3 - self.metrics.line_height).max(0.0) * 0.5;
+                    // Four dark copies form a one-pixel outline, keeping the
+                    // play glyph legible over both bright and dark posters.
+                    for (dx, dy) in [(-1.0_f32, 0.0_f32), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        menu_areas.push(TextArea {
+                            buffer: &self.media_receipt_badge_buffer,
+                            left: badge_left + dx,
+                            top: badge_top + dy,
+                            scale: 1.0,
+                            bounds: text_bounds_for_rect(badge_rect),
+                            default_color: GColor::rgb(0, 0, 0),
+                            custom_glyphs: &[],
+                        });
+                    }
+                    menu_areas.push(TextArea {
+                        buffer: &self.media_receipt_badge_buffer,
+                        left: badge_left,
+                        top: badge_top,
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect(badge_rect),
+                        default_color: GColor::rgb(255, 255, 255),
+                        custom_glyphs: &[],
+                    });
+                }
             }
 
             let title = geometry.title_rect;
             menu_areas.push(TextArea {
-                buffer: &self.image_receipt_title_buffer,
+                buffer: &self.media_receipt_title_buffer,
                 left: title.0,
                 top: title.1,
                 scale: 1.0,
@@ -7621,7 +7770,7 @@ impl Renderer {
             });
             if let Some(detail) = geometry.detail_rect {
                 menu_areas.push(TextArea {
-                    buffer: &self.image_receipt_detail_buffer,
+                    buffer: &self.media_receipt_detail_buffer,
                     left: detail.0,
                     top: detail.1,
                     scale: 1.0,
@@ -7631,7 +7780,7 @@ impl Renderer {
                 });
             }
             menu_areas.push(TextArea {
-                buffer: &self.image_receipt_dismiss_buffer,
+                buffer: &self.media_receipt_dismiss_buffer,
                 left: dismiss.0 + (dismiss.2 - self.overlay_text_cell_width()).max(0.0) * 0.5,
                 top: dismiss.1 + (dismiss.3 - self.metrics.line_height).max(0.0) * 0.5,
                 scale: 1.0,
@@ -8311,8 +8460,8 @@ impl Renderer {
                 &self.completion_emphasis_colors,
             )
             .hash(&mut h);
-            self.image_receipt_title_text.hash(&mut h);
-            self.image_receipt_detail_text.hash(&mut h);
+            self.media_receipt_title_text.hash(&mut h);
+            self.media_receipt_detail_text.hash(&mut h);
             context_menu_text_damage_key(
                 overlay.context_menu.as_ref(),
                 theme.foreground,
@@ -8492,7 +8641,7 @@ impl Renderer {
         // the per-window/process GPU budgets; visible entries remain pinned.
         self.bg_imgs.gc(&bg_live);
         self.imgs.gc(&inline_live);
-        self.image_receipt_img.gc(&image_receipt_live);
+        self.media_receipt_img.gc(&media_receipt_live);
         let wallpaper_upload_complete = self.bg_imgs.upload_retained(
             &self.gpu.device,
             &self.gpu.queue,
@@ -8515,11 +8664,11 @@ impl Renderer {
         }
         self.imgs
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
-        self.image_receipt_img.upload(
+        self.media_receipt_img.upload(
             &self.gpu.device,
             &self.gpu.queue,
             [sw, sh],
-            &image_receipt_items,
+            &media_receipt_items,
         );
         self.overlay_quads
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
@@ -8818,7 +8967,7 @@ impl Renderer {
         // then composited below the shared chrome-text pass, so its own labels
         // and the context-menu labels both remain readable above images.
         self.menu_quads.draw(&mut pass);
-        self.image_receipt_img.draw(&mut pass);
+        self.media_receipt_img.draw(&mut pass);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // v2.21.0 (idle perf): the focused solid-block cursor's inverted glyph,
@@ -9465,35 +9614,11 @@ impl Renderer {
         // below: only rows whose content changed re-shape.
         let shaping = Shaping::Advanced;
 
-        // v2.20.0 P1 (perf): per-LINE keyed shaping cache. The old path fed
-        // the whole viewport through `set_rich_text` every frame, which
-        // unconditionally resets every line's shaping — cosmic-text re-shaped
-        // 100% of visible text at up to 60fps even when nothing changed (an
-        // idle blink repaint re-shaped every pane's full viewport). Instead,
-        // keep `buf.lines` row-aligned with the grid and touch ONLY rows
-        // whose content key changed:
-        //   key match    → skip; the `BufferLine`'s shape + layout caches
-        //                  stay warm (`shape_until_scroll` walks them for
-        //                  free).
-        //   key mismatch → `BufferLine::set_text`, which itself resets
-        //                  shaping only on a REAL text/attrs change — the
-        //                  second guard that makes a hash collision across
-        //                  *frames* the only stale-render risk (~2⁻⁶⁴ per
-        //                  changed row, the same exposure rustc accepts for
-        //                  incremental fingerprints).
-        //   no key       → `reset_new` (fresh buffer line, or the style key
-        //                  below changed). This is the only path that updates
-        //                  a line's internal `shaping` mode — `set_text`
-        //                  never touches it.
-        // The row key hashes the row's run tuples (text, fg, bold, italic),
-        // so theme switches, OSC 4/10/11 palette overrides, selection
-        // recolors and the cursor-recolor cell all land in it via the
-        // resolved run colors — each dirties exactly the rows it touches.
-        // Inputs that change how a row SHAPES without changing its runs
-        // (font-family variants, ligature toggle, font-features) live in the
-        // per-pane style key; metrics / pane-size changes are handled inside
-        // the buffer (relayout keeps shaping). Shaping mode is a constant
-        // (always Advanced) so it no longer participates.
+        // Keep buffer lines row-aligned and reshape only when a row key changes.
+        // The key includes rendered runs; the style key below covers shaping
+        // inputs such as font variants, ligatures, and features. `reset_new`
+        // is required for a new row or style because `set_text` does not change
+        // a line's shaping mode.
         use std::hash::{Hash, Hasher};
         let style_key = {
             let mut h = std::hash::DefaultHasher::new();
@@ -13296,7 +13421,7 @@ pub fn capture_png_with_annotation(
                 ("unittests\n", fg.clone()),
                 ("test result: ", fg.clone()),
                 ("ok", grn.clone()),
-                (". 550 passed; 0 failed\n\n", fg.clone()),
+                (". workspace checks passed\n\n", fg.clone()),
                 ("kevim@kettle", grn.clone()),
                 (":", fg.clone()),
                 ("~/Repos/kettle", blu.clone()),
@@ -17302,12 +17427,12 @@ mod search_bar_tests {
 mod completion_panel_tests {
     use super::{
         COMPLETION_MAX_COLUMNS, COMPLETION_MIN_COLUMNS, CompletionOverlay, CompletionOverlayRow,
-        CompletionPanelPlacement, ImagePasteReceiptHit, ImagePasteReceiptOverlay,
-        MAX_COMPLETION_ROWS, Overlay, completion_header_columns, completion_header_count,
+        CompletionPanelPlacement, MAX_COMPLETION_ROWS, MediaPasteReceiptHit, MediaPasteReceiptKind,
+        MediaPasteReceiptOverlay, Overlay, completion_header_columns, completion_header_count,
         completion_header_label, completion_match_span, completion_overlay_row_rects,
         completion_palette, completion_panel_geometry, completion_scroll_thumb,
-        completion_selection_surface, display_width, image_paste_receipt_geometry,
-        image_paste_receipt_text, production_source, push_completion_selection_quads, solid_blend,
+        completion_selection_surface, display_width, media_paste_receipt_geometry,
+        media_paste_receipt_text, production_source, push_completion_selection_quads, solid_blend,
         text_overlay_requires_continuous_prepare,
     };
     use crate::color;
@@ -17350,29 +17475,46 @@ mod completion_panel_tests {
         kettle_config::Theme::default()
     }
 
-    fn receipt(expanded: bool) -> ImagePasteReceiptOverlay {
-        ImagePasteReceiptOverlay {
+    fn receipt(expanded: bool) -> MediaPasteReceiptOverlay {
+        MediaPasteReceiptOverlay {
             pane_rect: (100.0, 40.0, 900.0, 700.0),
             grid_rect: (108.0, 70.0, 884.0, 656.0),
             right_gutter: 0.0,
-            image: kettle_core::ImageData::solid(256, 128, [40, 80, 120, 255]).unwrap(),
-            original_width: 1920,
-            original_height: 960,
+            image: Some(kettle_core::ImageData::solid(256, 128, [40, 80, 120, 255]).unwrap()),
+            kind: MediaPasteReceiptKind::Image {
+                original_width: 1920,
+                original_height: 960,
+            },
+            openable: true,
             remote: false,
             expanded,
             prefer_top: true,
         }
     }
 
+    fn video_receipt(expanded: bool, preview: bool, count: usize) -> MediaPasteReceiptOverlay {
+        let mut receipt = receipt(expanded);
+        receipt.image =
+            preview.then(|| kettle_core::ImageData::solid(256, 144, [36, 40, 52, 255]).unwrap());
+        receipt.kind = MediaPasteReceiptKind::Video {
+            extension: "MP4".to_string(),
+            size: 34 * 1024 * 1024,
+            count,
+            preview_pending: !preview,
+        };
+        receipt.openable = false;
+        receipt
+    }
+
     #[test]
-    fn image_receipt_stays_inside_the_grid_and_preserves_thumbnail_aspect() {
+    fn media_receipt_stays_inside_the_grid_and_preserves_thumbnail_aspect() {
         let geometry =
-            image_paste_receipt_geometry(&receipt(true), None, CELL, CELL.0, CELL.1).unwrap();
+            media_paste_receipt_geometry(&receipt(true), None, CELL, CELL.0, CELL.1).unwrap();
         assert!(!geometry.compact);
         let (gx, gy, gw, gh) = receipt(true).grid_rect;
         let (x, y, w, h) = geometry.rect;
         assert!(x >= gx && y >= gy && x + w <= gx + gw && y + h <= gy + gh);
-        let image = geometry.image_rect.expect("expanded card has thumbnail");
+        let image = geometry.preview_rect.expect("expanded card has thumbnail");
         assert!((image.2 / image.3 - 2.0).abs() < 0.001);
         assert!(super::rects_overlap(geometry.dismiss_rect, geometry.rect));
         assert!(geometry.dismiss_rect.2 >= 24.0 && geometry.dismiss_rect.3 >= 24.0);
@@ -17380,35 +17522,83 @@ mod completion_panel_tests {
             !super::rects_overlap(geometry.dismiss_rect, geometry.title_rect),
             "dismiss and title hit targets must not overlap"
         );
+        assert!(
+            !super::rects_overlap(geometry.dismiss_rect, geometry.detail_rect.unwrap()),
+            "dismiss and detail text must not overlap"
+        );
         assert_eq!(
             geometry.hit_test(
                 geometry.dismiss_rect.0 + geometry.dismiss_rect.2 * 0.5,
                 geometry.dismiss_rect.1 + geometry.dismiss_rect.3 * 0.5,
             ),
-            Some(ImagePasteReceiptHit::Dismiss)
+            Some(MediaPasteReceiptHit::Dismiss)
         );
         assert_eq!(
             geometry.hit_test(geometry.rect.0 + 4.0, geometry.rect.1 + 4.0),
-            Some(ImagePasteReceiptHit::Open)
+            Some(MediaPasteReceiptHit::Open)
         );
     }
 
     #[test]
-    fn image_receipt_avoids_completion_and_compacts_in_a_short_grid() {
+    fn video_receipt_body_is_inert_but_still_consumes_hidden_terminal_clicks() {
+        let geometry =
+            media_paste_receipt_geometry(&video_receipt(true, true, 1), None, CELL, CELL.0, CELL.1)
+                .unwrap();
+        assert_eq!(
+            geometry.hit_test(geometry.rect.0 + 4.0, geometry.rect.1 + 4.0),
+            Some(MediaPasteReceiptHit::Body)
+        );
+        assert_eq!(
+            geometry.hit_test(
+                geometry.dismiss_rect.0 + geometry.dismiss_rect.2 * 0.5,
+                geometry.dismiss_rect.1 + geometry.dismiss_rect.3 * 0.5,
+            ),
+            Some(MediaPasteReceiptHit::Dismiss)
+        );
+    }
+
+    #[test]
+    fn bottom_lane_receipt_reserves_the_dismiss_corner_from_detail_text() {
+        let mut lower = receipt(true);
+        lower.prefer_top = false;
+        // font-size=6 and cell-height=0.5 make all three text/button bands
+        // overlap vertically, so horizontal reservation is load-bearing.
+        let geometry = media_paste_receipt_geometry(&lower, None, (8.0, 3.75), 8.0, 7.5)
+            .expect("the expanded receipt fits in the bottom lane");
+        assert!(!geometry.compact);
+        assert!(
+            (geometry.dismiss_rect.1 + geometry.dismiss_rect.3
+                - (geometry.rect.1 + geometry.rect.3 - 5.0))
+                .abs()
+                < 0.01,
+            "the dismiss target must occupy the bottom lane"
+        );
+        assert!(
+            !super::rects_overlap(geometry.dismiss_rect, geometry.detail_rect.unwrap()),
+            "bottom-lane detail text must reserve the dismiss target"
+        );
+        assert!(
+            !super::rects_overlap(geometry.dismiss_rect, geometry.title_rect),
+            "bottom-lane title text must reserve the dismiss target"
+        );
+    }
+
+    #[test]
+    fn media_receipt_avoids_completion_and_compacts_in_a_short_grid() {
         let mut completion = overlay(Some(0), 10);
         completion.anchor_col = Some(100);
         let completion_rect = super::completion_overlay_rect(&completion, CELL).unwrap();
         let geometry =
-            image_paste_receipt_geometry(&receipt(true), Some(&completion), CELL, CELL.0, CELL.1)
+            media_paste_receipt_geometry(&receipt(true), Some(&completion), CELL, CELL.0, CELL.1)
                 .expect("opposite corner remains available");
         assert!(!super::rects_overlap(geometry.rect, completion_rect));
 
         let mut short = receipt(true);
         short.pane_rect.3 = 100.0;
         short.grid_rect.3 = 64.0;
-        let geometry = image_paste_receipt_geometry(&short, None, CELL, CELL.0, CELL.1).unwrap();
+        let geometry = media_paste_receipt_geometry(&short, None, CELL, CELL.0, CELL.1).unwrap();
         assert!(geometry.compact, "short panes degrade to a chip");
-        assert!(geometry.image_rect.is_none());
+        assert!(geometry.preview_rect.is_none());
         assert!(geometry.dismiss_rect.2 >= 24.0 && geometry.dismiss_rect.3 >= 24.0);
         assert!(
             !super::rects_overlap(geometry.dismiss_rect, geometry.title_rect),
@@ -17417,20 +17607,20 @@ mod completion_panel_tests {
     }
 
     #[test]
-    fn image_receipt_keeps_one_lane_across_compact_and_expanded_states() {
+    fn media_receipt_keeps_one_lane_across_compact_and_expanded_states() {
         let mut exercised = 0;
         for row in 0..40 {
             let mut completion = overlay(Some(0), 6);
             completion.command_rows = (row, row);
             completion.anchor_col = Some(100);
-            let compact = image_paste_receipt_geometry(
+            let compact = media_paste_receipt_geometry(
                 &receipt(false),
                 Some(&completion),
                 CELL,
                 CELL.0,
                 CELL.1,
             );
-            let expanded = image_paste_receipt_geometry(
+            let expanded = media_paste_receipt_geometry(
                 &receipt(true),
                 Some(&completion),
                 CELL,
@@ -17450,54 +17640,62 @@ mod completion_panel_tests {
                 expanded.rect.1 < grid_mid,
                 "hover must not move the receipt to the opposite corner at row {row}"
             );
+            assert_eq!(
+                compact.dismiss_rect.0, expanded.dismiss_rect.0,
+                "hover must not move the dismiss target horizontally at row {row}"
+            );
+            assert_eq!(
+                compact.dismiss_rect.1 < grid_mid,
+                expanded.dismiss_rect.1 < grid_mid,
+                "hover must keep the dismiss target against the same lane edge at row {row}"
+            );
         }
         assert!(exercised > 0, "fixture never admitted an expanded receipt");
     }
 
     #[test]
-    fn image_receipt_uses_the_corner_opposite_the_terminal_cursor() {
-        let top = image_paste_receipt_geometry(&receipt(true), None, CELL, CELL.0, CELL.1).unwrap();
+    fn media_receipt_uses_the_corner_opposite_the_terminal_cursor() {
+        let top = media_paste_receipt_geometry(&receipt(true), None, CELL, CELL.0, CELL.1).unwrap();
         let mut lower = receipt(true);
         lower.prefer_top = false;
-        let bottom = image_paste_receipt_geometry(&lower, None, CELL, CELL.0, CELL.1).unwrap();
+        let bottom = media_paste_receipt_geometry(&lower, None, CELL, CELL.0, CELL.1).unwrap();
         assert!(top.rect.1 < bottom.rect.1);
         assert_eq!(top.rect.0, bottom.rect.0, "the right edge stays stable");
     }
 
     #[test]
-    fn image_receipt_hides_when_even_the_chip_cannot_fit() {
+    fn media_receipt_hides_when_even_the_chip_cannot_fit() {
         let mut tiny = receipt(false);
         tiny.pane_rect.2 = 80.0;
         tiny.grid_rect.2 = 64.0;
-        assert!(image_paste_receipt_geometry(&tiny, None, CELL, CELL.0, CELL.1).is_none());
+        assert!(media_paste_receipt_geometry(&tiny, None, CELL, CELL.0, CELL.1).is_none());
     }
 
     #[test]
-    fn image_receipt_text_preserves_dimensions_and_the_remote_warning() {
+    fn media_receipt_text_preserves_dimensions_and_the_remote_warning() {
         let mut compact = receipt(false);
-        compact.original_width = 16_384;
-        compact.original_height = 16_384;
+        compact.kind = MediaPasteReceiptKind::Image {
+            original_width: 16_384,
+            original_height: 16_384,
+        };
         let compact_geometry =
-            image_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
-        let (compact_title, _) = image_paste_receipt_text(&compact, &compact_geometry, CELL.0);
-        assert!(
-            compact_title.starts_with("16384×16384"),
-            "dimensions take priority if the compact title must truncate"
-        );
+            media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
+        let (compact_title, _) = media_paste_receipt_text(&compact, &compact_geometry, CELL.0);
+        assert_eq!(compact_title, "Image path pasted");
 
         compact.remote = true;
         let compact_geometry =
-            image_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
-        let (compact_title, _) = image_paste_receipt_text(&compact, &compact_geometry, CELL.0);
+            media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
+        let (compact_title, _) = media_paste_receipt_text(&compact, &compact_geometry, CELL.0);
         assert!(
-            compact_title.starts_with("Local path"),
-            "a compact remote receipt must retain the local-path warning"
+            compact_title.starts_with("Remote · local path"),
+            "a compact remote receipt must identify both the remote pane and local path"
         );
 
         let mut remote = receipt(true);
         remote.remote = true;
-        let geometry = image_paste_receipt_geometry(&remote, None, CELL, CELL.0, CELL.1).unwrap();
-        let (_, detail) = image_paste_receipt_text(&remote, &geometry, CELL.0);
+        let geometry = media_paste_receipt_geometry(&remote, None, CELL, CELL.0, CELL.1).unwrap();
+        let (_, detail) = media_paste_receipt_text(&remote, &geometry, CELL.0);
         assert!(detail.contains("Remote pane\nLocal path only"));
         let columns = (geometry.detail_rect.unwrap().2 / CELL.0).floor() as usize;
         assert!(
@@ -17509,7 +17707,7 @@ mod completion_panel_tests {
         narrow.remote = true;
         narrow.pane_rect.2 = 148.0;
         narrow.grid_rect.2 = 148.0;
-        let geometry = image_paste_receipt_geometry(&narrow, None, (5.0, 10.0), 10.0, 10.0)
+        let geometry = media_paste_receipt_geometry(&narrow, None, (5.0, 10.0), 10.0, 10.0)
             .expect("the compact receipt still fits");
         assert!(
             geometry.compact,
@@ -17517,7 +17715,7 @@ mod completion_panel_tests {
         );
 
         let scaled =
-            image_paste_receipt_geometry(&remote, None, (CELL.0 * 0.5, CELL.1), CELL.0, CELL.1)
+            media_paste_receipt_geometry(&remote, None, (CELL.0 * 0.5, CELL.1), CELL.0, CELL.1)
                 .expect("the compact receipt still fits at half-width terminal cells");
         assert!(
             scaled.compact,
@@ -17530,12 +17728,12 @@ mod completion_panel_tests {
             candidate.pane_rect.2 = pane_width as f32;
             candidate.grid_rect.2 = pane_width as f32;
             let Some(geometry) =
-                image_paste_receipt_geometry(&candidate, None, (6.0, CELL.1), CELL.0, CELL.1)
+                media_paste_receipt_geometry(&candidate, None, (6.0, CELL.1), CELL.0, CELL.1)
             else {
                 continue;
             };
             if !geometry.compact {
-                let (_, detail) = image_paste_receipt_text(&candidate, &geometry, CELL.0);
+                let (_, detail) = media_paste_receipt_text(&candidate, &geometry, CELL.0);
                 assert!(
                     detail.lines().any(|line| line == "Local path only"),
                     "an admitted expanded card must preserve the full warning at width {pane_width}"
@@ -17545,7 +17743,73 @@ mod completion_panel_tests {
     }
 
     #[test]
-    fn image_receipt_budgets_real_text_lines_and_the_scrollbar_gutter() {
+    fn video_receipt_has_a_stable_poster_and_never_projects_a_path() {
+        let pending = video_receipt(true, false, 3);
+        let pending_geometry =
+            media_paste_receipt_geometry(&pending, None, CELL, CELL.0, CELL.1).unwrap();
+        let poster = pending_geometry
+            .preview_rect
+            .expect("expanded video receipt has a generic poster");
+        assert!((poster.2 / poster.3 - 16.0 / 9.0).abs() < 0.001);
+        let (title, detail) = media_paste_receipt_text(&pending, &pending_geometry, CELL.0);
+        assert_eq!(title, "Video path pasted");
+        assert!(detail.contains("1 of 3 · MP4 · 35.7 MB"));
+        assert!(detail.contains("Preparing poster"));
+        assert!(!format!("{pending:?}{title}{detail}").contains("/Users/"));
+
+        let ready = video_receipt(true, true, 1);
+        let ready_geometry =
+            media_paste_receipt_geometry(&ready, None, CELL, CELL.0, CELL.1).unwrap();
+        let preview = ready_geometry
+            .preview_rect
+            .expect("native poster is visible");
+        assert!((preview.2 / preview.3 - 16.0 / 9.0).abs() < 0.001);
+        let (_, detail) = media_paste_receipt_text(&ready, &ready_geometry, CELL.0);
+        assert!(detail.contains("Path on command line"));
+    }
+
+    #[test]
+    fn receipt_can_move_to_the_left_when_completion_owns_both_right_corners() {
+        let mut completion = overlay(Some(0), 40);
+        completion.pane_rect = receipt(true).pane_rect;
+        completion.grid_rect = receipt(true).grid_rect;
+        completion.anchor_col = Some(70);
+        let completion_rect = super::completion_overlay_rect(&completion, CELL).unwrap();
+        let geometry =
+            media_paste_receipt_geometry(&receipt(true), Some(&completion), CELL, CELL.0, CELL.1)
+                .expect("the left side remains available");
+        assert!(!super::rects_overlap(geometry.rect, completion_rect));
+        assert!(
+            geometry.rect.0 < completion_rect.0,
+            "the receipt should use the free left side: receipt {:?}, completion {:?}",
+            geometry.rect,
+            completion_rect
+        );
+    }
+
+    #[test]
+    fn receipt_poster_width_uses_chrome_metrics_not_terminal_font_width() {
+        let geometry = media_paste_receipt_geometry(
+            &video_receipt(true, true, 1),
+            None,
+            (32.0, CELL.1),
+            CELL.0,
+            CELL.1,
+        )
+        .expect("wide terminal glyphs must not collapse the chrome card");
+        assert!(!geometry.compact);
+        assert!(geometry.preview_rect.unwrap().2 >= CELL.0 * 8.0);
+    }
+
+    #[test]
+    fn media_sizes_use_decimal_units_without_rounding_to_whole_kilobytes() {
+        assert_eq!(super::format_media_size(34 * 1024 * 1024), "35.7 MB");
+        assert_eq!(super::format_media_size(34 * 1024 * 1024 + 1), "35.7 MB");
+        assert_eq!(super::format_media_size(1_500), "1.5 KB");
+    }
+
+    #[test]
+    fn media_receipt_budgets_real_text_lines_and_the_scrollbar_gutter() {
         let mut remote = receipt(true);
         remote.remote = true;
         remote.grid_rect.3 = 160.0;
@@ -17555,7 +17819,7 @@ mod completion_panel_tests {
         // A supported 0.5 cell-height leaves chrome text at its ordinary
         // 16-pixel line height while terminal rows shrink to 8 pixels. The
         // remote warning must still remain wholly inside the expanded card.
-        let geometry = image_paste_receipt_geometry(&remote, None, (8.0, 8.0), 8.0, 16.0)
+        let geometry = media_paste_receipt_geometry(&remote, None, (8.0, 8.0), 8.0, 16.0)
             .expect("the text-aware card fits");
         assert!(!geometry.compact);
         for inner in [geometry.title_rect, geometry.detail_rect.unwrap()] {
@@ -17570,7 +17834,7 @@ mod completion_panel_tests {
 
         remote.grid_rect.3 = 96.0;
         remote.pane_rect.3 = 112.0;
-        let compact = image_paste_receipt_geometry(&remote, None, (8.0, 8.0), 8.0, 16.0)
+        let compact = media_paste_receipt_geometry(&remote, None, (8.0, 8.0), 8.0, 16.0)
             .expect("a short pane still has room for the compact receipt");
         assert!(
             compact.compact,
@@ -17582,7 +17846,7 @@ mod completion_panel_tests {
             widened.pane_rect.2 = pane_width as f32;
             widened.grid_rect.2 = pane_width as f32;
             let Some(geometry) =
-                image_paste_receipt_geometry(&widened, None, (24.0, 16.0), 8.0, 16.0)
+                media_paste_receipt_geometry(&widened, None, (24.0, 16.0), 8.0, 16.0)
             else {
                 continue;
             };
@@ -17599,15 +17863,15 @@ mod completion_panel_tests {
     }
 
     #[test]
-    fn image_receipt_text_enters_the_retained_chrome_damage_key() {
+    fn media_receipt_text_enters_the_retained_chrome_damage_key() {
         let source = production_source();
         let hash = source
             .split("let chrome_hash = {")
             .nth(1)
             .and_then(|rest| rest.split("let chrome_changed =").next())
             .expect("retained chrome hash body");
-        assert!(hash.contains("self.image_receipt_title_text.hash(&mut h);"));
-        assert!(hash.contains("self.image_receipt_detail_text.hash(&mut h);"));
+        assert!(hash.contains("self.media_receipt_title_text.hash(&mut h);"));
+        assert!(hash.contains("self.media_receipt_detail_text.hash(&mut h);"));
     }
 
     #[test]

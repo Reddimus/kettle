@@ -1200,6 +1200,9 @@ pub struct Config {
     /// clipboard bitmap's temporary path. Off avoids allocating preview pixels;
     /// this never previews arbitrary pasted paths.
     pub paste_image_preview: bool,
+    /// Show a short-lived receipt for an explicitly copied or dropped video
+    /// file. Kettle never scans terminal text or path-like output for media.
+    pub paste_video_preview: bool,
     /// Arm the GUI session recorder at launch (`record = on`). Off by default.
     /// Recording captures on-screen output verbatim; typed keystrokes are
     /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
@@ -1947,40 +1950,13 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
     Some((pattern, argv))
 }
 
-/// Terminator menu UX (C7): atomic write-back for the
-/// in-menu Preferences toggles. Persists a `key = value` line to
-/// the user's config file with these contracts:
+/// Atomically persist one in-app config toggle.
 ///
-///   1. **In-place edit**: if the file already has a line matching
-///      `key` (allowing `-` / `_` equivalence + leading/trailing
-///      whitespace), only that line is replaced — every other line
-///      including comments + blanks + ordering survives byte-for-
-///      byte.
-///   2. **Append on miss**: if no matching line exists, the new
-///      `key = value` is appended with a leading blank line for
-///      readability.
-///   3. **Atomic + durable**: stage a collision-safe private sibling, sync it,
-///      atomically replace the target, and sync the parent directory.
-///   4. **First-write backup**: if `<path>.bak` doesn't exist yet,
-///      save an encoding-preserving copy of the pre-edit bytes there. Subsequent
-///      writes don't touch the backup — it's a "what did my config
-///      look like before I started clicking toggles?" forensic
-///      snapshot.
-///   5. **Pre-commit validation**: before replacement, the candidate is
-///      scanned with `Config::detect_malformed_values`.
-///      Because this helper only ever rewrites a single line, any
-///      *additional* diagnostic compared with the pre-edit content
-///      means the new value is malformed, so it never becomes visible.
-///   6. **Symlink preservation**: a symlinked config is resolved and its regular
-///      target is replaced, leaving the link intact for dotfile managers.
-///   7. **Concurrency + encoding**: a per-target advisory lock serializes all
-///      Kettle editors, a final byte comparison refuses external-editor races,
-///      and UTF-8 BOM / UTF-16 LE / UTF-16 BE input keeps its encoding.
-///
-/// Returns the path of the backup (created or pre-existing) on
-/// success so the caller can surface it to the user. Pure-modulo-
-/// the-filesystem so the contract is unit-tested with a tempdir
-/// fixture.
+/// Existing comments, blank lines, ordering, encoding, and a symlinked leaf are
+/// preserved. The write holds a per-target lock, rejects external-editor races
+/// and newly malformed values, stages and syncs a private sibling, then
+/// atomically replaces the target and syncs its parent. The first write keeps
+/// an encoding-preserving `.bak`; the returned path identifies that backup.
 pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io::Result<PathBuf> {
     validate_single_line("config key", key)?;
     validate_single_line("config value", new_value)?;
@@ -2683,6 +2659,7 @@ impl Default for Config {
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             paste_image_preview: true,
+            paste_video_preview: true,
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
@@ -3325,6 +3302,8 @@ impl Config {
         "mouse_autohide",
         "paste-image-preview",
         "paste_image_preview",
+        "paste-video-preview",
+        "paste_video_preview",
         "new-tab-after-current-tab",
         "new_tab_after_current_tab",
         "putty-paste-style",
@@ -4445,6 +4424,11 @@ impl Config {
                 "paste-image-preview" | "paste_image_preview" => {
                     if let Some(value) = parse_bool(&e.value) {
                         cfg.paste_image_preview = value;
+                    }
+                }
+                "paste-video-preview" | "paste_video_preview" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.paste_video_preview = value;
                     }
                 }
                 "record" => {
@@ -7185,6 +7169,18 @@ cell-height = 1.2\n";
         );
         assert!(Config::BOOL_KEYS.contains(&"paste-image-preview"));
         assert!(Config::BOOL_KEYS.contains(&"paste_image_preview"));
+    }
+
+    #[test]
+    fn pasted_video_preview_is_independent_and_on_by_default() {
+        assert!(Config::default().paste_video_preview);
+        assert!(!Config::parse_text("paste-video-preview = off").paste_video_preview);
+        assert!(!Config::parse_text("paste_video_preview = false").paste_video_preview);
+        assert!(
+            Config::parse_text("paste-files = off\npaste-video-preview = on").paste_video_preview
+        );
+        assert!(Config::BOOL_KEYS.contains(&"paste-video-preview"));
+        assert!(Config::BOOL_KEYS.contains(&"paste_video_preview"));
     }
 
     #[test]

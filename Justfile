@@ -936,6 +936,17 @@ image-paste-receipt-smoke:
 image-paste-receipt-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
 
+# Copy two generated local videos, drive the real Paste action, and capture the
+# bounded native-poster receipt. Requires ffmpeg and a graphical session.
+# Artifacts land under target/diagnostics/video-paste-receipt-*.
+[unix]
+video-paste-receipt-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
+
+[windows]
+video-paste-receipt-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
+
 # Focus only the cross-pane hover-wheel contract and require no surface-copy
 # support. Useful on virtual GLES adapters that render normally but cannot copy
 # a live swapchain image into the screenshot pipeline.
