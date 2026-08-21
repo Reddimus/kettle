@@ -13091,6 +13091,32 @@ impl App {
             Action::ToggleMouseHide,
         ));
         inner.push(ContextMenuItem::Separator);
+        // Close-confirmation radio. `always` is worded to say that it also
+        // covers the titlebar close, because that gesture ignores the other
+        // two policies by design.
+        let abc = self.cfg.ask_before_closing;
+        inner.push(dyn_item(
+            format!(
+                "{}Confirm close: always, including titlebar",
+                r(abc == kettle_config::AskBeforeClosing::Always)
+            ),
+            Action::SetAskBeforeClosingAlways,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Confirm close: multiple terminals",
+                r(abc == kettle_config::AskBeforeClosing::MultipleTerminals)
+            ),
+            Action::SetAskBeforeClosingMultiple,
+        ));
+        inner.push(dyn_item(
+            format!(
+                "{}Confirm close: never",
+                r(abc == kettle_config::AskBeforeClosing::Never)
+            ),
+            Action::SetAskBeforeClosingNever,
+        ));
+        inner.push(ContextMenuItem::Separator);
         // Bell radio.
         let bell = self.cfg.bell;
         inner.push(dyn_item(
@@ -14912,6 +14938,22 @@ impl App {
             Action::SetScrollbarNever => {
                 self.cfg.scrollbar = kettle_config::ScrollbarMode::Never;
                 self.persist_pref("scrollbar", "never");
+            }
+            // Close-confirmation policy. The confirm bar deliberately does NOT
+            // carry a "don't ask again" answer: it decides the close in front
+            // of you, while standing policy lives here, where the selected
+            // radio IS the feedback and picking another row is the undo.
+            Action::SetAskBeforeClosingAlways => {
+                self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::Always;
+                self.persist_pref("ask-before-closing", "always");
+            }
+            Action::SetAskBeforeClosingMultiple => {
+                self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::MultipleTerminals;
+                self.persist_pref("ask-before-closing", "multiple-terminals");
+            }
+            Action::SetAskBeforeClosingNever => {
+                self.cfg.ask_before_closing = kettle_config::AskBeforeClosing::Never;
+                self.persist_pref("ask-before-closing", "never");
             }
             Action::ToggleCursorBlink => {
                 self.cfg.cursor_blink = !self.cfg.cursor_blink;
@@ -25273,24 +25315,37 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                // The titlebar ✕ and Alt+F4 destroy exactly as much as
-                // `Action::CloseWindow` does, so they have to ask the same
-                // question — this path used to skip `ask-before-closing`
-                // entirely and take every running pane with it. Ask BEFORE
-                // any of the teardown below: saving the session and finishing
-                // the recorder are not things to do speculatively while the
-                // user is still deciding.
-                let (scope, busy) = window_close_scope(ws);
-                if self.confirm_close(
-                    ws,
-                    format!("Close {scope} pane(s)?"),
-                    scope,
-                    busy,
-                    ConfirmAction::CloseWindow {
-                        drop_panes: DropPanes::No,
-                    },
-                ) {
-                    return;
+                // The titlebar ✕ and Alt+F4 are OS-level affordances: the user
+                // is asking the window manager to destroy a window, not
+                // invoking a Kettle command. Ordinary applications do not veto
+                // that request unless they own unsaved document state, and a
+                // terminal has no authoritative dirty bit — "a process exists"
+                // is not "work would be lost". Vetoing it made the gesture
+                // nondeterministic, and because `shell_idle()` reports busy for
+                // any pane without OSC 133 integration, in practice EVERY
+                // multi-pane window prompted. So this gesture closes.
+                //
+                // `ask-before-closing = always` is the deliberate opt-in for
+                // people who do want the question here, and it is the only
+                // policy that still raises it. The keybind close actions
+                // (`ClosePane`, `CloseTab`, `CloseWindow`) are unchanged: those
+                // are Kettle commands, not OS requests, and they keep the full
+                // policy. Ask BEFORE any of the teardown below — saving the
+                // session and finishing the recorder are not things to do
+                // speculatively while the user is still deciding.
+                if self.cfg.ask_before_closing == kettle_config::AskBeforeClosing::Always {
+                    let (scope, busy) = window_close_scope(ws);
+                    if self.confirm_close(
+                        ws,
+                        format!("Close {scope} pane(s)?"),
+                        scope,
+                        busy,
+                        ConfirmAction::CloseWindow {
+                            drop_panes: DropPanes::No,
+                        },
+                    ) {
+                        return;
+                    }
                 }
                 self.close_window_now(ws, DropPanes::No);
             }
@@ -27687,14 +27742,17 @@ mod modal_discipline_guard {
 
     /// `ask-before-closing` is only worth anything if EVERY way to close
     /// something asks. Four gestures used to walk straight past it — the
-    /// titlebar ✕ and Alt+F4 (both arrive as `WindowEvent::CloseRequested`),
-    /// the tab bar's ✕ button, and middle-clicking a tab — so a window full of
+    /// the tab bar's ✕ button and middle-clicking a tab — so a window full of
     /// running work vanished on one stray click no matter how the setting was
     /// configured.
     ///
     /// Each close site is checked for the `confirm_close` gate that raises the
     /// prompt. The gate itself decides whether to prompt; what this pins is
     /// that the decision is asked at all.
+    ///
+    /// `WindowEvent::CloseRequested` (the titlebar ✕ and Alt+F4) is the one
+    /// deliberate exception — see the assertion below for why — and it is
+    /// pinned to its own, narrower contract rather than exempted.
     #[test]
     fn every_close_gesture_asks_before_closing() {
         let src = production_source();
@@ -27707,10 +27765,22 @@ mod modal_discipline_guard {
             src[at..].chars().take(len).collect()
         };
 
+        // The titlebar ✕ and Alt+F4 are the ONE exception, and it is
+        // deliberate: they are OS window-destroy requests rather than Kettle
+        // commands, so they close without asking. `ask-before-closing = always`
+        // is the opt-in that restores the question, and pinning that gate here
+        // is what stops the exception from silently widening into "the ✕ never
+        // asks, whatever you configured".
+        let close_requested = after("WindowEvent::CloseRequested => {", 2400);
         assert!(
-            after("WindowEvent::CloseRequested => {", 1200).contains("self.confirm_close("),
-            "the titlebar ✕ and Alt+F4 must ask before taking every pane in the \
-             window; they arrive as CloseRequested"
+            close_requested.contains("kettle_config::AskBeforeClosing::Always"),
+            "the titlebar ✕ / Alt+F4 close must still honor \
+             `ask-before-closing = always`"
+        );
+        assert!(
+            close_requested.contains("self.confirm_close("),
+            "the `always` branch of the ✕ close must route through the shared \
+             confirm_close gate rather than raising its own dialog"
         );
         // Both tab-bar close gestures (the ✕ hit and middle-click) funnel
         // through one hit test, written once for real mouse input and once for
@@ -33191,11 +33261,12 @@ mod tests {
     /// must surface every runtime-mutable toggle the spec promises:
     ///   - 3 scrollbar radio rows
     ///   - 3 boolean toggles (cursor blink, copy on select, mouse-hide)
+    ///   - 3 close-confirmation radio rows
     ///   - 4 bell radio rows
     ///   - 2 font-size +/− rows
     ///   - 1 Advanced… (EditConfig) escape hatch
     ///
-    /// Total: 13 actionable rows + 4 separators = 17 items. If the
+    /// Total: 16 actionable rows + 5 separators = 21 items. If the
     /// count drifts (someone adds a row without updating this guard
     /// or removes one in a refactor), the test fails so the
     /// regression is caught at PR time.
@@ -33211,6 +33282,9 @@ mod tests {
             Action::ToggleCursorBlink,
             Action::ToggleCopyOnSelect,
             Action::ToggleMouseHide,
+            Action::SetAskBeforeClosingAlways,
+            Action::SetAskBeforeClosingMultiple,
+            Action::SetAskBeforeClosingNever,
             Action::SetBellOff,
             Action::SetBellVisual,
             Action::SetBellAttention,
@@ -33233,6 +33307,9 @@ mod tests {
                 Action::ToggleCursorBlink => "toggle_cursor_blink",
                 Action::ToggleCopyOnSelect => "toggle_copy_on_select",
                 Action::ToggleMouseHide => "toggle_mouse_hide",
+                Action::SetAskBeforeClosingAlways => "set_ask_before_closing_always",
+                Action::SetAskBeforeClosingMultiple => "set_ask_before_closing_multiple",
+                Action::SetAskBeforeClosingNever => "set_ask_before_closing_never",
                 Action::SetBellOff => "set_bell_off",
                 Action::SetBellVisual => "set_bell_visual",
                 Action::SetBellAttention => "set_bell_attention",

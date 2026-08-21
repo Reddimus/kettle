@@ -258,6 +258,13 @@ pub enum Action {
     SetScrollbarAlways,
     SetScrollbarAuto,
     SetScrollbarNever,
+    /// Close-confirmation policy radio. The close bar answers the CURRENT
+    /// close; standing policy belongs somewhere reversible in the same place
+    /// it was set, which is Preferences — not a third button on a destructive
+    /// one-line prompt.
+    SetAskBeforeClosingAlways,
+    SetAskBeforeClosingMultiple,
+    SetAskBeforeClosingNever,
     ToggleCursorBlink,
     ToggleCopyOnSelect,
     SetBellOff,
@@ -617,6 +624,9 @@ pub fn action_names() -> Vec<&'static str> {
         "set_scrollbar_always",
         "set_scrollbar_auto",
         "set_scrollbar_never",
+        "set_ask_before_closing_always",
+        "set_ask_before_closing_multiple",
+        "set_ask_before_closing_never",
         "toggle_cursor_blink",
         "toggle_copy_on_select",
         "set_bell_off",
@@ -904,6 +914,15 @@ impl Action {
             }
             "set_scrollbar_auto" | "set-scrollbar-auto" | "scrollbar_auto" => SetScrollbarAuto,
             "set_scrollbar_never" | "set-scrollbar-never" | "scrollbar_never" => SetScrollbarNever,
+            "set_ask_before_closing_always" | "set-ask-before-closing-always" => {
+                SetAskBeforeClosingAlways
+            }
+            "set_ask_before_closing_multiple" | "set-ask-before-closing-multiple" => {
+                SetAskBeforeClosingMultiple
+            }
+            "set_ask_before_closing_never" | "set-ask-before-closing-never" => {
+                SetAskBeforeClosingNever
+            }
             "toggle_cursor_blink" | "toggle-cursor-blink" | "cursor_blink_toggle" => {
                 ToggleCursorBlink
             }

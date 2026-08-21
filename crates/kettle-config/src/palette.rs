@@ -37,6 +37,15 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Preferences: scrollbar always-on", SetScrollbarAlways),
         ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
         ("Preferences: scrollbar hidden", SetScrollbarNever),
+        (
+            "Preferences: confirm close always",
+            SetAskBeforeClosingAlways,
+        ),
+        (
+            "Preferences: confirm close for multiple terminals",
+            SetAskBeforeClosingMultiple,
+        ),
+        ("Preferences: confirm close never", SetAskBeforeClosingNever),
         ("Preferences: toggle cursor blink", ToggleCursorBlink),
         ("Preferences: toggle copy-on-select", ToggleCopyOnSelect),
         ("Preferences: bell off", SetBellOff),
@@ -246,6 +255,9 @@ mod tests {
             SetScrollbarAlways,
             SetScrollbarAuto,
             SetScrollbarNever,
+            SetAskBeforeClosingAlways,
+            SetAskBeforeClosingMultiple,
+            SetAskBeforeClosingNever,
             ToggleCursorBlink,
             ToggleCopyOnSelect,
             SetBellOff,
@@ -375,6 +387,9 @@ mod tests {
                 | SetScrollbarAlways
                 | SetScrollbarAuto
                 | SetScrollbarNever
+                | SetAskBeforeClosingAlways
+                | SetAskBeforeClosingMultiple
+                | SetAskBeforeClosingNever
                 | ToggleCursorBlink
                 | ToggleCopyOnSelect
                 | SetBellOff
