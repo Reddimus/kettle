@@ -1429,6 +1429,32 @@ mod tests {
             kitty_body.contains("mods.super_key()"),
             "Kitty CSI-u must retain its real Super modifier bit"
         );
+
+        // The two public event entry points are guarded by DELEGATION rather
+        // than by their own Super check: they hand off to `encode` /
+        // `encode_app_keypad`, which do check. That only holds while they build
+        // no sequence of their own, so pin exactly that. Without this, an early
+        // return added at the top of `encode_key_event` would leak a
+        // Super-bearing legacy sequence from real GUI input while every guard
+        // and the modifier sweep — which drives `encode_key_press` — stayed
+        // green.
+        for signature in ["pub fn encode_key_event(", "fn encode_kitty_key_event("] {
+            let body = src
+                .split(signature)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}").next())
+                .unwrap_or_else(|| panic!("missing production body for {signature}"));
+            let introducer = ["\\x1b", "["].concat();
+            assert!(
+                !body.contains(&introducer) && !body.contains("\\x1bO"),
+                "{signature} must delegate to the guarded encoders instead of \
+                 building a legacy sequence itself"
+            );
+            assert!(
+                body.contains("encode_app_keypad(") || body.contains("encode("),
+                "{signature} must reach a guarded encoder"
+            );
+        }
     }
 
     #[test]
@@ -2122,6 +2148,62 @@ mod tests {
         assert_eq!(
             encode(&Key::Named(NamedKey::Backspace), None, ctrl, mode),
             Some(vec![0x08])
+        );
+    }
+
+    /// The four Alt fixes above each pin only the unnegotiated case, which is
+    /// the mode the bug was reported in — but `modifyOtherKeys` is where these
+    /// keys change shape entirely, and an implementation that silently fell
+    /// back to the legacy bytes at level 1 or 2 would keep every exact test
+    /// green and satisfy the sweep (the fallback still starts with ESC).
+    /// Pin the negotiated forms as their own contract.
+    #[test]
+    fn the_alt_chords_keep_their_modify_other_keys_forms_at_every_level() {
+        let alt = ModifiersState::ALT;
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        for level in [1u8, 2] {
+            let mode = negotiated_modify_other_keys(level);
+            // CSI 27 ; <mod> ; <code> ~  — mod = 1 + 2*alt (+ 4*ctrl).
+            assert_eq!(
+                encode(&Key::Named(NamedKey::Tab), None, alt, mode),
+                Some(b"\x1b[27;3;9~".to_vec()),
+                "Alt+Tab at modifyOtherKeys {level}"
+            );
+            assert_eq!(
+                encode(&Key::Character(" ".into()), Some(" "), ctrl_alt, mode),
+                Some(b"\x1b[27;7;32~".to_vec()),
+                "Ctrl+Alt+Space at modifyOtherKeys {level}"
+            );
+            assert_eq!(
+                encode(&Key::Named(NamedKey::Escape), None, alt, mode),
+                Some(b"\x1b[27;3;27~".to_vec()),
+                "Alt+Escape at modifyOtherKeys {level}"
+            );
+        }
+
+        // Backspace is deliberately not symmetric with the other three: it
+        // passes `level_one_encodes = false`, so level 1 keeps the legacy
+        // ESC+BS form and only level 2 takes the CSI 27 form. Its code is 8
+        // (BS), not 127 (DEL) — the DEL byte is the *unmodified* encoding.
+        assert_eq!(
+            encode(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ctrl_alt,
+                negotiated_modify_other_keys(1),
+            ),
+            Some(b"\x1b\x08".to_vec()),
+            "Ctrl+Alt+Backspace stays legacy at modifyOtherKeys 1"
+        );
+        assert_eq!(
+            encode(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ctrl_alt,
+                negotiated_modify_other_keys(2),
+            ),
+            Some(b"\x1b[27;7;8~".to_vec()),
+            "Ctrl+Alt+Backspace takes the CSI 27 form at modifyOtherKeys 2"
         );
     }
 

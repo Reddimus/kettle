@@ -16431,9 +16431,13 @@ impl App {
     ///
     /// Returns `true` when the prompt is up and the caller must abandon its
     /// close, `false` when the close should go ahead untouched. Every close
-    /// gesture routes through here so none of them can drift out of step:
-    /// the ✕ button, middle-click, the titlebar/Alt+F4 close, and the three
-    /// close actions all ask the same question the same way.
+    /// ACTION routes through here so none of them can drift out of step: the
+    /// tab-bar ✕, middle-click, and the three close actions all ask the same
+    /// question the same way.
+    ///
+    /// The titlebar ✕ and Alt+F4 are the exception. They are OS window-destroy
+    /// requests rather than Kettle commands, so `WindowEvent::CloseRequested`
+    /// reaches this only under `ask-before-closing = always`.
     fn confirm_close(
         &mut self,
         ws: &mut WindowState,
@@ -21479,8 +21483,9 @@ impl App {
 /// that is the encoded bytes themselves rather than an inspection of the
 /// modifier state. Reasoning from modifiers is what went wrong: Backspace
 /// guarded on `!control && !alt` — correct for its level-0 C0 forms — and
-/// Delete, whose `CSI 3 ~` form carries a modifier parameter for *shift, alt,
-/// control and super alike*, guarded on nothing at all. Since
+/// Delete, whose `CSI 3 ~` form carries a modifier parameter for *shift, alt
+/// and control alike* (Super has no legacy representation and is rejected
+/// before this point), guarded on nothing at all. Since
 /// `delete-binding` defaults to `EscapeSequence`, every modified Delete was
 /// rewritten back to the plain `CSI 3 ~`: `Ctrl+Delete` became byte-identical
 /// to `Delete`, so readline's `kill-word` and every `<C-Del>` / `<S-Del>` /
@@ -27772,10 +27777,19 @@ mod modal_discipline_guard {
         // is what stops the exception from silently widening into "the ✕ never
         // asks, whatever you configured".
         let close_requested = after("WindowEvent::CloseRequested => {", 2400);
+        // Pin the whole comparison, not just the enum name. Checking only that
+        // `AskBeforeClosing::Always` appears somewhere in the arm would pass a
+        // reversed `!=`, which inverts the entire policy: `always` would close
+        // silently while every other setting prompted.
+        let gate = [
+            "self.cfg.ask_before_closing ",
+            "== kettle_config::AskBeforeClosing::Always",
+        ]
+        .concat();
         assert!(
-            close_requested.contains("kettle_config::AskBeforeClosing::Always"),
-            "the titlebar ✕ / Alt+F4 close must still honor \
-             `ask-before-closing = always`"
+            close_requested.contains(&gate),
+            "the titlebar ✕ / Alt+F4 close must prompt exactly when \
+             `ask-before-closing` IS `always`"
         );
         assert!(
             close_requested.contains("self.confirm_close("),
@@ -28960,8 +28974,10 @@ mod tests {
             kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         assert!(
             render
-                .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));"),
-            "the confirm bar must be queued into the menu-chrome pass"
+                .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));"),
+            "the confirm bar must be queued into the menu-chrome pass, and \
+             painted opaque so its AA contrast guarantee against palette[1] \
+             is not diluted by whatever terminal content sits underneath"
         );
         assert!(
             render
@@ -32271,6 +32287,22 @@ mod tests {
         assert!(
             encode < reject && reject < feed,
             "ctl_send_keys must reject an unencodable token before writing any parsed key"
+        );
+        // Ordering alone is not atomicity. A `p.feed_input(&b)` added inside
+        // the encoding loop would sit before the rejection and satisfy every
+        // check above, while `["a", "cmd+up"]` wrote `a` and then errored --
+        // a partial batch, which is the exact failure this is here to prevent.
+        // Pin that the whole body performs exactly ONE write, whatever it is
+        // named.
+        let writes = body.matches(".feed_").count();
+        assert_eq!(
+            writes, 1,
+            "ctl_send_keys must write to the pane exactly once, after the whole \
+             batch has been encoded; found {writes} write calls"
+        );
+        assert!(
+            body[..reject].matches(".feed_").count() == 0,
+            "no PTY write may precede the unencodable-token rejection"
         );
     }
 

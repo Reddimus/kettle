@@ -6879,7 +6879,15 @@ impl Renderer {
             // came out greyed under it. A modal question has to be the most
             // legible thing on screen, and the one raised by rebinding onto an
             // already-bound chord is raised from inside that very panel.
-            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 0.96));
+            // Opaque, and that is load-bearing rather than cosmetic:
+            // `confirm_bar_text_color` guarantees AA against `palette[1]`
+            // itself. At the previous 0.96 the painted background was
+            // `palette[1]` composited over whatever terminal content happened
+            // to sit underneath, so the real ratio drifted with the scrollback
+            // and a valid custom theme could land under the floor the helper
+            // advertises. A destructive question is the one overlay that has
+            // no business being translucent.
+            menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
                 if !buttons_label.is_empty() {
@@ -11621,7 +11629,6 @@ fn search_query_column(query: &str, byte: usize) -> usize {
     display_width(&query[..byte])
 }
 
-/// Maximum monospace columns available to a single-line overlay buffer.
 /// Minimum contrast the confirm bar's text holds against its own background.
 /// WCAG AA for body text. A destructive question the user cannot read is worse
 /// than no question at all.
@@ -11641,6 +11648,11 @@ pub const CONFIRM_BAR_MIN_CONTRAST: f64 = 4.5;
 /// looking like part of the theme; `with_min_contrast` preserves as much of
 /// that tint as the ratio allows. Pure, so the whole bundled theme set can be
 /// checked without a GPU.
+///
+/// This holds only because the bar is painted OPAQUE. A translucent bar
+/// composites `palette[1]` over live terminal content, and the real ratio then
+/// depends on the scrollback underneath — which is exactly the guarantee this
+/// function exists to remove.
 pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
     color::with_min_contrast(
         theme.cursor_text,
@@ -11649,6 +11661,7 @@ pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
     )
 }
 
+/// Maximum monospace columns available to a single-line overlay buffer.
 /// Reserve one column for glyph overhang and fractional cell metrics.
 /// Lay out the confirm bar: prompt (plus help text when it fits) on the left,
 /// the button row flush right, within exactly `max_cols` columns.
@@ -18366,6 +18379,7 @@ mod title_fit_tests {
         CONFIRM_BAR_MIN_CONTRAST, color, compose_confirm_bar_label, confirm_bar_text_color,
         display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
         fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
+        production_source,
     };
 
     /// A destructive confirmation has to be readable in EVERY bundled theme,
@@ -18417,6 +18431,42 @@ mod title_fit_tests {
         assert!(
             lifted >= CONFIRM_BAR_MIN_CONTRAST,
             "confirm_bar_text_color did not reach AA on the shipped default: {lifted:.2}:1"
+        );
+    }
+
+    /// Wiring guards. The two tests above prove `confirm_bar_text_color` and
+    /// `bell-flash-intensity` compute the right values; neither proves the
+    /// renderer USES them. Reverting the bar's text color to `theme.foreground`
+    /// or hard-coding the bell peak back to a literal would leave every value
+    /// test green, which is precisely the failure mode that shipped the
+    /// unreadable bar in the first place.
+    ///
+    /// The bar's opacity is pinned here too, because the AA guarantee is
+    /// computed against opaque `palette[1]`: a translucent bar composites over
+    /// live terminal content and the real ratio drifts with the scrollback.
+    #[test]
+    fn the_renderer_actually_consumes_the_contrast_and_bell_helpers() {
+        let src = production_source();
+        assert!(
+            src.contains("let bar_fg = confirm_bar_text_color(theme);"),
+            "the confirm bar must take its text color from confirm_bar_text_color"
+        );
+        assert!(
+            src.contains("search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));"),
+            "the computed bar color must reach the shared bottom-bar text area"
+        );
+        assert!(
+            src.contains("search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b))"),
+            "the text area must prefer the per-overlay color over the theme foreground"
+        );
+        assert!(
+            src.contains("sh - bar_h, sw, bar_h, theme.palette[1], 1.0)"),
+            "the confirm bar must be painted opaque; the AA guarantee is \
+             computed against palette[1] itself"
+        );
+        assert!(
+            src.contains("overlay.bell * cfg.bell_flash_intensity"),
+            "the visual bell peak must come from the config key, not a literal"
         );
     }
 

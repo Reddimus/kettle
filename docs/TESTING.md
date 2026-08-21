@@ -2042,10 +2042,14 @@ name the shape of bug each pass caught.
   combinations. It asserts a shape property rather than a byte table: output is
   always `None`, plain text/C0, one ESC prefix plus such a payload, a
   well-formed SS3, or a well-formed CSI whose legacy modifier parameter is
-  exactly `1 + shift + 2*alt + 4*ctrl`. That is what makes it catch the class
-  rather than the instance — Super in the parameter, a dropped Alt prefix, and
-  a dropped Control all fail it. `Alt` implying an ESC prefix holds for every
-  legacy chord it emits, with plain Enter as the one recorded exception. Source
+  exactly `1 + shift + 2*alt + 4*ctrl`. Be precise about its reach: the shape
+  and parameter properties catch any Super bit or any modifier folded into a
+  parameterized sequence, which is the class the Command bug belonged to. They
+  do **not** catch a modifier dropped from a payload that carries no parameter
+  — encoding `Ctrl+A` as a plain `a` still satisfies them — so the per-chord
+  exact-byte tests remain load-bearing rather than decorative. `Alt` implying
+  an ESC prefix holds for every legacy chord it emits, with plain Enter as the
+  one recorded exception. Source
   drift guards pin that each legacy entry point consults the Super predicate
   and that the Kitty path still reports Super, so a later cleanup cannot
   "fix" the protocol that is entitled to it.
