@@ -3207,6 +3207,10 @@ fn selection_release_matches(owner: Option<u8>, button: u8) -> bool {
     owner == Some(button)
 }
 
+fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Option<u64> {
+    if selecting { pane_id } else { None }
+}
+
 fn clear_selection_gesture(ws: &mut WindowState) {
     ws.selecting = false;
     ws.selecting_pane = None;
@@ -9211,7 +9215,9 @@ impl App {
     /// `copy_selection` uses `selecting_pane` to preserve the pane the drag
     /// started in rather than whichever pane gained focus meanwhile.
     fn finish_selection_gesture(&mut self, ws: &mut WindowState) {
-        if ws.selecting && self.cfg.copy_on_select {
+        if self.cfg.copy_on_select
+            && selection_copy_owner(ws.selecting, ws.selecting_pane).is_some()
+        {
             self.copy_selection(ws);
         }
         clear_selection_gesture(ws);
@@ -9231,16 +9237,21 @@ impl App {
             return;
         }
         let Some(pane_id) = ws.selecting_pane else {
-            clear_selection_gesture(ws);
+            self.finish_selection_gesture(ws);
             return;
         };
         let Some(rect) = self.pane_rect(ws, area, pane_id) else {
-            clear_selection_gesture(ws);
+            // A tab switch can make the owning pane temporarily absent from
+            // the active layout while its selection is still available in
+            // the mux. Commit copy-on-select before dropping that ownership.
+            self.finish_selection_gesture(ws);
             return;
         };
         let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(pane) = ws.mux.panes.get(&pane_id) else {
-            clear_selection_gesture(ws);
+            // A removed pane has nothing left to copy, but using the shared
+            // transition keeps invalidation ordered with every other exit.
+            self.finish_selection_gesture(ws);
             return;
         };
         if let Ok(mut t) = pane.term.term.lock() {
@@ -12164,7 +12175,9 @@ impl App {
                         self.update_selection(ws, area);
                     }
                 } else {
-                    clear_selection_gesture(ws);
+                    // The owner may still exist in an inactive tab. Preserve
+                    // copy-on-select before invalidating the gesture.
+                    self.finish_selection_gesture(ws);
                 }
             }
             self.update_search(ws);
@@ -12688,10 +12701,6 @@ impl App {
 
     fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
-        // A modal takes exclusive pointer ownership. Cancel any terminal drag
-        // already in flight so its later motion/release cannot emit mouse
-        // protocol bytes behind Search.
-        clear_selection_gesture(ws);
         ws.mouse_btn = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
@@ -33891,6 +33900,16 @@ mod tests {
         ));
         assert!(!selection_drag_motion_started(
             Some(origin),
+            PhysicalPosition::new(100.99, 200.0),
+            0.5,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.0, 200.0),
+            0.5,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
             PhysicalPosition::new(101.0, 201.0),
             1.0,
         ));
@@ -33910,6 +33929,16 @@ mod tests {
             Some(origin),
             PhysicalPosition::new(102.0, 200.0),
             f64::NAN,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            -1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            f64::INFINITY,
         ));
         assert!(!selection_drag_motion_started(
             Some(origin),
@@ -33970,6 +33999,15 @@ mod tests {
     }
 
     #[test]
+    fn selection_copy_requires_the_gesture_owner() {
+        use super::selection_copy_owner;
+
+        assert_eq!(selection_copy_owner(true, Some(7)), Some(7));
+        assert_eq!(selection_copy_owner(true, None), None);
+        assert_eq!(selection_copy_owner(false, Some(7)), None);
+    }
+
+    #[test]
     fn native_and_control_selection_motion_share_the_drag_threshold() {
         let src = production_source();
         let control = src
@@ -34007,7 +34045,8 @@ mod tests {
             .expect("native cursor-left arm");
         let cursor_left = cursor_left.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            cursor_left.contains("selection_leave_edge( ws.selection_dragged,"),
+            cursor_left.contains("selection_leave_edge(")
+                && cursor_left.contains("ws.selection_dragged"),
             "leaving the client area must not bypass measured drag travel"
         );
 
@@ -34042,12 +34081,15 @@ mod tests {
         let copy_at = finish_selection
             .find("self.copy_selection(ws);")
             .expect("copy-on-select is committed");
+        let owner_at = finish_selection
+            .find("selection_copy_owner(ws.selecting, ws.selecting_pane).is_some()")
+            .expect("copy-on-select requires an explicit gesture owner");
         let clear_at = finish_selection
             .find("clear_selection_gesture(ws);")
             .expect("selection gesture is cleared");
         assert!(
-            copy_at < clear_at,
-            "copy_selection needs selecting_pane, so copying must precede the clear"
+            owner_at < copy_at && copy_at < clear_at,
+            "copying requires selecting_pane and must precede the clear"
         );
 
         let install_confirm = src
@@ -34068,7 +34110,7 @@ mod tests {
         let normalized_src = src.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(
             normalized_src
-                .matches("install_confirm_dialog( ws, ConfirmDialogState {")
+                .matches("self.install_confirm_dialog(")
                 .count(),
             4,
             "every confirmation path, including protected text and path paste, must use the shared transition"
@@ -34087,6 +34129,34 @@ mod tests {
         assert!(
             show_context_menu.contains("self.finish_selection_gesture(ws);"),
             "a context menu must commit copy-on-select before taking the pointer"
+        );
+
+        let update_selection = src
+            .split("fn update_selection(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("selection update body");
+        assert_eq!(
+            update_selection
+                .matches("self.finish_selection_gesture(ws);")
+                .count(),
+            3,
+            "every selection-owner invalidation must commit copy-on-select before clearing"
+        );
+        assert!(
+            !update_selection.contains("clear_selection_gesture(ws);"),
+            "selection invalidation must not bypass copy-on-select"
+        );
+
+        let redraw = src
+            .split("fn redraw(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("redraw body");
+        assert!(
+            redraw.contains("self.finish_selection_gesture(ws);")
+                && !redraw.contains("clear_selection_gesture(ws);"),
+            "frame-time pane invalidation must preserve copy-on-select"
         );
 
         let control_move = src
@@ -34710,7 +34780,7 @@ mod tests {
         );
         let capture_arm_normalized = capture_arm.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            capture_arm_normalized.contains("install_confirm_dialog( ws, ConfirmDialogState {")
+            capture_arm_normalized.contains("self.install_confirm_dialog(")
                 && capture_arm.contains("ConfirmAction::RebindKeybind {"),
             "a conflicting rebind must route through a confirm dialog, not apply immediately"
         );

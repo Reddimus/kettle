@@ -1726,15 +1726,18 @@ These need a real display and are run by hand (or on real hardware):
     jitter, and a short crossing above the client area create a selection
     anchor without scrolling. The scenario puts its tab bar at the bottom and
     asserts terminal content begins at client Y=0, so native macOS must deliver
-    `CursorLeft` rather than merely moving into chrome. Every probe position
-    remains within the two-logical-point displacement threshold from the press
-    on every positive display scale.
+    `CursorLeft` rather than merely moving into chrome. Native macOS derives
+    probe coordinates from CoreGraphics and requires the Swift toolchain. Its
+    probes remain within the two-logical-point threshold; the portable hosted
+    legs exercise their scale >= 1 coordinates, while focused behavior tests
+    cover representative positive and invalid display scales.
     It then requires non-empty selected text after the drag. Missing
     Accessibility permission therefore cannot look like an application
     failure. Portable behavioral tests cover the DPI-scaled movement threshold,
     latched drag state, owning-button matching, window-leave latch, edge zones,
     and both rate directions. Source drift guards pin copy-before-clear ordering
-    across modal, confirmation, focus-loss, and native/control release paths.
+    across modal, confirmation, focus-loss, pane invalidation, and
+    native/control release paths.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

@@ -6565,7 +6565,11 @@ def macos_window_frame(pid: int) -> Tuple[float, float, float, float]:
 import CoreGraphics
 import Foundation
 
-let pid = Int32(CommandLine.arguments[1])!
+guard let rawPID = ProcessInfo.processInfo.environment["KETTLE_SMOKE_PID"],
+      let pid = Int32(rawPID) else {
+    FileHandle.standardError.write(Data("missing KETTLE_SMOKE_PID\n".utf8))
+    exit(2)
+}
 let rows = CGWindowListCopyWindowInfo(
     [.optionOnScreenOnly, .excludeDesktopElements],
     kCGNullWindowID
@@ -6583,18 +6587,24 @@ let matches = rows.compactMap { row -> (CGRect, CGFloat)? in
     }
     return (rect, rect.width * rect.height)
 }.sorted { $0.1 > $1.1 }
-guard let rect = matches.first?.0 else { exit(2) }
+guard let rect = matches.first?.0 else {
+    FileHandle.standardError.write(
+        Data("no visible layer-0 CoreGraphics window for pid \(pid)\n".utf8)
+    )
+    exit(2)
+}
 print("\(rect.minX),\(rect.minY),\(rect.width),\(rect.height)")
 """
     deadline = time.monotonic() + 5.0
     while True:
         try:
             result = subprocess.run(
-                ["swift", "-e", script, str(pid)],
+                ["swift", "-e", script],
                 capture_output=True,
                 text=True,
                 timeout=8,
                 check=False,
+                env={**os.environ, "KETTLE_SMOKE_PID": str(pid)},
             )
         except subprocess.TimeoutExpired as error:
             raise SystemExit(
@@ -15692,7 +15702,9 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
                 # Exercise the native duplicate-event case deterministically,
                 # then add a small inward jitter and cross the top by half a
                 # coordinate unit. The farthest position stays below the
-                # two-logical-point threshold at every positive display scale.
+                # two-logical-point threshold on the native macOS driver and
+                # on the scale >= 1 hosted portable legs. Pure behavior tests
+                # cover representative positive and invalid display scales.
                 post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_edge_y)
                 post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_edge_y + 1.0)
                 post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_outside_y)
