@@ -145,7 +145,7 @@ for; it is not macOS Command and not the Windows or Linux Super key. A chord
 holding Super therefore has no legacy representation, and Kettle writes **no
 PTY bytes** for one that no keybinding claims, on every platform. Super reaches
 applications only through the Kitty keyboard protocol, which defines a real
-super bit: with `CSI > 1 u` negotiated, `Cmd+Option+Up` is `CSI 1 ; 11 A`,
+super bit: with `CSI > 1 u` negotiated, `Cmd+Option+Up` is `CSI 1;11A`,
 while the same chord in a legacy pane sends nothing. The agent control plane
 follows the same rule — `send_keys` reports an error for a Super chord the
 target pane cannot encode rather than silently dropping the modifier.

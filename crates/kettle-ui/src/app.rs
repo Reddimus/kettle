@@ -13094,25 +13094,25 @@ impl App {
         // Close-confirmation radio. `always` is worded to say that it also
         // covers the titlebar close, because that gesture ignores the other
         // two policies by design.
-        let abc = self.cfg.ask_before_closing;
+        let ask_before_closing = self.cfg.ask_before_closing;
         inner.push(dyn_item(
             format!(
                 "{}Confirm close: always, including titlebar",
-                r(abc == kettle_config::AskBeforeClosing::Always)
+                r(ask_before_closing == kettle_config::AskBeforeClosing::Always)
             ),
             Action::SetAskBeforeClosingAlways,
         ));
         inner.push(dyn_item(
             format!(
                 "{}Confirm close: multiple terminals",
-                r(abc == kettle_config::AskBeforeClosing::MultipleTerminals)
+                r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals)
             ),
             Action::SetAskBeforeClosingMultiple,
         ));
         inner.push(dyn_item(
             format!(
                 "{}Confirm close: never",
-                r(abc == kettle_config::AskBeforeClosing::Never)
+                r(ask_before_closing == kettle_config::AskBeforeClosing::Never)
             ),
             Action::SetAskBeforeClosingNever,
         ));
