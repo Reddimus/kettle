@@ -6558,6 +6558,9 @@ def macos_window_frame(pid: int) -> Tuple[float, float, float, float]:
     # System Events can report zero accessibility windows for a valid custom
     # winit NSWindow. CoreGraphics owns the screen-space bounds used by the
     # native event injector and sees that window regardless of its AX shape.
+    # This is a geometry lookup only; the scenario activates the app with its
+    # positive-control titlebar click before it sends the selection press.
+    require_cmd("swift")
     script = r"""
 import CoreGraphics
 import Foundation
@@ -6585,13 +6588,19 @@ print("\(rect.minX),\(rect.minY),\(rect.width),\(rect.height)")
 """
     deadline = time.monotonic() + 5.0
     while True:
-        result = subprocess.run(
-            ["swift", "-e", script, str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=8,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["swift", "-e", script, str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise SystemExit(
+                "selection-autoscroll smoke: timed out reading the native "
+                "macOS window frame from CoreGraphics"
+            ) from error
         if result.returncode == 0:
             break
         if time.monotonic() >= deadline:
@@ -15666,7 +15675,8 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
             # scroll until pointer motion turns it into a selection drag. Cross
             # above the client boundary by half a point too: that exercises
             # both an explicit out-of-pane coordinate and the native CursorLeft
-            # latch, while total travel stays below the two-point threshold. A
+            # latch, while displacement from the press stays below the
+            # two-point threshold. A
             # posted macOS activation click can occasionally be swallowed;
             # retry only when the positive control proves the pane press never
             # landed. A delivered press that scrolls still fails immediately.

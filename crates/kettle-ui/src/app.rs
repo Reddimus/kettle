@@ -3216,14 +3216,6 @@ fn clear_selection_gesture(ws: &mut WindowState) {
     ws.selection_button = None;
 }
 
-fn install_confirm_dialog(ws: &mut WindowState, dialog: ConfirmDialogState) {
-    // A confirmation takes exclusive pointer ownership just like every other
-    // modal. Clear an in-flight terminal drag before the event loop can run
-    // another scheduled autoscroll tick behind the dialog.
-    clear_selection_gesture(ws);
-    ws.confirm_dialog = Some(dialog);
-}
-
 fn take_window_close_request(pending: &mut std::collections::BTreeSet<u64>, seq: u64) -> bool {
     pending.remove(&seq)
 }
@@ -8862,7 +8854,7 @@ impl App {
                 .contains(kettle_core::TermMode::BRACKETED_PASTE)
         };
         if paste_needs_confirmation(text, self.cfg.clipboard_paste_protection, raw_target) {
-            install_confirm_dialog(
+            self.install_confirm_dialog(
                 ws,
                 ConfirmDialogState {
                     prompt: paste_confirm_prompt(text),
@@ -8985,7 +8977,7 @@ impl App {
                 .contains(kettle_core::TermMode::BRACKETED_PASTE)
         };
         if paste_needs_confirmation(&preview, self.cfg.clipboard_paste_protection, raw_target) {
-            install_confirm_dialog(
+            self.install_confirm_dialog(
                 ws,
                 ConfirmDialogState {
                     prompt: paste_confirm_prompt(&preview),
@@ -9212,6 +9204,26 @@ impl App {
                 log::warn!("clipboard set_text failed (selection copy): {e}");
             }
         }
+    }
+
+    /// Commit copy-on-select before another UI surface takes pointer ownership,
+    /// then disarm every selection gesture latch. The ordering matters because
+    /// `copy_selection` uses `selecting_pane` to preserve the pane the drag
+    /// started in rather than whichever pane gained focus meanwhile.
+    fn finish_selection_gesture(&mut self, ws: &mut WindowState) {
+        if ws.selecting && self.cfg.copy_on_select {
+            self.copy_selection(ws);
+        }
+        clear_selection_gesture(ws);
+    }
+
+    fn install_confirm_dialog(&mut self, ws: &mut WindowState, dialog: ConfirmDialogState) {
+        // A confirmation takes exclusive pointer ownership just like every
+        // other modal. Commit a completed selection before ending its gesture;
+        // otherwise the visible highlight survives while copy-on-select is
+        // silently lost.
+        self.finish_selection_gesture(ws);
+        ws.confirm_dialog = Some(dialog);
     }
 
     fn update_selection(&mut self, ws: &mut WindowState, area: Rect) {
@@ -12638,7 +12650,7 @@ impl App {
         // Opening or switching a modal takes pointer ownership. End a terminal
         // selection drag here so later motion cannot keep extending or
         // autoscrolling behind Command Palette, Settings, SSH, or title edit.
-        clear_selection_gesture(ws);
+        self.finish_selection_gesture(ws);
         // A live title edit materialises a chrome strip (see `tab_bar_h`), so
         // dropping it here changes the content rectangle. Resize only when it
         // was actually open -- this runs before every other modal opens, and an
@@ -13292,10 +13304,7 @@ impl App {
         // behind the menu. CursorMoved deliberately preserves the hover-reuse
         // hint, so leaving one of these armed would make the cached snapshot
         // stale without changing output_generation.
-        if ws.selecting && self.cfg.copy_on_select {
-            self.copy_selection(ws);
-        }
-        clear_selection_gesture(ws);
+        self.finish_selection_gesture(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         ws.mouse_btn = None;
@@ -16387,7 +16396,7 @@ impl App {
             return false;
         }
         self.close_all_modals(ws);
-        install_confirm_dialog(
+        self.install_confirm_dialog(
             ws,
             ConfirmDialogState {
                 prompt,
@@ -18313,6 +18322,11 @@ impl App {
     }
 
     fn ctl_mouse_move(&mut self, ws: &mut WindowState) {
+        // A control-driven move back inside the client supersedes a native
+        // `CursorLeft` edge latch. Without this reset, mixing the two input
+        // sources keeps scrolling even though the latest pointer coordinate is
+        // back over the pane.
+        ws.selection_autoscroll_edge = 0;
         if self.search_mouse_drag(ws) {
             return;
         }
@@ -18490,10 +18504,7 @@ impl App {
             handled = self.send_mouse(ws, bcode, false, false);
         }
         if selection_release_matches(ws.selection_button, bcode) {
-            if ws.selecting && self.cfg.copy_on_select {
-                self.copy_selection(ws);
-            }
-            clear_selection_gesture(ws);
+            self.finish_selection_gesture(ws);
             handled = true;
         }
         if bcode == 0 {
@@ -20679,7 +20690,7 @@ impl App {
                         let chord_label = trig.label();
                         let stolen_name = kettle_config::keybinds::action_label(&stolen_from);
                         let new_name = kettle_config::keybinds::action_label(&act);
-                        install_confirm_dialog(
+                        self.install_confirm_dialog(
                             ws,
                             ConfirmDialogState {
                                 prompt: format!(
@@ -26319,10 +26330,7 @@ impl App {
                     }
                 }
                 if selection_release_matches(ws.selection_button, bcode) {
-                    if ws.selecting && self.cfg.copy_on_select {
-                        self.copy_selection(ws);
-                    }
-                    clear_selection_gesture(ws);
+                    self.finish_selection_gesture(ws);
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
@@ -26512,10 +26520,7 @@ impl App {
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
-                    if ws.selecting && self.cfg.copy_on_select {
-                        self.copy_selection(ws);
-                    }
-                    clear_selection_gesture(ws);
+                    self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
                     ws.scrollbar_hover = false;
                     ws.tab_drag_active = false;
@@ -31793,8 +31798,7 @@ mod tests {
             .and_then(|body| body.split("WindowEvent::").next())
             .expect("Focused event arm");
         assert!(
-            focused_arm.contains("if ws.selecting && self.cfg.copy_on_select {")
-                && focused_arm.contains("clear_selection_gesture(ws);")
+            focused_arm.contains("self.finish_selection_gesture(ws);")
                 && focused_arm.contains("ws.search.dragging_editor = false;")
                 && focused_arm.contains("ws.mux.panes.values().chain(")
                 && focused_arm.contains("self.windows\n                        .values()")
@@ -33966,38 +33970,6 @@ mod tests {
     }
 
     #[test]
-    fn a_confirmation_takes_selection_pointer_ownership() {
-        use super::{Mux, WindowState, arm_selection_gesture, install_confirm_dialog};
-        use winit::dpi::PhysicalPosition;
-
-        let mut ws = WindowState::new(1, false, Mux::new());
-        ws.cursor = PhysicalPosition::new(8.0, 8.0);
-        arm_selection_gesture(&mut ws, 42, 0);
-        ws.selection_dragged = true;
-        ws.selection_autoscroll_edge = 1;
-
-        install_confirm_dialog(
-            &mut ws,
-            ConfirmDialogState {
-                prompt: "Protected paste".to_string(),
-                buttons: vec![ConfirmButton::Cancel],
-                focus_idx: 0,
-                on_confirm: ConfirmAction::PasteText {
-                    text: "text".into(),
-                    target: Some(42),
-                },
-            },
-        );
-
-        assert!(ws.confirm_dialog.is_some());
-        assert!(!ws.selecting);
-        assert!(!ws.selection_dragged);
-        assert_eq!(ws.selection_autoscroll_edge, 0);
-        assert_eq!(ws.selection_drag_origin, None);
-        assert_eq!(ws.selection_button, None);
-    }
-
-    #[test]
     fn native_and_control_selection_motion_share_the_drag_threshold() {
         let src = production_source();
         let control = src
@@ -34058,23 +34030,39 @@ mod tests {
             .and_then(|body| body.split("\n    fn ").next())
             .expect("shared modal transition");
         assert!(
-            close_modals.contains("clear_selection_gesture(ws);"),
-            "every modal transition must cancel selection pointer ownership"
+            close_modals.contains("self.finish_selection_gesture(ws);"),
+            "every modal transition must commit copy-on-select before ending pointer ownership"
+        );
+
+        let finish_selection = src
+            .split("fn finish_selection_gesture(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared selection completion transition");
+        let copy_at = finish_selection
+            .find("self.copy_selection(ws);")
+            .expect("copy-on-select is committed");
+        let clear_at = finish_selection
+            .find("clear_selection_gesture(ws);")
+            .expect("selection gesture is cleared");
+        assert!(
+            copy_at < clear_at,
+            "copy_selection needs selecting_pane, so copying must precede the clear"
         );
 
         let install_confirm = src
             .split("fn install_confirm_dialog(")
             .nth(1)
-            .and_then(|body| body.split("\n}\n").next())
+            .and_then(|body| body.split("\n    fn ").next())
             .expect("shared confirmation transition");
-        let clear_at = install_confirm
-            .find("clear_selection_gesture(ws);")
-            .expect("confirmation clears terminal pointer ownership");
+        let finish_at = install_confirm
+            .find("self.finish_selection_gesture(ws);")
+            .expect("confirmation completes terminal selection ownership");
         let install_at = install_confirm
             .find("ws.confirm_dialog = Some(dialog);")
             .expect("confirmation stores the modal");
         assert!(
-            clear_at < install_at,
+            finish_at < install_at,
             "selection ownership must end before a confirmation becomes visible"
         );
         let normalized_src = src.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -34089,6 +34077,26 @@ mod tests {
             normalized_src.matches("ws.confirm_dialog = Some(").count(),
             1,
             "confirmations must not bypass the shared pointer-ownership transition"
+        );
+
+        let show_context_menu = src
+            .split("fn show_context_menu(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared context-menu transition");
+        assert!(
+            show_context_menu.contains("self.finish_selection_gesture(ws);"),
+            "a context menu must commit copy-on-select before taking the pointer"
+        );
+
+        let control_move = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("control mouse move body");
+        assert!(
+            control_move.contains("ws.selection_autoscroll_edge = 0;"),
+            "a control move inside the client must clear a stale native edge latch"
         );
 
         let release_sites = src

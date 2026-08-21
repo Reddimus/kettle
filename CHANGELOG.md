@@ -50,8 +50,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   pane has no client area below its bottom edge, so downward selection drags
   could not reach that state. A six-point, DPI-scaled inner drag zone now starts
   the existing one-line-per-frame scroll before the boundary. A two-point,
-  DPI-scaled travel threshold keeps held clicks, duplicate native move events,
-  and small pointer jitter inert; farther overshoot keeps the existing faster
+  DPI-scaled displacement threshold keeps held clicks, duplicate native move
+  events, and small pointer jitter inert; farther overshoot keeps the existing faster
   rates. Native macOS and portable control-driver smokes cover both drag
   directions and cross the client edge with sub-threshold motion to keep the
   native window-leave path behind the same gate. Opening a modal or releasing

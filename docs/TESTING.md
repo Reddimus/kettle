@@ -1726,8 +1726,9 @@ These need a real display and are run by hand (or on real hardware):
     jitter, and a short crossing above the client area create a selection
     anchor without scrolling. The scenario puts its tab bar at the bottom and
     asserts terminal content begins at client Y=0, so native macOS must deliver
-    `CursorLeft` rather than merely moving into chrome. Total travel remains
-    below the two-logical-point drag threshold on every positive display scale.
+    `CursorLeft` rather than merely moving into chrome. Every probe position
+    remains within the two-logical-point displacement threshold from the press
+    on every positive display scale.
     It then requires non-empty selected text after the drag. Missing
     Accessibility permission therefore cannot look like an application
     failure. Portable behavioral tests cover the DPI-scaled movement threshold,
