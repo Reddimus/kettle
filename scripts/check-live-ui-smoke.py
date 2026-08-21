@@ -6554,6 +6554,78 @@ def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -
     raise SystemExit("interaction smoke: could not find a visible text row for selection drag")
 
 
+def macos_window_frame(pid: int) -> Tuple[float, float, float, float]:
+    script = f"""
+tell application "System Events"
+    set targetProcess to first process whose unix id is {pid}
+    set frontmost of targetProcess to true
+    set windowPosition to position of first window of targetProcess
+    set windowSize to size of first window of targetProcess
+    return (item 1 of windowPosition as string) & "," & ¬
+        (item 2 of windowPosition as string) & "," & ¬
+        (item 1 of windowSize as string) & "," & ¬
+        (item 2 of windowSize as string)
+end tell
+"""
+    result = subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "selection-autoscroll smoke: could not read the native macOS window frame: "
+            + result.stderr.strip()
+        )
+    values = [float(value.strip()) for value in result.stdout.strip().split(",")]
+    if len(values) != 4:
+        raise SystemExit(
+            f"selection-autoscroll smoke: malformed macOS window frame {result.stdout!r}"
+        )
+    return values[0], values[1], values[2], values[3]
+
+
+MACOS_LEFT_MOUSE_DOWN = 1
+MACOS_LEFT_MOUSE_UP = 2
+MACOS_MOUSE_MOVED = 5
+MACOS_LEFT_MOUSE_DRAGGED = 6
+
+
+def macos_mouse_event(event_type: int, x: float, y: float) -> None:
+    import ctypes
+
+    class CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+    core_graphics = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+    )
+    core_foundation = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    core_graphics.CGEventCreateMouseEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        CGPoint,
+        ctypes.c_uint32,
+    ]
+    core_graphics.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+    core_graphics.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    core_graphics.CGPreflightPostEventAccess.restype = ctypes.c_bool
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    if not core_graphics.CGPreflightPostEventAccess():
+        raise SystemExit(
+            "selection-autoscroll smoke: grant Accessibility access to the invoking terminal"
+        )
+    event = core_graphics.CGEventCreateMouseEvent(None, event_type, CGPoint(x, y), 0)
+    if not event:
+        raise SystemExit("selection-autoscroll smoke: CGEventCreateMouseEvent failed")
+    core_graphics.CGEventPost(0, event)
+    core_foundation.CFRelease(event)
+
+
 def text_cell_point(
     cells: Dict[str, object],
     geometry: Dict[str, object],
@@ -15415,6 +15487,254 @@ def run_interaction(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_selection_autoscroll(kettle: str, root: Path) -> Path:
+    out = root / f"selection-autoscroll-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 90",
+                "window-height = 28",
+                "window-position-x = 160",
+                "window-position-y = 160",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = (
+        ["-e", "powershell.exe", "-NoLogo", "-NoProfile"]
+        if platform.system() == "Windows"
+        else ["-e", "bash", "--noprofile", "--norc"]
+    )
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        live.wait_for_text(
+            "PS " if platform.system() == "Windows" else "bash-", timeout_ms=12000
+        )
+        # A visible startup prompt can race the first injected command on a
+        # freshly mapped window. Cancel once to establish a fresh prompt before
+        # installing the scrollback fixture.
+        live.ctl("send_keys", params={"keys": ["ctrl+c"]})
+        time.sleep(0.1)
+        marker = "KETTLE_SELECTION_AUTOSCROLL_DONE"
+        if platform.system() == "Windows":
+            body = "1..30 | ForEach-Object { 'KETTLE_SELECTION_AUTOSCROLL_{0:D3}' -f $_ }"
+        else:
+            body = (
+                "for i in $(seq 1 30); do "
+                "printf 'KETTLE_SELECTION_AUTOSCROLL_%03d\\n' \"$i\"; done"
+            )
+        live_shell_command(live, command_with_marker(body, marker), marker, timeout_ms=12000)
+        before = live.json_ctl("read_screen")
+        if int(before.get("display_offset", -1)) != 0:
+            raise SystemExit(
+                "selection-autoscroll smoke: fixture did not start at the live bottom"
+            )
+
+        geometry = live.json_ctl("ui_geometry")
+        content = geometry["content"]
+        cells = live.read_cells()
+        start_x, start_y, end_x, _ = selection_drag_points(cells, content)
+        cell_width = float(content["width"]) / max(1, int(cells.get("cols", 1)))
+        pointer_x = min(start_x + cell_width * 2.0, end_x)
+        surface = geometry["surface"]
+        native_window_frame: Optional[List[float]] = None
+        focus_point: Optional[Tuple[float, float]] = None
+        if platform.system() == "Darwin":
+            window_x, window_y, window_width, window_height = macos_window_frame(live.pid)
+            native_window_frame = [window_x, window_y, window_width, window_height]
+            scale_x = float(surface["width"]) / window_width
+            scale_y = scale_x
+            client_origin_y = (
+                window_y + window_height - float(surface["height"]) / scale_y
+            )
+            pointer_x = window_x + pointer_x / scale_x
+            pointer_y = client_origin_y + start_y / scale_y
+            focus_point = (window_x + window_width / 2.0, window_y + 12.0)
+
+            def emit_mouse(event_type: int, x: float, y: float) -> None:
+                macos_mouse_event(event_type, x, y)
+
+            pointer_driver = "macos-native"
+        else:
+            scale_x = 1.0
+            scale_y = 1.0
+            client_origin_y = 0.0
+            pointer_y = start_y
+
+            def emit_mouse(event_type: int, x: float, y: float) -> None:
+                if event_type == MACOS_LEFT_MOUSE_DOWN:
+                    live.ctl(
+                        "send_mouse",
+                        params={"event": "press", "x": x, "y": y, "button": "left"},
+                    )
+                elif event_type == MACOS_LEFT_MOUSE_UP:
+                    live.ctl(
+                        "send_mouse",
+                        params={"event": "release", "x": x, "y": y, "button": "left"},
+                    )
+                else:
+                    live.ctl("send_mouse", params={"event": "move", "x": x, "y": y})
+
+            pointer_driver = "ctl-portable"
+        cell_height = (
+            float(content["height"]) / max(1, int(cells.get("rows", 1))) / scale_y
+        )
+        mouse_pressed = False
+        last_pointer = (pointer_x, pointer_y)
+
+        def post_mouse(event_type: int, x: float, y: float) -> None:
+            nonlocal mouse_pressed, last_pointer
+            emit_mouse(event_type, x, y)
+            last_pointer = (x, y)
+            if event_type == MACOS_LEFT_MOUSE_DOWN:
+                mouse_pressed = True
+            elif event_type == MACOS_LEFT_MOUSE_UP:
+                mouse_pressed = False
+
+        def wait_for_drag_state(label: str, predicate: Callable[[int], bool]) -> Dict[str, object]:
+            deadline = time.monotonic() + 3.0
+            last: Dict[str, object] = {}
+            while time.monotonic() < deadline:
+                last = live.json_ctl("read_screen", {"include_selection": True})
+                selection = last.get("selection")
+                if (
+                    predicate(int(last.get("display_offset", 0)))
+                    and isinstance(selection, str)
+                    and selection
+                ):
+                    return last
+                time.sleep(0.05)
+            raise SystemExit(
+                f"selection-autoscroll smoke: timed out waiting for {label}: {last}"
+            )
+
+        armed: Dict[str, object] = {}
+        upper_edge_y = client_origin_y + (float(content["y"]) + 2.0) / scale_y
+        try:
+            if focus_point is not None:
+                post_mouse(MACOS_MOUSE_MOVED, *focus_point)
+                post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
+                post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
+                time.sleep(0.2)
+            # The inner zone is drag-only. A press held at the edge must not
+            # scroll until pointer motion turns it into a selection drag.
+            post_mouse(MACOS_MOUSE_MOVED, pointer_x, upper_edge_y)
+            post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, upper_edge_y)
+            time.sleep(0.2)
+            held_click = live.json_ctl("read_screen")
+            post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, upper_edge_y)
+            if not held_click.get("selection_present"):
+                raise SystemExit(
+                    "selection-autoscroll smoke: the edge press never started a "
+                    "selection, so the inert check proved nothing"
+                )
+            if int(held_click.get("display_offset", 0)) != 0:
+                raise SystemExit(
+                    "selection-autoscroll smoke: a held edge click scrolled before any drag"
+                )
+            for _ in range(3):
+                if focus_point is not None:
+                    post_mouse(MACOS_MOUSE_MOVED, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
+                    time.sleep(0.2)
+                post_mouse(MACOS_MOUSE_MOVED, pointer_x, pointer_y)
+                post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, pointer_y)
+                post_mouse(
+                    MACOS_LEFT_MOUSE_DRAGGED,
+                    pointer_x,
+                    pointer_y - cell_height * 2.0,
+                )
+                time.sleep(0.15)
+                armed = live.json_ctl("read_screen", {"include_selection": True})
+                if isinstance(armed.get("selection"), str) and armed["selection"]:
+                    break
+                post_mouse(
+                    MACOS_LEFT_MOUSE_UP, pointer_x, pointer_y - cell_height * 2.0
+                )
+            else:
+                raise SystemExit(
+                    "selection-autoscroll smoke: pointer did not arm a selection after three attempts "
+                    f"(driver={pointer_driver}, frame={native_window_frame}, "
+                    f"surface={surface}, scale={(scale_x, scale_y)}, "
+                    f"start={(pointer_x, pointer_y)}, state={armed})"
+                )
+            for step in range(1, 19):
+                y = pointer_y + (upper_edge_y - pointer_y) * step / 18.0
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, y)
+                time.sleep(1.0 / 60.0)
+            during = wait_for_drag_state(
+                "the upper edge to enter scrollback", lambda value: value > 0
+            )
+            offset = int(during.get("display_offset", 0))
+            lower_edge_y = client_origin_y + (
+                float(content["y"]) + float(content["height"]) - 2.0
+            ) / scale_y
+            for step in range(1, 25):
+                y = upper_edge_y + (lower_edge_y - upper_edge_y) * step / 24.0
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, y)
+                time.sleep(1.0 / 60.0)
+            down = wait_for_drag_state(
+                "the lower edge to reach the live bottom", lambda value: value == 0
+            )
+            down_offset = int(down.get("display_offset", 0))
+            post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, lower_edge_y)
+        finally:
+            if mouse_pressed:
+                try:
+                    emit_mouse(MACOS_LEFT_MOUSE_UP, *last_pointer)
+                except BaseException as error:
+                    print(
+                        f"selection-autoscroll smoke: could not release the native mouse button: {error}",
+                        file=sys.stderr,
+                    )
+        (out / "analysis.json").write_text(
+            json.dumps(
+                {
+                    "display_offset_before": int(before.get("display_offset", 0)),
+                    "display_offset_while_holding_edge_click": int(
+                        held_click.get("display_offset", 0)
+                    ),
+                    "display_offset_while_dragging_above": offset,
+                    "display_offset_while_dragging_below": down_offset,
+                    "selection": during.get("selection", ""),
+                    "selection_present_after_return": down.get("selection_present", False),
+                    "pointer_driver": pointer_driver,
+                    "native_window_frame": native_window_frame,
+                    "surface_scale": [scale_x, scale_y],
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        if offset <= 0:
+            raise SystemExit(
+                "selection-autoscroll smoke: dragging above the pane did not move into scrollback"
+            )
+        if not (
+            isinstance(during.get("selection"), str)
+            and during["selection"]
+            and isinstance(down.get("selection"), str)
+            and down["selection"]
+        ):
+            raise SystemExit(
+                "selection-autoscroll smoke: viewport moved without preserving selected text"
+            )
+        if down_offset != 0:
+            raise SystemExit(
+                "selection-autoscroll smoke: dragging below the pane did not return to the live bottom "
+                f"(above={offset}, below={down_offset})"
+            )
+    return out
+
+
 def run_tearoff(kettle: str, root: Path) -> Path:
     """Tier-1 deterministic tear-off: the mouseless `move_tab_to_new_window`
     action must detach the active tab into a second live window (PTYs
@@ -16460,6 +16780,7 @@ def main() -> int:
             "image-paste-receipt",
             "video-paste-receipt",
             "interaction",
+            "selection-autoscroll",
             "hover-wheel",
             "window-close-isolation",
             "touchpad-scroll",
@@ -16598,6 +16919,9 @@ def main() -> int:
     if args.case in ("interaction", "all"):
         out = run_interaction(args.kettle, root)
         print(f"interaction smoke: OK artifacts={out}")
+    if args.case == "selection-autoscroll":
+        out = run_selection_autoscroll(args.kettle, root)
+        print(f"selection-autoscroll smoke: OK artifacts={out}")
     if args.case == "hover-wheel":
         out = run_hover_wheel(args.kettle, root)
         print(f"hover-wheel smoke: OK artifacts={out}")

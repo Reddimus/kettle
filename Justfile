@@ -925,6 +925,21 @@ interaction-smoke:
 interaction-smoke:
     python scripts/check-live-ui-smoke.py --cargo-release interaction
 
+# Exercise a pointer-held selection at both vertical pane edges. macOS uses the
+# native pointer; Linux and Windows use the same portable control path that
+# drives the production selection handler.
+[macos]
+selection-autoscroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
+
+[linux]
+selection-autoscroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
+
+[windows]
+selection-autoscroll-smoke:
+    python scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
+
 # Replace the desktop clipboard with a generated bitmap, drive the real Paste
 # action, and capture expanded, compact, and hover-expanded receipt frames.
 # Artifacts land under target/diagnostics/image-paste-receipt-*.

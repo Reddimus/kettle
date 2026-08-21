@@ -3086,32 +3086,49 @@ fn cursor_in_status_bar_band(
     }
 }
 
-/// Auto-scroll rate when the user drags a selection past the focused pane's
-/// content area. Positive value = scroll *up* into history (cursor above
-/// the top edge); negative = scroll *down* toward the present (cursor below
-/// the bottom edge); zero when inside the pane (no autoscroll needed).
+/// Auto-scroll rate when a selection reaches or passes a pane's vertical edge.
+/// A six-point inner drag zone keeps full-height panes scrollable even though
+/// the pointer cannot move below their client area.
 ///
 /// Speed scales with how far past the edge the cursor sits — a small
 /// overshoot crawls (1 line/frame), a big one (40+ px) chases at 3 lines
 /// per frame. Pure so the cadence is unit-tested without spinning up a
 /// renderer or PTY.
-fn selection_autoscroll_lines(y: f32, rect_top: f32, rect_bottom: f32) -> i32 {
-    let dist = if y < rect_top {
-        rect_top - y
-    } else if y > rect_bottom {
-        rect_bottom - y // negative
+fn selection_autoscroll_lines(
+    y: f32,
+    rect_top: f32,
+    rect_bottom: f32,
+    scale_factor: f32,
+    selection_dragged: bool,
+) -> i32 {
+    const EDGE_ZONE_PT: f32 = 6.0;
+
+    let pane_height = rect_bottom - rect_top;
+    if pane_height <= 0.0 {
+        return 0;
+    }
+    let edge_zone = if selection_dragged {
+        (EDGE_ZONE_PT * scale_factor.max(0.0)).min(pane_height * 0.25)
+    } else {
+        0.0
+    };
+    let (overshoot, direction) = if y < rect_top || (selection_dragged && y <= rect_top + edge_zone)
+    {
+        ((rect_top - y).max(0.0), 1)
+    } else if y > rect_bottom || (selection_dragged && y >= rect_bottom - edge_zone) {
+        ((y - rect_bottom).max(0.0), -1)
     } else {
         return 0;
     };
     // Magnitude → 1..=3 lines/frame ladder.
-    let mag = if dist.abs() >= 40.0 {
+    let mag = if overshoot >= 40.0 {
         3
-    } else if dist.abs() >= 10.0 {
+    } else if overshoot >= 10.0 {
         2
     } else {
         1
     };
-    if dist > 0.0 { mag } else { -mag }
+    direction * mag
 }
 
 /// Which vertical edge an in-progress selection most likely crossed when the
@@ -3139,6 +3156,7 @@ fn clear_selection_gesture(ws: &mut WindowState) {
     ws.selecting = false;
     ws.selecting_pane = None;
     ws.selection_autoscroll_edge = 0;
+    ws.selection_dragged = false;
 }
 
 fn take_window_close_request(pending: &mut std::collections::BTreeSet<u64>, seq: u64) -> bool {
@@ -8536,6 +8554,7 @@ impl App {
             ws.selecting = true;
             ws.selecting_pane = Some(pane_id);
             ws.selection_autoscroll_edge = 0;
+            ws.selection_dragged = false;
         } else {
             clear_selection_gesture(ws);
         }
@@ -9219,6 +9238,7 @@ impl App {
                 ws.selecting = true;
                 ws.selecting_pane = Some(pane_id);
                 ws.selection_autoscroll_edge = 0;
+                ws.selection_dragged = false;
                 return true;
             }
         }
@@ -12021,9 +12041,8 @@ impl App {
             for id in output_panes {
                 ws.mux.touch_tab_output(id);
             }
-            // Auto-scroll while dragging a selection past the focused pane's
-            // top/bottom edge — every modern terminal does this so the user
-            // doesn't have to release / scroll-back / shift-click to extend.
+            // Auto-scroll while a selection stays at or beyond the focused
+            // pane's top or bottom edge.
             // Pure `selection_autoscroll_lines` chooses the per-frame rate;
             // scrolling the viewport here naturally re-fires `update_selection`
             // below to anchor the selection's end to the new visible line.
@@ -12032,10 +12051,20 @@ impl App {
                 if let Some(pane_id) = ws.selecting_pane
                     && let Some(rect) = self.pane_rect(ws, area, pane_id)
                 {
+                    let scale = ws
+                        .window
+                        .as_ref()
+                        .map_or(1.0, |window| window.scale_factor() as f32);
                     let lines = if ws.selection_autoscroll_edge != 0 {
                         i32::from(ws.selection_autoscroll_edge)
                     } else {
-                        selection_autoscroll_lines(ws.cursor.y as f32, rect.1, rect.1 + rect.3)
+                        selection_autoscroll_lines(
+                            ws.cursor.y as f32,
+                            rect.1,
+                            rect.1 + rect.3,
+                            scale,
+                            ws.selection_dragged,
+                        )
                     };
                     if lines != 0
                         && let Some(p) = ws.mux.panes.get(&pane_id)
@@ -18223,6 +18252,7 @@ impl App {
             let _ = self.send_mouse(ws, btn, true, true);
         }
         if ws.selecting {
+            ws.selection_dragged = true;
             let area = self.area(ws);
             self.update_selection(ws, area);
         }
@@ -25305,6 +25335,9 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
                 ws.selection_autoscroll_edge = 0;
+                if ws.selecting {
+                    ws.selection_dragged = true;
+                }
                 // v2.19.0 (tear-off UX): client pointer events do NOT reach
                 // the torn window while the OS moves it (Windows: NC modal
                 // loop; X11: the WM holds an active pointer grab). The first
@@ -27314,16 +27347,25 @@ impl App {
             ws.last_bg_frame = None;
         }
         // Selection-autoscroll runs at the same ~30 fps as bell / image
-        // animation — without an active wake-up the loop sits idle waiting
-        // for a fresh CursorMoved, so the drag-past-edge case would freeze
-        // until the user wiggled the mouse.
+        // animation. Without an active wake-up the edge drag freezes until
+        // the user wiggles the mouse.
         let autoscroll_active = !render_hidden && ws.selecting && {
             let area = self.area(ws);
+            let scale = ws
+                .window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32);
             ws.selecting_pane
                 .and_then(|id| self.pane_rect(ws, area, id))
                 .map(|r| {
                     ws.selection_autoscroll_edge != 0
-                        || selection_autoscroll_lines(ws.cursor.y as f32, r.1, r.1 + r.3) != 0
+                        || selection_autoscroll_lines(
+                            ws.cursor.y as f32,
+                            r.1,
+                            r.1 + r.3,
+                            scale,
+                            ws.selection_dragged,
+                        ) != 0
                 })
                 .unwrap_or(false)
         };
@@ -33729,20 +33771,60 @@ mod tests {
     #[test]
     fn selection_autoscroll_rate_scales_with_overshoot() {
         use super::selection_autoscroll_lines;
-        // Inside the pane → no scroll.
-        assert_eq!(selection_autoscroll_lines(150.0, 100.0, 200.0), 0);
-        assert_eq!(selection_autoscroll_lines(100.0, 100.0, 200.0), 0);
-        assert_eq!(selection_autoscroll_lines(200.0, 100.0, 200.0), 0);
+        let dragged = |y| selection_autoscroll_lines(y, 100.0, 200.0, 1.0, true);
+        // Outside the six-point edge zones → no scroll.
+        assert_eq!(dragged(150.0), 0);
+        assert_eq!(dragged(107.0), 0);
+        assert_eq!(dragged(193.0), 0);
+        assert_eq!(dragged(100.0), 1);
+        assert_eq!(dragged(200.0), -1);
         // Just past the top → 1 line/frame up into history (positive).
-        assert_eq!(selection_autoscroll_lines(95.0, 100.0, 200.0), 1);
+        assert_eq!(dragged(95.0), 1);
         // Moderate overshoot (10..40 px) → 2 lines/frame.
-        assert_eq!(selection_autoscroll_lines(80.0, 100.0, 200.0), 2);
+        assert_eq!(dragged(80.0), 2);
         // Big overshoot (≥40 px) → 3 lines/frame.
-        assert_eq!(selection_autoscroll_lines(50.0, 100.0, 200.0), 3);
+        assert_eq!(dragged(50.0), 3);
         // Past the bottom → negative (toward the present).
-        assert_eq!(selection_autoscroll_lines(205.0, 100.0, 200.0), -1);
-        assert_eq!(selection_autoscroll_lines(220.0, 100.0, 200.0), -2);
-        assert_eq!(selection_autoscroll_lines(280.0, 100.0, 200.0), -3);
+        assert_eq!(dragged(205.0), -1);
+        assert_eq!(dragged(220.0), -2);
+        assert_eq!(dragged(280.0), -3);
+        // Holding on the first or last few pixels inside a full-height pane
+        // must keep the selection moving; there may be no client area beyond
+        // the bottom edge for the pointer to enter.
+        assert_eq!(dragged(102.0), 1);
+        assert_eq!(dragged(198.0), -1);
+        // The inner zone is drag-only. A click held at the edge is inert, but
+        // the legacy outside-past-edge behavior remains unconditional.
+        assert_eq!(
+            selection_autoscroll_lines(100.0, 100.0, 200.0, 1.0, false),
+            0
+        );
+        assert_eq!(
+            selection_autoscroll_lines(95.0, 100.0, 200.0, 1.0, false),
+            1
+        );
+        // The zone is specified in logical points and capped to a quarter of a
+        // tiny pane so its top and bottom regions cannot overlap.
+        assert_eq!(
+            selection_autoscroll_lines(111.0, 100.0, 200.0, 2.0, true),
+            1
+        );
+        assert_eq!(
+            selection_autoscroll_lines(113.0, 100.0, 200.0, 2.0, true),
+            0
+        );
+        assert_eq!(selection_autoscroll_lines(1.0, 0.0, 8.0, 1.0, true), 1);
+        assert_eq!(selection_autoscroll_lines(4.0, 0.0, 8.0, 1.0, true), 0);
+        assert_eq!(selection_autoscroll_lines(7.0, 0.0, 8.0, 1.0, true), -1);
+        // A transient empty layout must not invent an edge direction.
+        assert_eq!(
+            selection_autoscroll_lines(100.0, 100.0, 100.0, 1.0, true),
+            0
+        );
+        assert_eq!(
+            selection_autoscroll_lines(100.0, 200.0, 100.0, 1.0, true),
+            0
+        );
     }
 
     #[test]
