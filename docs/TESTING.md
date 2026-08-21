@@ -1732,8 +1732,9 @@ These need a real display and are run by hand (or on real hardware):
     It then requires non-empty selected text after the drag. Missing
     Accessibility permission therefore cannot look like an application
     failure. Portable behavioral tests cover the DPI-scaled movement threshold,
-    latched drag state, owning-button and modal reset, window-leave latch, edge
-    zones, and both rate directions.
+    latched drag state, owning-button matching, window-leave latch, edge zones,
+    and both rate directions. Source drift guards pin copy-before-clear ordering
+    across modal, confirmation, focus-loss, and native/control release paths.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

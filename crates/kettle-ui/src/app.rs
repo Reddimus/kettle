@@ -34099,13 +34099,23 @@ mod tests {
             "a control move inside the client must clear a stale native edge latch"
         );
 
-        let release_sites = src
-            .matches("selection_release_matches(ws.selection_button, bcode)")
-            .count();
-        assert_eq!(
-            release_sites, 2,
-            "native and control release paths must honor the owning selection button"
-        );
+        let control_release = src
+            .split("fn ctl_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("control mouse release body");
+        let native_release = src
+            .split("state: ElementState::Released,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native mouse release arm");
+        for (name, body) in [("control", control_release), ("native", native_release)] {
+            assert!(
+                body.contains("selection_release_matches(ws.selection_button, bcode)")
+                    && body.contains("self.finish_selection_gesture(ws);"),
+                "{name} release must match the owning button and commit copy-on-select before clearing it"
+            );
+        }
     }
 
     #[test]
