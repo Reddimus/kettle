@@ -3107,7 +3107,12 @@ fn selection_autoscroll_lines(
     if !selection_dragged || pane_height <= 0.0 {
         return 0;
     }
-    let edge_zone = (EDGE_ZONE_PT * scale_factor.max(0.0)).min(pane_height * 0.25);
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let edge_zone = (EDGE_ZONE_PT * scale_factor).min(pane_height * 0.25);
     let (overshoot, direction) = if y < rect_top || y <= rect_top + edge_zone {
         ((rect_top - y).max(0.0), 1)
     } else if y > rect_bottom || y >= rect_bottom - edge_zone {
@@ -34241,6 +34246,18 @@ mod tests {
         assert_eq!(selection_autoscroll_lines(1.0, 0.0, 8.0, 1.0, true), 1);
         assert_eq!(selection_autoscroll_lines(4.0, 0.0, 8.0, 1.0, true), 0);
         assert_eq!(selection_autoscroll_lines(7.0, 0.0, 8.0, 1.0, true), -1);
+        for invalid_scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                selection_autoscroll_lines(105.0, 100.0, 200.0, invalid_scale, true),
+                1,
+                "invalid display scales use the 1x edge zone"
+            );
+            assert_eq!(
+                selection_autoscroll_lines(195.0, 100.0, 200.0, invalid_scale, true),
+                -1,
+                "invalid display scales use the 1x edge zone"
+            );
+        }
         // A transient empty layout must not invent an edge direction.
         assert_eq!(
             selection_autoscroll_lines(100.0, 100.0, 100.0, 1.0, true),

@@ -53,9 +53,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   DPI-scaled displacement threshold keeps held clicks, duplicate native move
   events, and small pointer jitter inert; farther overshoot keeps the existing faster
   rates. Native macOS and portable control-driver smokes cover both drag
-  directions and cross the client edge with sub-threshold motion to keep the
-  native window-leave path behind the same gate. Opening a modal or releasing
-  the button that owns the gesture now ends it, including Shift+right-drag.
+  directions and send a sub-threshold coordinate beyond the client edge.
+  Focused tests keep the supplementary native window-leave path behind the
+  same gate. Opening a modal or releasing the button that owns the gesture now
+  copies selected text first when copy-on-select is enabled, then ends the
+  gesture, including Shift+right-drag.
 
 ## [3.1.1] — 2026-08-18
 

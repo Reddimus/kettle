@@ -15597,7 +15597,7 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
         if float(content["y"]) != 0.0:
             raise SystemExit(
                 "selection-autoscroll smoke: content must begin at the client "
-                f"top so the inert probe emits CursorLeft: {content}"
+                f"top so the inert probe crosses the client boundary: {content}"
             )
         cells = live.read_cells()
         start_x, start_y, end_x, _ = selection_drag_points(cells, content)
@@ -15683,11 +15683,10 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
         try:
             # The inner zone is drag-only. A press held at the edge must not
             # scroll until pointer motion turns it into a selection drag. Cross
-            # above the client boundary by half a point too: that exercises
-            # both an explicit out-of-pane coordinate and the native CursorLeft
-            # latch, while displacement from the press stays below the
-            # two-point threshold. A
-            # posted macOS activation click can occasionally be swallowed;
+            # above the client boundary by half a point too. Native capture may
+            # deliver that as an out-of-client move rather than CursorLeft, and
+            # either must stay inert below the two-point threshold. A posted
+            # macOS activation click can occasionally be swallowed;
             # retry only when the positive control proves the pane press never
             # landed. A delivered press that scrolls still fails immediately.
             held_click: Dict[str, object] = {}

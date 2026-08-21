@@ -1725,8 +1725,10 @@ These need a real display and are run by hand (or on real hardware):
     fresh prompt, the smoke proves an edge press, a duplicate move, small inward
     jitter, and a short crossing above the client area create a selection
     anchor without scrolling. The scenario puts its tab bar at the bottom and
-    asserts terminal content begins at client Y=0, so native macOS must deliver
-    `CursorLeft` rather than merely moving into chrome. Native macOS derives
+    asserts terminal content begins at client Y=0, so the macOS probe sends an
+    explicit out-of-client drag coordinate rather than moving into chrome.
+    Native capture may report that as an out-of-client `CursorMoved` instead of
+    `CursorLeft`; the latter path has focused unit coverage. Native macOS derives
     probe coordinates from CoreGraphics and requires the Swift toolchain. Its
     probes remain within the two-logical-point threshold; the portable hosted
     legs exercise their scale >= 1 coordinates, while focused behavior tests
