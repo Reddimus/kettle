@@ -6349,29 +6349,9 @@ impl App {
         // (terminal output) channel permanently empty while still showing `[REC]`.
         let recording_requested = startup.record.is_some() || initial_cfg.record.enabled();
         let lua_output_subscribed = lua_output_subscribed || recording_requested;
-        // BUG FIX: an earlier version misread Terminator's
-        // `broadcast_default` config key. The Terminator semantics
-        // are: when the user ENABLES broadcast (via a chord), what
-        // scope applies — `all` / `group` / `off`. The default value
-        // `group` does NOT mean "broadcast is on at startup". But
-        // that earlier version mapped `!matches!(broadcast_default, Off)` to
-        // `initial_broadcast = true`, so every new kettle window
-        // started with broadcast ON. Users typing in one pane saw
-        // their keystrokes mirrored across every other pane in the
-        // tab — the bug a user report flagged.
-        //
-        // Correct mapping: broadcast STATE always starts off.
-        //
-        // NOTE: with that mapping removed, the
-        // `broadcast_default` config field currently has no runtime
-        // effect — it parses but no consumer reads it. The field is
-        // kept in `kettle_config::Config` for forward-compatibility:
-        // a follow-up wiring the scope-when-enabled semantics
-        // (named-group integration with Terminator's
-        // `broadcast_default = all` route) will read it. Until then,
-        // setting `broadcast-default = all` in a config has no
-        // visible effect; broadcast scope defaults to `BroadcastScope::Tab`,
-        // the active tab's panes.
+        // Broadcast always starts off. `broadcast_default` remains parseable
+        // for compatibility but is inert until scope-on-enable is wired; the
+        // runtime scope currently starts at `BroadcastScope::Tab`.
         // Resolve clipboard availability before constructing the first Mux:
         // DA1 extension 52 is a runtime capability, not merely compiled code,
         // and must not be advertised when policy or the platform denies writes.
@@ -8439,14 +8419,9 @@ impl App {
     }
 
     fn paste_clipboard(&mut self, ws: &mut WindowState) {
-        // File paste: when the OS clipboard holds a file list (an
-        // Explorer/Finder "Copy" on a file — e.g. a video — populates CF_HDROP /
-        // `text/uri-list`, not text) paste the file path(s) as shell-quoted
-        // text. That is the channel CLI agents like Claude Code / Codex accept
-        // for any file type (they `Read` the path, or drive `ffmpeg` for a
-        // video). WSL panes get the path translated to `/mnt/…`. Gated by
-        // `paste-files` (on by default); a plain-text clipboard falls through to
-        // the normal text paste below.
+        // A copied file arrives as CF_HDROP or `text/uri-list`, not text. Paste
+        // its quoted path and translate it for WSL. A text clipboard falls
+        // through to the normal paste path below.
         if self.cfg.paste_files.enabled()
             && let Some(paths) = self.clipboard_file_paste_paths()
         {
@@ -12602,41 +12577,9 @@ impl App {
         }
     }
 
-    /// Phase 7 of [`TERMINATOR-REMOTE-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): append the
-    /// "Reconnect to …" / "Re-attach …" menu entry when the
-    /// focused pane has a detected remote-session context.
-    ///
-    /// Click → the same `ContextMenuItem::ConfigItem` dispatch
-    /// `append_config_menu_items` uses; writes `clone_session_command(ctx) + "\n"` to the focused
-    /// pane's PTY. The user can then split first if they want
-    /// the reconnect to land in a new pane, or hit the entry
-    /// directly to reconnect in-place after the original session
-    /// exits.
-    /// Phase 8 of [`TERMINATOR-THEME-SUBMENU-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-THEME-SUBMENU-DESIGN.md):
-    /// append a `Submenu { "Profile", … }` entry populated from
-    /// `Config::list_profiles()`. Same machinery as
-    /// `append_theme_submenu_items`; click on a profile entry sets
-    /// `App::config_path` via the profile-path resolution helper and
-    /// reloads. The flyout-render side is still phase 3 of the
-    /// theme-submenu design (shared with Theme).
-    /// Preferences submenu, C8: append a `Preferences ▸`
-    /// submenu with runtime-mutable toggles. Each toggle dispatches
-    /// through a dedicated `Action::*` variant that
-    /// updates `self.cfg` AND writes back to the user's config file
-    /// atomically via the `persist_config_toggle` helper.
-    ///
-    /// Submenu layout (radio = "● selected / ○ other"; check =
-    /// "✓ on /   off"):
-    ///   - Scrollbar (radio: Always / Auto / Never)
-    ///   - Cursor blink (check)
-    ///   - Copy on select (check)
-    ///   - Bell (radio: Off / Visual / Attention / Both)
-    ///   - Mouse-hide while typing (check)
-    ///   - Font size + / Font size − (reuses existing actions)
-    ///   - Separator
-    ///   - Advanced… (C9 — `Action::EditConfig`)
+    /// Append runtime settings to the Preferences submenu. Each action updates
+    /// the live config and persists through `persist_config_toggle`; radio and
+    /// check marks are labels rather than separate state.
     fn append_preferences_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
         items.push(ContextMenuItem::Separator);
         let mut inner: Vec<ContextMenuItem> = Vec::new();
@@ -18337,8 +18280,9 @@ impl App {
 
     /// `screenshot`: queue a live-surface PNG capture and reply when the next
     /// rendered frame saves it. Defaults to the focused pane crop; pass
-    /// `{full_window:true}` to capture the whole window, or `{path:"…"}` to
-    /// choose the output file.
+    /// `{full_window:true}` to capture the whole window, pass all four `crop_*`
+    /// values for a physical-pixel window region, or use `{path:"…"}` to choose
+    /// the output file.
     fn ctl_screenshot(
         &mut self,
         ws: &mut WindowState,
@@ -28133,7 +28077,7 @@ mod tests {
 
     /// Both user-input paths have to cross the window boundary, not just the
     /// keystroke one. A paste is user input under the same scope as a
-    /// keystroke, and `broadcast_paste` had the identical window-local limit —
+    /// keystroke, and `broadcast_paste_delivery` had the identical window-local limit —
     /// fixing only the typing path would have left a broadcast that types to
     /// the whole group but pastes to half of it.
     #[test]
@@ -30920,15 +30864,7 @@ mod tests {
         );
     }
 
-    /// Drift guards. Three event-state leaks, each needing a
-    /// winit event loop (+ modal / tracking PTY / drag gesture) for a behavioral
-    /// test, so pinned at the source level like the sibling pointer-gate guards:
-    ///   1. A dropped file behind an open modal must not inject into the PTY.
-    ///   2. Focus loss must disarm latched drag flags (a swallowed button-up
-    ///      otherwise leaves `selecting` / `tab_drag_active` / `mouse_btn` set).
-    ///   3. A side-button press/release with a lone context menu open must
-    ///      dismiss the menu and NOT forward SGR (the lone menu isn't a
-    ///      `modal_swallows_pointer` modal, so the forward leaked before).
+    /// Source guards for event-loop states that require live winit gestures.
     #[test]
     fn event_state_leaks_are_gated() {
         let src = production_source();

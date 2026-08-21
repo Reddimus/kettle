@@ -590,45 +590,17 @@ pub fn encode(
             return Some(sequence);
         }
         if ctrl && let Some(code) = legacy_control_code(c) {
-            // Full xterm control-code table for Ctrl+<punctuation> — the
-            // letters are the obvious A→0x01..Z→0x1A range, the rest is
-            // the seven-bit C0 row terminals have produced since VT100:
+            // Seven-bit C0 aliases for Ctrl+punctuation:
             //   Ctrl+@ / Ctrl+Space = NUL (0x00)
             //   Ctrl+[              = ESC (0x1B)
             //   Ctrl+\              = FS  (0x1C, SIGQUIT in cooked tty)
             //   Ctrl+]              = GS  (0x1D, telnet/screen escape)
             //   Ctrl+^              = RS  (0x1E, vim alt-buffer, tmux)
             //   Ctrl+_ / Ctrl+/     = US  (0x1F, tmux/nano "undo")
-            // Shifted partners such as `{`, `|`, `}`, and `~` must retain the
-            // same aliases at level one; emitting them literally would make
-            // that compatibility level disagree with the physical key matrix.
-            //
-            // Adding Alt prefixes ESC — xterm's Meta+Control form. This used
-            // to be scoped to `C-M-v` alone, so every other `C-M-<char>` fell
-            // through to the printable-Meta path below and silently lost
-            // Control: `C-M-f` ran `forward-word` instead of `forward-sexp`
-            // in Emacs, and no `\e\C-h` readline binding could fire. Worse,
-            // that path emitted the character verbatim after ESC, so
-            // `Ctrl+Alt+[`, `]`, `_` and `Shift+P` wrote a bare CSI, OSC, APC
-            // or DCS introducer into the PTY and the terminal swallowed
-            // whatever the user typed next as sequence parameters.
-            //
-            // The scoping was justified by AltGr on international layouts.
-            // winit's `get_agnostic_mods` does clear CONTROL *and* ALT for
-            // AltGr — but only when the RIGHT Alt is down
-            // (`has_alt_graph && key_pressed(VK_RMENU)`), and Windows also
-            // documents left-Ctrl + left-Alt as an AltGr substitute. That
-            // substitute arrives here as plain CONTROL|ALT, and on a German
-            // layout it is how you type `@`. Turning it into DC1 would be a
-            // worse answer than the wrong-character one already given.
-            //
-            // The discriminator is whether the layout actually composed
-            // something: AltGr+Q reports the logical key `q` with `@` as the
-            // committed text, so the two DIFFER. A plain `Ctrl+Alt+V` reports
-            // `v` and `v` — the platform echoing the base character, not a
-            // composition — and must still take the table. Printability alone
-            // is not enough to tell them apart. (X11 and Wayland are
-            // unaffected either way: AltGr is Mod5 there, never ALT.)
+            // Shifted partners keep the same aliases. Alt adds an ESC prefix,
+            // except when the platform text differs from the logical key:
+            // that signals an AltGr composition which must reach the PTY as
+            // text. On X11 and Wayland AltGr is Mod5, not Alt.
             let composed_a_character = alt
                 && text.is_some_and(|t| {
                     !t.is_empty()

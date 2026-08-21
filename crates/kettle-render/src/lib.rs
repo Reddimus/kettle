@@ -1,42 +1,13 @@
-//! GPU renderer: wgpu surface + glyphon (cosmic-text) glyph atlas for text,
-//! plus an instanced quad pipeline for cell backgrounds, cursor, selection,
-//! search highlights, split dividers, focus borders and the tab bar.
+//! GPU renderer for pane grids, chrome, text, images, and overlays.
 //!
-//! Multiple panes are tiled in a single frame: each pane gets its own
-//! cosmic-text buffer clipped to its rectangle; all backgrounds/UI go through
-//! one instanced quad pass and all text through one glyphon prepare/render.
+//! Draw order is part of the contract: backgrounds and chrome, inline images,
+//! pane text, post-text dimming/scrollbars, then menu chrome and text. Changing
+//! it can break transparency, clipping, or overlay readability. See
+//! `docs/ARCHITECTURE.md` for the full pipeline.
 //!
-//! Pipeline order per frame (matters for transparency + dim overlays):
-//! 1. **Quads + pane outlines** — cell backgrounds, tab-bar chrome, focus borders,
-//!    cursor block / beam / underline / hollow outline. Active-tab + focused-
-//!    pane accents flip to theme `palette[3]` (yellow) while broadcast
-//!    mode is on so the user can see input is fan-out.
-//! 2. **Images** — kitty graphics / Sixel / iTerm2 OSC 1337 placements
-//!    composited per-pane with scrollback-anchored Y coords.
-//! 3. **Text** — glyphon `prepare` + `render`. Per-cell SGR resolution +
-//!    `Flags::DIM` half-blend + WCAG minimum-contrast lift (`minimum-contrast`
-//!    config) all happen here so they compose cleanly against the
-//!    backgrounds laid down by step 1.
-//! 4. **Overlay quads** — a *second* instanced pass for post-text chrome:
-//!    unfocused-pane dimming (theme bg at `1 - unfocused-split-opacity`)
-//!    and the per-pane scrollback scrollbar thumb. Drawn after text so the
-//!    dim actually covers glyphs.
-//!
-//! Modules (private; see source):
-//! - `color` — palette/cube/named-color resolution against the active
-//!   `Theme`, WCAG luminance + contrast-lift, SGR `Dim` half-blend,
-//!   OSC 4/10/11/12 query-reply formatting.
-//! - `quad` — `QuadPipeline` + `QuadInstance`. Reused twice per frame
-//!   (one instance for the main pass, one for the post-text overlay).
-//! - `imgpipe` — sampled-texture image-blit pipeline, used for kitty /
-//!   Sixel / iTerm2 placements.
-//!
-//! Headless paths: [`capture_png`] builds an offscreen device + texture
-//! chain, renders one representative frame, and copies it back via
-//! `copy_texture_to_buffer` — powers `kettle --screenshot`.
-//! [`offscreen_selftest`] compiles the WGSL shaders + sets up a tiny
-//! pipeline without ever creating a Surface, so CI can validate the GPU
-//! path under Xvfb without a real display.
+//! [`capture_png`] renders an offscreen representative frame;
+//! [`offscreen_selftest`] validates shader and pipeline creation without a
+//! window surface.
 
 mod bg_image;
 mod color;
@@ -1475,7 +1446,7 @@ pub fn completion_overlay_rect(overlay: &CompletionOverlay, cell: (f32, f32)) ->
     completion_panel_geometry(overlay, cell).map(|geometry| geometry.rect)
 }
 
-/// Exact paint/input geometry for the pasted-image receipt.
+/// Exact paint/input geometry for the pasted-media receipt.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImagePasteReceiptGeometry {
     pub rect: Rect4,
@@ -7590,7 +7561,7 @@ impl Renderer {
 
             if let Some(image_rect) = geometry.image_rect {
                 // A quiet matte keeps transparent screenshots legible and
-                // makes the thumbnail edge intentional on every theme.
+                // gives the generic video poster a deliberate frame.
                 menu_q.push(rect(
                     image_rect.0 - 1.0,
                     image_rect.1 - 1.0,
@@ -9465,35 +9436,11 @@ impl Renderer {
         // below: only rows whose content changed re-shape.
         let shaping = Shaping::Advanced;
 
-        // v2.20.0 P1 (perf): per-LINE keyed shaping cache. The old path fed
-        // the whole viewport through `set_rich_text` every frame, which
-        // unconditionally resets every line's shaping — cosmic-text re-shaped
-        // 100% of visible text at up to 60fps even when nothing changed (an
-        // idle blink repaint re-shaped every pane's full viewport). Instead,
-        // keep `buf.lines` row-aligned with the grid and touch ONLY rows
-        // whose content key changed:
-        //   key match    → skip; the `BufferLine`'s shape + layout caches
-        //                  stay warm (`shape_until_scroll` walks them for
-        //                  free).
-        //   key mismatch → `BufferLine::set_text`, which itself resets
-        //                  shaping only on a REAL text/attrs change — the
-        //                  second guard that makes a hash collision across
-        //                  *frames* the only stale-render risk (~2⁻⁶⁴ per
-        //                  changed row, the same exposure rustc accepts for
-        //                  incremental fingerprints).
-        //   no key       → `reset_new` (fresh buffer line, or the style key
-        //                  below changed). This is the only path that updates
-        //                  a line's internal `shaping` mode — `set_text`
-        //                  never touches it.
-        // The row key hashes the row's run tuples (text, fg, bold, italic),
-        // so theme switches, OSC 4/10/11 palette overrides, selection
-        // recolors and the cursor-recolor cell all land in it via the
-        // resolved run colors — each dirties exactly the rows it touches.
-        // Inputs that change how a row SHAPES without changing its runs
-        // (font-family variants, ligature toggle, font-features) live in the
-        // per-pane style key; metrics / pane-size changes are handled inside
-        // the buffer (relayout keeps shaping). Shaping mode is a constant
-        // (always Advanced) so it no longer participates.
+        // Keep buffer lines row-aligned and reshape only when a row key changes.
+        // The key includes rendered runs; the style key below covers shaping
+        // inputs such as font variants, ligatures, and features. `reset_new`
+        // is required for a new row or style because `set_text` does not change
+        // a line's shaping mode.
         use std::hash::{Hash, Hasher};
         let style_key = {
             let mut h = std::hash::DefaultHasher::new();

@@ -899,31 +899,15 @@ impl LuaEngine {
     /// Run the registered URL handlers against `url` and report what they
     /// decided.
     ///
-    /// The contract is the one `docs/examples/init.lua` documents to users,
-    /// because that is the file they copy from:
-    ///
-    /// * **a string** — open THAT URL instead of the matched text. Every
-    ///   handler in the shipped example file is this shape (`LP: #12345` →
-    ///   `https://bugs.launchpad.net/bugs/12345`), and the returned string
-    ///   used to be discarded, so every one of them did nothing.
-    /// * **`true`** — the handler opened it itself; kettle must not open
-    ///   anything.
-    /// * **`nil` / no return / `false`** — declined. Try the next handler,
-    ///   then kettle's own open.
-    /// * **an error** — declined, and logged. A handler exists to enhance a
-    ///   link, so a broken one must never be the reason a link stops
-    ///   working; it used to claim the URL anyway and leave the click dead.
+    /// A string rewrites the URL, `true` means the handler opened it, and
+    /// nil/false/error falls through (errors are logged).
     ///
     /// The caller re-checks a returned URL against `is_safe_url` before
     /// opening it. A handler runs in the user's own config, but it is fed
     /// untrusted terminal text, so it must not become a way to turn that text
     /// into a URL kettle would otherwise refuse.
     ///
-    /// Uses Lua's built-in `string.match` for pattern compatibility
-    /// with Terminator's URLHandler regex semantics (which are
-    /// Python-flavored, but Lua patterns are similar enough for
-    /// the common URL shapes — alternation isn't supported but most
-    /// URL handlers don't need it).
+    /// Patterns use Lua `string.match`; they are Lua patterns, not regexes.
     pub fn try_url_handler(&self, url: &str) -> UrlHandlerOutcome {
         self.arm_budget();
         let r: mlua::Result<UrlHandlerOutcome> = (|| {

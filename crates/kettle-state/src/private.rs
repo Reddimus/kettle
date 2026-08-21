@@ -366,38 +366,12 @@ impl Drop for CreatedUserSelectedFile {
     }
 }
 
-/// The directories kettle creates its own namespace directly inside: the XDG
-/// bases and the temp root. Read from the environment because that is where the
-/// call sites read them from.
+/// Bases that contain Kettle's private namespace directory.
 ///
-/// What does NOT belong here, and why the distinction matters: this list is for
-/// the roots kettle keeps *private state* under, not everywhere it writes.
-/// `~/.local/share/kettle` is kettle-named and kettle-created, but it holds the
-/// installed program — `install.sh`, the shell-integration snippets — which are
-/// deliberately world-readable. Adding it would make the repair narrow an
-/// install directory to `0700` and break a multi-user install, fixing nothing,
-/// since nothing under it goes through the private-path verifier. The same goes
-/// for a `--screenshot` path, which is wherever the user pointed.
-///
-/// The cache base belongs here for the same reason the others do:
-/// `cache_dir_from_env` resolves `XDG_CACHE_HOME`, then `~/.cache` on Unix and
-/// `%LOCALAPPDATA%` on Windows, and kettle puts recordings, diagnostics and
-/// crash logs under `<that>/kettle`. It was missing from the first version of
-/// this list, and a filesystem sweep of a real `002`-umask machine found
-/// exactly the consequence: `~/.cache/kettle` sitting at 0775 with private
-/// 0700/0600 content beneath it, unrecognized and so never repaired.
-///
-/// The residual risk, written down rather than left implicit: every entry that
-/// comes from an environment variable lets the user redirect what counts as a
-/// base, so `XDG_CACHE_HOME=$HOME/Repos` would make a `~/Repos/kettle` checkout
-/// kettle's own directory again — the bug the parent check exists to stop,
-/// re-entered through the front door. It is not new to the cache variable:
-/// `XDG_CONFIG_HOME` and `XDG_STATE_HOME` have carried exactly this exposure
-/// from the start. Dropping the variable and honouring only a fixed `~/.cache`
-/// trades it for a worse one — the 0775 refusal comes back for everyone who
-/// sets the variable for its intended purpose, which is the defect this list
-/// was widened to fix. What would actually close it is provenance kettle can
-/// verify (a marker it wrote itself), not a shorter list of names.
+/// Install/share roots and user-selected output paths are excluded because
+/// they are not private state. Environment-controlled bases remain a trust
+/// boundary: redirecting one can make a same-named directory eligible for
+/// repair. Closing that fully requires a Kettle-written provenance marker.
 fn kettle_base_dirs() -> Vec<std::path::PathBuf> {
     kettle_base_dirs_from(|key| std::env::var_os(key), std::env::temp_dir())
 }
@@ -412,12 +386,7 @@ fn kettle_base_dirs_from(
             .map(std::path::PathBuf::from)
             .filter(|path| path.is_absolute())
     };
-    // APPDATA as well as LOCALAPPDATA: `Config::default_path` resolves the
-    // Windows config directory under `%APPDATA%\kettle`, deliberately not
-    // LOCALAPPDATA. This predicate is only consulted from the Unix
-    // implementation today, so omitting it changed nothing — but a base list
-    // that is missing one the resolvers actually use is a trap for whoever
-    // wires this up on Windows.
+    // Windows config and cache resolvers use different bases.
     for key in [
         "XDG_RUNTIME_DIR",
         "XDG_STATE_HOME",
@@ -437,27 +406,10 @@ fn kettle_base_dirs_from(
     bases
 }
 
-/// Whether `path` is the namespace directory kettle creates for itself.
-///
-/// Two conditions, and the second is the one that matters. The **name** must be
-/// `kettle`, or `kettle-<uid>` for the uid-namespaced temp fallback. And the
-/// **parent** must be a directory kettle actually puts that namespace in — an
-/// XDG base or the temp root.
-///
-/// Requiring only the name was a real bug, not a theoretical one: `~/Repos/kettle`
-/// is a source checkout, matches `kettle` exactly, and `kettle --config
-/// ~/Repos/kettle/dev.config` therefore set the whole checkout to `0700`. It
-/// was measured going `0775 -> 0700` before this check existed. Anyone who
-/// keeps kettle's source in a directory called `kettle` — which is everyone —
-/// was one `--config` away from it.
-///
-/// The `kettle-<uid>` form also requires digits after the dash rather than any
-/// `kettle-` prefix, so `XDG_STATE_HOME=~/kettle-dev/state` cannot claim
-/// `~/kettle-dev`. That one first showed up as a test failing on its own
-/// scratch directory, named `kettle-ctl-umask-…`.
-///
-/// Directories *below* a matched namespace are still kettle's; the callers walk
-/// down from it rather than asking this again.
+/// Whether `path` is a Kettle namespace directly below a known private base.
+/// The name must be `kettle` or the numeric `kettle-<uid>` temp form. Requiring
+/// both name and parent prevents an unrelated directory such as a source
+/// checkout named `kettle` from being narrowed to `0700`.
 pub fn is_kettle_owned_dir_name(path: &Path) -> bool {
     is_kettle_owned_dir_name_in(path, &kettle_base_dirs())
 }
@@ -530,34 +482,10 @@ pub fn open_trusted_file_read_following_leaf(
     open_trusted_file_read_following_leaf_impl(path)
 }
 
-/// Create `directory`, giving every kettle-named ancestor an explicit `0700`
-/// and leaving only the conventional roots above them to the ambient umask.
-///
-/// `create_dir_all` takes the process umask, so on a `002` umask — Debian and
-/// Ubuntu's per-user-group default — kettle created its own directories at
-/// `0775`. The verifier in this module walks *ancestors*, so it then refused
-/// every private path beneath them: on Ubuntu 24.04 that silently disabled
-/// single-instance activation, the remote-command watcher and the update-check
-/// throttle, each reporting only a warning in a log.
-///
-/// Ancestors are walked upward while they are kettle-named rather than one
-/// fixed level, because the no-`HOME` fallback nests two of them
-/// (`<tmp>/kettle-<uid>/state/kettle/ctl`) and leaving the outer one at the
-/// umask's mercy would reproduce the same refusal.
-///
-/// Directories an earlier run left group-writable are repaired when this user
-/// owns them, since a fix that only helps installations that never ran would
-/// leave every affected machine broken. The repair covers *every* component
-/// from the outermost kettle-named ancestor down to `directory`, not just that
-/// ancestor: on a no-`HOME` machine the old code left all four of
-/// `<tmp>/kettle-<uid>/state/kettle/ctl` at `0775`, and repairing only the top
-/// one leaves the verifier refusing the path for a directory below it.
-///
-/// A symlink at the final component is never repaired through: the open uses
-/// `O_NOFOLLOW`, so a dotfile-manager link is skipped and left to the ownership
-/// checks at the call site. An ancestor link resolves as it does for any path,
-/// so the real directory behind it is repaired — which is what a
-/// dotfile-managed tree wants, and is not the same as "never follows a link".
+/// Create `directory` and set every Kettle-owned component to `0700` rather
+/// than inheriting a permissive process umask. Existing user-owned components
+/// are repaired from the outer namespace through the leaf. The final component
+/// is opened with `O_NOFOLLOW`; ancestor links resolve to their real directory.
 pub fn create_private_dirs(directory: &Path) -> io::Result<()> {
     create_private_dirs_impl(directory)
 }

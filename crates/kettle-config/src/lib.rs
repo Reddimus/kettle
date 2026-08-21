@@ -1947,40 +1947,13 @@ pub fn parse_trigger_with_command(value: &str) -> Option<(String, Vec<String>)> 
     Some((pattern, argv))
 }
 
-/// Terminator menu UX (C7): atomic write-back for the
-/// in-menu Preferences toggles. Persists a `key = value` line to
-/// the user's config file with these contracts:
+/// Atomically persist one in-app config toggle.
 ///
-///   1. **In-place edit**: if the file already has a line matching
-///      `key` (allowing `-` / `_` equivalence + leading/trailing
-///      whitespace), only that line is replaced — every other line
-///      including comments + blanks + ordering survives byte-for-
-///      byte.
-///   2. **Append on miss**: if no matching line exists, the new
-///      `key = value` is appended with a leading blank line for
-///      readability.
-///   3. **Atomic + durable**: stage a collision-safe private sibling, sync it,
-///      atomically replace the target, and sync the parent directory.
-///   4. **First-write backup**: if `<path>.bak` doesn't exist yet,
-///      save an encoding-preserving copy of the pre-edit bytes there. Subsequent
-///      writes don't touch the backup — it's a "what did my config
-///      look like before I started clicking toggles?" forensic
-///      snapshot.
-///   5. **Pre-commit validation**: before replacement, the candidate is
-///      scanned with `Config::detect_malformed_values`.
-///      Because this helper only ever rewrites a single line, any
-///      *additional* diagnostic compared with the pre-edit content
-///      means the new value is malformed, so it never becomes visible.
-///   6. **Symlink preservation**: a symlinked config is resolved and its regular
-///      target is replaced, leaving the link intact for dotfile managers.
-///   7. **Concurrency + encoding**: a per-target advisory lock serializes all
-///      Kettle editors, a final byte comparison refuses external-editor races,
-///      and UTF-8 BOM / UTF-16 LE / UTF-16 BE input keeps its encoding.
-///
-/// Returns the path of the backup (created or pre-existing) on
-/// success so the caller can surface it to the user. Pure-modulo-
-/// the-filesystem so the contract is unit-tested with a tempdir
-/// fixture.
+/// Existing comments, blank lines, ordering, encoding, and a symlinked leaf are
+/// preserved. The write holds a per-target lock, rejects external-editor races
+/// and newly malformed values, stages and syncs a private sibling, then
+/// atomically replaces the target and syncs its parent. The first write keeps
+/// an encoding-preserving `.bak`; the returned path identifies that backup.
 pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io::Result<PathBuf> {
     validate_single_line("config key", key)?;
     validate_single_line("config value", new_value)?;

@@ -10438,38 +10438,12 @@ mod cwd_reporting_tests {
     }
 }
 
-/// The PTY reader holds `term` and then takes `virtuals` to replay a deferred
-/// kitty virtual chunk. Any render path that holds `virtuals` while acquiring
-/// `term` is an ABBA deadlock: a child emitting `CSI ? 2026 h`, a deferred
-/// virtual placement, placeholder cells and `CSI ? 2026 l` while the UI paints
-/// parks both threads forever and freezes the pane. `placeholder_tiles` used to
-/// hold `virtuals` across a `placeholder_cells` call, which takes `term`.
+/// The PTY reader acquires `term` then `virtuals`; render code must never take
+/// them in the opposite order. `virtuals_snapshot` returns owned maps, so its
+/// guard cannot survive into `placeholder_cells`, which acquires `term`.
 ///
-/// A behavioural test cannot force that interleaving deterministically, and no
-/// source-text guard can prove a `MutexGuard` was dropped — brace depth, `};`
-/// searches and call ordering all pass on a body that moves the guard out of
-/// its block and keeps it live. So the release is enforced by the type system
-/// instead: `placeholder_tiles` gets its data from `virtuals_snapshot`, whose
-/// owned return type no guard can escape through. That much is a compile error
-/// to break, not a review note.
-///
-/// **What the test below does and does not cover**, because a guard that
-/// overstates its reach is how this function acquired the bug twice. It pins
-/// four things: `placeholder_tiles` contains no `virtuals.lock()` of its own;
-/// it consults the snapshot before the grid read; `virtuals_snapshot` is the
-/// thing that locks; and that helper's signature still returns owned maps.
-///
-/// It is text matching. It cannot see a lock taken through indirection that
-/// never writes `virtuals.lock()` — a macro expanding to `$mutex.lock()`, a
-/// `let mutex = self.virtuals.as_ref()` rebind, or a helper taking
-/// `&Virtuals` and handing back a guard. Nor can it be a count of lock sites:
-/// the PTY reader locks `virtuals` in six other places and is right to, since
-/// it already holds `term` and so takes them in the safe order.
-///
-/// What actually rules out the deadlock in the code as written is the owned
-/// return type — a `MutexGuard` cannot escape through it, and the compiler
-/// enforces that. The test keeps `placeholder_tiles` pointed at that door;
-/// a new lock reached by indirection is review's job, not this file's.
+/// The source guard below pins that call path and owned signature. It cannot
+/// detect a future indirect lock hidden behind a macro or another helper.
 #[cfg(test)]
 mod placeholder_lock_order_tests {
     #[test]

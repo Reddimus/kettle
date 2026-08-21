@@ -537,35 +537,10 @@ pub(crate) fn clamp_geometry_to_monitors(
     sanitized
 }
 
-/// Durable private save. The shared state writer stages the complete JSON in
-/// the destination directory, syncs it, atomically replaces the old snapshot,
-/// and syncs the directory. The resulting file is private (`0600` on Unix).
-///
-/// The durable write is skipped when the file already says exactly this.
-///
-/// This is reached from `handle_action`'s unconditional tail, so it runs on
-/// EVERY keybound action — scrolling, focus moves, `Copy`. The write is
-/// `atomic_replace`, which stages the bytes, `sync_all()`s them, applies the
-/// Windows DACL, renames, and then fsyncs the parent directory: measured at
-/// 30–100 ms, synchronously, on the event-loop thread. Holding
-/// `Ctrl+Shift+Down` for scrollback at key-repeat rate therefore asked for
-/// tens of blocking disk writes a second and the window stopped responding.
-///
-/// Serializing is about a millisecond; it is the durability syscalls that
-/// cost, and almost none of those actions change the session at all. Comparing
-/// the serialized text against what this process last wrote there removes the
-/// cost without weakening any guarantee — a real change is still written
-/// immediately and synchronously, exactly as before.
-///
-/// The comparison is against the FILE, not against a memo of what this process
-/// last wrote. Remembering the last write and confirming it with the file's
-/// *size* was the first shape of this, and it had a hole: a session replaced
-/// with different contents of the same length read as unchanged and was never
-/// corrected. That is not hypothetical — two kettle windows share
-/// `session.json`, and a hand-edited file is a supported thing to do. Reading a
-/// few kilobytes costs microseconds against the tens of milliseconds of
-/// durability syscalls it decides whether to spend, so the accurate check is
-/// also the cheap one.
+/// Save a private, durable session snapshot. Exact on-disk bytes are compared
+/// before `atomic_replace` because this path follows many actions that do not
+/// change session state. Reading the file, rather than trusting cached bytes or
+/// length, also detects same-size edits made by another window.
 pub(crate) fn save_to_path(s: &Session, p: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
         kettle_state::create_private_dirs(dir)?;

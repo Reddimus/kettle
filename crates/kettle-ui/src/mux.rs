@@ -94,9 +94,9 @@ impl PaneInputResult {
 pub(crate) struct PaneInputDelivery {
     pub result: PaneInputResult,
     pub accepted: bool,
-    /// Whether the pane that initiated an image-path paste accepted its own
-    /// bytes. A broadcast can succeed elsewhere while that pane rejects, which
-    /// must not produce contradictory success chrome over the rejection.
+    /// Whether the caller-designated receipt pane accepted its own bytes. A
+    /// broadcast can succeed elsewhere while that pane rejects, which must not
+    /// create success chrome or dismiss a still-valid receipt there.
     pub receipt_accepted: bool,
 }
 
@@ -3612,7 +3612,7 @@ impl Mux {
     /// Compute the pane IDs that should receive a
     /// broadcast given the current `self.broadcast` scope. Returns
     /// an empty Vec when scope is Off. Used by `broadcast_write`
-    /// and `broadcast_paste`.
+    /// and `broadcast_paste_delivery`.
     fn broadcast_target_ids(&self) -> Vec<u64> {
         if matches!(self.broadcast, BroadcastScope::Off) {
             return Vec::new();
