@@ -11,12 +11,18 @@ const MAX_PREVIEW_WIDTH: u32 = 256;
 const MAX_PREVIEW_HEIGHT: u32 = 160;
 const MAX_PREVIEW_BYTES: usize = MAX_PREVIEW_WIDTH as usize * MAX_PREVIEW_HEIGHT as usize * 4;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKER_TIMEOUT_EXIT: i32 = 4;
+const WORKER_WATCHDOG_SETUP_EXIT: i32 = 8;
+const MAX_WORKER_ATTEMPTS: u32 = 2;
 const PREVIEW_THREAD_COUNT: usize = 2;
 const PREVIEW_QUEUE_CAPACITY: usize = 8;
 /// One surviving thread may drain every queued job before reaching this one.
-/// The extra two seconds cover process startup and scheduler delay.
-pub(crate) const PENDING_RECEIPT_TIMEOUT: Duration =
-    Duration::from_secs(((PREVIEW_QUEUE_CAPACITY + 1) as u64 * WORKER_TIMEOUT.as_secs()) + 2);
+/// Two seconds of bounded slack cover dispatch overhead. An unusually loaded
+/// host drops the optional receipt instead of retaining pending state forever.
+pub(crate) const PENDING_RECEIPT_TIMEOUT: Duration = Duration::from_secs(
+    ((PREVIEW_QUEUE_CAPACITY + 1) as u64 * WORKER_TIMEOUT.as_secs() * MAX_WORKER_ATTEMPTS as u64)
+        + 2,
+);
 const MAX_FILE_LIST_ENTRIES: usize = 256;
 const FINGERPRINT_SAMPLE_BYTES: usize = 64 * 1024;
 #[cfg(target_os = "linux")]
@@ -337,11 +343,25 @@ impl VideoPreviewer {
                     }
                     while let Ok(job) = receiver.recv() {
                         let (candidate, preview) = match run_preview_child(job.request.path()) {
-                            Some((size, preview)) => (
+                            PreviewChildOutcome::Ready((size, preview)) => (
                                 Some(VideoPasteCandidate::from_verified(job.request, size)),
                                 preview,
                             ),
-                            None => (None, None),
+                            PreviewChildOutcome::Failed => (None, None),
+                            PreviewChildOutcome::WorkerLost => {
+                                let _ =
+                                    proxy.send_event(crate::app::UserEvent::VideoPreviewReady {
+                                        window_seq: job.window_seq,
+                                        pane_id: job.pane_id,
+                                        generation: job.generation,
+                                        candidate: None,
+                                        preview: None,
+                                    });
+                                log::warn!(
+                                    "video preview worker could not reap its child; worker stopped"
+                                );
+                                break;
+                            }
                         };
                         let _ = proxy.send_event(crate::app::UserEvent::VideoPreviewReady {
                             window_seq: job.window_seq,
@@ -408,9 +428,67 @@ fn block_sigpipe_on_current_thread() -> bool {
     true
 }
 
-fn run_preview_child(path: &Path) -> Option<(u64, Option<kettle_core::ImageData>)> {
-    let input = encode_path(path)?;
-    let mut command = Command::new(std::env::current_exe().ok()?);
+enum PreviewChildAttempt<T> {
+    Ready(T),
+    TimedOut,
+    Failed,
+    WorkerLost,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PreviewChildOutcome<T> {
+    Ready(T),
+    Failed,
+    WorkerLost,
+}
+
+fn retry_preview_timeout<T>(
+    mut attempt: impl FnMut() -> PreviewChildAttempt<T>,
+) -> PreviewChildOutcome<T> {
+    for _ in 0..MAX_WORKER_ATTEMPTS {
+        match attempt() {
+            PreviewChildAttempt::Ready(output) => return PreviewChildOutcome::Ready(output),
+            PreviewChildAttempt::TimedOut => {}
+            PreviewChildAttempt::Failed => return PreviewChildOutcome::Failed,
+            PreviewChildAttempt::WorkerLost => return PreviewChildOutcome::WorkerLost,
+        }
+    }
+    PreviewChildOutcome::Failed
+}
+
+fn worker_exit_is_retryable(code: Option<i32>) -> bool {
+    code == Some(WORKER_TIMEOUT_EXIT)
+}
+
+fn read_bounded_preview(reader: &mut impl std::io::Read) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    reader
+        .take((MAX_PREVIEW_BYTES + 64) as u64)
+        .read_to_end(&mut output)?;
+    Ok(output)
+}
+
+fn stop_and_reap_child(child: &mut std::process::Child) -> bool {
+    match child.kill() {
+        Ok(()) => child.wait().is_ok(),
+        Err(_) => matches!(child.try_wait(), Ok(Some(_))),
+    }
+}
+
+fn run_preview_child(path: &Path) -> PreviewChildOutcome<(u64, Option<kettle_core::ImageData>)> {
+    retry_preview_timeout(|| run_preview_child_once(path))
+}
+
+fn run_preview_child_once(
+    path: &Path,
+) -> PreviewChildAttempt<(u64, Option<kettle_core::ImageData>)> {
+    let Some(input) = encode_path(path) else {
+        return PreviewChildAttempt::Failed;
+    };
+    let Ok(executable) = std::env::current_exe() else {
+        return PreviewChildAttempt::Failed;
+    };
+    let mut command = Command::new(executable);
     command
         .arg("__media-preview-worker")
         .stdin(Stdio::piped())
@@ -421,40 +499,44 @@ fn run_preview_child(path: &Path) -> Option<(u64, Option<kettle_core::ImageData>
         use std::os::windows::process::CommandExt as _;
         command.creation_flags(0x0800_0000);
     }
-    let mut child = command.spawn().ok()?;
+    let Ok(mut child) = command.spawn() else {
+        return PreviewChildAttempt::Failed;
+    };
     let Some(mut stdin) = child.stdin.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
+        return if stop_and_reap_child(&mut child) {
+            PreviewChildAttempt::Failed
+        } else {
+            PreviewChildAttempt::WorkerLost
+        };
     };
     if stdin.write_all(&input).is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
+        return if stop_and_reap_child(&mut child) {
+            PreviewChildAttempt::Failed
+        } else {
+            PreviewChildAttempt::WorkerLost
+        };
     }
     drop(stdin);
 
     let Some(mut stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
+        return if stop_and_reap_child(&mut child) {
+            PreviewChildAttempt::Failed
+        } else {
+            PreviewChildAttempt::WorkerLost
+        };
     };
     let reader = match std::thread::Builder::new()
         .name("kettle-video-preview-reader".to_owned())
-        .spawn(move || {
-            let mut output = Vec::new();
-            let _ = stdout
-                .by_ref()
-                .take((MAX_PREVIEW_BYTES + 64) as u64)
-                .read_to_end(&mut output);
-            output
-        }) {
+        .spawn(move || read_bounded_preview(&mut stdout))
+    {
         Ok(reader) => reader,
         Err(error) => {
             log::warn!("video preview reader could not start: {error}");
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
+            return if stop_and_reap_child(&mut child) {
+                PreviewChildAttempt::Failed
+            } else {
+                PreviewChildAttempt::WorkerLost
+            };
         }
     };
     let deadline = std::time::Instant::now() + WORKER_TIMEOUT;
@@ -464,19 +546,40 @@ fn run_preview_child(path: &Path) -> Option<(u64, Option<kettle_core::ImageData>
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+            Ok(None) => {
+                if !stop_and_reap_child(&mut child) {
+                    return PreviewChildAttempt::WorkerLost;
+                }
+                return match reader.join() {
+                    Ok(Ok(_)) => PreviewChildAttempt::TimedOut,
+                    Ok(Err(_)) | Err(_) => PreviewChildAttempt::Failed,
+                };
+            }
+            Err(_) => {
+                if !stop_and_reap_child(&mut child) {
+                    return PreviewChildAttempt::WorkerLost;
+                }
+                // Joining is the bound here. A read error or panic remains the
+                // non-retryable wait failure that brought us into this arm.
                 let _ = reader.join();
-                return None;
+                return PreviewChildAttempt::Failed;
             }
         }
     };
-    let output = reader.join().ok()?;
+    let Ok(Ok(output)) = reader.join() else {
+        return PreviewChildAttempt::Failed;
+    };
     if !status.success() {
-        return None;
+        return if worker_exit_is_retryable(status.code()) {
+            PreviewChildAttempt::TimedOut
+        } else {
+            PreviewChildAttempt::Failed
+        };
     }
-    decode_preview(&output)
+    match decode_preview(&output) {
+        Some(output) => PreviewChildAttempt::Ready(output),
+        None => PreviewChildAttempt::Failed,
+    }
 }
 
 fn encode_path(path: &Path) -> Option<Vec<u8>> {
@@ -610,11 +713,11 @@ pub fn run_worker() -> i32 {
         .name("kettle-video-preview-deadline".to_owned())
         .spawn(|| {
             std::thread::sleep(WORKER_TIMEOUT);
-            std::process::exit(4);
+            std::process::exit(WORKER_TIMEOUT_EXIT);
         })
         .is_err()
     {
-        return 4;
+        return WORKER_WATCHDOG_SETUP_EXIT;
     }
     let mut input = Vec::new();
     if std::io::stdin()
@@ -1085,19 +1188,96 @@ mod tests {
         assert!(!previewer.request(1, 2, 3, request));
         assert!(
             PENDING_RECEIPT_TIMEOUT
-                >= WORKER_TIMEOUT * (PREVIEW_QUEUE_CAPACITY as u32 + 1) + Duration::from_secs(2),
+                >= WORKER_TIMEOUT * MAX_WORKER_ATTEMPTS * (PREVIEW_QUEUE_CAPACITY as u32 + 1)
+                    + Duration::from_secs(2),
             "pending state must outlive a full queue drained by one surviving worker"
         );
+    }
+
+    #[test]
+    fn preview_child_retries_only_one_timeout() {
+        let mut calls = 0;
+        let mut outcomes = [
+            PreviewChildAttempt::TimedOut,
+            PreviewChildAttempt::Ready(7_u8),
+        ]
+        .into_iter();
+        let result = retry_preview_timeout(|| {
+            calls += 1;
+            outcomes.next().unwrap()
+        });
+        assert_eq!(result, PreviewChildOutcome::Ready(7));
+        assert_eq!(calls, 2, "one cold timeout gets one fresh worker");
+
+        calls = 0;
+        let result = retry_preview_timeout(|| {
+            calls += 1;
+            PreviewChildAttempt::<u8>::Failed
+        });
+        assert_eq!(result, PreviewChildOutcome::Failed);
+        assert_eq!(calls, 1, "non-timeout failures must stay fail-closed");
+
+        calls = 0;
+        let result = retry_preview_timeout(|| {
+            calls += 1;
+            PreviewChildAttempt::<u8>::TimedOut
+        });
+        assert_eq!(result, PreviewChildOutcome::Failed);
+        assert_eq!(calls, 2, "repeated timeouts must remain bounded");
+
+        calls = 0;
+        let result = retry_preview_timeout(|| {
+            calls += 1;
+            PreviewChildAttempt::<u8>::WorkerLost
+        });
+        assert_eq!(result, PreviewChildOutcome::WorkerLost);
+        assert_eq!(calls, 1, "an unreaped child poisons its queue worker");
+    }
+
+    #[test]
+    fn only_the_worker_deadline_exit_is_retryable() {
+        assert!(worker_exit_is_retryable(Some(WORKER_TIMEOUT_EXIT)));
+        assert!(!worker_exit_is_retryable(Some(WORKER_WATCHDOG_SETUP_EXIT)));
+        assert!(!worker_exit_is_retryable(Some(1)));
+        assert!(!worker_exit_is_retryable(None));
+    }
+
+    #[test]
+    fn a_reader_error_discards_even_a_complete_preview_frame() {
+        struct CompleteThenError {
+            bytes: std::io::Cursor<Vec<u8>>,
+        }
+
+        impl std::io::Read for CompleteThenError {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.bytes.read(buffer)?;
+                if read == 0 {
+                    Err(std::io::Error::other("injected reader failure"))
+                } else {
+                    Ok(read)
+                }
+            }
+        }
+
+        let frame = encode_preview(7, None).unwrap();
+        let mut reader = CompleteThenError {
+            bytes: std::io::Cursor::new(frame.clone()),
+        };
+        assert!(
+            read_bounded_preview(&mut reader).is_err(),
+            "partial success must not authenticate bytes from a failed pipe read"
+        );
+        assert!(decode_preview(&frame).is_some(), "fixture must be valid");
     }
 
     #[test]
     fn preview_child_handles_reader_thread_spawn_failure() {
         let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
         let body = source
-            .split("fn run_preview_child(")
+            .split("fn run_preview_child_once(")
             .nth(1)
             .and_then(|rest| rest.split("\nfn encode_path(").next())
-            .expect("run_preview_child body");
+            .expect("run_preview_child_once body");
         assert!(
             !body.contains("std::thread::spawn("),
             "an infallible reader spawn aborts release builds when thread creation fails"
@@ -1111,10 +1291,56 @@ mod tests {
         assert!(
             body.contains("std::thread::Builder::new()")
                 && body.contains(".name(\"kettle-video-preview-reader\".to_owned())")
-                && spawn_error.contains("let _ = child.kill();")
-                && spawn_error.contains("let _ = child.wait();")
-                && spawn_error.contains("return None;"),
-            "reader creation must be fallible and reap the child when the OS refuses the thread"
+                && spawn_error.contains("stop_and_reap_child(&mut child)")
+                && spawn_error.contains("PreviewChildAttempt::WorkerLost"),
+            "reader creation must be fallible and poison the queue worker when the child cannot be reaped"
+        );
+    }
+
+    #[test]
+    fn an_unreaped_child_stops_its_queue_worker() {
+        let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
+        let lost_arm = source
+            .split("PreviewChildOutcome::WorkerLost => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n                            }").next())
+            .expect("worker-lost outcome arm");
+        assert!(
+            lost_arm.contains("candidate: None")
+                && lost_arm.contains("preview: None")
+                && lost_arm.contains("break;"),
+            "an unreaped child must clear the current receipt and stop that queue worker"
+        );
+    }
+
+    #[test]
+    fn a_parent_timeout_reaps_before_accepting_reader_completion() {
+        let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
+        let body = source
+            .split("fn run_preview_child_once(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn encode_path(").next())
+            .expect("run_preview_child_once body");
+        let timeout_arm = body
+            .split("Ok(None) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n            Err(_) => {").next())
+            .expect("parent timeout arm");
+        let reap = timeout_arm
+            .find("stop_and_reap_child(&mut child)")
+            .expect("a timed-out child must be reaped");
+        let join = timeout_arm
+            .find("reader.join()")
+            .expect("the pipe reader must be joined");
+
+        assert!(
+            reap < join,
+            "reap the child before trusting pipe completion"
+        );
+        assert!(
+            timeout_arm.contains("Ok(Ok(_)) => PreviewChildAttempt::TimedOut")
+                && timeout_arm.contains("Ok(Err(_)) | Err(_) => PreviewChildAttempt::Failed"),
+            "only a clean reader completion may make the timeout retryable"
         );
     }
 
