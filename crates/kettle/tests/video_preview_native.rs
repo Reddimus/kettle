@@ -39,17 +39,7 @@ fn worker_input(path: &Path) -> Vec<u8> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-#[test]
-fn shipped_worker_extracts_a_bounded_native_video_poster() {
-    let dir = kettle_test_support::private_tempdir("kettle-video-native-");
-    let video = dir.path().join("poster.mp4");
-    std::fs::write(&video, VIDEO_FIXTURE).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&video, std::fs::Permissions::from_mode(0o600)).unwrap();
-    }
-
+fn run_native_worker(video: &Path) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
         .arg("__media-preview-worker")
         .stdin(Stdio::piped())
@@ -61,9 +51,41 @@ fn shipped_worker_extracts_a_bounded_native_video_poster() {
         .stdin
         .take()
         .unwrap()
-        .write_all(&worker_input(&video))
+        .write_all(&worker_input(video))
         .unwrap();
-    let output = child.wait_with_output().unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[cfg(target_os = "macos")]
+fn worker_returned_poster(output: &std::process::Output) -> bool {
+    output.status.success()
+        && output.stdout.len() >= 28
+        && &output.stdout[..8] == OUTPUT_MAGIC
+        && u32::from_le_bytes(output.stdout[24..28].try_into().unwrap()) > 0
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn shipped_worker_extracts_a_bounded_native_video_poster() {
+    let dir = kettle_test_support::private_tempdir("kettle-video-native-");
+    let video = dir.path().join("poster.mp4");
+    std::fs::write(&video, VIDEO_FIXTURE).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&video, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let output = run_native_worker(&video);
+    #[cfg(target_os = "macos")]
+    let output = if !worker_returned_poster(&output) {
+        // Quick Look may spend the first request starting its thumbnail XPC
+        // service. A cold worker can return no poster or hit its own deadline;
+        // retry either first response before treating a capable host as broken.
+        run_native_worker(&video)
+    } else {
+        output
+    };
     assert!(
         output.status.success(),
         "native worker failed: status={} stderr={}",
@@ -79,8 +101,20 @@ fn shipped_worker_extracts_a_bounded_native_video_poster() {
     assert_eq!(size, VIDEO_FIXTURE.len() as u64);
     if len == 0 {
         assert_eq!((width, height), (0, 0));
-        eprintln!("skipping native video poster: this runner has no platform thumbnail provider");
-        return;
+        #[cfg(target_os = "macos")]
+        panic!("Quick Look returned no poster for the checked-in H.264 fixture");
+        #[cfg(target_os = "windows")]
+        {
+            assert!(
+                std::env::var_os("KETTLE_REQUIRE_NATIVE_VIDEO_POSTER").as_deref()
+                    != Some(std::ffi::OsStr::new("1")),
+                "Windows returned no poster although native poster support was required"
+            );
+            eprintln!(
+                "skipping native video poster: set KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1 on a capable Windows host"
+            );
+            return;
+        }
     }
     assert!(width > 0 && width <= MAX_PREVIEW_WIDTH);
     assert!(height > 0 && height <= MAX_PREVIEW_HEIGHT);

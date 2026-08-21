@@ -439,14 +439,24 @@ fn run_preview_child(path: &Path) -> Option<(u64, Option<kettle_core::ImageData>
         let _ = child.wait();
         return None;
     };
-    let reader = std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let _ = stdout
-            .by_ref()
-            .take((MAX_PREVIEW_BYTES + 64) as u64)
-            .read_to_end(&mut output);
-        output
-    });
+    let reader = match std::thread::Builder::new()
+        .name("kettle-video-preview-reader".to_owned())
+        .spawn(move || {
+            let mut output = Vec::new();
+            let _ = stdout
+                .by_ref()
+                .take((MAX_PREVIEW_BYTES + 64) as u64)
+                .read_to_end(&mut output);
+            output
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            log::warn!("video preview reader could not start: {error}");
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
     let deadline = std::time::Instant::now() + WORKER_TIMEOUT;
     let status = loop {
         match child.try_wait() {
@@ -1077,6 +1087,34 @@ mod tests {
             PENDING_RECEIPT_TIMEOUT
                 >= WORKER_TIMEOUT * (PREVIEW_QUEUE_CAPACITY as u32 + 1) + Duration::from_secs(2),
             "pending state must outlive a full queue drained by one surviving worker"
+        );
+    }
+
+    #[test]
+    fn preview_child_handles_reader_thread_spawn_failure() {
+        let source = kettle_test_support::production_source(include_str!("video_preview.rs"));
+        let body = source
+            .split("fn run_preview_child(")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn encode_path(").next())
+            .expect("run_preview_child body");
+        assert!(
+            !body.contains("std::thread::spawn("),
+            "an infallible reader spawn aborts release builds when thread creation fails"
+        );
+        let spawn_error = body
+            .split_once("Err(error) =>")
+            .and_then(|(_, rest)| rest.split_once("\n    let deadline"))
+            .expect("reader spawn error arm")
+            .0;
+
+        assert!(
+            body.contains("std::thread::Builder::new()")
+                && body.contains(".name(\"kettle-video-preview-reader\".to_owned())")
+                && spawn_error.contains("let _ = child.kill();")
+                && spawn_error.contains("let _ = child.wait();")
+                && spawn_error.contains("return None;"),
+            "reader creation must be fallible and reap the child when the OS refuses the thread"
         );
     }
 

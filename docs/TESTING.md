@@ -1896,13 +1896,17 @@ These need a real display and are run by hand (or on real hardware):
     file-list text and its stale receipt.
 
     Native CI also runs `video_preview_native`. Every platform leaves worker
-    stdin open and proves the child exits at its own deadline. macOS and Windows
-    additionally run the shipped worker against a checked-in MP4 and validate
-    its bounded metadata and opaque RGBA response. Linux unit coverage invokes
-    its complete Freedesktop cache resolver in an isolated child environment.
-    Portable state tests also prove that a missing worker response expires and
-    that the event loop schedules the cleanup deadline instead of retaining a
-    pending path forever.
+    stdin open and proves the child exits at its own deadline. macOS requires a
+    bounded opaque poster from the checked-in MP4. A missing, failed, or
+    malformed first response is retried once in a fresh worker so a Quick Look
+    service cold start cannot masquerade as missing support. Windows validates
+    the same response when its shell thumbnail
+    provider supports that fixture; set
+    `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
+    missing poster fail. Linux unit coverage invokes its complete Freedesktop
+    cache resolver in an isolated child environment. Portable state tests also
+    prove that a missing worker response expires and that the event loop
+    schedules the cleanup deadline instead of retaining a pending path forever.
 
 Search release evidence is platform-scoped. Run the live interaction/search
 probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and
