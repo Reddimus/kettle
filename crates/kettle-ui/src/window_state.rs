@@ -772,10 +772,14 @@ pub(crate) struct WindowState {
     /// horizontal exit. `CursorLeft` has no coordinate, so this latches the
     /// direction inferred from the last in-client position.
     pub(crate) selection_autoscroll_edge: i8,
-    /// Whether the pointer moved after the current selection press. The inner
-    /// auto-scroll zone is a drag affordance; a held click at the edge must
-    /// remain inert until motion turns it into a drag.
+    /// Whether the pointer crossed the drag threshold after the current
+    /// selection press. The inner auto-scroll zone is a drag affordance; a
+    /// held click and sub-threshold jitter at the edge must remain inert.
     pub(crate) selection_dragged: bool,
+    /// Physical cursor position of the current selection press. Some native
+    /// backends deliver a duplicate cursor-moved event after mouse-down; the
+    /// inner edge zone arms only after measured travel from this point.
+    pub(crate) selection_drag_origin: Option<PhysicalPosition<f64>>,
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
@@ -1088,6 +1092,7 @@ impl WindowState {
             selecting_pane: None,
             selection_autoscroll_edge: 0,
             selection_dragged: false,
+            selection_drag_origin: None,
             scrollbar_drag_offset: None,
             scrollbar_hover: false,
             dragging_split: None,

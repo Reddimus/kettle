@@ -1721,11 +1721,13 @@ These need a real display and are run by hand (or on real hardware):
     the native macOS pointer and Kettle's portable control driver on Linux and
     Windows. It selects terminal text, holds at the upper edge until the
     viewport enters scrollback, then drags to the last pane pixel and requires
-    the viewport to return to the live bottom. The smoke first proves the edge
-    press created a selection anchor without scrolling, then requires non-empty
-    selected text after the drag. Missing Accessibility permission therefore
-    cannot look like an application failure. Portable unit tests cover the
-    drag gate, DPI-scaled edge zones, and both rate directions.
+    the viewport to return to the live bottom. After waiting for the shell's
+    fresh prompt, the smoke proves an edge press, a duplicate move, and one
+    logical point of pointer jitter create a selection anchor without
+    scrolling; it then requires non-empty selected text after the drag. Missing
+    Accessibility permission therefore cannot look like an application
+    failure. Portable unit tests cover the DPI-scaled movement threshold, edge
+    zones, reset paths, and both rate directions.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

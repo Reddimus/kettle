@@ -15531,10 +15531,23 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
                 "printf 'KETTLE_SELECTION_AUTOSCROLL_%03d\\n' \"$i\"; done"
             )
         live_shell_command(live, command_with_marker(body, marker), marker, timeout_ms=12000)
-        before = live.json_ctl("read_screen")
-        if int(before.get("display_offset", -1)) != 0:
+        prompt_prefix = "PS " if platform.system() == "Windows" else "bash-"
+        prompt_deadline = time.monotonic() + 3.0
+        before: Dict[str, object] = {}
+        while time.monotonic() < prompt_deadline:
+            before = live.json_ctl("read_screen")
+            lines = str(before.get("text", "")).rstrip().splitlines()
+            if (
+                int(before.get("display_offset", -1)) == 0
+                and lines
+                and lines[-1].startswith(prompt_prefix)
+            ):
+                break
+            time.sleep(0.05)
+        else:
             raise SystemExit(
-                "selection-autoscroll smoke: fixture did not start at the live bottom"
+                "selection-autoscroll smoke: fixture did not settle at a fresh live prompt: "
+                f"{before}"
             )
 
         geometry = live.json_ctl("ui_geometry")
@@ -15618,26 +15631,38 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
         armed: Dict[str, object] = {}
         upper_edge_y = client_origin_y + (float(content["y"]) + 2.0) / scale_y
         try:
-            if focus_point is not None:
-                post_mouse(MACOS_MOUSE_MOVED, *focus_point)
-                post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
-                post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
-                time.sleep(0.2)
             # The inner zone is drag-only. A press held at the edge must not
-            # scroll until pointer motion turns it into a selection drag.
-            post_mouse(MACOS_MOUSE_MOVED, pointer_x, upper_edge_y)
-            post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, upper_edge_y)
-            time.sleep(0.2)
-            held_click = live.json_ctl("read_screen")
-            post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, upper_edge_y)
-            if not held_click.get("selection_present"):
+            # scroll until pointer motion turns it into a selection drag. A
+            # posted macOS activation click can occasionally be swallowed;
+            # retry only when the positive control proves the pane press never
+            # landed. A delivered press that scrolls still fails immediately.
+            held_click: Dict[str, object] = {}
+            for _ in range(3):
+                if focus_point is not None:
+                    post_mouse(MACOS_MOUSE_MOVED, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
+                    time.sleep(0.2)
+                post_mouse(MACOS_MOUSE_MOVED, pointer_x, upper_edge_y)
+                post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, upper_edge_y)
+                # Exercise the native duplicate-event case deterministically,
+                # then add one logical point of hand jitter. Neither is enough
+                # travel to turn the held press into a drag.
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, upper_edge_y)
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, upper_edge_y + 1.0)
+                time.sleep(0.2)
+                held_click = live.json_ctl("read_screen")
+                post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, upper_edge_y)
+                if int(held_click.get("display_offset", 0)) != 0:
+                    raise SystemExit(
+                        "selection-autoscroll smoke: a held edge click scrolled before any drag"
+                    )
+                if held_click.get("selection_present"):
+                    break
+            else:
                 raise SystemExit(
                     "selection-autoscroll smoke: the edge press never started a "
-                    "selection, so the inert check proved nothing"
-                )
-            if int(held_click.get("display_offset", 0)) != 0:
-                raise SystemExit(
-                    "selection-autoscroll smoke: a held edge click scrolled before any drag"
+                    "selection after three attempts, so the inert check proved nothing"
                 )
             for _ in range(3):
                 if focus_point is not None:

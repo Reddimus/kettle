@@ -49,9 +49,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   previously started only after the pointer moved beyond a pane. A full-height
   pane has no client area below its bottom edge, so downward selection drags
   could not reach that state. A six-point, DPI-scaled inner drag zone now starts
-  the existing one-line-per-frame scroll before the boundary; a held click
-  stays inert, and farther overshoot keeps the existing faster rates. Native
-  macOS and portable control-driver smokes cover both drag directions.
+  the existing one-line-per-frame scroll before the boundary. A two-point,
+  DPI-scaled travel threshold keeps held clicks, duplicate native move events,
+  and small pointer jitter inert; farther overshoot keeps the existing faster
+  rates. Native macOS and portable control-driver smokes cover both drag
+  directions.
 
 ## [3.1.1] — 2026-08-18
 

@@ -3131,6 +3131,51 @@ fn selection_autoscroll_lines(
     direction * mag
 }
 
+/// Whether pointer travel since the selection press is large enough to count
+/// as a drag. Native backends may emit a cursor-moved event after mouse-down at
+/// the same (or fractionally rounded) coordinate, so event arrival alone is
+/// not evidence that the user dragged. The threshold is in logical points and
+/// converted to physical pixels for the addressed window.
+fn selection_drag_motion_started(
+    origin: Option<winit::dpi::PhysicalPosition<f64>>,
+    cursor: winit::dpi::PhysicalPosition<f64>,
+    scale_factor: f64,
+) -> bool {
+    const DRAG_START_PT: f64 = 2.0;
+
+    let Some(origin) = origin else {
+        return false;
+    };
+    if !(origin.x.is_finite()
+        && origin.y.is_finite()
+        && cursor.x.is_finite()
+        && cursor.y.is_finite())
+    {
+        return false;
+    }
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let threshold = DRAG_START_PT * scale_factor;
+    let dx = cursor.x - origin.x;
+    let dy = cursor.y - origin.y;
+    dx.mul_add(dx, dy * dy) >= threshold * threshold
+}
+
+fn note_selection_drag_motion(ws: &mut WindowState) {
+    if ws.selection_dragged {
+        return;
+    }
+    let scale_factor = ws
+        .window
+        .as_ref()
+        .map_or(1.0, |window| window.scale_factor());
+    ws.selection_dragged =
+        selection_drag_motion_started(ws.selection_drag_origin, ws.cursor, scale_factor);
+}
+
 /// Which vertical edge an in-progress selection most likely crossed when the
 /// backend reports `CursorLeft` without an out-of-client coordinate. Corners
 /// resolve vertically on ties because horizontal selection overflow does not
@@ -3157,6 +3202,7 @@ fn clear_selection_gesture(ws: &mut WindowState) {
     ws.selecting_pane = None;
     ws.selection_autoscroll_edge = 0;
     ws.selection_dragged = false;
+    ws.selection_drag_origin = None;
 }
 
 fn take_window_close_request(pending: &mut std::collections::BTreeSet<u64>, seq: u64) -> bool {
@@ -8555,6 +8601,7 @@ impl App {
             ws.selecting_pane = Some(pane_id);
             ws.selection_autoscroll_edge = 0;
             ws.selection_dragged = false;
+            ws.selection_drag_origin = Some(ws.cursor);
         } else {
             clear_selection_gesture(ws);
         }
@@ -9239,6 +9286,7 @@ impl App {
                 ws.selecting_pane = Some(pane_id);
                 ws.selection_autoscroll_edge = 0;
                 ws.selection_dragged = false;
+                ws.selection_drag_origin = Some(ws.cursor);
                 return true;
             }
         }
@@ -18252,7 +18300,7 @@ impl App {
             let _ = self.send_mouse(ws, btn, true, true);
         }
         if ws.selecting {
-            ws.selection_dragged = true;
+            note_selection_drag_motion(ws);
             let area = self.area(ws);
             self.update_selection(ws, area);
         }
@@ -25336,7 +25384,7 @@ impl App {
                 ws.cursor = position;
                 ws.selection_autoscroll_edge = 0;
                 if ws.selecting {
-                    ws.selection_dragged = true;
+                    note_selection_drag_motion(ws);
                 }
                 // v2.19.0 (tear-off UX): client pointer events do NOT reach
                 // the torn window while the OS moves it (Windows: NC modal
@@ -33766,6 +33814,103 @@ mod tests {
         // Zero lines → None (a stale wheel event with no actual
         // motion shouldn't trigger a font change).
         assert_eq!(should_zoom_font(true, 0, false), None);
+    }
+
+    #[test]
+    fn selection_drag_requires_real_dpi_scaled_travel() {
+        use super::selection_drag_motion_started;
+        use winit::dpi::PhysicalPosition;
+
+        let origin = PhysicalPosition::new(100.0, 200.0);
+        assert!(!selection_drag_motion_started(None, origin, 1.0));
+        assert!(!selection_drag_motion_started(Some(origin), origin, 1.0));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.99, 200.0),
+            1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            1.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(103.99, 200.0),
+            2.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(104.0, 200.0),
+            2.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.0, 201.0),
+            1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.5, 201.5),
+            1.0,
+        ));
+        // Invalid scales use the conservative 1x fallback rather than making
+        // every movement a drag or permanently disabling drag detection.
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            0.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            f64::NAN,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(f64::NAN, 200.0),
+            1.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(PhysicalPosition::new(f64::INFINITY, 200.0)),
+            origin,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn native_and_control_selection_motion_share_the_drag_threshold() {
+        let src = production_source();
+        let control = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl mouse move body");
+        assert!(control.contains("note_selection_drag_motion(ws);"));
+
+        let native = src
+            .split("WindowEvent::CursorMoved { position, .. } => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native cursor-moved arm");
+        assert!(native.contains("note_selection_drag_motion(ws);"));
+        assert!(
+            !src.contains("ws.selection_dragged = true;"),
+            "a raw move event must not bypass the travel threshold"
+        );
+
+        let clear = src
+            .split("fn clear_selection_gesture(")
+            .nth(1)
+            .and_then(|body| body.split("\n}\n").next())
+            .expect("selection gesture reset");
+        assert!(clear.contains("ws.selection_drag_origin = None;"));
+        assert_eq!(
+            src.matches("ws.selection_drag_origin = Some(ws.cursor);")
+                .count(),
+            2,
+            "fresh and extended selections must both record their press origin"
+        );
     }
 
     #[test]
