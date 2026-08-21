@@ -531,6 +531,8 @@ enum AgentServerArg {
 /// returns early from `main` before any winit/GPU work.
 #[derive(clap::Subcommand, Debug)]
 enum Cmd {
+    #[command(name = "__media-preview-worker", hide = true)]
+    MediaPreviewWorker,
     /// Run a command under a real PTY, headlessly, and stream its output to
     /// stdout (the non-interactive counterpart to the GUI). Propagates the
     /// child's exit code; 124 when `--timeout` expires and owned-process
@@ -674,6 +676,18 @@ fn is_bare_gui_argv(args: impl IntoIterator) -> bool {
     let mut args = args.into_iter();
     let _program = args.next();
     args.next().is_none()
+}
+
+fn is_media_preview_worker_argv<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    args.next()
+        .is_some_and(|arg| arg.as_ref() == std::ffi::OsStr::new("__media-preview-worker"))
+        && args.next().is_none()
 }
 
 fn pending_update_exit_code(bare_gui_launch: bool) -> i32 {
@@ -998,6 +1012,12 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // The isolated poster worker is not an application startup. Dispatch it
+    // before update recovery so a paste cannot contend on install locks or
+    // launch a pending-update helper from a hidden, time-bounded child.
+    if is_media_preview_worker_argv(std::env::args_os()) {
+        std::process::exit(kettle_ui::run_media_preview_worker());
+    }
     let bare_gui_launch = is_bare_gui_argv(std::env::args_os());
     let (_running_install_guard, startup_update_warning) =
         match kettle_update::prepare_process_start()? {
@@ -1039,6 +1059,12 @@ fn main() -> anyhow::Result<()> {
     // child's, so it must drive `std::process::exit`, not `return Ok(())`.
     if let Some(cmd) = cli.cmd {
         match cmd {
+            Cmd::MediaPreviewWorker => {
+                eprintln!(
+                    "kettle: __media-preview-worker is an internal command and cannot be combined with launcher options"
+                );
+                std::process::exit(2);
+            }
             Cmd::Exec(args) => {
                 let mode = if args.json {
                     exec::OutputMode::Json
@@ -1309,10 +1335,7 @@ fn main() -> anyhow::Result<()> {
             println!("{name}");
         }
         println!("goto_tab:N    (parametric; N is 1-based, 1..=255)");
-        println!(
-            "switch_to_tab_N    (parametric; Terminator's spelling of \
-         goto_tab:N, N is 1-based)"
-        );
+        println!("switch_to_tab_N    (parametric alias for goto_tab:N, N is 1-based)");
         println!(
             "new_tab_shell_N    (parametric; N is 1-based — opens the Nth new-tab \
          dropdown entry, Ctrl+Shift+1..9 by default)"
@@ -2321,7 +2344,8 @@ mod window_state_flag_tests {
 #[cfg(test)]
 mod activation_cli_tests {
     use super::{
-        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, pending_update_exit_code,
+        Cli, EXIT_PENDING_UPDATE_TEMPORARY_FAILURE, is_bare_gui_argv, is_media_preview_worker_argv,
+        pending_update_exit_code,
     };
     use clap::Parser as _;
 
@@ -2331,6 +2355,45 @@ mod activation_cli_tests {
         assert!(!is_bare_gui_argv(["kettle", "--new-process"]));
         assert!(!is_bare_gui_argv(["kettle", "-d", "/tmp"]));
         assert!(!is_bare_gui_argv(["kettle", "--version"]));
+    }
+
+    #[test]
+    fn media_preview_worker_bypasses_application_startup_only_for_its_exact_argv() {
+        assert!(is_media_preview_worker_argv([
+            "kettle",
+            "__media-preview-worker"
+        ]));
+        assert!(!is_media_preview_worker_argv(["kettle"]));
+        assert!(!is_media_preview_worker_argv([
+            "kettle",
+            "__media-preview-worker",
+            "unexpected"
+        ]));
+
+        let parsed = Cli::try_parse_from([
+            "kettle",
+            "--title",
+            "not-a-worker-launch",
+            "__media-preview-worker",
+        ])
+        .expect("clap accepts global launcher options before the hidden subcommand");
+        assert!(matches!(parsed.cmd, Some(super::Cmd::MediaPreviewWorker)));
+
+        let source = super::production_source();
+        let worker = source
+            .find("if is_media_preview_worker_argv(std::env::args_os())")
+            .expect("the hidden worker has an early dispatch");
+        let update = source
+            .find("kettle_update::prepare_process_start()")
+            .expect("normal startup still prepares updates");
+        assert!(
+            worker < update,
+            "poster workers must exit before application update recovery"
+        );
+        assert!(
+            !source.contains("Cmd::MediaPreviewWorker => unreachable!"),
+            "a malformed hidden-worker invocation must fail cleanly, not panic"
+        );
     }
 
     #[test]

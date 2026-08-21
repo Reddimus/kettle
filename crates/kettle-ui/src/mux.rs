@@ -119,6 +119,14 @@ impl PaneInputDelivery {
         self.record(result);
     }
 
+    fn record_for(&mut self, pane_id: u64, receipt_pane: Option<u64>, result: PaneInputResult) {
+        if receipt_pane == Some(pane_id) {
+            self.record_receipt_target(result);
+        } else {
+            self.record(result);
+        }
+    }
+
     pub(crate) fn merge(self, other: Self) -> Self {
         Self {
             result: self.result.merge(other.result),
@@ -3446,11 +3454,17 @@ impl Mux {
         &mut self,
         bytes: &[u8],
         scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
     ) -> PaneInputDelivery {
-        self.broadcast_write_inner(bytes, scroll_to_bottom)
+        self.broadcast_write_inner(bytes, scroll_to_bottom, receipt_pane)
     }
 
-    fn broadcast_write_inner(&mut self, bytes: &[u8], scroll_to_bottom: bool) -> PaneInputDelivery {
+    fn broadcast_write_inner(
+        &mut self,
+        bytes: &[u8],
+        scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         // Respect the `BroadcastScope` enum (phase 3 of the named-groups
         // design). Off short-circuits; Tab keeps the
         // active-tab behavior; All targets every pane
@@ -3468,7 +3482,7 @@ impl Mux {
                 {
                     term.scroll_display(kettle_core::Scroll::Bottom);
                 }
-                delivery.record(pane_result);
+                delivery.record_for(id, receipt_pane, pane_result);
             }
         }
         delivery
@@ -3493,6 +3507,7 @@ impl Mux {
         scope: &BroadcastScope,
         bytes: &[u8],
         scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
     ) -> PaneInputDelivery {
         let mut delivery = PaneInputDelivery::new();
         for id in self.foreign_target_ids(scope) {
@@ -3504,7 +3519,7 @@ impl Mux {
                 {
                     term.scroll_display(kettle_core::Scroll::Bottom);
                 }
-                delivery.record(pane_result);
+                delivery.record_for(id, receipt_pane, pane_result);
             }
         }
         delivery
@@ -3515,6 +3530,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
         encode: F,
     ) -> PaneInputDelivery
     where
@@ -3526,6 +3542,7 @@ impl Mux {
             policy,
             sample_automatic_context,
             scroll_to_bottom,
+            receipt_pane,
             encode,
         )
     }
@@ -3536,6 +3553,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
         encode: F,
     ) -> PaneInputDelivery
     where
@@ -3547,6 +3565,7 @@ impl Mux {
             policy,
             sample_automatic_context,
             scroll_to_bottom,
+            receipt_pane,
             encode,
         )
     }
@@ -3557,6 +3576,7 @@ impl Mux {
         policy: ModifyOtherKeysMode,
         sample_automatic_context: bool,
         scroll_to_bottom: bool,
+        receipt_pane: Option<u64>,
         encode: F,
     ) -> PaneInputDelivery
     where
@@ -3580,7 +3600,7 @@ impl Mux {
             {
                 term.scroll_display(kettle_core::Scroll::Bottom);
             }
-            delivery.record(pane_result);
+            delivery.record_for(id, receipt_pane, pane_result);
         }
         delivery
     }
@@ -3683,24 +3703,29 @@ impl Mux {
     /// command line or leave bytes vulnerable to the bracketed-paste
     /// auto-execute attack inside vim. Pure modulo the writes; the
     /// per-pane wrap is the only logic here.
-    pub fn broadcast_paste(&mut self, text: &str) -> PaneInputResult {
+    pub(crate) fn broadcast_paste_delivery(
+        &mut self,
+        text: &str,
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         // Route through the scope-aware target computation
         // (phase 3 of the named-groups design), same as broadcast_write.
         let ids = self.broadcast_target_ids();
-        self.paste_into(ids, text)
+        self.paste_into(ids, text, receipt_pane)
     }
 
     /// Deliver a paste that ANOTHER window is originating, to the panes in this
     /// one that its scope selects. The companion to
     /// `broadcast_write_foreign_delivery`; see it for why only a named group
     /// crosses.
-    pub fn broadcast_paste_foreign(
+    pub(crate) fn broadcast_paste_foreign_delivery(
         &mut self,
         scope: &BroadcastScope,
         text: &str,
-    ) -> PaneInputResult {
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         let ids = self.foreign_target_ids(scope);
-        self.paste_into(ids, text)
+        self.paste_into(ids, text, receipt_pane)
     }
 
     pub(crate) fn broadcast_paste_paths_delivery(
@@ -3793,9 +3818,14 @@ impl Mux {
     /// The per-pane paste loop, shared by the local and cross-window paths so
     /// the bracketed-paste decision cannot be made one way in one window and
     /// the other way in the next.
-    fn paste_into(&mut self, ids: Vec<u64>, text: &str) -> PaneInputResult {
+    fn paste_into(
+        &mut self,
+        ids: Vec<u64>,
+        text: &str,
+        receipt_pane: Option<u64>,
+    ) -> PaneInputDelivery {
         if ids.is_empty() {
-            return PaneInputResult::Queued;
+            return PaneInputDelivery::new();
         }
         // Build the two possible payloads lazily — only when we hit the
         // first pane that needs each variant. With a 4 MiB clipboard
@@ -3807,15 +3837,15 @@ impl Mux {
         // set is entirely one BRACKETED_PASTE state.
         let mut raw: Option<Arc<[u8]>> = None;
         let mut wrapped: Option<Arc<[u8]>> = None;
-        let mut result = PaneInputResult::Queued;
+        let mut delivery = PaneInputDelivery::new();
         for id in ids {
             if let Some(p) = self.panes.get_mut(&id) {
                 if p.pty_input_failed() {
-                    result = result.merge(PaneInputResult::Failed);
+                    delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
                     continue;
                 }
                 if p.read_only {
-                    result = result.merge(PaneInputResult::ReadOnly);
+                    delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                     continue;
                 }
                 let bracketed = p
@@ -3832,10 +3862,11 @@ impl Mux {
                     raw.get_or_insert_with(|| Arc::from(crate::input::paste_payload(text, false)))
                 };
                 // Paste is user input — read-only panes drop it.
-                result = result.merge(p.feed_input_shared(bytes.clone()));
+                let result = p.feed_input_shared(bytes.clone());
+                delivery.record_for(id, receipt_pane, result);
             }
         }
-        result
+        delivery
     }
 
     fn paste_paths_into(
@@ -3868,11 +3899,11 @@ impl Mux {
                 continue;
             };
             if pane.pty_input_failed() {
-                delivery.record(PaneInputResult::Failed);
+                delivery.record_for(id, receipt_pane, PaneInputResult::Failed);
                 continue;
             }
             if pane.read_only {
-                delivery.record(PaneInputResult::ReadOnly);
+                delivery.record_for(id, receipt_pane, PaneInputResult::ReadOnly);
                 continue;
             }
             let bracketed = pane
@@ -3884,11 +3915,7 @@ impl Mux {
                 .unwrap_or(false);
             let bytes = crate::input::paste_payload(&text, bracketed);
             let result = pane.feed_input(&bytes);
-            if receipt_pane == Some(id) {
-                delivery.record_receipt_target(result);
-            } else {
-                delivery.record(result);
-            }
+            delivery.record_for(id, receipt_pane, result);
         }
         delivery
     }
@@ -4474,6 +4501,20 @@ mod node_tests {
             pane_input_policy(true, true),
             Some(Failed),
             "sticky transport failure must dominate read-only policy"
+        );
+    }
+
+    #[test]
+    fn broadcast_success_elsewhere_does_not_accept_for_the_receipt_pane() {
+        let mut delivery = PaneInputDelivery::new();
+        delivery.record_for(2, Some(1), PaneInputResult::Queued);
+        delivery.record_for(1, Some(1), PaneInputResult::ReadOnly);
+
+        assert!(delivery.accepted, "another broadcast target accepted input");
+        assert_eq!(delivery.result, PaneInputResult::ReadOnly);
+        assert!(
+            !delivery.receipt_accepted,
+            "success in another pane must not dismiss or create receipt chrome"
         );
     }
 

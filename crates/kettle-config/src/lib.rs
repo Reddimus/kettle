@@ -1200,6 +1200,9 @@ pub struct Config {
     /// clipboard bitmap's temporary path. Off avoids allocating preview pixels;
     /// this never previews arbitrary pasted paths.
     pub paste_image_preview: bool,
+    /// Show a short-lived receipt for an explicitly copied or dropped video
+    /// file. Kettle never scans terminal text or path-like output for media.
+    pub paste_video_preview: bool,
     /// Arm the GUI session recorder at launch (`record = on`). Off by default.
     /// Recording captures on-screen output verbatim; typed keystrokes are
     /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
@@ -2656,6 +2659,7 @@ impl Default for Config {
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             paste_image_preview: true,
+            paste_video_preview: true,
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
@@ -3298,6 +3302,8 @@ impl Config {
         "mouse_autohide",
         "paste-image-preview",
         "paste_image_preview",
+        "paste-video-preview",
+        "paste_video_preview",
         "new-tab-after-current-tab",
         "new_tab_after_current_tab",
         "putty-paste-style",
@@ -4418,6 +4424,11 @@ impl Config {
                 "paste-image-preview" | "paste_image_preview" => {
                     if let Some(value) = parse_bool(&e.value) {
                         cfg.paste_image_preview = value;
+                    }
+                }
+                "paste-video-preview" | "paste_video_preview" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.paste_video_preview = value;
                     }
                 }
                 "record" => {
@@ -7158,6 +7169,18 @@ cell-height = 1.2\n";
         );
         assert!(Config::BOOL_KEYS.contains(&"paste-image-preview"));
         assert!(Config::BOOL_KEYS.contains(&"paste_image_preview"));
+    }
+
+    #[test]
+    fn pasted_video_preview_is_independent_and_on_by_default() {
+        assert!(Config::default().paste_video_preview);
+        assert!(!Config::parse_text("paste-video-preview = off").paste_video_preview);
+        assert!(!Config::parse_text("paste_video_preview = false").paste_video_preview);
+        assert!(
+            Config::parse_text("paste-files = off\npaste-video-preview = on").paste_video_preview
+        );
+        assert!(Config::BOOL_KEYS.contains(&"paste-video-preview"));
+        assert!(Config::BOOL_KEYS.contains(&"paste_video_preview"));
     }
 
     #[test]

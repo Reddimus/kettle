@@ -50,8 +50,8 @@ const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
-const ACCESSIBILITY_IMAGE_RECEIPT_ID: NodeId = NodeId(1 << 59);
-const ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
+const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -421,6 +421,43 @@ fn screenshot_window_accepts_control_capture(
 ) -> bool {
     screenshot_window_availability(minimized, window_shown, visible)
         != ScreenshotWindowAvailability::Unavailable
+}
+
+/// Parse an optional explicit full-window screenshot crop. The four values are
+/// one unit: accepting a partial rectangle would make a typo silently capture
+/// more terminal content than the caller intended.
+fn screenshot_crop(
+    params: &serde_json::Value,
+) -> Result<Option<(f32, f32, f32, f32)>, &'static str> {
+    const KEYS: [&str; 4] = ["crop_x", "crop_y", "crop_width", "crop_height"];
+    let present = KEYS.map(|key| params.get(key).is_some());
+    if !present.into_iter().any(|value| value) {
+        return Ok(None);
+    }
+    if !present.into_iter().all(|value| value) {
+        return Err("crop_x, crop_y, crop_width, and crop_height must be provided together");
+    }
+    let read = |key| {
+        params
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite() && *value <= f64::from(f32::MAX))
+            .map(|value| value as f32)
+            .ok_or("screenshot crop values must be finite numbers within the f32 range")
+    };
+    let crop = (
+        read("crop_x")?,
+        read("crop_y")?,
+        read("crop_width")?,
+        read("crop_height")?,
+    );
+    if crop.0 < 0.0 || crop.1 < 0.0 {
+        return Err("crop_x and crop_y must be non-negative");
+    }
+    if crop.2 <= 0.0 || crop.3 <= 0.0 {
+        return Err("crop_width and crop_height must be positive");
+    }
+    Ok(Some(crop))
 }
 
 fn pending_screenshot_may_render_offscreen(
@@ -946,6 +983,37 @@ fn ctl_snapshot(kind: &str, value: &(impl serde::Serialize + ?Sized)) -> String 
     format!("{:016x}", hasher.0)
 }
 
+fn media_receipt_accessibility_label(
+    kind: &kettle_render::MediaPasteReceiptKind,
+    remote: bool,
+) -> String {
+    let mut label = match kind {
+        kettle_render::MediaPasteReceiptKind::Image {
+            original_width,
+            original_height,
+        } => format!("Image path pasted, {original_width} by {original_height}"),
+        kettle_render::MediaPasteReceiptKind::Video {
+            extension,
+            size,
+            count,
+            ..
+        } if *count > 1 => format!(
+            "{count} video paths pasted, first is {extension}, {}",
+            kettle_render::format_media_size(*size)
+        ),
+        kettle_render::MediaPasteReceiptKind::Video {
+            extension, size, ..
+        } => format!(
+            "Video path pasted, {extension}, {}",
+            kettle_render::format_media_size(*size)
+        ),
+    };
+    if remote {
+        label.push_str(", remote pane, local path only");
+    }
+    label
+}
+
 /// Sum a lazily-produced inventory while stopping as soon as the budget is
 /// crossed. Keeping this lazy is important: the limit exists to bound the
 /// enumeration itself, not merely the result allocation that follows it.
@@ -1024,6 +1092,13 @@ pub enum UserEvent {
     /// result even when no output generation advanced.
     RemoteScanReady,
     ReloadConfig,
+    VideoPreviewReady {
+        window_seq: u64,
+        pane_id: u64,
+        generation: u64,
+        candidate: Option<crate::video_preview::VideoPasteCandidate>,
+        preview: Option<kettle_core::ImageData>,
+    },
     /// An assistive-technology action addressed to a specific OS window.
     /// AccessKit can invoke this callback off the winit dispatch path, so it is
     /// re-serialized through the event-loop proxy before touching UI state.
@@ -4266,6 +4341,9 @@ pub enum ConfirmAction {
     /// `target` contract.
     PastePaths {
         paths: Box<[std::path::PathBuf]>,
+        /// Provenance-bound video request created only at an explicit file
+        /// clipboard or drop entry point. Plain terminal text never creates it.
+        video: Option<Box<crate::video_preview::VideoPasteRequest>>,
         trailing_space: bool,
         target: Option<u64>,
         /// Pane that initiated the paste. Separate from `target` because a
@@ -5583,6 +5661,10 @@ pub struct App {
     /// Temporary PNGs materialized from clipboard bitmaps. Owner-only, bounded,
     /// and removed on exit — see [`crate::paste_image`].
     pasted_images: crate::paste_image::PastedImages,
+    /// Bounded native-poster jobs. Paths cross only the private child-worker
+    /// protocol; decoded pixels return through the event loop.
+    video_previewer: crate::video_preview::VideoPreviewer,
+    next_video_preview_generation: u64,
     /// Triggers: compiled regex set built from `cfg.triggers` at App
     /// construction (and after live reload). Invalid patterns are logged via
     /// `log::warn!` and dropped.
@@ -6400,6 +6482,7 @@ impl App {
                     None
                 }
             };
+        let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
         let mut app = App {
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
@@ -6444,6 +6527,8 @@ impl App {
             pending_runs: std::collections::HashMap::new(),
             clipboard,
             pasted_images: crate::paste_image::PastedImages::new(),
+            video_previewer,
+            next_video_preview_generation: 1,
             compiled_triggers: initial_triggers,
             last_trigger_fire: None,
             remote_scan_worker,
@@ -7045,12 +7130,12 @@ impl App {
         }
     }
 
-    fn image_paste_receipt_geometry(
+    fn media_paste_receipt_geometry(
         &self,
         ws: &WindowState,
-    ) -> Option<kettle_render::ImagePasteReceiptGeometry> {
-        let (receipt, completion) = self.image_paste_receipt_projection(ws)?;
-        kettle_render::image_paste_receipt_geometry(
+    ) -> Option<kettle_render::MediaPasteReceiptGeometry> {
+        let (receipt, completion) = self.media_paste_receipt_projection(ws)?;
+        kettle_render::media_paste_receipt_geometry(
             &receipt,
             completion.as_ref(),
             self.menu_cell(ws),
@@ -7059,17 +7144,17 @@ impl App {
         )
     }
 
-    fn image_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
-        self.image_paste_receipt_geometry(ws)
+    fn media_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
+        self.media_paste_receipt_geometry(ws)
             .is_some_and(|geometry| {
                 rect_contains(geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
             })
     }
 
-    fn update_image_paste_receipt_hover(&self, ws: &mut WindowState) -> bool {
-        let hovered = self.image_paste_receipt_hovered(ws);
+    fn update_media_paste_receipt_hover(&self, ws: &mut WindowState) -> bool {
+        let hovered = self.media_paste_receipt_hovered(ws);
         let changed = ws
-            .image_paste_receipt
+            .media_paste_receipt
             .as_mut()
             .is_some_and(|receipt| receipt.set_hover(hovered, std::time::Instant::now()));
         if changed {
@@ -7086,17 +7171,17 @@ impl App {
     /// hit-test) and on ModifiersChanged (the modifier state gates the
     /// click-to-open affordance).
     fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
-        let image_receipt_hovered = self.image_paste_receipt_hovered(ws);
-        self.sync_cursor_icon_with_image_receipt_hover(ws, image_receipt_hovered);
+        let media_receipt_hovered = self.media_paste_receipt_hovered(ws);
+        self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered);
     }
 
     /// CursorMoved already computed the receipt hit test to update its hover
     /// timer. Reuse that answer instead of building a second full overlay for
     /// the same physical event.
-    fn sync_cursor_icon_with_image_receipt_hover(
+    fn sync_cursor_icon_with_media_receipt_hover(
         &mut self,
         ws: &mut WindowState,
-        image_receipt_hovered: bool,
+        media_receipt_action_hovered: bool,
     ) {
         // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
         // a "pointing hand" while the user holds the same modifier that
@@ -7160,7 +7245,7 @@ impl App {
                 })
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
-        let image_receipt_hover = image_receipt_hovered.then_some(CursorIcon::Pointer);
+        let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
         // v2.40.0 (tear-off UX): a live tab-drag owns the cursor, FIRST in
         // the chain — mid-drag the pointer can transiently cross another
@@ -7177,7 +7262,7 @@ impl App {
             .or(new_tab_hover_icon)
             .or(confirm_hover)
             .or(search_hover)
-            .or(image_receipt_hover)
+            .or(media_receipt_hover)
             .or(chrome)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
@@ -7197,17 +7282,18 @@ impl App {
         }
     }
 
-    /// Consume a press over receipt chrome and open the exact retained image
-    /// on a primary-button activation. Shared by native and ctl mouse input so
-    /// automation cannot click through to terminal content the GUI protects.
-    fn activate_image_paste_receipt_at(
+    /// Consume presses over receipt chrome. A primary press opens or dismisses
+    /// as appropriate; other buttons do nothing rather than reaching terminal
+    /// content hidden behind the card.
+    /// Shared by native and ctl mouse input so automation cannot click through.
+    fn activate_media_paste_receipt_at(
         &self,
         ws: &mut WindowState,
         x: f32,
         y: f32,
         bcode: u8,
     ) -> bool {
-        let Some((receipt, completion)) = self.image_paste_receipt_projection(ws) else {
+        let Some((receipt, completion)) = self.media_paste_receipt_projection(ws) else {
             return false;
         };
         let (pane_x, pane_y, pane_w, pane_h) = receipt.pane_rect;
@@ -7219,7 +7305,7 @@ impl App {
         {
             return false;
         }
-        let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+        let Some(geometry) = kettle_render::media_paste_receipt_geometry(
             &receipt,
             completion.as_ref(),
             self.menu_cell(ws),
@@ -7231,23 +7317,54 @@ impl App {
         let Some(hit) = geometry.hit_test(x, y) else {
             return false;
         };
-        if bcode == 0 && hit == kettle_render::ImagePasteReceiptHit::Dismiss {
-            ws.image_paste_receipt = None;
+        if bcode == 0 {
+            if matches!(
+                hit,
+                kettle_render::MediaPasteReceiptHit::Dismiss
+                    | kettle_render::MediaPasteReceiptHit::Body
+            ) {
+                ws.media_paste_receipt = None;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            } else if hit == kettle_render::MediaPasteReceiptHit::Open {
+                self.open_media_paste_receipt(ws);
+            }
+        }
+        true
+    }
+
+    /// Open Kettle's retained private image after rechecking its pane and file
+    /// identity. Video cards are informational: platform launch APIs accept a
+    /// path rather than the validated handle, so they deliberately have no
+    /// open action.
+    fn open_media_paste_receipt(&self, ws: &mut WindowState) {
+        let Some(active) = ws.media_paste_receipt.as_ref().filter(|receipt| {
+            ws.mux.active_focus() == Some(receipt.pane_id)
+                && matches!(
+                    &receipt.kind,
+                    crate::window_state::MediaPasteReceiptKind::Image { .. }
+                )
+        }) else {
+            return;
+        };
+        let path = active.path.clone();
+        if !self.pasted_images.path_still_matches(&path) {
+            ws.media_paste_receipt = None;
             ws.accessibility_pending = true;
+            fire_notify(
+                "kettle: image preview unavailable",
+                "The pasted image file is no longer available.",
+            );
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
-        } else if bcode == 0
-            && hit == kettle_render::ImagePasteReceiptHit::Open
-            && let Some(path) = ws
-                .image_paste_receipt
-                .as_ref()
-                .map(|receipt| receipt.path.clone())
-            && let Err(error) = open::that_detached(&path)
-        {
+            return;
+        }
+        if let Err(error) = open::that_detached(&path) {
             log::warn!("could not open a pasted-image preview: {error}");
         }
-        true
     }
 
     /// Clear the focused pane's selection (called when the user types —
@@ -7259,6 +7376,95 @@ impl App {
             && t.selection.is_some()
         {
             t.selection = None;
+        }
+    }
+
+    /// A receipt describes the command line at the instant Kettle pasted it.
+    /// The next authored input can edit, submit, or cancel that line, so keeping
+    /// the card would turn a receipt into stale success chrome. A later media
+    /// paste installs its own fresh receipt after delivery.
+    fn dismiss_media_paste_receipt_on_input(ws: &mut WindowState) {
+        drop(Self::take_media_paste_receipt_on_input(ws));
+    }
+
+    fn take_media_paste_receipt_on_input(
+        ws: &mut WindowState,
+    ) -> Option<crate::window_state::MediaPasteReceiptState> {
+        let (receipt, _) = Self::take_media_paste_state_on_input(ws);
+        receipt
+    }
+
+    fn take_media_paste_state_on_input(
+        ws: &mut WindowState,
+    ) -> (
+        Option<crate::window_state::MediaPasteReceiptState>,
+        Option<crate::window_state::PendingVideoPasteReceipt>,
+    ) {
+        let previous = ws.media_paste_receipt.take();
+        let pending = ws.pending_video_paste_receipt.take();
+        if previous.is_some() {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        (previous, pending)
+    }
+
+    fn dismiss_media_paste_receipt_for_pane(&mut self, ws: &mut WindowState, pane_id: u64) {
+        if ws
+            .media_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.pane_id == pane_id)
+            || ws
+                .pending_video_paste_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.pane_id == pane_id)
+        {
+            Self::dismiss_media_paste_receipt_on_input(ws);
+            return;
+        }
+        if let Some(window) = self.windows.values_mut().find(|window| {
+            window
+                .media_paste_receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.pane_id == pane_id)
+                || window
+                    .pending_video_paste_receipt
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.pane_id == pane_id)
+        }) {
+            Self::dismiss_media_paste_receipt_on_input(window);
+        }
+    }
+
+    fn media_paste_receipt_pane(ws: &WindowState) -> Option<u64> {
+        ws.media_paste_receipt
+            .as_ref()
+            .map(|receipt| receipt.pane_id)
+            .or_else(|| {
+                ws.pending_video_paste_receipt
+                    .as_ref()
+                    .map(|receipt| receipt.pane_id)
+            })
+    }
+
+    fn dismiss_media_paste_receipt_after_input(
+        ws: &mut WindowState,
+        pane_id: u64,
+        result: PaneInputResult,
+    ) {
+        if result.is_queued() && Self::media_paste_receipt_pane(ws) == Some(pane_id) {
+            Self::dismiss_media_paste_receipt_on_input(ws);
+        }
+    }
+
+    fn dismiss_media_paste_receipt_after_delivery(
+        ws: &mut WindowState,
+        delivery: PaneInputDelivery,
+    ) {
+        if delivery.receipt_accepted {
+            Self::dismiss_media_paste_receipt_on_input(ws);
         }
     }
 
@@ -7286,7 +7492,10 @@ impl App {
         let input_time = std::time::Instant::now();
         let result = if ws.mux.is_broadcast_on() {
             self.broadcast_input(ws, bytes, self.cfg.scroll_on_keystroke, input_time)
-        } else if let Some(pane) = ws.mux.focused() {
+        } else if let Some(pane_id) = ws.mux.active_focus() {
+            let Some(pane) = ws.mux.panes.get(&pane_id) else {
+                return;
+            };
             let result = pane.feed_input(bytes);
             if result.is_queued() {
                 ws.last_typed = Some(input_time);
@@ -7297,6 +7506,7 @@ impl App {
             {
                 term.scroll_display(Scroll::Bottom);
             }
+            Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
             result
         } else {
             PaneInputResult::Queued
@@ -7339,24 +7549,34 @@ impl App {
         let scope = ws.mux.broadcast.clone();
         let cfg = &self.cfg;
         let mods = ws.mods;
+        let receipt_pane = prepare_input
+            .then(|| Self::media_paste_receipt_pane(ws))
+            .flatten();
         let mut delivery = ws.mux.broadcast_encoded(
             self.cfg.modify_other_keys,
             modified_enter,
             scroll_to_bottom,
+            receipt_pane,
             |mode| encode_key_event_for_mode(cfg, event, mods, mode),
         );
+        Self::dismiss_media_paste_receipt_after_delivery(ws, delivery);
         if let Some(input_time) = input_time {
             stamp_accepted_input(&mut ws.last_typed, delivery, input_time);
         }
         if Mux::scope_crosses_windows(&scope) {
             for other in self.windows.values_mut() {
+                let receipt_pane = prepare_input
+                    .then(|| Self::media_paste_receipt_pane(other))
+                    .flatten();
                 let foreign = other.mux.broadcast_encoded_foreign(
                     &scope,
                     self.cfg.modify_other_keys,
                     modified_enter,
                     scroll_to_bottom,
+                    receipt_pane,
                     |mode| encode_key_event_for_mode(cfg, event, mods, mode),
                 );
+                Self::dismiss_media_paste_receipt_after_delivery(other, foreign);
                 if let Some(input_time) = input_time {
                     stamp_accepted_input(&mut other.last_typed, foreign, input_time);
                 }
@@ -8425,7 +8645,13 @@ impl App {
         if self.cfg.paste_files.enabled()
             && let Some(paths) = self.clipboard_file_paste_paths()
         {
-            self.paste_paths(ws, paths, false);
+            let video = self.cfg.paste_video_preview.then(|| {
+                crate::video_preview::VideoPasteRequest::from_user_paths(
+                    &paths,
+                    crate::video_preview::VideoPasteSource::Clipboard,
+                )
+            });
+            self.paste_paths(ws, paths, false, video.flatten());
             return;
         }
         // Bitmap paste: a screenshot puts raw pixels on the clipboard with no
@@ -8436,7 +8662,7 @@ impl App {
         if self.cfg.paste_images.enabled()
             && let Some(path) = self.clipboard_image_paste_path()
         {
-            self.paste_paths(ws, vec![path], false);
+            self.paste_paths(ws, vec![path], false, None);
             return;
         }
         let text = self
@@ -8586,11 +8812,20 @@ impl App {
             if let Some(rec) = self.recorder.as_mut() {
                 rec.record_marker(&format!("kettle:paste len={}", text.chars().count()));
             }
-            let mut result = ws.mux.broadcast_paste(text);
+            let receipt_pane = Self::media_paste_receipt_pane(ws);
+            let local = ws.mux.broadcast_paste_delivery(text, receipt_pane);
+            Self::dismiss_media_paste_receipt_after_delivery(ws, local);
+            let mut result = local.result;
             if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
                 let scope = ws.mux.broadcast.clone();
                 for other in self.windows.values_mut() {
-                    result = result.merge(other.mux.broadcast_paste_foreign(&scope, text));
+                    let receipt_pane = Self::media_paste_receipt_pane(other);
+                    let delivery =
+                        other
+                            .mux
+                            .broadcast_paste_foreign_delivery(&scope, text, receipt_pane);
+                    Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
+                    result = result.merge(delivery.result);
                 }
             }
             self.report_input_result(result);
@@ -8609,6 +8844,9 @@ impl App {
         }
         if let Some(result) = paste_text_into_target(&mut ws.mux, target, text) {
             self.report_input_result(result);
+            if let Some(pane_id) = target {
+                Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+            }
         }
     }
 
@@ -8617,6 +8855,7 @@ impl App {
         ws: &mut WindowState,
         paths: Vec<std::path::PathBuf>,
         trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
     ) {
         if paths.is_empty() {
             return;
@@ -8674,6 +8913,7 @@ impl App {
                 focus_idx: 0,
                 on_confirm: ConfirmAction::PastePaths {
                     paths: paths.into_boxed_slice(),
+                    video: video.map(Box::new),
                     trailing_space,
                     target,
                     receipt_pane,
@@ -8681,7 +8921,7 @@ impl App {
             });
             return;
         }
-        self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space);
+        self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space, video);
     }
 
     fn paste_paths_confirmed(
@@ -8691,7 +8931,12 @@ impl App {
         receipt_pane: Option<u64>,
         paths: &[std::path::PathBuf],
         trailing_space: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
     ) {
+        // Path delivery authors new terminal input. Keep the old receipt only
+        // long enough to coalesce the separate DroppedFile events one OS drag
+        // emits; every other outcome drops it here.
+        let previous = Self::take_media_paste_state_on_input(ws);
         if ws.mux.is_broadcast_on() {
             if let Some(recorder) = self.recorder.as_mut() {
                 recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
@@ -8714,12 +8959,19 @@ impl App {
                 }
             }
             self.report_input_result(delivery.result);
-            self.show_image_paste_receipt(ws, receipt_pane, paths, delivery.receipt_accepted);
+            self.show_media_paste_receipt(
+                ws,
+                receipt_pane,
+                paths,
+                delivery.receipt_accepted,
+                video,
+                previous,
+            );
             return;
         }
 
         if target.is_none_or(|id| !ws.mux.panes.contains_key(&id)) {
-            self.show_image_paste_receipt(ws, receipt_pane, paths, false);
+            self.show_media_paste_receipt(ws, receipt_pane, paths, false, video, previous);
             return;
         }
         if let Some(recorder) = self.recorder.as_mut() {
@@ -8728,46 +8980,58 @@ impl App {
         match paste_paths_into_target(&mut ws.mux, target, paths, trailing_space) {
             Some(delivery) => {
                 self.report_input_result(delivery.result);
-                self.show_image_paste_receipt(ws, receipt_pane, paths, delivery.receipt_accepted);
+                self.show_media_paste_receipt(
+                    ws,
+                    receipt_pane,
+                    paths,
+                    delivery.receipt_accepted,
+                    video,
+                    previous,
+                );
             }
-            None => self.show_image_paste_receipt(ws, receipt_pane, paths, false),
+            None => self.show_media_paste_receipt(ws, receipt_pane, paths, false, video, previous),
         }
     }
 
-    fn show_image_paste_receipt(
+    fn show_media_paste_receipt(
         &mut self,
         ws: &mut WindowState,
         receipt_pane: Option<u64>,
         paths: &[std::path::PathBuf],
         accepted_by_receipt_pane: bool,
+        video: Option<crate::video_preview::VideoPasteRequest>,
+        previous: (
+            Option<crate::window_state::MediaPasteReceiptState>,
+            Option<crate::window_state::PendingVideoPasteReceipt>,
+        ),
     ) {
-        if paths.len() != 1 {
+        let (previous_receipt, previous_pending) = previous;
+        let image_preview = if paths.len() == 1 {
+            // Move bounded pixels out even when presentation is rejected. A
+            // managed PNG gets one chance to create a receipt.
+            self.pasted_images.take_preview_for_path(&paths[0])
+        } else {
             self.pasted_images.discard_previews_for_paths(paths);
-            log::debug!("image paste receipt skipped: path_count={}", paths.len());
-            return;
-        }
-        // Move the bounded pixels out even when presentation is rejected. This
-        // exact managed PNG gets one chance to create a receipt; a read-only,
-        // backpressured, dead, or disabled target must not retain the preview
-        // for the rest of the process.
-        let preview = self.pasted_images.take_preview_for_path(&paths[0]);
-        if !self.cfg.paste_image_preview || !accepted_by_receipt_pane {
-            log::debug!(
-                "image paste receipt skipped: enabled={}, initiating_pane_accepted={accepted_by_receipt_pane}",
-                self.cfg.paste_image_preview
-            );
-            return;
-        }
-        let Some(preview) = preview else {
-            log::debug!("image paste receipt skipped: path has no managed preview");
-            return;
+            None
         };
+        if !accepted_by_receipt_pane {
+            ws.media_paste_receipt = previous_receipt;
+            ws.pending_video_paste_receipt = previous_pending;
+            if ws.media_paste_receipt.is_some() {
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            log::debug!("media paste receipt skipped: initiating pane did not accept the path");
+            return;
+        }
         let Some(pane_id) = receipt_pane.filter(|id| ws.mux.panes.contains_key(id)) else {
-            log::debug!("image paste receipt skipped: initiating pane is no longer live");
+            log::debug!("media paste receipt skipped: initiating pane is no longer live");
             return;
         };
         let Some(pane) = ws.mux.panes.get(&pane_id) else {
-            log::debug!("image paste receipt skipped: initiating pane lookup failed");
+            log::debug!("media paste receipt skipped: initiating pane lookup failed");
             return;
         };
         let remote = pane.remote_context.is_some();
@@ -8775,19 +9039,56 @@ impl App {
             let cursor_row = term.renderable_content().cursor.point.line.0.max(0) as usize;
             cursor_row >= term.screen_lines() / 2
         });
-        ws.image_paste_receipt = Some(crate::window_state::ImagePasteReceiptState::new(
-            pane_id,
-            paths[0].clone(),
-            preview,
-            remote,
-            prefer_top,
-            std::time::Instant::now(),
-        ));
+        let now = std::time::Instant::now();
+        let handled = if let Some(preview) = image_preview.filter(|_| self.cfg.paste_image_preview)
+        {
+            ws.media_paste_receipt = Some(crate::window_state::MediaPasteReceiptState::new_image(
+                pane_id,
+                paths[0].clone(),
+                preview,
+                remote,
+                prefer_top,
+                now,
+            ));
+            true
+        } else if let Some(request) = video.filter(|_| self.cfg.paste_video_preview) {
+            if let Some(mut pending) = previous_pending
+                && pending.merge_drop(pane_id, &request, now)
+            {
+                ws.pending_video_paste_receipt = Some(pending);
+                true
+            } else {
+                let generation = self.next_video_preview_generation;
+                self.next_video_preview_generation = generation.wrapping_add(1).max(1);
+                let queued =
+                    self.video_previewer
+                        .request(ws.seq, pane_id, generation, request.clone());
+                if queued {
+                    ws.pending_video_paste_receipt =
+                        Some(crate::window_state::PendingVideoPasteReceipt {
+                            pane_id,
+                            generation,
+                            request,
+                            remote,
+                            prefer_top,
+                            created_at: now,
+                            previous_receipt,
+                        });
+                }
+                queued
+            }
+        } else {
+            false
+        };
+        if !handled {
+            log::debug!("media paste receipt skipped: no eligible preview payload");
+            return;
+        }
         ws.accessibility_pending = true;
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
-        log::debug!("image paste receipt shown for pane {pane_id}");
+        log::debug!("media paste receipt queued or shown for pane {pane_id}");
     }
 
     fn copy_selection(&mut self, ws: &mut WindowState) {
@@ -10979,6 +11280,7 @@ impl App {
             if !result.is_queued() {
                 self.report_input_result(result);
             }
+            Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
         }
         ws.last_mouse_cell = Some((pane_id, row, col));
         true
@@ -11055,16 +11357,42 @@ impl App {
         })
     }
 
-    fn image_paste_receipt_overlay_projection(
+    fn media_paste_receipt_overlay_projection(
         &self,
         ws: &WindowState,
         terminal_surface: bool,
         now: std::time::Instant,
-    ) -> Option<kettle_render::ImagePasteReceiptOverlay> {
-        if !self.cfg.paste_image_preview || !terminal_surface || !ws.window_focused {
+    ) -> Option<kettle_render::MediaPasteReceiptOverlay> {
+        if !terminal_surface || !ws.window_focused {
             return None;
         }
-        let receipt = ws.image_paste_receipt.as_ref()?;
+        let receipt = ws.media_paste_receipt.as_ref()?;
+        let (kind, openable) = match &receipt.kind {
+            crate::window_state::MediaPasteReceiptKind::Image {
+                original_width,
+                original_height,
+            } if self.cfg.paste_image_preview => (
+                kettle_render::MediaPasteReceiptKind::Image {
+                    original_width: *original_width,
+                    original_height: *original_height,
+                },
+                true,
+            ),
+            crate::window_state::MediaPasteReceiptKind::Video {
+                candidate,
+                preview_pending,
+                ..
+            } if self.cfg.paste_video_preview => (
+                kettle_render::MediaPasteReceiptKind::Video {
+                    extension: candidate.extension.clone(),
+                    size: candidate.size,
+                    count: candidate.count,
+                    preview_pending: *preview_pending,
+                },
+                false,
+            ),
+            _ => return None,
+        };
         let pane_id = ws.mux.active_focus()?;
         if pane_id != receipt.pane_id || !receipt.live(now) {
             return None;
@@ -11100,7 +11428,7 @@ impl App {
         } else {
             0.0
         };
-        Some(kettle_render::ImagePasteReceiptOverlay {
+        Some(kettle_render::MediaPasteReceiptOverlay {
             pane_rect,
             grid_rect: (
                 grid_origin.0,
@@ -11110,28 +11438,28 @@ impl App {
             ),
             right_gutter,
             image: receipt.image.clone(),
-            original_width: receipt.original_width,
-            original_height: receipt.original_height,
+            kind,
+            openable,
             remote: receipt.remote,
             expanded: receipt.expanded(now),
             prefer_top: receipt.prefer_top,
         })
     }
 
-    fn image_paste_receipt_projection(
+    fn media_paste_receipt_projection(
         &self,
         ws: &WindowState,
     ) -> Option<(
-        kettle_render::ImagePasteReceiptOverlay,
+        kettle_render::MediaPasteReceiptOverlay,
         Option<kettle_render::CompletionOverlay>,
     )> {
         // This is the pointer-motion path. Keep the overwhelmingly common case
         // allocation- and lock-free, then project only the two overlays whose
         // geometry can affect the receipt rather than building every piece of
         // window chrome.
-        ws.image_paste_receipt.as_ref()?;
+        ws.media_paste_receipt.as_ref()?;
         let terminal_surface = terminal_surface_available(ws);
-        let receipt = self.image_paste_receipt_overlay_projection(
+        let receipt = self.media_paste_receipt_overlay_projection(
             ws,
             terminal_surface,
             std::time::Instant::now(),
@@ -11256,7 +11584,7 @@ impl App {
         };
         let terminal_surface = terminal_surface_available(ws);
         let completion = self.completion_overlay_projection(ws, terminal_surface);
-        let image_paste_receipt = self.image_paste_receipt_overlay_projection(
+        let media_paste_receipt = self.media_paste_receipt_overlay_projection(
             ws,
             terminal_surface,
             std::time::Instant::now(),
@@ -11379,7 +11707,7 @@ impl App {
                 hint_labels,
                 ime_preedit,
                 completion,
-                image_paste_receipt,
+                media_paste_receipt,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -11493,7 +11821,7 @@ impl App {
             hint_labels,
             ime_preedit,
             completion: None,
-            image_paste_receipt: None,
+            media_paste_receipt: None,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -13520,11 +13848,14 @@ impl App {
                 ws.context_menu = None;
                 // Terminator parity: write `CMD\n` to the PTY.
                 // Acts as the user — a read-only pane drops it.
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\n');
                     let result = p.feed_input(&bytes);
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
             ContextMenuClick::SetTheme(name) => {
@@ -13842,16 +14173,24 @@ impl App {
         scroll_to_bottom: bool,
         input_time: std::time::Instant,
     ) -> PaneInputResult {
-        let local = ws.mux.broadcast_write_delivery(bytes, scroll_to_bottom);
+        let receipt_pane = Self::media_paste_receipt_pane(ws);
+        let local = ws
+            .mux
+            .broadcast_write_delivery(bytes, scroll_to_bottom, receipt_pane);
+        Self::dismiss_media_paste_receipt_after_delivery(ws, local);
         stamp_accepted_input(&mut ws.last_typed, local, input_time);
         let mut result = local.result;
         if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
             let scope = ws.mux.broadcast.clone();
             for other in self.windows.values_mut() {
-                let delivery =
-                    other
-                        .mux
-                        .broadcast_write_foreign_delivery(&scope, bytes, scroll_to_bottom);
+                let receipt_pane = Self::media_paste_receipt_pane(other);
+                let delivery = other.mux.broadcast_write_foreign_delivery(
+                    &scope,
+                    bytes,
+                    scroll_to_bottom,
+                    receipt_pane,
+                );
+                Self::dismiss_media_paste_receipt_after_delivery(other, delivery);
                 stamp_accepted_input(&mut other.last_typed, delivery, input_time);
                 result = result.merge(delivery.result);
             }
@@ -14381,10 +14720,13 @@ impl App {
             // normally but expect explicit `\n` for line
             // continuation (multi-line readline prompts).
             Action::SendNewline => {
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     // Typed-input semantics — read-only drops it.
                     let result = p.feed_input(b"\n");
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
             // Terminator parity (`key_preferences` /
@@ -14548,9 +14890,12 @@ impl App {
                     let result =
                         self.broadcast_input(ws, b"\x1b[3J", false, std::time::Instant::now());
                     self.report_input_result(result);
-                } else if let Some(p) = ws.mux.focused() {
+                } else if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let result = p.feed_input(b"\x1b[3J");
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -14572,9 +14917,12 @@ impl App {
                 // feed_input — injecting ESC c into a
                 // read-only pane's child (e.g. a locked agent TUI, where ESC
                 // is the interrupt key) is exactly what the toggle prevents.
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let result = p.feed_input(b"\x1bc");
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
                 self.clear_selection_on_input(ws);
                 // The modal sweep was later extracted into a helper
@@ -15256,9 +15604,12 @@ impl App {
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let result = p.feed_input(idx.to_string().as_bytes());
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
             Action::InsertPanePadded => {
@@ -15267,9 +15618,12 @@ impl App {
                     .focused_pane_index_in_tab()
                     .map(|i| i + 1)
                     .unwrap_or(1);
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let result = p.feed_input(format!("{idx:02}").as_bytes());
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
             // Terminator parity (`insert_term_name.py`
@@ -15280,10 +15634,13 @@ impl App {
             // output by source pane, or for keyboard workflows
             // that re-type the current title into the command line.
             Action::InsertPaneName => {
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     let title = p.title.clone();
                     let result = p.feed_input(title.as_bytes());
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
             // Terminator parity (`dir_open.py` plugin →
@@ -15436,11 +15793,14 @@ impl App {
                 // ClearHistory actions.
                 // feed_input, same read-only rule as the
                 // separate Reset + ClearHistory arms.
-                if let Some(p) = ws.mux.focused() {
+                if let Some(pane_id) = ws.mux.active_focus()
+                    && let Some(p) = ws.mux.panes.get(&pane_id)
+                {
                     // One queue message prevents a saturated channel from
                     // accepting RIS but rejecting the paired history clear.
                     let result = p.feed_input(b"\x1bc\x1b[3J");
                     self.report_input_result(result);
+                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
                 }
             }
         }
@@ -16065,11 +16425,19 @@ impl App {
             }
             ConfirmAction::PastePaths {
                 paths,
+                video,
                 trailing_space,
                 target,
                 receipt_pane,
             } => {
-                self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space);
+                self.paste_paths_confirmed(
+                    ws,
+                    target,
+                    receipt_pane,
+                    &paths,
+                    trailing_space,
+                    video.map(|candidate| *candidate),
+                );
             }
             ConfirmAction::RebindKeybind {
                 trig,
@@ -17240,20 +17608,42 @@ impl App {
         // The retained path and thumbnail pixels stay private to the app; UI
         // automation needs the bounds to verify hover/collapse behavior, not
         // the clipboard content itself.
-        let image_paste_receipt = self
-            .image_paste_receipt_geometry(target)
+        let media_paste_receipt = self
+            .media_paste_receipt_geometry(target)
             .and_then(|geometry| {
-                let receipt = target.image_paste_receipt.as_ref()?;
+                let receipt = target.media_paste_receipt.as_ref()?;
+                let (kind, count, original_width, original_height) = match &receipt.kind {
+                    crate::window_state::MediaPasteReceiptKind::Image {
+                        original_width,
+                        original_height,
+                    } => ("image", 1, Some(*original_width), Some(*original_height)),
+                    crate::window_state::MediaPasteReceiptKind::Video { candidate, .. } => {
+                        ("video", candidate.count, None, None)
+                    }
+                };
                 Some(serde_json::json!({
                     "rect": rect_json(geometry.rect),
-                    "image_rect": geometry.image_rect.map(rect_json),
+                    "preview_rect": geometry.preview_rect.map(rect_json),
+                    "image_rect": (kind == "image").then(|| geometry.preview_rect.map(rect_json)).flatten(),
                     "dismiss_rect": rect_json(geometry.dismiss_rect),
                     "expanded": !geometry.compact,
-                    "original_width": receipt.original_width,
-                    "original_height": receipt.original_height,
+                    "kind": kind,
+                    "openable": geometry.openable,
+                    "count": count,
+                    "preview_ready": receipt.image.is_some(),
+                    "original_width": original_width,
+                    "original_height": original_height,
                     "remote": receipt.remote,
                 }))
             });
+        // Additive compatibility for automation written against the original
+        // bitmap-only receipt. Video receipts appear only in the generic key.
+        let image_paste_receipt = media_paste_receipt
+            .as_ref()
+            .filter(|receipt| {
+                receipt.get("kind").and_then(serde_json::Value::as_str) == Some("image")
+            })
+            .cloned();
         Response::ok(
             req.id,
             serde_json::json!({
@@ -17294,6 +17684,7 @@ impl App {
                 "context_menu": context_menu,
                 "search": search,
                 "image_paste_receipt": image_paste_receipt,
+                "media_paste_receipt": media_paste_receipt,
                 "title_edit": title_edit,
                 "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
                     "cols": cols,
@@ -17838,7 +18229,7 @@ impl App {
         // Control input may expand the receipt for deterministic automation,
         // but it must not retarget the physical cursor or unrelated tab-bar
         // hover state. Only a native CursorMoved event owns those affordances.
-        self.update_image_paste_receipt_hover(ws);
+        self.update_media_paste_receipt_hover(ws);
     }
 
     fn ctl_mouse_press(
@@ -17955,7 +18346,7 @@ impl App {
         }
 
         let area = self.area(ws);
-        if self.activate_image_paste_receipt_at(ws, px, py, bcode) {
+        if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
             return true;
         }
         let pre = self.focus_key(ws);
@@ -18222,6 +18613,7 @@ impl App {
                 .map(|pane| pane.feed_input(&bytes))
                 .unwrap_or(PaneInputResult::Queued);
             self.report_input_result(result);
+            Self::dismiss_media_paste_receipt_after_input(ws, wheel_pane, result);
             if result != PaneInputResult::ReadOnly {
                 return true;
             }
@@ -18295,7 +18687,30 @@ impl App {
             .get("full_window")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let pane = if full_window && req.params.get("pane").is_none() {
+        let explicit_crop = match screenshot_crop(&req.params) {
+            Ok(crop) => crop,
+            Err(message) => {
+                let _ = reply.send(Response::err(req.id, ec::BAD_PARAMS, message));
+                return;
+            }
+        };
+        if explicit_crop.is_some() && req.params.get("pane").is_some() {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "an explicit crop cannot be combined with pane; crop coordinates are window-relative",
+            ));
+            return;
+        }
+        if explicit_crop.is_some() && full_window {
+            let _ = reply.send(Response::err(
+                req.id,
+                ec::BAD_PARAMS,
+                "an explicit crop cannot be combined with full_window=true",
+            ));
+            return;
+        }
+        let pane = if (full_window || explicit_crop.is_some()) && req.params.get("pane").is_none() {
             None
         } else {
             match self.ctl_resolve_pane(ws, &req.params) {
@@ -18348,7 +18763,9 @@ impl App {
             ));
             return;
         }
-        let crop = if full_window {
+        let crop = if let Some(crop) = explicit_crop {
+            Some(crop)
+        } else if full_window {
             None
         } else {
             let Some(pane_id) = pane else {
@@ -18452,6 +18869,7 @@ impl App {
                         "pane": pane,
                         "window": target_seq,
                         "full_window": full_window,
+                        "crop": explicit_crop,
                     }),
                 ),
                 Err(error) => Response::err(request_id, ec::INTERNAL, error),
@@ -18516,8 +18934,12 @@ impl App {
         // An agent acts as the user — the per-pane read-only
         // toggle (Terminator parity) blocks it like any other input, with an
         // explicit error instead of a silent drop.
-        if let Some((code, message)) = ctl_input_error(p.feed_input(text.as_bytes())) {
+        let result = p.feed_input(text.as_bytes());
+        if let Some((code, message)) = ctl_input_error(result) {
             return Response::err(req.id, code, message);
+        }
+        if !text.is_empty() {
+            self.dismiss_media_paste_receipt_for_pane(ws, pane);
         }
         log::info!(
             "agent-server: send_text conn={conn_id} pane={pane} ({} bytes)",
@@ -18591,8 +19013,12 @@ impl App {
         }
         // The per-pane read-only toggle blocks agents
         // like any other input, with an explicit error.
-        if let Some((code, message)) = ctl_input_error(p.feed_key_inputs(&encoded_keys)) {
+        let result = p.feed_key_inputs(&encoded_keys);
+        if let Some((code, message)) = ctl_input_error(result) {
             return Response::err(req.id, code, message);
+        }
+        if !encoded_keys.is_empty() {
+            self.dismiss_media_paste_receipt_for_pane(ws, pane);
         }
         log::info!(
             "agent-server: send_keys conn={conn_id} pane={pane} ({} keys, {} bytes)",
@@ -18800,10 +19226,12 @@ impl App {
             // An agent acts as the user — the per-pane read-only
             // toggle (Terminator parity) blocks it, with an explicit error
             // (no PendingRun is registered; nothing was written).
-            if let Some((code, message)) = ctl_input_error(p.feed_input(line.as_bytes())) {
+            let result = p.feed_input(line.as_bytes());
+            if let Some((code, message)) = ctl_input_error(result) {
                 let _ = reply.send(Response::err(req.id, code, message));
                 return;
             }
+            self.dismiss_media_paste_receipt_for_pane(ws, pane);
         }
         log::info!("agent-server: run_command conn={conn_id} pane={pane}: {command:?}");
         self.ctl_attach(ws, conn_id, pane);
@@ -21688,6 +22116,29 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 self.finish_window_dispatch(el, window_seq, ws);
             }
+            UserEvent::VideoPreviewReady {
+                window_seq,
+                pane_id,
+                generation,
+                candidate,
+                preview,
+            } => {
+                let Some(mut ws) = self.windows.remove(&window_seq) else {
+                    return;
+                };
+                self.user_event_inner(
+                    &mut ws,
+                    el,
+                    UserEvent::VideoPreviewReady {
+                        window_seq,
+                        pane_id,
+                        generation,
+                        candidate,
+                        preview,
+                    },
+                );
+                self.finish_window_dispatch(el, window_seq, ws);
+            }
             UserEvent::RemoteCommand => {
                 // Re-arm before reading: a writer racing the drain can queue a
                 // new notification, while commands already present are batched.
@@ -22582,8 +23033,8 @@ impl App {
             children.push(ACCESSIBILITY_COMPLETION_CONTAINER_ID);
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
-        if let Some(receipt) = overlay.image_paste_receipt.as_ref()
-            && let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+        if let Some(receipt) = overlay.media_paste_receipt.as_ref()
+            && let Some(geometry) = kettle_render::media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -22591,15 +23042,13 @@ impl App {
                 self.overlay_text_line_height(ws),
             )
         {
+            let label = media_receipt_accessibility_label(&receipt.kind, receipt.remote);
             let mut node = Node::new(Role::Button);
-            node.set_label(format!(
-                "Image path pasted, {} by {}",
-                receipt.original_width, receipt.original_height
-            ));
-            node.set_description(if receipt.remote {
-                "Waiting for the client. The remote session may not read this local path. Open pasted image preview."
+            node.set_label(label);
+            node.set_description(if receipt.openable {
+                "Open the retained pasted image. The path remains on the command line."
             } else {
-                "Waiting for the client. Open pasted image preview."
+                "Hide this video poster notice. The path remains on the command line."
             });
             node.set_live(accesskit::Live::Polite);
             node.add_action(AccessibilityAction::Click);
@@ -22611,11 +23060,11 @@ impl App {
                 f64::from(x + open_width),
                 f64::from(y + height),
             ));
-            children.push(ACCESSIBILITY_IMAGE_RECEIPT_ID);
-            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_ID, node));
+            children.push(ACCESSIBILITY_MEDIA_RECEIPT_ID);
+            nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_ID, node));
 
             let mut dismiss = Node::new(Role::Button);
-            dismiss.set_label("Dismiss pasted image preview");
+            dismiss.set_label("Hide paste notice");
             dismiss.add_action(AccessibilityAction::Click);
             let (x, y, width, height) = geometry.dismiss_rect;
             dismiss.set_bounds(accesskit::Rect::new(
@@ -22624,8 +23073,8 @@ impl App {
                 f64::from(x + width),
                 f64::from(y + height),
             ));
-            children.push(ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID);
-            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID, dismiss));
+            children.push(ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID);
+            nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID, dismiss));
         }
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
@@ -22697,14 +23146,34 @@ impl App {
                 candidate.description.hash(&mut hasher);
             }
         }
-        let projected_receipt = overlay.image_paste_receipt.as_ref();
+        let projected_receipt = overlay.media_paste_receipt.as_ref();
         projected_receipt.is_some().hash(&mut hasher);
         if let Some(receipt) = projected_receipt {
-            receipt.original_width.hash(&mut hasher);
-            receipt.original_height.hash(&mut hasher);
+            match &receipt.kind {
+                kettle_render::MediaPasteReceiptKind::Image {
+                    original_width,
+                    original_height,
+                } => {
+                    0_u8.hash(&mut hasher);
+                    original_width.hash(&mut hasher);
+                    original_height.hash(&mut hasher);
+                }
+                kettle_render::MediaPasteReceiptKind::Video {
+                    extension,
+                    size,
+                    count,
+                    preview_pending,
+                } => {
+                    1_u8.hash(&mut hasher);
+                    extension.hash(&mut hasher);
+                    size.hash(&mut hasher);
+                    count.hash(&mut hasher);
+                    preview_pending.hash(&mut hasher);
+                }
+            }
             receipt.remote.hash(&mut hasher);
             receipt.expanded.hash(&mut hasher);
-            if let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+            if let Some(geometry) = kettle_render::media_paste_receipt_geometry(
                 receipt,
                 overlay.completion.as_ref(),
                 self.menu_cell(ws),
@@ -24326,9 +24795,9 @@ impl App {
     }
 
     fn handle_accessibility_action(&mut self, ws: &mut WindowState, request: ActionRequest) {
-        if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID {
+        if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID {
             if request.action == AccessibilityAction::Click {
-                ws.image_paste_receipt = None;
+                ws.media_paste_receipt = None;
                 ws.accessibility_pending = true;
                 if let Some(window) = &ws.window {
                     window.request_redraw();
@@ -24336,16 +24805,19 @@ impl App {
             }
             return;
         }
-        if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_ID {
-            if request.action == AccessibilityAction::Click
-                && let Some(path) = ws
-                    .image_paste_receipt
-                    .as_ref()
-                    .filter(|receipt| ws.mux.active_focus() == Some(receipt.pane_id))
-                    .map(|receipt| receipt.path.clone())
-                && let Err(error) = open::that_detached(&path)
-            {
-                log::warn!("could not open a pasted-image preview: {error}");
+        if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_ID {
+            if request.action == AccessibilityAction::Click {
+                let openable = self
+                    .media_paste_receipt_projection(ws)
+                    .is_some_and(|(receipt, _)| receipt.openable);
+                if openable {
+                    self.open_media_paste_receipt(ws);
+                } else if ws.media_paste_receipt.take().is_some() {
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                }
             }
             return;
         }
@@ -24428,6 +24900,62 @@ impl App {
             UserEvent::Activation | UserEvent::RemoteScanReady => {}
             UserEvent::AccessibilityAction { request, .. } => {
                 self.handle_accessibility_action(ws, request);
+            }
+            UserEvent::VideoPreviewReady {
+                window_seq,
+                pane_id,
+                generation,
+                candidate,
+                preview,
+            } => {
+                if window_seq != ws.seq {
+                    return;
+                }
+                let Some(mut pending) = ws.pending_video_paste_receipt.take() else {
+                    return;
+                };
+                if pending.pane_id != pane_id || pending.generation != generation {
+                    ws.pending_video_paste_receipt = Some(pending);
+                    return;
+                }
+                if pending.expired(std::time::Instant::now()) {
+                    ws.accessibility_pending = true;
+                    return;
+                }
+                let Some(mut candidate) = candidate else {
+                    ws.media_paste_receipt = None;
+                    ws.accessibility_pending = true;
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
+                };
+                if !ws.mux.panes.contains_key(&pane_id) {
+                    return;
+                }
+                candidate.count = pending.request.count;
+                let mut receipt = pending.previous_receipt.take();
+                if receipt
+                    .as_mut()
+                    .is_none_or(|prior| !prior.merge_drop(pane_id, &candidate, pending.created_at))
+                {
+                    receipt = Some(crate::window_state::MediaPasteReceiptState::new_video(
+                        pane_id,
+                        &candidate,
+                        generation,
+                        pending.remote,
+                        pending.prefer_top,
+                        pending.created_at,
+                    ));
+                }
+                if let Some(receipt) = receipt.as_mut() {
+                    receipt.finish_video_preview(generation, preview);
+                }
+                ws.media_paste_receipt = receipt;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
             }
             UserEvent::Wakeup => {
                 // Semantic terminal events and direct-child lifecycle edges
@@ -24759,7 +25287,7 @@ impl App {
                 ws.hovered_close_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
-                if let Some(receipt) = ws.image_paste_receipt.as_mut() {
+                if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }
                 if let Some(w) = &ws.window {
@@ -24910,8 +25438,8 @@ impl App {
                 // state. Sub-pixel movements that winit *might* coalesce
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor(ws);
-                let image_receipt_hovered = self.update_image_paste_receipt_hover(ws);
-                self.sync_cursor_icon_with_image_receipt_hover(ws, image_receipt_hovered);
+                let media_receipt_hovered = self.update_media_paste_receipt_hover(ws);
+                self.sync_cursor_icon_with_media_receipt_hover(ws, media_receipt_hovered);
                 // Terminator menu UX, hover-to-highlight:
                 // cursor over a context-menu row immediately updates
                 // the highlight. Matches GTK/NSMenu/Win32 menu
@@ -25390,10 +25918,10 @@ impl App {
                     return;
                 }
                 let area = self.area(ws);
-                // The receipt is chrome over terminal cells. Consume every
-                // press inside it so hidden links, selections, or mouse-mode
-                // applications never receive a click meant for the card.
-                if self.activate_image_paste_receipt_at(ws, px, py, bcode) {
+                // The receipt is chrome over terminal cells. The primary
+                // button acts; every other button is consumed without acting
+                // so hidden terminal content cannot receive the press.
+                if self.activate_media_paste_receipt_at(ws, px, py, bcode) {
                     return;
                 }
                 // The detached card covers terminal cells but is not a shell
@@ -25793,28 +26321,17 @@ impl App {
                 if self.any_modal_open(ws) {
                     return;
                 }
-                // Standard modern-terminal affordance: dragging a file
-                // onto the window inserts its (shell-quoted) path at the
-                // cursor, so the user can drop a config / log / Rust
-                // source file and press Enter to act on it without
-                // typing the path. iTerm2 / WezTerm / kitty / Ghostty /
-                // GNOME Terminal all do this. A trailing space lets
-                // `cat ` + drop + Enter Just Work; without it, the
-                // user would have to add a space between the previous
-                // token and the path.
-                //
-                // Route through `paste_payload` so a vim /
-                // neovim / fzf / mc that has bracketed paste enabled
-                // sees the path wrapped in `\e[200~ … \e[201~` and
-                // treats it as a paste block (no per-char command
-                // interpretation). Without this, dropping a file onto
-                // vim caused each char of the path to act as a normal-
-                // mode command — chaotic. Clipboard paste already
-                // routes through the same helper; this brings drag-
-                // drop into line. Honors broadcast: the path goes to every
-                // selected pane across the same windows as typing, and each
-                // pane gets its own shell formatting and BRACKETED_PASTE wrap.
-                self.paste_paths(ws, vec![path], true);
+                // Insert a shell-quoted path plus a trailing space. The shared
+                // paste path preserves bracketed paste, per-pane shell
+                // formatting, broadcast scope, and WSL translation.
+                let paths = vec![path];
+                let video = self.cfg.paste_video_preview.then(|| {
+                    crate::video_preview::VideoPasteRequest::from_user_paths(
+                        &paths,
+                        crate::video_preview::VideoPasteSource::Drop,
+                    )
+                });
+                self.paste_paths(ws, paths, true, video.flatten());
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -25890,7 +26407,7 @@ impl App {
                     ws.detach_drag = crate::detach::DragState::default();
                     ws.drag_press = None;
                     ws.pane_drag = None;
-                    if let Some(receipt) = ws.image_paste_receipt.as_mut()
+                    if let Some(receipt) = ws.media_paste_receipt.as_mut()
                         && receipt.set_hover(false, std::time::Instant::now())
                     {
                         ws.accessibility_pending = true;
@@ -26415,14 +26932,39 @@ impl App {
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
         if ws
-            .image_paste_receipt
+            .media_paste_receipt
             .as_ref()
             .is_some_and(|receipt| !ws.mux.panes.contains_key(&receipt.pane_id))
         {
-            ws.image_paste_receipt = None;
+            ws.media_paste_receipt = None;
             ws.accessibility_pending = true;
         }
+        if ws
+            .pending_video_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| !ws.mux.panes.contains_key(&receipt.pane_id))
+        {
+            ws.pending_video_paste_receipt = None;
+        }
+        if !self.cfg.paste_video_preview {
+            ws.pending_video_paste_receipt = None;
+        }
         let now = std::time::Instant::now();
+        if ws
+            .pending_video_paste_receipt
+            .as_ref()
+            .is_some_and(|pending| pending.expired(now))
+        {
+            ws.pending_video_paste_receipt = None;
+            ws.accessibility_pending = true;
+            log::debug!("video paste receipt abandoned: preview worker response timed out");
+        }
+        let pending_video_receipt_wait = ws.pending_video_paste_receipt.as_ref().map(|pending| {
+            pending
+                .deadline()
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         #[cfg(windows)]
         let bounded_pty_exit_wait = next_bounded_pty_exit_wait(ws, now);
         // Catch the session changes no gesture announces — see `SESSION_SWEEP`.
@@ -26468,6 +27010,7 @@ impl App {
                 RecoveryAction::Wait(wait) => {
                     let next = wait.max(std::time::Duration::from_millis(1));
                     let next = automation_wait.map_or(next, |automation| automation.min(next));
+                    let next = pending_video_receipt_wait.map_or(next, |pending| pending.min(next));
                     return Some(now + next);
                 }
                 RecoveryAction::Attempt { attempt_index } => {
@@ -26507,6 +27050,8 @@ impl App {
                             let next = backoff.max(std::time::Duration::from_millis(1));
                             let next =
                                 automation_wait.map_or(next, |automation| automation.min(next));
+                            let next = pending_video_receipt_wait
+                                .map_or(next, |pending| pending.min(next));
                             return Some(now + next);
                         }
                     }
@@ -26644,42 +27189,53 @@ impl App {
                 w.request_redraw();
             }
         }
-        let receipt_owner_visible = self.cfg.paste_image_preview
+        let receipt_enabled = ws
+            .media_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| match &receipt.kind {
+                crate::window_state::MediaPasteReceiptKind::Image { .. } => {
+                    self.cfg.paste_image_preview
+                }
+                crate::window_state::MediaPasteReceiptKind::Video { .. } => {
+                    self.cfg.paste_video_preview
+                }
+            });
+        let receipt_owner_visible = receipt_enabled
             && ws.window_focused
             && terminal_surface_available(ws)
             && ws
-                .image_paste_receipt
+                .media_paste_receipt
                 .as_ref()
                 .is_some_and(|receipt| ws.mux.active_focus() == Some(receipt.pane_id));
-        let mut image_receipt_redraw = false;
-        if !self.cfg.paste_image_preview && ws.image_paste_receipt.take().is_some() {
+        let mut media_receipt_redraw = false;
+        if !receipt_enabled && ws.media_paste_receipt.take().is_some() {
             // A live config change to `off` is an ownership boundary, not only
             // a paint toggle. Release the bounded pixels and retained path
             // immediately instead of keeping hidden preview state until its
             // original lifetime expires.
             ws.accessibility_pending = true;
-            image_receipt_redraw = true;
+            media_receipt_redraw = true;
         }
         if !receipt_owner_visible
-            && let Some(receipt) = ws.image_paste_receipt.as_mut()
+            && let Some(receipt) = ws.media_paste_receipt.as_mut()
             && receipt.set_hover(false, now)
         {
             ws.accessibility_pending = true;
-            image_receipt_redraw = true;
+            media_receipt_redraw = true;
         }
         if ws
-            .image_paste_receipt
+            .media_paste_receipt
             .as_ref()
             .is_some_and(|receipt| !receipt.live(now))
         {
-            ws.image_paste_receipt = None;
+            ws.media_paste_receipt = None;
             ws.accessibility_pending = true;
-            image_receipt_redraw = true;
-        } else if let Some(receipt) = ws.image_paste_receipt.as_mut() {
-            image_receipt_redraw |= receipt.mark_collapsed_if_due(now);
+            media_receipt_redraw = true;
+        } else if let Some(receipt) = ws.media_paste_receipt.as_mut() {
+            media_receipt_redraw |= receipt.mark_collapsed_if_due(now);
         }
-        let image_receipt_wait = ws
-            .image_paste_receipt
+        let media_receipt_wait = ws
+            .media_paste_receipt
             .as_ref()
             .and_then(|receipt| receipt.next_deadline(now))
             .map(|deadline| {
@@ -26790,7 +27346,7 @@ impl App {
             || autoscroll_active
             || coalesce_due
             || resize_chip_active
-            || image_receipt_redraw
+            || media_receipt_redraw
             || completion_hide_due)
             && let Some(w) = &ws.window
         {
@@ -26834,7 +27390,10 @@ impl App {
             let next = next.max(std::time::Duration::from_millis(1));
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
-        if let Some(next) = image_receipt_wait {
+        if let Some(next) = media_receipt_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = pending_video_receipt_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         #[cfg(windows)]
@@ -27295,8 +27854,8 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
-        ACCESSIBILITY_IMAGE_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
+        ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID,
+        ACCESSIBILITY_MEDIA_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
         ConfirmButton, ConfirmDialogState, ContextMenuItem, GroupBulkScope,
         MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch,
         PendingLuaCommand, PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
@@ -27733,33 +28292,54 @@ mod tests {
     }
 
     #[test]
-    fn image_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
+    fn media_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
         let source = production_source();
         let confirmed = source
             .split("fn paste_paths_confirmed(")
             .nth(1)
-            .and_then(|rest| rest.split("\n    fn show_image_paste_receipt").next())
+            .and_then(|rest| rest.split("\n    fn show_media_paste_receipt").next())
             .expect("confirmed path delivery body");
         assert_eq!(confirmed.matches("delivery.receipt_accepted").count(), 2);
         assert_eq!(
-            confirmed.matches("self.show_image_paste_receipt(").count(),
+            confirmed.matches("self.show_media_paste_receipt(").count(),
             4,
             "success, rejection, and a disappearing target must all consume the one-shot preview"
         );
 
         let show = source
-            .split("fn show_image_paste_receipt(")
+            .split("fn show_media_paste_receipt(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("image receipt gate");
         for gate in [
-            "paths.len() != 1",
-            "!self.cfg.paste_image_preview || !accepted_by_receipt_pane",
+            "paths.len() == 1",
+            "if !accepted_by_receipt_pane",
             "receipt_pane.filter(|id| ws.mux.panes.contains_key(id))",
             "self.pasted_images.take_preview_for_path(&paths[0])",
+            "video.filter(|_| self.cfg.paste_video_preview)",
         ] {
             assert!(show.contains(gate), "receipt gate lost {gate:?}");
         }
+        let clipboard = source
+            .split("fn paste_clipboard(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn clipboard_image_paste_path").next())
+            .expect("clipboard paste entry point");
+        let dropped = source
+            .split("WindowEvent::DroppedFile(path) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("WindowEvent::Focused").next())
+            .expect("dropped-file entry point");
+        assert!(
+            clipboard.contains("VideoPasteSource::Clipboard")
+                && dropped.contains("VideoPasteSource::Drop")
+                && clipboard.contains("VideoPasteRequest::from_user_paths")
+                && dropped.contains("VideoPasteRequest::from_user_paths")
+                && !clipboard.contains("VideoPasteCandidate::from_user_paths")
+                && !dropped.contains("VideoPasteCandidate::from_user_paths")
+                && source.contains("video: Option<Box<crate::video_preview::VideoPasteRequest>>"),
+            "video receipts must retain an explicit clipboard/drop provenance token through confirmation"
+        );
 
         let cancel = source
             .split("fn cancel_confirm_dialog(")
@@ -27778,7 +28358,8 @@ mod tests {
             .expect("path paste body");
         assert!(
             paths.contains("if !within_limit {")
-                && paths.contains("discard_previews_for_paths(&paths)"),
+                && paths.contains("discard_previews_for_paths(&paths)")
+                && !paths.contains("dismiss_media_paste_receipt_on_input"),
             "an oversize bitmap path must release its one-shot preview"
         );
 
@@ -27794,13 +28375,57 @@ mod tests {
             .expect("about_to_wait receipt cleanup");
         assert!(
             wait.contains("!ws.mux.panes.contains_key(&receipt.pane_id)")
-                && wait.contains("ws.image_paste_receipt = None;"),
-            "closing the owner pane must remove its receipt"
+                && wait.contains("ws.media_paste_receipt = None;")
+                && wait.contains("ws.pending_video_paste_receipt = None;"),
+            "closing the owner pane must remove its receipt and pending validation"
         );
         assert!(
-            wait.contains("!self.cfg.paste_image_preview")
-                && wait.contains("ws.image_paste_receipt.take().is_some()"),
-            "turning previews off must release an already-retained receipt"
+            wait.contains("let receipt_enabled")
+                && wait.contains("ws.media_paste_receipt.take().is_some()")
+                && wait.contains("!self.cfg.paste_video_preview")
+                && wait.contains("ws.pending_video_paste_receipt = None;"),
+            "turning previews off must release retained and pending receipt state"
+        );
+        let config_clear_at = wait
+            .find("if !self.cfg.paste_video_preview")
+            .expect("video-preview config clear");
+        let pending_wait_at = wait
+            .find("let pending_video_receipt_wait")
+            .expect("pending video receipt wait");
+        assert!(
+            config_clear_at < pending_wait_at,
+            "disabling previews must clear pending state before scheduling its wake"
+        );
+        assert!(
+            wait.contains("pending.expired(now)")
+                && wait
+                    .contains("video paste receipt abandoned: preview worker response timed out")
+                && wait.contains("let pending_video_receipt_wait")
+                && wait.contains("if let Some(next) = pending_video_receipt_wait"),
+            "a missing worker result must expire pending state on a scheduled wake"
+        );
+        let gpu_recovery = wait
+            .split("if self.gpu.as_ref().is_some_and(|g| g.is_lost())")
+            .nth(1)
+            .and_then(|rest| rest.split("if ws.pty_resize_retry.take_due(now)").next())
+            .expect("GPU recovery scheduler");
+        assert_eq!(
+            gpu_recovery.matches("pending_video_receipt_wait").count(),
+            2,
+            "GPU recovery backoff must not postpone pending receipt cleanup"
+        );
+        let ready = source
+            .split("fn user_event_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("user event handler")
+            .split("UserEvent::VideoPreviewReady {")
+            .nth(1)
+            .and_then(|rest| rest.split("UserEvent::Wakeup").next())
+            .expect("video preview result handler");
+        assert!(
+            ready.contains("pending.expired(std::time::Instant::now())"),
+            "a late worker reply must not revive already-expired pending state"
         );
 
         let ctl_press = source
@@ -27809,7 +28434,7 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("ctl mouse press body");
         assert!(
-            ctl_press.contains("activate_image_paste_receipt_at("),
+            ctl_press.contains("activate_media_paste_receipt_at("),
             "synthetic presses must not click through receipt chrome"
         );
         assert!(
@@ -27823,37 +28448,131 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("ctl mouse move body");
         assert!(
-            ctl_move.contains("update_image_paste_receipt_hover(ws)")
+            ctl_move.contains("update_media_paste_receipt_hover(ws)")
                 && !ctl_move.contains("sync_cursor_icon"),
             "synthetic motion may expand the receipt but must not retarget native chrome hover or the OS cursor"
         );
 
         let hit_test = source
-            .split("fn image_paste_receipt_geometry(")
+            .split("fn media_paste_receipt_geometry(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("receipt hit-test projection");
         assert!(
-            hit_test.contains("self.image_paste_receipt_projection(ws)?")
+            hit_test.contains("self.media_paste_receipt_projection(ws)?")
                 && !hit_test.contains("self.overlay("),
             "receipt hit-testing must project only the receipt and completion, never all window chrome"
         );
 
         let activation = source
-            .split("fn activate_image_paste_receipt_at(")
+            .split("fn activate_media_paste_receipt_at(")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("receipt activation body");
         assert!(
             activation.contains("receipt.right_gutter > 0.0")
                 && activation.contains("pane_x + pane_w - receipt.right_gutter")
-                && activation.contains("ImagePasteReceiptHit::Dismiss")
-                && activation.contains("ws.image_paste_receipt = None;"),
-            "receipt activation must preserve the scrollbar and honor its dismiss target"
+                && activation.contains("if bcode == 0 {")
+                && activation.contains("MediaPasteReceiptHit::Dismiss")
+                && activation.contains("MediaPasteReceiptHit::Body")
+                && activation.contains("ws.media_paste_receipt = None;")
+                && activation.contains("self.open_media_paste_receipt(ws)"),
+            "receipt activation must preserve the scrollbar, consume covered clicks, and honor its primary actions"
+        );
+        let open = source
+            .split("fn open_media_paste_receipt(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("shared receipt open body");
+        assert!(
+            open.contains("ws.mux.active_focus() == Some(receipt.pane_id)")
+                && open.contains("MediaPasteReceiptKind::Image")
+                && open.contains("self.pasted_images.path_still_matches(&path)")
+                && open.contains("ws.media_paste_receipt = None;")
+                && open.contains("preview unavailable"),
+            "only a retained image may open, after rechecking pane and file identity"
+        );
+        let accessibility = source
+            .split("fn handle_accessibility_action(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("accessibility action body");
+        assert!(
+            accessibility.contains("|(receipt, _)| receipt.openable")
+                && accessibility.contains("self.open_media_paste_receipt(ws)")
+                && accessibility.contains("ws.media_paste_receipt.take().is_some()"),
+            "assistive clicks must open retained images and dismiss non-openable video receipts"
+        );
+        let input_dismiss = source
+            .split("fn dismiss_media_paste_receipt_on_input(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("receipt input dismissal body");
+        assert!(
+            input_dismiss.contains("Self::take_media_paste_receipt_on_input(ws)")
+                && source.contains("Self::dismiss_media_paste_receipt_on_input(ws);"),
+            "later input must remove a receipt whose command-line claim may be stale"
+        );
+        let terminal_input = source
+            .split("fn write_terminal_input(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("terminal input body");
+        let broadcast_input = source
+            .split("fn broadcast_input(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("broadcast input body");
+        let text_paste = source
+            .split("fn paste_text_confirmed(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn paste_paths(").next())
+            .expect("confirmed text paste body");
+        let send_newline = source
+            .split("Action::SendNewline =>")
+            .nth(1)
+            .and_then(|rest| rest.split("Action::EditConfig =>").next())
+            .expect("send-newline action");
+        let run_command = source
+            .split("fn ctl_run_command(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// `run_command` is pending").next())
+            .expect("run-command body");
+        assert!(
+            terminal_input.contains("dismiss_media_paste_receipt_after_input")
+                && broadcast_input
+                    .matches("dismiss_media_paste_receipt_after_delivery")
+                    .count()
+                    == 2
+                && text_paste
+                    .matches("dismiss_media_paste_receipt_after_delivery")
+                    .count()
+                    == 2
+                && text_paste.contains("dismiss_media_paste_receipt_after_input")
+                && send_newline.contains("dismiss_media_paste_receipt_after_input")
+                && run_command.contains("dismiss_media_paste_receipt_for_pane"),
+            "every successful authored-input route must invalidate the affected pane's receipt, including foreign broadcasts and control commands"
+        );
+        assert!(
+            !terminal_input.contains("Self::dismiss_media_paste_receipt_on_input(ws);")
+                && !text_paste.contains("Self::dismiss_media_paste_receipt_on_input(ws);")
+                && broadcast_input.contains("receipt_pane"),
+            "a rejected pane write must preserve its receipt instead of clearing it optimistically"
+        );
+        assert!(
+            confirmed.contains("let previous = Self::take_media_paste_state_on_input(ws)")
+                && show.contains("ws.media_paste_receipt = previous_receipt")
+                && show.contains("ws.pending_video_paste_receipt = previous_pending")
+                && show.contains("pending.merge_drop(pane_id, &request, now)"),
+            "path delivery must restore rejected state and coalesce accepted adjacent drops before background validation"
         );
         assert!(
             geometry.contains("\"dismiss_rect\":")
+                && geometry.contains("\"preview_rect\":")
+                && geometry.contains("\"kind\":")
+                && geometry.contains("\"openable\":")
                 && !geometry.contains("\"path\":")
+                && !geometry.contains("extension")
                 && !geometry.contains("rgba"),
             "ui_geometry must expose safe shared controls, never retained paths or pixels"
         );
@@ -28133,22 +28852,21 @@ mod tests {
             .split("fn dispatch_confirm_action_arms(")
             .nth(1)
             .expect("confirm dispatch arms");
-        for call in [
-            "paste_text_confirmed(ws, target, &text)",
-            "paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space)",
-        ] {
-            assert!(
-                confirm_arms.contains(call),
-                "the confirmation dispatcher must carry the prompt's target into {call}"
-            );
-        }
+        assert!(confirm_arms.contains("paste_text_confirmed(ws, target, &text)"));
+        assert!(
+            confirm_arms.contains("ConfirmAction::PastePaths {")
+                && confirm_arms.contains("video,")
+                && confirm_arms.contains("self.paste_paths_confirmed("),
+            "the confirmation dispatcher must carry the pinned target and video provenance into path delivery"
+        );
         let dropped = src
             .split("WindowEvent::DroppedFile(path) => {")
             .nth(1)
             .and_then(|body| body.split("WindowEvent::Focused").next())
             .expect("dropped-file arm");
         assert!(
-            dropped.contains("self.paste_paths(ws, vec![path], true);"),
+            dropped.contains("VideoPasteSource::Drop")
+                && dropped.contains("self.paste_paths(ws, paths, true, video.flatten());"),
             "dropped files must use the same cross-window path fanout as clipboard files"
         );
         let clear_history = src
@@ -30050,6 +30768,57 @@ mod tests {
     }
 
     #[test]
+    fn explicit_screenshot_crop_is_all_or_nothing_and_bounded() {
+        assert_eq!(super::screenshot_crop(&serde_json::json!({})), Ok(None));
+        assert_eq!(
+            super::screenshot_crop(&serde_json::json!({
+                "crop_x": 4,
+                "crop_y": 5.5,
+                "crop_width": 120,
+                "crop_height": 36,
+            })),
+            Ok(Some((4.0, 5.5, 120.0, 36.0)))
+        );
+        for invalid in [
+            serde_json::json!({"crop_x": 1}),
+            serde_json::json!({
+                "crop_x": -1,
+                "crop_y": 0,
+                "crop_width": 1,
+                "crop_height": 1,
+            }),
+            serde_json::json!({
+                "crop_x": 0,
+                "crop_y": 0,
+                "crop_width": 0,
+                "crop_height": 1,
+            }),
+            serde_json::json!({
+                "crop_x": "0",
+                "crop_y": 0,
+                "crop_width": 1,
+                "crop_height": 1,
+            }),
+        ] {
+            assert!(super::screenshot_crop(&invalid).is_err(), "{invalid}");
+        }
+
+        let source = production_source();
+        let body = source
+            .split("fn ctl_screenshot(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    /// `send_text`").next())
+            .expect("ctl_screenshot body");
+        assert!(
+            body.contains("let crop = if let Some(crop) = explicit_crop")
+                && body.contains("ScreenshotRequest {")
+                && body.contains("explicit crop cannot be combined with pane")
+                && body.contains("explicit crop cannot be combined with full_window=true"),
+            "the parsed crop must reach the renderer without broadening its scope"
+        );
+    }
+
+    #[test]
     fn hidden_output_sidechannels_keep_transport_wakes_without_enabling_paints() {
         assert!(!super::output_wake_transport_enabled(true, false));
         assert!(super::output_wake_transport_enabled(true, true));
@@ -30869,10 +31638,20 @@ mod tests {
     fn event_state_leaks_are_gated() {
         let src = production_source();
         // 1. Dropped-file modal gate, at the top of the arm.
+        let dropped = src
+            .split("WindowEvent::DroppedFile(path) => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::Focused").next())
+            .expect("DroppedFile event arm");
+        let modal_gate = dropped
+            .find("if self.any_modal_open(ws) {\n                    return;\n                }")
+            .expect("DroppedFile must return while a modal is open");
+        let first_path_operation = dropped
+            .find("let paths = vec![path];")
+            .expect("DroppedFile path delivery");
         assert!(
-            src.contains("WindowEvent::DroppedFile(path) => {")
-                && src.contains("if self.any_modal_open(ws) {\n                    return;\n                }\n                // Standard modern-terminal affordance"),
-            "DroppedFile must early-return when a modal is open"
+            modal_gate < first_path_operation,
+            "the modal gate must precede all dropped-path work"
         );
         // 2. Focus-loss drag-flag reset (the block also clears dragging_split,
         //    so check the individual resets, not a contiguous
@@ -31586,6 +32365,19 @@ mod tests {
                 && tree.contains("completion_overlay_rect(completion, self.menu_cell(ws))"),
             "assistive technology must hear each visible row's absolute position and the full set size"
         );
+        let receipt = tree
+            .split("if let Some(receipt) = overlay.media_paste_receipt.as_ref()")
+            .nth(1)
+            .and_then(|rest| rest.split("let mut root = Node::new(Role::Window)").next())
+            .expect("media receipt accessibility nodes");
+        assert!(
+            receipt.contains("let mut node = Node::new(Role::Button)")
+                && receipt.contains("node.add_action(AccessibilityAction::Click)")
+                && receipt
+                    .contains("media_receipt_accessibility_label(&receipt.kind, receipt.remote)")
+                && !receipt.contains("Role::Group"),
+            "receipt bodies must advertise their action and visible video details"
+        );
         let body = src
             .split("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
             .nth(1)
@@ -31617,10 +32409,35 @@ mod tests {
     }
 
     #[test]
-    fn image_receipt_accessibility_id_cannot_collide_with_completion_rows() {
+    fn video_receipt_accessibility_names_the_visible_details() {
+        let one = kettle_render::MediaPasteReceiptKind::Video {
+            extension: "MP4".into(),
+            size: 1_500,
+            count: 1,
+            preview_pending: false,
+        };
+        assert_eq!(
+            super::media_receipt_accessibility_label(&one, false),
+            "Video path pasted, MP4, 1.5 KB"
+        );
+
+        let batch = kettle_render::MediaPasteReceiptKind::Video {
+            extension: "WEBM".into(),
+            size: 999,
+            count: 3,
+            preview_pending: true,
+        };
+        assert_eq!(
+            super::media_receipt_accessibility_label(&batch, true),
+            "3 video paths pasted, first is WEBM, 999 B, remote pane, local path only"
+        );
+    }
+
+    #[test]
+    fn media_receipt_accessibility_id_cannot_collide_with_completion_rows() {
         for receipt in [
-            ACCESSIBILITY_IMAGE_RECEIPT_ID,
-            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
+            ACCESSIBILITY_MEDIA_RECEIPT_ID,
+            ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID,
         ] {
             assert_ne!(
                 receipt,
@@ -31630,8 +32447,8 @@ mod tests {
             assert_ne!(receipt, ACCESSIBILITY_COMPLETION_CONTAINER_ID);
         }
         assert_ne!(
-            ACCESSIBILITY_IMAGE_RECEIPT_ID,
-            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID
+            ACCESSIBILITY_MEDIA_RECEIPT_ID,
+            ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID
         );
     }
 
@@ -35312,6 +36129,7 @@ mod tests {
             focus_idx: 1,
             on_confirm: ConfirmAction::PastePaths {
                 paths: vec![path].into_boxed_slice(),
+                video: None,
                 trailing_space: true,
                 target: confirmed_paste_target(&mux),
                 receipt_pane: mux.active_focus(),
@@ -35342,6 +36160,7 @@ mod tests {
             focus_idx: 1,
             on_confirm: ConfirmAction::PastePaths {
                 paths: vec![dead_path].into_boxed_slice(),
+                video: None,
                 trailing_space: true,
                 target: confirmed_paste_target(&mux),
                 receipt_pane: mux.active_focus(),

@@ -51,12 +51,14 @@ For Kettle's stable, client-independent path, focus the agent pane and press
 `Ctrl+Shift+V`. When the clipboard contains a bitmap and `paste-images` is on
 (the default), Kettle writes a bounded owner-only temporary PNG and pastes its
 shell-quoted path. The running agent can read that path without needing native
-clipboard-bitmap support. A short-lived thumbnail confirms which image path
-Kettle queued; it deliberately says “Waiting for client” because only the
-client can decide whether to read or attach it. Hover expands the receipt,
-clicking its body opens the retained PNG, and `×` dismisses it. A two-minute
-hard limit removes even a hovered receipt. Set `paste-image-preview = off` to avoid
-creating or retaining preview pixels without changing image paste.
+clipboard-bitmap support. A short-lived thumbnail confirms the image dimensions
+and says the path is on the command line without claiming the client attached
+or opened it. Hover expands the receipt, clicking its body opens the retained
+PNG, and `×` dismisses it. A two-minute hard limit removes even a hovered
+receipt. A newer media paste replaces it, and the next keyboard, paste, or
+control input dismisses it because the command line may have changed. Set
+`paste-image-preview = off` to avoid creating or retaining preview pixels
+without changing image paste.
 
 Current local `codex --help` also exposes `-i, --image <FILE>...` for images
 attached to an initial prompt. This is the durable Codex fallback when starting
@@ -102,6 +104,16 @@ double-quote), and when the pane runs **WSL** a Windows path is translated to
 its `/mnt/c/…` (or in-distro `/home/…` for a `\\wsl.localhost\…` share) form so
 the Linux-side agent can open it. There is no video decoder in either client;
 the path lets the agent drive `ffmpeg` itself.
+
+An explicit copied or dropped video also gets a short-lived receipt when
+`paste-video-preview` is on. After bounded background validation it uses a
+native thumbnail when one is available and a generic poster otherwise. The
+receipt never means the client attached or opened the video. macOS uses Quick
+Look, Windows uses the Shell thumbnail provider, and Linux accepts only a
+matching owner-controlled cache entry that other principals cannot modify. The
+video card has no open action because native launch APIs cannot bind a path to
+Kettle's validated handle; clicking the card or `×` dismisses it. Kettle does
+not scan hovered or pasted path text.
 
 ## Focus and cursor state
 

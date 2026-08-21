@@ -23,7 +23,7 @@ graph TD
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
-    cfg["kettle-config<br/>Ghostty config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
+    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
@@ -120,6 +120,8 @@ relative operations; ancestor identities are recorded and the complete chain
 is reopened and revalidated around publication. This keeps steady descriptor
 use O(1) per guard rather than O(path depth) without weakening path-swap checks.
 
+### Private clipboard images and video receipts
+
 Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of
 those primitives. One process owns at most 64 PNG handles and 256 MiB of final
 encoded PNG bytes; the streaming writer refuses a write that would cross the
@@ -154,7 +156,37 @@ Receipt state is window-local and pane-pinned; moving focus never projects it
 over another split. Paint, pointer blocking, and accessibility all use the same
 geometry result, while the image has its own single-instance GPU pipeline so
 terminal glyphs cannot cover the thumbnail and the thumbnail cannot cover its
-labels.
+labels. Before handing the private path to the OS launcher, Kettle reopens the
+PNG through the held session directory and requires it to match the retained
+kernel identity. The owner-only session directory prevents another principal
+from replacing the name between that check and the path-based launch.
+
+Explicit video file lists use the same receipt geometry without sharing the
+managed-image trust root. The event loop only classifies absolute path syntax
+and pastes it normally. Once the initiating pane accepts the paste, one of two
+background threads sends the first video path through a bounded eight-job queue
+to the current executable's hidden worker. The child requires a non-link regular
+file whose file and parent chain reject mutation by an untrusted principal. It
+holds the file open and compares kernel identity, timestamps, size, and a bounded
+first/middle/last SHA-256 sample before and after extraction. Each child has a
+two-second deadline and can return at most 256 by 160 RGBA pixels. A changed,
+missing, or untrusted source gets no receipt. The video card has no open action,
+so the parent never reopens the path after validation. A primary press on its
+body or dismiss target consumes the hidden terminal click and removes the card.
+Pending window state has a 20-second deadline, long enough for one surviving
+thread to drain the full queue but finite if a worker exits without replying.
+The hidden worker dispatches before update recovery and application startup, so
+poster work never takes install locks or launches an update helper.
+
+The child delegates thumbnail extraction instead of bundling a video decoder:
+[Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
+on macOS, [IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
+in a fresh Windows STA, and the
+[Freedesktop thumbnail cache](https://specifications.freedesktop.org/thumbnail-spec/latest/)
+on Linux. Linux opens one PNG through a held, trusted parent chain, verifies its
+owner, mode, `Thumb::URI`, and `Thumb::MTime`, then decodes that same descriptor.
+A missing or untrusted cache entry leaves the generic poster visible. No
+platform path runs a video codec inside the Kettle process.
 
 Crash cleanup recognizes only
 `kettle-paste-<canonical-pid>-<canonical-u128-nonce>` directories and canonical
@@ -1051,7 +1083,7 @@ flowchart LR
     glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
     text --> overlay["5. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
     overlay --> menuq["6. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
-    menuq --> receipt["7. image_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
+    menuq --> receipt["7. media_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
     receipt --> menut["8. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
     menut --> curg["9. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
@@ -1752,8 +1784,8 @@ Four notable invariants preserved by this flow:
   `--tab-handoff` loads were dead because `resumed()` `mem::take`'d
   the whole CLI-options struct before the gates read it.)
 
-See [`docs/ROADMAP.md`](ROADMAP.md) for the full ledger of
-session-restore hardening.
+See the [version history](VERSION-HISTORY.md) for the shipped session-restore
+hardening ledger.
 
 ## Performance evidence boundary
 

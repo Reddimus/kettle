@@ -52,47 +52,13 @@ the active file and `kettle --check-config` to validate it.
 
 ## Highlights
 
-* GPU rendering with damage aware draws and a shared glyph atlas
-* Tabs, splits, pane movement, broadcast input, and live tab tear off
-* Multiple native windows in one process, with an explicit isolated process mode
-* Search across the screen and bounded scrollback
-* Shell owned completion candidates in an IDE style card above the active prompt
-* Sixel, graphics placement, and OSC 1337 inline images
-* Hyperlinks, local file links, drag and drop paths, and quick select hints
-* Optional session restore, recording, SSH profiles, and authenticated updates
-* A local control API plus an MCP server, both disabled by default
-* 500+ themes and a bundled JetBrains Mono Nerd Font
-
-The completion panel stays in a detached lane above the active command, aligned
-with the first editable column, and never inserts or runs text itself. Fish and
-PowerShell can use it automatically when their stock Tab binding is still
-active. Bash, Zsh, and customized shells can publish existing candidates
-through [Shell integration](docs/SHELL-INTEGRATION.md).
-
-Native material is enabled by default. macOS and Windows use subtle
-translucency; Linux and other targets stay at 99% opacity whether compositor
-blur is available or not.
-
-macOS and Windows:
-
-```ini
-background-opacity = 0.86
-window-blur = true
-```
-
-Linux and other targets:
-
-```ini
-background-opacity = 0.99
-window-blur = true
-```
-
-Kettle follows macOS Reduce Transparency immediately. Linux compositors may
-ignore the blur hint; Kettle keeps explicitly lower live opacity at a 99% floor
-in that case so text stays readable without changing screenshots or your config.
-Windows matches its DWM caption to the active theme. macOS keeps AppKit's
-caption opaque and follows the selected light or dark appearance. Set opacity
-to `1.0` and blur to `false` for a fully opaque window.
+* Tabs, splits, multiple windows, pane movement, and broadcast input
+* GPU rendering, bounded scrollback, search, and inline image protocols
+* An IDE style completion card driven by the shell
+* File drop, copied media paths, and private image or video previews
+* Session restore, recording, SSH profiles, and signed Linux/Windows updates
+* A bundled font and more than 500 themes
+* An optional local control API and MCP server, both off by default
 
 ## Common keys
 
@@ -143,8 +109,22 @@ kettle --gpu-info
 
 See [Configuration](docs/CONFIG.md) for every setting and
 [Settings](docs/SETTINGS.md) for the in-app editor.
-Use `update-policy = auto`, `notify`, or `off` to control background checks;
-explicit `--check-update` requests still work in every mode.
+
+Native material is on by default. macOS and Windows use blur at 86% opacity;
+Linux stays at 99% opacity. Set `background-opacity = 1.0` and
+`window-blur = false` for an opaque window.
+
+## Clipboard media
+
+`Ctrl+Shift+V` pastes text or an explicitly copied file list. A clipboard
+screenshot becomes a bounded owner-only temporary PNG, and Kettle pastes its
+quoted path. A copied or dropped video remains the user's original file. Its
+receipt uses a native poster when available without decoding video inside
+Kettle. The pasted text is still only a path; the program in the pane has not
+opened or received the file.
+
+Read [Terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md)
+for shell quoting, WSL translation, privacy limits, and client behavior.
 
 ## Automation
 

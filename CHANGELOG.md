@@ -8,16 +8,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- **Screenshots can be cropped before Kettle writes them.** The control and MCP
+  screenshot commands accept `crop_x`, `crop_y`, `crop_width`, and
+  `crop_height` in window-relative physical pixels. Kettle validates the full
+  rectangle and crops the GPU readback before it creates the output file, so
+  automation can capture one UI region without first persisting the rest of the
+  terminal.
 - **Clipboard screenshots now have a visual receipt.** After the initiating
   pane accepts its private temporary PNG path, Kettle shows a bounded thumbnail
   inside that pane without claiming the client attached it. The card contracts
   after four seconds, expires after 30 seconds, and expands while hovered. A
   two-minute hard limit prevents a hovered card from staying over terminal
   cells forever. Click the body to open the retained PNG or `×` to dismiss it.
+  The newest media paste replaces the previous card, and later input removes
+  it once the command line can no longer be described reliably.
   It avoids completion cards and pane chrome, warns for remote sessions, and
   never previews arbitrary terminal paths. Set
   `paste-image-preview = off` to keep bitmap-to-path paste without allocating
   or retaining thumbnail pixels.
+- **Copied and dropped videos now get a safe poster receipt.** The first video
+  in an accepted path paste shows a bounded native thumbnail when available;
+  batches keep their count and remote panes keep the local-path warning.
+  Kettle never decodes video or scans terminal text. Poster work is isolated,
+  bounded, requires a trusted file and parent chain, and rechecks a retained
+  file handle around extraction. Video cards are informational and cannot open
+  the source through a later path lookup; a body or `×` click dismisses the
+  card without reaching hidden terminal content. Pending state expires after
+  20 seconds if a worker disappears without replying. Set
+  `paste-video-preview = off` to keep path paste without the receipt.
 
 ## [3.1.1] — 2026-08-18
 

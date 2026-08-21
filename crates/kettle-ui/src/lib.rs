@@ -51,6 +51,7 @@ mod settings;
 // `kettle` bin reaches the synchronous `--check-update` path via the public
 // `check_for_update_cli` wrapper below.
 mod update_check;
+mod video_preview;
 // OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 
@@ -70,6 +71,11 @@ mod dev_record;
 pub use app::App;
 pub use lua::{LuaCommand, LuaEngine, LuaEvent};
 pub use notifications::{flush_desktop_notifications, queue_desktop_notification};
+
+#[doc(hidden)]
+pub fn run_media_preview_worker() -> i32 {
+    video_preview::run_worker()
+}
 
 /// First-tab startup overrides from the CLI.
 #[derive(Debug, Default, Clone)]
