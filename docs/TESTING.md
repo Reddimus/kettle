@@ -1906,11 +1906,13 @@ These need a real display and are run by hand (or on real hardware):
 
     Native CI also runs `video_preview_native`. Every platform leaves worker
     stdin open and proves the child exits at its own deadline. macOS requires a
-    bounded opaque poster from the checked-in MP4. A missing, failed, or
-    malformed first response is retried once in a fresh worker so a Quick Look
-    service cold start cannot masquerade as missing support. Windows validates
-    the same response when its shell thumbnail
-    provider supports that fixture; set
+    bounded opaque poster from the checked-in MP4. Windows retries only an
+    explicit first-worker timeout, matching production's cold-provider retry.
+    Quick Look can cold-return a valid empty poster before its deadline, so the
+    macOS provider-capability test also gets one warm attempt for that response;
+    production keeps the empty result as a valid generic receipt. Neither path
+    retries malformed output, read errors, or trust failures. Windows validates
+    the response when its shell thumbnail provider supports that fixture; set
     `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
     missing poster fail. Linux unit coverage invokes its complete Freedesktop
     cache resolver in an isolated child environment. Portable state tests also

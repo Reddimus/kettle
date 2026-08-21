@@ -34,11 +34,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   file handle around extraction. Video cards are informational and cannot open
   the source through a later path lookup; a body or `×` click dismisses the
   card without reaching hidden terminal content. Pending state expires after
-  20 seconds if a worker disappears without replying. Set
+  38 seconds if a worker disappears without replying. Set
   `paste-video-preview = off` to keep path paste without the receipt.
 
 ### Fixed
 
+- **A cold Windows video thumbnail provider could drop a paste receipt.** The
+  hidden worker still has a two-second deadline, but Kettle now gives an
+  explicit timeout one fresh-worker retry. Other failures remain fail-closed,
+  repeated timeouts stop after the second attempt, and a worker that cannot
+  reap its child retires instead of starting the next queued job beside it.
+  Pending receipt cleanup accounts for the four-second per-job limit.
 - **Selection drags no longer stall on the last visible row.** Auto-scroll
   previously started only after the pointer moved beyond a pane. A full-height
   pane has no client area below its bottom edge, so downward selection drags

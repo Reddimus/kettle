@@ -169,14 +169,20 @@ to the current executable's hidden worker. The child requires a non-link regular
 file whose file and parent chain reject mutation by an untrusted principal. It
 holds the file open and compares kernel identity, timestamps, size, and a bounded
 first/middle/last SHA-256 sample before and after extraction. Each child has a
-two-second deadline and can return at most 256 by 160 RGBA pixels. A changed,
-missing, or untrusted source gets no receipt. The video card has no open action,
-so the parent never reopens the path after validation. A primary press on its
-body or dismiss target consumes the hidden terminal click and removes the card.
-Pending window state has a 20-second deadline, long enough for one surviving
-thread to drain the full queue but finite if a worker exits without replying.
-The hidden worker dispatches before update recovery and application startup, so
-poster work never takes install locks or launches an update helper.
+two-second deadline and can return at most 256 by 160 RGBA pixels. A deadline
+failure gets one fresh-child retry, so a job can spend at most four seconds in
+worker deadlines. Other failures remain final. If a child cannot be reaped, its
+queue thread sends a failure for the current receipt and retires instead of
+risking another job beside an unbounded child. A changed, missing, or untrusted
+source gets no receipt. The video card has no open action, so the parent never
+reopens the path after validation. A primary press on its body or dismiss target
+consumes the hidden terminal click and removes the card. Pending window state
+has a 38-second deadline, long enough for one surviving thread to drain the full
+queue at the bounded retry limit, with finite slack for dispatch. An unusually
+loaded host drops the optional receipt rather than retaining pending state
+indefinitely. The hidden worker dispatches before update recovery and
+application startup, so poster work never takes install locks or launches an
+update helper.
 
 The child delegates thumbnail extraction instead of bundling a video decoder:
 [Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
