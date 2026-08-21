@@ -1683,6 +1683,15 @@ pub struct Config {
     pub lua_sandbox: LuaSandbox,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
+    /// Peak alpha of the visual-bell flash (`0.0` = no flash at all).
+    ///
+    /// The flash is a full-surface wash of the theme foreground that decays to
+    /// nothing over 300 ms, so this value is how bright its FIRST frame is.
+    /// Full-surface flashes are the part of a terminal most likely to bother a
+    /// photosensitive user, and the most common bell by far is an empty Tab
+    /// completion -- a non-event that does not deserve a bright wash. Hence a
+    /// low default and a knob rather than a hard-coded constant.
+    pub bell_flash_intensity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
     pub scroll_multiplier: f32,
     /// WCAG minimum contrast ratio (text vs background); `0.0` = off.
@@ -2763,6 +2772,7 @@ impl Default for Config {
             putty_paste_style_source_clipboard: false,
             lua_sandbox: LuaSandbox::Safe,
             unfocused_split_opacity: 0.7,
+            bell_flash_intensity: 0.10,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
             window_title_format: "{title} — kettle".to_string(),
@@ -3428,6 +3438,9 @@ impl Config {
                 "background-opacity" => v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n)),
                 "unfocused-split-opacity" => {
                     v.parse::<f32>().is_ok_and(|n| (0.1..=1.0).contains(&n))
+                }
+                "bell-flash-intensity" | "bell_flash_intensity" => {
+                    v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n))
                 }
                 "scroll-multiplier" | "mouse-scroll-multiplier" => {
                     v.parse::<f32>().is_ok_and(|n| (0.1..=50.0).contains(&n))
@@ -5131,6 +5144,13 @@ impl Config {
                         && v.is_finite()
                     {
                         cfg.unfocused_split_opacity = v.clamp(0.1, 1.0);
+                    }
+                }
+                "bell-flash-intensity" | "bell_flash_intensity" => {
+                    if let Ok(v) = e.value.parse::<f32>()
+                        && v.is_finite()
+                    {
+                        cfg.bell_flash_intensity = v.clamp(0.0, 1.0);
                     }
                 }
                 "scroll-multiplier" | "mouse-scroll-multiplier" => {
@@ -8258,6 +8278,41 @@ cell-height = 1.2\n";
         // A truly bogus value still gets flagged.
         let bad = Config::detect_malformed_values("tab-bar-position = sideways\n");
         assert!(bad.iter().any(|b| b.contains("tab-bar-position")));
+    }
+
+    /// The visual bell is a full-surface wash, so its peak alpha is both a
+    /// taste setting and an accessibility one. Pin the default, both spellings,
+    /// the clamp, and that `0` is reachable — `0` means "no flash at all", so a
+    /// clamp floor above zero would make the opt-out unexpressible.
+    #[test]
+    fn bell_flash_intensity_parses_clamps_and_allows_opting_out() {
+        assert_eq!(Config::default().bell_flash_intensity, 0.10);
+        assert_eq!(
+            Config::parse_text("bell-flash-intensity = 0.25\n").bell_flash_intensity,
+            0.25
+        );
+        assert_eq!(
+            Config::parse_text("bell_flash_intensity = 0.25\n").bell_flash_intensity,
+            0.25
+        );
+        assert_eq!(
+            Config::parse_text("bell-flash-intensity = 0\n").bell_flash_intensity,
+            0.0,
+            "0 must survive the clamp so the flash can be turned off outright"
+        );
+        assert_eq!(
+            Config::parse_text("bell-flash-intensity = 5\n").bell_flash_intensity,
+            1.0
+        );
+        assert_eq!(
+            Config::parse_text("bell-flash-intensity = -2\n").bell_flash_intensity,
+            0.0
+        );
+        assert_eq!(
+            Config::parse_text("bell-flash-intensity = nonsense\n").bell_flash_intensity,
+            0.10,
+            "an unparseable value must leave the default alone"
+        );
     }
 
     #[test]

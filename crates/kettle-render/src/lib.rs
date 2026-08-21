@@ -6573,15 +6573,15 @@ impl Renderer {
         }
 
         // Visual bell: a brief full-surface flash (replaces an audible beep).
-        if overlay.bell > 0.0 {
-            quads.push(rect(
-                0.0,
-                0.0,
-                sw,
-                sh,
-                theme.foreground,
-                overlay.bell * 0.18,
-            ));
+        // `overlay.bell` is the 300 ms decay ramp; `bell-flash-intensity` is
+        // its peak alpha. The peak used to be a hard-coded 0.18, which is a
+        // lot of theme foreground across the whole surface for what is usually
+        // an empty Tab completion — the most frequent bell there is, and a
+        // non-event. `0.0` opts out of the flash while leaving the rest of the
+        // bell (window attention) alone.
+        let bell_alpha = overlay.bell * cfg.bell_flash_intensity;
+        if bell_alpha > 0.0 {
+            quads.push(rect(0.0, 0.0, sw, sh, theme.foreground, bell_alpha));
         }
 
         // Search uses a responsive RESERVED lane. The app subtracts the public
