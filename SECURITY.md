@@ -97,9 +97,8 @@ Reports that fit any of these are welcome:
   `cosmic-text`, etc.). Please file those upstream; if a kettle-side
   mitigation is also needed, mention it in your report and we'll
   coordinate.
-- Crashes from **valid** terminal programs (htop, vim, tmux, nvim) that
-  reproduce on Alacritty / kitty / WezTerm too — those are normal bugs;
-  open a public issue.
+- Crashes from valid terminal programs without a security impact. Open a public
+  issue for those.
 - Cosmetic / theme / font-rendering issues.
 
 ## Disclosure timeline
