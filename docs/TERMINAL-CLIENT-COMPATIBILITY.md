@@ -51,7 +51,12 @@ For Kettle's stable, client-independent path, focus the agent pane and press
 `Ctrl+Shift+V`. When the clipboard contains a bitmap and `paste-images` is on
 (the default), Kettle writes a bounded owner-only temporary PNG and pastes its
 shell-quoted path. The running agent can read that path without needing native
-clipboard-bitmap support.
+clipboard-bitmap support. A short-lived thumbnail confirms which image path
+Kettle queued; it deliberately says “Waiting for client” because only the
+client can decide whether to read or attach it. Hover expands the receipt,
+clicking its body opens the retained PNG, and `×` dismisses it. A two-minute
+hard limit removes even a hovered receipt. Set `paste-image-preview = off` to avoid
+creating or retaining preview pixels without changing image paste.
 
 Current local `codex --help` also exposes `-i, --image <FILE>...` for images
 attached to an initial prompt. This is the durable Codex fallback when starting
@@ -86,7 +91,9 @@ raw bytes):
   pastes that path. Controlled by `paste-images` (on by default). The temp files
   are owner-only, bounded, and deleted when Kettle exits — fine for handing an
   image to a running agent, not a durable store. This avoids depending on the
-  client's platform- and version-specific clipboard-bitmap support.
+  client's platform- and version-specific clipboard-bitmap support. The
+  optional receipt previews only these Kettle-created files, never arbitrary
+  paths printed or pasted in the terminal.
 - **Drag and drop** a file onto the window — always pastes the path.
 
 Multiple selected files paste as space-separated quoted paths. Paths are quoted

@@ -1196,6 +1196,10 @@ pub struct Config {
     pub paste_files: PasteFiles,
     /// Paste a clipboard BITMAP (screenshot) as a temporary-PNG path.
     pub paste_images: PasteImages,
+    /// Show a short-lived thumbnail receipt after the initiating pane queues a
+    /// clipboard bitmap's temporary path. Off avoids allocating preview pixels;
+    /// this never previews arbitrary pasted paths.
+    pub paste_image_preview: bool,
     /// Arm the GUI session recorder at launch (`record = on`). Off by default.
     /// Recording captures on-screen output verbatim; typed keystrokes are
     /// redacted to tokens unless [`Config::record_raw_input`] is on. The window
@@ -2430,12 +2434,11 @@ fn decode_utf16_strict(bytes: &[u8], little_endian: bool) -> std::io::Result<Str
             "UTF-16 config has an incomplete code unit",
         ));
     }
-    let units = bytes.chunks_exact(2).map(|pair| {
-        let pair = [pair[0], pair[1]];
+    let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
         if little_endian {
-            u16::from_le_bytes(pair)
+            u16::from_le_bytes(*pair)
         } else {
-            u16::from_be_bytes(pair)
+            u16::from_be_bytes(*pair)
         }
     });
     std::char::decode_utf16(units)
@@ -2679,6 +2682,7 @@ impl Default for Config {
             modify_other_keys: ModifyOtherKeysMode::Auto,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
+            paste_image_preview: true,
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
@@ -2833,15 +2837,19 @@ fn decode_config_text(bytes: &[u8]) -> String {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => {
             let units: Vec<u16> = rest
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             String::from_utf16_lossy(&units)
         }
         [0xFE, 0xFF, rest @ ..] => {
             let units: Vec<u16> = rest
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_be_bytes(*c))
                 .collect();
             String::from_utf16_lossy(&units)
         }
@@ -3315,6 +3323,8 @@ impl Config {
         "mouse-hide",
         "mouse-hide-while-typing",
         "mouse_autohide",
+        "paste-image-preview",
+        "paste_image_preview",
         "new-tab-after-current-tab",
         "new_tab_after_current_tab",
         "putty-paste-style",
@@ -4430,6 +4440,11 @@ impl Config {
                         PasteImages::Off
                     } else {
                         PasteImages::On
+                    }
+                }
+                "paste-image-preview" | "paste_image_preview" => {
+                    if let Some(value) = parse_bool(&e.value) {
+                        cfg.paste_image_preview = value;
                     }
                 }
                 "record" => {
@@ -7158,6 +7173,18 @@ cell-height = 1.2\n";
         // profiles (this one writes captured screen content to disk).
         let cfg = Config::parse_text("paste-files = off\npaste-images = on");
         assert!(!cfg.paste_files.enabled() && cfg.paste_images.enabled());
+    }
+
+    #[test]
+    fn pasted_image_preview_is_independent_and_on_by_default() {
+        assert!(Config::default().paste_image_preview);
+        assert!(!Config::parse_text("paste-image-preview = off").paste_image_preview);
+        assert!(!Config::parse_text("paste_image_preview = false").paste_image_preview);
+        assert!(
+            Config::parse_text("paste-images = off\npaste-image-preview = on").paste_image_preview
+        );
+        assert!(Config::BOOL_KEYS.contains(&"paste-image-preview"));
+        assert!(Config::BOOL_KEYS.contains(&"paste_image_preview"));
     }
 
     #[test]

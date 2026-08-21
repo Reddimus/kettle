@@ -50,6 +50,8 @@ const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK
 const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
+const ACCESSIBILITY_IMAGE_RECEIPT_ID: NodeId = NodeId(1 << 59);
+const ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -2257,7 +2259,7 @@ fn paste_paths_into_target(
     target: Option<u64>,
     paths: &[std::path::PathBuf],
     trailing_space: bool,
-) -> Option<PaneInputResult> {
+) -> Option<PaneInputDelivery> {
     let pane = mux.panes.get_mut(&target?)?;
     let mut text = crate::mux::format_paths_for_paste(&pane.argv, paths);
     if trailing_space {
@@ -2271,7 +2273,12 @@ fn paste_paths_into_target(
         .map(|term| term.mode().contains(kettle_core::TermMode::BRACKETED_PASTE))
         .unwrap_or(false);
     let bytes = input::paste_payload(&text, bracketed);
-    Some(pane.feed_input(&bytes))
+    let result = pane.feed_input(&bytes);
+    Some(PaneInputDelivery {
+        result,
+        accepted: result.is_queued(),
+        receipt_accepted: result.is_queued(),
+    })
 }
 
 /// Pure: when the mouse is over chrome (tab bar or any modal overlay), the
@@ -4261,6 +4268,9 @@ pub enum ConfirmAction {
         paths: Box<[std::path::PathBuf]>,
         trailing_space: bool,
         target: Option<u64>,
+        /// Pane that initiated the paste. Separate from `target` because a
+        /// broadcast has live group semantics but the receipt remains local.
+        receipt_pane: Option<u64>,
     },
     /// Finish a Settings keybind rebind that would otherwise silently steal
     /// a chord already bound to a different action (audit v2.38.2). Applies
@@ -7055,11 +7065,59 @@ impl App {
         }
     }
 
+    fn image_paste_receipt_geometry(
+        &self,
+        ws: &WindowState,
+    ) -> Option<kettle_render::ImagePasteReceiptGeometry> {
+        let (receipt, completion) = self.image_paste_receipt_projection(ws)?;
+        kettle_render::image_paste_receipt_geometry(
+            &receipt,
+            completion.as_ref(),
+            self.menu_cell(ws),
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        )
+    }
+
+    fn image_paste_receipt_hovered(&self, ws: &WindowState) -> bool {
+        self.image_paste_receipt_geometry(ws)
+            .is_some_and(|geometry| {
+                rect_contains(geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
+            })
+    }
+
+    fn update_image_paste_receipt_hover(&self, ws: &mut WindowState) -> bool {
+        let hovered = self.image_paste_receipt_hovered(ws);
+        let changed = ws
+            .image_paste_receipt
+            .as_mut()
+            .is_some_and(|receipt| receipt.set_hover(hovered, std::time::Instant::now()));
+        if changed {
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        hovered
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
     /// click-to-open affordance).
     fn sync_cursor_icon(&mut self, ws: &mut WindowState) {
+        let image_receipt_hovered = self.image_paste_receipt_hovered(ws);
+        self.sync_cursor_icon_with_image_receipt_hover(ws, image_receipt_hovered);
+    }
+
+    /// CursorMoved already computed the receipt hit test to update its hover
+    /// timer. Reuse that answer instead of building a second full overlay for
+    /// the same physical event.
+    fn sync_cursor_icon_with_image_receipt_hover(
+        &mut self,
+        ws: &mut WindowState,
+        image_receipt_hovered: bool,
+    ) {
         // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
         // a "pointing hand" while the user holds the same modifier that
         // would open a URL on click (Ctrl on Linux/Windows, Cmd on
@@ -7122,6 +7180,7 @@ impl App {
                 })
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
+        let image_receipt_hover = image_receipt_hovered.then_some(CursorIcon::Pointer);
         let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
         // v2.40.0 (tear-off UX): a live tab-drag owns the cursor, FIRST in
         // the chain — mid-drag the pointer can transiently cross another
@@ -7138,6 +7197,7 @@ impl App {
             .or(new_tab_hover_icon)
             .or(confirm_hover)
             .or(search_hover)
+            .or(image_receipt_hover)
             .or(chrome)
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
@@ -7155,6 +7215,59 @@ impl App {
             w.set_cursor(want);
             ws.last_cursor_icon = Some(want);
         }
+    }
+
+    /// Consume a press over receipt chrome and open the exact retained image
+    /// on a primary-button activation. Shared by native and ctl mouse input so
+    /// automation cannot click through to terminal content the GUI protects.
+    fn activate_image_paste_receipt_at(
+        &self,
+        ws: &mut WindowState,
+        x: f32,
+        y: f32,
+        bcode: u8,
+    ) -> bool {
+        let Some((receipt, completion)) = self.image_paste_receipt_projection(ws) else {
+            return false;
+        };
+        let (pane_x, pane_y, pane_w, pane_h) = receipt.pane_rect;
+        if receipt.right_gutter > 0.0
+            && x >= pane_x + pane_w - receipt.right_gutter
+            && x <= pane_x + pane_w
+            && y >= pane_y
+            && y <= pane_y + pane_h
+        {
+            return false;
+        }
+        let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+            &receipt,
+            completion.as_ref(),
+            self.menu_cell(ws),
+            self.overlay_text_cell_width(ws),
+            self.overlay_text_line_height(ws),
+        ) else {
+            return false;
+        };
+        let Some(hit) = geometry.hit_test(x, y) else {
+            return false;
+        };
+        if bcode == 0 && hit == kettle_render::ImagePasteReceiptHit::Dismiss {
+            ws.image_paste_receipt = None;
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        } else if bcode == 0
+            && hit == kettle_render::ImagePasteReceiptHit::Open
+            && let Some(path) = ws
+                .image_paste_receipt
+                .as_ref()
+                .map(|receipt| receipt.path.clone())
+            && let Err(error) = open::that_detached(&path)
+        {
+            log::warn!("could not open a pasted-image preview: {error}");
+        }
+        true
     }
 
     /// Clear the focused pane's selection (called when the user types —
@@ -8367,10 +8480,12 @@ impl App {
     /// failure mode this whole path exists to remove.
     fn clipboard_image_paste_path(&mut self) -> Option<std::path::PathBuf> {
         let image = self.clipboard.as_mut()?.get_image().ok()?;
-        let path = match self
-            .pasted_images
-            .save_rgba(image.width, image.height, &image.bytes)
-        {
+        let path = match self.pasted_images.save_rgba(
+            image.width,
+            image.height,
+            &image.bytes,
+            self.cfg.paste_image_preview,
+        ) {
             Ok(path) => path,
             Err(error) => {
                 log::warn!("clipboard image paste failed: {error}");
@@ -8532,6 +8647,7 @@ impl App {
             return;
         }
         let target = confirmed_paste_target(&ws.mux);
+        let receipt_pane = ws.mux.active_focus();
         let mut preview = crate::mux::format_paths_for_paste(&ws.mux.focused_argv(), &paths);
         if trailing_space {
             preview.push(' ');
@@ -8552,6 +8668,7 @@ impl App {
             local_paste_within_limit(&preview)
         };
         if !within_limit {
+            self.pasted_images.discard_previews_for_paths(&paths);
             self.report_input_result(PaneInputResult::Oversize);
             return;
         }
@@ -8584,17 +8701,19 @@ impl App {
                     paths: paths.into_boxed_slice(),
                     trailing_space,
                     target,
+                    receipt_pane,
                 },
             });
             return;
         }
-        self.paste_paths_confirmed(ws, target, &paths, trailing_space);
+        self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space);
     }
 
     fn paste_paths_confirmed(
         &mut self,
         ws: &mut WindowState,
         target: Option<u64>,
+        receipt_pane: Option<u64>,
         paths: &[std::path::PathBuf],
         trailing_space: bool,
     ) {
@@ -8603,12 +8722,15 @@ impl App {
                 recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
             }
             let scope = ws.mux.broadcast.clone();
-            let mut result = ws
-                .mux
-                .broadcast_paste_paths(paths, trailing_space, LOCAL_PASTE_MAX);
+            let mut delivery = ws.mux.broadcast_paste_paths_delivery(
+                paths,
+                trailing_space,
+                LOCAL_PASTE_MAX,
+                receipt_pane,
+            );
             if Mux::scope_crosses_windows(&scope) {
                 for other in self.windows.values_mut() {
-                    result = result.merge(other.mux.broadcast_paste_paths_foreign(
+                    delivery = delivery.merge(other.mux.broadcast_paste_paths_foreign_delivery(
                         &scope,
                         paths,
                         trailing_space,
@@ -8616,19 +8738,81 @@ impl App {
                     ));
                 }
             }
-            self.report_input_result(result);
+            self.report_input_result(delivery.result);
+            self.show_image_paste_receipt(ws, receipt_pane, paths, delivery.receipt_accepted);
             return;
         }
 
         if target.is_none_or(|id| !ws.mux.panes.contains_key(&id)) {
+            self.show_image_paste_receipt(ws, receipt_pane, paths, false);
             return;
         }
         if let Some(recorder) = self.recorder.as_mut() {
             recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
         }
-        if let Some(result) = paste_paths_into_target(&mut ws.mux, target, paths, trailing_space) {
-            self.report_input_result(result);
+        match paste_paths_into_target(&mut ws.mux, target, paths, trailing_space) {
+            Some(delivery) => {
+                self.report_input_result(delivery.result);
+                self.show_image_paste_receipt(ws, receipt_pane, paths, delivery.receipt_accepted);
+            }
+            None => self.show_image_paste_receipt(ws, receipt_pane, paths, false),
         }
+    }
+
+    fn show_image_paste_receipt(
+        &mut self,
+        ws: &mut WindowState,
+        receipt_pane: Option<u64>,
+        paths: &[std::path::PathBuf],
+        accepted_by_receipt_pane: bool,
+    ) {
+        if paths.len() != 1 {
+            self.pasted_images.discard_previews_for_paths(paths);
+            log::debug!("image paste receipt skipped: path_count={}", paths.len());
+            return;
+        }
+        // Move the bounded pixels out even when presentation is rejected. This
+        // exact managed PNG gets one chance to create a receipt; a read-only,
+        // backpressured, dead, or disabled target must not retain the preview
+        // for the rest of the process.
+        let preview = self.pasted_images.take_preview_for_path(&paths[0]);
+        if !self.cfg.paste_image_preview || !accepted_by_receipt_pane {
+            log::debug!(
+                "image paste receipt skipped: enabled={}, initiating_pane_accepted={accepted_by_receipt_pane}",
+                self.cfg.paste_image_preview
+            );
+            return;
+        }
+        let Some(preview) = preview else {
+            log::debug!("image paste receipt skipped: path has no managed preview");
+            return;
+        };
+        let Some(pane_id) = receipt_pane.filter(|id| ws.mux.panes.contains_key(id)) else {
+            log::debug!("image paste receipt skipped: initiating pane is no longer live");
+            return;
+        };
+        let Some(pane) = ws.mux.panes.get(&pane_id) else {
+            log::debug!("image paste receipt skipped: initiating pane lookup failed");
+            return;
+        };
+        let remote = pane.remote_context.is_some();
+        let prefer_top = pane.term.term.lock().ok().is_some_and(|term| {
+            let cursor_row = term.renderable_content().cursor.point.line.0.max(0) as usize;
+            cursor_row >= term.screen_lines() / 2
+        });
+        ws.image_paste_receipt = Some(crate::window_state::ImagePasteReceiptState::new(
+            pane_id,
+            paths[0].clone(),
+            preview,
+            remote,
+            prefer_top,
+            std::time::Instant::now(),
+        ));
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        log::debug!("image paste receipt shown for pane {pane_id}");
     }
 
     fn copy_selection(&mut self, ws: &mut WindowState) {
@@ -10825,6 +11009,162 @@ impl App {
         true
     }
 
+    fn completion_overlay_projection(
+        &self,
+        ws: &WindowState,
+        terminal_surface: bool,
+    ) -> Option<kettle_render::CompletionOverlay> {
+        if !terminal_surface || !ws.window_focused || ws.ime_preedit.is_some() {
+            return None;
+        }
+        let pane_id = ws.mux.active_focus()?;
+        let pane = ws.mux.panes.get(&pane_id)?;
+        if !pane.completion_overlay {
+            return None;
+        }
+        let (mode, display_offset, columns, rows) = {
+            let term = pane.term.term.lock().ok()?;
+            (
+                *term.mode(),
+                term.grid().display_offset(),
+                term.columns(),
+                term.screen_lines(),
+            )
+        };
+        if !completion_surface_available(mode, display_offset) {
+            return None;
+        }
+        let command_rows = pane.term.completion_command_rows()?;
+        let (list, completion_cursor_col) = pane.term.completion_projection()?;
+        let anchor_col = completion_cursor_col
+            .zip(list.input_prefix.as_deref())
+            .map(|(cursor, prefix)| completion_anchor_col(cursor, prefix));
+        let area = self.area(ws);
+        let pane_rect = self.focused_rect(ws, area)?;
+        let titlebar = self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, area).len());
+        let grid_origin = kettle_render::pane_grid_origin(
+            pane_rect,
+            (self.cfg.padding_x, self.cfg.padding_y),
+            titlebar,
+            self.cfg.title_at_bottom,
+        );
+        let renderer = ws.renderer.as_ref()?;
+        let kind = match list.kind {
+            kettle_core::CompletionKind::Completion => "Completions",
+            kettle_core::CompletionKind::Prediction => "Prediction",
+        };
+        Some(kettle_render::CompletionOverlay {
+            pane_rect,
+            grid_rect: (
+                grid_origin.0,
+                grid_origin.1,
+                columns as f32 * renderer.cell_w,
+                rows as f32 * renderer.cell_h,
+            ),
+            command_rows,
+            anchor_col,
+            kind: kind.to_string(),
+            source: list.source,
+            selected: list.selected,
+            total: list.total,
+            token: list.token,
+            candidates: list
+                .candidates
+                .into_iter()
+                .map(|candidate| kettle_render::CompletionOverlayRow {
+                    label: candidate.label,
+                    description: candidate.description,
+                    position: candidate.position,
+                })
+                .collect(),
+        })
+    }
+
+    fn image_paste_receipt_overlay_projection(
+        &self,
+        ws: &WindowState,
+        terminal_surface: bool,
+        now: std::time::Instant,
+    ) -> Option<kettle_render::ImagePasteReceiptOverlay> {
+        if !self.cfg.paste_image_preview || !terminal_surface || !ws.window_focused {
+            return None;
+        }
+        let receipt = ws.image_paste_receipt.as_ref()?;
+        let pane_id = ws.mux.active_focus()?;
+        if pane_id != receipt.pane_id || !receipt.live(now) {
+            return None;
+        }
+        let pane = ws.mux.panes.get(&pane_id)?;
+        let (columns, rows, has_history) = {
+            let term = pane.term.term.lock().ok()?;
+            (
+                term.columns(),
+                term.screen_lines(),
+                term.grid().history_size() > 0,
+            )
+        };
+        let area = self.area(ws);
+        let pane_rect = self.focused_rect(ws, area)?;
+        let titlebar = self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, area).len());
+        let grid_origin = kettle_render::pane_grid_origin(
+            pane_rect,
+            (self.cfg.padding_x, self.cfg.padding_y),
+            titlebar,
+            self.cfg.title_at_bottom,
+        );
+        let renderer = ws.renderer.as_ref()?;
+        let scrollbar_present = self.cfg.scrollbar == kettle_config::ScrollbarMode::Always
+            || (self.cfg.scrollbar != kettle_config::ScrollbarMode::Never && has_history);
+        let right_gutter = if scrollbar_present {
+            let scale = ws
+                .window
+                .as_ref()
+                .map(|window| window.scale_factor() as f32)
+                .unwrap_or(1.0);
+            (self.cfg.scrollbar_width.clamp(2.0, 40.0) * scale).max(12.0 * scale)
+        } else {
+            0.0
+        };
+        Some(kettle_render::ImagePasteReceiptOverlay {
+            pane_rect,
+            grid_rect: (
+                grid_origin.0,
+                grid_origin.1,
+                columns as f32 * renderer.cell_w,
+                rows as f32 * renderer.cell_h,
+            ),
+            right_gutter,
+            image: receipt.image.clone(),
+            original_width: receipt.original_width,
+            original_height: receipt.original_height,
+            remote: receipt.remote,
+            expanded: receipt.expanded(now),
+            prefer_top: receipt.prefer_top,
+        })
+    }
+
+    fn image_paste_receipt_projection(
+        &self,
+        ws: &WindowState,
+    ) -> Option<(
+        kettle_render::ImagePasteReceiptOverlay,
+        Option<kettle_render::CompletionOverlay>,
+    )> {
+        // This is the pointer-motion path. Keep the overwhelmingly common case
+        // allocation- and lock-free, then project only the two overlays whose
+        // geometry can affect the receipt rather than building every piece of
+        // window chrome.
+        ws.image_paste_receipt.as_ref()?;
+        let terminal_surface = terminal_surface_available(ws);
+        let receipt = self.image_paste_receipt_overlay_projection(
+            ws,
+            terminal_surface,
+            std::time::Instant::now(),
+        )?;
+        let completion = self.completion_overlay_projection(ws, terminal_surface);
+        Some((receipt, completion))
+    }
+
     fn overlay(&self, ws: &WindowState, reuse_pane_snapshots: bool) -> Overlay {
         let preedit_state = ws.ime_preedit.as_ref().filter(|(text, _)| !text.is_empty());
         let preedit = preedit_state.map(|(text, _)| text.as_str());
@@ -10939,81 +11279,13 @@ impl App {
                 .collect(),
             None => Vec::new(),
         };
-        let terminal_surface = ws.context_menu.is_none()
-            && ws.vi_mode.is_none()
-            && ws.hint_state.is_none()
-            && ws.palette_input.is_none()
-            && ws.settings_nav.is_none()
-            && ws.layout_picker_input.is_none()
-            && ws.ssh_input.is_none()
-            && ws.confirm_dialog.is_none()
-            && ws.editing_title.is_none()
-            && !ws.search.open;
-        let completion = (terminal_surface && ws.window_focused && ws.ime_preedit.is_none())
-            .then(|| {
-                let pane_id = ws.mux.active_focus()?;
-                let pane = ws.mux.panes.get(&pane_id)?;
-                if !pane.completion_overlay {
-                    return None;
-                }
-                let (mode, display_offset, columns, rows) = {
-                    let term = pane.term.term.lock().ok()?;
-                    (
-                        *term.mode(),
-                        term.grid().display_offset(),
-                        term.columns(),
-                        term.screen_lines(),
-                    )
-                };
-                if !completion_surface_available(mode, display_offset) {
-                    return None;
-                }
-                let command_rows = pane.term.completion_command_rows()?;
-                let (list, completion_cursor_col) = pane.term.completion_projection()?;
-                let anchor_col = completion_cursor_col
-                    .zip(list.input_prefix.as_deref())
-                    .map(|(cursor, prefix)| completion_anchor_col(cursor, prefix));
-                let pane_rect = self.focused_rect(ws, self.area(ws))?;
-                let titlebar =
-                    self.pane_titlebar_inset(ws, ws.mux.layout(ws.mux.active, self.area(ws)).len());
-                let grid_origin = kettle_render::pane_grid_origin(
-                    pane_rect,
-                    (self.cfg.padding_x, self.cfg.padding_y),
-                    titlebar,
-                    self.cfg.title_at_bottom,
-                );
-                let renderer = ws.renderer.as_ref()?;
-                let kind = match list.kind {
-                    kettle_core::CompletionKind::Completion => "Completions",
-                    kettle_core::CompletionKind::Prediction => "Prediction",
-                };
-                Some(kettle_render::CompletionOverlay {
-                    pane_rect,
-                    grid_rect: (
-                        grid_origin.0,
-                        grid_origin.1,
-                        columns as f32 * renderer.cell_w,
-                        rows as f32 * renderer.cell_h,
-                    ),
-                    command_rows,
-                    anchor_col,
-                    kind: kind.to_string(),
-                    source: list.source,
-                    selected: list.selected,
-                    total: list.total,
-                    token: list.token,
-                    candidates: list
-                        .candidates
-                        .into_iter()
-                        .map(|candidate| kettle_render::CompletionOverlayRow {
-                            label: candidate.label,
-                            description: candidate.description,
-                            position: candidate.position,
-                        })
-                        .collect(),
-                })
-            })
-            .flatten();
+        let terminal_surface = terminal_surface_available(ws);
+        let completion = self.completion_overlay_projection(ws, terminal_surface);
+        let image_paste_receipt = self.image_paste_receipt_overlay_projection(
+            ws,
+            terminal_surface,
+            std::time::Instant::now(),
+        );
         let ime_preedit = preedit.filter(|_| terminal_surface).and_then(|text| {
             let (row, col) = self.terminal_cursor_cell(ws)?;
             Some(ImePreedit {
@@ -11132,6 +11404,7 @@ impl App {
                 hint_labels,
                 ime_preedit,
                 completion,
+                image_paste_receipt,
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
@@ -11245,6 +11518,7 @@ impl App {
             hint_labels,
             ime_preedit,
             completion: None,
+            image_paste_receipt: None,
             window_focused,
             scrollbar_active,
             cursor_visible,
@@ -11985,7 +12259,7 @@ impl App {
         // with ambiguous key focus. Every modal-opener calls close_all_modals
         // first (then sets its own modal), so clearing the confirm dialog here
         // is safe: the confirm-open path clears-then-sets in that order.
-        ws.confirm_dialog = None;
+        self.cancel_confirm_dialog(ws);
         if title_edit_was_open {
             ws.pending_resize = true;
         }
@@ -12747,6 +13021,20 @@ impl App {
             .as_ref()
             .map(|r| (r.cell_w, r.cell_h))
             .unwrap_or((8.0, 16.0))
+    }
+
+    fn overlay_text_line_height(&self, ws: &WindowState) -> f32 {
+        ws.renderer
+            .as_ref()
+            .map(|renderer| renderer.overlay_text_line_height())
+            .unwrap_or(self.menu_cell(ws).1)
+    }
+
+    fn overlay_text_cell_width(&self, ws: &WindowState) -> f32 {
+        ws.renderer
+            .as_ref()
+            .map(|renderer| renderer.overlay_text_cell_width())
+            .unwrap_or(self.menu_cell(ws).0)
     }
 
     /// v2.24.0: reconcile the live theme preview with the current context-menu
@@ -15744,6 +16032,18 @@ impl App {
         }
     }
 
+    /// Drop the renderer-only copy attached to a bitmap paste when its prompt
+    /// is dismissed. The private PNG keeps its documented process lifetime;
+    /// only a receipt that can no longer be shown is released here.
+    fn cancel_confirm_dialog(&mut self, ws: &mut WindowState) {
+        let Some(dialog) = ws.confirm_dialog.take() else {
+            return;
+        };
+        if let ConfirmAction::PastePaths { paths, .. } = dialog.on_confirm {
+            self.pasted_images.discard_previews_for_paths(&paths);
+        }
+    }
+
     fn dispatch_confirm_action_arms(&mut self, ws: &mut WindowState, action: ConfirmAction) {
         match action {
             ConfirmAction::CloseWindow { drop_panes } => {
@@ -15824,8 +16124,9 @@ impl App {
                 paths,
                 trailing_space,
                 target,
+                receipt_pane,
             } => {
-                self.paste_paths_confirmed(ws, target, &paths, trailing_space);
+                self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space);
             }
             ConfirmAction::RebindKeybind {
                 trig,
@@ -16992,10 +17293,29 @@ impl App {
                 "controls": controls,
             })
         });
+        // Geometry diagnostics expose only the receipt's presentation state.
+        // The retained path and thumbnail pixels stay private to the app; UI
+        // automation needs the bounds to verify hover/collapse behavior, not
+        // the clipboard content itself.
+        let image_paste_receipt = self
+            .image_paste_receipt_geometry(target)
+            .and_then(|geometry| {
+                let receipt = target.image_paste_receipt.as_ref()?;
+                Some(serde_json::json!({
+                    "rect": rect_json(geometry.rect),
+                    "image_rect": geometry.image_rect.map(rect_json),
+                    "dismiss_rect": rect_json(geometry.dismiss_rect),
+                    "expanded": !geometry.compact,
+                    "original_width": receipt.original_width,
+                    "original_height": receipt.original_height,
+                    "remote": receipt.remote,
+                }))
+            });
         Response::ok(
             req.id,
             serde_json::json!({
                 "window": target.seq,
+                "window_focused": target.window_focused,
                 "surface": {"width": surface.0, "height": surface.1},
                 "cell": cell,
                 "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
@@ -17030,6 +17350,7 @@ impl App {
                 },
                 "context_menu": context_menu,
                 "search": search,
+                "image_paste_receipt": image_paste_receipt,
                 "title_edit": title_edit,
                 "resize_overlay": target.resize_overlay.map(|(cols, rows, _)| serde_json::json!({
                     "cols": cols,
@@ -17094,6 +17415,26 @@ impl App {
         let Some(name) = req.params.get("action").and_then(|v| v.as_str()) else {
             return Response::err(req.id, ec::BAD_PARAMS, "missing 'action' string");
         };
+        // Diagnostic automation needs an idempotent activation primitive.
+        // Reusing the user-facing visibility toggle is racy: if winit's focus
+        // event trails the native focus state, a smoke can hide the exact
+        // window it is trying to raise. This control-only action never hides.
+        if name == "focus_window" {
+            let Some(window) = ws.window.as_ref() else {
+                return Response::err(req.id, ec::INTERNAL, "target window is unavailable");
+            };
+            window.set_visible(true);
+            window.focus_window();
+            window.request_redraw();
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "action": "FocusWindow",
+                    "requested": name,
+                    "window": ws.seq,
+                }),
+            );
+        }
         let Some(action) = kettle_config::Action::from_name(name) else {
             return Response::err(req.id, ec::BAD_PARAMS, format!("unknown action '{name}'"));
         };
@@ -17551,6 +17892,10 @@ impl App {
             let area = self.area(ws);
             self.update_selection(ws, area);
         }
+        // Control input may expand the receipt for deterministic automation,
+        // but it must not retarget the physical cursor or unrelated tab-bar
+        // hover state. Only a native CursorMoved event owns those affordances.
+        self.update_image_paste_receipt_hover(ws);
     }
 
     fn ctl_mouse_press(
@@ -17667,6 +18012,9 @@ impl App {
         }
 
         let area = self.area(ws);
+        if self.activate_image_paste_receipt_at(ws, px, py, bcode) {
+            return true;
+        }
         let pre = self.focus_key(ws);
         ws.mux.focus_at(area, px, py);
         self.note_focus_change(ws, pre);
@@ -21277,6 +21625,22 @@ fn gpu_init_timed_out(
     !done.load(Ordering::Acquire)
 }
 
+/// Whether terminal-owned transient chrome may be projected. Keeping this
+/// predicate shared prevents a hidden receipt from retaining a hover pause
+/// behind a modal surface.
+fn terminal_surface_available(ws: &WindowState) -> bool {
+    ws.context_menu.is_none()
+        && ws.vi_mode.is_none()
+        && ws.hint_state.is_none()
+        && ws.palette_input.is_none()
+        && ws.settings_nav.is_none()
+        && ws.layout_picker_input.is_none()
+        && ws.ssh_input.is_none()
+        && ws.confirm_dialog.is_none()
+        && ws.editing_title.is_none()
+        && !ws.search.open
+}
+
 /// Should an open modal swallow a pointer event (mouse press /
 /// wheel) instead of letting it fall through to the tab bar, pane focus, or
 /// mouse-tracking *behind* the dialog? True whenever any modal is open —
@@ -22274,6 +22638,51 @@ impl App {
             children.push(ACCESSIBILITY_COMPLETION_CONTAINER_ID);
             nodes.push((ACCESSIBILITY_COMPLETION_CONTAINER_ID, list));
         }
+        if let Some(receipt) = overlay.image_paste_receipt.as_ref()
+            && let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+                receipt,
+                overlay.completion.as_ref(),
+                self.menu_cell(ws),
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            )
+        {
+            let mut node = Node::new(Role::Button);
+            node.set_label(format!(
+                "Image path pasted, {} by {}",
+                receipt.original_width, receipt.original_height
+            ));
+            node.set_description(if receipt.remote {
+                "Waiting for the client. The remote session may not read this local path. Open pasted image preview."
+            } else {
+                "Waiting for the client. Open pasted image preview."
+            });
+            node.set_live(accesskit::Live::Polite);
+            node.add_action(AccessibilityAction::Click);
+            let (x, y, _width, height) = geometry.rect;
+            let open_width = (geometry.dismiss_rect.0 - x).max(0.0);
+            node.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + open_width),
+                f64::from(y + height),
+            ));
+            children.push(ACCESSIBILITY_IMAGE_RECEIPT_ID);
+            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_ID, node));
+
+            let mut dismiss = Node::new(Role::Button);
+            dismiss.set_label("Dismiss pasted image preview");
+            dismiss.add_action(AccessibilityAction::Click);
+            let (x, y, width, height) = geometry.dismiss_rect;
+            dismiss.set_bounds(accesskit::Rect::new(
+                f64::from(x),
+                f64::from(y),
+                f64::from(x + width),
+                f64::from(y + height),
+            ));
+            children.push(ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID);
+            nodes.push((ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID, dismiss));
+        }
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
         root.set_children(children);
@@ -22342,6 +22751,34 @@ impl App {
                 candidate.position.hash(&mut hasher);
                 candidate.label.hash(&mut hasher);
                 candidate.description.hash(&mut hasher);
+            }
+        }
+        let projected_receipt = overlay.image_paste_receipt.as_ref();
+        projected_receipt.is_some().hash(&mut hasher);
+        if let Some(receipt) = projected_receipt {
+            receipt.original_width.hash(&mut hasher);
+            receipt.original_height.hash(&mut hasher);
+            receipt.remote.hash(&mut hasher);
+            receipt.expanded.hash(&mut hasher);
+            if let Some(geometry) = kettle_render::image_paste_receipt_geometry(
+                receipt,
+                overlay.completion.as_ref(),
+                self.menu_cell(ws),
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ) {
+                for component in [
+                    geometry.rect.0,
+                    geometry.rect.1,
+                    geometry.rect.2,
+                    geometry.rect.3,
+                    geometry.dismiss_rect.0,
+                    geometry.dismiss_rect.1,
+                    geometry.dismiss_rect.2,
+                    geometry.dismiss_rect.3,
+                ] {
+                    component.to_bits().hash(&mut hasher);
+                }
             }
         }
         let mut layout = ws.mux.layout(ws.mux.active, self.area(ws));
@@ -23945,6 +24382,29 @@ impl App {
     }
 
     fn handle_accessibility_action(&mut self, ws: &mut WindowState, request: ActionRequest) {
+        if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID {
+            if request.action == AccessibilityAction::Click {
+                ws.image_paste_receipt = None;
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
+        if request.target_node == ACCESSIBILITY_IMAGE_RECEIPT_ID {
+            if request.action == AccessibilityAction::Click
+                && let Some(path) = ws
+                    .image_paste_receipt
+                    .as_ref()
+                    .filter(|receipt| ws.mux.active_focus() == Some(receipt.pane_id))
+                    .map(|receipt| receipt.path.clone())
+                && let Err(error) = open::that_detached(&path)
+            {
+                log::warn!("could not open a pasted-image preview: {error}");
+            }
+            return;
+        }
         if !ws.search.open {
             return;
         }
@@ -24355,6 +24815,9 @@ impl App {
                 ws.hovered_close_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                if let Some(receipt) = ws.image_paste_receipt.as_mut() {
+                    receipt.set_hover(false, std::time::Instant::now());
+                }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
                 }
@@ -24503,7 +24966,8 @@ impl App {
                 // state. Sub-pixel movements that winit *might* coalesce
                 // are fine to ignore — the next "real" motion will fire.
                 self.show_mouse_cursor(ws);
-                self.sync_cursor_icon(ws);
+                let image_receipt_hovered = self.update_image_paste_receipt_hover(ws);
+                self.sync_cursor_icon_with_image_receipt_hover(ws, image_receipt_hovered);
                 // Terminator menu UX, hover-to-highlight:
                 // cursor over a context-menu row immediately updates
                 // the highlight. Matches GTK/NSMenu/Win32 menu
@@ -24818,7 +25282,7 @@ impl App {
                             }
                         }
                         ConfirmKeyResult::Cancel => {
-                            ws.confirm_dialog = None;
+                            self.cancel_confirm_dialog(ws);
                         }
                         ConfirmKeyResult::Move(_) | ConfirmKeyResult::Ignore => {}
                     }
@@ -24981,6 +25445,13 @@ impl App {
                     }
                     return;
                 }
+                let area = self.area(ws);
+                // The receipt is chrome over terminal cells. Consume every
+                // press inside it so hidden links, selections, or mouse-mode
+                // applications never receive a click meant for the card.
+                if self.activate_image_paste_receipt_at(ws, px, py, bcode) {
+                    return;
+                }
                 // The detached card covers terminal cells but is not a shell
                 // editor. A press dismisses it and stops here so selecting text,
                 // opening a link, or forwarding mouse tracking cannot act on
@@ -25004,7 +25475,6 @@ impl App {
                     }
                     return;
                 }
-                let area = self.area(ws);
                 // Ctrl/Cmd + left-click opens a hyperlink under the cursor.
                 //
                 // Terminator parity, terminatorlib/config.py:120
@@ -25110,6 +25580,8 @@ impl App {
                     return;
                 }
                 // Click the scrollbar to jump the viewport, then drag it.
+                // Keep this behind pane gestures and terminal mouse reporting;
+                // the receipt excludes the same gutter in its own hit test.
                 if bcode == 0
                     && let Some(grab) = self.scrollbar_jump(ws, area, px, py)
                 {
@@ -25474,6 +25946,11 @@ impl App {
                     ws.detach_drag = crate::detach::DragState::default();
                     ws.drag_press = None;
                     ws.pane_drag = None;
+                    if let Some(receipt) = ws.image_paste_receipt.as_mut()
+                        && receipt.set_hover(false, std::time::Instant::now())
+                    {
+                        ws.accessibility_pending = true;
+                    }
                     // v2.19.0 note: torn-drag tracking deliberately survives
                     // this disarm — the tear itself moves OS focus to the
                     // torn window (firing Focused(false) on the source), and
@@ -25761,7 +26238,7 @@ impl App {
                     {
                         let n = state.buttons.len();
                         let focus = state.focus_idx;
-                        let action = &state.on_confirm;
+                        let action = state.on_confirm.clone();
                         let result = confirm_dialog_keypress(focus, n, k);
                         match result {
                             ConfirmKeyResult::Move(idx) => {
@@ -25772,12 +26249,11 @@ impl App {
                             ConfirmKeyResult::Confirm => {
                                 // Inspect on_confirm BEFORE clearing
                                 // so the dispatch sees the right action.
-                                let to_run = action.clone();
                                 ws.confirm_dialog = None;
-                                self.dispatch_confirm_action(ws, to_run, event_loop);
+                                self.dispatch_confirm_action(ws, action, event_loop);
                             }
                             ConfirmKeyResult::Cancel => {
-                                ws.confirm_dialog = None;
+                                self.cancel_confirm_dialog(ws);
                             }
                             ConfirmKeyResult::Ignore => {}
                         }
@@ -25994,6 +26470,14 @@ impl App {
         }
         ws.search_queries
             .retain(|pane_id, _| ws.mux.panes.contains_key(pane_id));
+        if ws
+            .image_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| !ws.mux.panes.contains_key(&receipt.pane_id))
+        {
+            ws.image_paste_receipt = None;
+            ws.accessibility_pending = true;
+        }
         let now = std::time::Instant::now();
         #[cfg(windows)]
         let bounded_pty_exit_wait = next_bounded_pty_exit_wait(ws, now);
@@ -26216,6 +26700,49 @@ impl App {
                 w.request_redraw();
             }
         }
+        let receipt_owner_visible = self.cfg.paste_image_preview
+            && ws.window_focused
+            && terminal_surface_available(ws)
+            && ws
+                .image_paste_receipt
+                .as_ref()
+                .is_some_and(|receipt| ws.mux.active_focus() == Some(receipt.pane_id));
+        let mut image_receipt_redraw = false;
+        if !self.cfg.paste_image_preview && ws.image_paste_receipt.take().is_some() {
+            // A live config change to `off` is an ownership boundary, not only
+            // a paint toggle. Release the bounded pixels and retained path
+            // immediately instead of keeping hidden preview state until its
+            // original lifetime expires.
+            ws.accessibility_pending = true;
+            image_receipt_redraw = true;
+        }
+        if !receipt_owner_visible
+            && let Some(receipt) = ws.image_paste_receipt.as_mut()
+            && receipt.set_hover(false, now)
+        {
+            ws.accessibility_pending = true;
+            image_receipt_redraw = true;
+        }
+        if ws
+            .image_paste_receipt
+            .as_ref()
+            .is_some_and(|receipt| !receipt.live(now))
+        {
+            ws.image_paste_receipt = None;
+            ws.accessibility_pending = true;
+            image_receipt_redraw = true;
+        } else if let Some(receipt) = ws.image_paste_receipt.as_mut() {
+            image_receipt_redraw |= receipt.mark_collapsed_if_due(now);
+        }
+        let image_receipt_wait = ws
+            .image_paste_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.next_deadline(now))
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1))
+            });
         // `about_to_wait` sits on the same input-to-present path as a queued
         // menu-hover redraw on winit backends that deliver RedrawRequested in
         // the next turn. Reuse the validated snapshot's DEC blink bit while a
@@ -26319,6 +26846,7 @@ impl App {
             || autoscroll_active
             || coalesce_due
             || resize_chip_active
+            || image_receipt_redraw
             || completion_hide_due)
             && let Some(w) = &ws.window
         {
@@ -26360,6 +26888,9 @@ impl App {
         }
         if let Some(next) = completion_hide_wait {
             let next = next.max(std::time::Duration::from_millis(1));
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = image_receipt_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         #[cfg(windows)]
@@ -26485,7 +27016,7 @@ mod modal_discipline_guard {
             rest[..end].to_string()
         };
         assert!(
-            body("close_all_modals").contains("ws.confirm_dialog = None"),
+            body("close_all_modals").contains("self.cancel_confirm_dialog(ws)"),
             "close_all_modals must clear confirm_dialog so it can't stack under \
              another overlay"
         );
@@ -26820,15 +27351,17 @@ mod modal_discipline_guard {
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction, ConfirmButton,
-        ConfirmDialogState, ContextMenuItem, GroupBulkScope, MAX_REMOTE_COMMANDS_PER_BATCH,
-        Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch, PendingLuaCommand,
-        PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag, TitleEditScope,
-        apply_bs_del_binding, apply_mux_title_edit, apply_output_generation_outcome,
-        apply_remote_title_transition, argv_is_nonlocal_client, assign_mnemonics,
-        background_is_dark_enough_to_reveal_early, begin_title_edit, broadcast_scope_for_default,
-        cached_pane_cursor_blinking, claim_remote_command_file, clear_stale_title_edit,
-        confirmed_paste_target, context_menu_item_columns, context_menu_max_scroll_offset,
+        ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
+        ACCESSIBILITY_IMAGE_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
+        ConfirmButton, ConfirmDialogState, ContextMenuItem, GroupBulkScope,
+        MAX_REMOTE_COMMANDS_PER_BATCH, Osc52ClipboardChannel, PaneDrag, ParsedRemoteCommandBatch,
+        PendingLuaCommand, PendingLuaCommands, PendingRemoteCommand, RemoteBatchClaim, SplitDrag,
+        TitleEditScope, accessibility_completion_row_id, apply_bs_del_binding,
+        apply_mux_title_edit, apply_output_generation_outcome, apply_remote_title_transition,
+        argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
+        begin_title_edit, broadcast_scope_for_default, cached_pane_cursor_blinking,
+        claim_remote_command_file, clear_stale_title_edit, confirmed_paste_target,
+        context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
@@ -26931,7 +27464,9 @@ mod tests {
                 paths,
                 trailing_space,
                 target,
-            } => paste_paths_into_target(mux, target, &paths, trailing_space),
+                ..
+            } => paste_paths_into_target(mux, target, &paths, trailing_space)
+                .map(|delivery| delivery.result),
             _ => panic!("path confirmation carried the wrong action"),
         }
     }
@@ -27196,6 +27731,7 @@ mod tests {
             PaneInputDelivery {
                 result: PaneInputResult::ReadOnly,
                 accepted: true,
+                receipt_accepted: false,
             },
             input_time,
         );
@@ -27204,6 +27740,7 @@ mod tests {
             PaneInputDelivery {
                 result: PaneInputResult::ReadOnly,
                 accepted: false,
+                receipt_accepted: false,
             },
             input_time,
         );
@@ -27219,6 +27756,205 @@ mod tests {
                 "{owner} must stamp every foreign window that accepted input"
             );
         }
+    }
+
+    #[test]
+    fn mixed_path_delivery_tracks_the_initiating_pane_separately() {
+        let accepted = PaneInputDelivery {
+            result: PaneInputResult::Queued,
+            accepted: true,
+            receipt_accepted: true,
+        };
+        let rejected = PaneInputDelivery {
+            result: PaneInputResult::ReadOnly,
+            accepted: false,
+            receipt_accepted: false,
+        };
+        let mixed = accepted.merge(rejected);
+        assert_eq!(mixed.result, PaneInputResult::ReadOnly);
+        assert!(mixed.accepted);
+        assert!(mixed.receipt_accepted);
+
+        let other_only = PaneInputDelivery {
+            result: PaneInputResult::Queued,
+            accepted: true,
+            receipt_accepted: false,
+        }
+        .merge(rejected);
+        assert!(other_only.accepted, "another pane still received the path");
+        assert!(
+            !other_only.receipt_accepted,
+            "the rejecting initiating pane must not show contradictory success chrome"
+        );
+    }
+
+    #[test]
+    fn image_receipt_wiring_fails_closed_and_keeps_diagnostics_private() {
+        let source = production_source();
+        let confirmed = source
+            .split("fn paste_paths_confirmed(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn show_image_paste_receipt").next())
+            .expect("confirmed path delivery body");
+        assert_eq!(confirmed.matches("delivery.receipt_accepted").count(), 2);
+        assert_eq!(
+            confirmed.matches("self.show_image_paste_receipt(").count(),
+            4,
+            "success, rejection, and a disappearing target must all consume the one-shot preview"
+        );
+
+        let show = source
+            .split("fn show_image_paste_receipt(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("image receipt gate");
+        for gate in [
+            "paths.len() != 1",
+            "!self.cfg.paste_image_preview || !accepted_by_receipt_pane",
+            "receipt_pane.filter(|id| ws.mux.panes.contains_key(id))",
+            "self.pasted_images.take_preview_for_path(&paths[0])",
+        ] {
+            assert!(show.contains(gate), "receipt gate lost {gate:?}");
+        }
+
+        let cancel = source
+            .split("fn cancel_confirm_dialog(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("confirmation cancellation body");
+        assert!(
+            cancel.contains("ConfirmAction::PastePaths { paths, .. }")
+                && cancel.contains("discard_previews_for_paths(&paths)"),
+            "cancelling a protected bitmap paste must release its one-shot preview"
+        );
+        let paths = source
+            .split("fn paste_paths(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn paste_paths_confirmed").next())
+            .expect("path paste body");
+        assert!(
+            paths.contains("if !within_limit {")
+                && paths.contains("discard_previews_for_paths(&paths)"),
+            "an oversize bitmap path must release its one-shot preview"
+        );
+
+        let geometry = source
+            .split("// Geometry diagnostics expose only the receipt's presentation state.")
+            .nth(1)
+            .and_then(|rest| rest.split("Response::ok(").next())
+            .expect("ui_geometry receipt projection");
+        let wait = source
+            .split("fn about_to_wait_inner(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("about_to_wait receipt cleanup");
+        assert!(
+            wait.contains("!ws.mux.panes.contains_key(&receipt.pane_id)")
+                && wait.contains("ws.image_paste_receipt = None;"),
+            "closing the owner pane must remove its receipt"
+        );
+        assert!(
+            wait.contains("!self.cfg.paste_image_preview")
+                && wait.contains("ws.image_paste_receipt.take().is_some()"),
+            "turning previews off must release an already-retained receipt"
+        );
+
+        let ctl_press = source
+            .split("fn ctl_mouse_press(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("ctl mouse press body");
+        assert!(
+            ctl_press.contains("activate_image_paste_receipt_at("),
+            "synthetic presses must not click through receipt chrome"
+        );
+        assert!(
+            !ctl_press.contains("scrollbar_jump("),
+            "ctl presses must not invent native scrollbar semantics ahead of terminal input"
+        );
+
+        let ctl_move = source
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("ctl mouse move body");
+        assert!(
+            ctl_move.contains("update_image_paste_receipt_hover(ws)")
+                && !ctl_move.contains("sync_cursor_icon"),
+            "synthetic motion may expand the receipt but must not retarget native chrome hover or the OS cursor"
+        );
+
+        let hit_test = source
+            .split("fn image_paste_receipt_geometry(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("receipt hit-test projection");
+        assert!(
+            hit_test.contains("self.image_paste_receipt_projection(ws)?")
+                && !hit_test.contains("self.overlay("),
+            "receipt hit-testing must project only the receipt and completion, never all window chrome"
+        );
+
+        let activation = source
+            .split("fn activate_image_paste_receipt_at(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("receipt activation body");
+        assert!(
+            activation.contains("receipt.right_gutter > 0.0")
+                && activation.contains("pane_x + pane_w - receipt.right_gutter")
+                && activation.contains("ImagePasteReceiptHit::Dismiss")
+                && activation.contains("ws.image_paste_receipt = None;"),
+            "receipt activation must preserve the scrollbar and honor its dismiss target"
+        );
+        assert!(
+            geometry.contains("\"dismiss_rect\":")
+                && !geometry.contains("\"path\":")
+                && !geometry.contains("rgba"),
+            "ui_geometry must expose safe shared controls, never retained paths or pixels"
+        );
+
+        let native_press = source
+            .split("WindowEvent::MouseInput {")
+            .nth(1)
+            .and_then(|rest| rest.split("WindowEvent::MouseWheel").next())
+            .expect("native mouse input body");
+        let terminal_mouse = native_press
+            .find("self.send_mouse(")
+            .expect("terminal mouse path");
+        let scrollbar = native_press
+            .find("self.scrollbar_jump(")
+            .expect("native scrollbar path");
+        assert!(
+            terminal_mouse < scrollbar,
+            "terminal mouse reporting and pane gestures must retain priority over the scrollbar"
+        );
+
+        let focus = source
+            .split("WindowEvent::Focused(f) => {")
+            .nth(1)
+            .and_then(|rest| rest.split("WindowEvent::Occluded").next())
+            .expect("window focus handler");
+        assert!(
+            focus.contains("receipt.set_hover(false, std::time::Instant::now())"),
+            "focus loss must not freeze the receipt lifetime"
+        );
+
+        let action = source
+            .split("fn ctl_perform_action(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("ctl perform-action body");
+        assert!(
+            action.contains("name == \"focus_window\"")
+                && action.contains("window.set_visible(true);")
+                && action.contains("window.focus_window();"),
+            "live UI automation needs an idempotent focus action that never hides its target"
+        );
+        assert!(
+            action.find("name == \"focus_window\"") < action.find("Action::from_name(name)"),
+            "the control-only focus action must not depend on the user keybind action table"
+        );
     }
 
     #[test]
@@ -27455,7 +28191,7 @@ mod tests {
             .expect("confirm dispatch arms");
         for call in [
             "paste_text_confirmed(ws, target, &text)",
-            "paste_paths_confirmed(ws, target, &paths, trailing_space)",
+            "paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space)",
         ] {
             assert!(
                 confirm_arms.contains(call),
@@ -30941,6 +31677,25 @@ mod tests {
             draw.contains("self.publish_accessibility_if_due(ws, &overlay);")
                 && !draw.contains("if !reuse_pane_snapshots"),
             "snapshot-only hover redraws must not strand a pending accessibility update"
+        );
+    }
+
+    #[test]
+    fn image_receipt_accessibility_id_cannot_collide_with_completion_rows() {
+        for receipt in [
+            ACCESSIBILITY_IMAGE_RECEIPT_ID,
+            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID,
+        ] {
+            assert_ne!(
+                receipt,
+                accessibility_completion_row_id(0),
+                "duplicate child ids make AccessKit panic when both overlays project"
+            );
+            assert_ne!(receipt, ACCESSIBILITY_COMPLETION_CONTAINER_ID);
+        }
+        assert_ne!(
+            ACCESSIBILITY_IMAGE_RECEIPT_ID,
+            ACCESSIBILITY_IMAGE_RECEIPT_DISMISS_ID
         );
     }
 
@@ -34623,6 +35378,7 @@ mod tests {
                 paths: vec![path].into_boxed_slice(),
                 trailing_space: true,
                 target: confirmed_paste_target(&mux),
+                receipt_pane: mux.active_focus(),
             },
         };
         // Preserve the writable state used to raise the prompt; only after it
@@ -34652,6 +35408,7 @@ mod tests {
                 paths: vec![dead_path].into_boxed_slice(),
                 trailing_space: true,
                 target: confirmed_paste_target(&mux),
+                receipt_pane: mux.active_focus(),
             },
         };
         assert!(!mux.close_focused(), "the sibling keeps the tab alive");

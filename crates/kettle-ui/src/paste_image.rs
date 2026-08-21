@@ -52,6 +52,11 @@ const MAX_RGBA_BYTES: u64 = MAX_TOTAL_BYTES;
 /// likelier than a genuine capture.
 const MAX_DIMENSION: usize = 16_384;
 
+/// The receipt is UI chrome, not a second copy of the screenshot. Keep its
+/// decoded allocation small enough to remain cheap even on a large display.
+const PREVIEW_MAX_WIDTH: u32 = 256;
+const PREVIEW_MAX_HEIGHT: u32 = 160;
+
 /// Directories from an earlier run are removed once they are older than this.
 /// Only relevant when a previous process died without running its cleanup.
 const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
@@ -67,6 +72,16 @@ struct LiveImage {
     path: PathBuf,
     name: OsString,
     file: File,
+    preview: Option<PastedImagePreview>,
+}
+
+/// Bounded renderer projection retained only beside the private PNG whose path
+/// Kettle pasted. A caller cannot construct one for an arbitrary terminal path.
+#[derive(Clone, Debug)]
+pub(crate) struct PastedImagePreview {
+    pub(crate) image: kettle_core::ImageData,
+    pub(crate) original_width: u32,
+    pub(crate) original_height: u32,
 }
 
 struct SessionDirectory {
@@ -114,6 +129,7 @@ impl PastedImages {
         width: usize,
         height: usize,
         rgba: &[u8],
+        with_preview: bool,
     ) -> io::Result<PathBuf> {
         if width == 0 || height == 0 {
             return Err(io::Error::new(
@@ -283,12 +299,41 @@ impl PastedImages {
         };
         self.bytes = total;
         self.seq = sequence;
+        // Build UI chrome only after the private PNG has been published. A
+        // session already at its file or byte limit should fail before doing
+        // even the bounded thumbnail resize on every rejected paste.
+        let preview = if with_preview {
+            make_preview(width, height, rgba)
+        } else {
+            None
+        };
         self.files.push(LiveImage {
             path: path.clone(),
             name: name.to_os_string(),
             file: retained,
+            preview,
         });
         Ok(path)
+    }
+
+    /// Move out the preview attached to this exact retained PNG. File-list
+    /// paste, drag-and-drop, and text that merely resembles a path never reach
+    /// this. The receipt becomes the only owner, so its expiry releases the
+    /// bounded GPU/CPU reservation instead of retaining it until process exit.
+    pub(crate) fn take_preview_for_path(&mut self, path: &Path) -> Option<PastedImagePreview> {
+        self.files
+            .iter_mut()
+            .find(|image| image.path == path)
+            .and_then(|image| image.preview.take())
+    }
+
+    /// Release previews for a paste that will not be delivered. The PNGs stay
+    /// retained for their documented process lifetime; only the extra bounded
+    /// renderer copy is discarded.
+    pub(crate) fn discard_previews_for_paths(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            let _ = self.take_preview_for_path(path);
+        }
     }
 
     /// Remove only the exact PNG objects this process created, then the verified
@@ -338,6 +383,49 @@ impl PastedImages {
             bytes: 0,
         }
     }
+}
+
+fn make_preview(width: usize, height: usize, rgba: &[u8]) -> Option<PastedImagePreview> {
+    let width_u32 = u32::try_from(width).ok()?;
+    let height_u32 = u32::try_from(height).ok()?;
+    let source =
+        image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(width_u32, height_u32, rgba)?;
+    let (preview_width, preview_height) =
+        if width_u32 <= PREVIEW_MAX_WIDTH && height_u32 <= PREVIEW_MAX_HEIGHT {
+            (width_u32, height_u32)
+        } else if u64::from(width_u32) * u64::from(PREVIEW_MAX_HEIGHT)
+            > u64::from(height_u32) * u64::from(PREVIEW_MAX_WIDTH)
+        {
+            (
+                PREVIEW_MAX_WIDTH,
+                (u64::from(height_u32) * u64::from(PREVIEW_MAX_WIDTH) / u64::from(width_u32)).max(1)
+                    as u32,
+            )
+        } else {
+            (
+                (u64::from(width_u32) * u64::from(PREVIEW_MAX_HEIGHT) / u64::from(height_u32))
+                    .max(1) as u32,
+                PREVIEW_MAX_HEIGHT,
+            )
+        };
+    // `thumbnail` uses a cheap box downsample instead of applying a wide
+    // Triangle kernel across the full-resolution clipboard image on the UI
+    // thread. Small images are copied at their native size, never enlarged.
+    let thumbnail = if width_u32 <= PREVIEW_MAX_WIDTH && height_u32 <= PREVIEW_MAX_HEIGHT {
+        image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+            width_u32,
+            height_u32,
+            rgba.to_vec(),
+        )?
+    } else {
+        image::imageops::thumbnail(&source, preview_width, preview_height)
+    };
+    let image = kettle_core::ImageData::new(preview_width, preview_height, thumbnail.into_raw())?;
+    Some(PastedImagePreview {
+        image,
+        original_width: width_u32,
+        original_height: height_u32,
+    })
 }
 
 impl Drop for PastedImages {
@@ -1314,7 +1402,7 @@ mod tests {
         let mut images = PastedImages::with_dir(dir.clone());
         // 2x2 opaque red.
         let rgba = [255u8, 0, 0, 255].repeat(4);
-        let path = images.save_rgba(2, 2, &rgba).expect("save");
+        let path = images.save_rgba(2, 2, &rgba, true).expect("save");
         assert!(path.exists(), "the PNG must actually be written");
         let bytes = std::fs::read(&path).unwrap();
         assert_eq!(
@@ -1326,10 +1414,79 @@ mod tests {
         let decoded = image::load_from_memory(&bytes).expect("decode");
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
         // A second paste gets its own file rather than clobbering the first.
-        let second = images.save_rgba(2, 2, &rgba).expect("save 2");
+        let second = images.save_rgba(2, 2, &rgba, true).expect("save 2");
         assert_ne!(path, second);
         images.cleanup();
         assert!(!dir.exists(), "cleanup removes the whole directory");
+    }
+
+    #[test]
+    fn preview_is_bounded_aspect_preserving_and_path_pinned() {
+        let dir = scratch("preview");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let rgba = [30u8, 60, 90, 255].repeat(640 * 360);
+        let path = images.save_rgba(640, 360, &rgba, true).expect("save");
+        let preview = images
+            .take_preview_for_path(&path)
+            .expect("managed preview");
+        assert_eq!(
+            (preview.original_width, preview.original_height),
+            (640, 360)
+        );
+        assert_eq!((preview.image.width, preview.image.height), (256, 144));
+        assert!(preview.image.byte_len() <= (PREVIEW_MAX_WIDTH * PREVIEW_MAX_HEIGHT * 4) as usize);
+        assert!(
+            images
+                .take_preview_for_path(&dir.join("not-created-by-kettle.png"))
+                .is_none(),
+            "arbitrary paths must never acquire a thumbnail"
+        );
+        assert!(
+            images.take_preview_for_path(&path).is_none(),
+            "the bounded pixel reservation moves into the receipt instead of \
+             living for the rest of the process"
+        );
+        images.cleanup();
+    }
+
+    #[test]
+    fn disabled_receipts_do_not_build_or_retain_a_preview() {
+        let dir = scratch("preview-disabled");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let rgba = [30u8, 60, 90, 255].repeat(640 * 360);
+        let path = images
+            .save_rgba(640, 360, &rgba, false)
+            .expect("the PNG still materializes");
+        assert!(path.exists());
+        assert!(
+            images.take_preview_for_path(&path).is_none(),
+            "a disabled receipt must pay no thumbnail allocation"
+        );
+        images.cleanup();
+    }
+
+    #[test]
+    fn abandoned_paste_discards_only_its_managed_previews() {
+        let dir = scratch("preview-abandoned");
+        let mut images = PastedImages::with_dir(dir.clone());
+        let rgba = [30u8, 60, 90, 255].repeat(4);
+        let abandoned = images.save_rgba(2, 2, &rgba, true).expect("save first");
+        let retained = images.save_rgba(2, 2, &rgba, true).expect("save second");
+
+        images.discard_previews_for_paths(std::slice::from_ref(&abandoned));
+        assert!(
+            images.take_preview_for_path(&abandoned).is_none(),
+            "an abandoned confirmation must release its renderer copy"
+        );
+        assert!(
+            images.take_preview_for_path(&retained).is_some(),
+            "discarding one paste must not release another receipt candidate"
+        );
+        assert!(
+            abandoned.exists() && retained.exists(),
+            "PNG lifetime is unchanged"
+        );
+        images.cleanup();
     }
 
     #[cfg(windows)]
@@ -1349,16 +1506,18 @@ mod tests {
         let mut images = PastedImages::with_dir(dir.clone());
         // Byte count disagrees with the declared size — the encoder would index
         // out of bounds if this were trusted.
-        assert!(images.save_rgba(4, 4, &[0u8; 8]).is_err());
-        assert!(images.save_rgba(0, 4, &[]).is_err(), "zero dimension");
-        assert!(images.save_rgba(4, 0, &[]).is_err(), "zero dimension");
+        assert!(images.save_rgba(4, 4, &[0u8; 8], true).is_err());
+        assert!(images.save_rgba(0, 4, &[], true).is_err(), "zero dimension");
+        assert!(images.save_rgba(4, 0, &[], true).is_err(), "zero dimension");
         assert!(
-            images.save_rgba(MAX_DIMENSION + 1, 1, &[0u8; 4]).is_err(),
+            images
+                .save_rgba(MAX_DIMENSION + 1, 1, &[0u8; 4], true)
+                .is_err(),
             "absurd dimensions are refused before allocating"
         );
         assert!(
             images
-                .save_rgba(MAX_DIMENSION, 4_097, &[])
+                .save_rgba(MAX_DIMENSION, 4_097, &[], true)
                 .unwrap_err()
                 .to_string()
                 .contains("RGBA buffer exceeds"),
@@ -1375,12 +1534,12 @@ mod tests {
         let mut images = PastedImages::with_dir(dir.clone());
         let rgba = vec![0u8, 0, 0, 255];
         for i in 0..MAX_FILES {
-            images.save_rgba(1, 1, &rgba).unwrap_or_else(|e| {
+            images.save_rgba(1, 1, &rgba, true).unwrap_or_else(|e| {
                 panic!("save {i} within budget failed: {e}");
             });
         }
         assert!(
-            images.save_rgba(1, 1, &rgba).is_err(),
+            images.save_rgba(1, 1, &rgba, true).is_err(),
             "a paste loop must not be able to fill the disk"
         );
         images.cleanup();
@@ -1393,7 +1552,7 @@ mod tests {
         let mut images = PastedImages::with_dir(dir.clone());
         images.bytes = MAX_TOTAL_BYTES - 1;
         let error = images
-            .save_rgba(1, 1, &[0, 0, 0, 255])
+            .save_rgba(1, 1, &[0, 0, 0, 255], true)
             .expect_err("a PNG cannot fit in one remaining byte");
         assert_eq!(error.kind(), io::ErrorKind::QuotaExceeded);
         assert_eq!(images.bytes, MAX_TOTAL_BYTES - 1);
@@ -1411,7 +1570,7 @@ mod tests {
         );
         images.bytes = 0;
         let retry = images
-            .save_rgba(1, 1, &[0, 0, 0, 255])
+            .save_rgba(1, 1, &[0, 0, 0, 255], true)
             .expect("the failed sequence is reusable");
         assert_eq!(retry.file_name(), Some(std::ffi::OsStr::new("0001.png")));
         images.cleanup();
@@ -1614,7 +1773,7 @@ mod tests {
         let dir = scratch("identity-replacement");
         let mut images = PastedImages::with_dir(dir.clone());
         let path = images
-            .save_rgba(1, 1, &[1, 2, 3, 4])
+            .save_rgba(1, 1, &[1, 2, 3, 4], true)
             .expect("save original");
         std::fs::remove_file(&path).expect("unlink original while its handle is retained");
         let mut replacement = create_private_file(&path).expect("create replacement");
@@ -1637,7 +1796,7 @@ mod tests {
         // The production liveness probe independently protects this process.
         let mut images = PastedImages::new();
         let own = images.dir.clone();
-        images.save_rgba(1, 1, &[1u8, 2, 3, 4]).expect("save");
+        images.save_rgba(1, 1, &[1u8, 2, 3, 4], true).expect("save");
         sweep_stale();
         assert!(
             own.exists(),

@@ -1410,7 +1410,7 @@ fn decode_with_budget(control: &str, b64: &str, budget: &GraphicsBudget) -> Opti
             let reservation = budget.reserve_image_cpu(rgba_len)?;
             let mut rgba = Vec::new();
             rgba.try_reserve_exact(rgba_len).ok()?;
-            for px in raw.chunks_exact(3) {
+            for px in raw.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             ImageData::from_reserved(w, h, rgba, reservation)

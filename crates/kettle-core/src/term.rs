@@ -5208,8 +5208,10 @@ fn list_wsl_distros() -> Vec<String> {
     }
     let units: Vec<u16> = out
         .stdout
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     parse_wsl_distros(&String::from_utf16_lossy(&units))
 }

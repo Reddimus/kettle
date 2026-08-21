@@ -178,7 +178,7 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     }
     let mut normalized_selected = None;
     let mut candidates = Vec::with_capacity(remaining.len() / 2);
-    for (original_index, pair) in remaining.chunks_exact(2).enumerate() {
+    for (original_index, pair) in remaining.as_chunks::<2>().0.iter().enumerate() {
         // A single filesystem entry can legally contain a newline or bidi
         // control on Unix. It is not safe to put that label in terminal-owned
         // UI, but it must not suppress every other completion in the message.

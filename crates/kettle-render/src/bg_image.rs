@@ -160,7 +160,7 @@ fn box_blur(img: &mut BgImage, radius: u32) -> bool {
 }
 
 fn premultiply_linear_rgba8(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as f64 / 255.0;
         for channel in &mut pixel[..3] {
             let srgb = *channel as f64 / 255.0;
@@ -175,7 +175,7 @@ fn premultiply_linear_rgba8(rgba: &mut [u8]) {
 }
 
 fn unpremultiply_linear_rgba8(rgba: &mut [u8]) {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0 {
         let alpha = pixel[3] as f64 / 255.0;
         if alpha == 0.0 {
             pixel[..3].fill(0);
@@ -664,7 +664,9 @@ mod tests {
         assert!(box_blur(&mut image, 1));
         let fringe = image
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find(|pixel| pixel[3] > 0 && pixel[3] < 255)
             .expect("blur must create a partially transparent fringe");
         assert!(
