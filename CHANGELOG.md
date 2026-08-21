@@ -58,6 +58,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   same gate. Opening a modal or releasing the button that owns the gesture now
   copies selected text first when copy-on-select is enabled, then ends the
   gesture, including Shift+right-drag.
+- **Command chords no longer leave stray text on the command line.** Kettle
+  reported Super in the legacy xterm modifier parameter, but bit 8 there is
+  xterm's Meta — a distinct X11 modifier Kettle has no key for, not macOS
+  Command. `Cmd+Option+Up` therefore sent `CSI 1;11 A` and `Cmd+Left` sent
+  `CSI 1;9 D`, parameters no line editor decodes, so the shell echoed the
+  residue as literal `1A` or `1D`. In the other direction the character branch
+  dropped Super silently, so an unbound `Cmd+A` typed a bare `a`, and
+  `Cmd+Numpad` still emitted an application-keypad sequence. A chord holding
+  Super now produces no PTY bytes at all on any platform unless the application
+  has negotiated the Kitty keyboard protocol, which defines a real super bit and
+  is unchanged. Existing keybindings are unaffected — `Ctrl+Cmd+Arrow` pane
+  focus and `Cmd+Up`/`Cmd+Down` prompt jumps are consumed before the encoder.
+  `send_keys` now reports which token could not be encoded, and says whether
+  the pane's mode was the reason, instead of counting a key it silently
+  dropped.
+- **The close confirmation could not be read, so it could not be answered.**
+  The bar paints the theme's red `palette[1]`, but drew its prompt, buttons and
+  focus marker in the ordinary theme foreground — a color chosen to contrast
+  with the theme *background*. On the shipped TokyoNight Night default that was
+  light lavender on light red, about 1.6:1. Kettle now lifts the bar's text to
+  WCAG AA against its own background using the same contrast helper the
+  completion panel uses, and a test holds the floor across every bundled theme.
+  The key help also advertises `y`/`n` when `vim-menu-nav` is on, because those
+  answer the question directly while Enter fires the focused button — which is
+  the safe `Cancel` on every close prompt.
 
 ## [3.1.1] — 2026-08-18
 
