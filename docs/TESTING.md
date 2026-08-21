@@ -685,7 +685,7 @@ discipline here.
   artificial text padding from shifting either symbol, while
   `pane_window_corner_tests` proves only panes touching a rounded surface bottom
   receive left/right corner masks.
-  selection-autoscroll ladder; cwd-basename tab-title fallback;
+  selection-autoscroll inner edge and overshoot ladder; cwd-basename tab-title fallback;
   the SSH and `-e PROG` initial-pane-title heuristics;
   session JSON round-trips, durable private save,
   symlink refusal, permission tightening, and corruption/oversize backup
@@ -1717,6 +1717,15 @@ These need a real display and are run by hand (or on real hardware):
     deterministic and credential-independent. Commands are typed literally and
     submitted with `send_keys enter`; a raw `\n` is not an Enter key on ConPTY
     and would leave the Windows child alive without testing the reap path.
+  - **Selection drag at pane edges**: `just selection-autoscroll-smoke` uses
+    the native macOS pointer and Kettle's portable control driver on Linux and
+    Windows. It selects terminal text, holds at the upper edge until the
+    viewport enters scrollback, then drags to the last pane pixel and requires
+    the viewport to return to the live bottom. The smoke first proves the edge
+    press created a selection anchor without scrolling, then requires non-empty
+    selected text after the drag. Missing Accessibility permission therefore
+    cannot look like an application failure. Portable unit tests cover the
+    drag gate, DPI-scaled edge zones, and both rate directions.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
