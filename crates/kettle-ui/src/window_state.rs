@@ -763,7 +763,7 @@ pub(crate) struct WindowState {
     /// its own independent pointer-event stream.
     pub(crate) wheel: crate::input::WheelAccum,
     pub(crate) selecting: bool,
-    /// Pane that owns the active primary-button selection gesture. Focus can
+    /// Pane that owns the active pointer selection gesture. Focus can
     /// move through ctl/Lua while a drag is live; pinning the id prevents the
     /// next frame from extending or scrolling an unrelated split.
     pub(crate) selecting_pane: Option<u64>,
@@ -780,6 +780,10 @@ pub(crate) struct WindowState {
     /// backends deliver a duplicate cursor-moved event after mouse-down; the
     /// inner edge zone arms only after measured travel from this point.
     pub(crate) selection_drag_origin: Option<PhysicalPosition<f64>>,
+    /// Mouse button that owns the active selection gesture. Shift+right-click
+    /// extends an existing selection and may continue dragging, so its matching
+    /// right-button release must end the gesture just like a left-button drag.
+    pub(crate) selection_button: Option<u8>,
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
@@ -1093,6 +1097,7 @@ impl WindowState {
             selection_autoscroll_edge: 0,
             selection_dragged: false,
             selection_drag_origin: None,
+            selection_button: None,
             scrollbar_drag_offset: None,
             scrollbar_hover: false,
             dragging_split: None,

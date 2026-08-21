@@ -1722,12 +1722,17 @@ These need a real display and are run by hand (or on real hardware):
     Windows. It selects terminal text, holds at the upper edge until the
     viewport enters scrollback, then drags to the last pane pixel and requires
     the viewport to return to the live bottom. After waiting for the shell's
-    fresh prompt, the smoke proves an edge press, a duplicate move, and one
-    logical point of pointer jitter create a selection anchor without
-    scrolling; it then requires non-empty selected text after the drag. Missing
+    fresh prompt, the smoke proves an edge press, a duplicate move, small inward
+    jitter, and a short crossing above the client area create a selection
+    anchor without scrolling. The scenario puts its tab bar at the bottom and
+    asserts terminal content begins at client Y=0, so native macOS must deliver
+    `CursorLeft` rather than merely moving into chrome. Total travel remains
+    below the two-logical-point drag threshold on every positive display scale.
+    It then requires non-empty selected text after the drag. Missing
     Accessibility permission therefore cannot look like an application
-    failure. Portable unit tests cover the DPI-scaled movement threshold, edge
-    zones, reset paths, and both rate directions.
+    failure. Portable behavioral tests cover the DPI-scaled movement threshold,
+    latched drag state, owning-button and modal reset, window-leave latch, edge
+    zones, and both rate directions.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:
