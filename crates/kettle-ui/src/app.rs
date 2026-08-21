@@ -3104,18 +3104,18 @@ fn selection_autoscroll_lines(
     const EDGE_ZONE_PT: f32 = 6.0;
 
     let pane_height = rect_bottom - rect_top;
-    if pane_height <= 0.0 {
+    if !selection_dragged || pane_height <= 0.0 {
         return 0;
     }
-    let edge_zone = if selection_dragged {
-        (EDGE_ZONE_PT * scale_factor.max(0.0)).min(pane_height * 0.25)
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
     } else {
-        0.0
+        1.0
     };
-    let (overshoot, direction) = if y < rect_top || (selection_dragged && y <= rect_top + edge_zone)
-    {
+    let edge_zone = (EDGE_ZONE_PT * scale_factor).min(pane_height * 0.25);
+    let (overshoot, direction) = if y < rect_top || y <= rect_top + edge_zone {
         ((rect_top - y).max(0.0), 1)
-    } else if y > rect_bottom || (selection_dragged && y >= rect_bottom - edge_zone) {
+    } else if y > rect_bottom || y >= rect_bottom - edge_zone {
         ((y - rect_bottom).max(0.0), -1)
     } else {
         return 0;
@@ -3131,12 +3131,59 @@ fn selection_autoscroll_lines(
     direction * mag
 }
 
+/// Whether pointer travel since the selection press is large enough to count
+/// as a drag. Native backends may emit a cursor-moved event after mouse-down at
+/// the same (or fractionally rounded) coordinate, so event arrival alone is
+/// not evidence that the user dragged. The threshold is in logical points and
+/// converted to physical pixels for the addressed window.
+fn selection_drag_motion_started(
+    origin: Option<winit::dpi::PhysicalPosition<f64>>,
+    cursor: winit::dpi::PhysicalPosition<f64>,
+    scale_factor: f64,
+) -> bool {
+    const DRAG_START_PT: f64 = 2.0;
+
+    let Some(origin) = origin else {
+        return false;
+    };
+    if !(origin.x.is_finite()
+        && origin.y.is_finite()
+        && cursor.x.is_finite()
+        && cursor.y.is_finite())
+    {
+        return false;
+    }
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let threshold = DRAG_START_PT * scale_factor;
+    let dx = cursor.x - origin.x;
+    let dy = cursor.y - origin.y;
+    dx * dx + dy * dy >= threshold * threshold
+}
+
+fn note_selection_drag_motion(ws: &mut WindowState) {
+    if ws.selection_dragged {
+        return;
+    }
+    let scale_factor = ws
+        .window
+        .as_ref()
+        .map_or(1.0, |window| window.scale_factor());
+    ws.selection_dragged =
+        selection_drag_motion_started(ws.selection_drag_origin, ws.cursor, scale_factor);
+}
+
 /// Which vertical edge an in-progress selection most likely crossed when the
 /// backend reports `CursorLeft` without an out-of-client coordinate. Corners
 /// resolve vertically on ties because horizontal selection overflow does not
-/// scroll, while losing the vertical intent freezes the gesture entirely.
-fn selection_leave_edge(x: f32, y: f32, width: f32, height: f32) -> i8 {
-    if !(x.is_finite() && y.is_finite() && width > 0.0 && height > 0.0) {
+/// scroll, while losing the vertical intent freezes the gesture entirely. A
+/// window exit only latches after measured drag travel; otherwise a press on
+/// the last client pixel plus sub-threshold outward jitter could scroll.
+fn selection_leave_edge(selection_dragged: bool, x: f32, y: f32, width: f32, height: f32) -> i8 {
+    if !selection_dragged || !(x.is_finite() && y.is_finite() && width > 0.0 && height > 0.0) {
         return 0;
     }
     let top = y.max(0.0);
@@ -3152,11 +3199,30 @@ fn selection_leave_edge(x: f32, y: f32, width: f32, height: f32) -> i8 {
     }
 }
 
+fn arm_selection_gesture(ws: &mut WindowState, pane_id: u64, button: u8) {
+    ws.selecting = true;
+    ws.selecting_pane = Some(pane_id);
+    ws.selection_autoscroll_edge = 0;
+    ws.selection_dragged = false;
+    ws.selection_drag_origin = Some(ws.cursor);
+    ws.selection_button = Some(button);
+}
+
+fn selection_release_matches(owner: Option<u8>, button: u8) -> bool {
+    owner == Some(button)
+}
+
+fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Option<u64> {
+    if selecting { pane_id } else { None }
+}
+
 fn clear_selection_gesture(ws: &mut WindowState) {
     ws.selecting = false;
     ws.selecting_pane = None;
     ws.selection_autoscroll_edge = 0;
     ws.selection_dragged = false;
+    ws.selection_drag_origin = None;
+    ws.selection_button = None;
 }
 
 fn take_window_close_request(pending: &mut std::collections::BTreeSet<u64>, seq: u64) -> bool {
@@ -8551,10 +8617,7 @@ impl App {
             }
         }
         if installed && dragging {
-            ws.selecting = true;
-            ws.selecting_pane = Some(pane_id);
-            ws.selection_autoscroll_edge = 0;
-            ws.selection_dragged = false;
+            arm_selection_gesture(ws, pane_id, 0);
         } else {
             clear_selection_gesture(ws);
         }
@@ -8800,21 +8863,24 @@ impl App {
                 .contains(kettle_core::TermMode::BRACKETED_PASTE)
         };
         if paste_needs_confirmation(text, self.cfg.clipboard_paste_protection, raw_target) {
-            ws.confirm_dialog = Some(ConfirmDialogState {
-                prompt: paste_confirm_prompt(text),
-                buttons: vec![
-                    ConfirmButton::Cancel,
-                    ConfirmButton::Confirm {
-                        label: "Paste".into(),
-                        destructive: false,
+            self.install_confirm_dialog(
+                ws,
+                ConfirmDialogState {
+                    prompt: paste_confirm_prompt(text),
+                    buttons: vec![
+                        ConfirmButton::Cancel,
+                        ConfirmButton::Confirm {
+                            label: "Paste".into(),
+                            destructive: false,
+                        },
+                    ],
+                    focus_idx: 0,
+                    on_confirm: ConfirmAction::PasteText {
+                        text: text.to_string().into_boxed_str(),
+                        target,
                     },
-                ],
-                focus_idx: 0,
-                on_confirm: ConfirmAction::PasteText {
-                    text: text.to_string().into_boxed_str(),
-                    target,
                 },
-            });
+            );
             return;
         }
         self.paste_text_confirmed(ws, target, text);
@@ -8920,24 +8986,27 @@ impl App {
                 .contains(kettle_core::TermMode::BRACKETED_PASTE)
         };
         if paste_needs_confirmation(&preview, self.cfg.clipboard_paste_protection, raw_target) {
-            ws.confirm_dialog = Some(ConfirmDialogState {
-                prompt: paste_confirm_prompt(&preview),
-                buttons: vec![
-                    ConfirmButton::Cancel,
-                    ConfirmButton::Confirm {
-                        label: "Paste".into(),
-                        destructive: false,
+            self.install_confirm_dialog(
+                ws,
+                ConfirmDialogState {
+                    prompt: paste_confirm_prompt(&preview),
+                    buttons: vec![
+                        ConfirmButton::Cancel,
+                        ConfirmButton::Confirm {
+                            label: "Paste".into(),
+                            destructive: false,
+                        },
+                    ],
+                    focus_idx: 0,
+                    on_confirm: ConfirmAction::PastePaths {
+                        paths: paths.into_boxed_slice(),
+                        video: video.map(Box::new),
+                        trailing_space,
+                        target,
+                        receipt_pane,
                     },
-                ],
-                focus_idx: 0,
-                on_confirm: ConfirmAction::PastePaths {
-                    paths: paths.into_boxed_slice(),
-                    video: video.map(Box::new),
-                    trailing_space,
-                    target,
-                    receipt_pane,
                 },
-            });
+            );
             return;
         }
         self.paste_paths_confirmed(ws, target, receipt_pane, &paths, trailing_space, video);
@@ -9146,21 +9215,48 @@ impl App {
         }
     }
 
+    /// Commit copy-on-select before another UI surface takes pointer ownership,
+    /// then disarm every selection gesture latch. The ordering matters because
+    /// `copy_selection` uses `selecting_pane` to preserve the pane the drag
+    /// started in rather than whichever pane gained focus meanwhile.
+    fn finish_selection_gesture(&mut self, ws: &mut WindowState) {
+        if self.cfg.copy_on_select
+            && selection_copy_owner(ws.selecting, ws.selecting_pane).is_some()
+        {
+            self.copy_selection(ws);
+        }
+        clear_selection_gesture(ws);
+    }
+
+    fn install_confirm_dialog(&mut self, ws: &mut WindowState, dialog: ConfirmDialogState) {
+        // A confirmation takes exclusive pointer ownership just like every
+        // other modal. Commit a completed selection before ending its gesture;
+        // otherwise the visible highlight survives while copy-on-select is
+        // silently lost.
+        self.finish_selection_gesture(ws);
+        ws.confirm_dialog = Some(dialog);
+    }
+
     fn update_selection(&mut self, ws: &mut WindowState, area: Rect) {
         if !ws.selecting {
             return;
         }
         let Some(pane_id) = ws.selecting_pane else {
-            clear_selection_gesture(ws);
+            self.finish_selection_gesture(ws);
             return;
         };
         let Some(rect) = self.pane_rect(ws, area, pane_id) else {
-            clear_selection_gesture(ws);
+            // A tab switch can make the owning pane temporarily absent from
+            // the active layout while its selection is still available in
+            // the mux. Commit copy-on-select before dropping that ownership.
+            self.finish_selection_gesture(ws);
             return;
         };
         let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(pane) = ws.mux.panes.get(&pane_id) else {
-            clear_selection_gesture(ws);
+            // A removed pane has nothing left to copy, but using the shared
+            // transition keeps invalidation ordered with every other exit.
+            self.finish_selection_gesture(ws);
             return;
         };
         if let Ok(mut t) = pane.term.term.lock() {
@@ -9177,7 +9273,8 @@ impl App {
     }
 
     fn begin_or_extend_mouse_selection(&mut self, ws: &mut WindowState, area: Rect) {
-        if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area) {
+        if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area, 0)
+        {
             return;
         }
         let cell = self.cursor_cell(ws);
@@ -9215,30 +9312,34 @@ impl App {
     /// existed (so Shift+Click on empty space starts a normal selection).
     /// Matches xterm / Alacritty / iTerm2: Shift+Click anchors the
     /// existing selection's start and pulls the end to the click.
-    fn extend_selection_to_cursor(&mut self, ws: &mut WindowState, area: Rect) -> bool {
+    fn extend_selection_to_cursor(&mut self, ws: &mut WindowState, area: Rect, button: u8) -> bool {
         let rect = match self.focused_rect(ws, area) {
             Some(r) => r,
             None => return false,
         };
         let (vp, side) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
-        let pane_id = ws.mux.active_focus();
-        if let Some(pane_id) = pane_id
-            && let Some(pane) = ws.mux.panes.get(&pane_id)
-            && let Ok(mut t) = pane.term.term.lock()
-        {
-            // R1: grid-absolute end-point so Shift+Click extends to the right
-            // history row while scrolled back.
-            let p = viewport_point_to_grid(vp, t.grid().display_offset());
-            if let Some(sel) = t.selection.as_mut() {
-                // Sub-cell side so Shift+Click lands the boundary on the same
-                // half-cell rule as a drag.
-                sel.update(p, side);
+        if let Some(pane_id) = ws.mux.active_focus() {
+            let extended = if let Some(pane) = ws.mux.panes.get(&pane_id)
+                && let Ok(mut t) = pane.term.term.lock()
+            {
+                // R1: grid-absolute end-point so Shift+Click extends to the
+                // right history row while scrolled back.
+                let p = viewport_point_to_grid(vp, t.grid().display_offset());
+                if let Some(sel) = t.selection.as_mut() {
+                    // Sub-cell side so Shift+Click lands the boundary on the
+                    // same half-cell rule as a drag.
+                    sel.update(p, side);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if extended {
                 // Enter drag mode so a follow-up mouse-move keeps extending —
                 // matches every Mac/Linux text-control: shift-click, then drag.
-                ws.selecting = true;
-                ws.selecting_pane = Some(pane_id);
-                ws.selection_autoscroll_edge = 0;
-                ws.selection_dragged = false;
+                arm_selection_gesture(ws, pane_id, button);
                 return true;
             }
         }
@@ -12079,7 +12180,9 @@ impl App {
                         self.update_selection(ws, area);
                     }
                 } else {
-                    clear_selection_gesture(ws);
+                    // The owner may still exist in an inactive tab. Preserve
+                    // copy-on-select before invalidating the gesture.
+                    self.finish_selection_gesture(ws);
                 }
             }
             self.update_search(ws);
@@ -12562,6 +12665,10 @@ impl App {
     /// would render both, with palette capturing keys; visually
     /// confusing).
     fn close_all_modals(&mut self, ws: &mut WindowState) {
+        // Opening or switching a modal takes pointer ownership. End a terminal
+        // selection drag here so later motion cannot keep extending or
+        // autoscrolling behind Command Palette, Settings, SSH, or title edit.
+        self.finish_selection_gesture(ws);
         // A live title edit materialises a chrome strip (see `tab_bar_h`), so
         // dropping it here changes the content rectangle. Resize only when it
         // was actually open -- this runs before every other modal opens, and an
@@ -12599,10 +12706,6 @@ impl App {
 
     fn open_search(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
-        // A modal takes exclusive pointer ownership. Cancel any terminal drag
-        // already in flight so its later motion/release cannot emit mouse
-        // protocol bytes behind Search.
-        clear_selection_gesture(ws);
         ws.mouse_btn = None;
         ws.last_mouse_cell = None;
         ws.scrollbar_drag_offset = None;
@@ -13215,10 +13318,7 @@ impl App {
         // behind the menu. CursorMoved deliberately preserves the hover-reuse
         // hint, so leaving one of these armed would make the cached snapshot
         // stale without changing output_generation.
-        if ws.selecting && self.cfg.copy_on_select {
-            self.copy_selection(ws);
-        }
-        clear_selection_gesture(ws);
+        self.finish_selection_gesture(ws);
         ws.scrollbar_drag_offset = None;
         ws.dragging_split = None;
         ws.mouse_btn = None;
@@ -16310,18 +16410,21 @@ impl App {
             return false;
         }
         self.close_all_modals(ws);
-        ws.confirm_dialog = Some(ConfirmDialogState {
-            prompt,
-            buttons: vec![
-                ConfirmButton::Cancel,
-                ConfirmButton::Confirm {
-                    label: "Close".to_string(),
-                    destructive: true,
-                },
-            ],
-            focus_idx: 0, // Cancel — safe default.
-            on_confirm,
-        });
+        self.install_confirm_dialog(
+            ws,
+            ConfirmDialogState {
+                prompt,
+                buttons: vec![
+                    ConfirmButton::Cancel,
+                    ConfirmButton::Confirm {
+                        label: "Close".to_string(),
+                        destructive: true,
+                    },
+                ],
+                focus_idx: 0, // Cancel — safe default.
+                on_confirm,
+            },
+        );
         if let Some(w) = &ws.window {
             w.request_redraw();
         }
@@ -18233,6 +18336,11 @@ impl App {
     }
 
     fn ctl_mouse_move(&mut self, ws: &mut WindowState) {
+        // A control-driven move back inside the client supersedes a native
+        // `CursorLeft` edge latch. Without this reset, mixing the two input
+        // sources keeps scrolling even though the latest pointer coordinate is
+        // back over the pane.
+        ws.selection_autoscroll_edge = 0;
         if self.search_mouse_drag(ws) {
             return;
         }
@@ -18252,7 +18360,7 @@ impl App {
             let _ = self.send_mouse(ws, btn, true, true);
         }
         if ws.selecting {
-            ws.selection_dragged = true;
+            note_selection_drag_motion(ws);
             let area = self.area(ws);
             self.update_selection(ws, area);
         }
@@ -18409,11 +18517,11 @@ impl App {
             ws.mouse_btn = None;
             handled = self.send_mouse(ws, bcode, false, false);
         }
+        if selection_release_matches(ws.selection_button, bcode) {
+            self.finish_selection_gesture(ws);
+            handled = true;
+        }
         if bcode == 0 {
-            if ws.selecting && self.cfg.copy_on_select {
-                self.copy_selection(ws);
-            }
-            clear_selection_gesture(ws);
             ws.scrollbar_drag_offset = None;
             ws.dragging_split = None;
             ws.tab_drag_active = false;
@@ -20596,25 +20704,28 @@ impl App {
                         let chord_label = trig.label();
                         let stolen_name = kettle_config::keybinds::action_label(&stolen_from);
                         let new_name = kettle_config::keybinds::action_label(&act);
-                        ws.confirm_dialog = Some(ConfirmDialogState {
-                            prompt: format!(
-                                "{chord_label} is already bound to \"{stolen_name}\". \
+                        self.install_confirm_dialog(
+                            ws,
+                            ConfirmDialogState {
+                                prompt: format!(
+                                    "{chord_label} is already bound to \"{stolen_name}\". \
                                  Reassign it to \"{new_name}\"?"
-                            ),
-                            buttons: vec![
-                                ConfirmButton::Cancel,
-                                ConfirmButton::Confirm {
-                                    label: "Reassign".to_string(),
-                                    destructive: false,
+                                ),
+                                buttons: vec![
+                                    ConfirmButton::Cancel,
+                                    ConfirmButton::Confirm {
+                                        label: "Reassign".to_string(),
+                                        destructive: false,
+                                    },
+                                ],
+                                focus_idx: 0,
+                                on_confirm: ConfirmAction::RebindKeybind {
+                                    trig,
+                                    act,
+                                    action_name: action,
                                 },
-                            ],
-                            focus_idx: 0,
-                            on_confirm: ConfirmAction::RebindKeybind {
-                                trig,
-                                act,
-                                action_name: action,
                             },
-                        });
+                        );
                     } else {
                         self.apply_keybind_rebind(trig, act, action);
                     }
@@ -25305,6 +25416,7 @@ impl App {
                 {
                     let size = window.inner_size();
                     ws.selection_autoscroll_edge = selection_leave_edge(
+                        ws.selection_dragged,
                         ws.cursor.x as f32,
                         ws.cursor.y as f32,
                         size.width as f32,
@@ -25336,7 +25448,7 @@ impl App {
                 ws.cursor = position;
                 ws.selection_autoscroll_edge = 0;
                 if ws.selecting {
-                    ws.selection_dragged = true;
+                    note_selection_drag_motion(ws);
                 }
                 // v2.19.0 (tear-off UX): client pointer events do NOT reach
                 // the torn window while the OS moves it (Windows: NC modal
@@ -26111,7 +26223,7 @@ impl App {
                 // focused program is consuming mouse events, so this only
                 // fires for the kettle chrome.
                 if bcode == 2 {
-                    if ws.mods.shift_key() && self.extend_selection_to_cursor(ws, area) {
+                    if ws.mods.shift_key() && self.extend_selection_to_cursor(ws, area, bcode) {
                         if self.cfg.copy_on_select {
                             self.copy_selection(ws);
                         }
@@ -26231,11 +26343,10 @@ impl App {
                         return;
                     }
                 }
+                if selection_release_matches(ws.selection_button, bcode) {
+                    self.finish_selection_gesture(ws);
+                }
                 if bcode == 0 {
-                    if ws.selecting && self.cfg.copy_on_select {
-                        self.copy_selection(ws);
-                    }
-                    clear_selection_gesture(ws);
                     ws.search.dragging_editor = false;
                     ws.scrollbar_drag_offset = None;
                     // End any split-divider drag on left-button up.
@@ -26423,10 +26534,7 @@ impl App {
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
-                    if ws.selecting && self.cfg.copy_on_select {
-                        self.copy_selection(ws);
-                    }
-                    clear_selection_gesture(ws);
+                    self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
                     ws.scrollbar_hover = false;
                     ws.tab_drag_active = false;
@@ -31704,8 +31812,7 @@ mod tests {
             .and_then(|body| body.split("WindowEvent::").next())
             .expect("Focused event arm");
         assert!(
-            focused_arm.contains("if ws.selecting && self.cfg.copy_on_select {")
-                && focused_arm.contains("clear_selection_gesture(ws);")
+            focused_arm.contains("self.finish_selection_gesture(ws);")
                 && focused_arm.contains("ws.search.dragging_editor = false;")
                 && focused_arm.contains("ws.mux.panes.values().chain(")
                 && focused_arm.contains("self.windows\n                        .values()")
@@ -33769,6 +33876,324 @@ mod tests {
     }
 
     #[test]
+    fn selection_drag_requires_real_dpi_scaled_travel() {
+        use super::selection_drag_motion_started;
+        use winit::dpi::PhysicalPosition;
+
+        let origin = PhysicalPosition::new(100.0, 200.0);
+        assert!(!selection_drag_motion_started(None, origin, 1.0));
+        assert!(!selection_drag_motion_started(Some(origin), origin, 1.0));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.99, 200.0),
+            1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            1.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(103.99, 200.0),
+            2.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(104.0, 200.0),
+            2.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(100.99, 200.0),
+            0.5,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.0, 200.0),
+            0.5,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.0, 201.0),
+            1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(101.5, 201.5),
+            1.0,
+        ));
+        // Invalid scales use the conservative 1x fallback rather than making
+        // every movement a drag or permanently disabling drag detection.
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            0.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            f64::NAN,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            -1.0,
+        ));
+        assert!(selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(102.0, 200.0),
+            f64::INFINITY,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(origin),
+            PhysicalPosition::new(f64::NAN, 200.0),
+            1.0,
+        ));
+        assert!(!selection_drag_motion_started(
+            Some(PhysicalPosition::new(f64::INFINITY, 200.0)),
+            origin,
+            1.0,
+        ));
+    }
+
+    #[test]
+    fn selection_drag_state_measures_from_press_and_stays_latched() {
+        use super::{
+            Mux, WindowState, arm_selection_gesture, clear_selection_gesture,
+            note_selection_drag_motion, selection_release_matches,
+        };
+        use winit::dpi::PhysicalPosition;
+
+        let mut ws = WindowState::new(1, false, Mux::new());
+        let origin = PhysicalPosition::new(100.0, 200.0);
+        ws.cursor = origin;
+        arm_selection_gesture(&mut ws, 42, 2);
+        assert_eq!(ws.selecting_pane, Some(42));
+        assert_eq!(ws.selection_button, Some(2));
+        assert!(selection_release_matches(ws.selection_button, 2));
+        assert!(!selection_release_matches(ws.selection_button, 0));
+
+        note_selection_drag_motion(&mut ws);
+        assert!(!ws.selection_dragged, "a duplicate native move stays inert");
+
+        ws.cursor = PhysicalPosition::new(101.99, 200.0);
+        note_selection_drag_motion(&mut ws);
+        assert!(
+            !ws.selection_dragged,
+            "travel is measured from the press using the no-window 1x fallback"
+        );
+
+        ws.cursor = PhysicalPosition::new(102.0, 200.0);
+        note_selection_drag_motion(&mut ws);
+        assert!(ws.selection_dragged, "the exact threshold starts the drag");
+
+        ws.cursor = origin;
+        note_selection_drag_motion(&mut ws);
+        assert!(
+            ws.selection_dragged,
+            "once real travel starts a drag, returning to the origin cannot disarm it"
+        );
+
+        clear_selection_gesture(&mut ws);
+        assert!(!ws.selecting);
+        assert!(!ws.selection_dragged);
+        assert_eq!(ws.selection_drag_origin, None);
+        assert_eq!(ws.selection_button, None);
+        assert!(!selection_release_matches(ws.selection_button, 2));
+    }
+
+    #[test]
+    fn selection_copy_requires_the_gesture_owner() {
+        use super::selection_copy_owner;
+
+        assert_eq!(selection_copy_owner(true, Some(7)), Some(7));
+        assert_eq!(selection_copy_owner(true, None), None);
+        assert_eq!(selection_copy_owner(false, Some(7)), None);
+    }
+
+    #[test]
+    fn native_and_control_selection_motion_share_the_drag_threshold() {
+        let src = production_source();
+        let control = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl mouse move body");
+        assert!(control.contains("note_selection_drag_motion(ws);"));
+
+        let native = src
+            .split("WindowEvent::CursorMoved { position, .. } => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native cursor-moved arm");
+        assert!(native.contains("note_selection_drag_motion(ws);"));
+        let cursor_at = native
+            .find("ws.cursor = position;")
+            .expect("native motion stores the delivered position");
+        let motion_at = native
+            .find("note_selection_drag_motion(ws);")
+            .expect("native motion applies the drag threshold");
+        assert!(
+            cursor_at < motion_at,
+            "native motion must store the new cursor before measuring from the press origin"
+        );
+        assert!(
+            !src.contains("ws.selection_dragged = true;"),
+            "a raw move event must not bypass the travel threshold"
+        );
+
+        let cursor_left = src
+            .split("WindowEvent::CursorLeft { .. } => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native cursor-left arm");
+        let cursor_left = cursor_left.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            cursor_left.contains("selection_leave_edge(")
+                && cursor_left.contains("ws.selection_dragged"),
+            "leaving the client area must not bypass measured drag travel"
+        );
+
+        let clear = src
+            .split("fn clear_selection_gesture(")
+            .nth(1)
+            .and_then(|body| body.split("\n}\n").next())
+            .expect("selection gesture reset");
+        assert!(clear.contains("ws.selection_drag_origin = None;"));
+        assert!(clear.contains("ws.selection_button = None;"));
+        assert_eq!(
+            src.matches("arm_selection_gesture(ws, pane_id,").count(),
+            2,
+            "fresh and extended selections must share origin and button ownership"
+        );
+
+        let close_modals = src
+            .split("fn close_all_modals(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared modal transition");
+        assert!(
+            close_modals.contains("self.finish_selection_gesture(ws);"),
+            "every modal transition must commit copy-on-select before ending pointer ownership"
+        );
+
+        let finish_selection = src
+            .split("fn finish_selection_gesture(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared selection completion transition");
+        let copy_at = finish_selection
+            .find("self.copy_selection(ws);")
+            .expect("copy-on-select is committed");
+        let owner_at = finish_selection
+            .find("selection_copy_owner(ws.selecting, ws.selecting_pane).is_some()")
+            .expect("copy-on-select requires an explicit gesture owner");
+        let clear_at = finish_selection
+            .find("clear_selection_gesture(ws);")
+            .expect("selection gesture is cleared");
+        assert!(
+            owner_at < copy_at && copy_at < clear_at,
+            "copying requires selecting_pane and must precede the clear"
+        );
+
+        let install_confirm = src
+            .split("fn install_confirm_dialog(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared confirmation transition");
+        let finish_at = install_confirm
+            .find("self.finish_selection_gesture(ws);")
+            .expect("confirmation completes terminal selection ownership");
+        let install_at = install_confirm
+            .find("ws.confirm_dialog = Some(dialog);")
+            .expect("confirmation stores the modal");
+        assert!(
+            finish_at < install_at,
+            "selection ownership must end before a confirmation becomes visible"
+        );
+        let normalized_src = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            normalized_src
+                .matches("self.install_confirm_dialog(")
+                .count(),
+            4,
+            "every confirmation path, including protected text and path paste, must use the shared transition"
+        );
+        assert_eq!(
+            normalized_src.matches("ws.confirm_dialog = Some(").count(),
+            1,
+            "confirmations must not bypass the shared pointer-ownership transition"
+        );
+
+        let show_context_menu = src
+            .split("fn show_context_menu(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("shared context-menu transition");
+        assert!(
+            show_context_menu.contains("self.finish_selection_gesture(ws);"),
+            "a context menu must commit copy-on-select before taking the pointer"
+        );
+
+        let update_selection = src
+            .split("fn update_selection(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("selection update body");
+        assert_eq!(
+            update_selection
+                .matches("self.finish_selection_gesture(ws);")
+                .count(),
+            3,
+            "every selection-owner invalidation must commit copy-on-select before clearing"
+        );
+        assert!(
+            !update_selection.contains("clear_selection_gesture(ws);"),
+            "selection invalidation must not bypass copy-on-select"
+        );
+
+        let redraw = src
+            .split("fn redraw(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("redraw body");
+        assert!(
+            redraw.contains("self.finish_selection_gesture(ws);")
+                && !redraw.contains("clear_selection_gesture(ws);"),
+            "frame-time pane invalidation must preserve copy-on-select"
+        );
+
+        let control_move = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("control mouse move body");
+        assert!(
+            control_move.contains("ws.selection_autoscroll_edge = 0;"),
+            "a control move inside the client must clear a stale native edge latch"
+        );
+
+        let control_release = src
+            .split("fn ctl_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("control mouse release body");
+        let native_release = src
+            .split("state: ElementState::Released,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native mouse release arm");
+        for (name, body) in [("control", control_release), ("native", native_release)] {
+            assert!(
+                body.contains("selection_release_matches(ws.selection_button, bcode)")
+                    && body.contains("self.finish_selection_gesture(ws);"),
+                "{name} release must match the owning button and commit copy-on-select before clearing it"
+            );
+        }
+    }
+
+    #[test]
     fn selection_autoscroll_rate_scales_with_overshoot() {
         use super::selection_autoscroll_lines;
         let dragged = |y| selection_autoscroll_lines(y, 100.0, 200.0, 1.0, true);
@@ -33793,15 +34218,20 @@ mod tests {
         // the bottom edge for the pointer to enter.
         assert_eq!(dragged(102.0), 1);
         assert_eq!(dragged(198.0), -1);
-        // The inner zone is drag-only. A click held at the edge is inert, but
-        // the legacy outside-past-edge behavior remains unconditional.
+        // Every path is drag-only, including a coordinate just outside the
+        // pane. A press on the boundary plus sub-threshold outward jitter must
+        // not bypass the measured-travel gate.
         assert_eq!(
             selection_autoscroll_lines(100.0, 100.0, 200.0, 1.0, false),
             0
         );
         assert_eq!(
             selection_autoscroll_lines(95.0, 100.0, 200.0, 1.0, false),
-            1
+            0
+        );
+        assert_eq!(
+            selection_autoscroll_lines(205.0, 100.0, 200.0, 1.0, false),
+            0
         );
         // The zone is specified in logical points and capped to a quarter of a
         // tiny pane so its top and bottom regions cannot overlap.
@@ -33816,6 +34246,18 @@ mod tests {
         assert_eq!(selection_autoscroll_lines(1.0, 0.0, 8.0, 1.0, true), 1);
         assert_eq!(selection_autoscroll_lines(4.0, 0.0, 8.0, 1.0, true), 0);
         assert_eq!(selection_autoscroll_lines(7.0, 0.0, 8.0, 1.0, true), -1);
+        for invalid_scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                selection_autoscroll_lines(105.0, 100.0, 200.0, invalid_scale, true),
+                1,
+                "invalid display scales use the 1x edge zone"
+            );
+            assert_eq!(
+                selection_autoscroll_lines(195.0, 100.0, 200.0, invalid_scale, true),
+                -1,
+                "invalid display scales use the 1x edge zone"
+            );
+        }
         // A transient empty layout must not invent an edge direction.
         assert_eq!(
             selection_autoscroll_lines(100.0, 100.0, 100.0, 1.0, true),
@@ -33831,14 +34273,18 @@ mod tests {
     fn selection_leave_latches_only_the_nearest_vertical_edge() {
         use super::selection_leave_edge;
 
-        assert_eq!(selection_leave_edge(400.0, 1.0, 800.0, 600.0), 1);
-        assert_eq!(selection_leave_edge(400.0, 599.0, 800.0, 600.0), -1);
-        assert_eq!(selection_leave_edge(1.0, 300.0, 800.0, 600.0), 0);
-        assert_eq!(selection_leave_edge(799.0, 300.0, 800.0, 600.0), 0);
-        assert_eq!(selection_leave_edge(1.0, 1.0, 800.0, 600.0), 1);
-        assert_eq!(selection_leave_edge(799.0, 599.0, 800.0, 600.0), -1);
-        assert_eq!(selection_leave_edge(f32::NAN, 1.0, 800.0, 600.0), 0);
-        assert_eq!(selection_leave_edge(1.0, 1.0, 0.0, 600.0), 0);
+        // Leaving the window is not itself proof of a drag. A press on the
+        // last pixel followed by sub-threshold outward jitter must stay inert.
+        assert_eq!(selection_leave_edge(false, 400.0, 1.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(false, 400.0, 599.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(true, 400.0, 1.0, 800.0, 600.0), 1);
+        assert_eq!(selection_leave_edge(true, 400.0, 599.0, 800.0, 600.0), -1);
+        assert_eq!(selection_leave_edge(true, 1.0, 300.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(true, 799.0, 300.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(true, 1.0, 1.0, 800.0, 600.0), 1);
+        assert_eq!(selection_leave_edge(true, 799.0, 599.0, 800.0, 600.0), -1);
+        assert_eq!(selection_leave_edge(true, f32::NAN, 1.0, 800.0, 600.0), 0);
+        assert_eq!(selection_leave_edge(true, 1.0, 1.0, 0.0, 600.0), 0);
     }
 
     #[test]
@@ -34349,8 +34795,9 @@ mod tests {
             capture_arm.contains("self.cfg.keybinds.get(&trig).filter(|v| **v != act).cloned()"),
             "a conflicting existing binding must be looked up before applying the rebind"
         );
+        let capture_arm_normalized = capture_arm.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            capture_arm.contains("ws.confirm_dialog = Some(ConfirmDialogState {")
+            capture_arm_normalized.contains("self.install_confirm_dialog(")
                 && capture_arm.contains("ConfirmAction::RebindKeybind {"),
             "a conflicting rebind must route through a confirm dialog, not apply immediately"
         );
@@ -37230,8 +37677,12 @@ mod keyboard_selection_tests {
         );
         // Shift+click extension (existing behavior) must remain wired.
         assert!(
-            src.contains("self.extend_selection_to_cursor(ws, area)"),
+            src.contains("self.extend_selection_to_cursor(ws, area, 0)"),
             "Shift+click must still extend the selection via extend_selection_to_cursor"
+        );
+        assert!(
+            src.contains("self.extend_selection_to_cursor(ws, area, bcode)"),
+            "Shift+right-click must record the right button as gesture owner"
         );
     }
 }

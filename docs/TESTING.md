@@ -1721,11 +1721,25 @@ These need a real display and are run by hand (or on real hardware):
     the native macOS pointer and Kettle's portable control driver on Linux and
     Windows. It selects terminal text, holds at the upper edge until the
     viewport enters scrollback, then drags to the last pane pixel and requires
-    the viewport to return to the live bottom. The smoke first proves the edge
-    press created a selection anchor without scrolling, then requires non-empty
-    selected text after the drag. Missing Accessibility permission therefore
-    cannot look like an application failure. Portable unit tests cover the
-    drag gate, DPI-scaled edge zones, and both rate directions.
+    the viewport to return to the live bottom. After waiting for the shell's
+    fresh prompt, the smoke proves an edge press, a duplicate move, small inward
+    jitter, and a short crossing above the client area create a selection
+    anchor without scrolling. The scenario puts its tab bar at the bottom and
+    asserts terminal content begins at client Y=0, so the macOS probe sends an
+    explicit out-of-client drag coordinate rather than moving into chrome.
+    Native capture may report that as an out-of-client `CursorMoved` instead of
+    `CursorLeft`; the latter path has focused unit coverage. Native macOS derives
+    probe coordinates from CoreGraphics and requires the Swift toolchain. Its
+    probes remain within the two-logical-point threshold; the portable hosted
+    legs exercise their scale >= 1 coordinates, while focused behavior tests
+    cover representative positive and invalid display scales.
+    It then requires non-empty selected text after the drag. Missing
+    Accessibility permission therefore cannot look like an application
+    failure. Portable behavioral tests cover the DPI-scaled movement threshold,
+    latched drag state, owning-button matching, window-leave latch, edge zones,
+    and both rate directions. Source drift guards pin copy-before-clear ordering
+    across modal, confirmation, focus-loss, pane invalidation, and
+    native/control release paths.
   - **`kettle exec`**: `kettle exec -- echo ok` — output is piped to stdout and
     the child's exit code propagates (`kettle exec -- sh -c 'exit 7'` → 7).
     On Unix/WSL, also verify stdin-driven one-shots:

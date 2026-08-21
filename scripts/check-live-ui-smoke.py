@@ -6555,30 +6555,71 @@ def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -
 
 
 def macos_window_frame(pid: int) -> Tuple[float, float, float, float]:
-    script = f"""
-tell application "System Events"
-    set targetProcess to first process whose unix id is {pid}
-    set frontmost of targetProcess to true
-    set windowPosition to position of first window of targetProcess
-    set windowSize to size of first window of targetProcess
-    return (item 1 of windowPosition as string) & "," & ¬
-        (item 2 of windowPosition as string) & "," & ¬
-        (item 1 of windowSize as string) & "," & ¬
-        (item 2 of windowSize as string)
-end tell
-"""
-    result = subprocess.run(
-        ["osascript", "-e", script],
-        capture_output=True,
-        text=True,
-        timeout=8,
-        check=False,
+    # System Events can report zero accessibility windows for a valid custom
+    # winit NSWindow. CoreGraphics owns the screen-space bounds used by the
+    # native event injector and sees that window regardless of its AX shape.
+    # This is a geometry lookup only; the scenario activates the app with its
+    # positive-control titlebar click before it sends the selection press.
+    require_cmd("swift")
+    script = r"""
+import CoreGraphics
+import Foundation
+
+guard let rawPID = ProcessInfo.processInfo.environment["KETTLE_SMOKE_PID"],
+      let pid = Int32(rawPID) else {
+    FileHandle.standardError.write(Data("missing KETTLE_SMOKE_PID\n".utf8))
+    exit(2)
+}
+let rows = CGWindowListCopyWindowInfo(
+    [.optionOnScreenOnly, .excludeDesktopElements],
+    kCGNullWindowID
+)! as! [[String: Any]]
+let matches = rows.compactMap { row -> (CGRect, CGFloat)? in
+    guard (row[kCGWindowOwnerPID as String] as? Int32) == pid,
+          (row[kCGWindowLayer as String] as? Int) == 0,
+          let raw = row[kCGWindowBounds as String] as? NSDictionary else {
+        return nil
+    }
+    var rect = CGRect.zero
+    guard CGRectMakeWithDictionaryRepresentation(raw as CFDictionary, &rect),
+          rect.width > 0, rect.height > 0 else {
+        return nil
+    }
+    return (rect, rect.width * rect.height)
+}.sorted { $0.1 > $1.1 }
+guard let rect = matches.first?.0 else {
+    FileHandle.standardError.write(
+        Data("no visible layer-0 CoreGraphics window for pid \(pid)\n".utf8)
     )
-    if result.returncode != 0:
-        raise SystemExit(
-            "selection-autoscroll smoke: could not read the native macOS window frame: "
-            + result.stderr.strip()
-        )
+    exit(2)
+}
+print("\(rect.minX),\(rect.minY),\(rect.width),\(rect.height)")
+"""
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            result = subprocess.run(
+                ["swift", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                env={**os.environ, "KETTLE_SMOKE_PID": str(pid)},
+            )
+        except subprocess.TimeoutExpired as error:
+            raise SystemExit(
+                "selection-autoscroll smoke: timed out reading the native "
+                "macOS window frame from CoreGraphics"
+            ) from error
+        if result.returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise SystemExit(
+                "selection-autoscroll smoke: could not read the native macOS "
+                "window frame after waiting for CoreGraphics: "
+                + result.stderr.strip()
+            )
+        time.sleep(0.1)
     values = [float(value.strip()) for value in result.stdout.strip().split(",")]
     if len(values) != 4:
         raise SystemExit(
@@ -15497,6 +15538,7 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
                 "agent-server = full",
                 "text-renderer = grid",
                 "tab-bar = always",
+                "tab-bar-position = bottom",
                 "status-bar = off",
                 "restore-session = false",
                 "update-check = false",
@@ -15531,14 +15573,32 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
                 "printf 'KETTLE_SELECTION_AUTOSCROLL_%03d\\n' \"$i\"; done"
             )
         live_shell_command(live, command_with_marker(body, marker), marker, timeout_ms=12000)
-        before = live.json_ctl("read_screen")
-        if int(before.get("display_offset", -1)) != 0:
+        prompt_prefix = "PS " if platform.system() == "Windows" else "bash-"
+        prompt_deadline = time.monotonic() + 3.0
+        before: Dict[str, object] = {}
+        while time.monotonic() < prompt_deadline:
+            before = live.json_ctl("read_screen")
+            lines = str(before.get("text", "")).rstrip().splitlines()
+            if (
+                int(before.get("display_offset", -1)) == 0
+                and lines
+                and lines[-1].startswith(prompt_prefix)
+            ):
+                break
+            time.sleep(0.05)
+        else:
             raise SystemExit(
-                "selection-autoscroll smoke: fixture did not start at the live bottom"
+                "selection-autoscroll smoke: fixture did not settle at a fresh live prompt: "
+                f"{before}"
             )
 
         geometry = live.json_ctl("ui_geometry")
         content = geometry["content"]
+        if float(content["y"]) != 0.0:
+            raise SystemExit(
+                "selection-autoscroll smoke: content must begin at the client "
+                f"top so the inert probe crosses the client boundary: {content}"
+            )
         cells = live.read_cells()
         start_x, start_y, end_x, _ = selection_drag_points(cells, content)
         cell_width = float(content["width"]) / max(1, int(cells.get("cols", 1)))
@@ -15616,28 +15676,51 @@ def run_selection_autoscroll(kettle: str, root: Path) -> Path:
             )
 
         armed: Dict[str, object] = {}
+        content_top_y = client_origin_y + float(content["y"]) / scale_y
+        inert_edge_y = content_top_y + 1.0
+        inert_outside_y = content_top_y - 0.5
         upper_edge_y = client_origin_y + (float(content["y"]) + 2.0) / scale_y
         try:
-            if focus_point is not None:
-                post_mouse(MACOS_MOUSE_MOVED, *focus_point)
-                post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
-                post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
-                time.sleep(0.2)
             # The inner zone is drag-only. A press held at the edge must not
-            # scroll until pointer motion turns it into a selection drag.
-            post_mouse(MACOS_MOUSE_MOVED, pointer_x, upper_edge_y)
-            post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, upper_edge_y)
-            time.sleep(0.2)
-            held_click = live.json_ctl("read_screen")
-            post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, upper_edge_y)
-            if not held_click.get("selection_present"):
+            # scroll until pointer motion turns it into a selection drag. Cross
+            # above the client boundary by half a point too. Native capture may
+            # deliver that as an out-of-client move rather than CursorLeft, and
+            # either must stay inert below the two-point threshold. A posted
+            # macOS activation click can occasionally be swallowed;
+            # retry only when the positive control proves the pane press never
+            # landed. A delivered press that scrolls still fails immediately.
+            held_click: Dict[str, object] = {}
+            for _ in range(3):
+                if focus_point is not None:
+                    post_mouse(MACOS_MOUSE_MOVED, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_DOWN, *focus_point)
+                    post_mouse(MACOS_LEFT_MOUSE_UP, *focus_point)
+                    time.sleep(0.2)
+                post_mouse(MACOS_MOUSE_MOVED, pointer_x, inert_edge_y)
+                post_mouse(MACOS_LEFT_MOUSE_DOWN, pointer_x, inert_edge_y)
+                # Exercise the native duplicate-event case deterministically,
+                # then add a small inward jitter and cross the top by half a
+                # coordinate unit. The farthest position stays below the
+                # two-logical-point threshold on the native macOS driver and
+                # on the scale >= 1 hosted portable legs. Pure behavior tests
+                # cover representative positive and invalid display scales.
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_edge_y)
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_edge_y + 1.0)
+                post_mouse(MACOS_LEFT_MOUSE_DRAGGED, pointer_x, inert_outside_y)
+                time.sleep(0.2)
+                held_click = live.json_ctl("read_screen")
+                post_mouse(MACOS_LEFT_MOUSE_UP, pointer_x, inert_outside_y)
+                if int(held_click.get("display_offset", 0)) != 0:
+                    raise SystemExit(
+                        "selection-autoscroll smoke: sub-threshold boundary jitter "
+                        "scrolled before any drag"
+                    )
+                if held_click.get("selection_present"):
+                    break
+            else:
                 raise SystemExit(
                     "selection-autoscroll smoke: the edge press never started a "
-                    "selection, so the inert check proved nothing"
-                )
-            if int(held_click.get("display_offset", 0)) != 0:
-                raise SystemExit(
-                    "selection-autoscroll smoke: a held edge click scrolled before any drag"
+                    "selection after three attempts, so the inert check proved nothing"
                 )
             for _ in range(3):
                 if focus_point is not None:
