@@ -769,7 +769,9 @@ fn extract_bundle_into(staging: &Staging, archive: &[u8]) -> Result<(), UpdateEr
         file.sync_all()?;
         directory.sync_all()?;
 
-        present.push(inside.to_string_lossy().replace('\\', "/"));
+        // `validate_archive_path` admits only `[A-Za-z0-9._-]` per component, so
+        // a separator here is always `/` and needs no normalizing.
+        present.push(inside.to_string_lossy().into_owned());
     }
 
     for mandatory in MANDATORY_ENTRIES {

@@ -48,8 +48,9 @@ macOS has no installer to write a marker, and a marker cannot be added inside
 `kettle.app` without breaking its code signature. Ownership is proven from the
 signature instead: the bundle must be laid out as
 `kettle.app/Contents/MacOS/kettle`, signed with Kettle's bundle identifier and
-team, and sitting in a directory this user can write. A locally built app is ad-hoc signed and so is
-refused, which is the same answer a `local-dev` marker gets elsewhere.
+team, and sitting in a directory this user can write. A locally built app is
+ad-hoc signed and is therefore refused, which is the same answer a `local-dev`
+marker gets elsewhere.
 Repository installs deliberately use a `local-dev` marker (recording no longer
 affects the channel — it is a runtime toggle in every build; the legacy
 `local-dev-record` marker is still recognized and refused for older installs).
