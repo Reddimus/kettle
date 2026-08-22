@@ -11510,6 +11510,26 @@ pub fn search_bar_geometry(
     }
 }
 
+/// Recover a control's width in cells from the pixel rect the geometry built.
+///
+/// `search_bar_geometry` lays the bar out in whole columns and then multiplies
+/// by `cell_width` to store pixels, so this has to divide back. A plain
+/// `floor` loses a column whenever `n * cell_width / cell_width` lands a few
+/// ULP below `n` in f32, which for a cell width like `7.007` turns an 11-column
+/// slot into 10 and ellipsizes the label inside it. Sweeping cell widths
+/// 6.000–16.000 in 0.001 steps, that bit the widths used by Close (910 of
+/// 10001), Case (910) and Invert (415).
+///
+/// The epsilon is far larger than the f32 error (~1e-7 relative) and far
+/// smaller than the fraction of a cell that a genuinely clamped control loses
+/// at the surface edge, so a control cut off by the window still floors down.
+fn search_bar_columns(rect_width: f32, cell_width: f32) -> usize {
+    if cell_width <= 0.0 {
+        return 0;
+    }
+    (rect_width / cell_width + 1e-3).floor().max(0.0) as usize
+}
+
 fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_width: f32) -> String {
     let row_height = geometry.reserved_height / geometry.rows.max(1) as f32;
     let mut rows = vec![Vec::<(usize, usize, String)>::new(); geometry.rows];
@@ -11524,11 +11544,11 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
         }
         .min(rows.len().saturating_sub(1));
         let col = (rect.0 / cell_width).round().max(0.0) as usize;
-        let width = (rect.2 / cell_width).floor().max(1.0) as usize;
+        let width = search_bar_columns(rect.2, cell_width).max(1);
         rows[row].push((col, width, fit_single_line_label(&text, width)));
     };
 
-    let label_cols = (geometry.label.2 / cell_width).floor() as usize;
+    let label_cols = search_bar_columns(geometry.label.2, cell_width);
     add(
         geometry.label,
         if label_cols >= 6 { "Search" } else { "?" }.to_string(),
@@ -17478,6 +17498,54 @@ mod search_bar_tests {
                 "{status:?} must still be reported: {text}"
             );
         }
+    }
+
+    const ELLIPSIS: char = '\u{2026}';
+
+    /// No control label may be ellipsized at any realistic cell width.
+    ///
+    /// The bar stores its layout in pixels and divides back to columns, so a
+    /// label that exactly fills its slot sits one f32 rounding step away from
+    /// truncation. `Enter: Next` is exactly the 11 columns of its slot and
+    /// clipped to `Enter: Ne...` at cell widths like 7.007; `x Close` and
+    /// `Case: Ignore >` had the same exposure at 910 widths each. Sweep the
+    /// range instead of trusting one convenient number.
+    #[test]
+    fn no_search_control_label_is_ellipsized_at_any_cell_width() {
+        let states = [
+            (true, true, SearchCaseMode::Ignore),
+            (false, false, SearchCaseMode::Smart),
+            (true, false, SearchCaseMode::Match),
+        ];
+        let mut checked = 0usize;
+        // 6.000..16.000 in 0.005 steps: wide enough to cover real font metrics,
+        // fine enough to land on the values that previously lost a column.
+        for step in 0..=2000 {
+            let cell_width = 6.0 + step as f32 * 0.005;
+            let bar = search_bar_geometry(2400.0, 800.0, cell_width, 20.0);
+            if bar.rows != 1 {
+                continue;
+            }
+            for (wrap, invert, case_mode) in states {
+                let overlay = SearchOverlay {
+                    query: "needle".into(),
+                    cursor_byte: 6,
+                    wrap,
+                    invert,
+                    case_mode,
+                    status: SearchStatus::NoMatch,
+                    focused: SearchControl::Editor,
+                    ..SearchOverlay::default()
+                };
+                let text = search_bar_text(&overlay, bar, cell_width);
+                assert!(
+                    !text.contains(ELLIPSIS),
+                    "a control was truncated at cell_width={cell_width}: {text}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000, "the sweep must actually exercise wide mode");
     }
 
     #[test]

@@ -2100,6 +2100,34 @@ mod tests {
     }
 
     /// Drift guard. The three CaseSensitivity modes drive
+    /// the (?i) flag override on `build_regex_with`:
+    ///   - Smart: case-insensitive unless any uppercase in pattern
+    ///   - Always: case-sensitive even for all-lowercase pattern
+    ///   - Never: case-insensitive even for mixed-case pattern
+    #[test]
+    fn build_regex_with_honors_explicit_case_sensitivity() {
+        use super::{CaseSensitivity, build_regex_with};
+        // Smart: lowercase → insensitive (matches ERROR).
+        let re = build_regex_with("error", CaseSensitivity::Smart).unwrap();
+        assert!(re.is_match("ERROR"));
+        // Always: even lowercase pattern is sensitive (no match on ERROR).
+        let re = build_regex_with("error", CaseSensitivity::Always).unwrap();
+        assert!(!re.is_match("ERROR"));
+        assert!(re.is_match("error"));
+        // Never: even mixed-case pattern is insensitive (matches ERROR).
+        let re = build_regex_with("Error", CaseSensitivity::Never).unwrap();
+        assert!(re.is_match("ERROR"));
+        assert!(re.is_match("error"));
+        // Empty pattern still None across all modes.
+        for mode in [
+            CaseSensitivity::Smart,
+            CaseSensitivity::Always,
+            CaseSensitivity::Never,
+        ] {
+            assert!(build_regex_with("", mode).is_none());
+        }
+    }
+
     /// The cap is applied to the pattern the user typed, but escaping can
     /// roughly double it — 4096 bytes of `(` becomes 8192 bytes of `\(`. That
     /// larger string is what actually reaches the engine, so the worst case is
@@ -2197,34 +2225,6 @@ mod tests {
             CompiledSearch::compile(&oversized, CaseSensitivity::Always),
             Err(SearchCompileError::QueryTooLong { .. })
         ));
-    }
-
-    /// the (?i) flag override on `build_regex_with`:
-    ///   - Smart: case-insensitive unless any uppercase in pattern
-    ///   - Always: case-sensitive even for all-lowercase pattern
-    ///   - Never: case-insensitive even for mixed-case pattern
-    #[test]
-    fn build_regex_with_honors_explicit_case_sensitivity() {
-        use super::{CaseSensitivity, build_regex_with};
-        // Smart: lowercase → insensitive (matches ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Smart).unwrap();
-        assert!(re.is_match("ERROR"));
-        // Always: even lowercase pattern is sensitive (no match on ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Always).unwrap();
-        assert!(!re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Never: even mixed-case pattern is insensitive (matches ERROR).
-        let re = build_regex_with("Error", CaseSensitivity::Never).unwrap();
-        assert!(re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Empty pattern still None across all modes.
-        for mode in [
-            CaseSensitivity::Smart,
-            CaseSensitivity::Always,
-            CaseSensitivity::Never,
-        ] {
-            assert!(build_regex_with("", mode).is_none());
-        }
     }
 
     #[test]
