@@ -88,9 +88,59 @@ tracked here so they are not lost.
   rebinding an in-use chord requires confirmation, and failed Settings writes
   are surfaced instead of being silently treated as saved. Search now has a
   grapheme-aware editor with selection, caret/word movement, Home/End, and
-  bounded paste; the command palette, layout picker, and other older text
-  overlays still need that editor behavior consolidated behind one shared
-  component.
+  bounded paste.
+- **Give the modal text overlays a real editor, not just correct rules.**
+  Partially addressed: the title editors, command palette, SSH launcher, layout
+  picker, and Settings path prompt now share `kettle-ui/src/modal_input.rs`, so
+  they filter Command chords, paste, delete whole grapheme clusters, and stop at
+  4 KiB — the four things a live naive-user probe caught them getting wrong.
+  What they still lack is the *editor*: no caret, no selection, no Home/End, no
+  word movement. Typing a typo in the first character of a tab name still means
+  deleting everything after it.
+
+- **Clicking outside a modal dismisses some of them and not others.** Measured
+  with the same gesture at the same coordinates against each: the context menu
+  closes on an outside click, while the command palette and the layout picker
+  stay open — the click is consumed (`handled: true`) and nothing happens. A
+  person who opens the palette by accident and clicks away to get rid of it has
+  no way out until they find Escape.
+
+  Not fixed alongside the text-entry rules because it is a different concern:
+  it needs per-modal rect hit-testing and a decision about whether the
+  dismissing click should also pass through to what is underneath (the context
+  menu currently swallows it). Both are choices worth making deliberately
+  rather than inside a correctness fix.
+- **Two more raw-`text` consumers still carry the Command-chord bug.**
+  `vi_mode_key` and `context_menu_key` both take `KeyEvent::text` and act on it
+  without a modifier check, the same way the five text fields did. Neither
+  builds a buffer, so `modal_input::accept_text` is not a drop-in for either;
+  they need arm-level guards like the confirm dialog's. Listed with `hint_key`
+  below so the remaining set is named rather than partially recorded.
+- **`hint_key` has the same Command-chord bug the modal fields just lost.** It
+  still takes raw `KeyEvent::text`, so on macOS the `v` that `⌘V` produces is a
+  candidate hint selection. It is outside the five append-only text fields this
+  round covered — hint mode consumes single characters as labels rather than
+  building a buffer, so it needs a different shape of fix, not
+  `modal_input::accept_text`. Named here so it is not rediscovered as new.
+- **`open_text_modal` cannot see the modals that outrank it.** It resolves the
+  six text fields, but a confirm dialog, the context menu, vi-mode, or hint mode
+  can own the keyboard *above* one of them. When that happens `dispatch_ui_key`
+  types into a field a real keystroke would not reach. This is pre-existing
+  rather than new — the old search-only gate had exactly the same hole — and the
+  precedence drift guard cannot catch it, because it compares the two orders
+  against each other rather than against the modals neither one lists. The fix
+  is for the resolver to report "some other modal owns the keyboard" and refuse,
+  which needs the non-text modals enumerated in the same place.
+
+  Consolidating them behind `search_input::SearchEditor` is the finish line, and
+  it is a bigger change than it looks: `TitleEditOverlay` and its siblings carry
+  a bare `String` to the renderer, which measures it and parks the caret at the
+  end, so a real cursor means new fields in the `kettle-render` overlay structs,
+  caret and horizontal-scroll rendering for each one, and a decision about how
+  the IME preedit path (`with_preedit`) composes with a mid-string cursor.
+  Estimate: one focused change across `kettle-ui` and `kettle-render`, with
+  pixel tests for the caret in each overlay. Worth doing; not worth bolting on
+  to a correctness fix.
 
 ## Performance (measure first)
 

@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- **`dispatch_ui_key` can drive every modal text field, not just Search.** It
+  refused any batch unless the search bar was open, which is why Search was the
+  only modal with end-to-end coverage — and why the modal text-entry defects
+  listed under Fixed went unnoticed in the fields that had none. It now resolves the command palette,
+  the Settings path prompt, the layout picker, the SSH launcher, the title
+  editors and Search in the same precedence the real key handler uses, reports
+  which modal it typed into, and stops early if that modal closes mid-batch.
 - **Screenshots can be cropped before Kettle writes them.** The control and MCP
   screenshot commands accept `crop_x`, `crop_y`, `crop_width`, and
   `crop_height` in window-relative physical pixels. Kettle validates the full
@@ -114,6 +121,55 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   The key help also advertises `y`/`n` when `vim-menu-nav` is on, because those
   answer the question directly while Enter fires the focused button — which is
   the safe `Cancel` on every close prompt.
+- **Command chords typed their own letter into every modal text field.**
+  `winit` does not filter `KeyEvent::text` by Command, so on macOS `⌘V` arrived
+  as the text `"v"` — and the title editors, the command palette, the SSH
+  launcher, the layout picker and the Settings path prompt all appended it
+  blindly. Pressing paste while renaming a tab produced a tab named `v`; `⌘A`
+  produced an `a`. In the command palette it was worse than cosmetic: the stray
+  character rewrote the query and re-ranked the list, so the next Enter ran a
+  command the user never picked. These fields now share one text-entry rule with
+  the confirm dialog, which had always applied it. Option is deliberately still
+  allowed through, because on macOS it composes accented characters.
+- **AltGr characters were swallowed in the modal fields.** The first cut of the
+  shared rule rejected Control outright, but Windows reports AltGr as Ctrl+Alt —
+  so `@` on a German layout, `ł` on Polish and `€` on many others silently did
+  nothing in exactly the fields where there is no other way to type them.
+  Control on its own is still a shortcut modifier; Control **with** Alt is
+  treated as composition, and a genuine Ctrl+Alt chord is still not text entry
+  because it produces none.
+- **An IME commit could be discarded by whatever modifier happened to be held.**
+  Committed compositions are not keystrokes — the input method decides when to
+  commit, and the modifier latched at that instant did not produce the text.
+  Committing a CJK phrase with `⌘Space` dropped the whole phrase. IME text now
+  bypasses the modifier rule while keeping the control-character filter.
+- **The title editor's IME path had no length bound.** It appended directly to
+  the buffer, so an IME commit bypassed the 4 KiB cap the typed path enforces.
+  Both paths now share it.
+- **A pasted bidi override could reverse the OS titlebar.** Every other route to
+  the window title ran `sanitize_title`, which neutralizes the Cf bidi
+  characters that `char::is_control` does not catch; the user-set window title
+  did not, and the new paste arm made a clipboard payload one keystroke from the
+  titlebar and the Alt-Tab switcher. Clipboards are writable by terminal
+  programs through OSC 52. The edit buffer keeps what was typed; only what
+  reaches the window manager is sanitized.
+- **Search had the same bug for every chord it does not claim.** Its catch-all
+  filtered control characters but not modifiers, so while `⌘A`/`⌘C`/`⌘X`/`⌘V`
+  were handled explicitly, any *other* Command chord typed its letter into the
+  query — `⌘Q` added a `q`. It now shares the same rule as its siblings.
+- **Paste now works in those fields.** It never had: `⌘V`/`Ctrl+V` was the
+  literal-letter bug above, so there was no way to paste a path or a branch name
+  into a rename box at all. Every one of them now honours the platform paste
+  chord.
+- **Backspace no longer breaks emoji and accents apart.** These fields deleted
+  with `String::pop`, which removes one `char` rather than one grapheme cluster.
+  One press on `👩‍🚀` removed the rocket and left a dangling zero-width joiner in
+  the title — `U+200D` is a format character, so no control-character filter
+  caught it. Deletion is grapheme-correct now, matching the search bar, which
+  always was.
+- **Modal text fields are bounded.** They accepted unbounded input; a probe put
+  3000 characters into a tab title and the tab bar tried to lay all of them out.
+  They now share the search bar's 4 KiB ceiling.
 
 ## [3.1.1] — 2026-08-18
 

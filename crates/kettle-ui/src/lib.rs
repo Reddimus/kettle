@@ -38,6 +38,7 @@ mod ctl_server;
 mod gpu_diagnostics;
 mod input;
 mod lua;
+mod modal_input;
 mod mux;
 mod native_material;
 mod notifications;

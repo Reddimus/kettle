@@ -573,7 +573,7 @@ fn display_column_boundary_at_or_after(value: &str, target: usize) -> usize {
     column
 }
 
-fn previous_grapheme_boundary(value: &str, cursor: usize) -> usize {
+pub(crate) fn previous_grapheme_boundary(value: &str, cursor: usize) -> usize {
     value[..cursor]
         .grapheme_indices(true)
         .next_back()
