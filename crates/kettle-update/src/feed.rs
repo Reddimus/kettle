@@ -199,7 +199,7 @@ impl FeedClient {
         )
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub(crate) fn download_to<W: std::io::Write>(
         &self,
         update: &AvailableUpdate,
@@ -249,7 +249,7 @@ impl FeedClient {
     /// digest verifier and archive extractor consume. Keeping verified bytes
     /// off disk closes the remaining same-user in-place-overwrite window
     /// between two reads of a temporary archive inode.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn download_bytes(&self, update: &AvailableUpdate) -> Result<Vec<u8>, UpdateError> {
         let asset = update
             .asset
@@ -361,7 +361,7 @@ fn evaluate_manifest(
     }))
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) fn reverify_available_update(
     update: &AvailableUpdate,
     public_key: &[u8; 32],
@@ -396,7 +396,7 @@ pub(crate) fn reverify_available_update(
     Ok(manifest)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub(crate) fn require_strict_upgrade(
     candidate: &Version,
     installed: &Version,

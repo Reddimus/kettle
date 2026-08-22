@@ -7,6 +7,8 @@
 
 mod feed;
 mod install;
+#[cfg(target_os = "macos")]
+mod macos;
 
 pub use feed::{
     AvailableUpdate, CheckOutcome, FeedClient, Manifest, ManifestAsset, UpdateError,
@@ -40,7 +42,10 @@ pub const UPDATE_PUBLIC_KEY: [u8; 32] = [
 /// from being accepted as an update manifest.
 pub const SIGNING_CONTEXT: &[u8] = b"kettle-update-manifest-v1\0";
 
-/// Rust target identifier used in signed manifests for this build.
+/// Target identifier used in signed manifests for this build.
+///
+/// Usually a Rust triple. macOS is the exception: one universal2 archive serves
+/// both architectures, so the manifest names that artifact instead.
 pub const fn current_target() -> Option<&'static str> {
     // Kettle does not publish a native Windows ARM archive, so production ARM
     // builds remain intentionally unsupported by the managed updater. The
@@ -56,6 +61,12 @@ pub const fn current_target() -> Option<&'static str> {
         Some("x86_64-unknown-linux-gnu")
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         Some("aarch64-unknown-linux-gnu")
+    } else if cfg!(target_os = "macos") {
+        // Both Mac architectures share one `lipo`-merged archive, so this is a
+        // pseudo-triple rather than a real one. Naming the two Rust triples
+        // separately would point them at the same file, which the manifest
+        // generator's one-name-per-target map cannot express.
+        Some("universal-apple-darwin")
     } else {
         None
     }
