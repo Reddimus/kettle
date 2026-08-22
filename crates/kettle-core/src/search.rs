@@ -316,24 +316,47 @@ impl CompiledSearch {
             CaseSensitivity::Always => true,
             CaseSensitivity::Never => false,
         };
-        let regex = MetaRegex::builder()
-            .configure(
-                MetaRegex::config()
-                    .which_captures(WhichCaptures::Implicit)
-                    .nfa_size_limit(Some(MAX_SEARCH_NFA_BYTES))
-                    .onepass_size_limit(Some(MAX_SEARCH_ONEPASS_BYTES))
-                    .hybrid_cache_capacity(MAX_SEARCH_HYBRID_CACHE_BYTES)
-                    .dfa_size_limit(Some(MAX_SEARCH_DFA_BYTES)),
-            )
-            .syntax(RegexSyntaxConfig::new().case_insensitive(!case_sensitive))
-            .build(pattern)
-            .map_err(|error| {
-                if error.size_limit().is_some() {
-                    SearchCompileError::PatternTooComplex
-                } else {
-                    SearchCompileError::InvalidRegex
-                }
-            })?;
+        let build = |source: &str| -> Result<MetaRegex, SearchCompileError> {
+            MetaRegex::builder()
+                .configure(
+                    MetaRegex::config()
+                        .which_captures(WhichCaptures::Implicit)
+                        .nfa_size_limit(Some(MAX_SEARCH_NFA_BYTES))
+                        .onepass_size_limit(Some(MAX_SEARCH_ONEPASS_BYTES))
+                        .hybrid_cache_capacity(MAX_SEARCH_HYBRID_CACHE_BYTES)
+                        .dfa_size_limit(Some(MAX_SEARCH_DFA_BYTES)),
+                )
+                .syntax(RegexSyntaxConfig::new().case_insensitive(!case_sensitive))
+                .build(source)
+                .map_err(|error| {
+                    if error.size_limit().is_some() {
+                        SearchCompileError::PatternTooComplex
+                    } else {
+                        SearchCompileError::InvalidRegex
+                    }
+                })
+        };
+        let regex = match build(pattern) {
+            Ok(regex) => regex,
+            // A query that does not parse is almost never someone writing
+            // broken regex on purpose. It is someone typing text they can see
+            // on screen: `call(x`, `arr[0`, `a{`, or a bare `(` all read as
+            // ordinary terminal output and all fail to compile. Retry escaped
+            // so the search finds what was asked for, instead of answering
+            // "invalid regular expression" to a person who had no way to know
+            // the field took a regex and has no toggle to turn it off.
+            //
+            // Only a fallback. A pattern that IS valid regex keeps regex
+            // meaning, so `a|b` and `^row` still work — which also means
+            // `call(x)` and `arr[0]` are still matched as a group and a
+            // character class, and still will not find that literal text.
+            // Closing that needs a literal/regex toggle, not a wider fallback.
+            //
+            // Size limits are not retried: escaping cannot make a pattern
+            // cheaper in any way that matters, and "too complex" stays honest.
+            Err(SearchCompileError::InvalidRegex) => build(&regex::escape(pattern))?,
+            Err(error) => return Err(error),
+        };
         Ok(Some(Self { regex }))
     }
 
@@ -1280,9 +1303,18 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            CompiledSearch::compile("(", CaseSensitivity::Smart).unwrap_err(),
-            SearchCompileError::InvalidRegex
+        // `(` used to be a hard InvalidRegex. It now compiles, as the literal
+        // `(` the user could see on their screen — see
+        // `an_unparseable_query_falls_back_to_a_literal_search`. InvalidRegex
+        // survives only for a pattern that cannot compile even when escaped,
+        // which the engine does not produce for ordinary text; the variant is
+        // kept because the escaped retry is still fallible.
+        assert!(
+            matches!(
+                CompiledSearch::compile("(", CaseSensitivity::Smart),
+                Ok(Some(_))
+            ),
+            "an unparseable pattern falls back to a literal instead of erroring"
         );
 
         let oversized = "x".repeat(MAX_SEARCH_QUERY_BYTES + 1);
@@ -2068,6 +2100,78 @@ mod tests {
     }
 
     /// Drift guard. The three CaseSensitivity modes drive
+    /// A query that is not valid regex falls back to matching it literally.
+    ///
+    /// The reproduction: a pane showing `call(x) and arr[0]` answered "No match"
+    /// for `call(x)` (which is *valid* regex, and matches `callx`) and "invalid
+    /// regular expression" for a bare `(`. Someone searching for text they can
+    /// read on screen has no way to know the field takes a regex and no toggle
+    /// to turn it off, so an unparseable pattern is now treated as the literal
+    /// they almost certainly meant.
+    #[test]
+    fn an_unparseable_query_falls_back_to_a_literal_search() {
+        // Bare metacharacters used to be a hard `InvalidRegex`.
+        for pattern in ["(", "[", "a{", "*", "+", "?", "(unclosed"] {
+            let compiled = CompiledSearch::compile(pattern, CaseSensitivity::Always);
+            assert!(
+                matches!(compiled, Ok(Some(_))),
+                "{pattern:?} must compile as a literal, got {compiled:?}"
+            );
+        }
+
+        let mut term = empty_term(24, 1);
+        write_ascii(&mut term, 0, 0, "x call(x) y arr[0] z");
+        let bounds = SearchBounds::new(SearchPoint::new(0, 0), SearchPoint::new(0, 23));
+
+        // An unparseable pattern now finds the text exactly as typed.
+        for pattern in ["(", "[", "arr[0", "call(x"] {
+            let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            let found = search.find_in_range(&term, bounds, SearchDirection::Forward, 24);
+            assert!(
+                !found.matches.is_empty(),
+                "literal {pattern:?} must be found in the row"
+            );
+        }
+
+        // The limit of this fix, pinned so nobody mistakes it for more than it
+        // is: `call(x)` and `arr[0]` are *valid* regex — a group and a
+        // character class — so they never reach the fallback and still do not
+        // match the literal text on screen. Closing that gap needs a
+        // literal/regex toggle, which is deliberately not part of this change.
+        for pattern in ["call(x)", "arr[0]"] {
+            let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            let found = search.find_in_range(&term, bounds, SearchDirection::Forward, 24);
+            assert!(
+                found.matches.is_empty(),
+                "{pattern:?} is valid regex and is still matched as one; if this \
+                 now finds the literal, the fallback has become too eager"
+            );
+        }
+
+        // A pattern that IS valid regex keeps regex semantics rather than
+        // being escaped: this must match `callx`-style alternation, not a
+        // literal `a|b`.
+        let mut alternation = CompiledSearch::compile("call|zzz", CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let found = alternation.find_in_range(&term, bounds, SearchDirection::Forward, 24);
+        assert!(
+            !found.matches.is_empty(),
+            "alternation still behaves as regex"
+        );
+
+        // The oversized-query error is unchanged and still distinct.
+        let oversized = "x".repeat(MAX_SEARCH_QUERY_BYTES + 1);
+        assert!(matches!(
+            CompiledSearch::compile(&oversized, CaseSensitivity::Always),
+            Err(SearchCompileError::QueryTooLong { .. })
+        ));
+    }
+
     /// the (?i) flag override on `build_regex_with`:
     ///   - Smart: case-insensitive unless any uppercase in pattern
     ///   - Always: case-sensitive even for all-lowercase pattern

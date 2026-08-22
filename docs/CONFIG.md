@@ -171,9 +171,15 @@ window. Its controls are Editor, Previous, Next, Wrap, Case, Invert, and Close;
 `search-wrap`, `search-case-sensitive`, and `invert-search` are also available
 in **Settings → Search**. Changes made from either surface persist to the config.
 
-Patterns use strict Rust regex syntax through `regex-automata`'s meta engine and
-are limited to **4096 UTF-8 bytes**. An invalid pattern remains invalid: Kettle
-does not reinterpret it as a literal. Engine construction is bounded to a
+Patterns use Rust regex syntax through `regex-automata`'s meta engine and are
+limited to **4096 UTF-8 bytes**. A pattern that **fails to parse** is retried as
+a literal, so searching for `call(x` or a bare `(` finds that text on screen
+instead of reporting an error — most people typing into a search box are copying
+something they can see, not writing a regex, and the bar offers no way to turn
+regex off. A pattern that **does** parse keeps regex meaning, so `a|b` and `^row`
+work as expected. The consequence is worth knowing: `call(x)` and `arr[0]` are
+valid regex (a group and a character class), so they are matched as regex and
+still will not find that literal text. Engine construction is bounded to a
 **512 KiB NFA**, **256 KiB one-pass state**, **256 KiB hybrid cache**, and
 **40 KiB DFA**. A syntactically valid expression that exceeds an applicable
 ceiling shows **Pattern too complex**. Kettle asks the engine for its implicit
