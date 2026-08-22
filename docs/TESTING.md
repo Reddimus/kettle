@@ -2182,6 +2182,16 @@ Separate workflows:
   to match the checked-in production trust root, signs and verifies the update
   manifest with that root, renders Homebrew/AUR metadata from the archive
   bytes, verifies the exact 14-asset draft, and publishes it once.
+- `scripts/check-macos-update-smoke.sh` — downloads a published
+  `kettle-macos-universal.zip`, checks it against its sidecar, and runs the
+  macOS bundle updater over it with the real `codesign` and `spctl`. Unit tests
+  cover staging, refusal, and the swap against a stub verifier, because no
+  synthesized bundle can be notarized; this is the only check that proves a
+  real archive keeps its seal through plain zip extraction and an atomic
+  directory swap. `KETTLE_MACOS_ARCHIVE_REQUIRED=1` turns a missing archive
+  into a failure so the check cannot quietly stop running. macOS only, and a
+  documented release gate rather than a `gauntlet-full` dependency, since it
+  needs the network.
 - `scripts/check-package-templates.sh` — tests deterministic Homebrew/AUR
   rendering from source `.in` files. At an exact clean release tag, auto mode
   also checks its generated `kettle.rb` and `PKGBUILD` against the published

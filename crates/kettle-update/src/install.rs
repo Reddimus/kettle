@@ -12,13 +12,13 @@ use std::fs::OpenOptions;
 use std::io::Read;
 #[cfg(any(windows, target_os = "linux"))]
 use std::io::Seek;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::path::Component;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use sha2::{Digest as _, Sha256};
 
 use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
@@ -26,9 +26,10 @@ use crate::feed::{AvailableUpdate, FeedClient, UpdateError};
 use crate::feed::{MAX_ARTIFACT_BYTES, SignedManifest};
 #[cfg(any(windows, target_os = "linux"))]
 use crate::feed::{require_strict_upgrade, reverify_available_update};
-// Every use of the compiled verification key sits behind the same platform gate
-// as the authenticated install paths themselves, so macOS — which has no managed
-// install — would otherwise import it unused and trip `-D unused-imports`.
+// The compiled verification key sits behind the same platform gate as the
+// authenticated install paths that use it, so a target without one would
+// import it unused and trip `-D unused-imports`. macOS reaches the key
+// through `crate::macos` instead.
 #[cfg(any(windows, target_os = "linux"))]
 use crate::UPDATE_PUBLIC_KEY;
 use crate::current_target;
@@ -36,10 +37,10 @@ use crate::current_target;
 const MARKER_SCHEMA: u32 = 1;
 #[cfg(any(windows, target_os = "linux"))]
 const JOURNAL_SCHEMA: u32 = 2;
-#[cfg(any(windows, target_os = "linux"))]
-const MAX_ARCHIVE_ENTRIES: usize = 128;
-#[cfg(any(windows, target_os = "linux"))]
-const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 128;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024;
 #[cfg(any(windows, target_os = "linux"))]
 const PACKAGE_MANIFEST_FILE: &str = "kettle-package-manifest.json";
 #[cfg(target_os = "linux")]
@@ -723,7 +724,17 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
             warning: None,
         })
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(executable) = std::env::current_exe() {
+            crate::macos::sweep_leftovers_beside(&executable);
+        }
+        Ok(ProcessStart::Ready {
+            guard: RunningInstallGuard {},
+            warning: None,
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         Ok(ProcessStart::Ready {
             guard: RunningInstallGuard {},
@@ -789,9 +800,10 @@ pub fn run_pending_update_helper() -> Result<(), UpdateError> {
 /// `scripts/install.ps1` both write when they cannot determine one. Anything
 /// else did not come from an installer of ours.
 ///
-/// Gated to match its only caller, `detect_managed_install_at` — macOS has no
-/// managed-install path, so on that target this is dead code and `-D warnings`
-/// refuses it. Neither a Windows nor a Linux check can see that.
+/// Gated to match its only caller, `detect_managed_install_at`. macOS proves
+/// ownership from the bundle signature instead of a marker file, so it never
+/// reads a recorded version and `-D warnings` would refuse this as dead code
+/// there. Neither a Windows nor a Linux check can see that.
 #[cfg(any(windows, target_os = "linux"))]
 fn is_recorded_install_version(version: &str) -> bool {
     version == "unknown" || semver::Version::parse(version).is_ok()
@@ -1034,7 +1046,13 @@ pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
     detect_managed_install_at(&executable)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
+    let executable = std::env::current_exe()?;
+    crate::macos::locate_bundle_install(&executable, &crate::macos::AppleSeal)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn detect_managed_install() -> Result<ManagedInstall, UpdateError> {
     Err(UpdateError::UnsupportedPlatform)
 }
@@ -1154,7 +1172,16 @@ pub fn install_update(
     install_update_into(client, update, &install)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn install_update(
+    client: &FeedClient,
+    update: &AvailableUpdate,
+) -> Result<InstallOutcome, UpdateError> {
+    let install = prepare_managed_install_for_update()?;
+    crate::macos::install_bundle_update(client, update, &install, &crate::macos::AppleSeal)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn install_update(
     _client: &FeedClient,
     _update: &AvailableUpdate,
@@ -1179,7 +1206,15 @@ pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateErro
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateError> {
+    // Unlike Windows and Linux there is no install-wide lock to take here: the
+    // macOS path locks beside the bundle once it knows which directory it will
+    // swap in, and holds it across download, staging, and exchange.
+    detect_managed_install()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateError> {
     Err(UpdateError::UnsupportedPlatform)
 }
@@ -2222,8 +2257,8 @@ fn verify_sha256(file: &mut File, expected: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn verify_sha256_bytes(bytes: &[u8], expected: &str) -> Result<(), UpdateError> {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn verify_sha256_bytes(bytes: &[u8], expected: &str) -> Result<(), UpdateError> {
     if hex::encode(Sha256::digest(bytes)) != expected {
         return Err(UpdateError::HashMismatch);
     }
@@ -2547,8 +2582,8 @@ fn load_linux_package(
     VerifiedPackage::from_files(files, update, None)
 }
 
-#[cfg(any(windows, test))]
-fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
     let Some(mode) = mode else {
         return true;
     };
@@ -2657,8 +2692,8 @@ fn extract_archive(archive: &[u8], destination: &Path) -> Result<(), UpdateError
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
-fn validate_archive_path(path: &Path) -> Result<(), UpdateError> {
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) fn validate_archive_path(path: &Path) -> Result<(), UpdateError> {
     if path.as_os_str().is_empty() || path.is_absolute() {
         return Err(UpdateError::UnsafeArchive(path.display().to_string()));
     }
@@ -2685,7 +2720,7 @@ fn validate_archive_path(path: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn is_windows_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$")
@@ -2697,16 +2732,16 @@ fn is_windows_device_name(name: &str) -> bool {
             })
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[derive(Default)]
-struct ArchivePaths {
+pub(crate) struct ArchivePaths {
     /// Case-folded portable path -> whether the entry is a directory.
     entries: std::collections::HashMap<String, bool>,
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 impl ArchivePaths {
-    fn insert(&mut self, path: &Path, is_dir: bool) -> Result<(), UpdateError> {
+    pub(crate) fn insert(&mut self, path: &Path, is_dir: bool) -> Result<(), UpdateError> {
         let key = path
             .components()
             .map(|component| component.as_os_str().to_string_lossy())
@@ -6164,8 +6199,8 @@ fn remove_new_backup_dir_checked(prefix: &Path, path: &Path) -> Result<(), Updat
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
-fn unique_suffix() -> String {
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+pub(crate) fn unique_suffix() -> String {
     format!(
         "{}-{}",
         std::process::id(),
@@ -6674,13 +6709,33 @@ mod tests {
         open_trusted_linux_install_prefix(&prefix).unwrap();
     }
 
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     #[test]
     fn unsupported_platform_has_no_managed_installer() {
         assert!(matches!(
             detect_managed_install(),
             Err(UpdateError::UnsupportedPlatform)
         ));
+    }
+
+    /// macOS used to answer `UnsupportedPlatform` here, because it had no
+    /// managed-install path at all. It has one now, so the meaningful assertion
+    /// is the narrower one: a bundle is required, and the test harness is not
+    /// running inside one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_bare_test_binary_is_not_a_managed_bundle_install() {
+        let error = detect_managed_install().unwrap_err();
+        assert!(
+            matches!(error, UpdateError::UnmanagedInstall(_)),
+            "expected an unmanaged-install refusal, got {error:?}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("kettle.app/Contents/MacOS/kettle"),
+            "the refusal should say what layout is expected, got: {error}"
+        );
     }
 
     #[cfg(any(windows, target_os = "linux"))]

@@ -15,14 +15,15 @@ Tier-1 targets are required before a release can publish. Linux aarch64 is
 cross-built and package/ABI validated on x86_64 CI; a Parallels Ubuntu ARM
 guest supplies additional native build, PTY, software/virtual-GPU, and live-UI
 evidence, but is a manual check rather than a release gate. Every archive has a
-SHA-256 sidecar; Windows and Linux update metadata is additionally signed by a
-dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;
+SHA-256 sidecar; update metadata for every self-updating platform is
+additionally signed by a dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;
 `scripts/install-online.sh` points you at a source build (or `nix run
 github:Reddimus/kettle` to try it in a sandbox first).
 
 ## Updating
 
-Official Windows and Linux installer layouts can update themselves:
+Official Windows and Linux installer layouts, and the macOS `kettle.app`, can
+update themselves:
 
 ```sh
 kettle --check-update
@@ -39,9 +40,10 @@ windows close; new launches hand off to the helper instead of running the old
 binary. Upgrading a pre-v2.35 Windows install requires one rerun of the bundled
 `install.ps1` to bootstrap that helper-aware build. A
 Windows Kettle executable launched from WSL updates the same Windows install;
-a native WSL/Linux Kettle updates its Linux prefix. Package-manager, Cargo,
-Homebrew, Nix, AUR, and manually copied installs are refused so their owner
-remains authoritative. See [UPDATES.md](UPDATES.md) for policy and recovery.
+a native WSL/Linux Kettle updates its Linux prefix. On macOS the whole bundle is
+replaced at once, because the code signature seals it as a unit. Package-manager,
+Cargo, Homebrew, Nix, AUR, and manually copied installs are refused so their
+owner remains authoritative. See [UPDATES.md](UPDATES.md) for policy and recovery.
 
 ## Linux — easy desktop install (Ubuntu / Fedora / Arch / GNOME / KDE)
 

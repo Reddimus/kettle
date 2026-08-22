@@ -37,9 +37,8 @@ actually run. Record skipped checks and the reason.
 
 ## Version Control
 
-- Never run `git commit`, `git push`, or `git merge` unless the user explicitly
-  requests that operation.
-- Never run `svn commit` or `svn merge` unless the user explicitly requests it.
+- Commit in focused units with `<crate>: <imperative summary>` subjects, and
+  keep the tree green before each one.
 - Do not use destructive history or worktree commands to remove changes you did
   not create.
 

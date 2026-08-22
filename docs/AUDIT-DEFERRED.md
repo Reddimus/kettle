@@ -181,6 +181,53 @@ tracked here so they are not lost.
 
 ## Testing coverage
 
+- **Two macOS update cleanup windows are mitigated, not eliminated,
+  2026-08-22.** `Staging::discard` and the sweep both delete by pathname,
+  because `std::fs::remove_dir_all` takes a path and there is no
+  descriptor-taking equivalent in std. Each one checks `(dev, ino)`, renames the
+  tree to a name that did not exist a moment earlier, re-checks, and only then
+  removes. Someone who can write the enclosing directory and is watching it
+  could still substitute in the gap between the second check and the removal.
+
+  Fully closing this means a recursive `unlinkat` walk over an open descriptor,
+  roughly fifty lines of `fdopendir`/`readdir` FFI with its own depth and entry
+  caps. It is worth doing, and it is not worth doing in the same change that
+  introduces the feature.
+
+  Scope, so this is not read as bigger than it is: reaching the window needs
+  write access to the bundle's parent, which for `/Applications` means an
+  administrator account. The outcome is a deletion, not code execution. What
+  gets installed is bound by the Ed25519-signed manifest's SHA-256 and by
+  Apple's seal, and neither depends on these paths.
+
+- **The macOS staging emptiness check has no automated coverage, 2026-08-22.**
+  `Staging::create` requires the directory to be empty immediately after its ACL
+  is cleared, because an inheritable ACE could otherwise let someone create a
+  child during the window between `mkdirat` and the clear, and that child would
+  keep its own grant. Reaching the branch means winning a microsecond race
+  against the process under test, which a test cannot arrange. The check is
+  cheap insurance and is documented as untested rather than covered by a test
+  that would pass either way.
+
+- **The macOS update sweep's foreign-owner branch has no automated coverage,
+  2026-08-22.** `sweep_interrupted_updates` refuses to delete a leftover unless
+  it is a directory owned by the effective uid. The ownership half is the part
+  that matters: anyone who can write `/Applications` can rename someone else's
+  tree to wear the `.kettle-update-previous-` prefix, and a recursive delete
+  keyed on the name alone would then destroy it with rights the attacker does
+  not have.
+
+  Reaching that branch needs a file owned by a second uid, which a test running
+  as one user cannot create. A first attempt covered the symlink case instead
+  and was deleted rather than kept: `std::fs::remove_dir_all` already refuses to
+  traverse a symlink, so the test passed with the guard removed. A test that
+  cannot fail is worse than no test, because it reads like coverage.
+
+  Closing this properly needs either a fixture that runs as a second uid, or
+  making the sweep's decision a pure function over `(file_type, uid, euid)` and
+  testing that directly. The second is cheap and is the likely fix.
+
+
 - **Test scratch directories accumulated without bound, 2026-08-09.** A sweep
   of the Windows machine found **148** `kettle*` entries in `%TEMP%`; the Ubuntu
   machine had its own smaller set. Most came from one helper:
