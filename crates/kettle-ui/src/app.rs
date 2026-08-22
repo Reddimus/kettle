@@ -18111,12 +18111,16 @@ impl App {
         let mut applied = 0usize;
         for (mods, key) in &parsed {
             ws.mods = *mods;
+            // Mirror `winit`: `KeyEvent::text` is present for a character key
+            // under every modifier except Control — Command included, which is
+            // the exact case this whole change exists to handle. Suppressing
+            // Super here would leave the control plane unable to reproduce the
+            // bug the handlers now guard against, so a test driving `cmd+v`
+            // through this method would pass against the broken code. The
+            // modifier rule belongs in `modal_input::accept_text`, not in the
+            // transport.
             let text = match key {
-                Key::Character(text)
-                    if !mods.control_key() && !mods.alt_key() && !mods.super_key() =>
-                {
-                    Some(text.as_str())
-                }
+                Key::Character(text) if !mods.control_key() => Some(text.as_str()),
                 _ => None,
             };
             match modal {
@@ -20058,8 +20062,13 @@ impl App {
         }
     }
 
-    /// Clipboard text for a modal field, or `None` when the clipboard is
-    /// empty, unreadable, or holds nothing but control characters.
+    /// Clipboard text for a modal field, or `None` when the clipboard is empty
+    /// or unreadable.
+    ///
+    /// This does **not** sanitize: a clipboard holding only control characters
+    /// still returns `Some`. Callers pair it with `modal_input::push_text`,
+    /// which drops control characters and applies the byte cap — so a
+    /// control-only paste ends up a no-op there rather than here.
     ///
     /// The modal overlays that own a plain `String` had no paste at all: on
     /// macOS `⌘V` arrived as text `"v"` and was appended literally, so
@@ -20234,13 +20243,12 @@ impl App {
                 self.activate_search_control(ws, ws.search.focused_control);
             }
             _ => {
-                // Filter control chars like the sibling
-                // title / SSH-input handlers do — a stray control byte
-                // (Tab, embedded ESC from a paste, etc.) must not land in the
-                // search query and corrupt the match.
-                if let Some(t) = text
-                    && !t.chars().any(|c| c.is_control())
-                {
+                // Share the modal text-entry rule with the sibling handlers.
+                // The explicit shortcut arms above claim ⌘A/⌘C/⌘X/⌘V, but every
+                // *other* Command chord used to fall through to here and type
+                // its letter into the query — ⌘Q added a `q`. Control
+                // characters are filtered by the same helper.
+                if let Some(t) = crate::modal_input::accept_text(text, ws.mods) {
                     ws.search.focused_control = kettle_render::SearchControl::Editor;
                     let outcome = ws
                         .search
@@ -32209,20 +32217,33 @@ mod tests {
     /// Drift guard. `search_key` must filter control chars
     /// before appending to the query (like the title / SSH-input handlers), so a
     /// stray control byte can't corrupt the search. The handler needs full App
-    /// state; pin the filter at the source.
+    /// Drift guard. `search_key`'s catch-all must route typed text through the
+    /// shared modal rule and insert through its bounded editor.
+    ///
+    /// It used to filter control characters inline and nothing else, which left
+    /// it modifier-blind: the explicit arms above claim ⌘A/⌘C/⌘X/⌘V, but every
+    /// other Command chord fell through and typed its letter into the query —
+    /// `⌘Q` added a `q`. Needs full App state; pin at the source.
     #[test]
     fn search_key_filters_control_chars() {
         let src = production_source();
-        // The filtered push lives in search_key's catch-all arm.
         let arm = src
             .split("fn search_key(")
             .nth(1)
-            .and_then(|s| s.split("fn ").next())
+            .and_then(|s| s.split("\n    fn ").next())
             .expect("search_key present");
         assert!(
-            arm.contains("!t.chars().any(|c| c.is_control())")
-                && arm.contains(".insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES)"),
-            "search_key must filter control chars before appending to the query"
+            arm.contains("crate::modal_input::accept_text(text, ws.mods)"),
+            "search_key must filter typed text through the shared modal rule, \
+             or an unclaimed Command chord types its letter into the query"
+        );
+        assert!(
+            arm.contains(".insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES)"),
+            "search_key must insert through the bounded editor"
+        );
+        assert!(
+            !arm.contains("!t.chars().any(|c| c.is_control())"),
+            "the inline control-character filter is now modal_input's job"
         );
     }
 
@@ -32242,7 +32263,13 @@ mod tests {
             .expect("open_text_modal present");
         let resolver_order: Vec<&str> = [
             ("ws.palette_input.is_some()", "palette"),
-            ("ws.settings_text_edit.is_some()", "settings_text"),
+            // The compound condition, not just the text-edit half: dropping
+            // the `settings_nav` guard would diverge from the real handler
+            // while a substring probe stayed green.
+            (
+                "ws.settings_nav.is_some() && ws.settings_text_edit.is_some()",
+                "settings_text",
+            ),
             ("ws.layout_picker_input.is_some()", "layout_picker"),
             ("ws.ssh_input.is_some()", "ssh"),
             ("ws.editing_title.is_some()", "title_edit"),
@@ -32313,23 +32340,39 @@ mod tests {
     fn every_modal_text_field_routes_through_the_shared_input_rules() {
         let src = production_source();
 
-        for name in [
+        // Every handler that consumes typed text shares the modifier rule.
+        // Search is included: it owns a real editor and does its own paste and
+        // deletion, but its catch-all arm still has to reject Command chords,
+        // because every chord it does not claim explicitly (⌘Q, ⌘W, …) used to
+        // land in the query as a bare letter.
+        let append_only = [
             "fn palette_key(",
             "fn ssh_key(",
             "fn layout_picker_key(",
             "fn settings_text_key(",
             "fn title_edit_key(",
-        ] {
+        ];
+        for name in append_only.iter().copied().chain(["fn search_key("]) {
             let body = src
                 .split(name)
                 .nth(1)
                 .and_then(|rest| rest.split("\n    fn ").next())
                 .unwrap_or_else(|| panic!("missing production body for {name}"));
+
             assert!(
                 body.contains("crate::modal_input::accept_text(text, ws.mods)"),
                 "{name} must filter text through modal_input::accept_text, \
                  or a Command chord types its letter into the field"
             );
+            for banned in ["push_str(t)", ".buf.pop()", "input.pop()"] {
+                assert!(
+                    !body.contains(banned),
+                    "{name} still contains the raw-append pattern `{banned}`"
+                );
+            }
+            if !append_only.contains(&name) {
+                continue;
+            }
             assert!(
                 body.contains("crate::modal_input::push_text("),
                 "{name} must append through modal_input::push_text so the \
@@ -32344,13 +32387,6 @@ mod tests {
                 body.contains("crate::modal_input::is_paste_chord("),
                 "{name} must honour the platform paste chord"
             );
-            // The exact anti-patterns this replaced.
-            for banned in ["push_str(t)", ".buf.pop()", "input.pop()"] {
-                assert!(
-                    !body.contains(banned),
-                    "{name} still contains the raw-append pattern `{banned}`"
-                );
-            }
         }
     }
 

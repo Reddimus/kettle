@@ -131,6 +131,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   command the user never picked. These fields now share one text-entry rule with
   the confirm dialog, which had always applied it. Option is deliberately still
   allowed through, because on macOS it composes accented characters.
+- **Search had the same bug for every chord it does not claim.** Its catch-all
+  filtered control characters but not modifiers, so while `⌘A`/`⌘C`/`⌘X`/`⌘V`
+  were handled explicitly, any *other* Command chord typed its letter into the
+  query — `⌘Q` added a `q`. It now shares the same rule as its siblings.
 - **Paste now works in those fields.** It never had: `⌘V`/`Ctrl+V` was the
   literal-letter bug above, so there was no way to paste a path or a branch name
   into a rename box at all. Every one of them now honours the platform paste
