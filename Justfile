@@ -205,6 +205,16 @@ mermaid-check:
 mermaid-check:
     python scripts/check-mermaid.py
 
+# Run the macOS bundle updater against a real, notarized release archive.
+# Unit tests cover staging, refusal, and swap with a stub verifier, because
+# nothing in CI can notarize a synthesized bundle. This is the complement: it
+# proves a published archive still satisfies codesign and spctl after plain zip
+# extraction, which is the assumption the whole design rests on. Downloads the
+# archive once into target/diagnostics/ and caches it. macOS only.
+[unix]
+macos-update-smoke TAG="":
+    ./scripts/check-macos-update-smoke.sh {{TAG}}
+
 # Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
 # open, and should print the "remove ignores" instruction once upstream makes
 # `ttf-parser` disappear from the tree.
@@ -396,13 +406,18 @@ gauntlet: live-ui-helper-selftest shell-integration-check
 # Strict gate: gauntlet + direct patched-crate validation + supply-chain
 # hygiene (adds the cargo-deny stale-ignore catch and cargo-machete
 # unused-deps catch as separate CI workflows triggered on Cargo.lock
-# changes). Run `just gauntlet-strict` before a release cut so all CI gates
+# changes), plus the documentation gates. `mermaid-check` belongs here because
+# it previously had no caller in any gauntlet tier: it ran only in ci.yml, so a
+# clean `just gauntlet-full` could still be hiding a diagram that renders as a
+# red error panel on GitHub. It fails open without Node or Chrome, which is why
+# it is safe in a tier people run locally, and CI sets
+# KETTLE_MERMAID_REQUIRED=1 so it cannot quietly stop running there. Run `just gauntlet-strict` before a release cut so all CI gates
 # pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
-gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser/lru scopes, deny, machete, and tracked-file audit are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that

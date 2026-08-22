@@ -627,6 +627,7 @@ jobs:
             --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
             --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
             --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
+            --asset "universal-apple-darwin=dist/kettle-macos-universal.zip" \
             --output dist/kettle-update-manifest.json
 
           key=$(mktemp)
@@ -792,15 +793,16 @@ jobs:
             -inkey packaging/update-public.pem \
             -in "$payload" -sigfile "$signature"
 
-          # The update feed intentionally covers the three self-updater
-          # platforms. macOS is independently bound by its canonical sidecar
-          # and the regenerated Homebrew metadata below.
+          # The update feed covers every platform with a self-updater. macOS
+          # joined it in 3.2.0; its archive is additionally bound by the
+          # canonical sidecar and the regenerated Homebrew metadata below.
           python3 scripts/make-update-manifest.py \
             --verify-existing dist/kettle-update-manifest.json \
             --tag "$GITHUB_REF_NAME" \
             --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
             --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
-            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz"
+            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
+            --asset "universal-apple-darwin=dist/kettle-macos-universal.zip"
 
           python3 scripts/package-manifest.py extract \
             --archive dist/kettle-linux-x86_64.tar.gz \

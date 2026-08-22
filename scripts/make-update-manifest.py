@@ -16,10 +16,15 @@ import tempfile
 SCHEMA = 1
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_MANIFEST_BYTES = 128 * 1024
+# Keys are Rust target triples except for macOS, which ships one `lipo`-merged
+# universal2 archive covering both architectures. Naming the two Apple triples
+# separately would point them at the same file, and this map requires one
+# filename per target.
 EXPECTED_NAMES = {
     "x86_64-pc-windows-msvc": "kettle-windows-x86_64.zip",
     "x86_64-unknown-linux-gnu": "kettle-linux-x86_64.tar.gz",
     "aarch64-unknown-linux-gnu": "kettle-linux-aarch64.tar.gz",
+    "universal-apple-darwin": "kettle-macos-universal.zip",
 }
 
 

@@ -41,7 +41,7 @@ class ManifestTests(unittest.TestCase):
             )
             self.assertEqual(first, second)
             self.assertEqual(first["version"], "2.35.0")
-            self.assertEqual(len(first["assets"]), 3)
+            self.assertEqual(len(first["assets"]), 4)
             self.assertTrue(all(len(asset["sha256"]) == 64 for asset in first["assets"]))
 
     def test_existing_signed_manifest_binds_exact_local_artifacts(self):
