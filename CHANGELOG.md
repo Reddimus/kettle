@@ -10,8 +10,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - **`dispatch_ui_key` can drive every modal text field, not just Search.** It
   refused any batch unless the search bar was open, which is why Search was the
-  only modal with end-to-end coverage — and why the four bugs above went
-  unnoticed in the fields that had none. It now resolves the command palette,
+  only modal with end-to-end coverage — and why the modal text-entry defects
+  listed under Fixed went unnoticed in the fields that had none. It now resolves the command palette,
   the Settings path prompt, the layout picker, the SSH launcher, the title
   editors and Search in the same precedence the real key handler uses, reports
   which modal it typed into, and stops early if that modal closes mid-batch.
@@ -131,6 +131,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   command the user never picked. These fields now share one text-entry rule with
   the confirm dialog, which had always applied it. Option is deliberately still
   allowed through, because on macOS it composes accented characters.
+- **AltGr characters were swallowed in the modal fields.** The first cut of the
+  shared rule rejected Control outright, but Windows reports AltGr as Ctrl+Alt —
+  so `@` on a German layout, `ł` on Polish and `€` on many others silently did
+  nothing in exactly the fields where there is no other way to type them.
+  Control on its own is still a shortcut modifier; Control **with** Alt is
+  treated as composition, and a genuine Ctrl+Alt chord is still not text entry
+  because it produces none.
+- **An IME commit could be discarded by whatever modifier happened to be held.**
+  Committed compositions are not keystrokes — the input method decides when to
+  commit, and the modifier latched at that instant did not produce the text.
+  Committing a CJK phrase with `⌘Space` dropped the whole phrase. IME text now
+  bypasses the modifier rule while keeping the control-character filter.
+- **The title editor's IME path had no length bound.** It appended directly to
+  the buffer, so an IME commit bypassed the 4 KiB cap the typed path enforces.
+  Both paths now share it.
+- **A pasted bidi override could reverse the OS titlebar.** Every other route to
+  the window title ran `sanitize_title`, which neutralizes the Cf bidi
+  characters that `char::is_control` does not catch; the user-set window title
+  did not, and the new paste arm made a clipboard payload one keystroke from the
+  titlebar and the Alt-Tab switcher. Clipboards are writable by terminal
+  programs through OSC 52. The edit buffer keeps what was typed; only what
+  reaches the window manager is sanitized.
 - **Search had the same bug for every chord it does not claim.** Its catch-all
   filtered control characters but not modifiers, so while `⌘A`/`⌘C`/`⌘X`/`⌘V`
   were handled explicitly, any *other* Command chord typed its letter into the

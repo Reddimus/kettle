@@ -7679,6 +7679,15 @@ impl App {
         if ws.context_menu.is_some() || ws.vi_mode.is_some() || ws.hint_state.is_some() {
             return;
         }
+        // The modal handlers below filter typed text by the modifiers that
+        // produced it. A committed composition has none: the input method
+        // decides when to commit, and whatever is latched at that instant did
+        // not type the phrase. Committing with `⌘Space` (switch input source)
+        // would otherwise drop the whole thing. Present the handlers with the
+        // empty modifier set for the duration and restore it afterwards, so
+        // `ws.mods` stays truthful for the next real keystroke.
+        let latched_mods = ws.mods;
+        ws.mods = ModifiersState::empty();
         // The modal outranks whatever raised it. Rebinding a key onto a chord
         // that is already taken raises a confirm dialog from inside the
         // Settings overlay, and the Settings arms below used to claim the
@@ -7687,24 +7696,40 @@ impl App {
         // dialog's own handler (the named-key path) reads `y`/`n`; this arm
         // only has to stop the text from going somewhere else.
         if ws.confirm_dialog.is_some() {
+            ws.mods = latched_mods;
             return;
         } else if ws.palette_input.is_some() {
             self.palette_key(ws, &key, Some(text), event_loop);
         } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
             self.settings_text_key(ws, &key, Some(text));
         } else if ws.settings_nav.is_some() {
+            ws.mods = latched_mods;
             return;
         } else if ws.layout_picker_input.is_some() {
             self.layout_picker_key(ws, &key, Some(text));
         } else if ws.ssh_input.is_some() {
             self.ssh_key(ws, &key, Some(text));
-        } else if let Some(state) = ws.editing_title.as_mut() {
-            state.input.extend(text.chars().filter(|c| !c.is_control()));
+        } else if ws.editing_title.is_some() {
+            // Route through the shared helper rather than extending the buffer
+            // inline: this path had no length bound at all, so the 4 KiB cap
+            // the typed path gained was one IME commit away from being
+            // bypassed.
+            if let Some(accepted) = crate::modal_input::accept_committed_text(text)
+                && let Some(state) = ws.editing_title.as_mut()
+            {
+                crate::modal_input::push_text(&mut state.input, accepted);
+            }
         } else if ws.search.open {
             self.search_key(ws, &key, Some(text));
         } else {
+            ws.mods = latched_mods;
             self.write_terminal_input(ws, text.as_bytes());
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
         }
+        ws.mods = latched_mods;
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
@@ -12858,8 +12883,16 @@ impl App {
                     } else {
                         Some(value.clone())
                     };
+                    // Every other path to the OS titlebar runs through
+                    // `sanitize_title`, which neutralizes control characters
+                    // *and* the Cf bidi overrides that enable right-to-left
+                    // titlebar / Alt-Tab spoofing. This one did not, and the
+                    // new paste arm makes a clipboard payload a one-keystroke
+                    // way in — clipboards are writable by terminal programs
+                    // through OSC 52. The buffer keeps what the user typed;
+                    // only what reaches the window manager is sanitized.
                     if let Some(w) = &ws.window {
-                        w.set_title(&value);
+                        w.set_title(&sanitize_title(&value));
                     }
                     ws.last_title = value;
                 }
@@ -19965,9 +19998,13 @@ impl App {
 }
 
 /// The modal text fields `dispatch_ui_key` can drive, in the precedence the
-/// real `KeyboardInput` arm applies. Kept as an enum rather than strings so
-/// adding a modal to the key handler without teaching the control plane about
-/// it is a compile error, not a silent hole in the test coverage.
+/// real `KeyboardInput` arm applies.
+///
+/// An enum rather than strings so the dispatch `match` is exhaustive: adding a
+/// variant without routing it fails to compile. That is *not* a guarantee that
+/// a new modal added to the key handler reaches this enum at all — nothing
+/// forces that, which is what
+/// `the_control_plane_modal_order_matches_the_real_key_handler` is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextModal {
     Palette,
@@ -20056,7 +20093,7 @@ impl App {
                 if let Some(s) = crate::modal_input::accept_text(text, ws.mods)
                     && let Some(state) = ws.editing_title.as_mut()
                 {
-                    state.input.push_str(s);
+                    crate::modal_input::push_text(&mut state.input, s);
                 }
             }
         }
@@ -20070,11 +20107,9 @@ impl App {
     /// which drops control characters and applies the byte cap — so a
     /// control-only paste ends up a no-op there rather than here.
     ///
-    /// The modal overlays that own a plain `String` had no paste at all: on
-    /// macOS `⌘V` arrived as text `"v"` and was appended literally, so
-    /// "Edit tab title" produced a tab named `v`. Callers pair this with
-    /// `modal_input::push_text`, which applies the control-character filter and
-    /// the byte cap — this only reads.
+    /// The overlays that own a plain `String` had no paste at all: on macOS
+    /// `⌘V` arrived as text `"v"` and was appended literally, so "Edit tab
+    /// title" produced a tab named `v`.
     ///
     /// The search bar keeps its own paste path: it inserts at a cursor and
     /// reports truncation through `SearchStatus::TooLong`, neither of which
@@ -32245,6 +32280,21 @@ mod tests {
             !arm.contains("!t.chars().any(|c| c.is_control())"),
             "the inline control-character filter is now modal_input's job"
         );
+        // The checks above only prove the catch-all is right. A *new*
+        // `Key::Character` arm added above it with no guard would take
+        // precedence and reintroduce the bug with every assertion still green,
+        // so require every character arm in this handler to carry a condition.
+        for (index, _) in arm.match_indices("Key::Character(") {
+            let rest = &arm[index..];
+            let head = rest.split("=>").next().unwrap_or_default();
+            assert!(
+                head.contains(" if "),
+                "search_key has an unguarded `Key::Character` arm: `{}` — an \
+                 arm without a modifier condition claims Command chords before \
+                 the catch-all ever applies the shared rule",
+                head.trim()
+            );
+        }
     }
 
     /// `open_text_modal` decides which field `dispatch_ui_key` types into. If it
@@ -32319,6 +32369,70 @@ mod tests {
             "open_text_modal resolves modals in a different order than the real \
              key handler, so dispatch_ui_key would type into the wrong field"
         );
+
+        // Matching order is not enough: dispatch_ui_key still has to send each
+        // variant to *its own* handler. Swapping two arms in that match would
+        // leave both orders identical above while typing palette keys into the
+        // SSH launcher.
+        let dispatch = src
+            .split("fn ctl_dispatch_ui_key(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("ctl_dispatch_ui_key present");
+        for (variant, handler) in [
+            ("TextModal::Palette", "self.palette_key("),
+            ("TextModal::SettingsText", "self.settings_text_key("),
+            ("TextModal::LayoutPicker", "self.layout_picker_key("),
+            ("TextModal::Ssh", "self.ssh_key("),
+            ("TextModal::TitleEdit", "self.title_edit_key("),
+            ("TextModal::Search", "self.search_key("),
+        ] {
+            let arm = dispatch
+                .split(&format!("{variant} =>"))
+                .nth(1)
+                .unwrap_or_else(|| panic!("dispatch_ui_key has no arm for {variant}"))
+                .split('\n')
+                .next()
+                .unwrap_or_default();
+            assert!(
+                arm.contains(handler),
+                "dispatch_ui_key routes {variant} to `{arm}`, not {handler} — \
+                 the control plane would type into a different field than the \
+                 modal it reports"
+            );
+        }
+    }
+
+    /// The OS titlebar is a spoofing sink: the Cf bidi overrides are not
+    /// `char::is_control`, so they pass every control-character filter and can
+    /// reverse the rendered text in the titlebar and the Alt-Tab switcher.
+    ///
+    /// Every other route to that sink already ran `sanitize_title`. The
+    /// user-set window title did not, and this change gave it a paste arm —
+    /// which makes a clipboard payload a single keystroke away, and clipboards
+    /// are writable by terminal programs through OSC 52. Pin the sanitizer at
+    /// the callsite; the edit buffer itself deliberately keeps what was typed.
+    #[test]
+    fn the_user_set_window_title_is_sanitized_before_it_reaches_the_window() {
+        let src = production_source();
+        let arm = src
+            .split("TitleEditScope::Window => {")
+            .nth(1)
+            .and_then(|rest| rest.split("ws.last_title = value;").next())
+            .expect("window title-edit arm present");
+        assert!(
+            arm.contains("w.set_title(&sanitize_title(&value))"),
+            "the window title must be sanitized before set_title, or a pasted \
+             U+202E reverses the titlebar"
+        );
+        // And the sanitizer must still cover the bidi class, not just controls.
+        assert_eq!(sanitize_title("safe\u{202e}evil"), "safe evil");
+        assert_eq!(sanitize_title("ok\u{2069}"), "ok ");
+        // A ZWJ emoji is not a bidi override and must survive a title.
+        assert_eq!(
+            sanitize_title("a\u{1f469}\u{200d}\u{1f680}"),
+            "a\u{1f469}\u{200d}\u{1f680}"
+        );
     }
 
     /// Drift guard for the whole family of append-only modal text fields.
@@ -32364,10 +32478,30 @@ mod tests {
                 "{name} must filter text through modal_input::accept_text, \
                  or a Command chord types its letter into the field"
             );
-            for banned in ["push_str(t)", ".buf.pop()", "input.pop()"] {
+            // Not just the old spellings: ANY direct mutation of the buffer
+            // sidesteps the cap and the filter. A handler that grew a
+            // `state.input.push_str(...)` next to the helper call would have
+            // kept the previous version of this guard green while dropping the
+            // 4 KiB bound on that path.
+            for banned in [
+                "push_str(t)",
+                ".buf.pop()",
+                "input.pop()",
+                "input.push(",
+                "input.push_str(",
+                "input.extend(",
+                ".buf.push(",
+                ".buf.push_str(",
+                ".buf.extend(",
+                "q.push(",
+                "q.push_str(",
+                "q.extend(",
+            ] {
                 assert!(
                     !body.contains(banned),
-                    "{name} still contains the raw-append pattern `{banned}`"
+                    "{name} mutates its buffer directly with `{banned}`; every \
+                     write must go through modal_input so the cap and the \
+                     control-character filter apply"
                 );
             }
             if !append_only.contains(&name) {

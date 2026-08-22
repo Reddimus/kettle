@@ -110,6 +110,12 @@ tracked here so they are not lost.
   dismissing click should also pass through to what is underneath (the context
   menu currently swallows it). Both are choices worth making deliberately
   rather than inside a correctness fix.
+- **Two more raw-`text` consumers still carry the Command-chord bug.**
+  `vi_mode_key` and `context_menu_key` both take `KeyEvent::text` and act on it
+  without a modifier check, the same way the five text fields did. Neither
+  builds a buffer, so `modal_input::accept_text` is not a drop-in for either;
+  they need arm-level guards like the confirm dialog's. Listed with `hint_key`
+  below so the remaining set is named rather than partially recorded.
 - **`hint_key` has the same Command-chord bug the modal fields just lost.** It
   still takes raw `KeyEvent::text`, so on macOS the `v` that `⌘V` produces is a
   candidate hint selection. It is outside the five append-only text fields this

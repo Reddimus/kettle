@@ -2,12 +2,15 @@
 //! buffer: the title editors, the command palette, the SSH launcher, the layout
 //! picker, and the Settings path prompt.
 //!
-//! The search bar is deliberately *not* a caller. It owns a real
-//! [`crate::search_input::SearchEditor`] with a cursor, a selection, and its own
-//! clipboard chords, so it needs none of this. These helpers exist to give the
-//! remaining append-only fields the same *correctness* guarantees search already
-//! has — modifier filtering, grapheme-correct deletion, a byte cap, and a
-//! working paste — without pretending they are full editors.
+//! The search bar is a partial caller. It owns a real
+//! [`crate::search_input::SearchEditor`] with a cursor, a selection, a bounded
+//! insert and its own clipboard chords, so it needs none of the append-only
+//! helpers — but its catch-all arm shares [`accept_text`], because the chords
+//! it does not claim explicitly used to type their letter into the query.
+//!
+//! For the other five fields these helpers supply the *correctness* guarantees
+//! search already had — modifier filtering, grapheme-correct deletion, a byte
+//! cap, and a working paste — without pretending they are full editors.
 //!
 //! Each rule below is here because a live probe against the real application
 //! caught its absence; see the module tests for the reproductions.
@@ -45,11 +48,31 @@ pub(crate) const MAX_MODAL_INPUT_BYTES: usize = kettle_core::MAX_SEARCH_QUERY_BY
 ///
 /// [`KeyEvent::text`]: winit::event::KeyEvent::text
 pub(crate) fn accept_text(text: Option<&str>, mods: ModifiersState) -> Option<&str> {
-    if mods.control_key() || mods.super_key() {
+    // Control alone is a shortcut modifier and never text. Control *with* Alt
+    // is not: Windows reports AltGr as Ctrl+Alt, so rejecting the combination
+    // outright swallows every character a non-US layout composes with it —
+    // `@` on German, `ł` on Polish, `€` on many. Those layouts are exactly the
+    // ones that cannot type the character any other way. Gating on `text`
+    // being present keeps genuine Ctrl+Alt chords out, because they do not
+    // produce any.
+    if mods.super_key() || (mods.control_key() && !mods.alt_key()) {
         return None;
     }
     let text = text?;
     (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
+}
+
+/// Text a modal field should accept from an **IME commit**, which is not a
+/// keystroke and carries no modifier meaning.
+///
+/// [`accept_text`]'s modifier rule is right for `KeyEvent::text` and wrong
+/// here: a composition commits when the input method decides, and whatever
+/// modifier happens to be latched at that moment did not produce the text.
+/// Committing a CJK composition with `⌘Space` (switch input source) would
+/// otherwise discard the whole phrase, because `ws.mods` still carries SUPER
+/// from the preceding `ModifiersChanged`.
+pub(crate) fn accept_committed_text(text: &str) -> Option<&str> {
+    (!text.is_empty() && !text.chars().all(char::is_control)).then_some(text)
 }
 
 /// Append `text` to a modal buffer, dropping control characters and stopping at
@@ -188,6 +211,40 @@ mod tests {
             buf.len(),
             MAX_MODAL_INPUT_BYTES - 3,
             "the emoji is refused whole"
+        );
+    }
+
+    #[test]
+    fn altgr_composed_characters_are_not_swallowed() {
+        // Windows reports AltGr as Ctrl+Alt. Rejecting that combination
+        // outright makes `@` untypeable in these fields on a German layout —
+        // and there is no other way to enter it there.
+        let altgr = CONTROL | ALT;
+        assert_eq!(accept_text(Some("@"), altgr), Some("@"), "AltGr composes");
+        assert_eq!(
+            accept_text(Some("\u{20ac}"), altgr),
+            Some("\u{20ac}"),
+            "AltGr euro"
+        );
+        // A genuine Ctrl+Alt chord produces no text, so it is still not entry.
+        assert_eq!(accept_text(None, altgr), None);
+        // Control on its own remains a shortcut modifier.
+        assert_eq!(accept_text(Some("c"), CONTROL), None);
+    }
+
+    #[test]
+    fn committed_ime_text_ignores_whatever_modifier_is_latched() {
+        // The regression this exists to prevent: committing a composition with
+        // ⌘Space dropped the entire phrase, because ws.mods still carried SUPER.
+        assert_eq!(
+            accept_committed_text("\u{4f60}\u{597d}"),
+            Some("\u{4f60}\u{597d}")
+        );
+        assert_eq!(accept_committed_text(""), None);
+        assert_eq!(
+            accept_committed_text("\u{1}"),
+            None,
+            "control-only commit is nothing"
         );
     }
 
