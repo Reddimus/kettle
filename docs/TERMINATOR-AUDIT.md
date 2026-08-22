@@ -410,7 +410,7 @@ The full feature-by-feature ledger. Rows flip from B/C → ✅ A as cycles land.
 | zoom_in / zoom_out / zoom_normal | keybinds | ✅ `IncreaseFontSize` / `DecreaseFontSize` / `ResetFontSize` |
 | toggle_zoom (Ctrl+Shift+X) | keybinds | ✅ `ToggleZoom` |
 | full_screen (F11) | keybinds | ✅ `ToggleFullscreen` |
-| search (Ctrl+Shift+F) | keybinds | ✅ `StartSearch`; Terminator-style bottom bar, strict regex, signed history highlights |
+| search (Ctrl+Shift+F) | keybinds | ✅ `StartSearch`; Terminator-style bottom bar, regex with a literal fallback, signed history highlights |
 | reset (Ctrl+Shift+R) | keybinds | ✅ `Reset` |
 | copy / paste | keybinds | ✅ same |
 | switch_to_tab_N | keybinds | ✅ `GotoTab(N)` |

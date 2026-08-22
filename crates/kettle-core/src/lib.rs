@@ -12,7 +12,8 @@
 //!   the extractor in front, and exposes thread-safe `Arc<Mutex<Term>>`
 //!   for the renderer.
 //! - [`search`](mod@search) — bounded signed-grid [`CompiledSearch`]
-//!   (`Ctrl+Shift+F`) with strict regex compilation, plus viewport reveal
+//!   (`Ctrl+Shift+F`) with regex compilation that falls back to a literal when
+//!   the pattern does not parse, plus viewport reveal
 //!   geometry and legacy compatibility helpers.
 //! - [`links`](mod@links) — explicit OSC 8 hyperlinks + autodetected
 //!   URLs and local file paths in the visible grid; `is_safe_url`

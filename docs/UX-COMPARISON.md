@@ -61,7 +61,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
-| **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar; strict regex; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar; regex with a literal fallback for unparseable patterns; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **Kitty keyboard protocol** | ✅ progressive CSI-u negotiation + press/repeat/release encoder | ✅ | ✅ (origin) | ✅ | 🟡 (version/config dependent) | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |
@@ -518,7 +518,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | Sudo terminfo wrapper | Ghostty | ⛔ | low | S | reject | Exists to compensate for Ghostty's custom TERM; kettle ships xterm-256color, so it is moot by design. |
 | SSH integration (ssh-env / ssh-terminfo / `+ssh` wrapper) | Ghostty | ⛔ | low | M | reject | Solves the custom-TERM problem kettle does not have; COLORTERM forwarding is blocked by sshd AcceptEnv anyway. |
 | Command-finished events: exit code + duration | both | ✅ | high | S | reject | Anchor row: kettle already exceeds both upstreams; snippet upgrades compound this strength. |
-| Scrollback search (Ghostty parity check) | Ghostty | ✅ | low | S | reject | Kettle has strict regex plus bounded incremental signed-history scans; moving matching off the UI thread remains a measure-first option, not an unverified win. |
+| Scrollback search (Ghostty parity check) | Ghostty | ✅ | low | S | reject | Kettle has regex with a literal fallback plus bounded incremental signed-history scans; moving matching off the UI thread remains a measure-first option, not an unverified win. |
 | Rectangle selection + `window-save-state` | Ghostty | ✅ | low | S | reject | Both at or beyond parity; recorded so the matrix shows the areas were audited, not skipped. |
 | Position-independent shaped-run cache | Ghostty | 🟡 | low | M | reject | The new per-line skip already eliminates the steady-state cost; a run-level cache would fight cosmic-text. |
 | Renderer thread with draw timers (120fps tick, blink timer) | Ghostty | 🟡 | low | XL | reject | The single-event-loop model is load-bearing for tear-off; off-thread wgpu reintroduces the race class just eliminated. |
