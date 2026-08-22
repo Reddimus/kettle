@@ -6,6 +6,32 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **The search bar says what its controls do.** `[x] Wrap` became `Wrap: On`,
+  so the state is read rather than decoded. `Case: Smart` gained a `›` to show
+  that clicking cycles it, which nothing previously communicated. And `[x]
+  Invert` — which never said what it inverts — became `Enter: Next` /
+  `Enter: Prev`, naming the direction Enter searches and teaching the
+  keybinding at the same time. The query lost its `[ ]` brackets: the field
+  already has its own well, and the brackets read as syntax next to the
+  checkbox toggles. Groups are now separated by two columns instead of one, so
+  the row reads as query, navigation, options, outcome, close rather than one
+  undifferentiated strip. A plain `Match` status is no longer printed — the
+  highlight already says it, and suppressing it makes `No match` and
+  `Invalid pattern` read as answers instead of as another word in the strip.
+
+### Fixed
+
+- **Searching for text you can see on screen no longer reports an error.** The
+  search bar compiles every query as a regex and has no toggle to turn that off,
+  so typing `call(x` or a bare `(` — ordinary terminal output — answered
+  "invalid regular expression". A query that fails to parse is now retried as a
+  literal. Patterns that do parse keep regex meaning, so `a|b` and `^row` are
+  unchanged; that also means `call(x)` and `arr[0]` are still valid regex and
+  still do not match that literal text, which needs a literal/regex toggle
+  rather than a wider fallback.
+
 ### Added
 
 - **`dispatch_ui_key` can drive every modal text field, not just Search.** It

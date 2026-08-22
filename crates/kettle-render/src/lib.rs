@@ -11350,8 +11350,11 @@ pub fn search_bar_geometry(
     const STATUS: usize = 19;
     const CLOSE: usize = 7;
     const EDITOR_MIN: usize = 12;
+    // 8 single-column gaps between the nine controls, plus one extra column
+    // for each of the four gaps that separate groups rather than siblings
+    // (after the editor, after Next, after Invert, after Status).
     const WIDE_MIN: usize =
-        2 + LABEL + PREVIOUS + NEXT + WRAP + CASE + INVERT + STATUS + CLOSE + EDITOR_MIN + 8;
+        2 + LABEL + PREVIOUS + NEXT + WRAP + CASE + INVERT + STATUS + CLOSE + EDITOR_MIN + 8 + 4;
 
     let columns = (surface_width / cell_width).floor().max(1.0) as usize;
     let pad = usize::from(columns >= 4);
@@ -11369,22 +11372,30 @@ pub fn search_bar_geometry(
         rows,
     ) = if columns >= WIDE_MIN {
         let mut col = pad;
-        let mut place = |width: usize| {
+        // `gap` is the run of blank columns AFTER a control. One column
+        // separates controls inside a group; two separate the groups
+        // themselves, so the row reads as query / navigation / options /
+        // outcome / close instead of one undifferentiated strip. Without the
+        // wider gap the option group runs straight into the status text and
+        // `Enter: Prev Match` reads as a single phrase.
+        let mut place = |width: usize, gap: usize| {
             let here = col;
-            col += width + 1;
+            col += width + gap;
             (here, 0, width)
         };
-        let label_pos = place(LABEL);
+        const IN_GROUP: usize = 1;
+        const BETWEEN_GROUPS: usize = 2;
+        let label_pos = place(LABEL, IN_GROUP);
         // All fixed controls plus their inter-control gaps have already been
         // budgeted by WIDE_MIN; the editor gets every surplus column.
         let editor_width = EDITOR_MIN + (columns - WIDE_MIN);
-        let editor_pos = place(editor_width);
-        let previous_pos = place(PREVIOUS);
-        let next_pos = place(NEXT);
-        let wrap_pos = place(WRAP);
-        let case_pos = place(CASE);
-        let invert_pos = place(INVERT);
-        let status_pos = place(STATUS);
+        let editor_pos = place(editor_width, BETWEEN_GROUPS);
+        let previous_pos = place(PREVIOUS, IN_GROUP);
+        let next_pos = place(NEXT, BETWEEN_GROUPS);
+        let wrap_pos = place(WRAP, IN_GROUP);
+        let case_pos = place(CASE, IN_GROUP);
+        let invert_pos = place(INVERT, BETWEEN_GROUPS);
+        let status_pos = place(STATUS, BETWEEN_GROUPS);
         let close_pos = (col, 0, CLOSE.min(right.saturating_sub(col)).max(1));
         (
             label_pos,
@@ -11526,19 +11537,35 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
     add(geometry.editor, search_editor_label(search, editor_cols));
     add(geometry.previous, "‹ Prev".to_string());
     add(geometry.next, "Next ›".to_string());
+    // Say the state, not a checkbox. `[x] Wrap` makes someone decode a TUI
+    // idiom to learn whether wrapping is on; `Wrap: On` just tells them. The
+    // trailing chevron on Case is the affordance for "clicking cycles this",
+    // which nothing else in the bar communicated.
     add(
         geometry.wrap,
-        format!("[{}] Wrap", if search.wrap { 'x' } else { ' ' }),
+        format!("Wrap: {}", if search.wrap { "On" } else { "Off" }),
     );
     add(
         geometry.case_mode,
-        format!("Case: {}", search.case_mode.label()),
+        format!("Case: {} ›", search.case_mode.label()),
     );
+    // `Invert` never said what it inverts. It flips which direction Enter
+    // searches, so the control now names that directly — and doubles as a
+    // reminder of the keybinding for anyone who has not found it yet.
     add(
         geometry.invert,
-        format!("[{}] Invert", if search.invert { 'x' } else { ' ' }),
+        format!("Enter: {}", if search.invert { "Prev" } else { "Next" }),
     );
-    add(geometry.status, search.status.label().to_string());
+    // `Match` is the one status the user can already see: the hit is
+    // highlighted in the pane and the viewport has jumped to it. Printing it
+    // too spends the widest slot in the bar restating the obvious, and it
+    // makes the states that DO need attention — `No match`, `Invalid pattern`,
+    // `Results limited` — look like just another word in the strip rather than
+    // an answer. The slot keeps its width either way, so nothing shifts when
+    // the status appears and disappears.
+    if search.status != SearchStatus::Match {
+        add(geometry.status, search.status.label().to_string());
+    }
     add(geometry.close, "× Close".to_string());
 
     rows.iter_mut()
@@ -11597,7 +11624,13 @@ fn search_editor_label(search: &SearchOverlay, max_cols: usize) -> String {
     if display_width(&body) > inner {
         body = fit_single_line_label(&body, inner);
     }
-    let label = format!("[{body}]");
+    // One cell of padding on each side rather than `[ ]`. The field already
+    // has its own darker well, so the brackets were a second frame around the
+    // same thing — and they read as syntax next to the `[x]` toggles, as if
+    // the query itself took bracket notation. Same two-column allowance, so
+    // `inner`, the horizontal scroll, and the selection column math are all
+    // unchanged.
+    let label = format!(" {body} ");
     fit_single_line_label(&label, max_cols)
 }
 
@@ -17404,6 +17437,49 @@ mod search_bar_tests {
         assert_ne!(tiny.editor.1, tiny.close.1);
     }
 
+    /// The bar spends its widest slot on status, so it must not spend it
+    /// restating what the pane already shows. A plain `Match` is confirmed by
+    /// the highlight and the jump to it; the states that need attention are
+    /// the ones that print.
+    #[test]
+    fn only_the_status_that_tells_you_something_is_printed() {
+        let base = SearchOverlay {
+            query: "needle".into(),
+            cursor_byte: 6,
+            focused: SearchControl::Editor,
+            ..SearchOverlay::default()
+        };
+        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 20.0);
+
+        let matched = SearchOverlay {
+            status: SearchStatus::Match,
+            ..base.clone()
+        };
+        let text = search_bar_text(&matched, bar, 10.0);
+        assert!(
+            !text.contains(SearchStatus::Match.label()),
+            "a plain match is shown by the highlight, not by the bar: {text}"
+        );
+
+        for status in [
+            SearchStatus::NoMatch,
+            SearchStatus::Wrapped,
+            SearchStatus::Invalid,
+            SearchStatus::TooLong,
+            SearchStatus::Limited,
+        ] {
+            let overlay = SearchOverlay {
+                status,
+                ..base.clone()
+            };
+            let text = search_bar_text(&overlay, bar, 10.0);
+            assert!(
+                text.contains(status.label()),
+                "{status:?} must still be reported: {text}"
+            );
+        }
+    }
+
     #[test]
     fn rich_bar_is_status_only_and_never_emits_a_global_counter() {
         let search = SearchOverlay {
@@ -17420,8 +17496,26 @@ mod search_bar_tests {
         let text = search_bar_text(&search, bar, 10.0);
         assert!(text.contains("needle"));
         assert!(text.contains("Case: Ignore"));
-        assert!(text.contains("[x] Wrap"));
-        assert!(text.contains("[x] Invert"));
+        // The state labels say the state rather than making the reader decode
+        // a checkbox, and `Invert` names what it actually flips: the direction
+        // Enter searches.
+        assert!(
+            text.contains("Wrap: On"),
+            "wrap state is spelled out: {text}"
+        );
+        assert!(
+            text.contains("Enter: Prev"),
+            "invert=true means Enter searches backward: {text}"
+        );
+        assert!(
+            !text.contains("[x]") && !text.contains("[ ]"),
+            "the checkbox idiom is gone: {text}"
+        );
+        // The query well no longer wraps itself in brackets.
+        assert!(
+            !text.contains("[needle"),
+            "the query is not bracket-delimited: {text}"
+        );
         assert!(text.contains("Wrapped"));
         assert!(text.contains("× Close"));
         assert!(
