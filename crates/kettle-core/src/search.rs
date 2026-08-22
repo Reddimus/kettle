@@ -2100,6 +2100,33 @@ mod tests {
     }
 
     /// Drift guard. The three CaseSensitivity modes drive
+    /// The cap is applied to the pattern the user typed, but escaping can
+    /// roughly double it — 4096 bytes of `(` becomes 8192 bytes of `\(`. That
+    /// larger string is what actually reaches the engine, so the worst case is
+    /// worth pinning rather than assuming: it must compile as a cheap literal
+    /// (or report too-complex) quickly, never hang.
+    #[test]
+    fn the_escaped_retry_stays_bounded_at_the_query_cap() {
+        let pattern = "(".repeat(MAX_SEARCH_QUERY_BYTES);
+        assert_eq!(pattern.len(), MAX_SEARCH_QUERY_BYTES);
+        let started = std::time::Instant::now();
+        let compiled = CompiledSearch::compile(&pattern, CaseSensitivity::Always);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "escaping doubled the pattern and compile took {elapsed:?}"
+        );
+        // A literal of any length is cheap for the engine; the point is that it
+        // resolves one way or the other instead of running away.
+        assert!(
+            matches!(
+                compiled,
+                Ok(Some(_)) | Err(SearchCompileError::PatternTooComplex)
+            ),
+            "unexpected outcome for the escaped worst case: {compiled:?}"
+        );
+    }
+
     /// A query that is not valid regex falls back to matching it literally.
     ///
     /// The reproduction: a pane showing `call(x) and arr[0]` answered "No match"
