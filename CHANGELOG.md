@@ -17,7 +17,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   already has its own well, and the brackets read as syntax next to the
   checkbox toggles. Groups are now separated by two columns instead of one, so
   the row reads as query, navigation, options, outcome, close rather than one
-  undifferentiated strip. A plain `Match` status is no longer printed — the
+  undifferentiated strip, in both the one-row and the wrapped layouts. A plain `Match` status is no longer printed — the
   highlight already says it, and suppressing it makes `No match` and
   `Invalid pattern` read as answers instead of as another word in the strip.
 
