@@ -98,6 +98,18 @@ tracked here so they are not lost.
   word movement. Typing a typo in the first character of a tab name still means
   deleting everything after it.
 
+- **Clicking outside a modal dismisses some of them and not others.** Measured
+  with the same gesture at the same coordinates against each: the context menu
+  closes on an outside click, while the command palette and the layout picker
+  stay open — the click is consumed (`handled: true`) and nothing happens. A
+  person who opens the palette by accident and clicks away to get rid of it has
+  no way out until they find Escape.
+
+  Not fixed alongside the text-entry rules because it is a different concern:
+  it needs per-modal rect hit-testing and a decision about whether the
+  dismissing click should also pass through to what is underneath (the context
+  menu currently swallows it). Both are choices worth making deliberately
+  rather than inside a correctness fix.
 - **`hint_key` has the same Command-chord bug the modal fields just lost.** It
   still takes raw `KeyEvent::text`, so on macOS the `v` that `⌘V` produces is a
   candidate hint selection. It is outside the five append-only text fields this

@@ -20056,7 +20056,7 @@ impl App {
                 if let Some(s) = crate::modal_input::accept_text(text, ws.mods)
                     && let Some(state) = ws.editing_title.as_mut()
                 {
-                    crate::modal_input::push_text(&mut state.input, s);
+                    state.input.push_str(s);
                 }
             }
         }
