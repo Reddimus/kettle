@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- **`dispatch_ui_key` can drive every modal text field, not just Search.** It
+  refused any batch unless the search bar was open, which is why Search was the
+  only modal with end-to-end coverage — and why the four bugs above went
+  unnoticed in the fields that had none. It now resolves the command palette,
+  the Settings path prompt, the layout picker, the SSH launcher, the title
+  editors and Search in the same precedence the real key handler uses, reports
+  which modal it typed into, and stops early if that modal closes mid-batch.
 - **Screenshots can be cropped before Kettle writes them.** The control and MCP
   screenshot commands accept `crop_x`, `crop_y`, `crop_width`, and
   `crop_height` in window-relative physical pixels. Kettle validates the full
@@ -114,6 +121,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   The key help also advertises `y`/`n` when `vim-menu-nav` is on, because those
   answer the question directly while Enter fires the focused button — which is
   the safe `Cancel` on every close prompt.
+- **Command chords typed their own letter into every modal text field.**
+  `winit` does not filter `KeyEvent::text` by Command, so on macOS `⌘V` arrived
+  as the text `"v"` — and the title editors, the command palette, the SSH
+  launcher, the layout picker and the Settings path prompt all appended it
+  blindly. Pressing paste while renaming a tab produced a tab named `v`; `⌘A`
+  produced an `a`. In the command palette it was worse than cosmetic: the stray
+  character rewrote the query and re-ranked the list, so the next Enter ran a
+  command the user never picked. These fields now share one text-entry rule with
+  the confirm dialog, which had always applied it. Option is deliberately still
+  allowed through, because on macOS it composes accented characters.
+- **Paste now works in those fields.** It never had: `⌘V`/`Ctrl+V` was the
+  literal-letter bug above, so there was no way to paste a path or a branch name
+  into a rename box at all. Every one of them now honours the platform paste
+  chord.
+- **Backspace no longer breaks emoji and accents apart.** These fields deleted
+  with `String::pop`, which removes one `char` rather than one grapheme cluster.
+  One press on `👩‍🚀` removed the rocket and left a dangling zero-width joiner in
+  the title — `U+200D` is a format character, so no control-character filter
+  caught it. Deletion is grapheme-correct now, matching the search bar, which
+  always was.
+- **Modal text fields are bounded.** They accepted unbounded input; a probe put
+  3000 characters into a tab title and the tab bar tried to lay all of them out.
+  They now share the search bar's 4 KiB ceiling.
 
 ## [3.1.1] — 2026-08-18
 
