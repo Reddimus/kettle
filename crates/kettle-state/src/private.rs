@@ -1367,7 +1367,7 @@ pub(super) fn same_file_identity(_file: &File, _path: &Path) -> io::Result<bool>
 }
 
 #[cfg(unix)]
-mod unix {
+pub(crate) mod unix {
     use super::*;
     use std::ffi::{CString, OsStr, OsString};
     use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
@@ -3066,7 +3066,7 @@ mod unix {
             }
         }
 
-        pub(super) fn clear_extended_acl(file: &File) -> io::Result<()> {
+        pub(crate) fn clear_extended_acl(file: &File) -> io::Result<()> {
             // Darwin ACLs are independent of BSD mode bits. A shared export
             // directory can carry inheritable read ACEs, so a newly created
             // `0600` file is not owner-only until its extended ACL is removed.

@@ -576,6 +576,128 @@ fn schedule_stale_staged_reap(destination: &Path) {
     }
 }
 
+/// Strip any inherited extended ACL from an open file or directory.
+///
+/// Darwin ACLs are independent of the BSD mode bits, so a directory created
+/// `0700` inside a parent carrying an inheritable write ACE is still reachable
+/// by whoever that ACE names. Anything that relies on mode bits alone to keep a
+/// tree private has to do this too.
+///
+/// Cheap when there is nothing to remove: the ACL is inspected first, because
+/// installing an empty one on an already-clean file still bumps ctime and emits
+/// a metadata event.
+#[cfg(target_os = "macos")]
+pub fn clear_inherited_acl(file: &File) -> io::Result<()> {
+    private::unix::macos_acl::clear_extended_acl(file)
+}
+
+/// Why an atomic exchange did not fully succeed.
+///
+/// The two cases need different handling and conflating them loses data. A
+/// caller that cleans up its staging area on failure must not do so after
+/// [`Self::NotDurable`], because by then the exchange has happened and the
+/// staged name holds what used to be live.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub enum SwapFailure {
+    /// Nothing moved. Both entries are exactly as they were.
+    NotSwapped(io::Error),
+    /// The entries were exchanged, but the change could not be flushed. The
+    /// swap is visible now and may not survive a power loss.
+    NotDurable(io::Error),
+}
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Display for SwapFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSwapped(error) => write!(f, "the exchange did not happen: {error}"),
+            Self::NotDurable(error) => {
+                write!(f, "the exchange happened but was not made durable: {error}")
+            }
+        }
+    }
+}
+
+/// Atomically exchange two directory entries, each named relative to an open
+/// descriptor for its parent.
+///
+/// Both entries keep existing; they trade places. That is what makes this
+/// usable on a directory sealed as a unit, such as a signed `.app` bundle:
+/// there is no instant at which either name refers to a half-written tree, and
+/// whatever was live survives under the other name, so a process still running
+/// from it keeps working.
+///
+/// Taking descriptors rather than paths is the security-relevant part. The
+/// kernel resolves each name against the descriptor's inode, so an attacker who
+/// can rename the *containing directory* between staging and this call cannot
+/// redirect the exchange. Callers should hold the source descriptor from the
+/// moment they create the directory they are staging into.
+///
+/// # Errors
+///
+/// [`SwapFailure::NotSwapped`] carries [`io::ErrorKind::Unsupported`] when the
+/// filesystem has no atomic exchange. `RENAME_SWAP` is APFS-only, so a bundle
+/// on an HFS+, exFAT, or network volume lands there and the caller can say
+/// something better than `ENOTSUP`.
+#[cfg(target_os = "macos")]
+pub fn swap_directory_entries(
+    from_dir: &File,
+    from_name: &std::ffi::OsStr,
+    to_dir: &File,
+    to_name: &std::ffi::OsStr,
+) -> Result<(), SwapFailure> {
+    use std::ffi::CString;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    // Not in libc: `renameatx_np` is a Darwin extension.
+    unsafe extern "C" {
+        fn renameatx_np(
+            from_dir: libc::c_int,
+            from: *const libc::c_char,
+            to_dir: libc::c_int,
+            to: *const libc::c_char,
+            flags: libc::c_uint,
+        ) -> libc::c_int;
+    }
+    const RENAME_SWAP: libc::c_uint = 0x0000_0002;
+
+    let name = |value: &std::ffi::OsStr| {
+        CString::new(value.as_bytes()).map_err(|error| {
+            SwapFailure::NotSwapped(io::Error::new(io::ErrorKind::InvalidInput, error))
+        })
+    };
+    let (from, to) = (name(from_name)?, name(to_name)?);
+
+    let swapped = unsafe {
+        renameatx_np(
+            from_dir.as_raw_fd(),
+            from.as_ptr(),
+            to_dir.as_raw_fd(),
+            to.as_ptr(),
+            RENAME_SWAP,
+        )
+    };
+    if swapped != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTSUP) {
+            return Err(SwapFailure::NotSwapped(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this filesystem has no atomic exchange (RENAME_SWAP needs APFS)",
+            )));
+        }
+        return Err(SwapFailure::NotSwapped(error));
+    }
+    // The exchange is live from here on. Anything that fails below is a
+    // durability problem, never a reason to undo it.
+    to_dir.sync_all().map_err(SwapFailure::NotDurable)?;
+    if from_dir.as_raw_fd() != to_dir.as_raw_fd() {
+        from_dir.sync_all().map_err(SwapFailure::NotDurable)?;
+    }
+    Ok(())
+}
+
 /// An exclusive advisory lock released when this value is dropped.
 #[derive(Debug)]
 pub struct ExclusiveFileLock {
