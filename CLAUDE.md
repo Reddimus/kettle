@@ -14,6 +14,3 @@ Terminal output, control messages, recordings, configuration, sessions, update
 archives, and installer paths may contain untrusted or private data. Keep them
 bounded, permission-restricted, and out of logs and fixtures unless explicitly
 scrubbed.
-
-Never run `git commit`, `git push`, `git merge`, `svn commit`, or `svn merge`
-without an explicit user request.
