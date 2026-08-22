@@ -35,12 +35,21 @@ from a helper only after every Kettle process has exited.
 | Ubuntu/Linux aarch64 installed by the bundled installer | Supported |
 | Local source build (`local-dev` marker) | Refused; rebuild and reinstall from that checkout |
 | Cargo, distro package, Nix, a future Homebrew/AUR package, or manually copied binary | Refused; update with its owner |
-| macOS app | Use the release page; the Homebrew tap is not published and in-app replacement is not yet supported |
+| macOS `kettle.app` from the release page | Supported since 3.2.0 |
+| macOS app installed by Homebrew | Refused; run `brew upgrade` |
+| macOS app running translocated from Downloads | Refused; move it to Applications and open it once from there |
 
 Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires
 that marker to match Kettle, the stable channel, and the current Rust target.
 It never searches `PATH` for another copy and never elevates privileges.
+
+macOS has no installer to write a marker, and a marker cannot be added inside
+`kettle.app` without breaking its code signature. Ownership is proven from the
+signature instead: the bundle must be laid out as
+`kettle.app/Contents/MacOS/kettle`, signed with Kettle's bundle identifier and
+team, and sitting in a directory this user can write. A locally built app is ad-hoc signed and so is
+refused, which is the same answer a `local-dev` marker gets elsewhere.
 Repository installs deliberately use a `local-dev` marker (recording no longer
 affects the channel — it is a runtime toggle in every build; the legacy
 `local-dev-record` marker is still recognized and refused for older installs).
@@ -205,8 +214,10 @@ also stores the exact package-manifest bytes and the helper requires the held
 archive's embedded copy to match them byte for byte. Release CI generates this
 inner manifest before packaging, then extracts the final downloaded artifact
 and verifies it again with `scripts/package-manifest.py` before signing or
-publication. The macOS `.app` is not installed by Kettle's self-updater and does
-not use this inner manifest.
+publication. The macOS `.app` does not carry this inner manifest, because any
+file inside `Contents/` that the signature does not cover would invalidate it.
+Its equivalent is Apple's own seal, checked after extraction and before the
+bundle is swapped in.
 
 The transaction journal is what makes an interrupted update recoverable rather
 than a broken install. Its durable phase is the only thing a restarted process
@@ -297,14 +308,49 @@ and streamed SHA-256 before the release becomes public. This prevents a
 partial or substituted update feed without exposing the signing key and
 publication credential to the same job.
 
-The macOS universal archive is deliberately outside the signed self-update
-manifest because Kettle does not replace `.app` bundles in place. Its release
-assurance boundary is therefore distinct: the publisher requires the exact
-staged archive and canonical SHA-256 sidecar, regenerates the Homebrew formula
-from those bytes, and verifies the uploaded draft's reported size and streamed
-digest before publication. This does not claim that the macOS archive is bound
-by the updater's Ed25519 signature; adding macOS to that schema would be a
-future defense-in-depth improvement.
+The macOS universal archive joined the signed manifest in 3.2.0, under the
+target name `universal-apple-darwin`. That is not a Rust triple: one
+`lipo`-merged binary serves both architectures, and the manifest needs one
+filename per target. Older clients are unaffected, because each one looks up
+only its own target and ignores every other entry.
+
+macOS replaces the whole bundle rather than files inside it. The code signature
+seals `kettle.app` as a unit, so a bundle caught part-way through a file-by-file
+update is one Gatekeeper rejects. The updater extracts the verified archive into
+a private `0700` directory beside the live bundle, checks it with `codesign` and
+`spctl`, and only then exchanges the two in a single atomic operation. Both
+tools ship with macOS; `stapler` does not, so it is not used.
+
+That staging directory is held open from the moment it is created, and every
+write during extraction is made relative to that descriptor with `O_NOFOLLOW`
+and `O_EXCL`. The exchange names its source relative to the same descriptor.
+This matters because `/Applications` is `drwxrwxr-x root:admin`, so any
+administrator on the machine can rename entries in it. Resolving by descriptor
+rather than by pathname means renaming the staging directory cannot redirect a
+write or substitute what gets installed, and the `0700` mode means nobody else
+can reach inside it between verification and installation.
+
+The `spctl` check is the one that matters, and the reason is easy to miss:
+re-signing a bundle changes its cdhash, which orphans the stapled notarization
+ticket while leaving `codesign --verify` perfectly satisfied. Only the
+assessment notices, so a signature check alone would happily install a build
+that Gatekeeper then blocks.
+
+The displaced bundle is kept until the next run rather than deleted at once. A
+running Kettle reads its icon and asset catalog out of the bundle it launched
+from, and pulling that directory away from a live app buys nothing. The next
+start removes it, so a launch cannot delete files an update in another window
+is still using. Two things stop that: the sweep takes the same update lock, and
+a staging directory holds an advisory lock on itself for as long as it exists.
+The second is the one to rely on, because two processes can disagree about
+where a lock file lives if they inherited different environments, and cannot
+disagree about the directory in front of them.
+
+Kettle writes no lock or bookkeeping file into `/Applications`. The update lock
+lives under `$XDG_STATE_HOME/kettle` (or `~/.local/state/kettle`), one per
+install. That is partly hygiene and partly necessity: `/Applications` is
+group-writable, and Kettle refuses to create a private file in a directory an
+untrusted principal can write.
 
 ## Signing-key rotation
 

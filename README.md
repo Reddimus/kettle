@@ -33,9 +33,9 @@ No package needs administrator access. The Linux installer verifies the signed
 release before making changes. See [Installation](docs/INSTALL.md) for Nix,
 older Linux systems, uninstall steps, and source builds.
 
-On Linux and Windows, check with `kettle --check-update` and install with
-`kettle update`. Set `update-policy = off` to disable background checks. macOS
-updates come from the release page.
+Check with `kettle --check-update` and install with `kettle update`. Set
+`update-policy = off` to disable background checks. On macOS this replaces
+`kettle.app` in place, and refuses if Homebrew owns the copy.
 
 ## Quick start
 

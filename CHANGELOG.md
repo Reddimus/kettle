@@ -6,34 +6,45 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
-### Changed
-
-- **The search bar says what its controls do.** `[x] Wrap` became `Wrap: On`,
-  so the state is read rather than decoded. `Case: Smart` gained a `›` to show
-  that clicking cycles it, which nothing previously communicated. And `[x]
-  Invert` — which never said what it inverts — became `Enter: Next` /
-  `Enter: Prev`, naming the direction Enter searches and teaching the
-  keybinding at the same time. The query lost its `[ ]` brackets: the field
-  already has its own well, and the brackets read as syntax next to the
-  checkbox toggles. Groups are now separated by two columns instead of one, so
-  the row reads as query, navigation, options, outcome, close rather than one
-  undifferentiated strip, in both the one-row and the wrapped layouts. A plain `Match` status is no longer printed — the
-  highlight already says it, and suppressing it makes `No match` and
-  `Invalid pattern` read as answers instead of as another word in the strip.
-
-### Fixed
-
-- **Searching for text you can see on screen no longer reports an error.** The
-  search bar compiles every query as a regex and has no toggle to turn that off,
-  so typing `call(x` or a bare `(` — ordinary terminal output — answered
-  "invalid regular expression". A query that fails to parse is now retried as a
-  literal. Patterns that do parse keep regex meaning, so `a|b` and `^row` are
-  unchanged; that also means `call(x)` and `arr[0]` are still valid regex and
-  still do not match that literal text, which needs a literal/regex toggle
-  rather than a wider fallback.
-
 ### Added
 
+- **`kettle update` works on macOS.** The updater covered Windows and Linux;
+  on a Mac it answered "update through the package manager or installer that
+  owns this executable", because there was no macOS code path at all. The
+  universal archive now ships in the signed update manifest as
+  `universal-apple-darwin`, and the app can replace itself.
+
+  It replaces the whole bundle rather than files inside it. A code signature
+  seals `kettle.app` as a unit, so a bundle caught part-way through a
+  file-by-file update is one Gatekeeper rejects, which on macOS can mean an app
+  that will not launch at all rather than one running an older binary. The
+  verified archive is extracted into a private directory beside the live bundle,
+  checked with `codesign` and `spctl`, and only then exchanged with it in one
+  atomic operation. Nothing is ever written into the bundle you are running.
+
+  Extraction and the exchange both resolve names against a descriptor for that
+  staging directory, taken when it is created, and every write uses `O_NOFOLLOW`
+  and `O_EXCL`. `/Applications` is writable by every administrator on the
+  machine, so a pathname is not a stable thing to build on: without this, a
+  symlink planted mid-extraction could redirect a write outside the bundle, and
+  renaming the staging directory after verification could substitute what got
+  installed. Bundle directories are created `0755` rather than inheriting the
+  umask, which under `umask 002` would have left an installed bundle writable by
+  the user's group.
+
+  The `spctl` check is the load-bearing one. Re-signing a bundle changes its
+  cdhash, which orphans the stapled notarization ticket while leaving
+  `codesign --verify` perfectly satisfied, so a signature check on its own would
+  install a build Gatekeeper then blocks. Both tools ship with macOS; `stapler`
+  does not, so it is not used.
+
+  Ownership is proven from the signature rather than an installer marker, since
+  macOS has no installer and a marker inside the bundle would break the seal. A
+  Homebrew-managed copy, an app translocated read-only out of Downloads, and a
+  locally built ad-hoc-signed app are each refused with the specific next step
+  rather than a permission error. Existing Windows and Linux clients are
+  unaffected by the fourth manifest entry: each one looks up only its own target
+  and ignores the rest.
 - **`dispatch_ui_key` can drive every modal text field, not just Search.** It
   refused any batch unless the search bar was open, which is why Search was the
   only modal with end-to-end coverage — and why the modal text-entry defects
@@ -70,8 +81,33 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   38 seconds if a worker disappears without replying. Set
   `paste-video-preview = off` to keep path paste without the receipt.
 
+
+### Changed
+
+- **The search bar says what its controls do.** `[x] Wrap` became `Wrap: On`,
+  so the state is read rather than decoded. `Case: Smart` gained a `›` to show
+  that clicking cycles it, which nothing previously communicated. And `[x]
+  Invert` — which never said what it inverts — became `Enter: Next` /
+  `Enter: Prev`, naming the direction Enter searches and teaching the
+  keybinding at the same time. The query lost its `[ ]` brackets: the field
+  already has its own well, and the brackets read as syntax next to the
+  checkbox toggles. Groups are now separated by two columns instead of one, so
+  the row reads as query, navigation, options, outcome, close rather than one
+  undifferentiated strip, in both the one-row and the wrapped layouts. A plain `Match` status is no longer printed — the
+  highlight already says it, and suppressing it makes `No match` and
+  `Invalid pattern` read as answers instead of as another word in the strip.
+
+
 ### Fixed
 
+- **Searching for text you can see on screen no longer reports an error.** The
+  search bar compiles every query as a regex and has no toggle to turn that off,
+  so typing `call(x` or a bare `(` — ordinary terminal output — answered
+  "invalid regular expression". A query that fails to parse is now retried as a
+  literal. Patterns that do parse keep regex meaning, so `a|b` and `^row` are
+  unchanged; that also means `call(x)` and `arr[0]` are still valid regex and
+  still do not match that literal text, which needs a literal/regex toggle
+  rather than a wider fallback.
 - **A cold Windows video thumbnail provider could drop a paste receipt.** The
   hidden worker still has a two-second deadline, but Kettle now gives an
   explicit timeout one fresh-worker retry. Other failures remain fail-closed,

@@ -73,6 +73,26 @@ pull-request job runs the exact `macos-26` release-host path in addition to the
 normal current-macOS CI leg. The major-version pin also prevents a future Xcode
 27 preview from silently changing release assets.
 
+### macOS update gate
+
+Also before merging the release-cut pull request, run:
+
+```sh
+just macos-update-smoke
+```
+
+This downloads the current published `kettle-macos-universal.zip`, checks it
+against its sidecar, and drives the real bundle updater over it with the real
+`codesign` and `spctl`. Unit tests cover staging, refusal, and the swap with a
+stub verifier, because nothing in CI can notarize a synthesized bundle. Only
+this check proves the assumption underneath the design: that a published archive
+still satisfies Gatekeeper after plain zip extraction and an atomic swap.
+
+It runs against the *previous* release, which is the point. It tells you the
+archive shape the updater expects has not drifted before you publish another one
+built the same way. Record an unavailable network or `gh` login as a skipped
+release check.
+
 ## 1. Merge the changelog prep pull request
 
 Create `release/prep-vX.Y.Z` from synchronized `main`. Promote
@@ -188,7 +208,9 @@ For a `v*` tag, `.github/workflows/release.yml` first requires a GitHub-verified
 annotated tag pointing at `origin/main` and checks the tag, `Cargo.toml`,
 `flake.nix`, and `CHANGELOG.md` versions. It then tests and builds four packages:
 Linux x86_64, Linux aarch64, macOS universal, and Windows x86_64. Each package
-gets a canonical SHA-256 sidecar.
+gets a canonical SHA-256 sidecar. All four are named in the signed update
+manifest; macOS appears as `universal-apple-darwin`, since one archive covers
+both Apple architectures.
 
 The `release-signing` environment supplies `KETTLE_UPDATE_SIGNING_KEY_PEM`. The
 finalizer proves that secret matches `packaging/update-public.pem`, signs the
