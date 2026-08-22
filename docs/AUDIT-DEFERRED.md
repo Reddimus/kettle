@@ -88,9 +88,25 @@ tracked here so they are not lost.
   rebinding an in-use chord requires confirmation, and failed Settings writes
   are surfaced instead of being silently treated as saved. Search now has a
   grapheme-aware editor with selection, caret/word movement, Home/End, and
-  bounded paste; the command palette, layout picker, and other older text
-  overlays still need that editor behavior consolidated behind one shared
-  component.
+  bounded paste.
+- **Give the modal text overlays a real editor, not just correct rules.**
+  Partially addressed: the title editors, command palette, SSH launcher, layout
+  picker, and Settings path prompt now share `kettle-ui/src/modal_input.rs`, so
+  they filter Command chords, paste, delete whole grapheme clusters, and stop at
+  4 KiB — the four things a live naive-user probe caught them getting wrong.
+  What they still lack is the *editor*: no caret, no selection, no Home/End, no
+  word movement. Typing a typo in the first character of a tab name still means
+  deleting everything after it.
+
+  Consolidating them behind `search_input::SearchEditor` is the finish line, and
+  it is a bigger change than it looks: `TitleEditOverlay` and its siblings carry
+  a bare `String` to the renderer, which measures it and parks the caret at the
+  end, so a real cursor means new fields in the `kettle-render` overlay structs,
+  caret and horizontal-scroll rendering for each one, and a decision about how
+  the IME preedit path (`with_preedit`) composes with a mid-string cursor.
+  Estimate: one focused change across `kettle-ui` and `kettle-render`, with
+  pixel tests for the caret in each overlay. Worth doing; not worth bolting on
+  to a correctness fix.
 
 ## Performance (measure first)
 
