@@ -11443,19 +11443,38 @@ pub fn search_bar_geometry(
         // Pack the secondary row(s) with deterministic source order. Each
         // component may shrink on exceptionally narrow windows, but none is
         // hidden. Status is geometry, not a focusable control.
-        let desired = [PREVIOUS, NEXT, WRAP, CASE, INVERT, STATUS];
+        // Same grouping the wide branch uses: one column between siblings, two
+        // where one group ends and the next begins. Without it the narrow rows
+        // render `Enter: Next No match`, because `Enter: Next` fills its slot
+        // exactly and a single space does not read as a boundary between a
+        // control and the outcome text.
+        let desired = [
+            (PREVIOUS, 1usize),
+            (NEXT, 2),
+            (WRAP, 1),
+            (CASE, 1),
+            (INVERT, 2),
+            (STATUS, 1),
+        ];
         let usable = inner.max(1);
         let mut packed = [(0usize, 0usize, 1usize); 6];
         let mut row = if close_on_own_row { 2 } else { 1 };
         let mut col = pad;
-        for (idx, wanted) in desired.into_iter().enumerate() {
+        for (idx, (wanted, gap)) in desired.into_iter().enumerate() {
             let width = wanted.min(usable).max(1);
             if col > pad && col + width > right {
                 row += 1;
                 col = pad;
             }
             packed[idx] = (col, row, width);
-            col = col.saturating_add(width + 1);
+            // A group boundary never justifies pushing a control off the row.
+            // `right` is an exclusive end, so a control fits while
+            // `col + width <= right`; the next one starts at `col + width +
+            // gap` and is already off the row when that equals `right`. Compare
+            // with `>=`, not `>`, or the wider gap wraps a control that the
+            // single-column gap would have kept.
+            let gap = if col + width + gap >= right { 1 } else { gap };
+            col = col.saturating_add(width + gap);
         }
         let [
             previous_pos,
@@ -17501,6 +17520,64 @@ mod search_bar_tests {
     }
 
     const ELLIPSIS: char = '\u{2026}';
+
+    /// A control must never abut the status text, in either layout.
+    ///
+    /// `Enter: Next` fills its slot exactly, so with the single-column gap the
+    /// bar rendered `Enter: Next No match` and the control ran into the outcome
+    /// as one phrase. The wide branch got group spacing first; the narrow
+    /// branch kept single gaps and reproduced it on a 2-row bar, which is what
+    /// the deployed app actually showed.
+    #[test]
+    fn no_control_abuts_the_status_text_in_either_layout() {
+        // Both invert states, so `Enter: Prev` is actually generated rather
+        // than only asserted against, and every status that prints.
+        let statuses = [
+            SearchStatus::NoMatch,
+            SearchStatus::Wrapped,
+            SearchStatus::Invalid,
+            SearchStatus::TooLong,
+            SearchStatus::Limited,
+            SearchStatus::Start,
+            SearchStatus::End,
+        ];
+        let mut saw_prev = false;
+        let mut saw_next = false;
+        for width in [2400.0_f32, 1400.0, 1000.0, 820.0, 700.0, 600.0] {
+            let cell_width = 7.8_f32;
+            let bar = search_bar_geometry(width, 800.0, cell_width, 20.0);
+            for invert in [false, true] {
+                for status in statuses {
+                    let overlay = SearchOverlay {
+                        query: "needle".into(),
+                        cursor_byte: 6,
+                        invert,
+                        status,
+                        focused: SearchControl::Editor,
+                        ..SearchOverlay::default()
+                    };
+                    let text = search_bar_text(&overlay, bar, cell_width);
+                    let control = if invert { "Enter: Prev" } else { "Enter: Next" };
+                    saw_prev |= invert && text.contains(control);
+                    saw_next |= !invert && text.contains(control);
+                    let abutting = format!("{control} {}", status.label());
+                    for line in text.lines() {
+                        assert!(
+                            !line.contains(&abutting),
+                            "control abuts status at width={width} rows={} \
+                             invert={invert} status={status:?}: {line}",
+                            bar.rows
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_prev && saw_next,
+            "the sweep must actually render both invert states, or the \
+             assertions above are vacuous"
+        );
+    }
 
     /// No control label may be ellipsized at any realistic cell width.
     ///
