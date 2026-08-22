@@ -98,6 +98,22 @@ tracked here so they are not lost.
   word movement. Typing a typo in the first character of a tab name still means
   deleting everything after it.
 
+- **`hint_key` has the same Command-chord bug the modal fields just lost.** It
+  still takes raw `KeyEvent::text`, so on macOS the `v` that `⌘V` produces is a
+  candidate hint selection. It is outside the five append-only text fields this
+  round covered — hint mode consumes single characters as labels rather than
+  building a buffer, so it needs a different shape of fix, not
+  `modal_input::accept_text`. Named here so it is not rediscovered as new.
+- **`open_text_modal` cannot see the modals that outrank it.** It resolves the
+  six text fields, but a confirm dialog, the context menu, vi-mode, or hint mode
+  can own the keyboard *above* one of them. When that happens `dispatch_ui_key`
+  types into a field a real keystroke would not reach. This is pre-existing
+  rather than new — the old search-only gate had exactly the same hole — and the
+  precedence drift guard cannot catch it, because it compares the two orders
+  against each other rather than against the modals neither one lists. The fix
+  is for the resolver to report "some other modal owns the keyboard" and refuse,
+  which needs the non-text modals enumerated in the same place.
+
   Consolidating them behind `search_input::SearchEditor` is the finish line, and
   it is a bigger change than it looks: `TitleEditOverlay` and its siblings carry
   a bare `String` to the renderer, which measures it and parks the caret at the
