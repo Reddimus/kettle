@@ -123,8 +123,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   signed manifests therefore turned the signature check off and fell back to a
   checksum served by the same party, ending in an unverified archive's
   `install.sh` being executed. The same redirect could also pin every new
-  install to an old release indefinitely. A version the channel chose now has to
-  meet the signed-manifest floor, checked before anything is downloaded.
+  install to an old release indefinitely. A version the channel picks must now
+  meet the signed-manifest floor, and the check runs before anything is
+  downloaded.
   Naming an old release explicitly still works, because that is a decision the
   person installing made rather than one made for them.
 
@@ -163,7 +164,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - **The Arch and Homebrew packages no longer install an icon into a directory
   no icon theme reads.** Both derived a size from every `kettle-*.png` in the
   release archive, including `kettle-light-256.png`, whose name yields a size of
-  `light-256`.
+  `light-256` and a path of `hicolor/light-256xlight-256/apps/`. Both templates
+  now match only `kettle-[0-9]*.png`. The one-line installer was never affected:
+  it iterates an explicit list of sizes.
 
 - **Searching for text you can see on screen no longer reports an error.** The
   search bar compiles every query as a regex and has no toggle to turn that off,
