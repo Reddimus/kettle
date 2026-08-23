@@ -672,6 +672,39 @@ fn open_session_file(path: &std::path::Path) -> std::io::Result<(std::fs::File, 
     Ok((file, metadata.len()))
 }
 
+/// Move aside a session file kettle loaded but then refused to restore.
+///
+/// The parse-error and oversize branches already do this, and the preflight
+/// rejections did not. That asymmetry cost the user everything: a rejected
+/// preflight only logged a warning, kettle opened one default tab, and the next
+/// save — either the action tail or the two-second sweep — rewrote the file from
+/// that single tab. Every window, split ratio and working directory was gone
+/// within seconds of a launch that looked ordinary.
+///
+/// The rejections are reachable without a hostile file, because nothing on the
+/// save side enforces the limits the load side checks: seventeen open windows,
+/// or more than 256 panes, or a large enough aggregate surface area, and kettle
+/// writes a file it will refuse to read back.
+pub(crate) fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
+    if !path.exists() {
+        return;
+    }
+    let destination = path.with_extension(format!(
+        "json.unrestored.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    ));
+    log::warn!(
+        "session at {} could not be restored ({reason}); keeping it at {} so the \
+         next save cannot overwrite it",
+        path.display(),
+        destination.display()
+    );
+    let _ = std::fs::rename(path, destination);
+}
+
 fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
     log::warn!(
         "session file {} is {size} bytes (cap {limit}); \
@@ -692,6 +725,46 @@ fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A session kettle loads but refuses to restore must survive the launch.
+    ///
+    /// The preflight rejections used to only log. Everything downstream then
+    /// behaved as if there were no session, including the next save, so the
+    /// file was replaced by a single fresh tab within seconds. The parse-error
+    /// and oversize branches already stashed; these did not.
+    #[test]
+    fn a_session_that_cannot_be_restored_is_kept_rather_than_overwritten() {
+        let temp = kettle_test_support::private_tempdir("kettle-session-stash-");
+        let path = temp.path().join("session.json");
+        std::fs::write(&path, b"{\"windows\":[]}").unwrap();
+
+        super::stash_unrestorable_session(&path, "too many windows");
+
+        assert!(
+            !path.exists(),
+            "the original path must be free, or the next save writes over it"
+        );
+        let kept: Vec<_> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("json.unrestored."))
+            .collect();
+        assert_eq!(kept.len(), 1, "exactly one stashed copy");
+        assert_eq!(
+            std::fs::read(kept[0].path()).unwrap(),
+            b"{\"windows\":[]}",
+            "the stash keeps the bytes verbatim"
+        );
+    }
+
+    /// Stashing something that is not there must not invent a file.
+    #[test]
+    fn stashing_a_missing_session_does_nothing() {
+        let temp = kettle_test_support::private_tempdir("kettle-session-nostash-");
+        let path = temp.path().join("session.json");
+        super::stash_unrestorable_session(&path, "no reason");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
     use super::*;
 
     /// A directory the PRIVATE atomic write will accept.

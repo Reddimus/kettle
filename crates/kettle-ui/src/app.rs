@@ -786,6 +786,35 @@ mod macos_chrome_policy_tests {
         MacosTitlebarPolicy, macos_titlebar_policy, production_source, rounded_window_corner_policy,
     };
 
+    /// Both preflight rejections must stash, not just log.
+    ///
+    /// A behavioural test here would need a real event loop and a real window,
+    /// so this pins the wiring instead. The failure it guards is quiet and
+    /// total: a rejected preflight leaves everything downstream behaving as if
+    /// there were no session, and the next save replaces the file with a single
+    /// fresh tab.
+    #[test]
+    fn a_rejected_session_preflight_stashes_the_file() {
+        let src = production_source();
+        for rejection in [
+            "session.validated_restore_windows()",
+            "validated_restore_surface_geometries(",
+        ] {
+            let at = src
+                .find(rejection)
+                .unwrap_or_else(|| panic!("{rejection} is no longer called from startup"));
+            let arm = &src[at..src.len().min(at + 700)];
+            assert!(
+                arm.contains("stash_unrestorable_session"),
+                "the {rejection} rejection must stash the session before anything overwrites it"
+            );
+        }
+        assert!(
+            !src.contains(r#"log::warn!("session restore rejected during preflight"#),
+            "a warning alone was the whole bug: the file was gone seconds later"
+        );
+    }
+
     #[test]
     fn decorated_windows_use_theme_matched_native_chrome() {
         assert_eq!(
@@ -23805,10 +23834,17 @@ impl App {
                 // one-wakeup-per-read flood the latch eliminates.
                 let mk = || self.waker();
                 let geometries = self.restore_geometries(&ws, &sess);
-                if !ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk) {
+                let outcome = ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk);
+                if !outcome.restored_any {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
                     return Err(WindowOpen::Restore(sw));
+                }
+                if outcome.skipped > 0 {
+                    self.stash_unrestorable_session(&format!(
+                        "{} tab(s) could not be rebuilt",
+                        outcome.skipped
+                    ));
                 }
             }
         }
@@ -24679,6 +24715,22 @@ impl App {
     /// Loading and validating here lets `resumed_inner` seed the first native
     /// window with its final saved geometry. That avoids showing/configuring a
     /// default-sized swapchain and immediately replacing it after PTYs spawn.
+    /// Move a session aside when it loaded but could not be restored.
+    ///
+    /// Everything downstream of a rejected preflight behaves as if there were
+    /// no session at all, including the next save, so without this the file is
+    /// replaced by a single fresh tab before the user has finished looking at
+    /// the window.
+    fn stash_unrestorable_session(&self, reason: &str) {
+        let path = match self.startup.layout.as_deref() {
+            Some(name) => crate::session::Session::path_for_layout(name),
+            None => crate::session::Session::path(),
+        };
+        if let Some(path) = path {
+            crate::session::stash_unrestorable_session(&path, reason);
+        }
+    }
+
     fn load_startup_session(&mut self) -> Option<crate::session::Session> {
         // Terminator parity, detachable-tabs Bucket-D (drop-logic target):
         // --tab-handoff-fd FD wins over the file handoff, named layout, and
@@ -24769,7 +24821,7 @@ impl App {
             let windows = match session.validated_restore_windows() {
                 Ok(windows) => windows,
                 Err(error) => {
-                    log::warn!("session restore rejected during preflight: {error}");
+                    self.stash_unrestorable_session(&error);
                     return None;
                 }
             };
@@ -24780,7 +24832,7 @@ impl App {
             ) {
                 Ok(geometries) => geometries,
                 Err(error) => {
-                    log::warn!("session restore rejected during surface preflight: {error}");
+                    self.stash_unrestorable_session(&error);
                     return None;
                 }
             };
@@ -25042,10 +25094,21 @@ impl App {
                         };
                         let geometries = self.restore_geometries(ws, &first_session);
                         let mk = || self.waker();
-                        let ok =
+                        let outcome =
                             ws.mux
                                 .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
-                        if ok {
+                        // A tab that could not be rebuilt is gone from the live
+                        // mux, and the next save rewrites the file from it. Keep
+                        // the original so a transient failure — a command not on
+                        // PATH yet, a fork refused under a process limit — costs
+                        // nothing permanent.
+                        if outcome.skipped > 0 {
+                            self.stash_unrestorable_session(&format!(
+                                "{} tab(s) could not be rebuilt",
+                                outcome.skipped
+                            ));
+                        }
+                        if outcome.restored_any {
                             for (index, sw) in rest.iter().enumerate() {
                                 let sw = crate::session::SWindow {
                                     tabs: sw.tabs.to_vec(),
@@ -25065,7 +25128,7 @@ impl App {
                             // focused_seq to each window it opens).
                             self.focused_seq = ws.seq;
                         }
-                        ok
+                        outcome.restored_any
                     } else {
                         false
                     }
