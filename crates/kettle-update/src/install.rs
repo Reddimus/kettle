@@ -644,9 +644,7 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 });
             }
         };
-        if let Some(_update_lock) = kettle_state::ExclusiveFileLock::try_acquire(
-            &install.prefix.join(".kettle-update.lock"),
-        )? {
+        if let Some(_update_lock) = acquire_startup_recovery_lock(&install.prefix)? {
             let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
                 .expect("the crate package version is valid semver");
             confirm_committed_transaction(&install.prefix, &running_version)?;
@@ -743,6 +741,39 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
     }
 }
 
+/// Take the update lock for a best-effort startup recovery pass.
+///
+/// `Ok(None)` means "carry on without it". Two cases produce that, and both are
+/// normal. Another process is already holding it, or this user cannot create it
+/// at all.
+///
+/// The second is not hypothetical. `docs/INSTALL.md` documents a system-wide
+/// install under `KETTLE_PREFIX=/usr/local`, which leaves the prefix owned by
+/// root at `0755`. The marker inside is world-readable, so a normal user's
+/// kettle recognizes the install and then cannot create a lock file next to it.
+/// Propagating that turned a launch into `Error: Permission denied (os error
+/// 13)` and no window, on every launch by every non-root user. From a desktop
+/// entry there was not even a message.
+///
+/// Startup recovery belongs to whoever can write the prefix. If that is not us,
+/// skipping it is the whole correct response.
+#[cfg(any(windows, target_os = "linux"))]
+fn acquire_startup_recovery_lock(
+    prefix: &Path,
+) -> Result<Option<kettle_state::ExclusiveFileLock>, UpdateError> {
+    match kettle_state::ExclusiveFileLock::try_acquire(&prefix.join(".kettle-update.lock")) {
+        Ok(lock) => Ok(lock),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            log::debug!(
+                "skipping startup update recovery: {} is not writable by this user",
+                prefix.display()
+            );
+            Ok(None)
+        }
+        Err(error) => Err(UpdateError::Io(error)),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn prepare_linux_process_start_at(
     executable: &Path,
@@ -752,9 +783,7 @@ fn prepare_linux_process_start_at(
         Ok(install) => install,
         Err(_) => return Ok(()),
     };
-    let Some(_update_lock) =
-        kettle_state::ExclusiveFileLock::try_acquire(&install.prefix.join(".kettle-update.lock"))?
-    else {
+    let Some(_update_lock) = acquire_startup_recovery_lock(&install.prefix)? else {
         return Ok(());
     };
     confirm_committed_transaction(&install.prefix, running_version)?;
@@ -6722,6 +6751,40 @@ mod tests {
     /// managed-install path at all. It has one now, so the meaningful assertion
     /// is the narrower one: a bundle is required, and the test harness is not
     /// running inside one.
+    /// A prefix this user cannot write must not stop kettle from starting.
+    ///
+    /// `KETTLE_PREFIX=/usr/local` is a documented system-wide install. Run
+    /// under sudo it leaves the prefix owned by root at 0755 with a
+    /// world-readable marker, so a normal user's kettle recognizes the install
+    /// and then cannot create a lock beside it. That used to propagate all the
+    /// way out of `main`: `Error: Permission denied (os error 13)` and no
+    /// window, every launch, for every non-root user.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_recovery_skips_a_prefix_this_user_cannot_write() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Root ignores the mode bits, so the setup cannot be arranged there.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: running as root, where a 0500 directory is still writable");
+            return;
+        }
+        let temp = test_tempdir();
+        let prefix = temp.path().join("usr-local");
+        fs::create_dir_all(&prefix).unwrap();
+        fs::set_permissions(&prefix, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let outcome = acquire_startup_recovery_lock(&prefix);
+        // Restore before asserting so a failure still leaves a removable tree.
+        let _ = fs::set_permissions(&prefix, fs::Permissions::from_mode(0o700));
+
+        match outcome {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("a 0500 directory should not have yielded a lock"),
+            Err(error) => panic!("startup must not fail on an unwritable prefix: {error}"),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn a_bare_test_binary_is_not_a_managed_bundle_install() {
