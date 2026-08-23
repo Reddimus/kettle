@@ -2234,16 +2234,22 @@ fn creation_theme_hint(hint: Option<WindowTheme>, is_macos: bool) -> Option<Wind
 
 /// Whether this window may be handed the native theme hint yet.
 ///
-/// macOS waits until the window is on screen and has been the key window,
-/// which is when AppKit builds its titlebar container. Applying the appearance
-/// before that leaves the window permanently without a caption — removing the
-/// material view again does not bring it back — so a window that is never
-/// focused keeps the system appearance rather than a broken caption. See
-/// [`creation_theme_hint`].
+/// Only the *first* appearance a macOS window is given has to wait for the
+/// window to be on screen and key, which is when AppKit builds its titlebar
+/// container. That one can leave the window permanently without a caption —
+/// removing the material view again does not bring it back — so a window that
+/// has never been focused keeps the system appearance rather than a broken
+/// caption. See [`creation_theme_hint`].
+///
+/// Every later change is unconditional. The caption exists by then, and this
+/// is the path the runtime light/dark toggle always took. Holding those back
+/// too would strand a background window on a stale appearance until someone
+/// clicked it, since a schedule boundary, Lua, or a config reload can move the
+/// hint while another window has focus.
 ///
 /// Pure — unit-testable without a window.
-fn native_theme_sync_is_due(window_is_key: bool, is_macos: bool) -> bool {
-    !is_macos || window_is_key
+fn native_theme_sync_is_due(window_is_key: bool, already_synced: bool, is_macos: bool) -> bool {
+    !is_macos || window_is_key || already_synced
 }
 
 /// v2.34.0: decide the native window-theme hint (winit
@@ -16467,6 +16473,7 @@ impl App {
             if state.native_theme_synced == Some(hint)
                 || !native_theme_sync_is_due(
                     state.window_shown && w.has_focus(),
+                    state.native_theme_synced.is_some(),
                     cfg!(target_os = "macos"),
                 )
             {
@@ -38151,11 +38158,18 @@ mod tests {
                 "macOS must reach the window with no appearance override"
             );
         }
-        // The deferral is macOS-only, and there it waits for the key window.
-        assert!(native_theme_sync_is_due(false, false));
-        assert!(native_theme_sync_is_due(true, false));
-        assert!(!native_theme_sync_is_due(false, true));
-        assert!(native_theme_sync_is_due(true, true));
+        // The deferral is macOS-only.
+        for already_synced in [false, true] {
+            assert!(native_theme_sync_is_due(false, already_synced, false));
+            assert!(native_theme_sync_is_due(true, already_synced, false));
+        }
+        // On macOS only the first appearance waits for the key window; once a
+        // window has one, later changes must not be held back or a background
+        // window strands on a stale titlebar until someone clicks it.
+        assert!(!native_theme_sync_is_due(false, false, true));
+        assert!(native_theme_sync_is_due(true, false, true));
+        assert!(native_theme_sync_is_due(false, true, true));
+        assert!(native_theme_sync_is_due(true, true, true));
 
         // Policy alone does not fix anything if the call sites drop it.
         let src = production_source();
@@ -38165,7 +38179,12 @@ mod tests {
         );
         assert!(
             src.contains("state.window_shown && w.has_focus()"),
-            "the deferred apply must wait for a shown, key window"
+            "the first apply must wait for a shown, key window"
+        );
+        assert!(
+            src.contains("state.native_theme_synced.is_some(),"),
+            "later changes must not be gated on focus, or a background window \
+             keeps a stale titlebar"
         );
         assert!(
             src.contains("state.native_theme_synced = Some(hint)"),
