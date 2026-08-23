@@ -10,9 +10,11 @@ clone-time, 2026-05-21). Re-run the audit against a fresher SHA by re-cloning
 into `/tmp/terminator` and re-walking `terminatorlib/` — the per-module
 sections below are append-only; new features get new rows in the gap table.
 
-Status: re-verified 2026-06-12 by the v2.20.0 Terminator + Ghostty deep-dive
-cross-check — the parity claims held against source (residual gaps tracked in
-`docs/UX-COMPARISON.md` § "v2.20.0 Terminator + Ghostty deep-dive").
+Status: last fully re-verified against source on 2026-06-12, by the v2.20.0
+Terminator and Ghostty deep-dive cross-check. The parity claims held; residual
+gaps are tracked in `docs/UX-COMPARISON.md` under "v2.20.0 Terminator + Ghostty
+deep-dive". Edits since then have been corrections and new rows rather than a
+fresh sweep, so treat the date as the age of the *claims*, not of the file.
 
 Correction pass, 2026-08-03. A machine check of this document against both
 sources — every Terminator option name it cites, checked against a clone of
