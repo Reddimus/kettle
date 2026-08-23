@@ -286,7 +286,11 @@ uninstall with no documented recovery (`install-unix.py:700`).
   `private path crosses an untrusted directory edge`. That refusal is correct.
   Run the suite as the user who owns `/` instead. Their toolchain is the second
   problem: the only complete one lives under root's home, which on this VM *is*
-  `/`, so it needs `chmod -R a+rX` before that user can execute it.
+  `/`, so it is not executable by that user. Widen exactly the two toolchain
+  directories, `chmod -R a+rX /.cargo /.rustup`, and nothing else. Root's home
+  being `/` is precisely why the paths have to be named: the same command
+  without operands, or aimed at `/`, would make the whole filesystem
+  world-readable.
 
   A live window is still not covered. The guest's `/tmp` is a 7.6 GB tmpfs,
   which is where the build has to go because `/` has 1.4 GB free, and the
@@ -295,10 +299,17 @@ uninstall with no documented recovery (`install-unix.py:700`).
   shared folder instead works but is slow enough that it was not worth another
   pass for this change.
 
-  So the gap is specifically GPU and window behaviour on Linux ARM. CI builds
-  and tests Linux x86_64 on every pull request and runs an aarch64
-  early-warning job, so everything except live presentation is covered
-  elsewhere.
+  So GPU and window behaviour on Linux ARM went unverified this cycle. CI builds
+  and tests Linux x86_64 on every pull request and runs an aarch64 early-warning
+  job, so everything except live presentation is covered elsewhere.
+
+  Worth flagging for whoever picks this up: `docs/INSTALL.md:15-17` and
+  `docs/TESTING.md:180-182` both describe this guest as supplying live-UI and
+  Wayland evidence. Neither is wrong about what it can do. It could not do it
+  today, and the reason is disk rather than anything about the guest. Freeing
+  space in `/tmp`, or linking the binary elsewhere, should restore it. Those
+  documents are left alone because a full tmpfs is a passing condition, not a
+  change in what the VM is for.
 
 - **Two macOS update cleanup windows are mitigated, not eliminated,
   2026-08-22.** `Staging::discard` and the sweep both delete by pathname,
