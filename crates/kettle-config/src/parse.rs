@@ -157,7 +157,7 @@ impl Section {
 /// A section whose settings kettle read past without applying.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IgnoredSection {
-    /// The header line exactly as the user wrote it.
+    /// The header line as written, with surrounding whitespace trimmed.
     pub header: String,
     /// How many `key = value` lines it swallowed.
     pub settings: usize,
@@ -193,7 +193,17 @@ pub fn ignored_sections(input: &str) -> Vec<IgnoredSection> {
             current = (!section.applies()).then(|| line.to_string());
             continue;
         }
-        if section.applies() || !line.contains('=') {
+        if section.applies() {
+            continue;
+        }
+        // Count only what an applying section would have used. `parse` needs a
+        // `=` with a non-empty key before it builds an entry, so a stray
+        // `= value` is not a setting anywhere and must not inflate the number
+        // this reports as lost.
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        if line[..eq].trim().is_empty() {
             continue;
         }
         let Some(header) = current.as_deref() else {
@@ -379,6 +389,18 @@ mod tests {
         );
         // An empty one is not worth a line of output.
         assert!(super::ignored_sections("[layouts]\n").is_empty());
+
+        // Neither is a line that would not have been a setting anywhere:
+        // `parse` requires a non-empty key, so counting these would overstate
+        // what the user lost.
+        let malformed = "[globl_config]\n= orphan\nnot-an-assignment\ntheme = x\n";
+        assert_eq!(
+            super::ignored_sections(malformed),
+            vec![super::IgnoredSection {
+                header: "[globl_config]".into(),
+                settings: 1,
+            }]
+        );
     }
 
     #[test]

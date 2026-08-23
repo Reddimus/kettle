@@ -462,6 +462,9 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 `prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`, and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
+GTK's accelerator syntax works too, unchanged from a Terminator config:
+`<Primary><Shift>t` is the same binding as `ctrl+shift+t`.
+
 A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
 flagged by `kettle --check-config` — it doesn't silently degrade
 into a bare-key binding.
