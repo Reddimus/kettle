@@ -15735,6 +15735,47 @@ mod image_lifecycle_tests {
         }
     }
 
+    /// Two synchronized graphics frames arriving in one PTY read.
+    ///
+    /// `feed_with` hands the chunk handler a parser that is already mid
+    /// transition. `dispatch_escape_follower` flushes the pass-through bytes
+    /// and *then* sets `mode` and opens the control string, while the pending
+    /// chunks are drained afterwards. So the handler runs with `mode` already
+    /// `Apc`, and kettle-core's handler re-enters `feed_with` on the same
+    /// `Extractor` to replay a deferred frame. The inner call sees the open
+    /// string, cancels it, and returns with `mode == Pass`, so the outer loop
+    /// resumes in the wrong mode and paints the rest of the second frame onto
+    /// the grid as text.
+    ///
+    /// The existing tests here all end their buffer at the ESU or feed it
+    /// separately, so the flush happens with `mode == Pass` and never enters
+    /// the window.
+    #[test]
+    fn a_second_synchronized_frame_in_one_read_is_not_painted_onto_the_grid() {
+        let mut harness = SyncGraphicsHarness::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x1b[?2026h");
+        bytes.extend_from_slice(&kitty_image(1, 1, 1, 1));
+        bytes.extend_from_slice(b"\x1b[?2026l");
+        bytes.extend_from_slice(&kitty_image(2, 1, 1, 1));
+        harness.feed(&bytes);
+
+        let term = harness.term.lock().unwrap();
+        let text = crate::term::screen_text_of(&term, 0).text;
+        drop(term);
+        let placed = harness.images.lock().unwrap().len();
+
+        // Assert on the whole grid, not on a substring. The payload wraps at
+        // the harness's 8 columns, so `AQIDBA==` never appears contiguously and
+        // a `contains` check passes while the screen is full of it.
+        assert_eq!(
+            text.trim(),
+            "",
+            "graphics command text was painted onto the grid: {text:?}"
+        );
+        assert_eq!(placed, 2, "the second frame was dropped instead of placed");
+    }
+
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
