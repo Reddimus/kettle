@@ -6803,8 +6803,15 @@ mod tests {
         let _ = fs::set_permissions(&prefix, fs::Permissions::from_mode(0o700));
 
         match outcome {
-            Ok(None) => {}
-            Ok(Some(_)) => panic!("a 0500 directory should not have yielded a lock"),
+            // Not Busy: nobody else holds it. This user cannot make it at all,
+            // which is a different answer and the one Windows has to act on.
+            Ok(StartupRecovery::Unavailable) => {}
+            Ok(StartupRecovery::Busy) => {
+                panic!("nothing else holds this lock; the refusal was a permission failure")
+            }
+            Ok(StartupRecovery::Held(_)) => {
+                panic!("a 0500 directory should not have yielded a lock")
+            }
             Err(error) => panic!("startup must not fail on an unwritable prefix: {error}"),
         }
     }
