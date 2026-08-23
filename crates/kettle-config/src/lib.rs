@@ -6,10 +6,12 @@
 //! Two things are worth knowing first, because neither is visible from inside
 //! a single module.
 //!
-//! `theme_filter` is private and shared with `build.rs` through `include!`.
+//! `theme_filter` is private, and `build.rs` pulls in the same
+//! `src/theme_filter.rs` through `include!` rather than keeping its own copy.
 //! The build script bakes the theme set in at compile time, so it and this
-//! crate have to agree on what counts as a theme file under `assets/themes/`.
-//! Change the filter in one place and the other silently stops matching.
+//! crate have to agree on what counts as a theme file under `assets/themes/`,
+//! and sharing one file is what makes that agreement structural instead of a
+//! convention someone has to remember.
 //!
 //! [`fuzzy`] has no dependencies and two callers that look unrelated: the
 //! command palette (Ctrl+Shift+K) and the SSH launcher (Ctrl+Shift+S). A
