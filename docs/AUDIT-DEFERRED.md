@@ -48,6 +48,20 @@ tracked here so they are not lost.
   scrollable vertical list reusing the context-menu panel machinery (also makes
   room for per-row keybind hints).
 
+## Found by the 3.2.0 appearance gate
+
+- **Light themes draw the macOS window title through the traffic lights**
+  ([#251](https://github.com/Reddimus/kettle/issues/251)). The title lands at the
+  far left of the titlebar, over the red and yellow buttons, with its leading
+  characters clipped outside the window. `Alabaster`, `3024 Day` and `Adwaita`
+  reproduce it; `TokyoNight` does not. Not a regression — the shipped 3.1.1
+  bundle does the same — and not a stale frame, since it survives a full-screen
+  re-layout. `apply_macos_window_chrome` only sets
+  `with_titlebar_transparent(false)`, so the placement comes out of the
+  `NSWindow.appearance` switch that `with_theme` performs rather than out of any
+  drawing this repo does, which is why it is filed rather than patched.
+  [`APPEARANCE-GATE.md`](APPEARANCE-GATE.md) has the pixel evidence.
+
 ## Terminal / protocol
 
 - **Kitty graphics acknowledgement/query response path.** Immediate
@@ -263,6 +277,45 @@ overlapped write discards its transferred-byte count on cancellation
 uninstall with no documented recovery (`install-unix.py:700`).
 
 ## Testing coverage
+
+- **Ubuntu ARM: the suite runs, a live window does not, 2026-08-22.**
+
+  The test suite passes in the `Ubuntu 26.04` guest: 769 tests across
+  `kettle-core`, `kettle-vt`, `kettle-update` and `kettle-config`, zero
+  failures, including the Linux-gated startup-lock test and a direct
+  reproduction of the one-column crash on aarch64.
+
+  Getting there needed two things that are worth writing down, because both
+  wasted a pass. `prlctl exec` runs as root while the guest's `/` is owned by
+  uid 1000, so `kettle-state`'s trusted-directory check refuses every
+  private-file creation and ~36 tests fail on
+  `private path crosses an untrusted directory edge`. That refusal is correct.
+  Run the suite as the user who owns `/` instead. Their toolchain is the second
+  problem: the only complete one lives under root's home, which on this VM *is*
+  `/`, so it is not executable by that user. Widen exactly the two toolchain
+  directories, `chmod -R a+rX /.cargo /.rustup`, and nothing else. Root's home
+  being `/` is precisely why the paths have to be named: the same command
+  without operands, or aimed at `/`, would make the whole filesystem
+  world-readable.
+
+  A live window is still not covered. The guest's `/tmp` is a 7.6 GB tmpfs,
+  which is where the build has to go because `/` has 1.4 GB free, and the
+  target directory fills it before the final link. rustc dies with exit 101 and
+  no OOM in `dmesg`, because it is disk rather than memory. Building to the
+  shared folder instead works but is slow enough that it was not worth another
+  pass for this change.
+
+  So GPU and window behaviour on Linux ARM went unverified this cycle. CI builds
+  and tests Linux x86_64 on every pull request and runs an aarch64 early-warning
+  job, so everything except live presentation is covered elsewhere.
+
+  Worth flagging for whoever picks this up: `docs/INSTALL.md:15-17` and
+  `docs/TESTING.md:180-182` both describe this guest as supplying live-UI and
+  Wayland evidence. Neither is wrong about what it can do. It could not do it
+  today, and the reason is disk rather than anything about the guest. Freeing
+  space in `/tmp`, or linking the binary elsewhere, should restore it. Those
+  documents are left alone because a full tmpfs is a passing condition, not a
+  change in what the VM is for.
 
 - **Two macOS update cleanup windows are mitigated, not eliminated,
   2026-08-22.** `Staging::discard` and the sweep both delete by pathname,
