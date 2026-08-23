@@ -30,8 +30,10 @@ screen capture rather than from source.
 | Alpha on, blur off | AppKit drew its standard titlebar backdrop. No clear desktop strip. |
 | Opaque surface, blur on | No titlebar-only material seam. |
 | `background-opacity = 1.0`, `window-blur = false` | Theme reached both rounded top corners, no mismatched strip. |
-| Light and dark themes | The NSWindow background followed the palette in both directions. |
+| Live light/dark switch | `ToggleLightDark` on a `light-theme`/`dark-theme` pair took the titlebar from `(29,29,29)` to `(255,255,255)` and back. This is the runtime `set_theme` path, not just the creation-time hint. |
 | Dock icons, running and pinned | Same system mask, inset face parallel with clear rim space, `>_` centered and legible. The running build and the installed bundle agree. |
+| Finder icon | Matches the Dock rendering. |
+| Both 256 px appearances | `Assets.car` draws a blue rim over a dark face; the `AppIcon.icns` deployment-target fallback inverts them. Both keep the system mask, a parallel inset face, clear rim space, and a centered legible mark. |
 
 ### Failed
 
@@ -43,9 +45,9 @@ characters clipped outside the window. Reproduced on `Alabaster`, `3024 Day` and
 not a regression, and it survives a full-screen re-layout, so it is not a stale
 frame.
 
-Released anyway: it is cosmetic, it is not new, and 3.2.0 carries a crash fix, an
-installer downgrade fix and a session data-loss fix that are worth more than
-holding for it.
+Releasing with it: it is cosmetic, it is not new, and 3.2.0 carries a crash fix,
+an installer downgrade fix and a session data-loss fix worth more than holding
+for it.
 
 ### Not run
 
@@ -60,3 +62,7 @@ returns *live*, without a relaunch.
 pointer control was blocked for the same reason. The 256 px asset the magnified
 Dock draws was checked directly and the mark is centered and legible at that
 size.
+
+**The app switcher.** Cmd-Tab has to be held for its window to stay up, which is
+foreground keyboard input. The icon it shows comes from the same bundle
+resources as the Dock and Finder renderings above, both of which agree.
