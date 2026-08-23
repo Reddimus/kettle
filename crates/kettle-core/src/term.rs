@@ -13,7 +13,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::{
-    Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection,
+    Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection, MIN_COLUMNS,
 };
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, Handler, NamedColor, Processor, SYNC_MARKER_CAPACITY,
@@ -1460,9 +1460,24 @@ pub enum WorkingDirectoryPolicy {
 }
 
 impl PtyGeometry {
+    /// Build a geometry, clamped to what the terminal engine can actually
+    /// represent.
+    ///
+    /// Columns clamp to [`MIN_COLUMNS`], not to 1. The engine declares that
+    /// minimum and then never enforces it, and a one-column grid is not merely
+    /// cramped: writing any double-width character to it indexes past the end
+    /// of the row and panics on the PTY reader thread. The release profile sets
+    /// `panic = "abort"`, so that takes down every pane in every window, and a
+    /// CJK filename in `ls` output is enough to trigger it.
+    ///
+    /// One column was reachable two ways. `kettle exec --cols 1` accepted it
+    /// directly, and a split narrow enough to leave a single cell after padding
+    /// asked for it from the GUI. Every construction path goes through here,
+    /// including the `(1, 1, 1, 1)` fallbacks used when a geometry cannot be
+    /// resolved, so this is the one place the invariant has to hold.
     pub fn new(columns: usize, rows: usize, pixel_width: u16, pixel_height: u16) -> Self {
         Self {
-            columns: columns.max(1),
+            columns: columns.max(MIN_COLUMNS),
             rows: rows.max(1),
             pixel_width: pixel_width.max(1),
             pixel_height: pixel_height.max(1),
@@ -11307,6 +11322,32 @@ mod conformance {
             proxy,
         );
         (term, Processor::new(), rx)
+    }
+
+    /// A one-column grid used to abort the whole process on any wide
+    /// character, and one was reachable from `kettle exec --cols 1`, from a
+    /// narrow enough split, and from the `(1, 1, 1, 1)` geometry fallbacks.
+    ///
+    /// The engine declares `MIN_COLUMNS = 2` and then never enforces it. On a
+    /// single-cell row the line-wrap path writes a leading spacer at column 0,
+    /// wraps, writes the wide char at column 0 of the next row, and then indexes
+    /// column 1 for the trailing spacer. `Row`'s `Index` is unchecked, so that
+    /// panics on the PTY reader thread, and `panic = "abort"` in the release
+    /// profile turns one bad cell into a dead application. A CJK filename in
+    /// `ls` output was enough.
+    #[test]
+    fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
+        let geometry = PtyGeometry::new(1, 1, 1, 1);
+        assert_eq!(
+            geometry.columns, MIN_COLUMNS,
+            "one column is not representable; the clamp has to raise it"
+        );
+
+        // Drive the real thing: before the clamp this panicked here.
+        let (mut term, mut processor) = harness(geometry.columns, geometry.rows);
+        feed(&mut term, &mut processor, "\u{754c}".as_bytes());
+        feed(&mut term, &mut processor, "\u{1f680}".as_bytes());
+        feed(&mut term, &mut processor, "e\u{301}".as_bytes());
     }
 
     fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
