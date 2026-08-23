@@ -22,6 +22,8 @@ pub struct GraphicsLimits {
     pub animation_frames: usize,
     pub animation_bytes: usize,
     pub placements: usize,
+    /// Sixel columns one image may paint, across every band and colour pass.
+    pub sixel_column_writes: usize,
 }
 
 impl Default for GraphicsLimits {
@@ -38,6 +40,9 @@ impl Default for GraphicsLimits {
             animation_frames: 128,
             animation_bytes: 128 * MIB,
             placements: 256,
+            // A full 8192x8192 canvas is 11.2M columns, so this allows about
+            // six passes over a maximum-size image. See `sixel::decode`.
+            sixel_column_writes: 64 * 1024 * 1024,
         }
     }
 }
@@ -56,6 +61,7 @@ impl GraphicsLimits {
             || self.animation_frames == 0
             || self.animation_bytes == 0
             || self.placements == 0
+            || self.sixel_column_writes == 0
         {
             return Err("graphics limits must be non-zero");
         }
@@ -313,6 +319,7 @@ mod tests {
             animation_frames: 2,
             animation_bytes: 16,
             placements: 2,
+            sixel_column_writes: 4,
         }
     }
 

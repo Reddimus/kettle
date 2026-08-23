@@ -670,6 +670,66 @@ mod tests {
         (bytes, encoded, key.verifying_key().to_bytes())
     }
 
+    /// Every shipped target resolves its own asset out of the four-entry
+    /// manifest, and no other.
+    ///
+    /// 3.2.0 added `universal-apple-darwin` to a feed that had carried three
+    /// entries since the updater shipped. Deployed clients pick their asset by
+    /// exact target match and ignore the rest, so the addition reaches nobody
+    /// else — but "ignores the rest" was an argument about a `find` call rather
+    /// than something anyone had run. `deny_unknown_fields` does not cover it
+    /// either: it governs object keys, not array length.
+    #[test]
+    fn a_fourth_target_leaves_the_other_three_alone() {
+        let released = [
+            ("x86_64-pc-windows-msvc", "kettle-windows-x86_64.zip"),
+            ("x86_64-unknown-linux-gnu", "kettle-linux-x86_64.tar.gz"),
+            ("aarch64-unknown-linux-gnu", "kettle-linux-aarch64.tar.gz"),
+            ("universal-apple-darwin", "kettle-macos-universal.zip"),
+        ];
+        let manifest = Manifest {
+            schema: 1,
+            product: "kettle".into(),
+            channel: "stable".into(),
+            version: "99.0.0".into(),
+            tag: "v99.0.0".into(),
+            published_at: "2026-07-11T00:00:00Z".into(),
+            assets: released
+                .iter()
+                .enumerate()
+                .map(|(i, (target, name))| ManifestAsset {
+                    target: (*target).into(),
+                    name: (*name).into(),
+                    size: 4 + i as u64,
+                    sha256: "a".repeat(64),
+                })
+                .collect(),
+        };
+
+        // Round-trip through the wire format the clients actually read, so
+        // `deny_unknown_fields` sees the four-entry array too.
+        let decoded: Manifest =
+            serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(decoded, manifest);
+
+        for (target, name) in released {
+            let asset = decoded
+                .assets
+                .iter()
+                .find(|asset| asset.target == target)
+                .unwrap_or_else(|| panic!("{target} must resolve its own asset"));
+            assert_eq!(asset.name, name, "{target} resolved the wrong archive");
+        }
+
+        assert!(
+            decoded
+                .assets
+                .iter()
+                .all(|asset| asset.target != "aarch64-apple-darwin"),
+            "the universal archive is one manifest entry, not a per-arch pair"
+        );
+    }
+
     #[test]
     fn authentic_manifest_verifies_before_parsing() {
         let (bytes, signature, public) = signed_manifest();

@@ -9749,6 +9749,15 @@ enum StripState {
     String,
 }
 
+/// Longest unterminated control sequence the log stripper drops before it
+/// resynchronizes to plain text.
+///
+/// Every terminator the state machine honors is one the writer chooses to
+/// send. A child that simply never sends one would otherwise suppress the
+/// whole remaining log. `kettle exec`'s stripper draws the same line at the
+/// same place.
+const MAX_LOGGED_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
+
 /// Terminator parity (`plugins/logger.py` extension): a persistent-state
 /// stripper for ANSI/OSC escape sequences, used by the per-pane session-log
 /// path (`log_strip_ansi`). Recognizes:
@@ -9777,6 +9786,11 @@ pub struct AnsiStripper {
     /// Whether the lead byte of the current UTF-8 scalar reached the log.
     /// Continuations follow their lead across parser-state transitions.
     utf8_emitted: bool,
+    /// Bytes consumed since the `ESC` that opened the current sequence.
+    ///
+    /// Counted in every non-plain state, reset when a fresh `ESC` arrives, and
+    /// compared against [`MAX_LOGGED_CONTROL_SEQUENCE_BYTES`].
+    control_bytes: usize,
 }
 
 impl AnsiStripper {
@@ -9815,10 +9829,23 @@ impl AnsiStripper {
                 _ => 0,
             };
             self.utf8_emitted = matches!(self.state, StripState::Plain);
+            if !matches!(self.state, StripState::Plain) {
+                self.control_bytes += 1;
+                if self.control_bytes > MAX_LOGGED_CONTROL_SEQUENCE_BYTES {
+                    // Give up on the terminator and resume logging. The byte
+                    // that tripped the bound is dropped with the sequence it
+                    // belongs to; `utf8_emitted` is already false, so if it was
+                    // a UTF-8 lead its continuations go with it rather than
+                    // reaching the log alone.
+                    self.state = StripState::Plain;
+                    continue;
+                }
+            }
             match self.state {
                 StripState::Plain => {
                     if b == 0x1b {
                         self.state = StripState::EscSeen;
+                        self.control_bytes = 0;
                     } else {
                         out.push(b);
                     }
@@ -11253,6 +11280,65 @@ mod home_dir_tests {
                 );
             }
         }
+    }
+
+    /// A control string that never terminates must not silence the log.
+    ///
+    /// CAN, SUB and ST all end a sequence, and all three are the writer's
+    /// choice to send. A child that sends none of them held the stripper
+    /// mid-sequence forever, so every later line was dropped and the session
+    /// log ended without saying why.
+    #[test]
+    fn an_unterminated_control_string_stops_swallowing_the_log() {
+        for intro in [&b"\x1b]0;"[..], &b"\x1bP"[..], &b"\x1b_"[..], &b"\x1b["[..]] {
+            let mut input = intro.to_vec();
+            // `1` is a CSI parameter byte and ordinary payload everywhere
+            // else, so no introducer sees it as its terminator.
+            input.extend(std::iter::repeat_n(
+                b'1',
+                super::MAX_LOGGED_CONTROL_SEQUENCE_BYTES,
+            ));
+            input.extend_from_slice(b"after");
+
+            let mut stripper = super::AnsiStripper::new();
+            let out = stripper.strip(&input);
+            let text = String::from_utf8_lossy(&out);
+            assert!(
+                text.ends_with("after"),
+                "{intro:?}: the log must resume once the sequence outgrows its bound, got {text:?}"
+            );
+            // The introducer bytes are counted too, so the last few payload
+            // bytes land in the log once the bound trips. What matters is that
+            // the tail is a handful of bytes rather than the whole payload.
+            assert!(
+                out.len() < 16,
+                "{intro:?}: {} bytes of the payload reached the log",
+                out.len() - "after".len()
+            );
+        }
+    }
+
+    /// The bound is per sequence, not per stream.
+    ///
+    /// Two long-but-well-formed sequences must both be stripped whole. If the
+    /// counter carried over from the first, the second would trip the bound
+    /// part-way through and spill the rest of its payload into the log.
+    #[test]
+    fn each_control_sequence_gets_the_whole_bound() {
+        let payload = "t".repeat(super::MAX_LOGGED_CONTROL_SEQUENCE_BYTES - 100);
+        let one = format!("\x1b]0;{payload}\x07");
+
+        let mut stripper = super::AnsiStripper::new();
+        let mut out = stripper.strip(one.as_bytes());
+        out.extend(stripper.strip(b"between"));
+        out.extend(stripper.strip(one.as_bytes()));
+        out.extend(stripper.strip(b"end"));
+
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "betweenend",
+            "the second sequence must get its own budget"
+        );
     }
 
     /// sequence at a different, deliberately awkward byte boundary; with the

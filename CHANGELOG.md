@@ -100,6 +100,57 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **A session that failed to restore is no longer overwritten seconds later.**
+  Nothing on the save side enforced the limits the load side checks, so Kettle
+  wrote session files it would later refuse: seventeen open windows, more than
+  256 panes, or too much aggregate surface area. The next launch rejected the
+  whole file, opened one default tab, and the first save rewrote it from that
+  single tab — every window, split ratio, and working directory gone. A tab
+  that merely failed to rebuild, from a saved command not yet on `PATH` or a
+  fork refused under a process limit, was erased the same way despite the cause
+  being transient. Both now move the file aside, the way a parse error and an
+  oversize file already did.
+
+  Focus also landed on the wrong tab: `active` indexes the saved list while the
+  live one has holes in it, so saved `[A,B,C,D]` with `C` active and `B`
+  unbuildable restored `[A,C,D]` focused on `D`.
+
+- **`kettle_run` says why a command never started.** It answered every startup
+  failure with `exit code: 125` and nothing else. A command that cannot be
+  spawned returns before the output sink exists, so the reply was built from an
+  empty capture while the real diagnostic went to the MCP server's own stderr,
+  where the caller could not see it.
+
+- **One Sixel image can no longer freeze a pane for minutes.** A `!` repeat run
+  stops at the maximum canvas width and `$` returns to column zero without
+  growing the canvas, but nothing bounded the two together, so a payload could
+  repaint the same band until its bytes ran out. Measured, a 2 MiB body took
+  13.3 seconds, which scales to roughly 107 seconds at the sequence limit — one
+  `cat` of a hostile file. A total column-write cap brings the same payload to
+  387 milliseconds and a refusal, with room for six passes over a
+  maximum-size image.
+
+- **A session log no longer stops without saying why.** The log's escape-
+  sequence stripper ended a sequence on `CAN`, `SUB` or `ST`, all of which the
+  program being logged chooses to send. One that sent none of them held the
+  stripper mid-sequence forever and every later line was dropped. It now gives
+  up after 64 KiB and resumes, the same bound `kettle exec` uses.
+
+- **A window short of file descriptors no longer releases every other
+  window's colour.** Kettle picks a distinct accent per window by reading the
+  claims other windows leave in a private directory, and the sweep deleted any
+  file it could not turn into a claim — including one it never managed to open.
+  One process hitting its descriptor limit therefore erased live windows'
+  claims, and their colours went back into the pool for the next window to
+  take. Files that read through and are not claims are still pruned.
+
+- **Two shell cwd reports allocated before checking whether they could be
+  accepted.** OSC 7 and OSC 9;9 bodies were converted to text and then rejected
+  for being over the 8 KiB path limit, and the conversion emits three bytes for
+  every byte that is not valid UTF-8. Both now check the raw length first. OSC
+  133 D reads its exit code out of the bytes instead of converting the body to
+  find one integer.
+
 - **`docs/CONFIG.md` gave the wrong default for `inactive-color-offset`.** It
   said `0.8`; the code has always used `1.0`, so anyone reasoning about
   unfocused-pane dimming from the table was working from the wrong number.
