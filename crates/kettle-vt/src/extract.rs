@@ -863,7 +863,7 @@ impl Extractor {
                         let b = input[i];
                         i += 1;
                         self.esc_pending = false;
-                        self.dispatch_escape_follower(b, &mut out);
+                        self.dispatch_escape_follower(b, &mut out, &mut handle);
                     } else {
                         // Bulk path: everything up to the next ESC is plain.
                         match memchr::memchr(0x1b, &input[i..]) {
@@ -912,7 +912,7 @@ impl Extractor {
                             let pair = [0x1b, b];
                             let consumed = self.consume_seq_bytes(&pair);
                             match consumed {
-                                0 => self.dispatch_escape_follower(b, &mut out),
+                                0 => self.dispatch_escape_follower(b, &mut out, &mut handle),
                                 1 if self.mode == Mode::Pass
                                     && self.recovery_private_prefix > 0 =>
                                 {
@@ -932,7 +932,7 @@ impl Extractor {
                         // immediate while over-limit discard is active too.
                         i += 1;
                         self.cancel_seq();
-                        self.dispatch_escape_follower(b, &mut out);
+                        self.dispatch_escape_follower(b, &mut out, &mut handle);
                         self.handle_pending_chunks(&mut out, &mut handle);
                         continue;
                     } else {
@@ -1030,28 +1030,41 @@ impl Extractor {
         }
     }
 
-    fn dispatch_escape_follower(&mut self, b: u8, out: &mut Vec<Chunk>) {
-        match b {
-            b'P' => {
-                self.flush_pass(out);
-                self.mode = Mode::Dcs;
-                self.begin_seq();
-            }
-            b'_' => {
-                self.flush_pass(out);
-                self.mode = Mode::Apc;
-                self.begin_seq();
-            }
-            b']' => {
-                self.flush_pass(out);
-                self.mode = Mode::Osc;
-                self.begin_seq();
-            }
+    /// Open a control string, having flushed and *delivered* everything that
+    /// came before it.
+    ///
+    /// The delivery has to happen before the mode changes. `handle` can re-enter
+    /// `feed_with` on this same extractor: kettle-core's pass-through handler
+    /// runs the VT engine, which fires a DEC 2026 synchronized-update marker,
+    /// which replays deferred graphics through `feed_with` again. If the mode
+    /// has already moved to `Osc`/`Dcs`/`Apc` by then, that inner call sees a
+    /// control string it did not open, treats the replayed bytes' leading ESC as
+    /// an in-string escape, cancels the outer string, and returns leaving the
+    /// mode at `Pass`. The outer loop then carries on in the wrong mode and
+    /// paints the rest of the sequence onto the grid as text.
+    ///
+    /// Two synchronized graphics frames in one PTY read was enough, which is the
+    /// ordinary case for an animation.
+    fn dispatch_escape_follower<F>(&mut self, b: u8, out: &mut Vec<Chunk>, handle: &mut F)
+    where
+        F: FnMut(&mut Self, Chunk),
+    {
+        let mode = match b {
+            b'P' => Mode::Dcs,
+            b'_' => Mode::Apc,
+            b']' => Mode::Osc,
             _ => {
                 self.pass.push(0x1b);
                 self.pass.push(b);
+                return;
             }
-        }
+        };
+        self.flush_pass(out);
+        // Drain here, not at the bottom of the loop: `handle` must see a parser
+        // that is between sequences, not one part-way into opening this string.
+        self.handle_pending_chunks(out, handle);
+        self.mode = mode;
+        self.begin_seq();
     }
 
     fn begin_seq(&mut self) {

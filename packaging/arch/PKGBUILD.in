@@ -66,7 +66,12 @@ package() {
     # The release tarball ships per-size PNGs under `kettle-NNN.png`
     # — re-locate them to the hicolor `<size>x<size>/apps/kettle.png`
     # paths the freedesktop spec expects.
-    for png in packaging/linux/kettle-*.png; do
+    #
+    # `kettle-[0-9]*` and not `kettle-*`: the tarball also carries
+    # `kettle-light-256.png`, whose name yields a size of `light-256` and
+    # installs into `hicolor/light-256xlight-256/apps/`, a directory no icon
+    # theme reads.
+    for png in packaging/linux/kettle-[0-9]*.png; do
         # Extract NNN from `kettle-256.png`.
         size=$(basename "${png}" .png | sed 's/^kettle-//')
         install -Dm644 "${png}" \

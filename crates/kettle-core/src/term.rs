@@ -13,7 +13,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Cell;
 use alacritty_terminal::term::{
-    Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection,
+    Config as TermConfig, GraphicsEvent, GraphicsEventBatch, GraphicsScrollDirection, MIN_COLUMNS,
 };
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape, Handler, NamedColor, Processor, SYNC_MARKER_CAPACITY,
@@ -1460,9 +1460,24 @@ pub enum WorkingDirectoryPolicy {
 }
 
 impl PtyGeometry {
+    /// Build a geometry, clamped to what the terminal engine can actually
+    /// represent.
+    ///
+    /// Columns clamp to [`MIN_COLUMNS`], not to 1. The engine declares that
+    /// minimum and then never enforces it, and a one-column grid is not merely
+    /// cramped: writing any double-width character to it indexes past the end
+    /// of the row and panics on the PTY reader thread. The release profile sets
+    /// `panic = "abort"`, so that takes down every pane in every window, and a
+    /// CJK filename in `ls` output is enough to trigger it.
+    ///
+    /// One column was reachable two ways. `kettle exec --cols 1` accepted it
+    /// directly, and a split narrow enough to leave a single cell after padding
+    /// asked for it from the GUI. Every construction path goes through here,
+    /// including the `(1, 1, 1, 1)` fallbacks used when a geometry cannot be
+    /// resolved, so this is the one place the invariant has to hold.
     pub fn new(columns: usize, rows: usize, pixel_width: u16, pixel_height: u16) -> Self {
         Self {
-            columns: columns.max(1),
+            columns: columns.max(MIN_COLUMNS),
             rows: rows.max(1),
             pixel_width: pixel_width.max(1),
             pixel_height: pixel_height.max(1),
@@ -3989,6 +4004,22 @@ pub struct TermSize {
     pub screen_lines: usize,
 }
 
+impl TermSize {
+    /// Build a size the engine can actually represent.
+    ///
+    /// The second guard on the one-column crash. [`PtyGeometry::new`] clamps
+    /// too, but its fields are public and the type is re-exported, so a caller
+    /// can build `PtyGeometry { columns: 1, .. }` and never pass through it.
+    /// This is the boundary the engine is on the other side of, so enforcing it
+    /// here does not depend on how the geometry was made.
+    pub fn new(columns: usize, screen_lines: usize) -> Self {
+        Self {
+            columns: columns.max(MIN_COLUMNS),
+            screen_lines: screen_lines.max(1),
+        }
+    }
+}
+
 impl Dimensions for TermSize {
     fn total_lines(&self) -> usize {
         self.screen_lines
@@ -4032,10 +4063,7 @@ fn commit_local_geometry_inner(
     };
     let grid_resized = grid_options.is_some();
     if let Some(options) = grid_options {
-        term.resize(TermSize {
-            columns: desired.columns,
-            screen_lines: desired.rows,
-        });
+        term.resize(TermSize::new(desired.columns, desired.rows));
         term.set_options(options);
     }
     {
@@ -6424,14 +6452,7 @@ impl Terminal {
         {
             tconf.semantic_escape_chars = wd.to_string();
         }
-        let term = Term::new(
-            tconf.clone(),
-            &TermSize {
-                columns: cols,
-                screen_lines: rows,
-            },
-            proxy.clone(),
-        );
+        let term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
@@ -11309,6 +11330,46 @@ mod conformance {
         (term, Processor::new(), rx)
     }
 
+    /// A one-column grid used to abort the whole process on any wide
+    /// character, and one was reachable from `kettle exec --cols 1`, from a
+    /// narrow enough split, and from the `(1, 1, 1, 1)` geometry fallbacks.
+    ///
+    /// The engine declares `MIN_COLUMNS = 2` and then never enforces it. On a
+    /// single-cell row the line-wrap path writes a leading spacer at column 0,
+    /// wraps, writes the wide char at column 0 of the next row, and then indexes
+    /// column 1 for the trailing spacer. `Row`'s `Index` is unchecked, so that
+    /// panics on the PTY reader thread, and `panic = "abort"` in the release
+    /// profile turns one bad cell into a dead application. A CJK filename in
+    /// `ls` output was enough.
+    #[test]
+    fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
+        let geometry = PtyGeometry::new(1, 1, 1, 1);
+        assert_eq!(
+            geometry.columns, MIN_COLUMNS,
+            "one column is not representable; the clamp has to raise it"
+        );
+
+        // PtyGeometry's fields are public and the type is re-exported, so a
+        // caller can sidestep the constructor entirely. TermSize::new is the
+        // guard that does not depend on how the geometry was built.
+        let bypassed = PtyGeometry {
+            columns: 1,
+            rows: 1,
+            pixel_width: 1,
+            pixel_height: 1,
+        };
+        assert_eq!(
+            TermSize::new(bypassed.columns, bypassed.rows).columns,
+            MIN_COLUMNS
+        );
+
+        // Drive the real thing: before the clamp this panicked here.
+        let (mut term, mut processor) = harness(geometry.columns, geometry.rows);
+        feed(&mut term, &mut processor, "\u{754c}".as_bytes());
+        feed(&mut term, &mut processor, "\u{1f680}".as_bytes());
+        feed(&mut term, &mut processor, "e\u{301}".as_bytes());
+    }
+
     fn harness(cols: usize, rows: usize) -> (Term<EventProxy>, Processor) {
         let (t, p, _rx) = harness_rx(cols, rows);
         (t, p)
@@ -15692,6 +15753,47 @@ mod image_lifecycle_tests {
                 .filter_map(|placement| placement.id)
                 .collect()
         }
+    }
+
+    /// Two synchronized graphics frames arriving in one PTY read.
+    ///
+    /// `feed_with` hands the chunk handler a parser that is already mid
+    /// transition. `dispatch_escape_follower` flushes the pass-through bytes
+    /// and *then* sets `mode` and opens the control string, while the pending
+    /// chunks are drained afterwards. So the handler runs with `mode` already
+    /// `Apc`, and kettle-core's handler re-enters `feed_with` on the same
+    /// `Extractor` to replay a deferred frame. The inner call sees the open
+    /// string, cancels it, and returns with `mode == Pass`, so the outer loop
+    /// resumes in the wrong mode and paints the rest of the second frame onto
+    /// the grid as text.
+    ///
+    /// The existing tests here all end their buffer at the ESU or feed it
+    /// separately, so the flush happens with `mode == Pass` and never enters
+    /// the window.
+    #[test]
+    fn a_second_synchronized_frame_in_one_read_is_not_painted_onto_the_grid() {
+        let mut harness = SyncGraphicsHarness::new();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"\x1b[?2026h");
+        bytes.extend_from_slice(&kitty_image(1, 1, 1, 1));
+        bytes.extend_from_slice(b"\x1b[?2026l");
+        bytes.extend_from_slice(&kitty_image(2, 1, 1, 1));
+        harness.feed(&bytes);
+
+        let term = harness.term.lock().unwrap();
+        let text = crate::term::screen_text_of(&term, 0).text;
+        drop(term);
+        let placed = harness.images.lock().unwrap().len();
+
+        // Assert on the whole grid, not on a substring. The payload wraps at
+        // the harness's 8 columns, so `AQIDBA==` never appears contiguously and
+        // a `contains` check passes while the screen is full of it.
+        assert_eq!(
+            text.trim(),
+            "",
+            "graphics command text was painted onto the grid: {text:?}"
+        );
+        assert_eq!(placed, 2, "the second frame was dropped instead of placed");
     }
 
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
