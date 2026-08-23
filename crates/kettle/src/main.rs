@@ -1401,17 +1401,39 @@ fn main() -> anyhow::Result<()> {
         // `read_to_string`: the resolved default path has not gone through the
         // explicit `--config` regular-file precheck, and configs may be UTF-16.
         let mut read_error: Option<String> = None;
-        let (cfg, unknown, malformed) = match &path {
+        let (cfg, unknown, malformed, ignored) = match &path {
             Some(p) if p.exists() => match prepare_resolved_config(&cli, p).and_then(|()| {
                 kettle_config::Config::read_from_with_trust(p, resolved_config_trust(&cli))
             }) {
-                Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
+                Ok(loaded) => {
+                    // Sections kettle walked past. Every key inside one can be
+                    // spelled correctly and still do nothing, so this is a
+                    // separate category from an unknown key: the keys are fine,
+                    // the section is not read.
+                    let ignored = kettle_config::parse::ignored_sections(&loaded.text);
+                    (
+                        loaded.config,
+                        loaded.unknown_keys,
+                        loaded.malformed_values,
+                        ignored,
+                    )
+                }
                 Err(e) => {
                     read_error = Some(format!("could not read {}: {e}", p.display()));
-                    (kettle_config::Config::default(), Vec::new(), Vec::new())
+                    (
+                        kettle_config::Config::default(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
                 }
             },
-            _ => (kettle_config::Config::default(), Vec::new(), Vec::new()),
+            _ => (
+                kettle_config::Config::default(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
         };
         // Lead with the kettle build version + git SHA, so a
         // user pasting `--check-config` output into a bug report doesn't
@@ -1548,7 +1570,7 @@ fn main() -> anyhow::Result<()> {
         // confusing the diagnostic. Read errors get an `i/o error:`
         // line instead.
         let io_count = if read_error.is_some() { 1 } else { 0 };
-        let issues = unknown.len() + malformed.len() + io_count;
+        let issues = unknown.len() + malformed.len() + ignored.len() + io_count;
         if issues == 0 {
             println!("status:  OK — no issues");
             return Ok(());
@@ -1562,6 +1584,14 @@ fn main() -> anyhow::Result<()> {
         }
         for k in &malformed {
             println!("  - malformed value: {k}");
+        }
+        for section in &ignored {
+            let settings = section.settings;
+            let plural = if settings == 1 { "setting" } else { "settings" };
+            println!(
+                "  - ignored section: {} ({settings} {plural} not applied)",
+                section.header
+            );
         }
         std::process::exit(1);
     }

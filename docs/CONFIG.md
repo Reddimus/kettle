@@ -446,7 +446,10 @@ snapshot.
 `trigger` = `+`-joined modifiers and one key. Recognized modifier names:
 
 - `shift`
-- `ctrl` / `control`
+- `ctrl` / `control` / `ctl` / `primary` — `primary` is GTK's portable
+  spelling and appears in Terminator configs. It means Control on the desktops
+  Terminator runs on, so kettle reads it as Control everywhere rather than
+  moving the binding to a different key on one platform
 - `alt` / `opt` / `option`
 - `super` / `cmd` / `command` / `win` / `windows` / `meta` / `logo` —
   all aliases for the same Super-key bit, so a chord copied from a
@@ -458,6 +461,9 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 `up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
 `prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`, and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
+
+GTK's accelerator syntax works too, unchanged from a Terminator config:
+`<Primary><Shift>t` is the same binding as `ctrl+shift+t`.
 
 A typo'd modifier (`cttrl+t`, `supre+t`) is rejected outright and
 flagged by `kettle --check-config` — it doesn't silently degrade
