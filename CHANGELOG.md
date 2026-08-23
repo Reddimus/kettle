@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.2.0] — 2026-08-23
+
 ### Added
 
 - **`kettle update` works on macOS.** The updater covered Windows and Linux;
