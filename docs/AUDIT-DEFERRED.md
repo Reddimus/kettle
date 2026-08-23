@@ -189,6 +189,14 @@ is what was left, with the reason.
 Severities below are the refuter's, not the auditor's. Several were lowered on
 review, and two the auditor filed as security are robustness.
 
+Four items were fixed for 3.2.0 and no longer appear below: the Sixel
+total-work bound, the session-log stripper's resync bound, the OSC 7 / 9;9 /
+133 D conversions, and `presence::live_entries` deleting a claim it could not
+open. The Sixel cap was measured rather than guessed. A 2 MiB `!8191~$` body
+decoded in 13.3 s before the cap and 387 ms after, about 5.4 ns per column
+write, and the cap lives in `GraphicsLimits` beside the other graphics caps so
+tests can lower it.
+
 ### Needs an API change
 
 - **`hints::detect` takes a char index and calls it a column**
@@ -236,21 +244,6 @@ review, and two the auditor filed as security are robustness.
 
 ### Bounded, but not yet done
 
-- **Sixel repeat count has no total-work bound** (`kettle-vt/src/sixel.rs:276`,
-  medium). `$` resets the column without growing the canvas, so one DCS can
-  drive on the order of 2e10 inner iterations inside the existing per-axis and
-  byte caps. The fix is an aggregate operation counter; it is small, and it
-  wants a benchmark alongside it so the cap is chosen rather than guessed.
-
-- **OSC 7, OSC 9;9 and OSC 133 D convert untrusted payloads with unbudgeted,
-  infallible allocations of roughly ten times their length**
-  (`kettle-vt/src/extract.rs:1345`, low to medium). `clean_notify_field`
-  already length-checks before converting; these three do not.
-
-- **The session-log ANSI stripper has no resync bound**
-  (`kettle-core/src/term.rs:9844`, low). One unterminated OSC drops the rest of
-  the log. `exec.rs:329` already solves this and the fix is a direct port.
-
 - **`Terminal::drop` sends SIGHUP to a raw PID that `exit-action=hold` may
   already have reaped** (`kettle-core/src/term.rs:9027`, low to medium). The
   window is narrow and needs the PID to be recycled, but the fix is a `try_wait`
@@ -264,8 +257,7 @@ one long-argv descendant suppresses the process snapshot for every pane on Linux
 (`kettle-ctl/src/lib.rs:522`); `ssh -P tag` is neither reproduced nor marked
 unreproducible, so Reconnect can open a shell on a different host (`:1804`); the
 activation accept loop retries a failing `accept()` with no backoff
-(`kettle-ctl/src/activation.rs:469`); `presence::live_entries` deletes a live
-window's claim when the entry merely fails to open (`presence.rs:376`); an
+(`kettle-ctl/src/activation.rs:469`); an
 overlapped write discards its transferred-byte count on cancellation
 (`transport.rs:808`); an interrupted `install-unix.py` wedges both upgrade and
 uninstall with no documented recovery (`install-unix.py:700`).

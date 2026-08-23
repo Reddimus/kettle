@@ -358,9 +358,8 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let parsed = read_entry(&path);
-        match parsed {
-            Some(e)
+        match examine_entry(&path) {
+            EntryRead::Record(e)
                 if entry_path(dir, e.pid, e.win) == path
                     && e.is_valid()
                     && owner_alive(e.pid, e.start_token) =>
@@ -370,12 +369,16 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
             // Dead owner (including a pid now belonging to someone else) —
             // prune so the dir can't grow forever, but only while the file is
             // still the record we judged.
-            Some(stale) => prune_stale(&path, &stale),
-            // Garbage: nothing readable to preserve, and a claim this reader
-            // cannot parse can never take part in color selection.
-            None => {
+            EntryRead::Record(stale) => prune_stale(&path, &stale),
+            // Read through and not a record: nothing to preserve, and a claim
+            // this reader cannot parse can never take part in color selection.
+            EntryRead::Garbage => {
                 let _ = std::fs::remove_file(&path);
             }
+            // Never examined. Deleting on the strength of a failure to look
+            // took live windows' colors out of the pool whenever this process
+            // was short of descriptors.
+            EntryRead::Unexamined => {}
         }
     }
     out
@@ -440,7 +443,28 @@ fn private_dir_is_valid(dir: &Path) -> bool {
     }
 }
 
+/// What a presence file turned out to be.
+///
+/// The two failure arms are deliberately separate. `live_entries` deletes what
+/// it judges unusable, and running out of descriptors made every claim in the
+/// directory look unusable at once — including the live windows of other
+/// processes, whose colours then went back into the pool.
+enum EntryRead {
+    Record(PresenceEntry),
+    /// Read through and it is not a presence record. Nothing to preserve.
+    Garbage,
+    /// Could not be examined. It may be a perfectly good claim, so leave it.
+    Unexamined,
+}
+
 fn read_entry(path: &Path) -> Option<PresenceEntry> {
+    match examine_entry(path) {
+        EntryRead::Record(e) => Some(e),
+        _ => None,
+    }
+}
+
+fn examine_entry(path: &Path) -> EntryRead {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -448,36 +472,52 @@ fn read_entry(path: &Path) -> Option<PresenceEntry> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    #[cfg(windows)]
-    {
-        if std::fs::symlink_metadata(path)
-            .ok()
-            .is_none_or(|metadata| metadata.file_type().is_symlink())
-        {
-            return None;
-        }
+    // Classify a symlink before opening. `O_NOFOLLOW` turns one into an open
+    // failure, which is otherwise indistinguishable from running out of
+    // descriptors, and the two want opposite answers. Everything else is judged
+    // from the descriptor, which is the copy that cannot be swapped out from
+    // under the check.
+    let named_a_symlink =
+        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let Ok(mut file) = options.open(path) else {
+        return if named_a_symlink {
+            EntryRead::Garbage
+        } else {
+            EntryRead::Unexamined
+        };
+    };
+    if named_a_symlink {
+        return EntryRead::Garbage;
     }
-    let mut file = options.open(path).ok()?;
-    let metadata = file.metadata().ok()?;
+    let Ok(metadata) = file.metadata() else {
+        return EntryRead::Unexamined;
+    };
     if !metadata.file_type().is_file() || metadata.len() > MAX_PRESENCE_ENTRY_BYTES as u64 {
-        return None;
+        return EntryRead::Garbage;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
         if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            return None;
+            return EntryRead::Garbage;
         }
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.by_ref()
+    if file
+        .by_ref()
         .take(MAX_PRESENCE_ENTRY_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAX_PRESENCE_ENTRY_BYTES {
-        return None;
+        .is_err()
+    {
+        return EntryRead::Unexamined;
     }
-    serde_json::from_slice(&bytes).ok()
+    if bytes.len() > MAX_PRESENCE_ENTRY_BYTES {
+        return EntryRead::Garbage;
+    }
+    match serde_json::from_slice(&bytes) {
+        Ok(entry) => EntryRead::Record(entry),
+        Err(_) => EntryRead::Garbage,
+    }
 }
 
 #[cfg(test)]
@@ -507,6 +547,69 @@ mod tests {
             started_unix: 0,
             start_token: process_start_token(pid),
         }
+    }
+
+    /// A claim this reader cannot open must survive the sweep.
+    ///
+    /// The sweep deleted anything `read_entry` returned `None` for, and that
+    /// covered failing to open the file at all. One process short of
+    /// descriptors therefore erased every claim in the directory, including
+    /// live windows belonging to other processes, and their colours went back
+    /// into the pool for anyone to take.
+    ///
+    /// Mode `0000` stands in for the resource failure: both reach the same
+    /// `open` error, and this one is deterministic.
+    #[cfg(unix)]
+    #[test]
+    fn a_claim_this_reader_cannot_open_is_left_where_it_is() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        assert!(
+            unsafe { libc::geteuid() } != 0,
+            "run the suite as an ordinary user: root ignores the mode bits this test relies on"
+        );
+
+        let dir = tmp("unreadable");
+        ensure_private_dir(&dir).unwrap();
+        let me = std::process::id();
+        let mine = entry(me, 1, "#cba6f7");
+        write_entry(&dir, &mine);
+        let path = entry_path(&dir, me, 1);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert!(
+            live_entries(&dir).is_empty(),
+            "an unopenable claim cannot be reported as live"
+        );
+        assert!(
+            path.exists(),
+            "an unopenable claim must be left alone, not deleted"
+        );
+
+        // Restore it and the claim comes back, which is the whole point of
+        // keeping the file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(live_entries(&dir)[0].rgb, "#cba6f7");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file that reads through and is not a record is still pruned, so the
+    /// directory cannot fill with junk.
+    #[test]
+    fn an_unparseable_claim_is_still_pruned() {
+        let dir = tmp("garbage");
+        ensure_private_dir(&dir).unwrap();
+        let path = dir.join("999999-1.json");
+        std::fs::write(&path, b"not json").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        assert!(live_entries(&dir).is_empty());
+        assert!(!path.exists(), "unparseable content must still be pruned");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Put `entry` on disk exactly the way `claim` would, without taking a
