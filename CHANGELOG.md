@@ -100,6 +100,74 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **`docs/CONFIG.md` gave the wrong default for `inactive-color-offset`.** It
+  said `0.8`; the code has always used `1.0`, so anyone reasoning about
+  unfocused-pane dimming from the table was working from the wrong number.
+
+- **A one-column pane no longer takes the whole application down with it.**
+  Writing any double-width character to a one-column grid indexed past the end
+  of the row and panicked on the PTY reader thread, and because release builds
+  abort on panic that killed every pane in every window rather than the pane
+  responsible. A CJK filename in `ls` output or an emoji in a prompt was enough.
+  The terminal engine declares a two-column minimum and never enforced it;
+  kettle now clamps to it in both the geometry constructor and the size handed
+  to the engine, so no construction path can produce a grid that cannot hold a
+  character. One column was reachable from `kettle exec --cols 1`, from a split
+  narrow enough to leave a single cell after padding, and from the fallbacks
+  used when a geometry cannot be resolved.
+
+- **The one-line installer no longer lets the release channel choose how much
+  it verifies.** With no explicit version, `install-online.sh` takes the version
+  from the `releases/latest` redirect and decides from it whether an Ed25519
+  signature is required. A redirect naming a release old enough to predate
+  signed manifests therefore turned the signature check off and fell back to a
+  checksum served by the same party, ending in an unverified archive's
+  `install.sh` being executed. The same redirect could also pin every new
+  install to an old release indefinitely. A version the channel picks must now
+  meet the signed-manifest floor, and the check runs before anything is
+  downloaded.
+  Naming an old release explicitly still works, because that is a decision the
+  person installing made rather than one made for them.
+
+- **A system-wide Linux install no longer refuses to start for everyone but
+  root.** Installing with `KETTLE_PREFIX=/usr/local` under sudo leaves the
+  prefix owned by root. Every launch by a normal user then failed with
+  `Permission denied` and no window, because startup could not create its
+  update-recovery lock there and treated that as fatal. From the desktop entry
+  the install itself creates there was no message at all. Recovery belongs to
+  whoever can write the prefix, so kettle now carries on without it, exactly as
+  it already did when another process held the lock.
+
+- **Two synchronized graphics frames in one read no longer print the second one
+  on the screen.** The parser handed its own callback a half-opened control
+  string, and the callback re-enters the parser to replay deferred graphics, so
+  the replay cancelled the string that had just been opened and left the outer
+  loop reading a command as text. Anything that wraps kitty, sixel or iTerm2
+  graphics in DEC 2026 synchronized updates hit it, which is the ordinary case
+  for an animation: the frame was dropped and its payload was painted onto the
+  grid.
+
+- **`--check-config` no longer reports "OK" for a file it ignored.** A section
+  header with one character wrong makes every line beneath it inert, and because
+  each key in it is still spelled correctly there was nothing to call unknown or
+  malformed. It now names the section and how many settings went unapplied.
+  Sections kettle skips deliberately are reported the same way when they hold
+  settings, since a user who put their colours under `[[work]]` instead of
+  `[[default]]` has the same problem.
+
+- **GTK's `<Primary>` modifier binds Control instead of nothing.** It is the
+  spelling GTK's own documentation recommends, so it turns up in Terminator
+  configs. Kettle did not recognize it, and an unrecognized modifier falls
+  through to the key parser, so `<Primary>t` quietly became a bare `t` and the
+  binding fired on the wrong chord.
+
+- **The Arch and Homebrew packages no longer install an icon into a directory
+  no icon theme reads.** Both derived a size from every `kettle-*.png` in the
+  release archive, including `kettle-light-256.png`, whose name yields a size of
+  `light-256` and a path of `hicolor/light-256xlight-256/apps/`. Both templates
+  now match only `kettle-[0-9]*.png`. The one-line installer was never affected:
+  it iterates an explicit list of sizes.
+
 - **Searching for text you can see on screen no longer reports an error.** The
   search bar compiles every query as a regex and has no toggle to turn that off,
   so typing `call(x` or a bare `(` — ordinary terminal output — answered
