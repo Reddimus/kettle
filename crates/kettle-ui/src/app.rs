@@ -786,6 +786,35 @@ mod macos_chrome_policy_tests {
         MacosTitlebarPolicy, macos_titlebar_policy, production_source, rounded_window_corner_policy,
     };
 
+    /// Both preflight rejections must stash, not just log.
+    ///
+    /// A behavioural test here would need a real event loop and a real window,
+    /// so this pins the wiring instead. The failure it guards is quiet and
+    /// total: a rejected preflight leaves everything downstream behaving as if
+    /// there were no session, and the next save replaces the file with a single
+    /// fresh tab.
+    #[test]
+    fn a_rejected_session_preflight_stashes_the_file() {
+        let src = production_source();
+        for rejection in [
+            "session.validated_restore_windows()",
+            "validated_restore_surface_geometries(",
+        ] {
+            let at = src
+                .find(rejection)
+                .unwrap_or_else(|| panic!("{rejection} is no longer called from startup"));
+            let arm = &src[at..src.len().min(at + 700)];
+            assert!(
+                arm.contains("stash_unrestorable_session"),
+                "the {rejection} rejection must stash the session before anything overwrites it"
+            );
+        }
+        assert!(
+            !src.contains(r#"log::warn!("session restore rejected during preflight"#),
+            "a warning alone was the whole bug: the file was gone seconds later"
+        );
+    }
+
     #[test]
     fn decorated_windows_use_theme_matched_native_chrome() {
         assert_eq!(
@@ -5630,6 +5659,13 @@ fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static st
 
 pub struct App {
     cfg: Config,
+    /// The file this launch's session was read from, if any.
+    ///
+    /// Held so a restore that fails can move that exact file aside. It is not
+    /// recoverable later: `session_write_target` decides where a *save* goes
+    /// from state this never sees, and a one-shot tab handoff is deleted as it
+    /// is read.
+    restore_source: Option<std::path::PathBuf>,
     /// C1 (multi-window foundation): all per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -6568,6 +6604,7 @@ impl App {
             };
         let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
         let mut app = App {
+            restore_source: None,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
@@ -23805,10 +23842,17 @@ impl App {
                 // one-wakeup-per-read flood the latch eliminates.
                 let mk = || self.waker();
                 let geometries = self.restore_geometries(&ws, &sess);
-                if !ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk) {
+                let outcome = ws.mux.restore_geometry(&sess, &self.cfg, &geometries, &mk);
+                if !outcome.restored_any {
                     // `ws` (and its OS window) drop here; nothing restored.
                     log::error!("open_window: saved-window restore failed");
                     return Err(WindowOpen::Restore(sw));
+                }
+                if outcome.skipped > 0 {
+                    self.stash_unrestorable_session(&format!(
+                        "{} tab(s) could not be rebuilt",
+                        outcome.skipped
+                    ));
                 }
             }
         }
@@ -24679,6 +24723,25 @@ impl App {
     /// Loading and validating here lets `resumed_inner` seed the first native
     /// window with its final saved geometry. That avoids showing/configuring a
     /// default-sized swapchain and immediately replacing it after PTYs spawn.
+    /// Move a session aside when it loaded but could not be restored.
+    ///
+    /// Everything downstream of a rejected preflight behaves as if there were
+    /// no session at all, including the next save, so without this the file is
+    /// replaced by a single fresh tab before the user has finished looking at
+    /// the window.
+    fn stash_unrestorable_session(&self, reason: &str) {
+        // The path this session was READ from, not a guess at where the next
+        // save would go. Those are not the same question: `session_write_target`
+        // routes on the snapshot being empty and on whether a named layout is
+        // writable, and a `--tab-handoff` restore has no durable file at all.
+        // Re-deriving it risked moving a file we never loaded.
+        let Some(path) = self.restore_source.as_deref() else {
+            log::warn!("session could not be restored ({reason}); it had no file to keep");
+            return;
+        };
+        crate::session::stash_unrestorable_session(path, reason);
+    }
+
     fn load_startup_session(&mut self) -> Option<crate::session::Session> {
         // Terminator parity, detachable-tabs Bucket-D (drop-logic target):
         // --tab-handoff-fd FD wins over the file handoff, named layout, and
@@ -24731,11 +24794,20 @@ impl App {
             }
         }
 
+        // Record where the session came from as it is loaded. A rejected
+        // restore has to move that exact file aside, and nothing downstream can
+        // work it out afterwards: `session_write_target` routes on things this
+        // function never sees, and a one-shot tab handoff has no durable file
+        // by the time anyone asks.
         if let Some(path) = self.startup.tab_handoff.as_deref() {
+            // Deliberately not recorded: `load_tab_handoff` deletes the file as
+            // it reads, so there is nothing left to keep.
             crate::session::Session::load_tab_handoff(path)
         } else if let Some(name) = self.startup.layout.as_deref() {
+            self.restore_source = crate::session::Session::path_for_layout(name);
             crate::session::Session::load_layout(name)
         } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
+            self.restore_source = crate::session::Session::path();
             crate::session::Session::load()
         } else {
             None
@@ -24769,7 +24841,7 @@ impl App {
             let windows = match session.validated_restore_windows() {
                 Ok(windows) => windows,
                 Err(error) => {
-                    log::warn!("session restore rejected during preflight: {error}");
+                    self.stash_unrestorable_session(&error);
                     return None;
                 }
             };
@@ -24780,7 +24852,7 @@ impl App {
             ) {
                 Ok(geometries) => geometries,
                 Err(error) => {
-                    log::warn!("session restore rejected during surface preflight: {error}");
+                    self.stash_unrestorable_session(&error);
                     return None;
                 }
             };
@@ -25042,10 +25114,21 @@ impl App {
                         };
                         let geometries = self.restore_geometries(ws, &first_session);
                         let mk = || self.waker();
-                        let ok =
+                        let outcome =
                             ws.mux
                                 .restore_geometry(&first_session, &self.cfg, &geometries, &mk);
-                        if ok {
+                        // A tab that could not be rebuilt is gone from the live
+                        // mux, and the next save rewrites the file from it. Keep
+                        // the original so a transient failure — a command not on
+                        // PATH yet, a fork refused under a process limit — costs
+                        // nothing permanent.
+                        if outcome.skipped > 0 {
+                            self.stash_unrestorable_session(&format!(
+                                "{} tab(s) could not be rebuilt",
+                                outcome.skipped
+                            ));
+                        }
+                        if outcome.restored_any {
                             for (index, sw) in rest.iter().enumerate() {
                                 let sw = crate::session::SWindow {
                                     tabs: sw.tabs.to_vec(),
@@ -25065,7 +25148,7 @@ impl App {
                             // focused_seq to each window it opens).
                             self.focused_seq = ws.seq;
                         }
-                        ok
+                        outcome.restored_any
                     } else {
                         false
                     }

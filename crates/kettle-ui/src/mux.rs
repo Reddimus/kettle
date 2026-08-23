@@ -1639,6 +1639,37 @@ pub struct Mux {
     pub autoclean_groups: bool,
 }
 
+/// Where focus lands after a restore that dropped tabs.
+///
+/// `saved_active` indexes the saved vector; the live one has holes in it
+/// wherever a tab could not be rebuilt. Clamping the saved index against the
+/// shorter vector focused whichever tab happened to land there, so saved
+/// `[A,B,C,D]` with `C` active and `B` unbuildable restored `[A,C,D]` focused
+/// on `D`. Subtracting the tabs dropped *ahead* of it keeps focus where the
+/// user left it.
+fn restored_active_index(saved_active: usize, skipped_before_active: usize, live: usize) -> usize {
+    saved_active
+        .saturating_sub(skipped_before_active)
+        .min(live.saturating_sub(1))
+}
+
+/// What a session restore actually managed to rebuild.
+///
+/// `skipped` used to be invisible outside a log line, which mattered because
+/// the next save rewrites `session.json` from the live mux. A tab whose command
+/// was missing from PATH, or whose pane could not fork under a process limit,
+/// was dropped on restore and then erased from the file seconds later, taking
+/// its argv, cwd, split tree and title with it. Both failures are transient by
+/// nature, so the tab would have come back on the next launch had anything kept
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestoreOutcome {
+    /// Whether anything at all was rebuilt.
+    pub restored_any: bool,
+    /// How many tabs were dropped because they could not be rebuilt.
+    pub skipped: usize,
+}
+
 impl Mux {
     pub fn new() -> Self {
         Self {
@@ -2019,7 +2050,7 @@ impl Mux {
                 std::iter::repeat_n(PtyGeometry::from_cell_size(80, 24, cw, ch), leaves).collect(),
             );
         }
-        self.restore_geometry(s, cfg, &geometries, mk)
+        self.restore_geometry(s, cfg, &geometries, mk).restored_any
     }
 
     /// Restore with one exact initial geometry per serialized leaf, in DFS
@@ -2031,7 +2062,9 @@ impl Mux {
         cfg: &Config,
         geometries: &[Vec<PtyGeometry>],
         mk: &dyn Fn() -> Waker,
-    ) -> bool {
+    ) -> RestoreOutcome {
+        let mut skipped = 0usize;
+        let mut skipped_before_active = 0usize;
         // Bound the total PTY fan-out. The 16 MiB file-size
         // cap is a weak proxy — a small session.json of minimal flat leaves
         // (~30 bytes each) could ask to fork hundreds of thousands of shells on
@@ -2101,11 +2134,18 @@ impl Mux {
                          ({} orphaned pane(s) reaped): {e}",
                         tab_pane_ids.len()
                     );
+                    skipped += 1;
+                    if i < s.active {
+                        skipped_before_active += 1;
+                    }
                 }
             }
         }
-        self.active = s.active.min(self.tabs.len().saturating_sub(1));
-        !self.tabs.is_empty()
+        self.active = restored_active_index(s.active, skipped_before_active, self.tabs.len());
+        RestoreOutcome {
+            restored_any: !self.tabs.is_empty(),
+            skipped,
+        }
     }
 
     #[allow(dead_code)]
@@ -4463,6 +4503,27 @@ impl Default for Mux {
 #[cfg(test)]
 mod node_tests {
     use super::*;
+
+    /// Focus must follow the tab, not the index.
+    #[test]
+    fn focus_survives_a_restore_that_dropped_earlier_tabs() {
+        // Saved [A,B,C,D] with C active. B could not be rebuilt, so the live
+        // vector is [A,C,D] and C sits at 1. Clamping the raw 2 focused D.
+        assert_eq!(restored_active_index(2, 1, 3), 1);
+
+        // Nothing dropped: unchanged.
+        assert_eq!(restored_active_index(2, 0, 4), 2);
+
+        // Dropped only after the active tab: the index still points at it.
+        assert_eq!(restored_active_index(1, 0, 3), 1);
+
+        // The active tab and everything before it went: focus falls to the
+        // first survivor rather than underflowing.
+        assert_eq!(restored_active_index(3, 3, 1), 0);
+
+        // A restore that rebuilt nothing must not index anything.
+        assert_eq!(restored_active_index(5, 0, 0), 0);
+    }
 
     /// The production half of this file: everything above the test module.
     ///
