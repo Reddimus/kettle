@@ -173,6 +173,10 @@ printf 'config=%s max=%s retry=%s delay=%s retry-max=%s refused=%s proto=%s redi
   >> "${FIXTURE_CURL_LOG:?}"
 
 case "$url" in
+  */releases/latest)
+    printf 'location: https://github.com/Reddimus/kettle/releases/tag/%s\n' \
+      "${FIXTURE_LATEST_TAG:-v3.1.1}" > "$output"
+    ;;
   *.tar.gz.sha256)
     cp "${FIXTURE_SIDECAR:?}" "$output"
     ;;
@@ -590,7 +594,7 @@ fi
         self,
         archive: Path,
         *,
-        version: str = "v1.3.4",
+        version: str | None = "v1.3.4",
         sidecar: bytes | None = None,
         extra_environment: dict[str, str] | None = None,
         signed: bool = False,
@@ -653,7 +657,6 @@ fi
                 "XDG_CONFIG_HOME": str(xdg_config),
                 "TMPDIR": str(fixture_tmp),
                 "KETTLE_PREFIX": str(prefix),
-                "KETTLE_VERSION": version,
                 "FIXTURE_ARCHIVE": str(archive),
                 "FIXTURE_SIDECAR": str(self.sidecar),
                 "FIXTURE_CURL_LOG": str(self.curl_log),
@@ -661,6 +664,11 @@ fi
                 "FIXTURE_MANIFEST_SIGNATURE": str(signature),
             }
         )
+        if version is None:
+            # Let `releases/latest` choose it, which is the documented default.
+            environment.pop("KETTLE_VERSION", None)
+        else:
+            environment["KETTLE_VERSION"] = version
         if extra_environment:
             environment.update(extra_environment)
         if environment.get("FIXTURE_HOSTILE_CURLRC") == "1":
@@ -697,6 +705,36 @@ fi
             stdout,
             stderr,
         )
+
+    def test_the_release_channel_cannot_pick_the_weak_trust_policy(self):
+        """A `latest` redirect naming a pre-manifest release must be refused.
+
+        With KETTLE_VERSION unset the version comes from the unauthenticated
+        `releases/latest` redirect, and the Ed25519 requirement is computed
+        from that version. Answering the redirect with an old enough tag
+        therefore switched the installer to the same-origin `.sha256` sidecar
+        that the same party serves, and then ran the tarball's install.sh.
+        Every existing case here pins KETTLE_VERSION, so nothing covered it.
+        """
+        archive = self._archive()
+        result = self._run(
+            archive,
+            version=None,
+            extra_environment={"FIXTURE_LATEST_TAG": "v0.0.0"},
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        combined = result.stdout + result.stderr
+        self.assertIn("predates signed manifests", combined)
+        self.assertIn("Refusing to install it without Ed25519 verification", combined)
+        # And it should say how to get that release deliberately.
+        self.assertIn("KETTLE_VERSION=v0.0.0", combined)
+
+    def test_a_named_old_release_may_still_take_the_legacy_path(self):
+        """Naming an old version explicitly is a human decision, not the
+        channel's, so the pre-manifest path stays available for it."""
+        archive = self._archive()
+        result = self._run(archive, version="v1.3.4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_safe_checksum_only_archive_installs_after_bounded_checksum(self):
         result = self._run(self._archive())
