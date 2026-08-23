@@ -193,6 +193,11 @@ GitHub runners for every platform:
   apps are intentionally unsigned and are for development use rather than the
   recommended installation path.
 
+  From 3.2.0 the app updates itself: `kettle update`, or the in-app prompt,
+  replaces the whole bundle and verifies the replacement with `codesign` and
+  `spctl` before it swaps. Moving up *from* 3.1.1 is a manual drag, once,
+  because 3.1.1 predates that code.
+
   Each release includes a ready-to-use `kettle.rb` formula rendered from
   [`packaging/homebrew/kettle.rb.in`](../packaging/homebrew/kettle.rb.in);
   however, the `Reddimus/homebrew-kettle` tap repository is not currently

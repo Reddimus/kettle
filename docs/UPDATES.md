@@ -35,9 +35,15 @@ from a helper only after every Kettle process has exited.
 | Ubuntu/Linux aarch64 installed by the bundled installer | Supported |
 | Local source build (`local-dev` marker) | Refused; rebuild and reinstall from that checkout |
 | Cargo, distro package, Nix, a future Homebrew/AUR package, or manually copied binary | Refused; update with its owner |
-| macOS `kettle.app` from the release page | Supported since 3.2.0 |
+| macOS `kettle.app` from the release page | Supported from 3.2.0 onward. Replacing a 3.1.1 app is a one-time manual step — see below |
 | macOS app installed by Homebrew | Refused; run `brew upgrade` |
 | macOS app running translocated from Downloads | Refused; move it to Applications and open it once from there |
+
+Updating **to** 3.2.0 on macOS has to be done by hand, once. The updater is
+part of 3.2.0, so a 3.1.1 app has no code to run it: it still notices a new
+release and still offers the release page, but it cannot install one. Download
+`kettle-macos-universal.zip`, unzip it, and replace the app in `/Applications`.
+Every release after that updates itself.
 
 Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires
