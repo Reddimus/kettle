@@ -101,7 +101,8 @@ struct SixelCanvas {
     height: usize,
     budget: GraphicsBudget,
     reservation: Option<GraphicsReservation>,
-    /// Columns painted so far, checked against [`MAX_COLUMN_WRITES`].
+    /// Columns painted so far, checked against
+    /// [`GraphicsLimits::sixel_column_writes`](crate::GraphicsLimits::sixel_column_writes).
     writes: usize,
 }
 

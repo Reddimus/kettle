@@ -151,14 +151,19 @@ const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 
 /// Longest raw OSC 7 / OSC 9;9 body converted to a `String` for cwd parsing.
 ///
-/// `safe_reported_cwd` already rejects any path over 8 KiB, but it saw the
+/// `safe_reported_cwd` already rejects an oversized path, but it saw the
 /// decoded path, so the conversion had already happened. An OSC body runs to
 /// `GraphicsLimits::sequence_bytes`, and `from_utf8_lossy` turns each invalid
 /// byte into a three-byte replacement character, so 16 MiB of `0xff` allocated
 /// 48 MiB outside any budget to produce a path that was then thrown away.
-/// Three times the path cap is the widest a fully percent-encoded path can be,
-/// so nothing that could have been accepted is lost.
-const MAX_CWD_REPORT_BYTES: usize = 3 * 8192;
+/// Three times [`MAX_REPORTED_CWD_BYTES`] is the widest a fully
+/// percent-encoded path can be, so nothing that could have been accepted is
+/// lost.
+const MAX_CWD_REPORT_BYTES: usize = 3 * MAX_REPORTED_CWD_BYTES;
+
+/// Longest cwd `safe_reported_cwd` accepts, above common `PATH_MAX` values
+/// while still bounding untrusted output.
+const MAX_REPORTED_CWD_BYTES: usize = 8192;
 
 /// After abandoning an over-budget control string, consume at most one PTY
 /// read-sized window looking for its real terminator before returning to
@@ -1809,8 +1814,6 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
 /// relative paths, general UNC/NT namespace paths, controls, and oversized
 /// values are rejected.
 fn safe_reported_cwd(path: String) -> Option<String> {
-    // Above common PATH_MAX values while still bounding untrusted output.
-    const MAX_REPORTED_CWD_BYTES: usize = 8192;
     // Case-insensitive, because Windows path components are.
     const WSL_P9_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];
 
