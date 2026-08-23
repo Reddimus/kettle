@@ -596,7 +596,7 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
             return EXIT_INTERNAL;
         }
     };
-    run_exec_engine(opts, &default_size_probe, &mut output, None)
+    run_exec_engine(opts, &default_size_probe, &mut output, None, false)
 }
 
 /// (agent-first A3): run a command headlessly and CAPTURE its output
@@ -675,7 +675,7 @@ impl Write for TailSink {
 fn run_exec_capture_inner(opts: ExecOpts, cancelled: Option<&AtomicBool>) -> (i32, String) {
     let mut sink = TailSink::new(1024 * 1024);
     let mut output = DirectOutput::new(opts.mode, &mut sink);
-    let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled);
+    let code = run_exec_engine(opts, &default_size_probe, &mut output, cancelled, true);
     (code, String::from_utf8_lossy(sink.tail()).into_owned())
 }
 
@@ -711,7 +711,7 @@ pub fn run_exec_with(
     sink: &mut dyn Write,
 ) -> i32 {
     let mut output = DirectOutput::new(opts.mode, sink);
-    run_exec_engine(opts, _size_probe, &mut output, None)
+    run_exec_engine(opts, _size_probe, &mut output, None, false)
 }
 
 /// Drain one bounded output slice and report whether a backlog remains.
@@ -867,15 +867,49 @@ fn drain_event_slice_until<T>(receiver: &Receiver<T>, mut handle: impl FnMut(T) 
     !receiver.is_empty()
 }
 
+/// Report a failure that happens before the PTY exists.
+///
+/// The message still goes to stderr, and now also into the output sink when
+/// that sink is a plain byte stream. `run_exec_capture` returns only an exit
+/// code and that sink, and the MCP `kettle_run` tool builds its whole reply
+/// from those two, so an agent that typo'd a binary name received
+/// `exit code: 125` and nothing else. Command-not-found and a bad working
+/// directory are the two most common ways that tool fails, and 125 is
+/// documented as an internal error, so the agent concluded kettle was broken
+/// rather than fixing its own argument.
+///
+/// JSON mode is deliberately left alone. Its stream is a documented sequence
+/// that opens with a `start` event, and emitting an `output` event before one
+/// would be a worse answer than the missing text.
+fn startup_failure(
+    mode: OutputMode,
+    capturing: bool,
+    output: &mut dyn ExecOutput,
+    message: String,
+) -> i32 {
+    let _ = writeln!(std::io::stderr(), "{message}");
+    // Only for a capturing caller. Writing it to a terminal's stdout as well
+    // would print the same line twice to someone who can already see it.
+    if capturing && matches!(mode, OutputMode::Raw | OutputMode::StripAnsi) {
+        let _ = output.output(format!("{message}\n").into_bytes());
+    }
+    EXIT_INTERNAL
+}
+
 fn run_exec_engine(
     mut opts: ExecOpts,
     _size_probe: &dyn Fn() -> Option<(u16, u16)>,
     output: &mut dyn ExecOutput,
     cancelled: Option<&AtomicBool>,
+    capturing: bool,
 ) -> i32 {
     if opts.argv.is_empty() {
-        let _ = writeln!(std::io::stderr(), "kettle exec: no command given");
-        return EXIT_INTERNAL;
+        return startup_failure(
+            opts.mode,
+            capturing,
+            output,
+            "kettle exec: no command given".to_string(),
+        );
     }
     // Clamp geometry into a sane PTY range (kettle-core clamps too, but a 0
     // here would make ConPTY unhappy).
@@ -885,8 +919,12 @@ fn run_exec_engine(
     let cwd = match validate_exec_cwd(opts.cwd.as_deref()) {
         Ok(cwd) => cwd,
         Err(error) => {
-            let _ = writeln!(std::io::stderr(), "kettle exec: invalid --cwd: {error}");
-            return EXIT_INTERNAL;
+            return startup_failure(
+                opts.mode,
+                capturing,
+                output,
+                format!("kettle exec: invalid --cwd: {error}"),
+            );
         }
     };
 
@@ -957,8 +995,12 @@ fn run_exec_engine(
     ) {
         Ok(t) => t,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "kettle exec: cannot start PTY: {e}");
-            return EXIT_INTERNAL;
+            return startup_failure(
+                opts.mode,
+                capturing,
+                output,
+                format!("kettle exec: cannot start PTY: {e}"),
+            );
         }
     };
     let process_tree = ExecProcessTree::attach(&term);
@@ -3318,6 +3360,62 @@ fn windows_console_size() -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+
+    fn opts_for(argv: Vec<String>, cwd: Option<PathBuf>) -> ExecOpts {
+        ExecOpts {
+            argv,
+            cols: 80,
+            rows: 24,
+            cwd,
+            timeout: None,
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        }
+    }
+
+    /// A capturing caller must be told *why* a run never started.
+    ///
+    /// `run_exec_capture` returns an exit code and the sink, and the MCP
+    /// `kettle_run` tool builds its whole reply from those two. Before this,
+    /// a command that could not be spawned produced `exit code: 125` and an
+    /// empty capture, so an agent that mistyped a binary name had nothing to
+    /// act on and 125 is documented as an internal error.
+    #[test]
+    fn a_capturing_caller_is_told_why_the_command_never_started() {
+        let missing = opts_for(vec!["kettle-no-such-binary-8f21c".into()], None);
+        let (code, output) = run_exec_capture(missing);
+        assert_eq!(code, EXIT_INTERNAL);
+        assert!(
+            output.contains("cannot start PTY"),
+            "the capture must carry the reason, got {output:?}"
+        );
+
+        let bad_cwd = opts_for(
+            vec!["echo".into()],
+            Some("/kettle-no-such-directory-8f21c".into()),
+        );
+        let (code, output) = run_exec_capture(bad_cwd);
+        assert_eq!(code, EXIT_INTERNAL);
+        assert!(
+            output.contains("invalid --cwd"),
+            "a bad working directory must say so, got {output:?}"
+        );
+    }
+
+    /// The terminal already shows stderr, so stdout must not repeat it.
+    #[test]
+    fn an_interactive_run_does_not_print_the_reason_twice() {
+        let mut sink: Vec<u8> = Vec::new();
+        let opts = opts_for(vec!["kettle-no-such-binary-8f21c".into()], None);
+        let code = run_exec_with(opts, &|| None, &mut sink);
+        assert_eq!(code, EXIT_INTERNAL);
+        assert!(
+            sink.is_empty(),
+            "stdout should stay clean for a caller that can see stderr, got {:?}",
+            String::from_utf8_lossy(&sink)
+        );
+    }
     use super::*;
 
     /// `--strip-ansi` corrupted ordinary text, and MCP `kettle_run` strips by
@@ -4094,7 +4192,7 @@ mod tests {
         expected: i32,
     ) {
         let mut output = StopBeforeReadinessOutput::default();
-        let code = run_exec_engine(opts, &|| None, &mut output, cancelled);
+        let code = run_exec_engine(opts, &|| None, &mut output, cancelled, true);
         if code == EXIT_INTERNAL && output.finished.is_none() {
             eprintln!("skipping lifecycle stop ordering test: no PTY");
             return;
@@ -4948,7 +5046,7 @@ wait
             forward_stdin: false,
         };
 
-        let code = run_exec_engine(opts, &|| None, &mut output, None);
+        let code = run_exec_engine(opts, &|| None, &mut output, None, false);
         assert_eq!(code, EXIT_TIMEOUT);
         entered_rx
             .recv_timeout(Duration::from_secs(1))
