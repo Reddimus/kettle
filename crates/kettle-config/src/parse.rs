@@ -154,6 +154,73 @@ impl Section {
     }
 }
 
+/// A section whose settings kettle read past without applying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredSection {
+    /// The header line as written, with surrounding whitespace trimmed.
+    pub header: String,
+    /// How many `key = value` lines it swallowed.
+    pub settings: usize,
+}
+
+/// The most sections worth naming in a diagnostic. A file with more than this
+/// has a structural problem the first few already demonstrate.
+const MAX_REPORTED_IGNORED_SECTIONS: usize = 16;
+
+/// Sections that swallowed settings, for `--check-config` to report.
+///
+/// [`parse`] answers "what applies", and everything else it walks past
+/// silently. That silence is right at load time and wrong in a diagnostic: a
+/// header with one character out of place makes every line beneath it do
+/// nothing, and `--check-config` used to answer "OK — no issues" because no
+/// individual key was unknown or malformed. The keys are fine. They are in a
+/// section nobody reads.
+///
+/// Only sections that actually swallowed an assignment are reported. An empty
+/// `[layouts]` is not a problem worth a line of output.
+pub fn ignored_sections(input: &str) -> Vec<IgnoredSection> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut section = Section::default();
+    let mut out: Vec<IgnoredSection> = Vec::new();
+    let mut current: Option<String> = None;
+    for raw in input.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            section.enter(section_header(line));
+            current = (!section.applies()).then(|| line.to_string());
+            continue;
+        }
+        if section.applies() {
+            continue;
+        }
+        // Count only what an applying section would have used. `parse` needs a
+        // `=` with a non-empty key before it builds an entry, so a stray
+        // `= value` is not a setting anywhere and must not inflate the number
+        // this reports as lost.
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        if line[..eq].trim().is_empty() {
+            continue;
+        }
+        let Some(header) = current.as_deref() else {
+            continue;
+        };
+        if let Some(existing) = out.iter_mut().find(|s| s.header == header) {
+            existing.settings += 1;
+        } else if out.len() < MAX_REPORTED_IGNORED_SECTIONS {
+            out.push(IgnoredSection {
+                header: header.to_string(),
+                settings: 1,
+            });
+        }
+    }
+    out
+}
+
 pub fn parse(input: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     // Strip the UTF-8 byte-order mark if Notepad / certain Windows
@@ -291,6 +358,68 @@ mod section_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mistyped_section_header_is_reported_with_what_it_swallowed() {
+        // The footgun: one character wrong in a header and every line under it
+        // does nothing, while every key in it is individually valid, so
+        // --check-config had nothing to complain about and answered "OK".
+        let text = "[globl_config]\ntheme = TokyoNight Night\nfont-size = 14\n";
+        assert_eq!(
+            super::ignored_sections(text),
+            vec![super::IgnoredSection {
+                header: "[globl_config]".into(),
+                settings: 2,
+            }]
+        );
+        // The settings really are dropped, which is what makes it worth saying.
+        assert!(super::parse(text).is_empty());
+    }
+
+    #[test]
+    fn a_deliberate_skip_is_reported_only_when_it_holds_settings() {
+        // A non-default profile is a deliberate skip rather than a typo, but a
+        // user who put settings there still needs to hear nothing read them.
+        let with_settings = "[profiles]\n  [[work]]\n    background_color = \"#222222\"\n";
+        assert_eq!(
+            super::ignored_sections(with_settings),
+            vec![super::IgnoredSection {
+                header: "[[work]]".into(),
+                settings: 1,
+            }]
+        );
+        // An empty one is not worth a line of output.
+        assert!(super::ignored_sections("[layouts]\n").is_empty());
+
+        // Neither is a line that would not have been a setting anywhere:
+        // `parse` requires a non-empty key, so counting these would overstate
+        // what the user lost.
+        let malformed = "[globl_config]\n= orphan\nnot-an-assignment\ntheme = x\n";
+        assert_eq!(
+            super::ignored_sections(malformed),
+            vec![super::IgnoredSection {
+                header: "[globl_config]".into(),
+                settings: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_kettle_fully_understands_reports_nothing() {
+        assert!(super::ignored_sections("theme = TokyoNight Night\n").is_empty());
+        assert!(
+            super::ignored_sections(
+                "[global_config]\nfocus = system\n[keybindings]\nnew_tab = <Control><Shift>t\n"
+            )
+            .is_empty()
+        );
+        assert!(
+            super::ignored_sections(
+                "[profiles]\n  [[default]]\n    background_color = \"#1a1b26\"\n"
+            )
+            .is_empty()
+        );
+    }
+
     use super::*;
 
     #[test]
