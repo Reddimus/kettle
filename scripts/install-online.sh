@@ -58,6 +58,13 @@ export LC_ALL LANG CDPATH
 
 REPO="Reddimus/kettle"
 VERSION="${KETTLE_VERSION:-latest}"
+# Whether the caller named the version, or the release channel did. It decides
+# whether the pre-manifest trust path may be taken at all; see the floor below.
+if [ -n "${KETTLE_VERSION:-}" ]; then
+  VERSION_PINNED=1
+else
+  VERSION_PINNED=0
+fi
 # ASSET is selected from `uname -m` in the arch check below (x86_64 / aarch64).
 ASSET="kettle-linux-x86_64.tar.gz"
 
@@ -341,6 +348,55 @@ if ! VERSION_NUMBER=$(awk -v value="$VERSION" '
   exit 1
 fi
 
+# The signed manifest first shipped in v2.35.0 (scripts/make-update-manifest.py).
+# Every release from there on publishes `kettle-update-manifest.json[.sig]`, so
+# for those a *capable* openssl that still can't fetch-and-verify the manifest
+# means it is being suppressed or tampered with — fail closed rather than
+# silently downgrading to the same-origin `.sha256` sidecar, which anyone who
+# can swap the tarball can forge. Only genuinely older releases (no manifest
+# was ever published) may take the weaker fallback. A modern release never
+# downgrades merely because its verifier is missing: that would let a
+# compromised release channel choose the weaker trust policy.
+MANIFEST_MIN_VERSION="v2.35.0"
+MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
+  BEGIN {
+    split(value, component, ".")
+    required = component[1] > 2 ||
+      (component[1] == 2 && component[2] > 35) ||
+      (component[1] == 2 && component[2] == 35 && component[3] >= 0)
+    print required ? 1 : 0
+  }
+')
+PACKAGE_MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
+  BEGIN {
+    split(value, component, ".")
+    required = component[1] > 2 ||
+      (component[1] == 2 && component[2] > 36) ||
+      (component[1] == 2 && component[2] == 36 && component[3] >= 0)
+    print required ? 1 : 0
+  }
+')
+
+# The comment above is right that a compromised release channel must not get to
+# choose the weaker trust policy. It could, because it chose the *version*.
+# With KETTLE_VERSION unset, VERSION comes from the unauthenticated
+# `releases/latest` redirect, and MANIFEST_REQUIRED is computed from it, so a
+# redirect naming v0.0.0 skipped the whole Ed25519 path and fell through to the
+# same-origin `.sha256` sidecar that the same party serves. That reached
+# `install.sh` from an unauthenticated tarball.
+#
+# The legacy path exists for releases that genuinely predate signed manifests,
+# so it stays open when a human names one. A version the channel picked has to
+# meet the floor. Checked here, before the archive is fetched, so a tag the
+# channel invented is never downloaded at all.
+if [ "$VERSION_PINNED" -eq 0 ] && [ "$MANIFEST_REQUIRED" -eq 0 ]; then
+  echo "kettle install-online.sh: the release channel resolved 'latest' to ${VERSION}, which predates signed manifests (${MANIFEST_MIN_VERSION})." >&2
+  echo "A current channel does not answer 'latest' with a release that old, so this is a stale mirror or a downgrade attempt." >&2
+  echo "Refusing to install it without Ed25519 verification." >&2
+  echo "If you genuinely want that release, ask for it by name: KETTLE_VERSION=${VERSION} sh install-online.sh" >&2
+  exit 1
+fi
+
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
 echo "kettle: installing ${VERSION} from ${URL}"
 
@@ -380,35 +436,6 @@ MANIFEST_SIG_URL="${MANIFEST_URL}.sig"
 MANIFEST_FILE="${TMP}/kettle-update-manifest.json"
 MANIFEST_SIG_FILE="${TMP}/kettle-update-manifest.json.sig"
 MANIFEST_VERIFIED=0
-
-# The signed manifest first shipped in v2.35.0 (scripts/make-update-manifest.py).
-# Every release from there on publishes `kettle-update-manifest.json[.sig]`, so
-# for those a *capable* openssl that still can't fetch-and-verify the manifest
-# means it is being suppressed or tampered with — fail closed rather than
-# silently downgrading to the same-origin `.sha256` sidecar, which anyone who
-# can swap the tarball can forge. Only genuinely older releases (no manifest
-# was ever published) may take the weaker fallback. A modern release never
-# downgrades merely because its verifier is missing: that would let a
-# compromised release channel choose the weaker trust policy.
-MANIFEST_MIN_VERSION="v2.35.0"
-MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
-  BEGIN {
-    split(value, component, ".")
-    required = component[1] > 2 ||
-      (component[1] == 2 && component[2] > 35) ||
-      (component[1] == 2 && component[2] == 35 && component[3] >= 0)
-    print required ? 1 : 0
-  }
-')
-PACKAGE_MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
-  BEGIN {
-    split(value, component, ".")
-    required = component[1] > 2 ||
-      (component[1] == 2 && component[2] > 36) ||
-      (component[1] == 2 && component[2] == 36 && component[3] >= 0)
-    print required ? 1 : 0
-  }
-')
 
 # Feature-probe `openssl` up front, and keep it SEPARATE from the manifest
 # download: `pkeyutl` before OpenSSL 3.0 cannot verify Ed25519, and
