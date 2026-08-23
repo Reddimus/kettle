@@ -179,6 +179,97 @@ tracked here so they are not lost.
 - Per-window `FontSystem` sharing; lazy system-font load on first frame. Both are
   speculative — profile on the maintainer's machine before implementing.
 
+## Deferred from the 2026-08-22 boundary audit
+
+Seven boundary units were audited, each cross-checked with codex and then
+handed to a refuter told to default to "not real". 43 findings were raised and
+36 survived. One critical and three high were fixed in that pass; what follows
+is what was left, with the reason.
+
+Severities below are the refuter's, not the auditor's. Several were lowered on
+review, and two the auditor filed as security are robustness.
+
+### Needs an API change
+
+- **`hints::detect` takes a char index and calls it a column**
+  (`kettle-core/src/hints.rs:79`, medium). Callers hand it row text whose wide
+  characters occupy two columns, so every hint past a CJK character or emoji is
+  offset, and quick-select copies or opens a truncated string. The fix is not
+  local: column identity has to travel with the text rather than be inferred,
+  which means `detect` taking a byte-to-column map or an iterator of
+  `(column, char)` and every caller changing with it. `links.rs:118` has the
+  same root cause in a smaller form, under-reporting `end_col` by one cell when
+  a link ends in a wide glyph.
+
+- **Graphics transient budget is process-wide with no per-terminal ceiling**
+  (`kettle-vt/src/extract.rs:1087`, medium). `reserve_transient_cpu` charges
+  only the process counter, so one pane holding retained images plus parked
+  in-flight chunks can pin all 512 MiB indefinitely. Other panes then silently
+  drop OSC titles and hyperlinks, and control strings over 64 KiB have their
+  tail printed as grid text. Fixing it properly means separating "over the
+  configured sequence limit" from "transient allocation failure" and giving
+  in-flight bytes a per-terminal ceiling, which is a design change to the budget
+  rather than a patch.
+
+### Needs measurement or a live platform
+
+- **`output_generation` is published after the terminal mutex is released**
+  (`kettle-core/src/term.rs:3888`, low). A reader can pair a mutated grid with
+  the pre-mutation generation. The refuter confirmed the ordering and rejected
+  two of the auditor's claims about its consequences, including the proposed
+  fix, so this needs its own analysis before anything moves.
+
+- **Three Windows update paths** (`kettle-update/src/install.rs:1771`, `:652`,
+  `:2821`, all low after review). A wedged lock holder blocks launch with no
+  retry budget; a 250 ms sharing-violation window can abort the first launch
+  after an update; nothing checks the packaged `kettle.exe`'s PE version against
+  the signed release version. All three want a real Windows machine to confirm
+  the timing, and the VM cannot currently build the workspace.
+
+### Protocol conformance, kitty graphics
+
+- **A frame transmitted without `z=` is stored with gap 0 and never displayed**
+  (`kettle-vt/src/kitty.rs:684`, low), and **`a=f,r=1` appends a frame instead
+  of editing the root frame** (`:729`, low). Both are real divergences from the
+  kitty specification and neither has a consumer today. They belong with the
+  other kitty graphics items already in this file rather than as one-off fixes.
+
+### Bounded, but not yet done
+
+- **Sixel repeat count has no total-work bound** (`kettle-vt/src/sixel.rs:276`,
+  medium). `$` resets the column without growing the canvas, so one DCS can
+  drive on the order of 2e10 inner iterations inside the existing per-axis and
+  byte caps. The fix is an aggregate operation counter; it is small, and it
+  wants a benchmark alongside it so the cap is chosen rather than guessed.
+
+- **OSC 7, OSC 9;9 and OSC 133 D convert untrusted payloads with unbudgeted,
+  infallible allocations of roughly ten times their length**
+  (`kettle-vt/src/extract.rs:1345`, low to medium). `clean_notify_field`
+  already length-checks before converting; these three do not.
+
+- **The session-log ANSI stripper has no resync bound**
+  (`kettle-core/src/term.rs:9844`, low). One unterminated OSC drops the rest of
+  the log. `exec.rs:329` already solves this and the fix is a direct port.
+
+- **`Terminal::drop` sends SIGHUP to a raw PID that `exit-action=hold` may
+  already have reaped** (`kettle-core/src/term.rs:9027`, low to medium). The
+  window is narrow and needs the PID to be recycled, but the fix is a `try_wait`
+  before the `kill`.
+
+### Smaller, individually cheap
+
+Each is a few lines and none is urgent: the Windows named-pipe listener keeps a
+closed handle in `pending` on one error path (`kettle-ctl/src/transport.rs:1224`);
+one long-argv descendant suppresses the process snapshot for every pane on Linux
+(`kettle-ctl/src/lib.rs:522`); `ssh -P tag` is neither reproduced nor marked
+unreproducible, so Reconnect can open a shell on a different host (`:1804`); the
+activation accept loop retries a failing `accept()` with no backoff
+(`kettle-ctl/src/activation.rs:469`); `presence::live_entries` deletes a live
+window's claim when the entry merely fails to open (`presence.rs:376`); an
+overlapped write discards its transferred-byte count on cancellation
+(`transport.rs:808`); an interrupted `install-unix.py` wedges both upgrade and
+uninstall with no documented recovery (`install-unix.py:700`).
+
 ## Testing coverage
 
 - **Two macOS update cleanup windows are mitigated, not eliminated,
