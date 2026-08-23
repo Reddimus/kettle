@@ -644,10 +644,24 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
                 });
             }
         };
-        if let Some(_update_lock) = acquire_startup_recovery_lock(&install.prefix)? {
-            let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-                .expect("the crate package version is valid semver");
-            confirm_committed_transaction(&install.prefix, &running_version)?;
+        match acquire_startup_recovery_lock(&install.prefix)? {
+            // Every path below this needs to write the prefix too, starting
+            // with the shared running lock. A user who cannot create the
+            // recovery lock cannot take part in updates at all, so returning
+            // here is the whole correct response: propagating instead turned a
+            // launch into "Error: Permission denied" and no window.
+            StartupRecovery::Unavailable => {
+                return Ok(ProcessStart::Ready {
+                    guard: RunningInstallGuard { _lock: None },
+                    warning: None,
+                });
+            }
+            StartupRecovery::Busy => {}
+            StartupRecovery::Held(_update_lock) => {
+                let running_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                    .expect("the crate package version is valid semver");
+                confirm_committed_transaction(&install.prefix, &running_version)?;
+            }
         }
         let pending_path = install.prefix.join(PENDING_FILE);
         let mut warning = None;
@@ -758,17 +772,26 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
 /// Startup recovery belongs to whoever can write the prefix. If that is not us,
 /// skipping it is the whole correct response.
 #[cfg(any(windows, target_os = "linux"))]
-fn acquire_startup_recovery_lock(
-    prefix: &Path,
-) -> Result<Option<kettle_state::ExclusiveFileLock>, UpdateError> {
+enum StartupRecovery {
+    /// We hold the lock and should run recovery.
+    Held(kettle_state::ExclusiveFileLock),
+    /// Someone else holds it. They are doing the work; carry on without it.
+    Busy,
+    /// This user cannot create it, so cannot take part in updates at all.
+    Unavailable,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn acquire_startup_recovery_lock(prefix: &Path) -> Result<StartupRecovery, UpdateError> {
     match kettle_state::ExclusiveFileLock::try_acquire(&prefix.join(".kettle-update.lock")) {
-        Ok(lock) => Ok(lock),
+        Ok(Some(lock)) => Ok(StartupRecovery::Held(lock)),
+        Ok(None) => Ok(StartupRecovery::Busy),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             log::debug!(
                 "skipping startup update recovery: {} is not writable by this user",
                 prefix.display()
             );
-            Ok(None)
+            Ok(StartupRecovery::Unavailable)
         }
         Err(error) => Err(UpdateError::Io(error)),
     }
@@ -783,7 +806,8 @@ fn prepare_linux_process_start_at(
         Ok(install) => install,
         Err(_) => return Ok(()),
     };
-    let Some(_update_lock) = acquire_startup_recovery_lock(&install.prefix)? else {
+    let StartupRecovery::Held(_update_lock) = acquire_startup_recovery_lock(&install.prefix)?
+    else {
         return Ok(());
     };
     confirm_committed_transaction(&install.prefix, running_version)?;

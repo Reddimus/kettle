@@ -4004,6 +4004,22 @@ pub struct TermSize {
     pub screen_lines: usize,
 }
 
+impl TermSize {
+    /// Build a size the engine can actually represent.
+    ///
+    /// The second guard on the one-column crash. [`PtyGeometry::new`] clamps
+    /// too, but its fields are public and the type is re-exported, so a caller
+    /// can build `PtyGeometry { columns: 1, .. }` and never pass through it.
+    /// This is the boundary the engine is on the other side of, so enforcing it
+    /// here does not depend on how the geometry was made.
+    pub fn new(columns: usize, screen_lines: usize) -> Self {
+        Self {
+            columns: columns.max(MIN_COLUMNS),
+            screen_lines: screen_lines.max(1),
+        }
+    }
+}
+
 impl Dimensions for TermSize {
     fn total_lines(&self) -> usize {
         self.screen_lines
@@ -4047,10 +4063,7 @@ fn commit_local_geometry_inner(
     };
     let grid_resized = grid_options.is_some();
     if let Some(options) = grid_options {
-        term.resize(TermSize {
-            columns: desired.columns,
-            screen_lines: desired.rows,
-        });
+        term.resize(TermSize::new(desired.columns, desired.rows));
         term.set_options(options);
     }
     {
@@ -6439,14 +6452,7 @@ impl Terminal {
         {
             tconf.semantic_escape_chars = wd.to_string();
         }
-        let term = Term::new(
-            tconf.clone(),
-            &TermSize {
-                columns: cols,
-                screen_lines: rows,
-            },
-            proxy.clone(),
-        );
+        let term = Term::new(tconf.clone(), &TermSize::new(cols, rows), proxy.clone());
         let term: SharedTerm = Arc::new(Mutex::new(term));
 
         let images: Images = Arc::new(Mutex::new(Vec::new()));
@@ -11341,6 +11347,20 @@ mod conformance {
         assert_eq!(
             geometry.columns, MIN_COLUMNS,
             "one column is not representable; the clamp has to raise it"
+        );
+
+        // PtyGeometry's fields are public and the type is re-exported, so a
+        // caller can sidestep the constructor entirely. TermSize::new is the
+        // guard that does not depend on how the geometry was built.
+        let bypassed = PtyGeometry {
+            columns: 1,
+            rows: 1,
+            pixel_width: 1,
+            pixel_height: 1,
+        };
+        assert_eq!(
+            TermSize::new(bypassed.columns, bypassed.rows).columns,
+            MIN_COLUMNS
         );
 
         // Drive the real thing: before the clamp this panicked here.
