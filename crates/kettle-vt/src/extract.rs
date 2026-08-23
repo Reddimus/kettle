@@ -149,6 +149,22 @@ pub enum Progress {
 
 const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 
+/// Longest raw OSC 7 / OSC 9;9 body converted to a `String` for cwd parsing.
+///
+/// `safe_reported_cwd` already rejects an oversized path, but it saw the
+/// decoded path, so the conversion had already happened. An OSC body runs to
+/// `GraphicsLimits::sequence_bytes`, and `from_utf8_lossy` turns each invalid
+/// byte into a three-byte replacement character, so 16 MiB of `0xff` allocated
+/// 48 MiB outside any budget to produce a path that was then thrown away.
+/// Three times [`MAX_REPORTED_CWD_BYTES`] is the widest a fully
+/// percent-encoded path can be, so nothing that could have been accepted is
+/// lost.
+const MAX_CWD_REPORT_BYTES: usize = 3 * MAX_REPORTED_CWD_BYTES;
+
+/// Longest cwd `safe_reported_cwd` accepts, above common `PATH_MAX` values
+/// while still bounding untrusted output.
+const MAX_REPORTED_CWD_BYTES: usize = 8192;
+
 /// After abandoning an over-budget control string, consume at most one PTY
 /// read-sized window looking for its real terminator before returning to
 /// ground state. This bounds desynchronization when a producer never emits a
@@ -1354,8 +1370,10 @@ impl Extractor {
         // OSC 7 cwd report (`7;file://host/abs/path`).
         if mode == Mode::Osc && seq.starts_with(b"7;") {
             self.emit_raw_control(mode, &seq, out);
-            if let Some(path) =
-                parse_osc7(&String::from_utf8_lossy(&seq[2..])).and_then(safe_reported_cwd)
+            let body = &seq[2..];
+            if body.len() <= MAX_CWD_REPORT_BYTES
+                && let Some(path) =
+                    parse_osc7(&String::from_utf8_lossy(body)).and_then(safe_reported_cwd)
             {
                 out.push(Chunk::Cwd(path));
             }
@@ -1381,7 +1399,10 @@ impl Extractor {
         // both are shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
             self.emit_raw_control(mode, &seq, out);
-            if let Some(path) = parse_osc9_9(&seq[4..]).and_then(safe_reported_cwd) {
+            let body = &seq[4..];
+            if body.len() <= MAX_CWD_REPORT_BYTES
+                && let Some(path) = parse_osc9_9(body).and_then(safe_reported_cwd)
+            {
                 out.push(Chunk::Cwd(path));
             }
             return;
@@ -1793,8 +1814,6 @@ fn parse_osc9_9(payload: &[u8]) -> Option<String> {
 /// relative paths, general UNC/NT namespace paths, controls, and oversized
 /// values are rejected.
 fn safe_reported_cwd(path: String) -> Option<String> {
-    // Above common PATH_MAX values while still bounding untrusted output.
-    const MAX_REPORTED_CWD_BYTES: usize = 8192;
     // Case-insensitive, because Windows path components are.
     const WSL_P9_SERVERS: [&str; 2] = ["wsl$", "wsl.localhost"];
 
@@ -2049,11 +2068,15 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
         b'B' => Some(PromptKind::CommandStart),
         b'C' => Some(PromptKind::OutputStart),
         b'D' => {
-            let s = String::from_utf8_lossy(rest);
-            let code = s
-                .split(';')
+            // Only the second `;`-separated field carries the exit code, so
+            // read it out of the borrowed bytes. Converting the whole body
+            // first allocated up to three times a 16 MiB OSC payload to parse
+            // one integer out of its first few bytes.
+            let code = rest
+                .splitn(3, |&b| b == b';')
                 .nth(1)
-                .and_then(|c| c.trim().parse::<i32>().ok());
+                .and_then(|field| std::str::from_utf8(field).ok())
+                .and_then(|field| field.trim().parse::<i32>().ok());
             Some(PromptKind::CommandEnd(code))
         }
         _ => None,
@@ -2062,6 +2085,80 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
 
 #[cfg(test)]
 mod tests {
+    /// The cwd-report cap must clear a fully percent-encoded path.
+    ///
+    /// Rejecting an oversized body before converting it changes no output on
+    /// its own — `safe_reported_cwd` refused those paths anyway, just after
+    /// the conversion had already allocated. What the cap can break is the
+    /// other direction, so that is what this pins: a path inside the 8 KiB
+    /// limit whose encoded form is three times as long still reports. Set the
+    /// cap to the path limit itself and this fails.
+    #[test]
+    fn a_fully_percent_encoded_path_still_fits_the_cwd_report_cap() {
+        // Separators stay literal, as they do in a real report; everything
+        // else is encoded, which is the widest a body can legitimately get.
+        let path = format!("/{}", "a".repeat(4000));
+        let encoded: String = std::iter::once("/".to_string())
+            .chain(path[1..].bytes().map(|b| format!("%{b:02X}")))
+            .collect();
+        assert!(
+            encoded.len() > 8192,
+            "the encoded form must exceed the path cap"
+        );
+        assert!(encoded.len() <= super::MAX_CWD_REPORT_BYTES);
+
+        let mut ex = Extractor::default();
+        let chunks = ex.feed(format!("\x1b]7;file://{encoded}\x1b\\").as_bytes());
+        assert!(
+            chunks
+                .iter()
+                .any(|c| matches!(c, Chunk::Cwd(p) if *p == path)),
+            "an encoded path inside the path limit must still report"
+        );
+    }
+
+    /// Ordinary cwd reports keep working with the cap in place.
+    #[test]
+    fn cwd_reports_survive_the_conversion_cap() {
+        for (label, input) in [
+            ("OSC 7", &b"\x1b]7;file:///home/me/proj\x1b\\"[..]),
+            ("OSC 9;9", &b"\x1b]9;9;\"/home/me/proj\"\x1b\\"[..]),
+        ] {
+            let mut ex = Extractor::default();
+            assert!(
+                ex.feed(input)
+                    .iter()
+                    .any(|c| matches!(c, Chunk::Cwd(p) if p == "/home/me/proj")),
+                "{label} must still report a cwd"
+            );
+        }
+    }
+
+    /// OSC 133 D reads one integer, so it reads it out of the borrowed bytes.
+    #[test]
+    fn command_end_reports_its_exit_code_without_converting_the_body() {
+        let mut ex = Extractor::default();
+        assert!(
+            ex.feed(b"\x1b]133;D;7\x1b\\")
+                .iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::CommandEnd(Some(7))))),
+            "the exit code must still be parsed"
+        );
+
+        // A body far past any real exit code costs no allocation and yields no
+        // code, rather than being converted whole to find that out.
+        let mut input = b"\x1b]133;D;".to_vec();
+        input.extend(std::iter::repeat_n(0xff, 4096));
+        input.extend_from_slice(b"\x1b\\");
+        let mut ex = Extractor::default();
+        assert!(
+            ex.feed(&input)
+                .iter()
+                .any(|c| matches!(c, Chunk::Prompt(PromptKind::CommandEnd(None)))),
+            "a non-numeric body must report no exit code"
+        );
+    }
+
     /// CAN/SUB must cancel a control string, or the terminal freezes.
     ///
     /// DEC defines `0x18` and `0x1a` as immediate cancellation of any
