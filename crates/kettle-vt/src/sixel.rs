@@ -7,6 +7,14 @@ use crate::image::{ImageData, rgba_bytes};
 
 const MAX_DIM: usize = 8192;
 
+/// Bounding total paint work, not just each repeat.
+///
+/// `!` repeats and `$` carriage returns are each bounded on their own — one
+/// repeat run stops at `MAX_DIM` columns — but nothing stopped a payload from
+/// alternating them. `!8191~$` is seven bytes and paints 8191 columns, so a
+/// 16 MiB DCS drove on the order of 1.9e10 column writes and froze the pane
+/// for minutes. `GraphicsLimits::sixel_column_writes` caps the total.
+
 #[derive(Clone, Copy)]
 struct Rgb(u8, u8, u8);
 
@@ -93,6 +101,8 @@ struct SixelCanvas {
     height: usize,
     budget: GraphicsBudget,
     reservation: Option<GraphicsReservation>,
+    /// Columns painted so far, checked against [`MAX_COLUMN_WRITES`].
+    writes: usize,
 }
 
 impl SixelCanvas {
@@ -105,6 +115,7 @@ impl SixelCanvas {
             height: 0,
             budget,
             reservation: None,
+            writes: 0,
         }
     }
 
@@ -157,7 +168,16 @@ impl SixelCanvas {
 
     /// Paint one 6-pixel sixel column at `(x, band_y)` using the ALLOCATED
     /// stride (`cap_w`), not the logical width.
-    fn put(&mut self, x: usize, band_y: usize, bits: u8, c: Rgb) {
+    ///
+    /// Returns `false` once the image has painted
+    /// `GraphicsLimits::sixel_column_writes` columns, which callers treat like
+    /// any other decode failure.
+    #[must_use]
+    fn put(&mut self, x: usize, band_y: usize, bits: u8, c: Rgb) -> bool {
+        self.writes += 1;
+        if self.writes > self.budget.limits().sixel_column_writes {
+            return false;
+        }
         for r in 0..6 {
             if bits & (1 << r) != 0 {
                 let y = band_y + r;
@@ -170,6 +190,7 @@ impl SixelCanvas {
                 }
             }
         }
+        true
     }
 
     /// Compact the used `width × height` region (stride `cap_w`) into a tight
@@ -277,7 +298,9 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                             if !canvas.ensure(x + 1, band_y + 6) {
                                 return None;
                             }
-                            canvas.put(x, band_y, bits, palette[color]);
+                            if !canvas.put(x, band_y, bits, palette[color]) {
+                                return None;
+                            }
                             x += 1;
                         }
                     }
@@ -317,7 +340,9 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                 if !canvas.ensure(x + 1, band_y + 6) {
                     return None;
                 }
-                canvas.put(x, band_y, bits, palette[color]);
+                if !canvas.put(x, band_y, bits, palette[color]) {
+                    return None;
+                }
                 x += 1;
                 i += 1;
             }
@@ -364,6 +389,38 @@ mod tests {
         assert_eq!(grow_cap(0, 5000), 8192); // smallest pow2 ≥ 5000
         assert_eq!(grow_cap(8192, 8192), 8192);
         assert!(grow_cap(0, MAX_DIM) >= MAX_DIM);
+    }
+
+    /// `$` returns the cursor to column 0 without growing the canvas, so a
+    /// payload can alternate it with `!` repeats and repaint the same band for
+    /// as long as its bytes hold out. Each construct is bounded on its own; the
+    /// product of the two was not. Measured before the aggregate cap, a 2 MiB
+    /// body took 13.3 s, which scales to about 107 s at the 16 MiB sequence
+    /// limit — one `cat` of a hostile file froze the pane for minutes.
+    #[test]
+    fn alternating_repeat_and_carriage_return_cannot_paint_forever() {
+        let limits = crate::GraphicsLimits {
+            sixel_column_writes: 64,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+
+        let mut body = Vec::new();
+        for _ in 0..32 {
+            body.extend_from_slice(b"!8191~$");
+        }
+        assert!(
+            super::decode_with_budget(&body, &budget).is_none(),
+            "a payload past the column-write cap must be refused"
+        );
+
+        // The cap is a ceiling on abuse, not on ordinary images: a small sixel
+        // well inside it still decodes.
+        let small = b"#0;2;100;0;0~~~~";
+        assert!(
+            super::decode_with_budget(small, &budget).is_some(),
+            "an image inside the cap must still decode"
+        );
     }
 
     /// A long digit run in any numeric param must not
