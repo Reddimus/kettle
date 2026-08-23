@@ -2212,6 +2212,40 @@ fn pick_light_dark_target(current: &str, light: &str, dark: &str) -> Option<Stri
     }
 }
 
+/// The hint winit gets at window creation, which on macOS is not the hint the
+/// window ends up with.
+///
+/// macOS gets `None` here and picks its appearance up later, from
+/// [`native_theme_sync_is_due`]. winit applies a creation-time hint as an
+/// `NSWindow` appearance override before AppKit has built the titlebar's
+/// container view, and the native material view kettle adds to the frame view
+/// right afterwards then locks in the container-less layout: AppKit centres
+/// the title over the 72pt traffic-light cluster instead of the caption, so
+/// `~ — kettle` is drawn across the red and yellow buttons and clipped at the
+/// window edge (Reddimus/kettle#251).
+///
+/// Every other platform still seeds the caption at creation, where it costs
+/// nothing and avoids a first-frame flash.
+///
+/// Pure — unit-testable without a window.
+fn creation_theme_hint(hint: Option<WindowTheme>, is_macos: bool) -> Option<WindowTheme> {
+    if is_macos { None } else { hint }
+}
+
+/// Whether this window may be handed the native theme hint yet.
+///
+/// macOS waits until the window is on screen and has been the key window,
+/// which is when AppKit builds its titlebar container. Applying the appearance
+/// before that leaves the window permanently without a caption — removing the
+/// material view again does not bring it back — so a window that is never
+/// focused keeps the system appearance rather than a broken caption. See
+/// [`creation_theme_hint`].
+///
+/// Pure — unit-testable without a window.
+fn native_theme_sync_is_due(window_is_key: bool, is_macos: bool) -> bool {
+    !is_macos || window_is_key
+}
+
 /// v2.34.0: decide the native window-theme hint (winit
 /// `WindowAttributes::preferred_theme` / `Window::set_theme`) so the OS
 /// titlebar — the Windows DWM caption, the Wayland Adwaita CSD frame —
@@ -5697,14 +5731,6 @@ pub struct App {
     gpu_incident_started_for_loss: bool,
     /// True once recovery had to fall back to software rendering.
     gpu_software_fallback: bool,
-    /// v2.34.0: the last native window-theme hint pushed to every window via
-    /// `Window::set_theme` (None = never synced). The hint keeps the OS
-    /// titlebar — Windows DWM caption, Wayland Adwaita CSD — matching the
-    /// active palette. Cached so the redraw-time check is a compare, and
-    /// `set_theme` only fires when the answer actually changes; a lazy sync
-    /// at redraw (vs. per-mutation-site calls) can't drift when a new
-    /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
-    native_theme_synced: Option<Option<WindowTheme>>,
     /// Last palette variant installed as the live Windows/X11 window icon.
     /// macOS and Wayland ignore this winit hook and use their bundle/desktop
     /// assets, but keeping one lazy theme-sync path makes native platforms that
@@ -6618,7 +6644,6 @@ impl App {
             gpu_incident: None,
             gpu_incident_started_for_loss: false,
             gpu_software_fallback: false,
-            native_theme_synced: None,
             window_icon_dark_synced: None,
             pending_window_closes: std::collections::BTreeSet::new(),
             quit_requested: false,
@@ -16429,22 +16454,32 @@ impl App {
     /// schedule, OS auto-switch) without each needing to remember a call.
     /// `ws` is the checked-out window (see the `windows` field contract);
     /// the map holds only the others during dispatch.
-    fn maybe_sync_native_theme(&mut self, ws: &WindowState) {
+    fn maybe_sync_native_theme(&mut self, ws: &mut WindowState) {
         let hint = self.native_theme_hint();
-        if self.native_theme_synced != Some(hint) {
-            self.native_theme_synced = Some(hint);
-            for w in std::iter::once(ws)
-                .chain(self.windows.values())
-                .filter_map(|s| s.window.as_ref())
+        // Tracked per window, not once for the process: on macOS a window can
+        // only take the hint after AppKit has built its caption, so windows
+        // reach that point at different times and a window opened later still
+        // has to be told. See `native_theme_sync_is_due`.
+        for state in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            let Some(w) = state.window.as_ref() else {
+                continue;
+            };
+            if state.native_theme_synced == Some(hint)
+                || !native_theme_sync_is_due(
+                    state.window_shown && w.has_focus(),
+                    cfg!(target_os = "macos"),
+                )
             {
-                w.set_theme(hint);
+                continue;
             }
+            w.set_theme(hint);
+            state.native_theme_synced = Some(hint);
         }
         let icon_dark = self.cfg.theme.is_dark();
         if self.window_icon_dark_synced != Some(icon_dark) {
             self.window_icon_dark_synced = Some(icon_dark);
             let icon = load_window_icon(icon_dark);
-            for w in std::iter::once(ws)
+            for w in std::iter::once(&*ws)
                 .chain(self.windows.values())
                 .filter_map(|s| s.window.as_ref())
             {
@@ -23126,7 +23161,10 @@ impl App {
             // v2.34.0: seed the native titlebar (Windows DWM caption, Wayland
             // Adwaita CSD) to match the active palette from the first frame;
             // runtime changes go through `maybe_sync_native_theme`.
-            .with_theme(self.native_theme_hint());
+            .with_theme(creation_theme_hint(
+                self.native_theme_hint(),
+                cfg!(target_os = "macos"),
+            ));
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         {
             // Wayland implements this through KWin's blur protocol. Other
@@ -38087,6 +38125,52 @@ mod tests {
         let single = vec!["only".to_string()];
         assert_eq!(pick_next_profile(Some("only"), &single, true), "only");
         assert_eq!(pick_next_profile(Some("only"), &single, false), "only");
+    }
+
+    /// #251: on macOS the titlebar theme must not be seeded at window
+    /// creation. winit turns a creation-time hint into an `NSWindow`
+    /// appearance override before AppKit has built the titlebar's container
+    /// view, and the native material view kettle adds to the frame view right
+    /// afterwards then locks in the container-less layout — AppKit centres the
+    /// title over the traffic lights, and nothing recovers it for the life of
+    /// the window. The appearance goes on once the window is the key window
+    /// instead. Layout itself is only checkable live, on a real desktop; this
+    /// pins the policy and the wiring that carry it.
+    #[test]
+    fn macos_applies_the_titlebar_theme_after_the_window_is_up() {
+        use super::{WindowTheme, creation_theme_hint, native_theme_sync_is_due};
+        for hint in [None, Some(WindowTheme::Light), Some(WindowTheme::Dark)] {
+            assert_eq!(
+                creation_theme_hint(hint, false),
+                hint,
+                "every other platform still seeds the caption at creation"
+            );
+            assert_eq!(
+                creation_theme_hint(hint, true),
+                None,
+                "macOS must reach the window with no appearance override"
+            );
+        }
+        // The deferral is macOS-only, and there it waits for the key window.
+        assert!(native_theme_sync_is_due(false, false));
+        assert!(native_theme_sync_is_due(true, false));
+        assert!(!native_theme_sync_is_due(false, true));
+        assert!(native_theme_sync_is_due(true, true));
+
+        // Policy alone does not fix anything if the call sites drop it.
+        let src = production_source();
+        assert!(
+            src.contains(".with_theme(creation_theme_hint("),
+            "window creation must route its theme hint through creation_theme_hint"
+        );
+        assert!(
+            src.contains("state.window_shown && w.has_focus()"),
+            "the deferred apply must wait for a shown, key window"
+        );
+        assert!(
+            src.contains("state.native_theme_synced = Some(hint)"),
+            "the applied hint must be tracked per window, not once per process"
+        );
     }
 
     /// v2.34.0: `native_theme_hint` is the pure policy behind the native

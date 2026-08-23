@@ -50,17 +50,20 @@ tracked here so they are not lost.
 
 ## Found by the 3.2.0 appearance gate
 
-- **Light themes draw the macOS window title through the traffic lights**
-  ([#251](https://github.com/Reddimus/kettle/issues/251)). The title lands at the
-  far left of the titlebar, over the red and yellow buttons, with its leading
-  characters clipped outside the window. `Alabaster`, `3024 Day` and `Adwaita`
-  reproduce it; `TokyoNight` does not. Not a regression — the shipped 3.1.1
-  bundle does the same — and not a stale frame, since it survives a full-screen
-  re-layout. `apply_macos_window_chrome` only sets
-  `with_titlebar_transparent(false)`, so the placement comes out of the
-  `NSWindow.appearance` switch that `with_theme` performs rather than out of any
-  drawing this repo does, which is why it is filed rather than patched.
-  [`APPEARANCE-GATE.md`](APPEARANCE-GATE.md) has the pixel evidence.
+- **~~Light themes draw the macOS window title through the traffic lights~~ —
+  fixed** ([#251](https://github.com/Reddimus/kettle/issues/251)). Filed during
+  the 3.2.0 gate on the theory that the placement came out of AppKit's
+  appearance switch rather than out of code this repo owns. That was wrong.
+  Dumping the `NSThemeFrame` subviews showed the two cases are structurally
+  different: a dark window has an `NSTitlebarContainerView`, a light one has
+  loose `_NSThemeWidget`s and a title field at x = -10, which is
+  `(72 - 92) / 2` — AppKit centring the title over the traffic-light cluster
+  because there is no caption to centre it in. kettle's own material view,
+  added to the frame view just after winit applies the creation-time appearance
+  override, is what stops the caption being built. Fixed by letting macOS
+  windows reach the screen with no override and applying the hint once the
+  window is key. [`APPEARANCE-GATE.md`](APPEARANCE-GATE.md) has the pixel
+  evidence and the before/after.
 
 ## Terminal / protocol
 
