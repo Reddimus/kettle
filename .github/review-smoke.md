@@ -5,3 +5,5 @@ This temporary documentation change verifies that advisory pull request review s
 This revision verifies that review starts again when the pull request head changes.
 
 This final revision verifies the refreshed automatic-review registration.
+
+This repository-specific revision verifies the personal-only review scope.
