@@ -58,6 +58,9 @@ treatment and icon details that unit and image tests cannot establish:
   space; and the `>_` mark remains centered and legible at normal and magnified
   Dock sizes.
 
+Record each run in [`APPEARANCE-GATE.md`](APPEARANCE-GATE.md), including the
+checks that did not run and why.
+
 The package compiles `packaging/macos/AppIcon.icon` through Xcode's asset
 pipeline with a macOS 11 deployment target. The emitted asset catalog and loose
 fallback must be present before the app is signed. Record an unavailable macOS

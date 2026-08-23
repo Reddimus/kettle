@@ -48,6 +48,20 @@ tracked here so they are not lost.
   scrollable vertical list reusing the context-menu panel machinery (also makes
   room for per-row keybind hints).
 
+## Found by the 3.2.0 appearance gate
+
+- **Light themes draw the macOS window title through the traffic lights**
+  ([#251](https://github.com/Reddimus/kettle/issues/251)). The title lands at the
+  far left of the titlebar, over the red and yellow buttons, with its leading
+  characters clipped outside the window. `Alabaster`, `3024 Day` and `Adwaita`
+  reproduce it; `TokyoNight` does not. Not a regression — the shipped 3.1.1
+  bundle does the same — and not a stale frame, since it survives a full-screen
+  re-layout. `apply_macos_window_chrome` only sets
+  `with_titlebar_transparent(false)`, so the placement comes out of the
+  `NSWindow.appearance` switch that `with_theme` performs rather than out of any
+  drawing this repo does, which is why it is filed rather than patched.
+  [`APPEARANCE-GATE.md`](APPEARANCE-GATE.md) has the pixel evidence.
+
 ## Terminal / protocol
 
 - **Kitty graphics acknowledgement/query response path.** Immediate
