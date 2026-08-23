@@ -1,37 +1,19 @@
-//! kettle configuration: Ghostty-compatible `key = value` config, the bundled
-//! Ghostty theme set (TokyoNight Night default), the embedded Nerd Font,
-//! Terminator-compatible keybindings, and the fuzzy matcher / command-palette
-//! infrastructure the SSH launcher (Ctrl+Shift+S) and command palette
-//! (Ctrl+Shift+K) reuse.
+//! Kettle's configuration: Ghostty-compatible `key = value` files, the bundled
+//! Ghostty theme set with TokyoNight Night as the default, the embedded Nerd
+//! Font, and Terminator-compatible keybindings.
 //!
-//! Modules (all `pub` except `theme_filter`):
-//! - [`parse`] — Ghostty-syntax tokenizer: one `key = value` per line,
-//!   first `=` splits, full-line `#` comments only, BOM-strip, empty-
-//!   value-resets semantics. The single source of truth for *what* a
-//!   config file is.
-//! - [`color`] — `Rgb` + parser accepting `#rrggbb` / `#rgb` / `0xRRGGBB`
-//!   / X11 color names.
-//! - [`theme`] — bundled-theme set baked in at build time via the
-//!   `theme_filter` skip list; `Theme::by_name` for case-insensitive
-//!   lookup, `Theme::find_name` for canonical-form rewriting,
-//!   `Theme::cycle` for runtime forward/back navigation.
-//! - [`keybinds`] — `Action` enum, `Trigger` (modifiers + key), parser
-//!   (accepts `win`/`meta`/`logo` / `cmd` / `super` Super-key aliases
-//!   and rejects typo'd modifiers), default Terminator-compatible
-//!   bindings, `apply_keybind` for user overrides, `describe` for
-//!   `--list-keybinds`.
-//! - [`palette`] — command-palette registry: friendly label + Action
-//!   pairs the UI fuzzy-ranks via [`fuzzy`].
-//! - [`fuzzy`] — dependency-free subsequence-with-bonuses ranker;
-//!   `score(pattern, candidate)` + `best(pattern, items, key)`. Used by
-//!   palette and SSH launcher.
-//! - [`font`] — embedded JetBrains Mono Nerd Font (`FAMILY` + `all()`
-//!   font-face bytes for `cosmic-text` loading).
-//! - [`template`] — `{title}` / `{cwd}` / `{tab}` placeholder substitution
-//!   for `window-title-format` / `tab-format`.
-//! - `theme_filter` (private) — filter for what counts as a real theme
-//!   file under `assets/themes/`; shared between this crate and
-//!   `build.rs` via `include!`.
+//! Every module below documents itself, so this header does not repeat them.
+//! Two things are worth knowing first, because neither is visible from inside
+//! a single module.
+//!
+//! `theme_filter` is private and shared with `build.rs` through `include!`.
+//! The build script bakes the theme set in at compile time, so it and this
+//! crate have to agree on what counts as a theme file under `assets/themes/`.
+//! Change the filter in one place and the other silently stops matching.
+//!
+//! [`fuzzy`] has no dependencies and two callers that look unrelated: the
+//! command palette (Ctrl+Shift+K) and the SSH launcher (Ctrl+Shift+S). A
+//! change to its scoring moves the ranking in both.
 
 pub mod color;
 pub mod font;

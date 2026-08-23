@@ -1,20 +1,21 @@
-//! SCM_RIGHTS file-descriptor passing over Unix sockets, built for
-//! Terminator parity (detachable tabs, Bucket-D, phase 3 of
-//! docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md). Used by the cross-window
-//! tab-handoff path (docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md phases 7+8):
+//! SCM_RIGHTS file-descriptor passing over Unix sockets.
+//!
+//! This is what lets a tab move between windows that are different processes.
+//! The PTY stays open the whole time; its descriptors are handed across rather
+//! than reopened, so the shell never notices.
 //!
 //!   source process → SerializedTab + raw PTY fds
 //!                 → send_fds over unix socket
 //!   target process ← recv_fds over unix socket
 //!                 ← deserialize_tab + adopt fds as Pane PTYs
 //!
-//! Unix-only by design (Linux + macOS + BSDs). Windows + Wayland
-//! get the keyboard-driven fallback (`Action::MoveTabToNewWindow`)
-//! instead.
+//! Unix only, deliberately: Linux, macOS, and the BSDs. Windows and Wayland get
+//! the keyboard-driven `Action::MoveTabToNewWindow` instead, which opens a new
+//! tab rather than moving the running one.
 //!
-//! The actual cross-process IPC handshake + auth + connection
-//! lifecycle is phases 6+7+8 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md;
-//! this module is the pure fd-passing primitive those phases compose.
+//! Only the transfer lives here. The handshake, authentication, and connection
+//! lifecycle around it are described in
+//! `docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`.
 
 #![allow(dead_code)]
 
