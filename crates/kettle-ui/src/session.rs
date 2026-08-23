@@ -696,13 +696,23 @@ pub(crate) fn stash_unrestorable_session(path: &std::path::Path, reason: &str) {
             .map(|duration| duration.as_secs())
             .unwrap_or(0)
     ));
-    log::warn!(
-        "session at {} could not be restored ({reason}); keeping it at {} so the \
-         next save cannot overwrite it",
-        path.display(),
-        destination.display()
-    );
-    let _ = std::fs::rename(path, destination);
+    match std::fs::rename(path, &destination) {
+        Ok(()) => log::warn!(
+            "session at {} could not be restored ({reason}); kept at {} so the \
+             next save cannot overwrite it",
+            path.display(),
+            destination.display()
+        ),
+        // Saying "kept at ..." when the rename failed would be worse than
+        // saying nothing: the original is still in place and the next save
+        // will overwrite it, which is exactly what the reader would believe
+        // had been prevented.
+        Err(error) => log::error!(
+            "session at {} could not be restored ({reason}) and could not be moved \
+             aside ({error}); the next save will overwrite it",
+            path.display()
+        ),
+    }
 }
 
 fn stash_oversize_session(path: &std::path::Path, size: u64, limit: u64) {
@@ -755,6 +765,43 @@ mod tests {
             b"{\"windows\":[]}",
             "the stash keeps the bytes verbatim"
         );
+    }
+
+    /// A rename that fails must leave the original alone.
+    ///
+    /// This pins the safe half. The other half of that fix, that the log stops
+    /// claiming the file was kept when the move failed, is not covered here:
+    /// asserting on log output would need a capture layer this crate does not
+    /// have, and a test that cannot fail is worse than none. The claim mattered
+    /// because it is worse than silence, telling the reader their session was
+    /// preserved while the next save is about to overwrite it.
+    #[cfg(unix)]
+    #[test]
+    fn a_stash_that_cannot_move_the_file_leaves_it_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Root ignores the mode bits, so the setup cannot be arranged there.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: as root a read-only directory still permits rename");
+            return;
+        }
+        let temp = kettle_test_support::private_tempdir("kettle-session-stashfail-");
+        let holder = temp.path().join("holder");
+        std::fs::create_dir(&holder).unwrap();
+        let path = holder.join("session.json");
+        std::fs::write(&path, b"keep me").unwrap();
+        // Renaming an entry needs write permission on its directory.
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        super::stash_unrestorable_session(&path, "some reason");
+        let still_there = path.exists();
+        let _ = std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700));
+
+        assert!(
+            still_there,
+            "a failed move must leave the original in place"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
     }
 
     /// Stashing something that is not there must not invent a file.

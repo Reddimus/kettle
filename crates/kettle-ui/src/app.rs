@@ -5659,6 +5659,13 @@ fn ctl_input_error(result: PaneInputResult) -> Option<(&'static str, &'static st
 
 pub struct App {
     cfg: Config,
+    /// The file this launch's session was read from, if any.
+    ///
+    /// Held so a restore that fails can move that exact file aside. It is not
+    /// recoverable later: `session_write_target` decides where a *save* goes
+    /// from state this never sees, and a one-shot tab handoff is deleted as it
+    /// is read.
+    restore_source: Option<std::path::PathBuf>,
     /// C1 (multi-window foundation): all per-window state, keyed by the
     /// window's stable sequence number (`WindowState::seq`, 1-based, never
     /// reused). BTreeMap so iteration order is deterministic (window 1, 2,
@@ -6597,6 +6604,7 @@ impl App {
             };
         let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
         let mut app = App {
+            restore_source: None,
             cfg: initial_cfg,
             // Assume writable; `resumed` clears it when a launch override
             // means the named layout was never loaded.
@@ -24722,13 +24730,16 @@ impl App {
     /// replaced by a single fresh tab before the user has finished looking at
     /// the window.
     fn stash_unrestorable_session(&self, reason: &str) {
-        let path = match self.startup.layout.as_deref() {
-            Some(name) => crate::session::Session::path_for_layout(name),
-            None => crate::session::Session::path(),
+        // The path this session was READ from, not a guess at where the next
+        // save would go. Those are not the same question: `session_write_target`
+        // routes on the snapshot being empty and on whether a named layout is
+        // writable, and a `--tab-handoff` restore has no durable file at all.
+        // Re-deriving it risked moving a file we never loaded.
+        let Some(path) = self.restore_source.as_deref() else {
+            log::warn!("session could not be restored ({reason}); it had no file to keep");
+            return;
         };
-        if let Some(path) = path {
-            crate::session::stash_unrestorable_session(&path, reason);
-        }
+        crate::session::stash_unrestorable_session(path, reason);
     }
 
     fn load_startup_session(&mut self) -> Option<crate::session::Session> {
@@ -24783,11 +24794,20 @@ impl App {
             }
         }
 
+        // Record where the session came from as it is loaded. A rejected
+        // restore has to move that exact file aside, and nothing downstream can
+        // work it out afterwards: `session_write_target` routes on things this
+        // function never sees, and a one-shot tab handoff has no durable file
+        // by the time anyone asks.
         if let Some(path) = self.startup.tab_handoff.as_deref() {
+            // Deliberately not recorded: `load_tab_handoff` deletes the file as
+            // it reads, so there is nothing left to keep.
             crate::session::Session::load_tab_handoff(path)
         } else if let Some(name) = self.startup.layout.as_deref() {
+            self.restore_source = crate::session::Session::path_for_layout(name);
             crate::session::Session::load_layout(name)
         } else if should_restore_session(self.startup.restore, self.cfg.restore_session) {
+            self.restore_source = crate::session::Session::path();
             crate::session::Session::load()
         } else {
             None
