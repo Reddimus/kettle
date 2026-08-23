@@ -1223,7 +1223,14 @@ pub fn parse_trigger(s: &str) -> Option<Trigger> {
             }
             // GTK's accelerator parser accepts `Ctl` as well as `Ctrl` and
             // `Control`, and Terminator configs are written by GTK.
-            "ctrl" | "control" | "ctl" => {
+            //
+            // `Primary` is GTK's portable spelling, and it is what its own
+            // documentation tells people to write. On the Linux desktops
+            // Terminator runs on it means Control, so that is what a chord
+            // copied out of one of those configs meant when the user wrote it.
+            // Mapping it to Control everywhere keeps the binding they had,
+            // rather than moving it to a different key on one platform.
+            "ctrl" | "control" | "ctl" | "primary" => {
                 mods |= Mods::CTRL;
                 true
             }
@@ -1679,6 +1686,17 @@ mod tests {
         assert_eq!(parse_trigger("logo+t"), Some(s_t));
         // Case-insensitive (`Ctrl` / `WIN` / `Cmd`).
         assert_eq!(parse_trigger("WIN+T"), Some(s_t));
+        // GTK's portable spelling, which is what its own docs tell people to
+        // write and what a Terminator config copied off a Linux desktop
+        // contains. It used to fall through to parse_key and silently degrade
+        // `<Primary>t` to a bare `t`.
+        let c_t = Trigger::new(Mods::CTRL, Key::Char('t'));
+        assert_eq!(parse_trigger("primary+t"), Some(c_t));
+        assert_eq!(parse_trigger("<Primary>t"), Some(c_t));
+        assert_eq!(
+            parse_trigger("<Primary><Shift>t"),
+            Some(Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('t')))
+        );
         // Multi-modifier still works (regression).
         assert_eq!(
             parse_trigger("ctrl+shift+c"),
