@@ -12,8 +12,8 @@
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
 Tier-1 targets are required before a release can publish. Linux aarch64 is
-cross-built and package/ABI validated on x86_64 CI; a Parallels Ubuntu ARM
-guest supplies additional native build, PTY, software/virtual-GPU, and live-UI
+cross-built and package/ABI validated on x86_64 CI; the direct QEMU/HVF Ubuntu
+ARM guest supplies additional native build, PTY, software-GPU, and live-UI
 evidence, but is a manual check rather than a release gate. Every archive has a
 SHA-256 sidecar; update metadata for every self-updating platform is
 additionally signed by a dedicated Ed25519 release key. Tier-2 targets have no prebuilt binary;

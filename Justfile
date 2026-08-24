@@ -374,6 +374,16 @@ shell-integration-check:
 shell-integration-check:
     python scripts/check-shell-integration.py
 
+# Exercise the macOS QEMU launcher with a fake executable so CI can verify its
+# network boundary without booting or reading the private guest disk.
+[unix]
+vm-launcher-test:
+    python3 scripts/test-vm-launcher.py
+
+[windows]
+vm-launcher-test:
+    python scripts/test-vm-launcher.py
+
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
 # measurements cannot count as competitive evidence. The fixture is GUI-free
 # and portable even though the comparator it guards is macOS-specific.
@@ -391,7 +401,7 @@ macos-compare-score-self-test:
 # it before every commit. It does NOT cover the packaging/installer/
 # update-manifest/GPU-render checks ci.yml also runs — see
 # `gauntlet-full` below for those.
-gauntlet: live-ui-helper-selftest shell-integration-check
+gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
     # Feature unification hides a crate that leans on an optional dependency,
