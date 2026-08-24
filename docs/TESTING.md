@@ -1195,7 +1195,7 @@ python3 scripts/test-install-online.py
 
 The current suites cover ten signed-update-manifest cases, six exact
 draft-release cases, two release-preparation cases, seventeen package-manifest
-cases (with platform-dependent skips), and fifteen POSIX online-installer
+cases (with platform-dependent skips), and seventeen POSIX online-installer
 cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
 sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
 name/size/SHA-256 binding, bounded release-document updates, immutable archive
@@ -1235,7 +1235,7 @@ Ed25519 secret and read-only repository permission, while the publisher has
 repository write permission and no signing secret. The publisher must
 re-verify the signature, bind every local archive back to the canonical signed
 manifest, regenerate package metadata, and verify the exact remote draft before
-making it public. Run all four fixture suites after changing either job,
+making it public. Run all five fixture suites after changing either job,
 installer parsing, archive handling, or release metadata.
 
 ## Manual / interactive checks

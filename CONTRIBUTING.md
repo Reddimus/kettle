@@ -287,7 +287,8 @@ Flow:
    `main` or a dirty tree, and rejects a missing CHANGELOG section,
    an existing tag, or a non-semver VERSION. On success it leaves a
    single signed `release: vX.Y.Z` commit bumping
-   Cargo.toml/Cargo.lock/flake.nix/README/docs.
+   `Cargo.toml`, `Cargo.lock`, `flake.nix`, `docs/INSTALL.md`, and
+   `docs/VERSION-HISTORY.md`.
 4. Push the branch, open a PR titled `release: vX.Y.Z`, wait for
    the required checks, and merge (merge commit, matching the
    repo's history).
