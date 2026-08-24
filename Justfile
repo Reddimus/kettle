@@ -240,6 +240,13 @@ update-manifest-test:
 release-assets-test:
     python3 scripts/test-verify-release-assets.py
 
+# Execute release.sh against a disposable Git repository. The fixture pins the
+# exact live-document anchors and proves historical tag/download references are
+# immutable across a version bump.
+[unix]
+release-script-test:
+    python3 scripts/test-release.py
+
 # Hermetic unit tests for scripts/package-manifest.py (the inner
 # release-tarball manifest generator/verifier). Mirrors CI's
 # Linux-only "Inner package manifest generator and verifier" step.
@@ -346,9 +353,9 @@ gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
 # pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
-gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that

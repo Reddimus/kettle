@@ -234,6 +234,9 @@ jobs:
       - name: Exact draft-release asset verifier
         if: runner.os == 'Linux'
         run: python3 scripts/test-verify-release-assets.py
+      - name: Release preparation script
+        if: runner.os == 'Linux'
+        run: python3 scripts/test-release.py
       - name: Inner package manifest generator and verifier
         # Extraction is a native filesystem security boundary. Run its portable
         # fixtures on every runner so macOS aliases and Windows path semantics

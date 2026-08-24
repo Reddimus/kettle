@@ -1188,17 +1188,20 @@ the Rust updater tests:
 ```sh
 python3 scripts/test-update-manifest.py
 python3 scripts/test-verify-release-assets.py
+python3 scripts/test-release.py
 python3 scripts/test-package-manifest.py
 python3 scripts/test-install-online.py
 ```
 
-The current suites cover nine signed-update-manifest cases, six exact
-draft-release cases, seventeen package-manifest cases (with platform-dependent
-skips), and fifteen POSIX online-installer cases. They pin the checked-in Ed25519
-trust root, canonical manifest bytes and sidecars, no-follow same-handle
-artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
-archive structure and extraction, modern no-downgrade behavior, compatible
-legacy sidecars, and hostile archive/network/parser fixtures.
+The current suites cover ten signed-update-manifest cases, six exact
+draft-release cases, two release-preparation cases, seventeen package-manifest
+cases (with platform-dependent skips), and fifteen POSIX online-installer
+cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
+sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
+name/size/SHA-256 binding, bounded release-document updates, immutable archive
+references, bounded archive structure and extraction, modern no-downgrade
+behavior, compatible legacy sidecars, and hostile archive/network/parser
+fixtures.
 On macOS the signed-update suite also opens disposable keychains whose paths
 contain quotes and backslashes, then proves the native Security.framework
 helper's prepend, de-duplication, removal, and empty-list transformations
