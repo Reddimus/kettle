@@ -52,7 +52,6 @@ unrelated fixes.
 * Add CPU and memory widgets to the status bar without polling on the render
   path.
 * Add a native macOS menu bar.
-* Add a signed Windows MSI installer.
 
 ## Packaging and distribution
 
@@ -61,13 +60,19 @@ unrelated fixes.
   release cycle.
 * Keep installer, updater, signature, and rollback checks fail-closed.
 
+## Retired platform work
+
+The signed Windows MSI and its code-signing certificate were removed from the
+roadmap when Windows distribution support was scheduled to end with 3.3.0.
+Version 4.0.0 keeps Windows only as a compile and regression CI leg; it does not
+publish a Windows archive or installer.
+
 ## Upstream blockers
 
 * The font stack still carries `fontdb 0.23` through `cosmic-text 0.19`.
   `fontdb 0.24` removes the older parser dependency, but the workspace cannot
   adopt it until the text stack publishes a compatible release. Track this in
   issue #36 rather than adding a local fork without a separate design review.
-* Windows MSI signing needs a trusted Windows code-signing certificate.
 
 ## Quality bar
 

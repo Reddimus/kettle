@@ -97,26 +97,13 @@ Each change has the same shape:
    workflows so a stale dependency-ignore entry is caught
    at the local pre-flight. `just gauntlet-strict` chains
    gauntlet + deny + machete for release-cut pre-flight.
-   The CI matrix on `main` runs the same on Linux / macOS / Windows
-   plus a headless GPU smoke under Xvfb on Linux, a `--screenshot`
+   The supported Linux and macOS jobs run the same gate. A retained Windows
+   job compiles and tests portable and conditional code, but does not claim a
+   supported Windows package or installer. CI also runs a headless GPU smoke
+   under Xvfb on Linux, a `--screenshot`
    end-to-end check, a `--screenshot-menu` visual regression, a
    MSRV (Rust 1.89) build verification, and a `cargo audit` advisory
    scan. The local gate must be green before pushing.
-
-   **Windows 11 dev gotcha**: `cargo install <anything>`
-   (and even some `cargo build` steps for crates with `build.rs`)
-   can be blocked by Windows **Smart App Control (SAC)** with the
-   error `An Application Control policy has blocked this file
-   (os error 4551)`. SAC blocks any unsigned `.exe`, and every
-   build-script artifact cargo produces is unsigned. SAC ships
-   enabled by default on clean Win11 installs with Secure Boot on.
-
-   Workaround: disable SAC at **Settings ▸ Privacy & Security ▸
-   Windows Security ▸ App & browser control ▸ Smart App Control ▸
-   Off**. **This is a one-way toggle** — re-enabling requires
-   reinstalling Windows. Required if you want to do Rust dev on
-   Win11. Use winget-installed tools (`winget install Casey.Just`
-   etc.) for signed binaries that bypass SAC.
 
    **Optional pre-commit hook**: `.githooks/pre-commit` runs the
    gate automatically on every `git commit` (skipping doc-only
@@ -307,7 +294,7 @@ Flow:
 5. On synchronized `main`, run `scripts/tag-release.sh X.Y.Z` — it
    re-validates the version/CHANGELOG pairing, creates the signed
    annotated tag `vX.Y.Z`, verifies it, and pushes it.
-6. The release workflow (pretest → per-OS package matrix →
+6. The release workflow (pretest → three-package matrix →
    finalize) builds the platform archives + `.sha256` sidecars,
    Ed25519-signs the update manifest, and publishes the GitHub
    release from a verified draft. Poll it with:
@@ -319,5 +306,6 @@ Patch vs minor vs major: kettle follows semver loosely — a new
 config key or CLI flag is a minor (e.g., v1.7 → v1.8). A bug fix
 without API surface change is a patch (v1.7.1 → v1.7.2). A
 breaking change to the config schema or library surface is a
-major (v1.x → v2.0). kettle has shipped one major to date —
-v2.0.0 (the Windows 11 / PowerShell 7 release).
+major (v1.x → v2.0). Removing the Windows package and update target in
+v4.0.0 is a distribution-breaking change, so it also requires a major release.
+The final Windows-supported release is v3.3.0.

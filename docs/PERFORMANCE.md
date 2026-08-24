@@ -1,5 +1,10 @@
 # Performance
 
+Windows measurements on this page are historical. Kettle 3.3.0 is the final
+Windows-supported release, and the PowerShell benchmark suite is available in
+the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
+Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
+
 ## Unreleased — macOS comparator, first measured standing
 
 The first macOS comparison Kettle has ever had. Windows and Linux comparator
@@ -179,7 +184,7 @@ remotes, direct nonlocal clients, and nested WSL sessions never install a
 misleading host cwd. Split/duplicate reads the latest foreground-shell result
 from this cache instead of scanning on the input path.
 
-## Unreleased -- comparator smoke, four terminals
+## Archived Windows comparator smoke, four terminals
 
 Not release evidence, and the reasons are recorded rather than implied: a
 position-only rotation instead of a Williams square (`-AllowUnbalanced`), four
@@ -303,7 +308,12 @@ best on idle CPU, now leads time-to-window (see the startup section below --
 these suite figures predate that change and are an end-to-end readiness number,
 not time-to-window), and trails on memory.
 
-## Next release — paired six-terminal and physical-display gates
+## Archived Windows six-terminal and physical-display gate
+
+This campaign was designed before Windows support ended. It remains a precise
+record of the intended evidence standard, but it is not a Kettle 4.0 release
+gate and no completed release claim came from it. The contract below retains
+its original present tense so the archived procedure stays exact.
 
 The Windows harness measures Kettle, Windows Terminal, Alacritty, WezTerm, Rio,
 and Tabby in one interleaved session. `-Mode release` is the publication gate;
@@ -484,13 +494,15 @@ any JSON shape are tokenized. Publication accepts only the reviewed fixed
 harness filenames; custom JSON evidence is rejected until its name and schema
 receive an explicit sanitizer review, preventing source filenames from leaking
 user or credential text.
-Exact commands, sample counts, margins, validation steps, and caveats
-are in [`scripts/perf/README.md`](../scripts/perf/README.md).
+Exact historical commands, sample counts, margins, validation steps, and
+caveats are in the
+[`v3.3.0` performance README](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/README.md).
 
-No fresh Windows release comparison is claimed in this section until the full
-suite completes on the stated physical displays. GUI-free PowerShell
-self-tests and manifest smoke runs validate the harness logic, but they do not
-substitute for live GPU, input, or monitor-transition measurements.
+No fresh Windows release comparison is claimed. The full campaign never
+completed on the required physical displays before Windows support ended.
+GUI-free PowerShell self-tests and manifest smoke runs validated the harness
+logic, but they did not substitute for live GPU, input, or monitor-transition
+measurements.
 
 ## v2.25.1 — grid cursor-blink regression fix
 
@@ -574,7 +586,8 @@ pipeline are unchanged, so PTY parsing (the throughput path) is untouched by
 design — and the measurements bear that out.
 
 **Throughput — grid vs legacy, same release binary, both orderings** (Surface
-Book 3, discrete GPU per the live config; `scripts/perf/throughput.ps1`, MB/s,
+Book 3, discrete GPU per the live config; the archived
+[`throughput.ps1`](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/throughput.ps1), MB/s,
 median of 5). Run-to-run variance was ~10 % and the *second* run of each pair was
 always faster regardless of mode (GPU clock warm-up), so the orderings are
 averaged to cancel that bias:
@@ -606,8 +619,11 @@ cell-locked renderer is at parity with the path it replaces.
 
 ## v2.23.x — re-verification + the animated-background idle fix
 
-Re-ran `scripts/perf/perf-all.ps1` against **Alacritty** and **WezTerm**
-(`scripts/perf/score.ps1` is the committed "kettle in the top half" gate).
+Re-ran the archived
+[`perf-all.ps1`](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/perf-all.ps1)
+against **Alacritty** and **WezTerm**. The archived
+[`score.ps1`](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/score.ps1)
+is the committed "kettle in the top half" gate.
 
 **Throughput is unchanged and still leads the dedicated competitors.** The
 v2.23.x changes (the wallpaper render pass, the GPU-default flip) don't touch the
@@ -737,7 +753,9 @@ with a number against it.
 
 ### Input latency
 
-`scripts/perf/latency.ps1` — SendInput a key, poll
+The archived
+[`latency.ps1`](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/latency.ps1)
+uses SendInput to send a key, then polls
 client-only `PrintWindow(PW_RENDERFULLCONTENT)` until the pixels change beyond
 an auto-calibrated blink-noise floor. Capture cost bounds resolution at
 ~5–15 ms, so these are **comparative between terminals captured the same
@@ -751,40 +769,26 @@ capture method) — while kettle, Windows Terminal and Alacritty failed
 the foreground guard, so no cross-terminal comparison is published; that
 needs an interactive session.
 
-### Methodology / reproducing
+### Historical methodology
 
-```pwsh
-pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
-  -Mode release -KettleCandidate current -Label release-candidate
-pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
-  -Mode release `
-  -ResultsDir target/perf-results/release-candidate `
-  -BaselineResultsDir target/perf-results/baseline-previous-release `
-  -RequireLatency -RequireMenuHover -RequireVtebench `
-  -RequireMonitorTransition
-```
+Run the archived PowerShell commands from the
+[`v3.3.0` performance tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf),
+not from a 4.0 checkout.
 
 The prior release baseline must first be acquired and pinned with the
 `-KettleCandidate baseline`, `-KettleExe`, `-SkipKettleBuild`,
 `-ExpectedKettleCommit`, and `-ExpectedKettleSha256` arguments documented in
-[`scripts/perf/README.md`](../scripts/perf/README.md). The orchestrator builds
+the archived `scripts/perf/README.md`. The orchestrator builds
 the current candidate, creates and locks isolated configs, and runs probes in
-the pinned order. Do not replace it with direct probe invocations for release
-evidence. A manifest-only smoke is:
+the pinned order. Do not replace it with direct probe invocations when
+interpreting the historical results. The archived manifest-only mode validated
+discovery and schema paths only. It did not exercise a native GPU window or
+physical-display interaction.
 
-```pwsh
-pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
-  -Mode smoke -ManifestOnly -AllowUnidentifiedDisplay `
-  -Label ("topology-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-```
+### Retired Windows performance gate
 
-That smoke validates discovery and schema paths only. It does not exercise a
-native GPU window or physical-display interaction.
-
-### Current performance gate
-
-New Windows performance work should publish a sanitized bundle derived from a
-clean same-machine release run. The confirmed gate excludes advisory Windows
+The planned Windows performance gate required a sanitized bundle derived from a
+clean same-machine release run. It excluded advisory Windows
 Terminal and uses paired bootstrap intervals against the four isolated peers.
 It requires at least three confirmed primary peer wins, at most one confirmed
 loss, all throughput rounds positive after the 5% margin, bounded drift, both
@@ -890,8 +894,10 @@ reference platforms:
 
 Reproducible:
 - Linux / macOS: `scripts/bench.sh` (GNU `time -f '%e %M'` based).
-- Windows: `scripts/bench.ps1` (`System.Diagnostics.Process`
-  based; uses `PeakWorkingSet64` for peak memory, captured at exit).
+- Windows: the archived `scripts/bench.ps1` from
+  [v3.3.0](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/bench.ps1)
+  (`System.Diagnostics.Process` based; uses `PeakWorkingSet64` for peak memory,
+  captured at exit).
 
 Both scripts build a release binary if one isn't present, then run
 each measurement five times and print the wall-clock + peak-memory
@@ -918,15 +924,16 @@ for each invocation.
 
 > Captured on a Surface Book 3 (Intel Iris Plus Graphics, x64,
 > Windows 11 build 26200) the day the v1.46.0 release was cut (a fixed data
-> point — the current release may differ; re-run `scripts/bench.ps1` for fresh
-> numbers). wgpu
+> point. To reproduce it, use `scripts/bench.ps1` from the
+> [v3.3.0 source tree](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/bench.ps1),
+> not a 4.0 checkout. wgpu
 > picked the **Vulkan** backend (Intel driver, integrated GPU) — the
 > same selection a user with the same hardware would see. Wall-clock
 > via .NET `Process.ExitTime - StartTime`; peak working set sampled
 > at 5ms granularity via `Process.WorkingSet64` polling (the
 > `PeakWorkingSet64` property is documented in .NET but returns 0
-> once the process exits on Win11; see the docstring in
-> `scripts/bench.ps1` for why we poll instead).
+> once the process exits on Win11; see the archived script's docstring for why
+> the harness polls instead).
 
 | Measurement | Value | Notes |
 |---|---:|---|
@@ -1011,32 +1018,25 @@ cargo build --release -p kettle
 `gtime` from `brew install coreutils`). Output goes to stdout; pipe
 to a file or markdown table as you like.
 
-### Windows 11
+### Historical Windows 11 reproduction
 
-```pwsh
-cargo build --release -p kettle
-.\scripts\bench.ps1
-# or via just:
-just bench
-```
+Use the benchmark and instructions from the
+[`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0).
+The Windows script and `just bench` recipe are not present in 4.0.
 
-`scripts/bench.ps1` needs PowerShell 5.1+ (preinstalled on
-Windows 10+) or PowerShell Core 7+. No external dependencies — uses
-the .NET `System.Diagnostics.Process` API directly.
-
-On macOS / Windows expect different numbers from the Linux baseline:
-startup is generally faster on macOS arm64, the headless GPU path
-uses Metal / DX12 instead of software-Vulkan, and the binary size
-differs because the universal2 macOS build is fatter.
+On macOS expect different numbers from the Linux baseline: startup is generally
+faster on arm64, the headless GPU path uses Metal instead of software Vulkan,
+and the binary size differs because the universal macOS build contains both
+architectures.
 
 ## Legacy microbench exclusions
 
-The small `scripts/bench.sh` and `scripts/bench.ps1` microbenchmarks in this
-section do not automate live peer windows, display transitions, input latency,
-or GPU presentation. The current Windows release harness described above does:
-it applies one pinned methodology to Kettle, Windows Terminal, Alacritty,
-WezTerm, Rio, and Tabby, and fails closed when configuration, binary, workload,
-or physical-display identity is not comparable.
+The current `scripts/bench.sh` microbenchmark and archived Windows
+`scripts/bench.ps1` do not automate live peer windows, display transitions,
+input latency, or GPU presentation. The retired Windows campaign described
+above applied one pinned methodology to Kettle, Windows Terminal, Alacritty,
+WezTerm, Rio, and Tabby. It never completed the physical-display gate required
+for release evidence.
 
 Still outside the automated release evidence are photodiode-grade
 input-to-photon latency, long-duration GPU atlas/residency behavior, battery

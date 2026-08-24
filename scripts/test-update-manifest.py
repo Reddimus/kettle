@@ -35,13 +35,13 @@ class ManifestTests(unittest.TestCase):
     def test_manifest_is_complete_deterministic_and_hashed(self):
         with tempfile.TemporaryDirectory() as raw:
             assets = self.assets(Path(raw))
-            first = MODULE.build_manifest("v2.35.0", "2026-07-11T00:00:00Z", assets)
+            first = MODULE.build_manifest("v4.0.0", "2026-07-11T00:00:00Z", assets)
             second = MODULE.build_manifest(
-                "v2.35.0", "2026-07-11T00:00:00Z", list(reversed(assets))
+                "v4.0.0", "2026-07-11T00:00:00Z", list(reversed(assets))
             )
             self.assertEqual(first, second)
-            self.assertEqual(first["version"], "2.35.0")
-            self.assertEqual(len(first["assets"]), 4)
+            self.assertEqual(first["version"], "4.0.0")
+            self.assertEqual(len(first["assets"]), 3)
             self.assertTrue(all(len(asset["sha256"]) == 64 for asset in first["assets"]))
 
     def test_existing_signed_manifest_binds_exact_local_artifacts(self):
@@ -49,36 +49,42 @@ class ManifestTests(unittest.TestCase):
             root = Path(raw)
             assets = self.assets(root)
             manifest = MODULE.build_manifest(
-                "v2.43.0",
+                "v4.1.0",
                 "2026-07-26T10:00:00-07:00",
                 assets,
             )
             path = root / "kettle-update-manifest.json"
             canonical = MODULE.encode_manifest(manifest)
             path.write_bytes(canonical)
-            MODULE.verify_manifest(path, "v2.43.0", assets)
+            MODULE.verify_manifest(path, "v4.1.0", assets)
 
             path.write_bytes(canonical[:-1] + b" \n")
             with self.assertRaisesRegex(ValueError, "exactly bind"):
-                MODULE.verify_manifest(path, "v2.43.0", assets)
+                MODULE.verify_manifest(path, "v4.1.0", assets)
 
             path.write_bytes(canonical)
             assets[0][1].write_bytes(b"substituted")
             with self.assertRaisesRegex(ValueError, "exactly bind"):
-                MODULE.verify_manifest(path, "v2.43.0", assets)
+                MODULE.verify_manifest(path, "v4.1.0", assets)
 
     def test_rejects_prerelease_missing_and_misnamed_assets(self):
         with tempfile.TemporaryDirectory() as raw:
             assets = self.assets(Path(raw))
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v2.35.0-rc.1", "now", assets)
+                MODULE.build_manifest("v4.0.0-rc.1", "now", assets)
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v2.35.0", "now", assets[:-1])
+                MODULE.build_manifest("v4.0.0", "now", assets[:-1])
             wrong = list(assets)
             wrong[0] = (wrong[0][0], Path(raw) / "wrong.zip")
             wrong[0][1].write_bytes(b"wrong")
             with self.assertRaises(ValueError):
-                MODULE.build_manifest("v2.35.0", "now", wrong)
+                MODULE.build_manifest("v4.0.0", "now", wrong)
+
+    def test_three_target_manifest_rejects_pre_retirement_releases(self):
+        with tempfile.TemporaryDirectory() as raw:
+            assets = self.assets(Path(raw))
+            with self.assertRaisesRegex(ValueError, "v4.0.0 and later"):
+                MODULE.build_manifest("v3.3.0", "now", assets)
 
     def test_release_generator_matches_shipped_client_artifact_limit(self):
         feed_source = (
@@ -99,7 +105,7 @@ class ManifestTests(unittest.TestCase):
             with oversized.open("wb") as stream:
                 stream.truncate(MODULE.MAX_ARTIFACT_BYTES + 1)
             with self.assertRaisesRegex(ValueError, "outside the accepted range"):
-                MODULE.build_manifest("v2.35.0", "now", assets)
+                MODULE.build_manifest("v4.0.0", "now", assets)
 
     def test_production_trust_root_is_locked_across_release_consumers(self):
         trusted_pem = (ROOT / "packaging" / "update-public.pem").read_text(
@@ -165,7 +171,7 @@ class ManifestTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(
             release_workflow.count("scripts/package-manifest.py extract"),
-            6,
+            4,
         )
         for archive, target in (
             (
@@ -175,10 +181,6 @@ class ManifestTests(unittest.TestCase):
             (
                 "dist/kettle-linux-aarch64.tar.gz",
                 "aarch64-unknown-linux-gnu",
-            ),
-            (
-                "dist/kettle-windows-x86_64.zip",
-                "x86_64-pc-windows-msvc",
             ),
         ):
             self.assertEqual(release_workflow.count(f"--archive {archive}"), 2)
@@ -213,7 +215,7 @@ class ManifestTests(unittest.TestCase):
             "\n  finalize:\n", 1
         )[0]
         self.assertIn("environment: ${{ matrix.environment }}", package)
-        self.assertEqual(package.count("environment: release-build"), 3)
+        self.assertEqual(package.count("environment: release-build"), 2)
         self.assertEqual(package.count("environment: macos-signing"), 1)
         self.assertIn("printf '%s' \"$APPLE_CERT_P12\" | base64 -D", package)
         self.assertIn('-k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"', package)

@@ -28,8 +28,6 @@ body:
         - Linux (X11)
         - Linux (Wayland)
         - macOS
-        - Windows 11
-        - Windows 10
         - Other (specify in the description)
     validations:
       required: true
@@ -38,7 +36,7 @@ body:
     id: os-version
     attributes:
       label: OS version / distro
-      placeholder: "Ubuntu 24.04, macOS 14.5, Windows 11 23H2, …"
+      placeholder: "Ubuntu 24.04, macOS 14.5, Fedora 42, …"
     validations:
       required: false
 

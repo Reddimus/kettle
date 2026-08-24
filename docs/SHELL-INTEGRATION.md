@@ -14,7 +14,11 @@ between commands:
 Marks are parsed out of the PTY stream ahead of the VT engine, so they never
 corrupt the screen even on terminals/apps that don't understand them.
 
-## Automatic integration: default PowerShell only
+## Automatic integration in Windows releases through 3.3.0
+
+Kettle 4.0 and later do not publish Windows builds. This section records the
+automatic PowerShell behavior of releases through 3.3.0. The manual snippets
+below remain supported anywhere the named shell runs.
 
 Since v2.30.0, `shell-integration = on` is the default. Automatic injection is
 currently implemented only when Windows Kettle selects `pwsh` or
@@ -170,9 +174,10 @@ their ordinary Tab behavior.
 The snippets also report the working directory at each prompt. This keeps tab
 titles current and lets new tabs and splits inherit the right directory.
 
-### Windows installer
+### Windows installer through 3.3.0
 
-If you installed via the bundled `install.ps1`, you can let the
+If you still maintain an installation through 3.3.0 made by the bundled
+`install.ps1`, you can let the
 installer wire up `$PROFILE` for you in one go (no manual
 `>> $PROFILE` step needed):
 

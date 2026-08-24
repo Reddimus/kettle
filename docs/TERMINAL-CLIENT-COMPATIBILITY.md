@@ -1,5 +1,9 @@
 # Terminal Client Compatibility
 
+Kettle 4.0 supports Linux and macOS. Windows and WSL paragraphs on this page
+record the final Windows-supported 3.3.0 behavior and retained compatibility
+logic; they do not describe a current package or support commitment.
+
 Kettle transports terminal input and output; Codex CLI and Claude Code own image
 decoding and attachment. Kettle does not add a proprietary image protocol.
 
@@ -261,9 +265,8 @@ see.
   that compile-time option from `tmux -V`. A capable tmux advertises DA1
   feature code `4` to an application inside its pane; tmux 3.6 or newer also
   exposes the direct check `tmux display-message -p '#{sixel_support}'`
-  (`1` means enabled). `just agent-tui-smoke` and
-  `just agent-tui-wsl-smoke` perform the DA1 check on tmux 3.4 and newer and
-  cross-check the format on tmux 3.6 and newer.
+  (`1` means enabled). `just agent-tui-smoke` performs the DA1 check on tmux
+  3.4 and newer and cross-checks the format on tmux 3.6 and newer.
 
   Only after both gates are confirmed, add `sixel` for Kettle's outer terminal
   type (or append `:sixel` to the existing feature entry):

@@ -9,18 +9,12 @@ kettle update --yes       Confirm non-interactively for scripts
 kettle --update           Convenience alias for interactive `kettle update`
 ```
 
-On Windows, use the bare `kettle` command after installation. The installed
-`kettle.com` console launcher makes PowerShell/cmd wait for prompts and return
-the updater's exit code; the Start Menu points directly at no-console
-`kettle.exe`.
-
 There is intentionally no `-u` shorthand: short flags are easy to trigger by
 mistake and are difficult to reserve permanently. Updates never restart running
 windows. Linux commits the replacement immediately and existing processes keep
-their mapped image. Windows retains the authenticated archive and applies it
-from a helper only after every Kettle process has exited.
+their mapped image.
 
-> **Windows bootstrap for v2.35:** releases before v2.35 did not include the
+> **Historical Windows bootstrap for v2.35:** releases before v2.35 did not include the
 > out-of-process helper/run-lock protocol and could not reliably replace a
 > mapped `kettle.exe`. Install v2.35 once with the bundled `install.ps1`; later
 > releases can use `kettle update` without that manual bootstrap.
@@ -29,8 +23,8 @@ from a helper only after every Kettle process has exited.
 
 | Running Kettle | Self-update behavior |
 |---|---|
-| Windows 11 x86_64 installed by the bundled `install.ps1` | Supported |
-| The same Windows executable launched from WSL | Supported through Windows interop |
+| Final Windows-supported 3.3.0 EOL build | No 4.0+ artifact; the check links to the release page instead of offering an in-place update |
+| Older Windows 3.x installation | Update to 3.3.0 first; older binaries cannot display the EOL notice |
 | Ubuntu/Linux x86_64 installed by the bundled `install.sh` or online installer | Supported |
 | Ubuntu/Linux aarch64 installed by the bundled installer | Supported |
 | Local source build (`local-dev` marker) | Refused; rebuild and reinstall from that checkout |
@@ -77,7 +71,9 @@ Refusing those channels prevents the stable updater from replacing a
 source-built binary or rewriting its launcher. Only an extracted release
 tarball or the online installer writes a `stable` marker.
 
-On Windows, the updater writes a schema-3 bounded pending capsule inside the
+The following Windows transaction description is retained as the security
+record for Windows releases through 3.3.0. On Windows, the updater writes a schema-3
+bounded pending capsule inside the
 installer-owned prefix. It contains the exact signed release manifest and
 detached Ed25519 signature, selected asset identity and digest, exact inner
 package manifest, target version, retained archive identity, and copied-helper
@@ -140,11 +136,10 @@ is held.
 
 ## Automatic policy
 
-The default is `auto`: Kettle keeps itself current in the background,
-oh-my-zsh style. It checks at most once per day (tunable), and when a newer
-signed release is found it installs it — applied on Linux immediately (running
-windows keep the old mapped image until they exit) and staged on Windows until
-every Kettle window closes, then used on the next launch. The first launch only
+The default is `auto`: Kettle keeps itself current in the background. It checks
+at most once per day (tunable), and when a newer signed release is found it
+installs it. Linux applies it immediately while running windows keep the old
+mapped image until they exit. The first launch only
 creates the throttle state and performs no network request; the first automatic
 install shows a one-time notification explaining how to opt out.
 
@@ -226,7 +221,7 @@ files, Windows device names, and declared/actual size mismatches are rejected.
 Updates acquire an install-prefix lock and atomically replace each destination
 on its own filesystem.
 
-Linux and Windows update archives contain
+Linux archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
 every regular file to an exact relative path, size, SHA-256, and Unix mode where
 applicable before any replacement is accepted. On Windows, the pending capsule
@@ -336,8 +331,15 @@ only its own target and ignores every other entry.
 
 Windows retirement is the deliberate exception to the usual missing-target
 failure. The final 3.3.0 Windows build accepts that absence only for a signed
-4.0-or-newer release and shows the release page. Missing targets in a 3.x
-manifest, or for any still-supported platform, remain hard errors.
+4.0-or-newer release, declines to install, and shows the release page. Earlier
+3.x clients do not contain that EOL path and must first be updated to 3.3.0.
+Missing targets in a 3.x manifest, or for any still-supported platform, remain
+hard errors.
+
+Cut any later 3.3.x hotfix from the `v3.3.0` tag rather than post-removal
+`main`, and retain the four signed targets: Linux x86_64, Linux aarch64, macOS
+universal, and Windows x86_64. Post-removal release tooling rejects a pre-v4
+manifest containing only the three non-Windows targets.
 
 macOS replaces the whole bundle rather than files inside it. The code signature
 seals `kettle.app` as a unit, so a bundle caught part-way through a file-by-file

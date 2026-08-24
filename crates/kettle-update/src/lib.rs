@@ -47,16 +47,21 @@ pub const SIGNING_CONTEXT: &[u8] = b"kettle-update-manifest-v1\0";
 /// Usually a Rust triple. macOS is the exception: one universal2 archive serves
 /// both architectures, so the manifest names that artifact instead.
 pub const fn current_target() -> Option<&'static str> {
-    // Kettle does not publish a native Windows ARM archive, so production ARM
-    // builds remain intentionally unsupported by the managed updater. The
-    // crate's unit-test harness is different: all Windows transaction and ACL
-    // tests describe the shipped x86_64 package contract and should still run
-    // on an ARM contributor machine. Restrict that substitution to cfg(test),
-    // leaving integration consumers and the built library truthful.
-    if cfg!(all(test, target_os = "windows", target_arch = "aarch64"))
-        || cfg!(all(target_os = "windows", target_arch = "x86_64"))
-    {
+    // Windows was retired in 4.0.0: the release no longer publishes
+    // `kettle-windows-x86_64.zip`, so a production Windows build has no
+    // artifact to update itself with and must report that rather than ask the
+    // feed for a target the manifest no longer names.
+    //
+    // The crate's own unit tests are a different case. Several hundred Windows
+    // transaction and ACL tests describe the package contract that shipped
+    // through 3.x, and they still pass and still guard the code paths that
+    // remain compiled. Restricting the substitution to cfg(test) keeps them
+    // running while leaving the built library, integration tests, and
+    // downstream consumers truthful.
+    if cfg!(all(test, target_os = "windows")) {
         Some("x86_64-pc-windows-msvc")
+    } else if cfg!(target_os = "windows") {
+        None
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("x86_64-unknown-linux-gnu")
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {

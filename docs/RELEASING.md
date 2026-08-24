@@ -13,7 +13,7 @@ flowchart TD
     cut_m --> tag["3 · scripts/tag-release.sh X.Y.Z<br/>git tag -s, verify-tag, push tag only"]
     tag --> gate{"release.yml:<br/>GitHub reports<br/>verification.verified"}
     gate -- "false" --> stop["release fails closed<br/>no artifacts published"]
-    gate -- "true" --> build["test + build 4 packages<br/>each with a SHA-256 sidecar"]
+    gate -- "true" --> build["test + build 3 packages<br/>each with a SHA-256 sidecar"]
     build --> sign["finalizer proves the secret matches<br/>packaging/update-public.pem,<br/>signs the domain-separated manifest"]
     sign --> publish["publish job reverifies size + SHA-256<br/>of the exact remote set, then makes it public"]
 ```
@@ -125,6 +125,16 @@ interval so online Windows clients can receive its end-of-life behavior. Also
 retain a direct manual 3.3.0 download route for clients that missed that window.
 Only then may 4.0 remove the Windows package, installer, and manifest target.
 
+Starting with 4.0.0, release CI keeps only Linux x86_64, Linux aarch64, and
+macOS universal packages. The Windows CI runner remains a portability check for
+retained conditional code; it is not a release package, installer, or supported
+platform claim.
+
+Any later 3.3.x hotfix must branch from the `v3.3.0` tag, not from post-removal
+`main`. It must retain the four-package and four-target contract: Linux x86_64,
+Linux aarch64, macOS universal, and Windows x86_64. Post-removal release tooling
+rejects a pre-v4 manifest that contains only the three non-Windows targets.
+
 ## 2. Merge the signed release-cut pull request
 
 Create `release/vX.Y.Z-cut` from the now-synchronized `main`, then run from the
@@ -227,15 +237,17 @@ signing key, before pushing the new tag.
 
 For a `v*` tag, `.github/workflows/release.yml` first requires a GitHub-verified
 annotated tag pointing at `origin/main` and checks the tag, `Cargo.toml`,
-`flake.nix`, and `CHANGELOG.md` versions. It then tests and builds four packages:
-Linux x86_64, Linux aarch64, macOS universal, and Windows x86_64. Each package
-gets a canonical SHA-256 sidecar. All four are named in the signed update
-manifest; macOS appears as `universal-apple-darwin`, since one archive covers
-both Apple architectures.
+`flake.nix`, and `CHANGELOG.md` versions. It then tests and builds three packages:
+Linux x86_64, Linux aarch64, and macOS universal. Each package gets a canonical
+SHA-256 sidecar. All three are named in the signed update manifest; macOS
+appears as `universal-apple-darwin`, since one archive covers both Apple
+architectures.
 
 The `release-signing` environment supplies `KETTLE_UPDATE_SIGNING_KEY_PEM`. The
 finalizer proves that secret matches `packaging/update-public.pem`, signs the
-domain-separated update manifest, and stages the exact release set. The publish
+domain-separated update manifest, and stages the exact twelve-file release set:
+three packages, their three sidecars, the manifest and signature with their two
+sidecars, plus the rendered Homebrew formula and Arch `PKGBUILD`. The publish
 job reverifies those files, creates or resumes a draft release, uploads and
 checks the exact remote size/SHA-256 set, and only then makes the release public.
 

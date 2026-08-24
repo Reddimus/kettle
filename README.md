@@ -6,9 +6,8 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.89-blue?logo=rust)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Kettle is a GPU-accelerated terminal workspace for macOS, Linux, and
-Windows 11. It includes tabs, splits, search, session restore, themes, and local
-automation.
+Kettle is a GPU-accelerated terminal workspace for macOS and Linux. It includes
+tabs, splits, search, session restore, themes, and local automation.
 
 ![Kettle with a two pane split and the TokyoNight Night theme](docs/images/kettle-hero.png)
 
@@ -21,7 +20,9 @@ Download a package from the
 | --- | --- | --- |
 | Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the command below |
 | macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to Applications |
-| Windows 11 | `kettle-windows-x86_64.zip` | Extract and run `install.ps1` |
+
+Windows support ended with 3.3.0. Archived Windows packages remain attached to
+their historical releases, but 4.0 and later do not ship or update Windows.
 
 Linux installs for the current user under `~/.local`:
 
@@ -56,7 +57,7 @@ the active file and `kettle --check-config` to validate it.
 * GPU rendering, bounded scrollback, search, and inline image protocols
 * An IDE style completion card driven by the shell
 * File drop, copied media paths, and private image or video previews
-* Session restore, recording, SSH profiles, and signed Linux/Windows updates
+* Session restore, recording, SSH profiles, and signed updates
 * A bundled font and more than 500 themes
 * An optional local control API and MCP server, both off by default
 
@@ -68,7 +69,7 @@ the active file and `kettle --check-config` to validate it.
 | Split left or right | `Ctrl+Shift+E` |
 | Split top or bottom | `Ctrl+Shift+O` |
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
-| Directional focus, Linux/Windows | `Alt+Arrow` |
+| Directional focus, Linux | `Alt+Arrow` |
 | Directional focus, macOS | `Ctrl+Cmd+Arrow` |
 | Search | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
@@ -76,7 +77,7 @@ the active file and `kettle --check-config` to validate it.
 | Settings | `Ctrl+,` |
 | Zoom pane | `Ctrl+Shift+X` |
 
-On Linux and Windows, `Alt+Arrow` moves only when a split exists in that
+On Linux, `Alt+Arrow` moves only when a split exists in that
 direction. At an outer edge, the running program receives the chord. macOS
 keeps bare Option available for text entry unless `macos-option-as-alt` is on.
 macOS also provides `Cmd+T`, `Cmd+C/V`, `Cmd+F`, and `Cmd+,`.
@@ -110,8 +111,8 @@ kettle --gpu-info
 See [Configuration](docs/CONFIG.md) for every setting and
 [Settings](docs/SETTINGS.md) for the in-app editor.
 
-Native material is on by default. macOS and Windows use blur at 86% opacity;
-Linux stays at 99% opacity. Set `background-opacity = 1.0` and
+Native material is on by default. macOS uses blur at 86% opacity; Linux stays
+at 99% opacity. Set `background-opacity = 1.0` and
 `window-blur = false` for an opaque window.
 
 ## Clipboard media

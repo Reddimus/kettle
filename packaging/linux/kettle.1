@@ -4,7 +4,7 @@
 .TH KETTLE 1 "2026-07-26" "kettle" "User Commands"
 .
 .SH NAME
-kettle \- fast, cross-platform, GPU-accelerated terminal emulator
+kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
 .
 .SH SYNOPSIS
 .B kettle
@@ -29,7 +29,7 @@ kettle \- fast, cross-platform, GPU-accelerated terminal emulator
 .
 .SH DESCRIPTION
 .B kettle
-is a fast GPU terminal workspace for Linux, macOS, and Windows.
+is a fast GPU terminal workspace for Linux and macOS.
 .PP
 Features include split panes,
 multiple tabs with drag-to-reorder, live tear-off into a new
@@ -298,7 +298,7 @@ config key.
 .B MODE
 is one of
 .BR off ", " read\-only ", or " full .
-The server is a local\-IPC surface (Unix socket / Windows named pipe) that
+The server is a local\-IPC surface over a Unix socket that
 .BR "kettle ctl" ", " "kettle mcp" ", or an AI agent can drive: list panes,"
 read the screen, and (in
 .BR full )
@@ -384,10 +384,8 @@ caption \(em not a per-cell annotation.
 .B \-\-write\-default\-config
 Write the embedded default configuration to the resolved config path, creating
 the parent directory, then exit. Refuses to overwrite an existing file. The
-easiest cross-platform way to bootstrap a config \(em preferred over a shell
-redirect on Windows PowerShell, whose
-.B >
-writes UTF-16.
+preferred way to bootstrap a config without relying on shell redirect
+semantics.
 .TP
 .B \-\-check\-update
 Check the authenticated stable release feed once for a newer kettle version,
@@ -436,11 +434,8 @@ started; a recording error exits with status 125 instead of running unaudited.
 Capture is output-only and stops on a complete asciicast event boundary before
 512 MiB; a later write failure stops the trace without killing the child.
 Piped or redirected stdin bytes are forwarded to the child. An interactive
-terminal stdin is left attached to the caller. Unix and WSL signal a safely
-tracked canonical EOF without closing the bidirectional PTY master. Windows
-ConPTY has no safe input half-close: delimiter-driven input works, but a child
-that waits for EOF must use its own delimiter or
-.BR \-\-timeout .
+terminal stdin is left attached to the caller. Unix signals a safely tracked
+canonical EOF without closing the bidirectional PTY master.
 .TP
 .B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-keys \fIKEYS\fR] [\fB\-\-regex \fIREGEX\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
 Drive a running kettle's agent control server.
@@ -500,14 +495,11 @@ and exits, for CI.
 .TP
 .B kettle update \fR[\fB\-\-yes\fR]
 Download and install the latest authenticated stable release. Supported for
-official installer-owned Windows x86_64 and Linux x86_64/aarch64 layouts; other
-installs are refused with package-manager guidance. Verifies an Ed25519-signed
+official installer-owned Linux x86_64/aarch64 layouts; other installs are
+refused with package-manager guidance. Verifies an Ed25519-signed
 manifest, exact archive size, and SHA-256 before transactional replacement.
-Running windows are not restarted. Windows stages verified files for an
-out-of-process helper that waits for every Kettle process to exit; invalid or
-three-times-failed pending state is quarantined on a best-effort basis so the
-intact old build can start even when evidence cannot be moved. Source and
-dev-record ownership markers are refused. Without
+Running windows are not restarted. Source and dev-record ownership markers are
+refused. Without
 .BR \-\-yes ,
 an interactive confirmation is required.
 .
@@ -515,7 +507,7 @@ an interactive confirmation is required.
 Defaults (every binding remappable via
 .IR ~/.config/kettle/config 's
 .B keybind
-entries). Cmd is the macOS modifier; Ctrl on Linux / Windows.
+entries). Cmd is the macOS modifier; Ctrl on Linux.
 .SS Tabs
 .TP
 .B Ctrl+Shift+T
@@ -554,11 +546,8 @@ close window
 .B F11
 toggle fullscreen
 .PP
-The new-tab button's dropdown lists every detected shell in Windows
-Terminal order \(em PowerShell, Windows PowerShell, Command Prompt,
-WSL distros, Visual Studio 2022 Developer Command Prompt /
-PowerShell (vswhere-detected), Git Bash \(em plus Settings, Command
-palette and About rows; it is always visible on every platform.
+The new-tab button's dropdown lists detected shells plus Settings, Command
+palette, and About rows; it is always visible.
 Menu rows show right-aligned shortcut hints taken from the live
 keybind map.
 .PP
@@ -567,8 +556,7 @@ window in the same process that rides the pointer in the OS's native
 move loop \(em the tab's running programs, PTYs and scrollback move
 untouched, and the window inherits the source window's size. Dropping
 a torn window onto another kettle window's tab bar merges the tab
-there at the marked insertion slot (the dragged window turns
-translucent over the target strip on Windows); dragging a lone-tab
+there at the marked insertion slot; dragging a lone-tab
 window's tab drags the whole window, which is how a torn-off window
 re-docks. Esc before the tear cancels. On Wayland, where clients
 cannot position windows, the tear happens at release instead. The
@@ -591,7 +579,7 @@ auto-split (longest axis)
 focus pane up / down / left / right when a split exists in that
 direction; at an outer edge, send the chord to the terminal program
 instead. A zoom that hides sibling panes keeps the chord as a no-op; a
-one-pane tab passes it through (Linux and Windows; macOS uses
+one-pane tab passes it through (Linux; macOS uses
 Ctrl+Cmd+arrow for pane focus)
 .TP
 .B Ctrl+Shift+N
@@ -757,10 +745,7 @@ Configuration lives at
 so macOS uses the same
 .I ~/.config
 path, not
-.IR ~/Library ),
-or
-.IR %APPDATA%\\kettle\\config
-(Windows). The format uses
+.IR ~/Library ). The format uses
 .RI """ key " = " value """
 lines. A
 .B #
