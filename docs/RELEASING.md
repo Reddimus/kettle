@@ -47,6 +47,12 @@ treatment and icon details that unit and image tests cannot establish:
   strip; return to an opaque surface, leave blur enabled once to confirm it does
   not create a titlebar-only material seam, and switch between a light and dark
   theme to prove the NSWindow background follows palette changes;
+- **start** a window on a light theme rather than toggling into one, with the
+  system in dark mode, and confirm the title sits beside the traffic lights
+  rather than across them. Startup and the runtime toggle apply the appearance
+  at different points and only one of them can lose AppKit's titlebar caption;
+  the toggle passing says nothing about startup, which is how
+  [#251](https://github.com/Reddimus/kettle/issues/251) reached a release;
 - toggle Reduce Transparency while the blurred window is open; the material
   must disappear immediately, the theme background must become opaque, and both
   must return when the setting is restored;
