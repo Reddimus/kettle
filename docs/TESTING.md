@@ -178,10 +178,10 @@ wgpu backend; macOS uses Metal. The native PTY checks also need permission to
 create `/dev/ptmx` children on Unix or a ConPTY on Windows.
 
 Native ARM guest checks complement, but do not replace, the hosted release
-matrix. The Parallels Ubuntu ARM guest can build and run the aarch64 product,
-its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM guest
-can build the complete workspace natively once its Visual Studio ARM64 MSVC and
-LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
+matrix. The direct QEMU/HVF Ubuntu ARM guest can build and run the aarch64
+product, its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM
+guest can build the complete workspace natively once its Visual Studio ARM64
+MSVC and LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
 -host_arch=amd64` (or `Launch-VsDevShell.ps1 -Arch arm64 -HostArch amd64`).
 Visual Studio currently supplies an x64-hosted ARM64 compiler, so `cl.exe`
 runs through Windows ARM's x64 compatibility layer while its objects and the
