@@ -64,7 +64,7 @@ exec qemu-system-aarch64 \
   -drive "if=pflash,format=raw,file=$EFI_VARS" \
   -drive "if=none,id=hd0,file=$DISK,format=qcow2,discard=unmap,cache=writeback" \
   -device virtio-blk-pci,drive=hd0 \
-  -netdev "user,id=net0,hostfwd=tcp::${SSH_PORT}-:22" \
+  -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${SSH_PORT}-:22" \
   -device virtio-net-pci,netdev=net0 \
   -device virtio-serial-pci \
   -chardev "socket,path=$QGA_SOCKET,server=on,wait=off,id=qga0" \
