@@ -39,6 +39,14 @@ from a helper only after every Kettle process has exited.
 | macOS app installed by Homebrew | Refused; run `brew upgrade` |
 | macOS app running translocated from Downloads | Refused; move it to Applications and open it once from there |
 
+Windows 3.3.0 is the final supported Windows release. It retains the installer
+and normal self-update ownership checks so existing clients can reach this EOL
+build. A 3.3.0 client that later sees a signed 4.0-or-newer manifest without the
+`x86_64-pc-windows-msvc` target declines to install and opens a visible path to
+the release page. Earlier Windows clients do not contain that retirement path;
+update them to 3.3.0 while it remains the latest release or install 3.3.0
+manually.
+
 Updating **to** 3.2.0 on macOS has to be done by hand, once. The updater is
 part of 3.2.0, so a 3.1.1 app has no code to run it: it still notices a new
 release and still offers the release page, but it cannot install one. Download
@@ -325,6 +333,11 @@ target name `universal-apple-darwin`. That is not a Rust triple: one
 `lipo`-merged binary serves both architectures, and the manifest needs one
 filename per target. Older clients are unaffected, because each one looks up
 only its own target and ignores every other entry.
+
+Windows retirement is the deliberate exception to the usual missing-target
+failure. The final 3.3.0 Windows build accepts that absence only for a signed
+4.0-or-newer release and shows the release page. Missing targets in a 3.x
+manifest, or for any still-supported platform, remain hard errors.
 
 macOS replaces the whole bundle rather than files inside it. The code signature
 seals `kettle.app` as a unit, so a bundle caught part-way through a file-by-file

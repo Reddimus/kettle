@@ -334,16 +334,27 @@ fn evaluate_manifest(
         return Ok(CheckOutcome::UpToDate { latest });
     }
 
-    let asset = target
-        .map(|target| {
-            manifest
-                .assets
-                .iter()
-                .find(|asset| asset.target == target)
-                .cloned()
-                .ok_or_else(|| UpdateError::MissingTarget(target.to_string()))
-        })
-        .transpose()?;
+    // A manifest that does not name this build's target is the retired-platform
+    // case: Windows stopped being published in 4.0.0, and a 3.x client still
+    // asks for `x86_64-pc-windows-msvc`. Erroring here would reduce that to a
+    // log line and tell the user nothing, so use the same shape a build with no
+    // target at all produces. The newer version is still announced with a
+    // release URL, and only the in-place download is unavailable.
+    // `resolve_asset` below still refuses, so nothing installs without a
+    // signed artifact for this exact target.
+    let asset = match target {
+        None => None,
+        Some(target) => match manifest
+            .assets
+            .iter()
+            .find(|asset| asset.target == target)
+            .cloned()
+        {
+            Some(asset) => Some(asset),
+            None if target == "x86_64-pc-windows-msvc" && latest.major >= 4 => None,
+            None => return Err(UpdateError::MissingTarget(target.to_string())),
+        },
+    };
     let prefix = download_prefix.trim_end_matches('/');
     let download_url = asset
         .as_ref()
@@ -768,6 +779,73 @@ mod tests {
         };
         assert!(update.asset.is_none());
         assert!(update.download_url.is_none());
+    }
+
+    #[test]
+    fn a_retired_target_still_discovers_a_signed_release() {
+        // Windows was retired in 4.0.0, so a client built before that still
+        // asks for a target the manifest no longer names. That must announce
+        // the newer release with its URL rather than failing the check, which
+        // the UI would only log. Reverting to the `ok_or_else(MissingTarget)`
+        // form makes this `unwrap` panic.
+        let mut without_windows = manifest();
+        without_windows.version = "4.0.0".into();
+        without_windows.tag = "v4.0.0".into();
+        without_windows.assets.clear();
+        let outcome = evaluate_manifest(
+            without_windows,
+            "1.0.0",
+            Some("x86_64-pc-windows-msvc"),
+            "https://example.invalid",
+            None,
+        )
+        .expect("a manifest without this target must not fail the check");
+        let CheckOutcome::UpdateAvailable(update) = outcome else {
+            panic!("expected newer release");
+        };
+        // No artifact for a retired platform, so nothing can install in place,
+        // but the user is still told a newer version exists and where it is.
+        assert!(update.asset.is_none());
+        assert!(update.download_url.is_none());
+        assert!(update.release_url.contains("/releases/tag/"));
+    }
+
+    #[test]
+    fn a_missing_windows_target_before_retirement_still_fails_closed() {
+        let target = "x86_64-pc-windows-msvc";
+        let mut without_windows = manifest();
+        without_windows.version = "3.3.0".into();
+        without_windows.tag = "v3.3.0".into();
+        without_windows.assets.clear();
+        let outcome = evaluate_manifest(
+            without_windows,
+            "3.2.1",
+            Some(target),
+            "https://example.invalid",
+            None,
+        );
+        assert!(matches!(
+            outcome,
+            Err(UpdateError::MissingTarget(missing)) if missing == target
+        ));
+    }
+
+    #[test]
+    fn a_missing_supported_target_still_fails_closed() {
+        let target = "x86_64-unknown-linux-gnu";
+        let mut without_target = manifest();
+        without_target.assets.clear();
+        let outcome = evaluate_manifest(
+            without_target,
+            "1.0.0",
+            Some(target),
+            "https://example.invalid",
+            None,
+        );
+        assert!(matches!(
+            outcome,
+            Err(UpdateError::MissingTarget(missing)) if missing == target
+        ));
     }
 
     #[test]

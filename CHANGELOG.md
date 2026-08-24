@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **Windows 3.3.0 is the final supported Windows release.** It keeps the
+  x86_64 archive, installer, and signed update target so existing clients can
+  receive the end-of-life notice before 4.0 stops publishing Windows packages.
+  When a signed 4.0-or-newer manifest has no Windows target, Kettle now shows
+  the release page instead of failing silently or offering an install.
+
 ## [3.2.1] — 2026-08-24
 
 ### Fixed
