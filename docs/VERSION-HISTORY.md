@@ -58,14 +58,6 @@ actually shipped.
   retention, graphics-resource accounting, hardened control/MCP and durable
   state boundaries, and restartable installer-owned updates.
 
-### Planned platform transition
-
-- `v3.3.0`: final Windows-supported release. It retains the Windows x86_64
-  archive and installer so existing clients receive the end-of-life notice.
-- `v4.0.0` onward: Linux x86_64, Linux aarch64, and macOS universal are the
-  published platforms. Windows remains in CI only for portable-code and
-  conditional-compilation coverage.
-
 ## Maintainer checks
 
 Before cutting a public release, verify:
