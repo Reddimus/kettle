@@ -5,6 +5,56 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 3.2.1 — 2026-08-24
+
+Host: macOS 26 (Darwin 25.6), Apple silicon, system appearance **dark**
+throughout.
+
+Bundle: a universal `kettle.app` at 3.2.1 assembled from the release job's own
+steps — `compile-macos-app-icon.sh`, the same `Info.plist` with its version
+patched, a `lipo` of the `aarch64-apple-darwin` and `x86_64-apple-darwin`
+release binaries — then ad-hoc signed. `lipo -archs` reports `x86_64 arm64`.
+
+Windows were driven through `kettle ctl` (`focus_window`, `toggle_fullscreen`,
+`toggle_light_dark`, `ui_geometry`). Every judgement below comes from a screen
+capture, and the traffic-light rows come from classifying one pixel row across
+the titlebar.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| 86% opacity, blur on: one material to both rounded top corners | No clear strip, no seam. Lights clean, title beside them. |
+| Full-screen round trip | Content rect `1600 x 1159.5` at `y = 40.5` before and after, byte-identical. |
+| `borderless = true` full-screen round trip | Terminal stayed visible through the sharp-alpha fallback, not covered by a material view. Geometry identical across the round trip. |
+| Alpha on, blur off | AppKit drew its standard opaque titlebar backdrop. No clear desktop strip. |
+| Opaque surface, blur on | No titlebar-only material seam; caption matches the theme. |
+| `background-opacity = 1.0`, `window-blur = false` | Theme reached both rounded top corners, no mismatched strip. |
+| Live light/dark switch | Four consecutive `toggle_light_dark` steps: Alabaster `(226,226,226)` → TokyoNight `(40,38,35)` → Alabaster `(255,255,255)` → TokyoNight `(40,38,35)`. Drives the appearance in both directions, repeatably. |
+| **Start on a light theme** | New row this release, and the one 3.2.0 lacked. `theme = Alabaster` from launch: caption present, traffic lights clean, full `~ — kettle` beside them. This is [#251](https://github.com/Reddimus/kettle/issues/251), fixed. |
+| Dock icons, running and pinned | Both render the system mask with a blue rim over a dark inset face, clear rim space, `>_` centered and legible. The running build and the installed bundle agree. |
+| Finder icon at 128 px | Matches the Dock rendering. |
+| Both 256 px appearances | `Assets.car` draws a blue rim over a dark face; the `AppIcon.icns` deployment-target fallback inverts them. Both keep the system mask, a parallel inset face, clear rim space, and a centered legible mark. |
+
+### Not run
+
+**Toggling Reduce Transparency live.** Unchanged from 3.2.0: TCC refuses
+`defaults write com.apple.universalaccess`, and the System Settings switch needs
+foreground pointer input that the automation policy blocks.
+
+**Dock magnification.** It only renders under the pointer, and global pointer
+control is refused.
+
+**The app-switcher icon.** ⌘-Tab is foreground input, refused for the same
+reason. The Dock and Finder renderings agree, which is the same asset, but the
+switcher itself was not captured.
+
+**System appearance light with a dark theme.** The inverse of the #251 case. By
+the mechanism it is safe — the fix moves every macOS appearance application to
+after AppKit builds the caption, in either direction — but flipping the whole
+desktop's appearance was out of scope for this session, so it is reasoning
+rather than a run.
+
 ## 3.2.0 — 2026-08-23
 
 Host: macOS 26 (Darwin 25.6), Apple silicon, 1920x1080 at 1x, system appearance
