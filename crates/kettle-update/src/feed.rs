@@ -340,8 +340,10 @@ fn evaluate_manifest(
     // log line and tell the user nothing, so use the same shape a build with no
     // target at all produces. The newer version is still announced with a
     // release URL, and only the in-place download is unavailable.
-    // `resolve_asset` below still refuses, so nothing installs without a
-    // signed artifact for this exact target.
+    // Installation re-verifies the signed manifest, resolves `current_target()`
+    // against it again, and requires the selected asset to match. The installer
+    // also rejects a missing `update.asset` before download, so this
+    // announcement-only result cannot install anything.
     let asset = match target {
         None => None,
         Some(target) => match manifest
