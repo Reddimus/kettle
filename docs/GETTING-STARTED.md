@@ -6,10 +6,6 @@ built-in **Settings** panel for the common things.
 
 ## 1. Install
 
-- **Windows 11** — download `kettle-windows-x86_64.zip` from the
-  [latest release](https://github.com/Reddimus/kettle/releases/latest), unzip
-  it anywhere, and run `install.ps1`. Then press the **Windows key** and type
-  **kettle**. (No admin prompt — it installs just for you.)
 - **Linux** — one line, no `sudo`:
   ```sh
   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
@@ -25,10 +21,8 @@ Homebrew/AUR metadata, and SHA-256 verification.
 
 ## 2. Your first window
 
-kettle opens a normal terminal — on Windows it starts **PowerShell 7**, on
-Linux/macOS your usual shell. Type commands like you would anywhere. To use
-**WSL / Ubuntu** as your shell on Windows, see
-[the WSL recipe](CONFIG.md#launching-wsl--ubuntu-as-your-shell-windows).
+kettle opens a normal terminal with your usual shell. Type commands like you
+would anywhere.
 
 ## 3. Change settings — no file editing required
 
@@ -69,7 +63,7 @@ Kettle starts with these pane and tab keys:
 See the full list any time with `kettle --list-keybinds`, or press
 `Ctrl+Shift+K` and type what you want.
 
-On Linux and Windows, the focus chord is edge-aware: if no split exists in the
+On Linux, the focus chord is edge-aware: if no split exists in the
 arrow's direction, Kettle passes `Alt+Arrow` to the program instead. This keeps
 terminal-app shortcuts such as Codex's `Alt+Up` previous-message editor usable
 without giving up fast split navigation. A zoom that hides sibling panes keeps
@@ -109,12 +103,12 @@ large or infinite scrollback responsive.
   or use `Ctrl + +` / `Ctrl + -`.
 - **Want the defaults back?** Delete your config file (its location is shown by
   `kettle --config-path`) and relaunch.
-- **Found a bug?** Crash logs are written to
-  `%LOCALAPPDATA%\kettle\crash\` (Windows) or
-  `~/.local/state/kettle/crash/` (Linux). GPU device-loss records are written
-  separately to `%LOCALAPPDATA%\kettle\diagnostics\` or
+- **Found a bug?** Linux crash logs are written to
+  `~/.local/state/kettle/crash/`. GPU device-loss records are written to
   `~/.cache/kettle/diagnostics/`; they contain adapter/recovery metadata and no
-  terminal contents. Attach the relevant file to an issue.
+  terminal contents. On macOS, crash logs use
+  `$XDG_STATE_HOME/kettle/crash/` when set and otherwise
+  `~/.local/state/kettle/crash/`. Attach the relevant file to an issue.
 
 Welcome aboard. For everything else, [CONFIG.md](CONFIG.md) is the full
 reference and [README.md](../README.md) has the feature tour.

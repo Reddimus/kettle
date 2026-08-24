@@ -50,6 +50,10 @@ tracked here so they are not lost.
   use the live keybind-hint column. The focused regression fails when the
   projection is collapsed back to the former one-line representation.
 
+The 4.0.0 platform-retirement work leaves the `app.rs` split and the three
+Kitty graphics items below deferred. The first is a multi-session structural
+refactor. The Kitty items need protocol probes and have no current consumer.
+
 ## Found by the 3.2.0 appearance gate
 
 - **~~Light themes draw the macOS window title through the traffic lights~~ —

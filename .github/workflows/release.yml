@@ -146,9 +146,6 @@ jobs:
           - os: macos-26
             artifact: kettle-macos-universal.zip
             environment: macos-signing
-          - os: windows-2022
-            artifact: kettle-windows-x86_64.zip
-            environment: release-build
           # ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
           # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
           # ci.yml early-warning job proves this target builds. Windowing deps
@@ -193,7 +190,7 @@ jobs:
       # project's earliest releases, but the underlying binary was
       # single-arch from whatever runner architecture macos-latest
       # happened to be until this build step fixed it.
-      # Linux + Windows: native release build.
+      # Linux x86_64: native release build.
       - name: Build (macOS universal)
         if: runner.os == 'macOS'
         run: |
@@ -206,7 +203,7 @@ jobs:
             target/aarch64-apple-darwin/release/kettle \
             -output target/release/kettle
           file target/release/kettle
-      - name: Build (Linux / Windows)
+      - name: Build (Linux x86_64)
         if: runner.os != 'macOS' && matrix.rust_target == ''
         run: cargo build --locked --release -p kettle
 
@@ -448,43 +445,6 @@ jobs:
         # bundle-aware path and preserves the exact app Gatekeeper assessed.
         run: ditto -c -k --keepParent dist/kettle.app ${{ matrix.artifact }}
 
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist/kettle | Out-Null
-          Copy-Item target/release/kettle.exe dist/kettle/
-          # Windows resolves .com before .exe for a bare command. This console
-          # shim waits for CLI prompts and exit codes; Start Menu still targets
-          # the no-console GUI executable directly.
-          Copy-Item target/release/kettle-console.exe dist/kettle/kettle.com
-          # The .ico file is embedded into the .exe by build.rs +
-          # winresource (see crates/kettle/Cargo.toml + build.rs); we
-          # also ship the standalone .ico in the zip so Windows Start
-          # menu pinning and right-click "Pin to taskbar" pick it up
-          # if the user moves the .exe out of its install directory.
-          Copy-Item packaging/windows/kettle.ico dist/kettle/
-          Copy-Item LICENSE,NOTICE,README.md,CHANGELOG.md dist/kettle/
-          # Shell-integration snippets — useful for Windows
-          # users running Git Bash, MSYS2, or WSL inside kettle on
-          # ConPTY. Same files as on the other platforms.
-          Copy-Item -Recurse shell-integration dist/kettle/
-          # Bundled install.ps1 puts kettle into
-          # %LOCALAPPDATA%\Programs\kettle, creates a Start menu
-          # shortcut (so Win-key search finds "kettle"), adds to user
-          # PATH, and registers an Add/Remove Programs entry. Mirrors
-          # the Linux install.sh + the macOS .app bundle's
-          # Spotlight integration — before this script existed, the
-          # Windows .zip was the only release artifact that didn't
-          # surface in the OS app launcher after the user extracted it.
-          Copy-Item scripts/install.ps1 dist/kettle/
-          $version = (Select-String '^version = "([^"]+)"' Cargo.toml | Select-Object -First 1).Matches.Groups[1].Value
-          python scripts/package-manifest.py generate `
-            --root dist/kettle --target x86_64-pc-windows-msvc --version $version
-          python scripts/package-manifest.py verify `
-            --root dist/kettle --target x86_64-pc-windows-msvc --version $version
-          Compress-Archive -Path dist/kettle/* -DestinationPath ${{ matrix.artifact }} -Force
-
       - name: Remove ephemeral Apple signing material
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -523,23 +483,14 @@ jobs:
       # before extracting. Output format matches `sha256sum` / `shasum
       # -a 256` so the standard verification incantation works as-is:
       #     sha256sum -c kettle-linux-x86_64.tar.gz.sha256
-      # Each runner uses the native tool — `sha256sum` on Linux,
-      # `shasum -a 256` on macOS, `Get-FileHash` on Windows.
+      # Each runner uses the native tool: `sha256sum` on Linux and
+      # `shasum -a 256` on macOS.
       - name: Generate SHA-256 (Linux)
         if: runner.os == 'Linux'
         run: sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
       - name: Generate SHA-256 (macOS)
         if: runner.os == 'macOS'
         run: shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
-      - name: Generate SHA-256 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Emit the same `<hex>  <filename>` layout `sha256sum` does so
-          # cross-platform verification doesn't need a parser per OS.
-          $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.artifact }}").Hash.ToLower()
-          Set-Content -NoNewline -Path "${{ matrix.artifact }}.sha256" -Value "$hash  ${{ matrix.artifact }}`n"
-
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact }}
@@ -574,7 +525,6 @@ jobs:
           required=(
             kettle-linux-x86_64.tar.gz
             kettle-linux-aarch64.tar.gz
-            kettle-windows-x86_64.zip
             kettle-macos-universal.zip
           )
           for artifact in "${required[@]}"; do
@@ -607,10 +557,6 @@ jobs:
             --archive dist/kettle-linux-aarch64.tar.gz \
             --root "$extracted/linux-aarch64" \
             --target aarch64-unknown-linux-gnu --version "$VERSION"
-          python3 scripts/package-manifest.py extract \
-            --archive dist/kettle-windows-x86_64.zip \
-            --root "$extracted/windows" \
-            --target x86_64-pc-windows-msvc --version "$VERSION"
 
       - name: Build deterministic signed update feed
         shell: bash
@@ -626,7 +572,6 @@ jobs:
           python3 scripts/make-update-manifest.py \
             --tag "$GITHUB_REF_NAME" \
             --published-at "$published_at" \
-            --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
             --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
             --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
             --asset "universal-apple-darwin=dist/kettle-macos-universal.zip" \
@@ -691,8 +636,6 @@ jobs:
             dist/kettle-linux-x86_64.tar.gz.sha256
             dist/kettle-linux-aarch64.tar.gz
             dist/kettle-linux-aarch64.tar.gz.sha256
-            dist/kettle-windows-x86_64.zip
-            dist/kettle-windows-x86_64.zip.sha256
             dist/kettle-macos-universal.zip
             dist/kettle-macos-universal.zip.sha256
             dist/kettle-update-manifest.json
@@ -732,8 +675,6 @@ jobs:
               "kettle-linux-x86_64.tar.gz.sha256",
               "kettle-linux-aarch64.tar.gz",
               "kettle-linux-aarch64.tar.gz.sha256",
-              "kettle-windows-x86_64.zip",
-              "kettle-windows-x86_64.zip.sha256",
               "kettle-macos-universal.zip",
               "kettle-macos-universal.zip.sha256",
               "kettle-update-manifest.json",
@@ -764,7 +705,6 @@ jobs:
             for artifact in \
               kettle-linux-x86_64.tar.gz \
               kettle-linux-aarch64.tar.gz \
-              kettle-windows-x86_64.zip \
               kettle-macos-universal.zip \
               kettle-update-manifest.json \
               kettle-update-manifest.json.sig
@@ -801,7 +741,6 @@ jobs:
           python3 scripts/make-update-manifest.py \
             --verify-existing dist/kettle-update-manifest.json \
             --tag "$GITHUB_REF_NAME" \
-            --asset "x86_64-pc-windows-msvc=dist/kettle-windows-x86_64.zip" \
             --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
             --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
             --asset "universal-apple-darwin=dist/kettle-macos-universal.zip"
@@ -814,10 +753,6 @@ jobs:
             --archive dist/kettle-linux-aarch64.tar.gz \
             --root "$extracted/linux-aarch64" \
             --target aarch64-unknown-linux-gnu --version "$VERSION"
-          python3 scripts/package-manifest.py extract \
-            --archive dist/kettle-windows-x86_64.zip \
-            --root "$extracted/windows" \
-            --target x86_64-pc-windows-msvc --version "$VERSION"
 
           python3 scripts/render-package-templates.py \
             --version "$VERSION" \
@@ -890,8 +825,6 @@ jobs:
             dist/kettle-linux-x86_64.tar.gz.sha256
             dist/kettle-linux-aarch64.tar.gz
             dist/kettle-linux-aarch64.tar.gz.sha256
-            dist/kettle-windows-x86_64.zip
-            dist/kettle-windows-x86_64.zip.sha256
             dist/kettle-macos-universal.zip
             dist/kettle-macos-universal.zip.sha256
             dist/kettle-update-manifest.json

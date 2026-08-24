@@ -18,17 +18,15 @@
 # scripts/*manifest*.{py,ps1}, or the renderer, not just before a
 # routine commit.
 #
-# Cross-platform: every recipe runs on Windows PowerShell, Linux/macOS
-# bash/zsh, and Git Bash on Windows. Two patterns:
+# The supported development hosts are Linux and macOS. Platform-neutral Cargo
+# recipes still parse on Windows so the hosted compile/test leg can use them,
+# but Windows-only installer, performance, and live-UI recipes were retired
+# with the Windows distribution in 4.0.0. Two patterns remain:
 #
 #   - `export RUSTDOCFLAGS := "-D warnings"` below makes the env
 #     var visible to all recipes without a shell-prefix (`FOO=bar
 #     cmd` is bash-only; just's `export` is shell-agnostic).
-#   - `[unix]` / `[windows]` recipe attributes platform-gate
-#     install/uninstall/bench/menu-shot/clean/every CI-parity smoke
-#     added below, so Windows users get a graceful message on a
-#     Linux/macOS-only check (and vice versa) instead of a confusing
-#     failure.
+#   - `[unix]`, `[linux]`, and `[macos]` recipe attributes gate native checks.
 
 # Use Windows PowerShell (preinstalled on every Windows 10+
 # machine) as the recipe shell on Windows. Just's default is `sh` which
@@ -167,30 +165,15 @@ icons-check:
     python3 scripts/test-gen-icons.py
     python3 scripts/gen-icons.py --check
 
-[windows]
-icons-check:
-    python scripts/test-gen-icons.py
-    python scripts/gen-icons.py --check
-
 [unix]
 icons-check-required:
     python3 scripts/test-gen-icons.py
     python3 scripts/gen-icons.py --check --require-tooling
 
-[windows]
-icons-check-required:
-    python scripts/test-gen-icons.py
-    python scripts/gen-icons.py --check --require-tooling
-
 [unix]
 tracked-audit:
     python3 scripts/test-audit-tracked-files.py
     python3 scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
-
-[windows]
-tracked-audit:
-    python scripts/test-audit-tracked-files.py
-    python scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
 
 # Compile every ```mermaid block in tracked Markdown. A diagram that does not
 # parse renders as a red error panel on GitHub, which reads as a broken
@@ -200,10 +183,6 @@ tracked-audit:
 [unix]
 mermaid-check:
     python3 scripts/check-mermaid.py
-
-[windows]
-mermaid-check:
-    python scripts/check-mermaid.py
 
 # Run the macOS bundle updater against a real, notarized release archive.
 # Unit tests cover staging, refusal, and swap with a stub verifier, because
@@ -222,10 +201,6 @@ macos-update-smoke TAG="":
 ttf-parser-scope:
     python3 scripts/check-ttf-parser-scope.py
 
-[windows]
-ttf-parser-scope:
-    python scripts/check-ttf-parser-scope.py
-
 # Guard the accepted RUSTSEC-2026-0253 warning while #207 is open. The
 # affected `LruCache::pop()` method is not used by glyphon 0.12.0, but any
 # dependency-path or reviewed-version change fails until reachability is
@@ -234,11 +209,6 @@ ttf-parser-scope:
 [unix]
 lru-scope:
     ./scripts/check-lru-scope.sh
-
-[windows]
-lru-scope:
-    python scripts/test-lru-scope.py
-    python scripts/check-lru-scope.py
 
 # === Packaging & release metadata ==================================
 # These four wrap CI checks that used to have NO `just` entry point at
@@ -257,11 +227,6 @@ lru-scope:
 package-templates:
     ./scripts/check-package-templates.sh
 
-[windows]
-package-templates:
-    @echo "package-templates needs bash (scripts/check-package-templates.sh)."
-    @echo "Run it under Git Bash/WSL, or trust CI's Linux leg."
-
 # Hermetic unit tests for scripts/make-update-manifest.py (the signed
 # update-manifest generator). Mirrors CI's Linux-only "Signed update
 # manifest generator" step.
@@ -269,19 +234,18 @@ package-templates:
 update-manifest-test:
     python3 scripts/test-update-manifest.py
 
-[windows]
-update-manifest-test:
-    python scripts/test-update-manifest.py
-
 # Validate the exact GitHub draft-release shape and local size/SHA-256 binding
 # used by the token-only publisher job.
 [unix]
 release-assets-test:
     python3 scripts/test-verify-release-assets.py
 
-[windows]
-release-assets-test:
-    python scripts/test-verify-release-assets.py
+# Execute release.sh against a disposable Git repository. The fixture pins the
+# exact live-document anchors and proves historical tag/download references are
+# immutable across a version bump.
+[unix]
+release-script-test:
+    python3 scripts/test-release.py
 
 # Hermetic unit tests for scripts/package-manifest.py (the inner
 # release-tarball manifest generator/verifier). Mirrors CI's
@@ -290,21 +254,12 @@ release-assets-test:
 package-manifest-test:
     python3 scripts/test-package-manifest.py
 
-[windows]
-package-manifest-test:
-    python scripts/test-package-manifest.py
-
 # Hermetic Linux/POSIX tests for install-online.sh. A private fake curl serves
 # authenticated fixtures so the safe archive path, modern no-downgrade policy,
 # sidecar parser, and malicious tar rejection run without network access.
 [unix]
 online-installer-test:
     python3 scripts/test-install-online.py
-
-[windows]
-online-installer-test:
-    @echo "online-installer-test exercises the Linux/POSIX one-line installer."
-    @echo "Run it under WSL, or trust the Linux CI leg."
 
 # Compile the maintained Icon Composer package through the same Xcode asset
 # pipeline the release uses. Require Assets.car, a loose AppIcon.icns fallback,
@@ -325,29 +280,6 @@ icns-smoke:
 [linux]
 icns-smoke:
     @echo "icns-smoke requires macOS Xcode actool and is not a Linux gate."
-
-[windows]
-icns-smoke:
-    @echo "icns-smoke needs Xcode actool (macOS-only); not applicable on Windows."
-    @echo "See 'just ico-smoke' for the Windows .ico equivalent."
-
-# Verify packaging/windows/kettle.ico parses as a well-formed,
-# multi-resolution Windows icon. The check parses the ICONDIR header
-# natively (no `file`/`xxd` dependency, unlike ci.yml's bash version) so
-# it needs nothing beyond PowerShell 5.1+. Mirrors CI's Windows-only
-# "Packaging smoke — Windows .ico" step and shares its >= 4 floor.
-#
-# It lives in scripts/ rather than inline: a plain `just` recipe runs
-# each line in a separate shell, so the inline version this replaces
-# lost `$path` before the line that read it and could never pass.
-[windows]
-ico-smoke:
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-ico.ps1
-
-[unix]
-ico-smoke:
-    @echo "ico-smoke checks packaging/windows/kettle.ico; not applicable off Windows."
-    @echo "See 'just icns-smoke' for the macOS .icns equivalent."
 
 # === Builds ========================================================
 
@@ -391,10 +323,6 @@ vm-launcher-test:
 macos-compare-score-self-test:
     python3 scripts/perf/macos-compare-score-self-test.py
 
-[windows]
-macos-compare-score-self-test:
-    python scripts/perf/macos-compare-score-self-test.py
-
 # The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
 # the live-UI-helper and native shell-integration fixtures. This is the fast
 # pre-commit loop; run
@@ -425,14 +353,15 @@ gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
 # pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
-gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check
+[unix]
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
     @echo ""
-    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that
 # `gauntlet`/`gauntlet-strict` don't touch. Every dependency below is
-# [unix]/[windows]-gated (see each recipe's own comment for exactly
+# platform-gated (see each recipe's own comment for exactly
 # what it covers and on which OS it's a real check vs. an informational
 # stub), so this either exercises the full ci.yml surface reachable on
 # the current OS, or tells you plainly what it couldn't run here. Needs
@@ -443,22 +372,19 @@ gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope mac
 # `gauntlet`/`gauntlet-strict` alone won't catch a regression there. The
 # platform-specific dependency set contains no successful stubs: every listed
 # dependency performs a real check, and missing required tooling fails.
+[unix]
 gauntlet-full: gauntlet-strict full-native-gates
     @echo ""
     @echo "CURRENT-OS FULL GAUNTLET PASSED — every required native gate listed above is green."
     @echo "This is not a PASS for native legs on other operating systems."
 
-[windows]
-full-native-gates: icons-check-required update-manifest-test release-assets-test package-manifest-test ico-smoke windows-installer-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke perf-self-test
-    @echo "NOT APPLICABLE on Windows: Linux installer/online/package-template/headless-Xvfb and macOS actool gates."
-
 [linux]
 full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
-    @echo "NOT APPLICABLE on Linux: Windows installer/ICO/performance-matrix and macOS actool gates."
+    @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
 full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke
-    @echo "NOT APPLICABLE on macOS: Windows installer/ICO/performance-matrix and Linux installer/Xvfb gates."
+    @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
 
@@ -522,11 +448,6 @@ headless-gpu-smoke: release
 headless-gpu-smoke:
     @echo "headless-gpu-smoke requires Linux/Xvfb and is not a macOS gate."
 
-[windows]
-headless-gpu-smoke:
-    @echo "headless-gpu-smoke needs Xvfb (Linux-only). Windows coverage comes from"
-    @echo "CI's windows-latest build/test/CLI smoke; see 'just cli-smoke' locally."
-
 # Bundle of ci.yml's Linux/macOS-only offscreen render smokes:
 # `--gpu-info` (adapter resolution + key:value output shape),
 # `--screenshot-menu` (the v1.3.0/v1.3.1 blank-menu regression class),
@@ -561,10 +482,6 @@ gpu-render-smoke: release
       || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
     echo "screenshot OK ($size bytes)"
     echo "gpu-render-smoke PASSED (gpu-info + screenshot-menu + screenshot)"
-
-[windows]
-gpu-render-smoke: release
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-gpu-render-smoke.ps1
 
 # Faithful local mirror of ci.yml's "CLI smoke (all OSes)" step: drives
 # every introspection flag (--version, --help, --check-config,
@@ -687,44 +604,11 @@ cli-smoke:
     rm -rf "$XDG_CONFIG_HOME"
     echo "cli-smoke PASSED"
 
-[windows]
-cli-smoke:
-    python scripts/check-cli-smoke.py
-
-# Reproduce the docs/PERFORMANCE.md baseline. Runs each measurement
-# 5× via `/usr/bin/time` (Linux/macOS) or `Measure-Command` (Win11).
-#
-# Platform-gated. The unix version calls scripts/bench.sh
-# (the GNU-time based harness); the Windows version calls
-# scripts/bench.ps1 (the Measure-Command based harness).
-# `powershell.exe` is the Windows-PowerShell-5.1 binary preinstalled
-# on every Windows 10+ machine; if `pwsh` (PS Core 7+) is also
-# present it'd work too, but powershell.exe is the universal default.
+# Reproduce the docs/PERFORMANCE.md local baseline. Runs each measurement
+# five times through the Unix timing harness.
 [unix]
 bench:
     ./scripts/bench.sh
-
-[windows]
-bench:
-    & ./scripts/bench.ps1
-
-# GUI-free invariants for the Windows performance harness. CI requires both
-# PowerShell runtimes, so the Windows full gate does too; a missing runtime is
-# a hard failure instead of a successful skip.
-[windows]
-perf-self-test: perf-self-test-ps7 perf-self-test-ps5
-
-[windows]
-perf-self-test-ps7:
-    pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/perf/self-test.ps1
-
-[windows]
-perf-self-test-ps5:
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/perf/self-test.ps1
-
-[unix]
-perf-self-test:
-    @echo "perf-self-test is the Windows PowerShell 7/5.1 CI matrix and is not a Unix gate."
 
 # Compare Kettle against installed Linux peer terminals using Hyperfine.
 # Terminator and Ghostty are required, Alacritty is included when present.
@@ -735,12 +619,6 @@ perf-self-test:
 [unix]
 linux-perf:
     ./scripts/perf/linux-compare.sh
-
-[windows]
-linux-perf:
-    @echo "linux-perf is a Linux desktop benchmark."
-    @echo "On Windows use: pwsh -File scripts/perf/perf-all.ps1 -Label after"
-    @echo "then:          pwsh -File scripts/perf/score.ps1 -ResultsDir target/perf-results/after"
 
 # Compare Kettle against installed macOS peer terminals using Hyperfine, native
 # max-RSS accounting, quiet-window CPU samples, and a top-half rank gate. This
@@ -753,57 +631,33 @@ macos-perf:
 macos-perf:
     @echo "macos-perf is a macOS desktop benchmark."
 
-[windows]
-macos-perf:
-    @echo "macos-perf is a macOS desktop benchmark."
-
 # === Install / uninstall ===========================================
 
 # Drop a build under ~/.local/ (scripts/install.sh — Linux
 # only). Same path the `install-online.sh` curl|sh wrapper
 # uses for online installs.
 #
-# Linux uses scripts/install.sh (the XDG
-# installer); Windows uses scripts/install.ps1 (per-user install
-# to %LOCALAPPDATA%\Programs\kettle + Start menu shortcut + PATH
-# update + Add/Remove Programs entry, no admin / UAC). Both run with
-# no system-wide side effects; the install.ps1 script mirrors
-# install.sh's shape and runs on PowerShell 5.1+ (built into Win10+).
 [unix]
 install:
     ./scripts/install.sh
-
-[windows]
-install:
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
 
 # Remove everything `just install` placed.
 [unix]
 uninstall:
     ./scripts/install.sh --uninstall
 
-[windows]
-uninstall:
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -Uninstall
-
-# Build the current release binary AND (re)install it in one step, so the
-# Start-menu / PATH / Windows-Search "kettle" launches THIS build. `just install`
+# Build the current release binary and reinstall it in one step, so the desktop
+# launcher and PATH resolve to this build. `just install`
 # alone installs whatever is already in target/release/ (which may be stale or
 # absent); this recipe rebuilds first, closing the "built but forgot to reinstall"
 # gap. Run after any change you want reflected in the installed app — and after
 # every release cut — to keep the installed app synced to the repo.
 #
-# Unix uses `--skip-build` after the `release` dependency so local deployment
-# does not compile the same release binary twice. Windows install.ps1 already
-# expects the release artifact built by the dependency.
+# `--skip-build` after the `release` dependency keeps local deployment from
+# compiling the same release binary twice.
 [unix]
 install-local: release
     ./scripts/install.sh --skip-build
-    @echo "local install synced to the current release build"
-
-[windows]
-install-local: release
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
     @echo "local install synced to the current release build"
 
 # Linux install that auto-records each Super-key launch into a local asciicast
@@ -816,10 +670,6 @@ install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
     ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
     @printf 'recording install synced to %s\n' {{quote(RECORD_DIR)}}
 
-[windows]
-install-recording:
-    @echo "install-recording is a Linux helper; on Windows set 'record = on' in the config."
-
 # Exercise scripts/install.sh's real install/uninstall paths (default
 # per-user prefix, custom --prefix, the release-tarball layout,
 # --record-dir validation, and — once the current tag is published —
@@ -830,32 +680,6 @@ install-recording:
 [unix]
 linux-installer-smoke: release
     ./scripts/check-linux-installers.sh
-
-[windows]
-linux-installer-smoke:
-    @echo "linux-installer-smoke exercises scripts/install.sh (Linux/XDG paths)."
-    @echo "Not applicable on Windows; see 'just windows-installer-smoke' instead."
-
-# Exercise scripts/install.ps1's portable/custom-prefix mode and its
-# isolated default-install integration mode — including upgrading a
-# stale pre-existing shortcut — on real Windows. Needs a release build
-# (kettle.exe + kettle-console.exe). Mirrors CI's Windows-only
-# installer-smoke matrix. Both runtimes are required locally just as in CI.
-[windows]
-windows-installer-smoke: windows-installer-smoke-ps7 windows-installer-smoke-ps5
-
-[windows]
-windows-installer-smoke-ps7: release
-    pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-installer.ps1
-
-[windows]
-windows-installer-smoke-ps5: release
-    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check-windows-installer.ps1
-
-[unix]
-windows-installer-smoke:
-    @echo "windows-installer-smoke exercises scripts/install.ps1 (Windows-only paths)."
-    @echo "Not applicable here; see 'just linux-installer-smoke' instead."
 
 # === Misc ==========================================================
 
@@ -878,12 +702,6 @@ run:
 menu-shot *ARGS:
     ./scripts/menu-screenshot.sh {{ARGS}}
 
-[windows]
-menu-shot *ARGS:
-    @echo "menu-shot requires xdotool + scrot (Linux X11). On Windows,"
-    @echo "use 'just menu' instead — it renders the same menu offscreen"
-    @echo "via the menu visual-regression pipeline."
-
 # Start a real kettle window with `text-renderer = grid`, capture live
 # screenshots through `kettle ctl screenshot`, and assert cursor blink changes
 # only a cursor-sized region. This needs a visible Linux X11/Wayland or unlocked
@@ -891,13 +709,6 @@ menu-shot *ARGS:
 [unix]
 live-render-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-live-render-smoke.sh
-
-[windows]
-live-render-smoke:
-    @echo "live-render-smoke is currently a Unix desktop helper."
-    @echo "Windows coverage comes from CI's windows-latest build/test/CLI smoke;"
-    @echo "manual Windows live screenshot smoke can use 'kettle --agent-server full'"
-    @echo "plus 'kettle ctl screenshot'."
 
 # Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
 # tmux, and clean/configured Neovim marker + split states. Captures
@@ -909,10 +720,6 @@ live-render-smoke:
 agent-tui-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
 
-[windows]
-agent-tui-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
-
 # Exercise Kettle's non-interactive PTY, JSON-event, and MCP agent surfaces,
 # plus bounded probes for installed Codex, Claude, Neovim, and tmux clients.
 # The Kettle-owned probes are mandatory; unavailable third-party tools are
@@ -922,33 +729,11 @@ agent-tui-smoke:
 agent-cli-smoke: release
     KETTLE_BIN="${KETTLE_BIN:-./target/release/kettle}" ./scripts/check-agent-cli-smoke.sh
 
-[windows]
-agent-cli-smoke: release
-    if ($env:KETTLE_BIN) { bash scripts/check-agent-cli-smoke.sh } else { $env:KETTLE_BIN = 'target/release/kettle.exe'; bash scripts/check-agent-cli-smoke.sh }
-
-# Exercise the Windows Kettle executable + ConPTY boundary while all shell,
-# tmux, Neovim/AstroNvim, Codex, and Claude commands run inside WSL. Set
-# KETTLE_SMOKE_WSL_DISTRO to select a non-default distro and
-# KETTLE_SMOKE_ASTRO_CONFIG / KETTLE_SMOKE_NVIM_DATA to select its config and
-# plugin-data directories. The helper copies bounded regular files into an
-# owner-private snapshot and redirects HOME plus all Neovim XDG paths there.
-[windows]
-agent-tui-wsl-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release --shell-mode wsl agent-tui
-
-[unix]
-agent-tui-wsl-smoke:
-    @echo "agent-tui-wsl-smoke exercises Windows kettle.exe -> wsl.exe and must run on Windows."
-
 # Drive broader live UI interactions: multiline text entry, scrollback wheel,
 # selection drag, tab creation, context-menu split dispatch, and screenshots.
 [unix]
 interaction-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release interaction
-
-[windows]
-interaction-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release interaction
 
 # Exercise a pointer-held selection at both vertical pane edges. macOS uses the
 # native pointer; Linux and Windows use the same portable control path that
@@ -961,20 +746,12 @@ selection-autoscroll-smoke:
 selection-autoscroll-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
 
-[windows]
-selection-autoscroll-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
-
 # Replace the desktop clipboard with a generated bitmap, drive the real Paste
 # action, and capture expanded, compact, and hover-expanded receipt frames.
 # Artifacts land under target/diagnostics/image-paste-receipt-*.
 [unix]
 image-paste-receipt-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
-
-[windows]
-image-paste-receipt-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
 
 # Copy two generated local videos, drive the real Paste action, and capture the
 # bounded native-poster receipt. Requires ffmpeg and a graphical session.
@@ -983,20 +760,12 @@ image-paste-receipt-smoke:
 video-paste-receipt-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
 
-[windows]
-video-paste-receipt-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
-
 # Focus only the cross-pane hover-wheel contract and require no surface-copy
 # support. Useful on virtual GLES adapters that render normally but cannot copy
 # a live swapchain image into the screenshot pipeline.
 [unix]
 hover-wheel-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release hover-wheel
-
-[windows]
-hover-wheel-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release hover-wheel
 
 # Terminate one detached window's child through the PTY reap path and prove the
 # sibling OS window and its pane remain live. Linux requires X11 + xdotool; the
@@ -1005,10 +774,6 @@ hover-wheel-smoke:
 [unix]
 window-close-isolation-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
-
-[windows]
-window-close-isolation-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
 
 # Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
 # deltas (the units winit actually reports) instead of pre-quantized whole
@@ -1021,19 +786,11 @@ window-close-isolation-smoke:
 touchpad-scroll-smoke: release
     python3 scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
 
-[windows]
-touchpad-scroll-smoke: release
-    python scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
-
 # Reproduce and guard the multi-tab mouse-click visual state. Captures full
 # window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
 [unix]
 tabbar-click-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-tabbar-click-smoke.sh
-
-[windows]
-tabbar-click-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release tabbar
 
 # Terminator parity: drag a terminal to another position in its tab. Drives the
 # press/move/release through the control plane and checks the gesture reaches
@@ -1055,19 +812,11 @@ tearoff-smoke: release
     python3 scripts/check-live-ui-smoke.py --cargo-release tearoff
     KETTLE_BIN=./target/release/kettle ./scripts/check-tearoff-live-smoke.sh
 
-[windows]
-tearoff-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release tearoff
-
 # Reproduce cwd-derived title recovery for shell-truncated tab titles.
 # Captures list_panes/list_tabs/ui_geometry under target/diagnostics/tab-title-*.
 [unix]
 tab-title-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release tab-title
-
-[windows]
-tab-title-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release tab-title
 
 # Reproduce cwd-derived split titlebars at both pane edges and verify their
 # focused/receiving/inactive PNG colors against ui_geometry-derived samples.
@@ -1076,19 +825,11 @@ tab-title-smoke:
 split-titlebar-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release split-titlebar
 
-[windows]
-split-titlebar-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release split-titlebar
-
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
 [unix]
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
-
-[windows]
-zoom-keybind-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
@@ -1096,26 +837,11 @@ zoom-keybind-smoke:
 underline-scroll-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release underline
 
-[windows]
-underline-scroll-smoke:
-    python scripts/check-live-ui-smoke.py --cargo-release underline
-
 # Clean every build artifact — `cargo clean` plus any temp PNGs
 # the screenshot / menu / bench recipes may have left in the OS
 # temp dir.
 #
-# Split into [unix] / [windows] because `rm` and `/tmp`
-# are bash-only. cargo clean is the cross-platform core; the temp-
-# PNG cleanup is OS-specific. The Windows variant delegates the
-# delete to powershell.exe (Remove-Item is a cmdlet, not a binary)
-# and `-ErrorAction SilentlyContinue` swallows the not-found case
-# so re-running `just clean` after the first call doesn't fail.
 [unix]
 clean:
     cargo clean
     rm -f /tmp/kettle.png /tmp/kettle-menu.png /tmp/kettle-bench.png /tmp/kettle-bench-menu.png
-
-[windows]
-clean:
-    cargo clean
-    Remove-Item -ErrorAction SilentlyContinue $env:TEMP\kettle.png, $env:TEMP\kettle-menu.png, $env:TEMP\kettle-bench.png, $env:TEMP\kettle-bench-menu.png

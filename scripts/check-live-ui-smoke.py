@@ -73,38 +73,6 @@ SPLIT_TITLEBAR_COLOR_HEX = {
 }
 
 
-def is_parallels_windows_arm(
-    system: str, architecture: str, manufacturer: str
-) -> bool:
-    """Whether the host matches the one known-broken headless WDDM path."""
-    return (
-        system == "Windows"
-        and architecture.lower() in ("arm64", "aarch64")
-        and manufacturer.lower().startswith("parallels")
-    )
-
-
-def parallels_windows_arm_requires_software_gpu() -> bool:
-    """Detect Parallels Windows ARM without widening the workaround's scope."""
-    if platform.system() != "Windows":
-        return False
-    try:
-        import winreg
-
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"HARDWARE\DESCRIPTION\System\BIOS",
-        ) as key:
-            manufacturer = str(winreg.QueryValueEx(key, "SystemManufacturer")[0])
-    except (ImportError, OSError):
-        # An unavailable BIOS record is not evidence that this is the affected
-        # VM. Physical ARM machines must retain hardware-first coverage.
-        return False
-    return is_parallels_windows_arm(
-        platform.system(), platform.machine(), manufacturer
-    )
-
-
 def is_optional_remote_windows_screenshot_error(
     system: str,
     environment: Dict[str, str],
@@ -6057,18 +6025,6 @@ while True:
         # here lets such a machine run the live smokes without hardcoding one
         # developer's hardware into the repo. Unset in CI, so it is a no-op.
         config_additions: List[str] = []
-        if parallels_windows_arm_requires_software_gpu():
-            # Parallels Desktop 26.4.1's ARM WDDM adapter faults inside a
-            # headless wgpu device request before Kettle can create its control
-            # server. This is the same exact-machine exception as the native
-            # GPU smoke: DX12/WARP still exercises the complete render path,
-            # while physical Windows ARM and hosted Windows x64 stay
-            # hardware-first. Keep the environment override last so a
-            # developer can deliberately retest a repaired Parallels driver.
-            config_additions.append("gpu-force-software = true")
-            print(
-                "live-ui smoke: Parallels Windows ARM detected; using DX12/WARP."
-            )
         extra_cfg = os.environ.get("KETTLE_SMOKE_EXTRA_CONFIG", "").strip()
         if extra_cfg:
             config_additions.append(extra_cfg.replace("\\n", "\n").strip())
@@ -8180,12 +8136,6 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
-    assert is_parallels_windows_arm("Windows", "ARM64", "Parallels International GmbH")
-    assert is_parallels_windows_arm("Windows", "aarch64", "Parallels")
-    assert not is_parallels_windows_arm("Windows", "AMD64", "Parallels")
-    assert not is_parallels_windows_arm("Windows", "ARM64", "Microsoft Corporation")
-    assert not is_parallels_windows_arm("Linux", "aarch64", "Parallels")
-
     with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
         fixture = Path(temp) / "fixture.png"
         write_image_receipt_fixture(fixture, 64, 36)

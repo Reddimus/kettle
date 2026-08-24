@@ -1,8 +1,10 @@
 # Testing
 
-kettle is verified by a fast, deterministic test suite plus CI smoke runs on
-all three OSes. Most parser, state, and UI-decision tests need neither a GPU
-nor a PTY. The full workspace suite intentionally also opens an offscreen wgpu
+kettle is verified by a fast, deterministic test suite plus native CI smoke
+runs on Linux and macOS. A Windows CI leg retains compile and regression
+coverage for conditional code, but it does not represent a supported package or
+installer. Most parser, state, and UI-decision tests need neither a GPU nor a
+PTY. The full workspace suite intentionally also opens an offscreen wgpu
 device and runs a small number of native PTY/ConPTY lifecycle tests. An
 adapter-less host can soft-skip the GPU test and a restricted sandbox can
 soft-skip the PTY tests, but that is reduced coverage and must not be reported
@@ -170,7 +172,7 @@ the validation contract for the vendor workspace.
 ### Platform coverage
 
 For full Linux coverage, install the source-build dependencies from
-[INSTALL.md](INSTALL.md#from-source-all-platforms) plus `libvulkan1` and
+[INSTALL.md](INSTALL.md#from-source) plus `libvulkan1` and
 `mesa-vulkan-drivers`. No graphical session is needed for
 `gpu_pipelines_compile_and_render_offscreen`, but a working Vulkan loader and
 hardware or software adapter are. Windows uses DX12/WARP or another available
@@ -178,40 +180,35 @@ wgpu backend; macOS uses Metal. The native PTY checks also need permission to
 create `/dev/ptmx` children on Unix or a ConPTY on Windows.
 
 Native ARM guest checks complement, but do not replace, the hosted release
-matrix. The direct QEMU/HVF Ubuntu ARM guest can build and run the aarch64
-product, its PTY tests, and live Wayland scenarios. The Parallels Windows 11 ARM
-guest can build the complete workspace natively once its Visual Studio ARM64
-MSVC and LLVM/Clang components are loaded with `VsDevCmd.bat -arch=arm64
--host_arch=amd64` (or `Launch-VsDevShell.ps1 -Arch arm64 -HostArch amd64`).
-Visual Studio currently supplies an x64-hosted ARM64 compiler, so `cl.exe`
-runs through Windows ARM's x64 compatibility layer while its objects and the
-Rust target remain native `aarch64-pc-windows-msvc`.
+matrix. The maintained guest is the migrated Ubuntu 26.04 aarch64 installation
+running directly under QEMU with Apple's HVF accelerator. Start it with
+`scripts/vm/run-ubuntu-arm.sh`; the launcher pins the CPU, memory, disk, EFI,
+network, display, and guest-agent channels while keeping disk and EFI state
+private to the owner.
 
-The renderer unit fixtures force Windows ARM's DX12/WARP software adapter.
-Parallels Desktop 26.4.1's ARM64 WDDM adapter faults during a headless wgpu
-device request even when a single test runs, whereas the same compiled
-pipelines and pixel readbacks pass under WARP. This exception is deliberately
-scoped: the Windows GPU and live-UI smoke harnesses detect that exact Parallels
-ARM guest and use WARP, while physical Windows machines and ordinary Kettle
-launches keep hardware-first adapter selection. A Parallels guest therefore
-proves the complete renderer and pixel pipeline through WARP, not the virtual
-WDDM driver. The guest still
-exercises native ARM64 ConPTY and every portable renderer path, but it does not
-produce or validate the shipped x86_64 Windows archive; that remains the job of
-hosted Windows CI and the physical x86_64 Windows machine. Record the exact
-commit and adapter for each guest run, then stop the guest when the batch is
-complete.
+The private qcow2 and mutable EFI variables live outside the checkout under
+`~/VMs` and must never be committed. The default mode is headless and forwards
+guest SSH to `127.0.0.1:2222`; `scripts/vm/run-ubuntu-arm.sh gui` adds the Cocoa
+virtio framebuffer for desktop checks. Use the pinned `kettle-vm` SSH host for
+automation. Shut down with `ssh kettle-vm 'sudo systemctl poweroff'`, wait for
+QEMU to exit, and run `qemu-img check ~/VMs/ubuntu-arm.qcow2` only while the
+image is offline. An in-guest `sudo fstrim -av` before shutdown returns freed
+blocks to the sparse qcow2 because the launcher enables discard.
 
-Run Windows tests as the ordinary signed-in user, not from an elevated shell.
-The `kettle-update` unit-test harness deliberately embeds an `asInvoker`
-manifest: without it, Windows installer detection sees `update` in the
-generated executable name and refuses to start it with error 740. This is a
-build-policy regression if it returns, not a reason to make Cargo
-administrator-only. Because no native Windows ARM archive is published, its
-unit-test build explicitly exercises the shipped x86_64 update/package
-contract; the production ARM library continues to report the managed updater
-as unsupported.
+The 2026-08-23 migration preserved the guest OS, user, tools, credentials, and
+repository state, then expanded the root disk from 128 GiB to 256 GiB. A full
+workspace run completed 2,131 tests across 45 binaries with zero failures and
+the release binary linked successfully. The native aarch64 `search-history`
+live-window smoke passed once under Xvfb and once in the real GNOME Wayland
+session. Both runs selected Vulkan through Mesa llvmpipe and reported
+`Adapter type: Cpu`. This proves the software-rendered Vulkan and Wayland
+paths. It does not prove accelerated virtio GPU rendering.
 
+The retained Windows CI runner compiles and tests portable and conditional
+Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
+not publish or support a Windows package, installer, GPU smoke, or live-window
+harness. Historical native Windows and Parallels ARM evidence belongs to the
+3.3.0-and-earlier record, not to current release coverage.
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
@@ -233,177 +230,34 @@ high-DPI surface remains legal, but clamps every other WebGPU default to the
 adapter's advertised value. This matters on virtual GLES adapters which expose
 graphics and presentation while advertising zero compute workgroups: Kettle
 has no compute pipelines, so a default request for 65,535 workgroups must not
-reject an otherwise usable device. The pure limit regression is portable; a
-Parallels guest run is still required to prove the guest pipeline creates a
-WARP device and renders. The known-bad virtual WDDM adapter is not claimed as
-covered.
+reject an otherwise usable device. The pure limit regression is portable. The
+QEMU Ubuntu ARM smokes prove Vulkan through llvmpipe on Xvfb and real Wayland;
+they do not claim accelerated virtual-GPU rendering.
 
-### Performance harness
+### Performance evidence
 
-Performance-harness changes first run GUI-free fixtures under both supported
-PowerShell hosts:
+Current performance automation is native to the supported platforms:
 
-```pwsh
-pwsh.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
-powershell.exe -NoLogo -NoProfile -File scripts/perf/self-test.ps1
+```sh
+just macos-perf
+just linux-perf
 ```
 
-The Windows PowerShell 5.1 entry point reconstructs `PSModulePath` from that
-engine's native machine roots and imports its engine-owned Utility manifest.
-This keeps the documented command deterministic even when it is launched from
-PowerShell 7 and would otherwise inherit incompatible PowerShell 7 modules.
+The macOS comparator measures the maintained multi-terminal campaign. The Linux
+comparator remains a narrower diagnostic gate and requires the documented peer
+terminals and a real X11 or Wayland session.
 
-These tests cover strict schemas, the immutable release acquisition/scoring
-profiles, deterministic Williams schedules and bootstrap output, config
-generation, startup and throughput marker tampering, drift and non-inferiority
-policy, evidence snapshots, harness provenance, schema-2 sanitization,
-synthetic EDID/CCD display-identity resolution, and complete schema-4
-release-scorer rejection paths. The PS5/PS7 display fixtures cover strict
-same-instance WMI connections, same-source CCD fallback, signed/unsigned
-INTERNAL and physical USB-tunnel normalization, Miracast/indirect rejection,
-connection removal/mismatch, checksum, product, and path tampering. The
-sanitizer fixtures prove numeric, Boolean, and complex display-routing values
-cannot bypass tokenization while safe build/config hashes remain public.
-These remain synthetic checks: no terminal window, GPU adapter, input
-injection, live monitor registry entry, or monitor transition is exercised.
-
-Use smoke mode to inspect live discovery without claiming a benchmark:
-
-```pwsh
-pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
-  -Mode smoke -ManifestOnly -AllowUnidentifiedDisplay `
-  -Label ("topology-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-```
-
-### Cross-terminal comparison
-
-Performance changes that claim cross-terminal movement must run the full
-PowerShell 7 suite with the exact GUI binary from a verified signed prior
-release and again with the clean current checkout, then run the score gate.
-The following assumes the prior archive has already been signature-verified
-and extracted:
-
-```pwsh
-$baselineExe = (Resolve-Path 'C:\path\to\previous-release\kettle.exe').Path
-$baselineTag = (git describe --tags --abbrev=0).Trim()
-$baselineCommit = (git rev-parse "$baselineTag^{commit}").Trim()
-$baselineSha = (Get-FileHash -LiteralPath $baselineExe -Algorithm SHA256).Hash
-$baselineLabel = "baseline-$baselineTag"
-$baselineDir = Join-Path 'target/perf-results' $baselineLabel
-
-pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
-  -Mode release -KettleCandidate baseline -KettleExe $baselineExe `
-  -SkipKettleBuild -ExpectedKettleCommit $baselineCommit `
-  -ExpectedKettleSha256 $baselineSha -Label $baselineLabel
-pwsh -NoLogo -NoProfile -File scripts/perf/perf-all.ps1 `
-  -Mode release -KettleCandidate current -Label release-candidate
-pwsh -NoLogo -NoProfile -File scripts/perf/score.ps1 `
-  -Mode release `
-  -ResultsDir target/perf-results/release-candidate `
-  -BaselineResultsDir $baselineDir `
-  -RequireLatency -RequireMenuHover -RequireVtebench `
-  -RequireMonitorTransition
-```
-
-The baseline requires both pins, a full commit that is an ancestor of the
-current checkout, the exact GUI hash, and the colocated CLI's embedded clean
-commit. The generated configuration paths may differ between the two labels,
-but their bytes and hashes, all comparator terminal binaries, schedules,
-toolchain and harness hashes, and every material environment field must match.
-The Kettle executable identities differ by design. Result labels must be new:
-an existing label directory is rejected even when empty.
-
-Release mode requires all six named terminals in the canonical order, seed
-`kettle-windows-release-v1`, offset 3, a 15-second probe cooldown, a 1280×800
-comparator client, and the pinned 12 startup, 6 idle, 60 latency, 6 throughput,
-10-per-transition-state, and 200-per-hover-leg samples in 20-sample blocks. The
-scorer rejects every noncanonical release policy override, including dirty
-manifests, looser menu/transition limits, and misleading legacy advisory
-thresholds. It generates
-isolated configs for Kettle, Alacritty, WezTerm, Rio, and Tabby. Windows
-Terminal has no per-launch config-file switch, so it remains descriptive and
-cannot contribute a confirmed win or loss.
-
-Before live acquisition, run
-`scripts/perf/setup-comparator-campaign.ps1` once with network access. The
-release producer then permits only offline reuse of the exact campaign pinned
-by `release-contract.ps1`: every asset, expanded tree, executable, version,
-role, and Authenticode identity is verified, all confirmed-tree files remain
-read-leased, and Windows Terminal must match the pinned installed Appx package.
-Explicit comparator parameters and `KETTLE_PERF_*_EXE` environment overrides
-are smoke-only. The schema-4 scorer independently requires the exact campaign
-projection and peer identities in both current and baseline manifests.
-
-The confirmed comparison uses raw Williams-balanced clusters, deterministic
-10,000-resample 90% paired bootstrap intervals, practical margins, and 10%
-trend/20% peak-to-peak drift limits. Kettle needs confirmed primary wins
-against at least three of the four isolated peers with at most one confirmed
-loss. Uncertainty never establishes a metric or peer win, but the authoritative
-3-of-4 metric rule can confirm a peer with one uncertain metric, and the
-3-of-4-peer rule can pass with one uncertain peer. Throughput additionally
-requires all six paired round composites to remain positive after its 5%
-margin.
-
-The release baseline is mandatory. It must match OS, machine, CPU/GPU and
-drivers, power scheme, comparator terminal binaries, isolated config bytes,
-schedules, PowerShell and harness identities, and display topology. Every
-required Kettle metric must pass paired non-inferiority and drift; a missing or
-uncertain result fails.
-
-The release desktop must expose the target as exactly one EDID-backed physical
-monitor and must expose a second eligible physical screen for the mandatory
-monitor-transition probe. Both screens must fit the 1280×800 physical-pixel
-client. The fixed and native-display context-menu ROI legs are mandatory. The
-transition probe chooses the maximum-contrast eligible pair deterministically
-across DPI, refresh, and screen/working-area size, then intentionally moves
-Kettle between those pinned monitors. The scorer independently reconstructs
-that choice and every closed/open sample, direction, capture, DPI, refresh,
-menu, geometry, and summary invariant. Combined and per-state p95 must be at
-most 1000 ms and maximum at most 2000 ms; all six p95/max summaries must also
-stay within `max(100 ms, 25% of baseline)`. Any other switch or topology change
-invalidates the result.
-
-The identity resolver prefers a unique active `WmiMonitorID`. Its fallback
-requires exactly one active physical CCD path for the desktop source, requires
-the returned path's exact `GUID_DEVINTERFACE_MONITOR` class, and reads EDID only
-from the registry key derived from that path. Header, length, extension count,
-per-block checksums, manufacturer, and product must agree; the harness never
-scans registry instances by monitor model.
-Unavailable, ambiguous, or inconsistent evidence stays unidentified and fails
-the release gate.
-
-CI runs the PowerShell 7 and Windows PowerShell 5.1 performance suites as
-separate Windows jobs with independent 30-minute limits. This keeps each
-10,000-resample release-scorer fixture bounded without consuming the
-45-minute Rust/OS matrix budget.
-
-Vtebench validation also requires the pinned WSL launcher and exact registered
-distribution, clean before/after source-state signatures for every terminal
-leg, and canonical path/SHA-256/version identities for Rustup, Cargo,
-`timeout`, `setsid`, and `script`. Its generator and preflight run in a fixed
-pseudo-TTY, all phases are bounded, and timeout cleanup is confined to the
-nonce-marked Linux process group. The typed-latency fixture verifies that raw
-rows match the manifest's exact `cmd.exe` path and hash. The release-score
-self-test includes negative cases for each contract; those remain synthetic
-tests and do not claim a live WSL terminal, GPU, or display pass.
-
-Publish only sanitized JSON evidence:
-
-```pwsh
-pwsh -NoLogo -NoProfile -File scripts/perf/sanitize-results.ps1 `
-  -ResultsDir target/perf-results/release-candidate `
-  -OutputDir target/perf-public-release-candidate
-```
-
-The raw result directory remains private because it contains paths, commands,
-device identifiers, and helper artifacts. See
-[the harness README](../scripts/perf/README.md) for the exact timing boundaries,
-sample design, margins, and limitations.
+The PowerShell performance campaign and its self-tests retired with the final
+Windows-supported 3.3.0 line. The measurements and methodology remain in
+[PERFORMANCE.md](PERFORMANCE.md) as historical evidence. To reproduce that
+historical campaign, use the scripts from the `v3.3.0` tag. Deleted PowerShell
+commands are not part of the 4.0 test or release gate.
 
 ## What's covered (automated)
 
 **2000+ tests across the workspace.** Run `cargo test --workspace` for today's
-number; it was 2071 on 2026-08-22. The per-section counts below are
+number; it was 2,131 on native Ubuntu ARM on 2026-08-23. The per-section counts
+below are
 deliberately range-stable rather than exact, because the workspace grows by one
 to three tests per feature landed and an exact figure is wrong again within a
 release. [CHANGELOG.md](../CHANGELOG.md) records what was added when.
@@ -1334,17 +1188,20 @@ the Rust updater tests:
 ```sh
 python3 scripts/test-update-manifest.py
 python3 scripts/test-verify-release-assets.py
+python3 scripts/test-release.py
 python3 scripts/test-package-manifest.py
 python3 scripts/test-install-online.py
 ```
 
-The current suites cover nine signed-update-manifest cases, six exact
-draft-release cases, seventeen package-manifest cases (with platform-dependent
-skips), and fifteen POSIX online-installer cases. They pin the checked-in Ed25519
-trust root, canonical manifest bytes and sidecars, no-follow same-handle
-artifact hashing, exact local-to-GitHub name/size/SHA-256 binding, bounded
-archive structure and extraction, modern no-downgrade behavior, compatible
-legacy sidecars, and hostile archive/network/parser fixtures.
+The current suites cover ten signed-update-manifest cases, six exact
+draft-release cases, two release-preparation cases, seventeen package-manifest
+cases (with platform-dependent skips), and seventeen POSIX online-installer
+cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
+sidecars, no-follow same-handle artifact hashing, exact local-to-GitHub
+name/size/SHA-256 binding, bounded release-document updates, immutable archive
+references, bounded archive structure and extraction, modern no-downgrade
+behavior, compatible legacy sidecars, and hostile archive/network/parser
+fixtures.
 On macOS the signed-update suite also opens disposable keychains whose paths
 contain quotes and backslashes, then proves the native Security.framework
 helper's prepend, de-duplication, removal, and empty-list transformations
@@ -1378,7 +1235,7 @@ Ed25519 secret and read-only repository permission, while the publisher has
 repository write permission and no signing secret. The publisher must
 re-verify the signature, bind every local archive back to the canonical signed
 manifest, regenerate package metadata, and verify the exact remote draft before
-making it public. Run all four fixture suites after changing either job,
+making it public. Run all five fixture suites after changing either job,
 installer parsing, archive handling, or release metadata.
 
 ## Manual / interactive checks
@@ -1401,16 +1258,16 @@ These need a real display and are run by hand (or on real hardware):
   [SHELL-INTEGRATION.md](SHELL-INTEGRATION.md), then `Ctrl+Up`/`Ctrl+Down`
   to jump between prompt marks.
 - **Perf**: `cat` a ~100 MB file / fast `yes` stays responsive.
-- **Platform compatibility**: before a release, verify the shipped binary on
-  Ubuntu, native Windows 11, and Windows 11 WSL. Windows 11 is a known-good
-  baseline for v2.25.0 behavior, so renderer fixes must not regress ConPTY,
-  PowerShell/cmd startup, GUI-subsystem piped stdout, shell integration, or the
-  installer. WSL verification should cover Linux shells and the same CLI/agent
-  flows launched from inside a WSL pane.
+- **Platform compatibility**: before a release, verify the shipped binaries on
+  Ubuntu and macOS. Windows 11 and WSL were release checks through 3.3.0; in
+  4.0 they remain historical baselines and compile/regression CI coverage, not
+  required live evidence for a supported package.
 
 ### Agent gauntlet
 
-Run these on Windows and WSL. [AGENT.md](AGENT.md) has the full surface.
+Run these on supported Linux and macOS desktops. [AGENT.md](AGENT.md) has the
+full surface. Windows and WSL behavior mentioned below records the final 3.3.0
+line and retained conditional tests.
 
 #### Local agent/TUI CLIs
 
@@ -1594,47 +1451,12 @@ self-test runs in the normal CI matrix and pins this distinction, including
 a failed-command/stale-exit-code transcript. External auth failures are
 captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
 credentials should fail the run.
-On Windows, `just agent-tui-wsl-smoke` builds and selects the current
-checkout's `kettle.exe`, keeps its ConPTY/render path, and launches non-rc
-Bash through
-`wsl.exe`; `KETTLE_SMOKE_WSL_DISTRO` selects a distro. Tool detection,
-tmux control, Neovim/AstroNvim, and agent commands then run inside that
-distro. The harness removes `/mnt/<drive>` entries from WSL `PATH`, resolves
-candidate executables canonically, and reports Windows-host shims as skips
-rather than treating them as Linux coverage. WSL failure cleanup opens a
-pidfd before inspecting each exact `XDG_CONFIG_HOME` environment entry,
-rechecks that the held process is still live, signals through the pidfd,
-closes every retained descriptor even when another signal fails, and
-rescans until the sandbox process set stays empty. An unreadable same-user
-environment is an unsafe unknown rather than an absent match. The sandbox
-is removed only after that drain succeeds; the prerequisite fixture also
-leaves its tree in place if its final drain fails. Before creating the
-sandbox it requires target-side Python/kernel `pidfd_open` and
-`pidfd_send_signal`, then runs a real selected-distro check in which a
-signalled process spawns one final matching child while an environment
-decoy must survive. The ordinary helper self-test compiles that exact
-assembled WSL exercise, not only the cleanup fragments embedded inside it.
-Neovim writes its own PID during a pre-init `--cmd`, so
-emergency cleanup is independent of launcher or AppImage process names.
-The normal pane command emits only a release marker and deliberately leaves
-the tree in place; a portable detached-daemon test proves the host cleanup
-retains and drains that process, while a shared lifecycle guard fails if
-removal is moved before the drain.
-Every signal uses a held pidfd; an unanchored numeric PID is never retained
-across a grace period, including in the self-test.
-`KETTLE_SMOKE_ASTRO_CONFIG` can select the target-shell config directory.
-`KETTLE_SMOKE_NVIM_DATA` can select its installed plugin data. The helper
-creates an unpredictable owner-private directory inside the target distro,
-copies only regular files from the config and existing `lazy`/`site`
-runtime while dereferencing symlinks. Plugin Git refs are retained for
-lazy.nvim checkout recognition, but non-runtime Git object databases are
-excluded. It redirects `HOME` plus every Neovim XDG
-config/data/state/cache/runtime path to that snapshot before removing it.
-The streaming copy rejects cycles and special files and caps the snapshot at
-100,000 entries, 64 directory levels, 256 MiB per file, and 2 GiB total.
-Ordinary writes that honor those paths cannot edit live configuration.
-This is not an OS security sandbox; config code that deliberately uses a
-hard-coded absolute path can still reach that path.
+The Windows/WSL live-agent recipe retired with the final
+Windows-supported 3.3.0 line. Its prior contract remains in the `v3.3.0`
+documentation and source history. The portable helper self-tests still protect
+retained parsing and cleanup code on the Windows CI runner, but no current
+release claims a Windows or WSL live-window pass.
+
 The artifact directory writes its initial `provenance.json` before Kettle
 launches. After configured Neovim has completed any first-run bootstrap,
 it adds a bounded, no-follow content hash of the copied LazyVCS tree and
@@ -2000,12 +1822,11 @@ prove that a missing worker response expires and that the event loop
 schedules the cleanup deadline instead of retaining a pending path forever.
 
 Search release evidence is platform-scoped. Run the live interaction/search
-probe on an Ubuntu Wayland or X11 desktop, an unlocked macOS Aqua session, and
-native Windows 11; exercise the same pane under tmux, clean Neovim, configured
-AstroNvim, Codex CLI, and Claude Code CLI where installed. macOS and Windows/WSL
-results remain separate checks: never infer them from a Linux unit test or an
-offscreen renderer pass. Record missing tools and unrun platforms as explicit
-skips in the release audit.
+probe on an Ubuntu Wayland or X11 desktop and an unlocked macOS Aqua session;
+exercise the same pane under tmux, clean Neovim, configured AstroNvim, Codex
+CLI, and Claude Code CLI where installed. Never infer one supported platform's
+result from another platform's unit test or offscreen renderer pass. Record
+missing tools and unrun platforms as explicit skips in the release audit.
 
 ## Pattern: audit-driven hardening
 
@@ -2018,7 +1839,8 @@ name the shape of bug each pass caught.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on **ubuntu/macos/windows**:
+`.github/workflows/ci.yml` runs supported runtime checks on **ubuntu/macos** and
+retained compile/regression checks on **windows**:
 
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
   `cargo test --workspace` on every OS.
@@ -2143,68 +1965,9 @@ name the shape of bug each pass caught.
   ambiguous sibling branches directly under the shell. Native PTY readiness
   markers are assembled from separate shell words so the shell's own input echo
   cannot satisfy the assertion before the child actually prints them.
-- The Windows installer smoke covers both portable install/uninstall and an
-  isolated default install. It seeds a pre-existing Start shortcut with stale
-  PowerShell launcher arguments, upgrades it, and verifies the shortcut target,
-  empty argument list, working directory, registry entry, and cleanup. Sentinel
-  state also verifies a portable uninstall cannot remove default-install
-  shortcut, registry, PATH, or PowerShell profile state. Adversarial cases
-  reject Win32 device/ADS/control/trailing/traversal path aliases, a junction in
-  the prefix chain or managed shell directory, duplicate/extra/wrong-type
-  ownership JSON fields, and unmanaged root or nested files. Every rejection
-  asserts the unrelated sentinel survives. A hard-link upgrade fixture also
-  proves atomic publication replaces the managed directory entry without
-  overwriting the unrelated backing file. The smoke additionally exercises an
-  exact interrupted stage/journal/hash-bound backup, a post-commit orphan
-  backup, a real schema-3 pending capsule with archive/helper, signed-asset, and
-  package-manifest identities,
-  rejection of legacy-schema and unknown-field pending records, the narrowly
-  supported legacy binary-backup names, and rejection of a near-miss backup
-  name. It proves uninstall can finish after its first updater artifact has
-  already been removed. It rejects alternate data streams and `SUBST` mappings
-  before prefix mutation. The package leg validates exact stable provenance,
-  saved-helper channel retention, write-ahead rollback coverage before each
-  destination mutation, rollback after every publication checkpoint for both
-  new installs and upgrades, and next-run recovery of intentionally abandoned
-  pre- and post-publication transactions. It also rejects broad-ACL and
-  junction-preseeded sibling transaction roots while checking that a real
-  abandoned transaction has the exact protected ACL. The broad sibling fixture
-  adds an explicit Everyone/Modify ACE instead of depending on the runner's
-  temporary-directory inheritance, so a private LocalAppData temp root cannot
-  make the negative test pass for an unrelated journal-entry error. Eight subprocess
-  `TerminateProcess` checkpoints cover the initial journal temporary, created
-  shell directory, staged payload temporary, write-ahead publication journal,
-  destination temporary, each ownership marker immediately after its atomic
-  publication, and the post-package commit boundary. Recovery-only assertions
-  prove every interrupted first install has no managed payload; separate marker
-  upgrade fixtures byte-compare the restored README and ownership record with
-  their pre-upgrade state. Exact orphan cleanup tests accept the maximum
-  canonical Rust `u128` epoch and `u64` sequence, reject either value plus one,
-  delete only a dead-PID ordinary leaf, and preserve live-PID, hard-link, and
-  junction sentinels. The Windows PowerShell leg compiles a disposable child
-  that independently proves the installed version probe rejects output beyond
-  its combined 4 KiB bound and terminates at its deadline. The default-install
-  leg rejects an unbalanced profile block before copying files and covers UTF-8
-  (with/without BOM), UTF-16LE, UTF-16BE, CR/LF/CRLF, and
-  trailing/non-trailing newline combinations. It also pins concurrent-write
-  exclusion, alternate-stream rejection, appended-suffix separation, and DACL,
-  attribute, timestamp, BOM, newline, and outside-block preservation. A
-  pre-replacement fault proves the original profile name and bytes remain
-  present without retired-name or temporary artifacts. CI runs the whole
-  script separately under Windows PowerShell 5.1 and PowerShell 7. The same
-  smoke rejects an `Everyone:Modify` ancestor before prefix creation, verifies
-  every permanent managed object has the exact protected ACL, refuses a legacy
-  broad root without opt-in, and proves trusted `-MigrateLegacyPermissions`
-  repairs both root and file ACLs. `just windows-installer-smoke` runs both
-  PowerShell engines locally.
-
-  These subprocess terminations bypass PowerShell `finally` blocks and model a
-  hard process stop after explicit file flushes. They do not claim resilience
-  to physical power loss before storage-device cache persistence. The local
-  smoke also does not substitute for elevated cross-user recovery, EFS,
-  compressed/offline profile storage, UNC/network filesystems, or a real
-  machine restart; those unsupported paths are rejected or remain explicit
-  native-environment checks.
+- The Windows installer and fault-injection smoke retired with 3.3.0. Its
+  historical contract remains in the `v3.3.0` source and documentation. The
+  Windows CI leg in 4.0 does not install, upgrade, uninstall, or package Kettle.
 - **Session recording** — recording is a runtime toggle (`record = on` /
   `--record`) compiled into every build, so the default build/clippy/test
   exercise the GUI recording flags, input tokens, markers, and status UI
@@ -2238,8 +2001,8 @@ Separate workflows:
   GUI dependencies rather than borrowing them from the runner. ARM Linux and
   Apple Silicon outputs are evaluation-only in this workflow and are not
   reported as native Nix build/runtime passes.
-- `.github/workflows/release.yml` — mandatory Windows, macOS, Linux x86_64,
-  and Linux aarch64 packaging on every verified `v*` tag. One protected
+- `.github/workflows/release.yml` — mandatory macOS, Linux x86_64, and Linux
+  aarch64 packaging on every verified `v*` tag. One protected
   Linux packaging baseline builds both GNU targets on Ubuntu 22.04 and rejects
   any binary whose `readelf --version-info` requirements exceed glibc 2.35.
   This keeps the one-line installer compatible with the documented ABI floor.
@@ -2247,7 +2010,9 @@ Separate workflows:
   finalizer validates all archives and sidecars, requires the signing secret
   to match the checked-in production trust root, signs and verifies the update
   manifest with that root, renders Homebrew/AUR metadata from the archive
-  bytes, verifies the exact 14-asset draft, and publishes it once.
+  bytes, verifies the exact twelve-file draft, and publishes it once. Those
+  files are three packages and sidecars, the manifest and signature with their
+  sidecars, plus the rendered Homebrew formula and Arch `PKGBUILD`.
 - `scripts/check-macos-update-smoke.sh` — downloads a published
   `kettle-macos-universal.zip`, checks it against its sidecar, and runs the
   macOS bundle updater over it with the real `codesign` and `spctl`. Unit tests
@@ -2277,11 +2042,3 @@ Separate workflows:
   both published, the script also runs `install-online.sh` and verifies SHA-256
   and prefix-local uninstall behavior. A tag whose asset still returns 404 is
   treated as an in-progress release; other asset-probe failures remain fatal.
-- `scripts/check-windows-installer.ps1` — runs on Windows CI after the release
-  binary is built, installs to a throwaway custom prefix, verifies the portable
-  install payload, then uninstalls through the saved helper without repeating
-  `-Prefix`. Windows CI runs the complete script once under PowerShell 7 and
-  once under Windows PowerShell 5.1; `just windows-installer-smoke` runs both
-  engines locally. Installer fault-injection
-  environment variables are honored only with the isolated
-  `-IntegrationTestRoot` test boundary.

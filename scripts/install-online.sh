@@ -20,7 +20,7 @@
 # Notes
 # - Linux x86_64 + aarch64. macOS users: grab the `.app` bundle from
 #   https://github.com/Reddimus/kettle/releases/latest and drag it to
-#   /Applications. Windows users: extract the zip and add to PATH.
+#   /Applications.
 # - The script uses `curl`, GNU `tar`, `gzip`, OpenSSL 3.0+, and standard
 #   POSIX text tools. `gh` (GitHub CLI) is NOT required.
 # - Verifies the downloaded tarball is non-empty and has a recognizable
@@ -132,7 +132,7 @@ case "$(uname -s)" in
     ;;
   *)
     echo "kettle install-online.sh: unsupported OS '$(uname -s)'." >&2
-    echo "Prebuilt binaries are available for Linux (x86_64), macOS (universal), and Windows." >&2
+    echo "Prebuilt binaries are available for Linux (x86_64 or aarch64) and macOS (universal)." >&2
     echo "See https://github.com/${REPO}/releases/latest" >&2
     exit 1
     ;;

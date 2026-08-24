@@ -190,12 +190,10 @@ jobs:
           trap 'rm -rf "$out"' EXIT
           scripts/compile-macos-app-icon.sh "$out"
       - name: Packaging smoke — Windows .ico
-        # Same logic as the macOS step: the winresource build-dep
-        # already compiles via `cargo build --workspace --all-targets`
-        # above (so a missing .ico file aborts the build), but we also
-        # want to confirm the .ico itself is well-formed and
-        # multi-resolution (a single-size .ico means the
-        # auto-resize step in our `convert` command degraded).
+        # Windows remains a compile/regression CI target after distribution
+        # support ends. build.rs deliberately skips a missing icon, so this
+        # explicit check keeps the retained compatibility resource present,
+        # well-formed, and multi-resolution.
         if: runner.os == 'Windows'
         shell: bash
         run: |
@@ -236,6 +234,9 @@ jobs:
       - name: Exact draft-release asset verifier
         if: runner.os == 'Linux'
         run: python3 scripts/test-verify-release-assets.py
+      - name: Release preparation script
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-release.py
       - name: Inner package manifest generator and verifier
         # Extraction is a native filesystem security boundary. Run its portable
         # fixtures on every runner so macOS aliases and Windows path semantics
@@ -307,129 +308,6 @@ jobs:
             exit 1
           }
           Write-Host "Windows release build + piped --version smoke OK"
-      - name: Windows installer smoke
-        # Exercise install.ps1 in portable/custom-prefix mode and its isolated
-        # default-install integration mode on real Windows. The latter seeds an
-        # old shortcut with stale arguments and verifies an upgrade replaces it.
-        # The saved helper must uninstall without repeating -Prefix.
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/check-windows-installer.ps1
-      - name: Windows installer smoke (Windows PowerShell 5.1)
-        # Keep the inbox engine covered separately: install.ps1 intentionally
-        # supports 5.1 as well as PowerShell 7, and their .NET/encoding
-        # behavior is not identical.
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\scripts\check-windows-installer.ps1
-      - name: GPU render smokes (Windows)
-        # The --gpu-info / --screenshot-menu / --screenshot smokes below
-        # (Linux/macOS) are bash scripts guarded `if: runner.os != 'Windows'`,
-        # so Windows CI's only GPU-render coverage was whatever
-        # `cargo test --workspace` exercises in-process (menu_visual.rs) —
-        # the actual CLI surface real users invoke (`kettle --gpu-info`,
-        # `kettle --screenshot`, `kettle --screenshot-menu`) never ran here,
-        # on the one platform whose GPU backend (DX12/WARP) differs most from
-        # Linux's software-Vulkan and macOS's Metal. `cargo test --workspace`
-        # already proves wgpu resolves a usable adapter on this runner (that's
-        # exactly what menu_visual.rs does), so no LIBGL_ALWAYS_SOFTWARE-style
-        # env var is needed here. Port the same three checks (adapter
-        # resolution + key:value layout, PNG magic bytes, size floor) to pwsh
-        # so a DX12-only regression — e.g. a capture_png readback bug specific
-        # to the swapchain-less offscreen texture path, or a panic in
-        # --gpu-info's adapter enumeration — fails CI instead of shipping
-        # silently. Every kettle.exe invocation checks $LASTEXITCODE
-        # explicitly: GitHub Actions' pwsh wrapper only fails the step on the
-        # *last* statement's exit code, so a mid-script crash would otherwise
-        # go unnoticed if the following checks happened to pass.
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          function Test-PngMagic($path) {
-            $bytes = [System.IO.File]::ReadAllBytes($path)
-            if ($bytes.Length -lt 4) {
-              Write-Error "$path is too short to contain a PNG header ($($bytes.Length) bytes)"
-              exit 1
-            }
-            # \211PNG magic. Compare via a joined-string of decimal values
-            # rather than Compare-Object/-eq on the raw byte[]: PowerShell's
-            # numeric-literal array (@(0x89, ...)) is System.Int32, and
-            # Byte.Equals(Int32) is false even when the numeric value
-            # matches — a naive comparison would false-fail on every real PNG.
-            $expected = @(0x89, 0x50, 0x4E, 0x47)
-            if (($bytes[0..3] -join ',') -ne ($expected -join ',')) {
-              Write-Error "$path is missing the PNG magic bytes (got $($bytes.Length) bytes total)"
-              exit 1
-            }
-          }
-
-          # --gpu-info: pin that the flag resolves an adapter and prints the
-          # expected key:value layout, same floor as the Linux/macOS step.
-          $gpuInfo = (& ".\target\release\kettle.exe" --gpu-info | Out-String)
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "--gpu-info exited $LASTEXITCODE"
-            exit 1
-          }
-          Write-Host $gpuInfo
-          if ($gpuInfo -notmatch '(?m)^Backend:\s+\S') {
-            Write-Error "--gpu-info output missing a 'Backend:' line"
-            exit 1
-          }
-          if ($gpuInfo -notmatch '(?m)^Adapter:\s+\S') {
-            Write-Error "--gpu-info output missing an 'Adapter:' line"
-            exit 1
-          }
-          # `\s*$` (not a bare `$`): `| Out-String` joins with CRLF, and in
-          # .NET multiline mode `$` matches just before the `\n`, so a bare
-          # `side$` fails against the trailing `\r`. The Backend/Adapter checks
-          # above escape this only because they don't anchor the line end.
-          if ($gpuInfo -notmatch '(?m)^Max texture:\s+\d+ px / side\s*$') {
-            Write-Error "--gpu-info output missing a 'Max texture:' line"
-            exit 1
-          }
-          Write-Host "gpu-info OK"
-
-          # --screenshot-menu: the v1.3.0/v1.3.1 blank-menu regression guard,
-          # same 40 KB floor rationale as the Linux/macOS step, now exercised
-          # against the DX12/WARP offscreen adapter.
-          # kettle.exe is a GUI-subsystem binary, so PowerShell's `&` does NOT
-          # wait for it — it returns immediately and the file check would race
-          # the still-running render (the --gpu-info call above only waited
-          # because the `| Out-String` pipe blocks until the process closes its
-          # stdout at exit). Use `Start-Process -Wait -PassThru` so the write
-          # is complete before Test-PngMagic and the real exit code is read.
-          $menuPng = Join-Path $env:RUNNER_TEMP "kettle-menu.png"
-          $proc = Start-Process -FilePath ".\target\release\kettle.exe" `
-            -ArgumentList "--screenshot-menu", $menuPng -Wait -PassThru -NoNewWindow
-          if ($proc.ExitCode -ne 0) {
-            Write-Error "--screenshot-menu exited $($proc.ExitCode)"
-            exit 1
-          }
-          Test-PngMagic $menuPng
-          $menuSize = (Get-Item $menuPng).Length
-          if ($menuSize -le 40000) {
-            Write-Error "kettle-menu.png is too small ($menuSize bytes) — likely the blank-menu regression"
-            exit 1
-          }
-          Write-Host "screenshot-menu OK ($menuSize bytes)"
-
-          # --screenshot: end-to-end text + quad + image pipeline (bundled
-          # Nerd Font, glyphon shaping, wgpu offscreen device + texture,
-          # image::save PNG encode) through the DX12/WARP adapter.
-          $shotPng = Join-Path $env:RUNNER_TEMP "kettle-ci.png"
-          $proc = Start-Process -FilePath ".\target\release\kettle.exe" `
-            -ArgumentList "--screenshot", $shotPng -Wait -PassThru -NoNewWindow
-          if ($proc.ExitCode -ne 0) {
-            Write-Error "--screenshot exited $($proc.ExitCode)"
-            exit 1
-          }
-          Test-PngMagic $shotPng
-          $shotSize = (Get-Item $shotPng).Length
-          if ($shotSize -le 10000) {
-            Write-Error "kettle-ci.png is too small ($shotSize bytes)"
-            exit 1
-          }
-          Write-Host "screenshot OK ($shotSize bytes)"
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:
@@ -761,30 +639,6 @@ jobs:
           "$KETTLE_CI_BIN" --config /tmp/k.cfg --config-path \
             | grep -qE 'k\.cfg$'
 
-  perf-self-tests:
-    name: performance self-tests (${{ matrix.name }})
-    runs-on: windows-2022
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: PowerShell 7
-            runtime: ps7
-          - name: Windows PowerShell 5.1
-            runtime: ps5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Run GUI-free performance harness self-tests (PowerShell 7)
-        if: matrix.runtime == 'ps7'
-        shell: pwsh
-        run: scripts/perf/self-test.ps1
-      - name: Run GUI-free performance harness self-tests (Windows PowerShell 5.1)
-        if: matrix.runtime == 'ps5'
-        shell: powershell
-        run: scripts/perf/self-test.ps1
 
   # Verify the declared workspace MSRV (`rust-version = "1.89"` in
   # Cargo.toml) actually still builds. Without this job we

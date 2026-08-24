@@ -7,8 +7,7 @@
 | Linux | x86_64 | **Tier 1** — glibc 2.35+, prebuilt binary + one-line installer |
 | Linux | aarch64 | **Tier 1 distribution** — glibc 2.35+, cross-built prebuilt binary + one-line installer; native ARM UI/runtime is manually verified but not yet in CI |
 | macOS | universal (Intel + Apple Silicon) | **Tier 1** — signed and notarized universal `.app` bundle |
-| Windows 11 | x86_64 | **Tier 1** — `.zip` + `install.ps1` |
-| Windows 11 | aarch64 | **Tier 2** — native source build verified; no prebuilt archive |
+| Windows | any | **Unsupported since 4.0** — the final supported release is 3.3.0; no new packages are published |
 | Linux/other | armv7l, i686, riscv64, … | **Tier 2** — source build only, *experimental* (wgpu/glyphon have no tier-1 GPU support on these targets) |
 
 Tier-1 targets are required before a release can publish. Linux aarch64 is
@@ -22,8 +21,8 @@ github:Reddimus/kettle` to try it in a sandbox first).
 
 ## Updating
 
-Official Windows and Linux installer layouts, and the macOS `kettle.app`, can
-update themselves:
+Official Linux installer layouts and the macOS `kettle.app` can update
+themselves:
 
 ```sh
 kettle --check-update
@@ -35,13 +34,8 @@ kettle update --yes
 `kettle --update` is an interactive convenience alias. Kettle verifies the
 signed stable manifest, archive size, and SHA-256 before a transactional
 replacement. It never requests elevation and never restarts open windows. On
-Windows, the verified release waits in private staged state until all Kettle
-windows close; new launches hand off to the helper instead of running the old
-binary. Upgrading a pre-v2.35 Windows install requires one rerun of the bundled
-`install.ps1` to bootstrap that helper-aware build. A
-Windows Kettle executable launched from WSL updates the same Windows install;
-a native WSL/Linux Kettle updates its Linux prefix. On macOS the whole bundle is
-replaced at once, because the code signature seals it as a unit. Package-manager,
+macOS the whole bundle is replaced at once because the code signature seals it
+as a unit. Package-manager,
 Cargo, Homebrew, Nix, AUR, and manually copied installs are refused so their
 owner remains authoritative. See [UPDATES.md](UPDATES.md) for policy and recovery.
 
@@ -170,7 +164,7 @@ type **"kettle"** to launch. To remove everything later:
 ## From a release
 
 Each tagged release ships prebuilt artifacts, built and packaged on real
-GitHub runners for every platform:
+GitHub runners for every supported platform:
 
 - **Linux** — `kettle-linux-x86_64.tar.gz` (binary + `kettle.desktop` + icon
   + `install.sh` + the no-follow `install-unix.py` helper). Extract and run
@@ -205,9 +199,14 @@ GitHub runners for every platform:
   [`packaging/homebrew/README.md`](../packaging/homebrew/README.md) for the
   remaining publication workflow. Until then, install the release `.app`
   directly.
-- **Windows 11** — `kettle-windows-x86_64.zip` containing `kettle.exe`, the
-  `kettle.com` console launcher, and `install.ps1`. Unzip anywhere, then run the bundled installer for
-  Start menu + PATH integration:
+- **Archived Windows releases through 3.3.0** — Kettle 4.0 and later do not publish a
+  Windows package. The old `kettle-windows-x86_64.zip` contained `kettle.exe`, the
+  `kettle.com` console launcher, and `install.ps1`. The instructions below are
+  retained only for uninstalling, recovering, or inspecting an archived
+  installation. Do not use them as a current installation path.
+
+  To recover an existing archived installation, its original package can be
+  unpacked and the bundled installer rerun for Start menu and PATH integration:
 
   ```powershell
   # From the extracted folder:
@@ -324,14 +323,11 @@ GitHub runners for every platform:
   destination. The installer never first moves the original profile to a
   retired name, so interruption cannot leave the profile pathname absent.
 
-  > **No `winget` / `scoop` recipe yet.** `winget install kettle` and
-  > `scoop install kettle` don't resolve — kettle isn't in the winget-pkgs
-  > repo or a scoop bucket. If you'd like to maintain one, the SHA-256
-  > sidecars shipped with every release satisfy both ecosystems' integrity
-  > checks, and the generated `kettle.rb` + `PKGBUILD` release assets are
-  > ready-made templates for the manifest shape. Until then, use
-  > `install.ps1` above (it covers PATH + Start-menu + auto-uninstall, the
-  > same integration a package manager would give you).
+  > **Archived package-manager status.** Kettle never published a `winget` or
+  > `scoop` manifest during its supported Windows releases. For recovery or
+  > uninstall work, use the archived [v3.3.0 package](https://github.com/Reddimus/kettle/releases/tag/v3.3.0)
+  > and its bundled `install.ps1` as described above. Kettle 4.0 and later do
+  > not publish a Windows package.
 
 ## First run
 
@@ -351,7 +347,6 @@ To bootstrap a commented starter config in the right spot for your OS:
 ```sh
 # Linux / WSL    — ~/.config/kettle/config (or $XDG_CONFIG_HOME/kettle/config)
 # macOS          — ~/.config/kettle/config (kettle uses XDG paths, not ~/Library)
-# Windows        — %APPDATA%\kettle\config (a stray HOME is ignored; set XDG_CONFIG_HOME for ~/.config)
 # (always run `kettle --config-path` to see the exact resolved location)
 # Easiest + cross-platform safe — creates the directory, writes the file,
 # won't overwrite an existing config:
@@ -408,9 +403,7 @@ claude mcp add kettle -- kettle mcp
 { "mcpServers": { "kettle": { "command": "kettle", "args": ["mcp"] } } }
 ```
 
-`kettle` must resolve on PATH first. On Windows, `install.ps1` adds kettle to
-PATH but already-running shells keep their old snapshot — open a **fresh**
-shell before running `claude mcp add`. On Linux, make sure `~/.local/bin` is on
+`kettle` must resolve on PATH first. On Linux, make sure `~/.local/bin` is on
 PATH.
 
 See [docs/AGENT.md](AGENT.md) for the full surface (`kettle exec` headless
@@ -435,13 +428,6 @@ sha256sum -c kettle-linux-x86_64.tar.gz.sha256
 shasum -a 256 -c kettle-macos-universal.zip.sha256
 ```
 
-```powershell
-# Windows (PowerShell)
-$expected = (Get-Content kettle-windows-x86_64.zip.sha256).Split()[0]
-$actual   = (Get-FileHash kettle-windows-x86_64.zip).Hash.ToLower()
-if ($expected -eq $actual) { "OK" } else { "MISMATCH" }
-```
-
 The one-line installer
 ([`scripts/install-online.sh`](../scripts/install-online.sh)) uses these
 sidecars only for releases older than the signed-manifest channel. Current
@@ -449,7 +435,7 @@ releases require the independent Ed25519 trust root and additionally bind the
 archive size and platform identity. Any missing or failed required
 verification aborts before extraction.
 
-## From source (all platforms)
+## From source
 
 ```sh
 # Linux build deps (Debian/Ubuntu)
@@ -461,23 +447,8 @@ cd kettle
 cargo run --release
 ```
 
-macOS needs only a stable Rust toolchain (`rustup`). Windows needs the Visual
-Studio 2022 Build Tools **Desktop development with C++** workload and a Windows
-SDK in addition to Rust. A native Windows ARM64 build also needs the **MSVC
-ARM64 build tools** and **C++ Clang tools for Windows** components: `ring` uses
-the component's x64-hosted `clang.exe` targeting ARM64, while other native
-crates use the ARM64 MSVC linker and libraries. Run Cargo from an ARM64
-Developer Command Prompt, or
-initialize an ordinary shell first:
-
-```bat
-call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" -arch=arm64 -host_arch=arm64
-rustup target add aarch64-pc-windows-msvc
-cargo build --locked --workspace --all-targets
-```
-
-The optional `just` gate runner has a native ARM64 package (`winget install
-Casey.Just`). Minimum supported Rust version is **1.89** (Cargo.toml
+macOS needs only a stable Rust toolchain (`rustup`). Minimum supported Rust
+version is **1.89** (Cargo.toml
 `rust-version`); `rustup update stable` will always satisfy it.
 
 ## Verifying your build
@@ -517,7 +488,8 @@ whose curve can fight the platform mask. The system owns the only outer mask,
 and Xcode generates the previous-release fallback for the macOS 11 deployment
 target.
 The generator also writes the fixed-size hicolor PNGs (`kettle-16.png` …
-`kettle-256.png`), the retained compatibility iconset, and the Windows `.ico`:
+`kettle-256.png`), the retained compatibility iconset, and a Windows `.ico`
+kept only for compile/regression CI of the retained conditional code:
 
 ```sh
 # Cross-platform path (needs Pillow) — regenerates both SVG sources,

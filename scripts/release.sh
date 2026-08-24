@@ -86,7 +86,7 @@ fi
 # to restore these files if any command fails before the release commit lands.
 RESTORE_FILES=(
     Cargo.toml Cargo.lock CHANGELOG.md flake.nix
-    README.md docs/INSTALL.md docs/VERSION-HISTORY.md
+    docs/INSTALL.md docs/VERSION-HISTORY.md
 )
 MUTATIONS_STARTED=0
 cleanup_release_attempt() {
@@ -145,8 +145,9 @@ if remote_tag=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null)
     exit 1
 fi
 
-# Replace the FIRST line equal to $2 in file $1 with $3, and fail if there was
-# no such line.
+# Replace the one line equal to $2 in file $1 with $3. Missing and duplicate
+# anchors are both errors: either means the owning file changed shape and a
+# release must not guess which text is current.
 #
 # This used to be `sed -i.bak "0,/re/s//replacement/"`. Both halves are GNU
 # extensions that BSD sed -- macOS's /usr/bin/sed -- does not implement:
@@ -163,16 +164,16 @@ fi
 # release aborted. Silently, until you read the cargo error closely.
 #
 # awk with an exact string comparison is portable, needs no regex escaping at
-# all, and can report a miss instead of pretending to succeed.
-replace_first_line() {
+# all, and can enforce the match count on both BSD and GNU userlands.
+replace_exact_line() {
     local file="$1" want="$2" repl="$3"
     awk -v want="${want}" -v repl="${repl}" '
-        !done && $0 == want { print repl; done = 1; next }
+        $0 == want { print repl; matches += 1; next }
         { print }
-        END { exit(done ? 0 : 1) }
+        END { exit(matches == 1 ? 0 : 1) }
     ' "${file}" >"${file}.tmp" || {
         rm -f "${file}.tmp"
-        echo "::error::${file} has no line matching: ${want}" >&2
+        echo "::error::${file} expected exactly one matching line: ${want}" >&2
         exit 1
     }
     # Remove the temporary file on a failed rename too. `release.sh` refuses to
@@ -186,20 +187,34 @@ replace_first_line() {
     }
 }
 
+# Replace exactly one complete line selected by a POSIX extended regular
+# expression. This is reserved for generated history values whose previous
+# counts are not known until release time. As above, drift fails closed.
+replace_matching_line() {
+    local file="$1" pattern="$2" repl="$3"
+    awk -v pattern="${pattern}" -v repl="${repl}" '
+        $0 ~ pattern { print repl; matches += 1; next }
+        { print }
+        END { exit(matches == 1 ? 0 : 1) }
+    ' "${file}" >"${file}.tmp" || {
+        rm -f "${file}.tmp"
+        echo "::error::${file} expected exactly one matching line for: ${pattern}" >&2
+        exit 1
+    }
+    mv "${file}.tmp" "${file}" || {
+        rm -f "${file}.tmp"
+        echo "::error::could not replace ${file}" >&2
+        exit 1
+    }
+}
+
 # Bump Cargo.toml workspace version. The workspace's leading
 # `[workspace.package]` block has the single `version = "X.Y.Z"`
 # line; per-crate Cargo.tomls inherit via `version.workspace = true`.
 PREV=$(awk -F\" '/^version = "/ { print $2; exit }' Cargo.toml)
-# Escape BRE metacharacters before splicing PREV into the remaining sed
-# substitutions (the `vX.Y.Z` doc bumps). A plain `X.Y.Z` semver works either
-# way — the dots only ever match their literal selves — but a pre-release tag
-# like `1.0.0-rc.1+build` carries chars BRE would misinterpret. The two
-# line-replacements above need no escaping at all: `replace_first_line`
-# compares strings, not patterns.
-PREV_RE=$(printf '%s' "${PREV}" | sed 's/[.[\*^$/]/\\&/g')
 echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
 MUTATIONS_STARTED=1
-replace_first_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
+replace_exact_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
 
 # Durable lockstep for the inter-crate path-dep version
 # requirements in `[workspace.dependencies]`. They were pinned at a fixed
@@ -237,96 +252,56 @@ fi
 #     version = "1.42.0";
 #
 # (10 leading spaces + version + ;).
-# `replace_first_line` matches the whole line exactly and stops at the first
-# hit, so only the package version is touched -- not any cargo-vendor-deps
-# version further down.
+# `replace_exact_line` matches the whole line exactly, so only the package
+# version is touched -- not any cargo-vendor-deps version further down.
 if [ -f flake.nix ]; then
     echo "bumping flake.nix:  ${PREV} → ${VERSION}"
-    replace_first_line flake.nix \
+    replace_exact_line flake.nix \
         "          version = \"${PREV}\";" \
         "          version = \"${VERSION}\";"
 fi
-# Durable lockstep for the user-facing install docs. README.md's
-# status banner and docs/INSTALL.md's "current latest" line + example
-# `KETTLE_VERSION=` / download URLs spell the version as `vX.Y.Z`, and kept
-# re-staling because nothing synced them to Cargo.toml (a manual
-# bump went stale within two days — the audit's finding E2). Bump every
-# `vPREV` → `vVERSION` occurrence here, atomically with the Cargo/flake bumps.
-# These files only ever write `vX.Y.Z` as a release reference, so a global
-# replace is safe.
-for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
-    if [ -f "$doc" ] && grep -q "v${PREV}" "$doc"; then
-        echo "bumping ${doc}: v${PREV} → v${VERSION}"
-        sed -i.bak "s/v${PREV_RE}/v${VERSION}/g" "$doc"
-        rm -f "${doc}.bak"
-    fi
-done
 
-# v2.34.1 (audit) — durable fix for the exact drift the install-docs
-# lockstep loop above cannot catch. That loop only rewrites `v${PREV}`; a doc whose release-reference
-# version missed a bump is never healed. (docs/INSTALL.md's "current latest" +
-# download URLs and README.md's `KETTLE_VERSION=` example had stranded at
-# v2.31.0 while the workspace was already v2.34.0 — three releases back — because
-# `grep -q v2.34.0` never matched them.) Rewrite the well-defined release-
-# reference patterns keyed to the version being RELEASED, not PREV, so they land
-# on the current release no matter how far they drifted. Bounded, unambiguous
-# anchors — the "current latest" claim, GitHub release-download URLs, and the
-# `KETTLE_VERSION=` pin example. Historical / feature-era refs (e.g. "Every
-# release from v1.3.4 onward") never match these anchors, so they stay put.
-for doc in README.md docs/INSTALL.md; do
-    [ -f "$doc" ] || continue
-    sed -i.bak -E \
-        -e "s/current latest: v[0-9]+\.[0-9]+\.[0-9]+/current latest: v${VERSION}/g" \
-        -e "s#releases/download/v[0-9]+\.[0-9]+\.[0-9]+/#releases/download/v${VERSION}/#g" \
-        -e "s/KETTLE_VERSION=v[0-9]+\.[0-9]+\.[0-9]+/KETTLE_VERSION=v${VERSION}/g" \
-        "$doc"
-    rm -f "${doc}.bak"
-    if ! git diff --quiet -- "$doc"; then
-        echo "bumping ${doc}: release-reference version strings → v${VERSION}"
-    fi
-done
-if [ -f docs/VERSION-HISTORY.md ] && grep -q "Current workspace version: \`${PREV}\`" docs/VERSION-HISTORY.md; then
-    echo "bumping docs/VERSION-HISTORY.md workspace version: ${PREV} → ${VERSION}"
-    sed -i.bak "s/Current workspace version: \`${PREV_RE}\`/Current workspace version: \`${VERSION}\`/" docs/VERSION-HISTORY.md
-    rm -f docs/VERSION-HISTORY.md.bak
+# Keep only the live install examples in lockstep. README.md and the other
+# versioned references in these documents are historical records, so every
+# replacement is a complete, unique line keyed to the previous workspace
+# version. A stale or duplicated anchor aborts instead of broadening the edit.
+echo "bumping docs/INSTALL.md current release references: v${PREV} → v${VERSION}"
+replace_exact_line docs/INSTALL.md \
+    "  | KETTLE_VERSION=v${PREV} sh" \
+    "  | KETTLE_VERSION=v${VERSION} sh"
+replace_exact_line docs/INSTALL.md \
+    "Every release from **v1.3.4** onward ships a \`.sha256\` sidecar (current latest: v${PREV})" \
+    "Every release from **v1.3.4** onward ships a \`.sha256\` sidecar (current latest: v${VERSION})"
+replace_exact_line docs/INSTALL.md \
+    "curl -fLO https://github.com/Reddimus/kettle/releases/download/v${PREV}/kettle-linux-x86_64.tar.gz" \
+    "curl -fLO https://github.com/Reddimus/kettle/releases/download/v${VERSION}/kettle-linux-x86_64.tar.gz"
+replace_exact_line docs/INSTALL.md \
+    "curl -fLO https://github.com/Reddimus/kettle/releases/download/v${PREV}/kettle-linux-x86_64.tar.gz.sha256" \
+    "curl -fLO https://github.com/Reddimus/kettle/releases/download/v${VERSION}/kettle-linux-x86_64.tar.gz.sha256"
+
+echo "refreshing docs/VERSION-HISTORY.md current baseline"
+replace_exact_line docs/VERSION-HISTORY.md \
+    "- Latest version in this tree: \`v${PREV}\` — carried by the changelog and the" \
+    "- Latest version in this tree: \`v${VERSION}\` — carried by the changelog and the"
+replace_exact_line docs/VERSION-HISTORY.md \
+    "- Current workspace version: \`${PREV}\`" \
+    "- Current workspace version: \`${VERSION}\`"
+
+# release.sh runs after the new changelog heading is committed but before its
+# tag exists, so the heading count leads the real tag count by one.
+TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
+HEADING_COUNT=$((TAG_COUNT + 1))
+NEWEST_TAG=$(git tag -l 'v[0-9]*' --sort=-version:refname | head -1)
+if [ -z "${NEWEST_TAG}" ]; then
+    echo "::error::cannot refresh docs/VERSION-HISTORY.md without a release tag" >&2
+    exit 1
 fi
-if [ -f docs/VERSION-HISTORY.md ]; then
-    RELEASE_DATE=$(awk -v ver="$VERSION" '$0 ~ "^## \\[" ver "\\] — " { print $4; exit }' CHANGELOG.md)
-    # The two counts are NOT equal at this point, and writing them as one number
-    # made the file contradict itself. This script runs after the changelog
-    # heading for $VERSION is committed but BEFORE its tag exists -- the tag is
-    # created by tag-release.sh once this lands -- so there is exactly one more
-    # heading than tag. The paragraph directly above the line already explains
-    # that; claiming a tag that does not exist argued with it.
-    TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
-    HEADING_COUNT=$((TAG_COUNT + 1))
-    # Restore the tag range's upper bound to the newest tag that actually
-    # EXISTS. The install-docs lockstep loop above rewrites every `vPREV` in
-    # this file, which is right for the "latest version in this tree" line and
-    # wrong here: this sentence describes the Git tags inspected, and the tag
-    # for $VERSION is not created until tag-release.sh runs. Left alone it
-    # claimed "156 Git tags ... through v2.53.0" while counting 156 tags whose
-    # newest is v2.52.0 -- contradicting the paragraph directly above, which
-    # exists to explain that very off-by-one.
-    NEWEST_TAG=$(git tag -l 'v[0-9]*' | sort -V | tail -1)
-    if [ -n "${NEWEST_TAG}" ]; then
-        sed -i.bak -E \
-            "s/(through \`)v[0-9]+\.[0-9]+\.[0-9]+(\`)/\1${NEWEST_TAG}\2/" \
-            docs/VERSION-HISTORY.md
-        rm -f docs/VERSION-HISTORY.md.bak
-    fi
-    echo "refreshing docs/VERSION-HISTORY.md release count/date"
-    sed -i.bak -E \
-        "s/Release records inspected: [0-9]+ Git tags and [0-9]+ changelog headings/Release records inspected: ${TAG_COUNT} Git tags and ${HEADING_COUNT} changelog headings/" \
-        docs/VERSION-HISTORY.md
-    rm -f docs/VERSION-HISTORY.md.bak
-    if [ -n "$RELEASE_DATE" ]; then
-        sed -i.bak -E \
-            "s/(\`v2\.29\.0\` to \`v${VERSION}\` \(2026-06-19 to )[0-9]{4}-[0-9]{2}-[0-9]{2}\)/\1${RELEASE_DATE})/" \
-            docs/VERSION-HISTORY.md
-        rm -f docs/VERSION-HISTORY.md.bak
-    fi
-fi
+replace_matching_line docs/VERSION-HISTORY.md \
+    '^- Release records inspected: [0-9][0-9]* Git tags and [0-9][0-9]* changelog headings, from$' \
+    "- Release records inspected: ${TAG_COUNT} Git tags and ${HEADING_COUNT} changelog headings, from"
+replace_matching_line docs/VERSION-HISTORY.md \
+    "^  \`v0[.]1[.]0\` through \`v[0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*\`[.] The counts are equal after a release tag is\$" \
+    "  \`v0.1.0\` through \`${NEWEST_TAG}\`. The counts are equal after a release tag is"
 
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
@@ -381,9 +356,8 @@ ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
 if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)
 fi
-# Stage the install docs whose version strings were bumped above
-# (only if the bump actually changed them, so a clean tree stays clean).
-for doc in README.md docs/INSTALL.md docs/VERSION-HISTORY.md; do
+# Stage the release docs whose current-version anchors were bumped above.
+for doc in docs/INSTALL.md docs/VERSION-HISTORY.md; do
     if [ -f "$doc" ] && ! git diff --quiet -- "$doc"; then
         ADD_FILES+=("$doc")
     fi

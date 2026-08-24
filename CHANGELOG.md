@@ -8,6 +8,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- **Windows distribution support ends with 3.3.0.** Version 3.3.0 is the final
+  supported Windows release and keeps its x86_64 archive and installer so the
+  end-of-life notice reaches existing clients. Version 4.0.0 removes the
+  Windows package, installer, performance harnesses, and signed update target.
+  The Windows CI job remains as compile and regression coverage for retained
+  conditional code, not as a supported-platform claim.
 - **The native Ubuntu ARM test machine now runs under direct QEMU/HVF.** The
   migrated Ubuntu 26.04 aarch64 disk keeps the original OS, user, tools, and
   repository state, with its root filesystem expanded from 128 GiB to 256 GiB.

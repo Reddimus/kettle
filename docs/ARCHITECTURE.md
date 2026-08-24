@@ -209,16 +209,23 @@ time-indeterminate candidates fail closed. PID reuse therefore delays
 reclamation rather than risking a live sibling.
 
 `kettle-update` composes those primitives into one managed-install
-transaction. Windows names archive/helper/backup/quarantine state from one
-exact decimal PID-and-epoch-nanoseconds id. Its schema-3 pending capsule carries
-the exact signed release document and signature, selected asset digest, inner
-package manifest, and retained archive/helper identities. The helper rechecks
-that capsule against the compiled Ed25519 key and freshness window after taking
-the update and running locks, reads the actually installed version from the
-held PE version resource, and accepts only a strict upgrade.
+transaction. Kettle 4.0 uses that transaction for supported Linux installs.
+Windows distribution ended after 3.3.0; the Windows updater description below
+records the final supported design rather than current install architecture.
+Its complete source, including `scripts/install.ps1`, is archived at the
+`v3.3.0` tag.
 
-Both platforms parse the digest-verified archive directly and materialize its
-manifest-verified members into immutable byte buffers; transaction publication
+The archived Windows path named archive/helper/backup/quarantine state from one
+exact decimal PID-and-epoch-nanoseconds id. Its schema-3 pending capsule carried
+the exact signed release document and signature, selected asset digest, inner
+package manifest, and retained archive/helper identities. The helper rechecked
+that capsule against the compiled Ed25519 key and freshness window after taking
+the update and running locks, read the actually installed version from the held
+PE version resource, and accepted only a strict upgrade.
+
+The Linux path and archived Windows path parse the digest-verified archive
+directly and materialize its manifest-verified members into immutable byte
+buffers; transaction publication
 never returns to an extracted pathname. The release grammar is capped at 128
 entries and 512 MiB. Before a backup pathname can appear, the schema-2 journal
 durably records a transaction-bound `backing_up` intent with the destination's
@@ -245,31 +252,34 @@ and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
 recovery data after a crash between publication and provenance replacement.
-The Windows lock order is update then running; the helper releases running then
-update after durable commit and pending-record removal, before asking a fully
-qualified system PowerShell to execute the exact archive-verified `install.ps1`
-while a no-write/no-delete handle remains held. The PowerShell installer
-implements the same byte-range and sharing contract while retaining non-reparse
-directory handles from the drive root through the prefix, so validation and
+The archived Windows lock order was update then running; the helper released
+running then update after durable commit and pending-record removal, before
+asking a fully qualified system PowerShell to execute the exact
+archive-verified `install.ps1` while a no-write/no-delete handle remained held.
+The PowerShell installer implemented the same byte-range and sharing contract
+while retaining non-reparse directory handles from the drive root through the
+prefix, so validation and
 leaf-only mutation cannot be redirected through an exchanged ancestor.
-The Windows installer separately protects permanent state: every created root,
-managed directory, coordination file, staged payload, and published file has an
-explicit protected DACL for the initiating identity, SYSTEM, and Administrators.
-It holds and validates the fixed-volume ancestor chain before root creation,
-rejects untrusted replacement rights, and requires that exact ACL on an existing
-root. An opt-in legacy migration from a trusted external installer accepts only
-the bounded known tree before replacing inherited ACLs.
-On Windows, a pending helper cannot replace the mapped `kettle.exe`/`kettle.com`
-images until the old process releases its running-install guard and exits, so
-that process cannot transparently re-exec the replacement and still propagate
-its eventual status. A bare GUI handoff may exit zero, but any invocation with
-arguments prints that no requested work ran and exits 75 (`EX_TEMPFAIL`). This
-keeps help/version, configuration checks, CLI subcommands, and MCP launchers
-truthful while the verified update waits for other windows to close.
-After extraction, both supported updater paths verify any inner package
-manifest that is present. Signed release archives from v2.36.0 onward must
-contain that manifest; older archives may omit it for compatibility, but do
-not bypass verification when one is present.
+The archived Windows installer separately protected permanent state: every
+created root, managed directory, coordination file, staged payload, and
+published file had an explicit protected DACL for the initiating identity,
+SYSTEM, and Administrators.
+It held and validated the fixed-volume ancestor chain before root creation,
+rejected untrusted replacement rights, and required that exact ACL on an
+existing root. An opt-in legacy migration from a trusted external installer
+accepted only the bounded known tree before replacing inherited ACLs.
+On archived Windows installs, a pending helper could not replace the mapped
+`kettle.exe`/`kettle.com` images until the old process released its
+running-install guard and exited, so that process could not transparently
+re-exec the replacement and still propagate its eventual status. A bare GUI
+handoff could exit zero, but any invocation with arguments printed that no
+requested work ran and exited 75 (`EX_TEMPFAIL`). This kept help/version,
+configuration checks, CLI subcommands, and MCP launchers truthful while the
+verified update waited for other windows to close.
+After extraction, the supported Linux updater and archived Windows updater
+verify any inner package manifest that is present. Signed release archives from
+v2.36.0 onward must contain that manifest; older archives may omit it for
+compatibility, but do not bypass verification when one is present.
 
 Managed-recording retention also deletes through these primitives. It keeps
 the candidate locked while `kettle-state` proves the path still identifies the
@@ -1793,15 +1803,20 @@ Four notable invariants preserved by this flow:
 See the [version history](VERSION-HISTORY.md) for the shipped session-restore
 hardening ledger.
 
-## Performance evidence boundary
+## Archived Windows performance evidence boundary
 
-The Windows comparison suite in `scripts/perf/` is a release-evidence system,
-not a collection of ad-hoc timers. The orchestrator creates a new result
-directory, resolves and read-locks every production harness script and
-generated comparator configuration, records their SHA-256 identities, and
-holds those locks until the live run finishes. Release evidence compares a
-clean current checkout with an exact executable from a verified prior release;
-both candidates carry full source-commit and binary identities.
+Kettle 4.0 removed the Windows PowerShell comparison suite from `scripts/perf/`.
+The complete final harness is archived at the `v3.3.0` tag. This section keeps
+its implementation history; none of the paths or commands below are part of the
+current test or release architecture.
+
+The archived suite was a release-evidence system, not a collection of ad-hoc
+timers. Its orchestrator created a new result directory, resolved and read-locked
+every production harness script and generated comparator configuration,
+recorded their SHA-256 identities, and held those locks until the live run
+finished. Release evidence compared a clean current checkout with an exact
+executable from a verified prior release; both candidates carried full
+source-commit and binary identities.
 
 ```mermaid
 flowchart LR
@@ -1816,43 +1831,43 @@ flowchart LR
     G --> U["sanitized JSON-only bundle<br/>exact-handle revalidation"]
 ```
 
-Several boundaries are deliberate:
+Several archived boundaries were deliberate:
 
-- Live result transfer never trusts a predictable temporary pathname.
-  Throughput and vtebench relays use current-user-only named pipes, random
+- Live result transfer never trusted a predictable temporary pathname.
+  Throughput and vtebench relays used current-user-only named pipes, random
   capabilities, exact client-process ancestry, bounded frames, strict UTF-8
   where the payload is textual, and finite connect/read/process deadlines.
-- WSL vtebench inherits terminal output so the emulator receives the real
-  workload, while a separate binary control frame carries only the exit status
+- WSL vtebench inherited terminal output so the emulator received the real
+  workload, while a separate binary control frame carried only the exit status
   and bounded DAT evidence back to the locked Windows relay. The Windows WSL
-  launcher, relay, Linux source revision, built binary, and workload runner are
+  launcher, relay, Linux source revision, built binary, and workload runner were
   part of the recorded toolchain rather than ambient command-name lookups.
-- Scoring opens a bounded, no-follow snapshot of every authoritative input and
-  retains identity locks for the full evaluation. Duplicate or
+- Scoring opened a bounded, no-follow snapshot of every authoritative input and
+  retained identity locks for the full evaluation. Duplicate or
   case-equivalent JSON keys, byte-order marks, invalid UTF-8, oversized files,
-  reparse points, and post-open identity changes are fatal.
-- Publication copies only the allowlisted JSON result set into a newly created
-  staging tree. The sanitizer retains exact handles, revalidates the complete
-  tree after the move, and rolls back if a path, stream, child set, or content
-  identity changed. Raw evidence remains private and is never modified in
+  reparse points, and post-open identity changes were fatal.
+- Publication copied only the allowlisted JSON result set into a newly created
+  staging tree. The sanitizer retained exact handles, revalidated the complete
+  tree after the move, and rolled back if a path, stream, child set, or content
+  identity changed. Raw evidence remained private and was never modified in
   place.
-- Physical-display identity accepts WMI only as a same-instance
+- Physical-display identity accepted WMI only as a same-instance
   monitor/connection pair with an explicitly physical Windows output
-  technology. Miracast and indirect display paths are excluded. If that
-  connection is absent, the fallback binds one desktop source to one active
-  physical CCD monitor/connection pair, requires its exact
-  `GUID_DEVINTERFACE_MONITOR` class, derives a single registry location from
-  that strict path, and validates the complete EDID and CCD identifiers. It
-  never mixes WMI monitor identity with a CCD connection or scans registry
-  instances by model. The scorer distrusts the serialized acquisition,
-  reconstructs unique monitor/connection/screen mappings, and re-applies the
+  technology. Miracast and indirect display paths were excluded. If that
+  connection was absent, the fallback bound one desktop source to one active
+  physical CCD monitor/connection pair, required its exact
+  `GUID_DEVINTERFACE_MONITOR` class, derived a single registry location from
+  that strict path, and validated the complete EDID and CCD identifiers. It
+  never mixed WMI monitor identity with a CCD connection or scanned registry
+  instances by model. The scorer distrusted the serialized acquisition,
+  reconstructed unique monitor/connection/screen mappings, and re-applied the
   physical allowlist; missing, ambiguous, synthetic, or inconsistent evidence
-  remains unidentified.
-- Display topology is part of the run identity. Only the dedicated transition
-  probe may move Kettle between the two pinned EDID-backed screens; any other
-  topology change invalidates release evidence. Virtual or fallback displays
-  can exercise the manifest and synthetic protocol paths but cannot support a
-  comparative release claim.
+  remained unidentified.
+- Display topology was part of the run identity. Only the dedicated transition
+  probe could move Kettle between the two pinned EDID-backed screens; any other
+  topology change invalidated release evidence. Virtual or fallback displays
+  could exercise the manifest and synthetic protocol paths but could not
+  support a comparative release claim.
 
-`docs/TESTING.md` defines the validation gates and
-`docs/PERFORMANCE.md` defines the claims that may be made from a passing run.
+At `v3.3.0`, `docs/TESTING.md` defines the suite's validation gates and
+`docs/PERFORMANCE.md` defines the claims that could be made from a passing run.

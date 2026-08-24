@@ -17,7 +17,7 @@ pub fn run(assume_yes: bool, current: &str) -> i32 {
         } else {
             eprintln!("kettle update: {error}");
             eprintln!(
-                "Use the package manager or installer that owns this executable. Self-update covers installs made by kettle's official Windows or Linux installer, and the macOS kettle.app from the release page."
+                "Use the package manager or installer that owns this executable. Self-update covers installs made by kettle's official Linux installer and the macOS kettle.app from the release page."
             );
         }
         return 2;

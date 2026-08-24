@@ -20,8 +20,11 @@ MAX_MANIFEST_BYTES = 128 * 1024
 # universal2 archive covering both architectures. Naming the two Apple triples
 # separately would point them at the same file, and this map requires one
 # filename per target.
+#
+# Windows was removed in 4.0.0 when the platform was retired. A client built
+# before that still asks for `x86_64-pc-windows-msvc`; the updater announces
+# the release page but offers no in-place download.
 EXPECTED_NAMES = {
-    "x86_64-pc-windows-msvc": "kettle-windows-x86_64.zip",
     "x86_64-unknown-linux-gnu": "kettle-linux-x86_64.tar.gz",
     "aarch64-unknown-linux-gnu": "kettle-linux-aarch64.tar.gz",
     "universal-apple-darwin": "kettle-macos-universal.zip",
@@ -95,6 +98,8 @@ def build_manifest(
     match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
     if not match:
         raise ValueError(f"stable tag must be vMAJOR.MINOR.PATCH, got {tag!r}")
+    if int(match.group(1)) < 4:
+        raise ValueError("the three-target manifest is valid only for v4.0.0 and later")
     if not published_at or any(char in published_at for char in "\r\n"):
         raise ValueError("published-at must be a non-empty single-line timestamp")
     by_target = dict(assets)

@@ -13,6 +13,10 @@ This doc covers the programmatic surface: `kettle exec`, the control server +
 `kettle ctl`, and the `kettle mcp` MCP server. It is OFF by default — the
 control server only starts when you opt in.
 
+Kettle 4.0 supports Linux and macOS. Windows and WSL details below describe the
+final Windows-supported 3.3.0 line and retained conditional code; they are not a
+current package or support commitment.
+
 ## The three entry points
 
 ```
@@ -527,8 +531,8 @@ wakes an unlocked display before Kettle starts.
 just agent-tui-smoke
 ```
 
-Starts a real grid-renderer Kettle window in explicit `native` shell mode,
-using PowerShell on Windows and deterministic non-rc Bash on Unix/macOS. The
+Starts a real grid-renderer Kettle window in explicit `native` shell mode with
+deterministic non-rc Bash on Linux and macOS. The
 recipe asks Cargo to build and report the current checkout's exact release
 executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
 and fails nonzero instead of reporting success when the graphical session is
@@ -536,8 +540,7 @@ missing or locked. On macOS the preflight wakes an unlocked display before the
 window starts. It
 then drives a shell marker, optional Codex
 CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
-`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, a
-deterministic Windows Codex active-placeholder and queued-input cursor fixtures,
+`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, and
 tmux attach/send/capture
 when `tmux` is installed, including a build-capability-gated SIXEL render on
 tmux 3.4 or newer built with `--enable-sixel`, and clean/configured
@@ -553,10 +556,8 @@ exact response inside its generated output frame, so command echo and a stale
 `KETTLE_AGENT_AUTH_SMOKE=strict` when missing or expired external credentials
 should fail the run. It saves PNG screenshots,
 `read_screen`, `read_cells`, and
-`analysis.json` under `target/diagnostics/agent-tui-*` on Unix. On Windows, the
-default is an unpredictable protected-DACL directory at
-`%LOCALAPPDATA%\kettle\kettle-live-ui-diagnostics-*\agent-tui-*`; explicit
-`--out-dir` still overrides it. The harness fails if a captured state is blank
+`analysis.json` under `target/diagnostics/agent-tui-*`. Explicit `--out-dir`
+overrides that location. The harness fails if a captured state is blank
 or lacks visible terminal cells. Missing optional CLIs/tools are reported as skips;
 the shell and prompt-shaped states always run. The Codex/Claude legs remain
 version/help captures or opt-in noninteractive authenticated prompts; they do
@@ -566,83 +567,6 @@ compile-capable tmux with nonzero cell-pixel geometry additionally produces
 `tmux-sixel.png` and pixel evidence. Zero geometry produces a captured
 `tmux-sixel-fallback` state but remains an explicit render skip; an older,
 disabled, or unverified tmux build is skipped before the fixture.
-
-On Windows, use the separate cross-boundary mode to keep the shipped
-`kettle.exe`/ConPTY/window path while running the shell and tools inside WSL:
-
-```powershell
-just agent-tui-wsl-smoke
-# Optional non-default distro and AstroNvim config inside that distro:
-$env:KETTLE_SMOKE_WSL_DISTRO = "Ubuntu"
-$env:KETTLE_SMOKE_ASTRO_CONFIG = "/home/me/.config/nvim"
-$env:KETTLE_SMOKE_NVIM_DATA = "/home/me/.local/share/nvim"
-just agent-tui-wsl-smoke
-```
-
-The selected distro must be WSL 2 with a kernel that supports pidfds and a
-Python 3 build exposing both `os.pidfd_open` and
-`signal.pidfd_send_signal`. The recipe runs a real decoy plus
-spawn-during-cleanup preflight before it creates the Neovim sandbox; if either
-API or the kernel support is missing, it stops with an explicit prerequisite
-error instead of falling back to reusable numeric PIDs. Use `wsl --update` for
-the WSL kernel; upgrade Python separately through the selected distribution's
-package manager or release upgrade until both APIs are present. The normal
-helper self-test compiles the fully assembled preflight program and the child
-program embedded inside it as a string, so malformed generated Python fails on
-every host before this Windows-only recipe is run.
-Each acquired pidfd is closed even when another target cannot be signalled. An
-unreadable same-user environment fails the drain closed, rather than letting an
-unknown process look absent, and the sandbox is removed only after the
-exact-environment process set has stayed empty. The prerequisite fixture
-likewise reaps both direct children independently; it removes its tree only
-after its own final drain succeeds.
-The normal in-pane completion command only publishes a release marker; it
-never deletes the sandbox while a detached configured-editor daemon may still
-be using it. The host performs the drain and deletion after Kettle exits.
-
-Native Windows uses the same drain-before-delete invariant without inspecting
-reusable process IDs. Immediately before the sandboxed editor phase, the host
-opens an unpredictable named kill-on-close Job Object before it creates the
-sandbox and registers cleanup as soon as the tree exists. The exact PowerShell
-pane assigns its own current-process handle. Every later Neovim/plugin descendant
-inherits membership even after detaching from ConPTY or the shell. Post-exit
-cleanup terminates the Job, waits until its accounting reports zero active
-processes, closes the Job, and only then removes the private sandbox. The native
-regression also holds a file without delete sharing and requires Windows itself
-to refuse a real pre-drain tree deletion. Cleanup rejects both symlinks and
-Windows directory junctions before restoring owner permissions or walking an
-entry; a native junction regression proves an external read-only target remains
-unchanged. Named-Job
-self-assignment, accounting, or retained-Job failures all fail the smoke closed
-and leave the tree in place.
-
-This builds the exact current checkout Windows executable reported by Cargo,
-launches `wsl.exe` with deterministic non-rc Bash, strips Windows
-`/mnt/<drive>` entries from the target `PATH`, and rejects or reports any tool
-whose canonical path still resolves to a Windows-host mount. tmux uses a
-cryptographically random private socket, the Bash executable resolved inside
-that distro (not a hard-coded `/bin/bash`), and checked cleanup registered
-before the session starts. Before configured Neovim or AstroNvim runs, the
-helper creates an unpredictable, owner-private directory inside the target
-distro. It copies only regular files from the config plus existing
-`lazy`/`site` plugin runtime while dereferencing symlinks. Plugin Git refs are
-retained so lazy.nvim recognizes the pinned checkout, but Git object databases
-are excluded because they are not Neovim runtime; cycles, special files, more
-than 100,000 entries or 64 levels, a runtime file over 256 MiB, and an aggregate
-over 2 GiB are rejected. Directory entries are counted before being retained
-for deterministic hashing, so one huge directory cannot allocate past that
-limit. Typed directory and file paths are hashed too, so empty-directory
-changes cannot hide behind unchanged file and byte counts. It then redirects
-`HOME`,
-`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME` to
-that snapshot; `XDG_RUNTIME_DIR` is isolated there as well. Clean Neovim uses
-the same isolation; the directory is removed at the end.
-
-This protects ordinary configuration and plugin writes that honor `HOME` or
-Neovim's XDG paths. It is state isolation, not an OS security sandbox: code
-that deliberately writes a hard-coded absolute path can still reach that path.
-Authenticated agent probes remain opt-in and use the target shell's existing
-credentials.
 
 ```sh
 just interaction-smoke
