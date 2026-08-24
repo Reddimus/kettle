@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **The native Ubuntu ARM test machine now runs under direct QEMU/HVF.** The
+  migrated Ubuntu 26.04 aarch64 disk keeps the original OS, user, tools, and
+  repository state, with its root filesystem expanded from 128 GiB to 256 GiB.
+  Both the Xvfb and real GNOME Wayland `search-history` live-window smokes
+  passed on native ARM. Each used Vulkan through Mesa llvmpipe, reported as a
+  CPU adapter, so the result proves software rendering and does not claim
+  accelerated graphics.
+
 ## [3.3.0] — 2026-08-24
 
 ### Changed

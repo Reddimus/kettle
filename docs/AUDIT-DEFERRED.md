@@ -281,12 +281,27 @@ uninstall with no documented recovery (`install-unix.py:700`).
 
 ## Testing coverage
 
-- **Ubuntu ARM: the suite runs, a live window does not, 2026-08-22.**
+- **~~Ubuntu ARM: the suite runs, a live window does not, 2026-08-22~~ —
+  closed 2026-08-23.**
 
-  The test suite passes in the `Ubuntu 26.04` guest: 769 tests across
-  `kettle-core`, `kettle-vt`, `kettle-update` and `kettle-config`, zero
-  failures, including the Linux-gated startup-lock test and a direct
-  reproduction of the one-column crash on aarch64.
+  The same Ubuntu 26.04 aarch64 installation now runs under direct QEMU with
+  Apple's HVF accelerator. Its root disk was expanded from 128 GiB to 256 GiB,
+  removing the link-space failure without replacing the OS. The full workspace
+  run completed 2,131 tests across 45 binaries with zero failures, and the
+  release binary linked successfully.
+
+  `search-history` then passed twice on native ARM: once under Xvfb and once in
+  the real GNOME Wayland session. Both runs selected Vulkan through Mesa
+  llvmpipe and reported `Adapter type: Cpu`. This closes the live-window and
+  Wayland evidence gap. It does not prove accelerated virtual GPU rendering.
+
+  The original blocked record follows because it explains why the earlier run
+  stopped and why moving the guest fixed it.
+
+  In that earlier run, the test suite passed in the `Ubuntu 26.04` guest: 769
+  tests across `kettle-core`, `kettle-vt`, `kettle-update` and
+  `kettle-config`, zero failures. It included the Linux-gated startup-lock test
+  and a direct reproduction of the one-column crash on aarch64.
 
   Getting there needed two things that are worth writing down, because both
   wasted a pass. `prlctl exec` runs as root while the guest's `/` is owned by
@@ -301,24 +316,19 @@ uninstall with no documented recovery (`install-unix.py:700`).
   without operands, or aimed at `/`, would make the whole filesystem
   world-readable.
 
-  A live window is still not covered. The guest's `/tmp` is a 7.6 GB tmpfs,
+  A live window was not covered in that run. The guest's `/tmp` was a 7.6 GB tmpfs,
   which is where the build has to go because `/` has 1.4 GB free, and the
   target directory fills it before the final link. rustc dies with exit 101 and
   no OOM in `dmesg`, because it is disk rather than memory. Building to the
   shared folder instead works but is slow enough that it was not worth another
   pass for this change.
 
-  So GPU and window behaviour on Linux ARM went unverified this cycle. CI builds
+  GPU and window behaviour on Linux ARM therefore went unverified in that cycle. CI builds
   and tests Linux x86_64 on every pull request and runs an aarch64 early-warning
   job, so everything except live presentation is covered elsewhere.
 
-  Worth flagging for whoever picks this up: `docs/INSTALL.md:15-17` and
-  `docs/TESTING.md:180-182` both describe this guest as supplying live-UI and
-  Wayland evidence. Neither is wrong about what it can do. It could not do it
-  today, and the reason is disk rather than anything about the guest. Freeing
-  space in `/tmp`, or linking the binary elsewhere, should restore it. Those
-  documents are left alone because a full tmpfs is a passing condition, not a
-  change in what the VM is for.
+  The cause was disk pressure rather than ARM, Wayland, or the renderer. The
+  migrated and expanded QEMU disk is now the maintained native-ARM test path.
 
 - **Two macOS update cleanup windows are mitigated, not eliminated,
   2026-08-22.** `Staging::discard` and the sweep both delete by pathname,
