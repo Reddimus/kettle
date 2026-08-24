@@ -5,6 +5,35 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 3.2.1 pre-release completion — 2026-08-23
+
+Host: macOS 26 (Darwin 25.6), Apple silicon. Bundle: the installed, signed
+`/Applications/kettle.app` at 3.2.1. The run used foreground Computer Use
+against System Settings and restored the user's original dark appearance,
+Reduce Transparency off, and Dock magnification off when it finished.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| System appearance light with a dark Kettle theme | With macOS Appearance set to **Light** and Kettle still on **TokyoNight Night**, the live window kept a clean dark caption and surface. The title remained beside the traffic lights and the rounded top corners had no clear strip or seam. |
+| Toggle Reduce Transparency live | With `background-opacity = 0.86` and `window-blur = true`, Accessibility > Display changed **Reduce transparency** from off to on and back while the same Kettle window stayed open. A fixed `700 x 400` crop of the terminal surface changed from mean RGB `(35,37,49)` to `(29,31,43)` when reduction was on, then returned exactly to `(35,37,49)` when switched off. The window needed no relaunch and kept clean corners throughout. |
+
+### Still not capturable
+
+**Dock magnification.** The System Settings slider was driven from `0` to `1`
+and back successfully. The automation screenshot for Finder exposes the desktop
+but filters the Dock out, and attempting a coordinate action on that desktop is
+rejected as `noWindowsAvailable`. That compositor/app boundary prevents a
+screen-derived judgement of the magnified icon; the setting itself is no longer
+the blocker.
+
+**The app-switcher icon.** An app-targeted `Cmd+Tab` was sent to the live Kettle
+window, but Computer Use cannot invoke global shortcuts and its app-scoped
+screenshot did not expose the switcher. This is now specifically blocked by
+system-UI capture and global-shortcut isolation, not by missing Automation
+permission.
+
 ## 3.2.1 — 2026-08-24
 
 Host: macOS 26 (Darwin 25.6), Apple silicon, system appearance **dark**
