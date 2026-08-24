@@ -517,18 +517,15 @@ fn solid_blend(source: Rgb, target: Rgb, source_percent: u16) -> Rgb {
     )
 }
 
-/// Right-click context menu (Terminator / GNOME Terminal / iTerm2
-/// parity). Drawn as a floating panel anchored at the click point;
-/// the UI clamps the anchor so the panel fits the surface. The
-/// renderer reads this slice each frame and draws if `Some` — the
-/// UI is the single source of truth for state + dispatch.
+/// Vertical menu panel used by the right-click menu and the command, layout,
+/// and SSH pickers. The UI clamps the anchor and remains the source of truth
+/// for selection and dispatch; the renderer owns only shared list paint.
 pub struct ContextMenu {
     /// Top-left of the panel in surface pixels (already clamped).
     pub anchor: (f32, f32),
     pub rows: Vec<ContextMenuRow>,
-    /// Index of the currently highlighted (selectable) row. Always
-    /// points at an enabled, non-separator row when the menu is
-    /// non-empty.
+    /// Index of the currently highlighted row. A disabled status row is the
+    /// only non-empty case where this does not point at a selectable item.
     pub highlight: usize,
     /// Index of the first row the renderer should paint (Terminator
     /// menu UX parity). Rows `0..scroll_offset` are scrolled
@@ -888,15 +885,17 @@ pub struct Overlay {
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
+    /// Keyboard help for the SSH input lane. Ranked hosts are projected through
+    /// `context_menu` so each match gets its own row.
     pub ssh_hint: String,
     /// `Some(typed)` while the command palette is open.
     pub palette_query: Option<String>,
-    /// The ranked command labels (selected one marked) for the palette.
+    /// Keyboard help for the palette input lane. Ranked commands are projected
+    /// through `context_menu`, including their live shortcut hints.
     pub palette_hint: String,
     /// Terminator parity (`layoutlauncher.py`): `Some(typed)` while
-    /// the layout picker is open. Same UX surface as the command
-    /// palette but the hint string lists layout names from
-    /// `Session::list_layouts`.
+    /// the layout picker is open. Its rows use the same menu projection as the
+    /// command palette.
     pub layout_picker_query: Option<String>,
     pub layout_picker_hint: String,
     /// Terminator parity (edit-title overlay UX): the in-progress
@@ -6744,10 +6743,7 @@ impl Renderer {
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[5], 0.96));
-            let label = format!(
-                "  ⌘ {q}_   ▸ {}   (Enter run · Tab/↑↓ select · Esc cancel)",
-                overlay.palette_hint
-            );
+            let label = format!("  ⌘ {q}_   {}", overlay.palette_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -6767,16 +6763,13 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(q) = &overlay.layout_picker_query {
             // Terminator parity, layoutlauncher.py:
-            // layout picker overlay. Same bar shape as the
-            // palette but the hint string lists layouts.
+            // layout picker input. The ranked layouts live in the shared
+            // context-menu panel above this lane.
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[6], 0.96));
-            let label = format!(
-                "  ▤ layout: {q}_   ▸ {}   (Enter spawn · Tab/↑↓ select · Esc cancel)",
-                overlay.layout_picker_hint
-            );
+            let label = format!("  ▤ layout: {q}_   {}", overlay.layout_picker_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -6799,10 +6792,7 @@ impl Renderer {
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[4], 0.96));
-            let label = format!(
-                "  ssh ❯ {q}_    {}   (Enter connect · Tab complete · Esc cancel)",
-                overlay.ssh_hint
-            );
+            let label = format!("  ssh ❯ {q}_   {}", overlay.ssh_hint);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));

@@ -43,10 +43,12 @@ tracked here so they are not lost.
   typed `Outcome` command list (pure deciders + a thin applier), replacing the
   source-text drift guards with behavioral unit tests. Large; best done as its own
   multi-session refactor after the small correctness fixes have settled.
-- **Vertical-list pickers.** The command-palette / layout / ssh pickers render as a
-  one-line bottom strip that clips matches on narrow windows; rework into a
-  scrollable vertical list reusing the context-menu panel machinery (also makes
-  room for per-row keybind hints).
+- ~~**Vertical-list pickers.**~~ Done in a separate change: the command palette,
+  layout picker, and SSH launcher now project ranked matches into the existing
+  context-menu panel as individually clipped, scrollable rows above the input
+  lane. Selection remains visible within the bounded viewport, and command rows
+  use the live keybind-hint column. The focused regression fails when the
+  projection is collapsed back to the former one-line representation.
 
 ## Found by the 3.2.0 appearance gate
 
@@ -930,10 +932,10 @@ or cross-crate plumbing that should not be rushed into one release:
   marks store stable document-row ids, prune on genuine eviction/reset, ignore
   alternate-screen rows, and clear on reflow rather than targeting unrelated
   text.
-- **Command palette / layout picker / SSH launcher stay single-line bars.** Fold
-  them into the responsive, multi-row layout the search bar gained in v2.38.0
-  (also makes room for per-row keybind hints). Extends the vertical-list-pickers
-  entry above.
+- ~~**Command palette / layout picker / SSH launcher stay single-line bars.**~~
+  Closed by the vertical-list picker work above. The shared context-menu panel
+  supplies the multi-row layout, bounded scrolling, selection rail, and hint
+  column while the editable query remains in its bottom input lane.
 
 Two related Kitty findings from the same audit are also resolved in the next
 release. Global/frame deletion now crosses the extractor/core boundary and

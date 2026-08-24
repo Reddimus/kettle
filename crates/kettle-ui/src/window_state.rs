@@ -807,7 +807,10 @@ pub(crate) struct WindowState {
     /// suppress the first same-coordinate report in another.
     pub(crate) last_mouse_cell: Option<(u64, usize, usize)>,
     pub(crate) links: Vec<kettle_core::Link>,
-    pub(crate) ssh_input: Option<String>,
+    /// `Some((query, selected))` while the SSH launcher is open. Selection is
+    /// over the fuzzy-ranked configured-host list; a query with no match still
+    /// connects to the typed target on Enter.
+    pub(crate) ssh_input: Option<(String, usize)>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(String, usize)>,
     /// `Action::OpenSettings` overlay navigation. `Some` while the
