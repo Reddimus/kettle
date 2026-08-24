@@ -323,14 +323,11 @@ GitHub runners for every supported platform:
   destination. The installer never first moves the original profile to a
   retired name, so interruption cannot leave the profile pathname absent.
 
-  > **No `winget` / `scoop` recipe yet.** `winget install kettle` and
-  > `scoop install kettle` don't resolve — kettle isn't in the winget-pkgs
-  > repo or a scoop bucket. If you'd like to maintain one, the SHA-256
-  > sidecars shipped with every release satisfy both ecosystems' integrity
-  > checks, and the generated `kettle.rb` + `PKGBUILD` release assets are
-  > ready-made templates for the manifest shape. Until then, use
-  > `install.ps1` above (it covers PATH + Start-menu + auto-uninstall, the
-  > same integration a package manager would give you).
+  > **Archived package-manager status.** Kettle never published a `winget` or
+  > `scoop` manifest during its supported Windows releases. For recovery or
+  > uninstall work, use the archived [v3.3.0 package](https://github.com/Reddimus/kettle/releases/tag/v3.3.0)
+  > and its bundled `install.ps1` as described above. Kettle 4.0 and later do
+  > not publish a Windows package.
 
 ## First run
 
