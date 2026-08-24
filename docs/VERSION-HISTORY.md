@@ -28,6 +28,14 @@ actually shipped.
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot
   refer to a different version.
 
+## Planned platform transition
+
+- `v3.3.0` is the final Windows-supported release. It retains the Windows
+  archive, installer, and signed update target and teaches installed clients to
+  explain the later missing target.
+- `v4.0.0` removes Windows distribution support. Retained Windows CI is compile
+  and regression coverage for conditional code, not a package or support claim.
+
 ## Release eras
 
 - `v0.1.0` to `v1.0.1` (2026-05-19 to 2026-05-20): initial public terminal

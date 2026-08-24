@@ -113,6 +113,18 @@ This ordering closes the tag-before-changelog race recorded in
 `scripts/release.sh`: the release workflow once reached its platform jobs before
 one job rejected the missing version heading.
 
+### Windows retirement sequence
+
+Publish Windows-supported 3.3.0 before merging the 4.0 distribution removal.
+The 3.3.0 release must retain the Windows x86_64 archive, `install.ps1`, and the
+`x86_64-pc-windows-msvc` signed-manifest target. Verify that archive and target
+through the normal publication checks.
+
+Keep 3.3.0 as GitHub's latest release for at least one default 24-hour update
+interval so online Windows clients can receive its end-of-life behavior. Also
+retain a direct manual 3.3.0 download route for clients that missed that window.
+Only then may 4.0 remove the Windows package, installer, and manifest target.
+
 ## 2. Merge the signed release-cut pull request
 
 Create `release/vX.Y.Z-cut` from the now-synchronized `main`, then run from the
