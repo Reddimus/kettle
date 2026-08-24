@@ -18,6 +18,20 @@ const MAX_CACHE_BYTES: usize = 256 * 1024;
 const PACKAGED: bool = option_env!("KETTLE_PACKAGED").is_some();
 static CHECK_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateDelivery {
+    Install,
+    Notify,
+}
+
+fn update_delivery(policy: &UpdatePolicy, has_asset: bool) -> UpdateDelivery {
+    if matches!(policy, UpdatePolicy::Auto) && has_asset {
+        UpdateDelivery::Install
+    } else {
+        UpdateDelivery::Notify
+    }
+}
+
 struct CheckInFlight {
     _file_lock: Option<kettle_state::ExclusiveFileLock>,
 }
@@ -177,7 +191,9 @@ pub fn maybe_spawn_check(
                     if dismissed.as_deref() == Some(update.tag.as_str()) {
                         return;
                     }
-                    if policy == UpdatePolicy::Auto {
+                    if update_delivery(&policy, update.asset.is_some())
+                        == UpdateDelivery::Install
+                    {
                         match kettle_update::install_update(&client, &update) {
                             Ok(outcome) => {
                                 let staged = matches!(
@@ -228,6 +244,11 @@ pub fn maybe_spawn_check(
                             }
                         }
                     } else {
+                        if matches!(policy, UpdatePolicy::Auto) {
+                            log::info!(
+                                "automatic update has no artifact for this platform; notifying instead"
+                            );
+                        }
                         let _ = proxy.send_event(UserEvent::UpdateAvailable {
                             tag: update.tag,
                             url: update.release_url,
@@ -280,7 +301,9 @@ pub fn run_blocking_check(current: &str) -> String {
             cache.last_check = now_secs();
             cache.latest_tag = Some(update.tag.clone());
             save_cache(&cache);
-            let guidance = if kettle_update::detect_managed_install().is_ok() {
+            let guidance = if update.asset.is_none() {
+                "this platform has no release artifact; open the release page for supported packages"
+            } else if kettle_update::detect_managed_install().is_ok() {
                 "run `kettle update` to install it"
             } else {
                 "update through the package manager or installer that owns this executable"
@@ -297,10 +320,28 @@ pub fn run_blocking_check(current: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CheckLockAttempt, UpdateCache, is_due};
+    use kettle_config::UpdatePolicy;
+
+    use super::{CheckLockAttempt, UpdateCache, UpdateDelivery, is_due, update_delivery};
 
     /// The daily default (`update-check-interval-hours = 24`) in seconds.
     const DAY: u64 = 24 * 60 * 60;
+
+    #[test]
+    fn automatic_policy_notifies_when_the_platform_has_no_artifact() {
+        assert_eq!(
+            update_delivery(&UpdatePolicy::Auto, false),
+            UpdateDelivery::Notify
+        );
+        assert_eq!(
+            update_delivery(&UpdatePolicy::Auto, true),
+            UpdateDelivery::Install
+        );
+        assert_eq!(
+            update_delivery(&UpdatePolicy::Notify, true),
+            UpdateDelivery::Notify
+        );
+    }
 
     #[test]
     fn due_check_skips_first_launch_and_handles_clock_skew() {

@@ -2,6 +2,14 @@ use std::io::{BufRead as _, IsTerminal as _, Write as _};
 
 use kettle_update::{CheckOutcome, FeedClient, UpdateError};
 
+fn missing_artifact_message(has_asset: bool, tag: &str, release_url: &str) -> Option<String> {
+    (!has_asset).then(|| {
+        format!(
+            "kettle update: {tag} has no package for this platform; see supported downloads at\n  {release_url}"
+        )
+    })
+}
+
 pub fn run(assume_yes: bool, current: &str) -> i32 {
     if let Err(error) = kettle_update::prepare_managed_install_for_update() {
         if matches!(&error, UpdateError::UpdateLocked) {
@@ -27,6 +35,13 @@ pub fn run(assume_yes: bool, current: &str) -> i32 {
             return 1;
         }
     };
+
+    if let Some(message) =
+        missing_artifact_message(update.asset.is_some(), &update.tag, &update.release_url)
+    {
+        eprintln!("{message}");
+        return 2;
+    }
 
     if !assume_yes {
         if !std::io::stdin().is_terminal() {
@@ -81,6 +96,19 @@ pub fn run(assume_yes: bool, current: &str) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_release_without_this_platforms_artifact_links_instead_of_installing() {
+        let message = super::missing_artifact_message(
+            false,
+            "v4.0.0",
+            "https://example.invalid/releases/tag/v4.0.0",
+        )
+        .expect("missing artifact must stop before confirmation and download");
+        assert!(message.contains("no package for this platform"));
+        assert!(message.contains("https://example.invalid/releases/tag/v4.0.0"));
+        assert!(super::missing_artifact_message(true, "v4.0.0", "ignored").is_none());
+    }
+
     #[test]
     fn confirmation_accepts_only_explicit_yes_tokens() {
         for accepted in ["y", "Y", "yes", " YES "] {
