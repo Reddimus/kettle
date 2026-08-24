@@ -5,7 +5,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
-  group: advisory-pr-review-${{ github.event.pull_request.number }}
+  group: advisory-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 1
+          persist-credentials: false
 
       - uses: anthropics/claude-code-action@8569a83495a3f6f0c50a90e46351d3816fed1a75 # v1
         with:
@@ -31,12 +31,11 @@ jobs:
           prompt: |
             /pr-review
 
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
+            Repository: ${{ github.repository }}
+            Pull request: ${{ github.event.pull_request.number }}
 
-            Use `mcp__github_inline_comment__create_inline_comment` with `confirmed: true`
-            for specific defects. Use `gh pr comment` only when a finding cannot be placed
-            inline. Post review feedback only as GitHub comments.
+            Use inline comments only for concrete findings. Before posting, check existing review feedback and do not repeat equivalent findings. If no finding survives the repository policy, post nothing.
 
-          claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+          claude_args: >-
+            --allowedTools
+            "mcp__github_inline_comment__create_inline_comment,Bash(gh api --method GET:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
