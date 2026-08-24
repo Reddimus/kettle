@@ -125,6 +125,12 @@ interval so online Windows clients can receive its end-of-life behavior. Also
 retain a direct manual 3.3.0 download route for clients that missed that window.
 Only then may 4.0 remove the Windows package, installer, and manifest target.
 
+For v4.0.0 only, the maintainer explicitly waived this 24-hour interval.
+GitHub published v3.3.0 at `2026-08-24T08:01:20Z` and v4.0.0 at
+`2026-08-24T21:23:20Z`, 13 hours 22 minutes apart. The direct v3.3.0 download
+route remained available when v4.0.0 went public. This one-release exception
+does not change the policy above.
+
 Starting with 4.0.0, release CI keeps only Linux x86_64, Linux aarch64, and
 macOS universal packages. The Windows CI runner remains a portability check for
 retained conditional code; it is not a release package, installer, or supported
