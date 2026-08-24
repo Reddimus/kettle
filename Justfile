@@ -353,6 +353,7 @@ gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
 # pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
 # (one-time). The current-OS vendor check is supplemented by Linux + Windows
 # native vendor legs in CI.
+[unix]
 gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
     @echo ""
     @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
@@ -371,6 +372,7 @@ gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope mac
 # `gauntlet`/`gauntlet-strict` alone won't catch a regression there. The
 # platform-specific dependency set contains no successful stubs: every listed
 # dependency performs a real check, and missing required tooling fails.
+[unix]
 gauntlet-full: gauntlet-strict full-native-gates
     @echo ""
     @echo "CURRENT-OS FULL GAUNTLET PASSED — every required native gate listed above is green."
