@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.2.1] — 2026-08-24
+
 ### Fixed
 
 - **macOS: a light theme no longer draws the window title through the traffic
