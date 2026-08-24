@@ -35,19 +35,48 @@ screen capture rather than from source.
 | Finder icon | Matches the Dock rendering. |
 | Both 256 px appearances | `Assets.car` draws a blue rim over a dark face; the `AppIcon.icns` deployment-target fallback inverts them. Both keep the system mask, a parallel inset face, clear rim space, and a centered legible mark. |
 
-### Failed
+### Failed at the gate, fixed after the release
 
 **Light themes draw the window title through the traffic lights**
-([#251](https://github.com/Reddimus/kettle/issues/251)). The title lands at the
+([#251](https://github.com/Reddimus/kettle/issues/251)). The title landed at the
 far left of the titlebar, over the red and yellow buttons, with its leading
 characters clipped outside the window. Reproduced on `Alabaster`, `3024 Day` and
-`Adwaita`; not on `TokyoNight`. The shipped 3.1.1 bundle does the same, so it is
-not a regression, and it survives a full-screen re-layout, so it is not a stale
+`Adwaita`; not on `TokyoNight`. The shipped 3.1.1 bundle did the same, so it was
+not a regression, and it survived a full-screen re-layout, so it was not a stale
 frame.
 
-Releasing with it: it is cosmetic, it is not new, and 3.2.0 carries a crash fix,
+3.2.0 shipped with it: cosmetic, not new, and the release carried a crash fix,
 an installer downgrade fix and a session data-loss fix worth more than holding
-for it.
+for it. It is fixed on `main`.
+
+The gate write-up guessed the cause was AppKit's appearance switch, outside code
+this repo owns. Reading the live `NSThemeFrame` settled it, and the guess was
+wrong. The two cases are structurally different:
+
+| | dark theme | light theme |
+|---|---|---|
+| caption | `NSTitlebarContainerView` 0,600 800×32 | absent |
+| buttons | inside the container | loose on the frame view, x = 9 / 32 / 55 |
+| title | inside the container | `NSTextField` x = **-10**, w = 92 |
+
+`(72 - 92) / 2 = -10`: with no caption to centre the title in, AppKit centres it
+over the 72-point traffic-light cluster. The trigger is kettle's own doing —
+`native_material` adds an `NSVisualEffectView` to AppKit's frame view, and doing
+that after winit has applied a creation-time appearance override stops the
+caption from ever being built. Any foreign subview does it, not just an effect
+view; a plain `NSView` reproduces it. Nothing recovers afterwards: removing the
+view again leaves the caption gone.
+
+The fix is to reach the window with no override and apply the theme hint once
+the window is key, which is the path the live light/dark switch above already
+exercised — that row passing while startup failed is exactly the clue.
+
+Verified live on the same desktop, one pixel row across the titlebar:
+
+```
+before  ..  RRRRRRRRR .   YY  YYY  YYY..   GGGGGGGGGGGG      title over the buttons
+after   ....  RRRRRRRR      YYYYYYYYYY     GGGGGGGGGGGG      title beside them
+```
 
 ### Not run
 

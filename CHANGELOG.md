@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS: a light theme no longer draws the window title through the traffic
+  lights.** With any light theme the title sat at the far left of the titlebar,
+  across the red and yellow buttons, its leading characters clipped outside the
+  window. Dark themes were unaffected, which is what made it look like a
+  drawing bug rather than a layout one.
+
+  It was neither. winit turns a creation-time theme hint into an `NSWindow`
+  appearance override and applies it before AppKit has built the titlebar's
+  container view. The native material view kettle adds to the frame view
+  immediately afterwards then locks that state in: AppKit keeps its
+  container-less layout, in which the title is centred over the 72-point
+  traffic-light cluster rather than the caption, putting the text field at
+  x = -10. Nothing recovers it later — taking the material view back out does
+  not bring the caption back, and neither does re-applying the appearance.
+
+  macOS now reaches the window with no appearance override at all and takes
+  the hint once the window is on screen and key, which is the path the runtime
+  light/dark toggle already used and which leaves the caption intact. The hint
+  is tracked per window rather than once per process, so a second window still
+  gets it. Every other platform still seeds its caption at creation, where it
+  costs nothing and avoids a first-frame flash.
+
 ## [3.2.0] — 2026-08-23
 
 ### Added

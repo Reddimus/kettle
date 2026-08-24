@@ -980,6 +980,18 @@ pub(crate) struct WindowState {
     /// once the surface is configured; `window_state = hidden` keeps this true
     /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
+    /// v2.34.0: the last native window-theme hint this window was given via
+    /// `Window::set_theme` (`None` = never synced). The hint keeps the OS
+    /// titlebar — Windows DWM caption, Wayland Adwaita CSD, macOS appearance —
+    /// matching the active palette. Cached so the redraw-time check is a
+    /// compare and `set_theme` only fires when the answer changes; a lazy sync
+    /// at redraw (vs. per-mutation-site calls) can't drift when a new
+    /// theme-mutation path is added (Lua, preview, reload, schedule, ...).
+    ///
+    /// Per window rather than per process since #251: macOS can only take the
+    /// hint once AppKit has built that window's caption, and windows reach
+    /// that point at different times. See `app::native_theme_sync_is_due`.
+    pub(crate) native_theme_synced: Option<Option<winit::window::Theme>>,
     /// C4: per-pane `Terminal::output_generation` values consumed by this
     /// window's last successfully presented frame. During genuine device loss,
     /// the redraw guard intentionally snapshots these without presentation so
@@ -1151,6 +1163,7 @@ impl WindowState {
             window_title_override: None,
             pending_pane_restarts: Vec::new(),
             window_shown: false,
+            native_theme_synced: None,
             seen_output_gen: std::collections::HashMap::new(),
             pending_output_gen: std::collections::HashMap::new(),
             frame_recovery: FrameRecoveryState::default(),
