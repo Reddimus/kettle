@@ -16,6 +16,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   CPU adapter, so the result proves software rendering and does not claim
   accelerated graphics.
 
+- **Picker matches now render as vertical lists.** The command palette, layout
+  picker, and SSH launcher share the scrollable menu panel, keep the selected
+  result visible, and no longer flatten matches into a clipped bottom strip.
+
 ## [3.3.0] — 2026-08-24
 
 ### Changed

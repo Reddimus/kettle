@@ -1033,6 +1033,14 @@ checks the top, middle, and final scroll windows.
 `count_rows_fitting_respects_panel_height_and_separator_height` and
 `theme_submenu_with_512_entries_clamps_panel_to_surface_height` pin the
 single-pass scroll clamp for ordinary and maximum-size menus.
+`picker_candidates_are_vertical_rows_and_selection_scrolls_into_view` pins the
+command palette's reuse of that panel: one row per ranked result, live keybind
+hints, a visible selected row, and no overlap with the bottom input lane.
+`layout_and_ssh_pickers_keep_ranked_candidates_on_separate_rows` covers the
+other two projections and SSH target dispatch; the regression fails when the
+projection is collapsed to the former flattened strip.
+`picker_scroll_offset_handles_tiny_and_invalid_geometry` keeps malformed or
+too-small geometry from producing an invalid row window.
 `capture_carries_cursor_blink_state_for_lock_free_ui_redraws` keeps the cached
 blink bit wired through `PaneSnapshot::capture`, and
 `cached_cursor_blink_lookup_tracks_the_active_snapshot` verifies a validated

@@ -5120,6 +5120,231 @@ pub(crate) fn rank_layouts(q: &str, layouts: &[String]) -> Vec<usize> {
         .collect()
 }
 
+/// Indices into the configured SSH-host list, best fuzzy match first. Ties
+/// preserve config order so an empty query has a stable initial selection.
+fn rank_ssh_hosts(query: &str, hosts: &[(String, String)]) -> Vec<usize> {
+    let query = query.trim();
+    let mut ranked: Vec<(usize, i32)> = hosts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (name, _))| {
+            kettle_config::fuzzy::score(query, name).map(|score| (index, score))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    ranked.into_iter().map(|(index, _)| index).collect()
+}
+
+fn selected_ssh_target(query: &str, selected: usize, hosts: &[(String, String)]) -> Option<String> {
+    let ranked = rank_ssh_hosts(query, hosts);
+    let selected = selected.min(ranked.len().saturating_sub(1));
+    ranked
+        .get(selected)
+        .map(|&index| hosts[index].1.clone())
+        .or_else(|| {
+            let query = query.trim();
+            (!query.is_empty()).then(|| query.to_string())
+        })
+}
+
+struct PickerList {
+    rows: Vec<ContextMenuRow>,
+    selected: usize,
+}
+
+const PICKER_MAX_VISIBLE_ROWS: usize = 8;
+
+fn command_picker_list(query: &str, selected: usize, bindings: &Bindings) -> PickerList {
+    let commands = kettle_config::palette::commands();
+    let ranked = kettle_config::palette::rank(query, &commands);
+    let rows = ranked
+        .iter()
+        .map(|&index| {
+            let (label, action) = &commands[index];
+            ContextMenuRow {
+                label: (*label).to_string(),
+                separator: false,
+                enabled: true,
+                hint: kettle_config::keybinds::hint_label(bindings, action).unwrap_or_default(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        PickerList {
+            rows: vec![ContextMenuRow {
+                label: "No matching command".to_string(),
+                separator: false,
+                enabled: false,
+                hint: String::new(),
+            }],
+            selected: 0,
+        }
+    } else {
+        PickerList {
+            selected: selected.min(rows.len() - 1),
+            rows,
+        }
+    }
+}
+
+fn layout_picker_list(query: &str, selected: usize, layouts: &[String]) -> PickerList {
+    let ranked = rank_layouts(query, layouts);
+    let rows = ranked
+        .iter()
+        .map(|&index| ContextMenuRow {
+            label: layouts[index].clone(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        let label = if layouts.is_empty() {
+            "No saved layouts"
+        } else {
+            "No matching layout"
+        };
+        PickerList {
+            rows: vec![ContextMenuRow {
+                label: label.to_string(),
+                separator: false,
+                enabled: false,
+                hint: if layouts.is_empty() {
+                    "kettle --save-layout NAME".to_string()
+                } else {
+                    String::new()
+                },
+            }],
+            selected: 0,
+        }
+    } else {
+        PickerList {
+            selected: selected.min(rows.len() - 1),
+            rows,
+        }
+    }
+}
+
+fn ssh_picker_list(query: &str, selected: usize, hosts: &[(String, String)]) -> PickerList {
+    let ranked = rank_ssh_hosts(query, hosts);
+    let rows = ranked
+        .iter()
+        .map(|&index| ContextMenuRow {
+            label: hosts[index].0.clone(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        PickerList {
+            rows: vec![ContextMenuRow {
+                label: if hosts.is_empty() {
+                    "No configured hosts".to_string()
+                } else {
+                    "No configured host matches".to_string()
+                },
+                separator: false,
+                enabled: false,
+                hint: "Enter uses typed target".to_string(),
+            }],
+            selected: 0,
+        }
+    } else {
+        PickerList {
+            selected: selected.min(rows.len() - 1),
+            rows,
+        }
+    }
+}
+
+/// Keep the selected picker row inside the visible suffix. Picker rows have no
+/// separators, so this is the context-menu scroll rule reduced to equal-height
+/// rows and can be recomputed from selection on each frame.
+fn picker_scroll_offset(
+    row_count: usize,
+    selected: usize,
+    panel_height: f32,
+    row_height: f32,
+) -> usize {
+    if row_count == 0
+        || !panel_height.is_finite()
+        || !row_height.is_finite()
+        || panel_height <= 0.0
+        || row_height <= 0.0
+    {
+        return 0;
+    }
+    let visible = ((panel_height / row_height).floor() as usize)
+        .max(1)
+        .min(row_count);
+    let selected = selected.min(row_count - 1);
+    selected
+        .saturating_add(1)
+        .saturating_sub(visible)
+        .min(row_count - visible)
+}
+
+/// Place a picker list above its bottom input lane using the same rows, width
+/// budget, clipping, selection rail, and overflow cues as the context menu.
+fn picker_context_menu(
+    mut list: PickerList,
+    surface: (f32, f32),
+    cell: (f32, f32),
+) -> Option<ContextMenu> {
+    let (surface_w, surface_h) = surface;
+    let (cell_w, cell_h) = cell;
+    let input_height = cell_h + 10.0;
+    let list_surface = (surface_w, (surface_h - input_height - 4.0).max(0.0));
+    if !context_menu_surface_can_fit_row(list_surface, cell) || list.rows.is_empty() {
+        return None;
+    }
+
+    let row_height = cell_h + kettle_render::menu::ROW_PAD;
+    let natural_width = (list
+        .rows
+        .iter()
+        .map(kettle_render::menu_row_chars)
+        .max()
+        .unwrap_or(0) as f32
+        * cell_w
+        + kettle_render::menu::H_PAD)
+        .max(kettle_render::menu::MIN_W);
+    let natural_height = row_height * list.rows.len().min(PICKER_MAX_VISIBLE_ROWS) as f32;
+    let panel = clamp_context_menu_panel((natural_width, natural_height), list_surface);
+    let max_columns = ((panel.0 - kettle_render::menu::H_PAD).max(0.0) / cell_w).floor() as usize;
+    for row in &mut list.rows {
+        fit_context_menu_row(row, max_columns);
+    }
+    let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, panel.1, row_height);
+    let requested_anchor = (
+        (surface_w - panel.0) * 0.5,
+        (list_surface.1 - panel.1 - 4.0).max(4.0),
+    );
+    let anchor = clamp_context_menu_anchor(requested_anchor, panel, list_surface);
+    Some(ContextMenu {
+        anchor,
+        rows: list.rows,
+        highlight: list.selected,
+        scroll_offset,
+        panel_w_clamped: panel.0,
+        panel_h_clamped: panel.1,
+    })
+}
+
+fn picker_overlay_context_menu(
+    palette: Option<PickerList>,
+    layout: Option<PickerList>,
+    ssh: Option<PickerList>,
+    surface: (f32, f32),
+    cell: (f32, f32),
+) -> Option<ContextMenu> {
+    palette
+        .or(layout)
+        .or(ssh)
+        .and_then(|list| picker_context_menu(list, surface, cell))
+}
+
 /// v2.20.0 (`vim-menu-nav`): the `Ctrl+d`/`Ctrl+u` half-page target. Moves
 /// `current` by `rows` items in `dir` (no wrap — vim half-page semantics
 /// clamp at the ends), then snaps to the nearest dispatchable row in the
@@ -11221,7 +11446,7 @@ impl App {
                     .as_ref()
                     .map(|(query, _)| (12, query.as_str()))
             })
-            .or_else(|| ws.ssh_input.as_deref().map(|query| (8, query)));
+            .or_else(|| ws.ssh_input.as_ref().map(|(query, _)| (8, query.as_str())));
         let search_cursor = self.search_geometry(ws).map(|geometry| {
             let mut projected = ws.search.query().to_string();
             let replace = ws
@@ -11703,48 +11928,22 @@ impl App {
             })
             .collect();
 
-        let (ssh_query, ssh_hint) = match &ws.ssh_input {
-            Some(q) => {
-                let hint = if self.cfg.ssh_hosts.is_empty() {
-                    "(type user@host)".to_string()
-                } else {
-                    let names: Vec<&str> =
-                        self.cfg.ssh_hosts.iter().map(|(n, _)| n.as_str()).collect();
-                    format!("hosts: {}", names.join(", "))
-                };
-                (Some(with_preedit(q)), hint)
-            }
-            None => (None, String::new()),
+        let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
+            Some((query, selected)) => (
+                Some(with_preedit(query)),
+                "(Enter connect · Tab complete · ↑↓ select · Esc cancel)".to_string(),
+                Some(ssh_picker_list(query, *selected, &self.cfg.ssh_hosts)),
+            ),
+            None => (None, String::new(), None),
         };
 
-        let (palette_query, palette_hint) = match &ws.palette_input {
-            Some((q, sel)) => {
-                let cmds = kettle_config::palette::commands();
-                let ranked = kettle_config::palette::rank(q, &cmds);
-                let hint = if ranked.is_empty() {
-                    "(no matching command)".to_string()
-                } else {
-                    let sel = (*sel).min(ranked.len() - 1);
-                    let start = if sel < 8 { 0 } else { sel - 7 };
-                    ranked
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(8)
-                        .map(|(i, &ci)| {
-                            let l = cmds[ci].0;
-                            if i == sel {
-                                format!("«{l}»")
-                            } else {
-                                l.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ·  ")
-                };
-                (Some(with_preedit(q)), hint)
-            }
-            None => (None, String::new()),
+        let (palette_query, palette_hint, palette_picker) = match &ws.palette_input {
+            Some((query, selected)) => (
+                Some(with_preedit(query)),
+                "(Enter run · Tab/↑↓ select · Esc cancel)".to_string(),
+                Some(command_picker_list(query, *selected, &self.cfg.keybinds)),
+            ),
+            None => (None, String::new(), None),
         };
 
         // Terminator parity (layoutlauncher.py):
@@ -11752,38 +11951,18 @@ impl App {
         // string the same way as the command palette. Empty
         // layouts dir is fine — the hint reads `(no saved
         // layouts; run kettle --save-layout NAME)`.
-        let (layout_picker_query, layout_picker_hint) = match &ws.layout_picker_input {
-            Some((q, sel)) => {
+        let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
+        {
+            Some((query, selected)) => {
                 let layouts = crate::session::Session::list_layouts();
-                let ranked = rank_layouts(q, &layouts);
-                let hint = if layouts.is_empty() {
-                    "(no saved layouts; run `kettle --save-layout NAME`)".to_string()
-                } else if ranked.is_empty() {
-                    "(no matching layout)".to_string()
-                } else {
-                    let sel = (*sel).min(ranked.len() - 1);
-                    let start = if sel < 8 { 0 } else { sel - 7 };
-                    ranked
-                        .iter()
-                        .enumerate()
-                        .skip(start)
-                        .take(8)
-                        .map(|(i, &li)| {
-                            let l = &layouts[li];
-                            if i == sel {
-                                format!("«{l}»")
-                            } else {
-                                l.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ·  ")
-                };
-                (Some(with_preedit(q)), hint)
+                (
+                    Some(with_preedit(query)),
+                    "(Enter spawn · Tab/↑↓ select · Esc cancel)".to_string(),
+                    Some(layout_picker_list(query, *selected, &layouts)),
+                )
             }
-            None => (None, String::new()),
+            None => (None, String::new(), None),
         };
-
         let hint_labels: Vec<HintLabel> = match &ws.hint_state {
             Some((targets, typed)) => targets
                 .iter()
@@ -11858,7 +12037,23 @@ impl App {
             .resize_overlay
             .and_then(|(c, r, t)| (t.elapsed() < RESIZE_OVERLAY_DURATION).then_some((c, r)));
 
-        let context_menu = self.context_menu_overlay(ws);
+        let context_menu = self.context_menu_overlay(ws).or_else(|| {
+            let surface = ws
+                .renderer
+                .as_ref()
+                .map(|renderer| {
+                    let (width, height) = renderer.surface_size();
+                    (width as f32, height as f32)
+                })
+                .unwrap_or((800.0, 600.0));
+            picker_overlay_context_menu(
+                palette_picker,
+                layout_picker,
+                ssh_picker,
+                surface,
+                self.menu_cell(ws),
+            )
+        });
         // Marshal the in-progress Edit-title state for
         // the render layer so the user sees what they're typing. The
         // title-edit rect is app chrome, never a bottom overlay over terminal
@@ -15300,7 +15495,7 @@ impl App {
             }
             Action::OpenSsh => {
                 self.close_all_modals(ws);
-                ws.ssh_input = Some(String::new());
+                ws.ssh_input = Some((String::new(), 0));
             }
             Action::CommandPalette => {
                 self.close_all_modals(ws);
@@ -21686,45 +21881,42 @@ impl App {
                 self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
-                if let Some(q) = ws.ssh_input.as_mut() {
-                    crate::modal_input::backspace(q);
+                if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                    crate::modal_input::backspace(query);
+                    *selected = 0;
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
+                    if count > 0 {
+                        *selected = (*selected + 1) % count;
+                    }
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
+                    if count > 0 {
+                        *selected = (*selected + count - 1) % count;
+                    }
                 }
             }
             Key::Named(NamedKey::Tab) => {
-                // Fuzzy-complete to the best-matching configured host name.
-                let typed = ws.ssh_input.clone().unwrap_or_default();
-                if !typed.is_empty()
-                    && let Some((n, _)) =
-                        kettle_config::fuzzy::best(&typed, &self.cfg.ssh_hosts, |h| h.0.as_str())
-                {
-                    ws.ssh_input = Some(n.clone());
+                // Complete to the highlighted configured host, not merely the
+                // first fuzzy result, so keyboard navigation and the input line
+                // cannot disagree about what Enter will connect to.
+                if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                    let ranked = rank_ssh_hosts(query, &self.cfg.ssh_hosts);
+                    if let Some(&index) = ranked.get(*selected) {
+                        query.clone_from(&self.cfg.ssh_hosts[index].0);
+                        *selected = 0;
+                    }
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let typed = ws.ssh_input.take().unwrap_or_default();
-                let target = self
-                    .cfg
-                    .ssh_hosts
-                    .iter()
-                    .find(|(n, _)| *n == typed)
-                    .map(|(_, t)| t.clone())
-                    // No exact name → best fuzzy host match for the query.
-                    .or_else(|| {
-                        if typed.trim().is_empty() {
-                            return None;
-                        }
-                        kettle_config::fuzzy::best(typed.trim(), &self.cfg.ssh_hosts, |h| {
-                            h.0.as_str()
-                        })
-                        .map(|(_, t)| t.clone())
-                    })
-                    .or_else(|| {
-                        if !typed.trim().is_empty() {
-                            Some(typed.trim().to_string())
-                        } else {
-                            self.cfg.ssh_hosts.first().map(|(_, t)| t.clone())
-                        }
-                    });
+                let (typed, selected) = ws.ssh_input.take().unwrap_or_default();
+                let target = selected_ssh_target(&typed, selected, &self.cfg.ssh_hosts);
                 if let Some(target) = target {
                     let area = self.area(ws);
                     let (cols, rows) = self.grid_of(ws, area);
@@ -21739,11 +21931,28 @@ impl App {
                     self.save_session(ws);
                 }
             }
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
+            {
+                if let Some((query, selected)) = ws.ssh_input.as_mut() {
+                    let count = rank_ssh_hosts(query, &self.cfg.ssh_hosts).len();
+                    if count > 0 {
+                        *selected = match s.as_str() {
+                            "j" | "n" => (*selected + 1) % count,
+                            _ => (*selected + count - 1) % count,
+                        };
+                    }
+                }
+            }
             Key::Character(s) if crate::modal_input::is_paste_chord(Some(s.as_str()), ws.mods) => {
                 if let Some(pasted) = self.modal_clipboard_text()
-                    && let Some(q) = ws.ssh_input.as_mut()
+                    && let Some((query, selected)) = ws.ssh_input.as_mut()
+                    && crate::modal_input::push_text(query, &pasted)
                 {
-                    crate::modal_input::push_text(q, &pasted);
+                    *selected = 0;
                 }
             }
             _ => {
@@ -21751,9 +21960,10 @@ impl App {
                 // cap all live in `modal_input` now, shared with the palette,
                 // the title editors, the layout picker and the Settings prompt.
                 if let Some(t) = crate::modal_input::accept_text(text, ws.mods)
-                    && let Some(q) = ws.ssh_input.as_mut()
+                    && let Some((query, selected)) = ws.ssh_input.as_mut()
+                    && crate::modal_input::push_text(query, t)
                 {
-                    crate::modal_input::push_text(q, t);
+                    *selected = 0;
                 }
             }
         }
@@ -28410,19 +28620,21 @@ mod tests {
         apply_mux_title_edit, apply_output_generation_outcome, apply_remote_title_transition,
         argv_is_nonlocal_client, assign_mnemonics, background_is_dark_enough_to_reveal_early,
         begin_title_edit, broadcast_scope_for_default, cached_pane_cursor_blinking,
-        claim_remote_command_file, clear_stale_title_edit, confirmed_paste_target,
-        context_menu_item_columns, context_menu_max_scroll_offset,
+        claim_remote_command_file, clear_stale_title_edit, command_picker_list,
+        confirmed_paste_target, context_menu_item_columns, context_menu_max_scroll_offset,
         context_menu_scroll_for_highlight, context_menu_snapshot_reuse_safe,
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
-        input_rejection_message, key_is_modified_enter, local_paste_within_limit,
-        macos_effective_modifiers, modal_swallows_pointer, osc52_clipboard_channel,
-        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
-        pane_snapshot_keys_match, parse_remote_command_batch, paste_paths_into_target,
-        paste_text_into_target, production_source, rank_layouts, sanitize_native_window_title,
-        sanitize_title, selection_kind, session_sweep_due, should_notify_input_rejection,
+        input_rejection_message, key_is_modified_enter, layout_picker_list,
+        local_paste_within_limit, macos_effective_modifiers, modal_swallows_pointer,
+        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
+        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
+        paste_paths_into_target, paste_text_into_target, picker_context_menu,
+        picker_overlay_context_menu, picker_scroll_offset, production_source, rank_layouts,
+        rank_ssh_hosts, sanitize_native_window_title, sanitize_title, selected_ssh_target,
+        selection_kind, session_sweep_due, should_notify_input_rejection,
         should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
-        should_reveal_before_first_surface_frame, stage_applied_remote_probe,
+        should_reveal_before_first_surface_frame, ssh_picker_list, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
         startup_inner_size_px, typeahead_match,
     };
@@ -34273,6 +34485,112 @@ mod tests {
         assert_eq!(rank_layouts("xyz", &layouts), Vec::<usize>::new());
         // Empty layouts → empty (defensive).
         assert_eq!(rank_layouts("dev", &[]), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
+        let list = command_picker_list("", 20, &kettle_config::keybinds::defaults());
+        let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0))
+            .expect("a 320x160 surface fits a picker row above its input lane");
+
+        assert!(
+            menu.rows.len() > 20,
+            "the projection must retain one row per ranked command instead of flattening matches"
+        );
+        assert_eq!(menu.highlight, 20);
+        assert!(menu.scroll_offset > 0);
+        let visible_rows =
+            (menu.panel_h_clamped / (16.0 + kettle_render::menu::ROW_PAD)).floor() as usize;
+        assert!(
+            (menu.scroll_offset..menu.scroll_offset + visible_rows).contains(&menu.highlight),
+            "the command Enter will run must remain inside the visible row window"
+        );
+        assert!(
+            menu.rows.iter().any(|row| !row.hint.is_empty()),
+            "command rows must carry live keybind hints in the menu hint column"
+        );
+        assert!(
+            menu.anchor.1 + menu.panel_h_clamped <= 160.0 - (16.0 + 10.0),
+            "the vertical list must stay above the bottom input lane"
+        );
+    }
+
+    #[test]
+    fn layout_and_ssh_pickers_keep_ranked_candidates_on_separate_rows() {
+        let layouts = ["dev", "dev-rust", "notes"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let layout = layout_picker_list("dev", 1, &layouts);
+        assert_eq!(
+            layout
+                .rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["dev", "dev-rust"]
+        );
+        assert_eq!(layout.selected, 1);
+
+        let hosts = [
+            ("staging-prod".to_string(), "dev@staging".to_string()),
+            ("gpu-prod".to_string(), "dev@gpu".to_string()),
+            ("gpu".to_string(), "dev@gpu-short".to_string()),
+        ];
+        assert_eq!(rank_ssh_hosts("gp", &hosts), vec![2, 1, 0]);
+        let ssh = ssh_picker_list("gp", 1, &hosts);
+        assert_eq!(
+            ssh.rows
+                .iter()
+                .map(|row| row.label.as_str())
+                .collect::<Vec<_>>(),
+            ["gpu", "gpu-prod", "staging-prod"]
+        );
+        assert_eq!(ssh.selected, 1);
+        assert_eq!(
+            selected_ssh_target("gp", 1, &hosts).as_deref(),
+            Some("dev@gpu")
+        );
+        assert_eq!(
+            selected_ssh_target("someone@example.test", 0, &hosts).as_deref(),
+            Some("someone@example.test"),
+            "an unmatched query must retain direct user-at-host launches"
+        );
+        assert_eq!(selected_ssh_target("", 0, &[]), None);
+        assert_eq!(
+            selected_ssh_target("gp", usize::MAX, &hosts).as_deref(),
+            Some("dev@staging"),
+            "dispatch must clamp to the same last visible row after a host-list reload"
+        );
+    }
+
+    #[test]
+    fn picker_overlay_projection_installs_the_vertical_context_menu() {
+        let menu = picker_overlay_context_menu(
+            Some(command_picker_list(
+                "",
+                3,
+                &kettle_config::keybinds::defaults(),
+            )),
+            None,
+            None,
+            (480.0, 240.0),
+            (8.0, 16.0),
+        )
+        .expect("an active command picker must install the shared vertical panel");
+
+        assert!(menu.rows.len() > 3);
+        assert_eq!(menu.highlight, 3);
+        assert!(menu.rows.iter().all(|row| !row.separator));
+    }
+
+    #[test]
+    fn picker_scroll_offset_handles_tiny_and_invalid_geometry() {
+        assert_eq!(picker_scroll_offset(12, 11, 72.0, 24.0), 9);
+        assert_eq!(picker_scroll_offset(12, 0, 72.0, 24.0), 0);
+        assert_eq!(picker_scroll_offset(0, 0, 72.0, 24.0), 0);
+        assert_eq!(picker_scroll_offset(12, 11, f32::NAN, 24.0), 0);
+        assert_eq!(picker_scroll_offset(12, 11, 72.0, 0.0), 0);
     }
 
     #[test]
