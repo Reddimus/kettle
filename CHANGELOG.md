@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.0.0] — 2026-08-24
+
 ### Changed
 
 - **Windows distribution support ends with 3.3.0.** Version 3.3.0 is the final
