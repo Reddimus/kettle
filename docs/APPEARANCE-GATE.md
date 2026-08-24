@@ -5,6 +5,49 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 4.0.0 pre-release — 2026-08-24
+
+Host: macOS 26.6.2 (Darwin 25G83), Apple silicon. Bundle: a universal
+ad-hoc-signed `kettle.app` built from exact clean cut
+`67282a152b5b28402f842db8875d451101753459` using Rust 1.97.1 and the
+release workflow's Xcode 26.6 icon, dual-target build, `lipo`, plist and
+resource steps. `lipo -archs` reports `x86_64 arm64`.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| Default 86% opacity and native blur | One material reached both rounded top corners with no clear strip or seam. Traffic lights and title remained in their native positions. |
+| Resize and full-screen round trip | After resizing to 1100×700, `ui_geometry.content` returned exactly to `1100×675.75` at `y = 24.25`. |
+| `borderless = true` full-screen round trip | The terminal remained visible through the sharp-alpha fallback and restored the same exact geometry. |
+| Alpha on, blur off | AppKit supplied its opaque titlebar backdrop; no clear desktop strip appeared. |
+| Opaque surface, blur on | No titlebar-only material seam appeared. |
+| `background-opacity = 1.0`, `window-blur = false` | TokyoNight reached both rounded top corners without a clear or mismatched strip. |
+| Runtime light/dark switching | Four deterministic switches alternated central mean RGB `(35,37,49)` and `(255,255,255)` repeatably while caption and corners stayed intact. |
+| Start on a light theme with macOS Dark | Alabaster started white with the complete title beside clean traffic lights. |
+| macOS Light with dark Kettle | TokyoNight retained a clean dark caption, surface and rounded corners. |
+| Toggle Reduce Transparency live | The same open window changed from mean RGB `(35,37,49)` to opaque `(29,31,43)`, then returned exactly to `(35,37,49)` without relaunch. |
+| Finder icon | The exact cut bundle retained the system mask, parallel inset face, clear rim and centered legible terminal mark. |
+| Both 256 px resource paths | `Assets.car` rendered a blue rim over a dark face and `AppIcon.icns` rendered the inverse; both retained matching geometry and a centered mark. |
+
+### Partial or not run
+
+**Running and pinned Dock icons.** A native capture showed the exact-cut running
+item and the existing pinned `/Applications/kettle.app` item agreeing visually.
+The existing pinned application was already running and was preserved, so an
+exact-cut closed-but-pinned state was not captured.
+
+**Dock magnification.** Dock accessibility inspection timed out and the
+automation interface has no pointer-hover primitive. Magnification remained
+off and untouched.
+
+**App-switcher icon.** App-scoped automation cannot keep the global Command-Tab
+switcher open for capture.
+
+System appearance was restored to Dark, Reduce Transparency to off, Dock
+auto-hide to on, and Dock magnification remained off. The cut worktree was
+still clean at the exact SHA after the run.
+
 ## 3.3.0 (2026-08-24)
 
 ### Not run
