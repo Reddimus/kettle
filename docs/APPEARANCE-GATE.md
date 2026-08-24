@@ -5,6 +5,19 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 3.3.0 (2026-08-24)
+
+### Not run
+
+**Native macOS appearance gate.** No native appearance run was performed for
+3.3.0 before the release was published. This was a procedural miss against the
+release checklist, not a passing result. The release changed only the updater's
+end-of-life notification for retired Windows clients and release metadata and
+documentation. It did not change native-window, titlebar/material, renderer, or
+icon code, so the release received a narrow, one-release waiver from repeating
+the native appearance run. This entry records the omission; it does not
+retroactively satisfy the gate or extend the waiver to later releases.
+
 ## 3.2.1 pre-release completion — 2026-08-23
 
 Host: macOS 26 (Darwin 25.6), Apple silicon. Bundle: the installed, signed
