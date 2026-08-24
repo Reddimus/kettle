@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [3.3.0] — 2026-08-24
+
 ### Changed
 
 - **Windows 3.3.0 is the final supported Windows release.** It keeps the
