@@ -43,7 +43,12 @@ Updating **to** 3.2.0 on macOS has to be done by hand, once. The updater is
 part of 3.2.0, so a 3.1.1 app has no code to run it: it still notices a new
 release and still offers the release page, but it cannot install one. Download
 `kettle-macos-universal.zip`, unzip it, and replace the app in `/Applications`.
-Every release after that updates itself.
+Every release after that updates itself. First exercised against the real feed
+on 2026-08-24: an installed 3.2.0 `kettle.app` fetched 3.2.1, replaced its own
+bundle, and still assessed as `source=Notarized Developer ID` afterwards, with
+no staging or previous-bundle directories left in `/Applications`. Until 3.2.1
+existed there was no published macOS target newer than the installed one, so
+this path could be designed and unit-tested but not demonstrated.
 
 Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires
