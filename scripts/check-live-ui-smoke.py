@@ -7390,12 +7390,22 @@ def home_display_path(path: str) -> str:
     compares against the absolute path therefore never matches when its fixture
     lives under `$HOME`, which is exactly where `target/diagnostics` sits by
     default.
+
+    Mirrors `abbreviate_home` and `home_dir_string` in
+    `crates/kettle-ui/src/mux.rs` rather than approximating them.
+    `os.path.expanduser` is not the same function: it falls back to the passwd
+    database when the environment variable is unset, where kettle abbreviates
+    nothing, and it does not consider a backslash separator.
     """
-    home = os.path.expanduser("~")
+    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
+    if not home:
+        return path
     if path == home:
         return "~"
-    if path.startswith(home + os.sep):
-        return "~" + path[len(home) :]
+    for sep in ("/", "\\"):
+        prefix = home + sep
+        if path.startswith(prefix):
+            return "~" + sep + path[len(prefix) :]
     return path
 
 
@@ -7758,10 +7768,12 @@ def focus_live_kettle_window(
 ) -> None:
     """Ask the desktop to activate the exact Kettle process under test.
 
-    There is no `focus_window` action and there never was; the dispatch that
-    used to open this helper failed hard every time it ran. Activation is a
-    desktop concern anyway, which is what the platform paths below do.
+    `focus_window` is control-only: `ctl_perform_action` handles it before the
+    keybind catalogue is consulted, so it resolves through no `Action`. It is
+    the only activation step that works on Linux and Windows, where the Swift
+    and osascript paths below do not apply.
     """
+    live.json_ctl("perform_action", {"action": "focus_window"})
     if platform.system() == "Darwin" and shutil.which("swift"):
         env = os.environ.copy()
         env["KETTLE_SMOKE_PID"] = str(live.pid)
@@ -15424,18 +15436,27 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
         states.append(capture_live_state(live, out, "search-open"))
 
+        # Keyed by action rather than written as positional tuples so the
+        # drift guard in kettle-config sees these six the same way it sees
+        # every inline dispatch. As tuples they were invisible to it and could
+        # all have gone stale while it stayed green.
         modal_sequence = [
-            ("ssh", "ssh_launcher", "ssh-launcher"),
-            ("open_layout_picker", "layout_picker", "layout-picker"),
-            ("hint_mode", "hint_mode", "hint-mode"),
-            ("edit_window_title", "title_edit", "title-edit-window"),
-            ("edit_tab_title", "title_edit", "title-edit-tab"),
-            ("edit_pane_title", "title_edit", "title-edit-pane"),
+            {"action": "ssh", "modal": "ssh_launcher", "label": "ssh-launcher"},
+            {"action": "open_layout_picker", "modal": "layout_picker", "label": "layout-picker"},
+            {"action": "hint_mode", "modal": "hint_mode", "label": "hint-mode"},
+            {"action": "edit_window_title", "modal": "title_edit", "label": "title-edit-window"},
+            {"action": "edit_tab_title", "modal": "title_edit", "label": "title-edit-tab"},
+            {"action": "edit_pane_title", "modal": "title_edit", "label": "title-edit-pane"},
         ]
         modal_flags: Dict[str, object] = {}
         previous_shot = out / "search-open.png"
         previous_geo = search_geo
-        for action_name, modal_name, label in modal_sequence:
+        for modal in modal_sequence:
+            action_name, modal_name, label = (
+                modal["action"],
+                modal["modal"],
+                modal["label"],
+            )
             live.ctl("perform_action", params={"action": action_name})
             time.sleep(0.3)
             modal_geo = live.json_ctl("ui_geometry")
