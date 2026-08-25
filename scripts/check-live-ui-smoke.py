@@ -16663,6 +16663,12 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
         # Ask the tty itself what size it thinks it is.
         if platform.system() != "Windows":
             token = "KETTLE_WINSZ" + "_OK"
+            # An interactive login shell may still be holding a startup
+            # question (oh-my-zsh asks about updates with a single-key read),
+            # which would swallow the first character of the probe. One bare
+            # Enter answers it with its default and leaves a clean prompt.
+            live.ctl("send_text", params={"pane": base_id, "text": "\r"})
+            time.sleep(1.0)
             live.ctl(
                 "send_text",
                 params={
