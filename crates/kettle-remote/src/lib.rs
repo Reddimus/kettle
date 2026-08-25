@@ -1163,8 +1163,19 @@ const SHELL_LONG_OPTIONS_TAKING_A_VALUE: &[&str] = &[
     "--plugin-config",
 ];
 
-/// Whether a POSIX-ish shell invocation runs something and exits rather than
-/// being one a person is typing into.
+/// Whether one argument is the flag that carries a command inline.
+fn shell_flag_carries_a_command(arg: &str) -> bool {
+    arg == "-c"
+        || arg == "--command"
+        || arg == "--commands"
+        || (arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg.len() >= 2
+            && arg[1..].contains('c'))
+}
+
+/// Whether a POSIX shell invocation runs something and exits rather than being
+/// one a person is typing into.
 ///
 /// Two shapes do that, and only the first used to be recognized. `-c` and its
 /// spellings carry the command inline. A plain operand is a *script file*:
@@ -1186,7 +1197,7 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
         if arg == "--" {
             return args.next().is_some();
         }
-        if arg == "-c" || arg == "--command" || arg == "--commands" {
+        if shell_flag_carries_a_command(arg) {
             return true;
         }
         // A bare `-` or `+` means "read from stdin", not a script to run.
@@ -1194,8 +1205,11 @@ fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
             continue;
         }
         if arg.starts_with('-') || arg.starts_with('+') {
-            if !arg.starts_with("--") && arg[1..].contains('c') {
-                return true;
+            // `-s` reads commands from stdin, which in a pane is the person
+            // typing. Its operands become positional parameters, so `bash -s
+            // worker` never names a script and stays interactive.
+            if !arg.starts_with("--") && arg[1..].contains('s') {
+                return false;
             }
             // `--opt=value` carries its own value; `--opt value` eats the next
             // word, as do the single-letter options that name a shell option.
@@ -1218,8 +1232,18 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
     match base.as_str() {
         // POSIX-ish: `-c`, a combined short cluster containing `c` (`-ic`,
         // `-lc`), or `--command`/`--commands`. `-i`/`-l`/`-il` stay interactive.
-        "bash" | "zsh" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "fish" | "nu" | "elvish"
-        | "xonsh" => posix_shell_runs_and_exits(rest),
+        // The classic POSIX family, where `sh [options] command_file` is
+        // standardized, so a bare operand is a script.
+        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest),
+        // Everything else keeps the flags-only rule. Their option grammars
+        // carry value-taking flags this code has no table for (`fish -C`,
+        // `nu -I`, `elvish -log`, `xonsh --rc`, and tcsh's `-i` and `-s`, which
+        // suppress script interpretation outright). Reading one of those values
+        // as a script would push a shell a person is typing into onto the
+        // fallback path, and none of them is the shape that produced the bug.
+        "tcsh" | "csh" | "fish" | "nu" | "elvish" | "xonsh" => {
+            rest.iter().any(|arg| shell_flag_carries_a_command(arg))
+        }
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
         // prefix-abbreviated, case-insensitive) all run and exit — UNLESS
         // -NoExit keeps the session open. -EncodedCommand support was added
@@ -5099,7 +5123,7 @@ mod tests {
             &["bash", "-l", "/tmp/hook.sh"],
             &["sh", "--", "/tmp/hook.sh"],
             &["zsh", "script.zsh", "arg"],
-            &["nu", "run.nu"],
+            &["ksh", "deploy.ksh"],
         ] {
             assert!(
                 is_noninteractive_shell(&argv(a)),
@@ -5146,9 +5170,22 @@ mod tests {
             &["bash", "-O", "extglob"],
             &["zsh", "-o", "vi"],
             &["fish", "--init-command", "set -x FOO 1"],
-            // `-` reads from stdin; it is not an operand naming a file.
+            // `-` and `-s` read from stdin; neither names a file, and `-s`
+            // makes its operands positional parameters.
             &["bash", "-"],
+            &["bash", "-s"],
+            &["bash", "-s", "worker"],
             &["bash", "--login"],
+            // Shells outside the POSIX family keep the flags-only rule,
+            // because their value-taking options have no table here and
+            // reading one as a script would strand an interactive shell.
+            &["fish", "-C", "init"],
+            &["nu", "-I", "/modules"],
+            &["elvish", "-log", "/tmp/elvish.log"],
+            &["xonsh", "--rc", "rc.xsh"],
+            &["xonsh", "--shell-type", "readline"],
+            &["tcsh", "-i", "worker"],
+            &["csh", "-s", "worker"],
         ] {
             assert!(
                 !is_noninteractive_shell(&argv(a)),

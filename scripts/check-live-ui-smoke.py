@@ -16617,12 +16617,47 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
                 return int(pane.get("cols", 0)), int(pane.get("rows", 0))
         raise SystemExit(f"split-exit-resize smoke: pane {pane_id} vanished: {panes}")
 
+    # `stty size` reads the tty winsize, which is what `master.resize()` writes
+    # and what the kernel turns into SIGWINCH. The grid alone is not enough:
+    # `try_resize_geometry` commits local geometry even when the native resize
+    # returns an error, and a failed native resize also arms a retry that would
+    # later run `resize_all` for unrelated reasons.
+    probe_supported = platform.system() != "Windows"
+    token = "KETTLE_WINSZ" + "_"
+
+    def tty_size(live: LiveKettle, pane_id: object, label: str) -> Optional[str]:
+        mark = f"{token}{label}"
+        live.ctl(
+            "send_text",
+            params={
+                "pane": pane_id,
+                "text": f"printf '{mark} %s\\n' \"$(stty size | tr ' ' x)\"\r",
+            },
+        )
+        pattern = re.compile(re.escape(mark) + r"\s+(\d+)x(\d+)")
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            screen = screen_text(live.json_ctl("read_screen", {"pane": pane_id}))
+            found = pattern.findall(screen)
+            if found:
+                return f"{found[-1][0]}x{found[-1][1]}"
+            time.sleep(0.1)
+        (out / f"winsize-screen-{label}.txt").write_text(screen)
+        return None
+
     analysis: Dict[str, object] = {}
     with LiveKettle(kettle, cfg, out / "kettle.log") as live:
         before = wait_panes(live, 1, "before the split")
         base_id = before[0].get("id")
         baseline = size_of(before, base_id)
         analysis["baseline"] = {"id": base_id, "cols": baseline[0], "rows": baseline[1]}
+        if probe_supported:
+            # An interactive login shell may still be holding a startup question
+            # (oh-my-zsh asks about updates with a single-key read), which would
+            # swallow the first character of a probe. One bare Enter answers it
+            # with its default and leaves a clean prompt.
+            live.ctl("send_text", params={"pane": base_id, "text": "\r"})
+            time.sleep(1.0)
 
         live.json_ctl("perform_action", {"action": "split_down"})
         split = wait_panes(live, 2, "after split_down")
@@ -16637,6 +16672,26 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
         if new_id is None or new_id == base_id:
             raise SystemExit(f"split-exit-resize smoke: no new focused pane: {split}")
         analysis["split"] = {"new_id": new_id, "cols": split_size[0], "rows": split_size[1]}
+
+        # Settle the split before closing it. If the split's own native resize
+        # had failed, the grid would still report the smaller size while a retry
+        # sat armed, and that retry firing after the close would restore
+        # everything for reasons this test is not measuring.
+        if probe_supported:
+            want_split = f"{split_size[1]}x{split_size[0]}"
+            got_split = tty_size(live, base_id, "split")
+            analysis["tty_winsize_in_split"] = {
+                "reported": got_split,
+                "expected": want_split,
+            }
+            if got_split != want_split:
+                raise SystemExit(
+                    "split-exit-resize smoke: the source pane's tty never "
+                    f"reached the split size. stty size reported {got_split}, "
+                    f"expected {want_split}. Closing now would measure a "
+                    f"pending resize retry rather than the reap; the pane is "
+                    f"captured in {out}"
+                )
 
         # From here to the assertion: reads only.
         live.ctl("send_text", params={"pane": new_id, "text": "exit\r"})
@@ -16658,44 +16713,16 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
                 "the space was never resized, so its child got no SIGWINCH."
             )
 
-        # The grid alone is necessary but not sufficient: `try_resize_geometry`
-        # commits local geometry even when the native resize returns an error.
-        # Ask the tty itself what size it thinks it is.
-        if platform.system() != "Windows":
-            token = "KETTLE_WINSZ" + "_OK"
-            # An interactive login shell may still be holding a startup
-            # question (oh-my-zsh asks about updates with a single-key read),
-            # which would swallow the first character of the probe. One bare
-            # Enter answers it with its default and leaves a clean prompt.
-            live.ctl("send_text", params={"pane": base_id, "text": "\r"})
-            time.sleep(1.0)
-            live.ctl(
-                "send_text",
-                params={
-                    "pane": base_id,
-                    "text": f"printf '{token} %s\\n' \"$(stty size | tr ' ' x)\"\r",
-                },
-            )
+        if probe_supported:
             want = f"{baseline[1]}x{baseline[0]}"
-            pattern = re.compile(re.escape(token) + r"\s+(\d+)x(\d+)")
-            reported = None
-            last = ""
-            deadline = time.monotonic() + 15.0
-            while time.monotonic() < deadline:
-                last = screen_text(live.json_ctl("read_screen"))
-                found = pattern.findall(last)
-                if found:
-                    reported = f"{found[-1][0]}x{found[-1][1]}"
-                    break
-                time.sleep(0.1)
-            analysis["tty_winsize"] = {"reported": reported, "expected": want}
-            if reported != want:
-                (out / "winsize-screen.txt").write_text(last)
+            got = tty_size(live, base_id, "after-close")
+            analysis["tty_winsize"] = {"reported": got, "expected": want}
+            if got != want:
                 raise SystemExit(
                     "split-exit-resize smoke: the grid came back but the tty "
-                    f"winsize did not. stty size reported {reported}, expected "
-                    f"{want}. The ioctl never reached the child, or the probe "
-                    f"never ran; the pane is captured in {out}/winsize-screen.txt"
+                    f"winsize did not. stty size reported {got}, expected "
+                    f"{want}. The ioctl never reached the child; the pane is "
+                    f"captured in {out}"
                 )
             live.screenshot(out / "after-close.png")
 

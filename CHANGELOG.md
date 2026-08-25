@@ -39,8 +39,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
   A shell given a script-file operand now counts as running and exiting, the
   same as `-c`. The split falls back to the configured shell, which is somewhere
-  to work. Options that take a value are not mistaken for scripts, so
-  `bash --rcfile /etc/bashrc` and `zsh -o vi` stay interactive.
+  to work. The rule applies to the POSIX family, where `sh [options] file` is
+  standardized; fish, nu, elvish, xonsh, tcsh and csh keep the flags-only rule
+  because their value-taking options would otherwise read as scripts. Within the
+  POSIX family, options that take a value are consumed, so
+  `bash --rcfile /etc/bashrc` and `zsh -o vi` stay interactive, and `-s` reads
+  from stdin so `bash -s worker` does too.
 
   Confirmed against a live window in both directions. With a `bash <script>`
   helper in the foreground, `list_panes` reported the new pane's argv as exactly
