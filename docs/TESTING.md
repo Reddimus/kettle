@@ -1896,7 +1896,12 @@ retained compile/regression checks on **windows**:
   alone in a pane and asserts every pixel in that glyph's own cell is a blend of
   one ink and the background. A monochrome glyph stays on that line; a colour
   glyph carries more than one hue and leaves it. Both reference colours are read
-  out of the screenshot, so the oracle does not depend on the theme.
+  out of the screenshot, so the oracle does not depend on the theme. It **skips**
+  when `ui_geometry` reports a null `text_presentation_face`, which is what a
+  host with no monochrome font carrying U+23FA does, GitHub's Linux runner
+  included: kettle leaves such a system on the platform cascade, so there is
+  nothing to assert. A missing field is a hard failure, so the skip cannot
+  quietly become unconditional.
 - A quarantined Linux **live-UI `split-exit-resize` smoke** splits a pane,
   lets the new pane's own shell exit, and asserts the survivor returns to its
   exact pre-split columns and rows, then reads the tty winsize back with
