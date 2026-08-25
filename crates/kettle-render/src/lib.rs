@@ -49,6 +49,101 @@ use glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
 use outline::{OutlineInstance, OutlinePipeline};
 use quad::{QuadInstance, QuadPipeline};
 
+/// Monochrome faces that carry text-presentation symbols, most specific first.
+///
+/// A colour-emoji face is deliberately absent: it is what these steer away
+/// from. Only a family the system actually has is used, so an unusual install
+/// simply keeps today's behaviour rather than tofu-boxing anything.
+#[cfg(target_os = "macos")]
+const TEXT_SYMBOL_FAMILIES: &[&str] = &["STIX Two Math", "Apple Symbols"];
+#[cfg(target_os = "windows")]
+const TEXT_SYMBOL_FAMILIES: &[&str] = &["Segoe UI Symbol"];
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const TEXT_SYMBOL_FAMILIES: &[&str] = &[
+    "Noto Sans Symbols2",
+    "Noto Sans Symbols 2",
+    "Symbola",
+    "DejaVu Sans",
+];
+
+/// The codepoint the candidate faces are probed with.
+///
+/// Being installed is not enough. A stock Ubuntu runner has DejaVu Sans and
+/// DejaVu Sans does not have U+23FA, so requesting it there resolves nothing
+/// and shaping falls straight back through the cascade to the colour face,
+/// which is the state this whole change exists to leave. One probe is
+/// deliberate rather than exhaustive: this is the codepoint the defect was
+/// reported against, and a family that lacks it is not a useful text-symbol
+/// face here. A host where no candidate passes keeps the cascade it had.
+const TEXT_SYMBOL_PROBE: char = '\u{23FA}';
+
+/// The first [`TEXT_SYMBOL_FAMILIES`] entry this system has AND that carries a
+/// glyph for [`TEXT_SYMBOL_PROBE`].
+fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static str> {
+    let probe = TEXT_SYMBOL_PROBE;
+    for wanted in TEXT_SYMBOL_FAMILIES.iter().copied() {
+        let ids: Vec<fontdb::ID> = font_system
+            .db()
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case(wanted))
+            })
+            .map(|face| face.id)
+            .collect();
+        for id in ids {
+            // `Font::unicode_codepoints` is empty unless cosmic-text's
+            // `monospace_fallback` feature is on, which it is not here, so ask
+            // the face's own character map instead.
+            if font_system
+                .get_font(id, fontdb::Weight::NORMAL)
+                .is_some_and(|font| font.as_swash().charmap().map(probe) != 0)
+            {
+                return Some(wanted);
+            }
+        }
+    }
+    None
+}
+
+/// Whether this codepoint is emoji-capable, text by default, and occupies one
+/// column.
+///
+/// Derived from the width table rather than a vendored `Emoji_Presentation`
+/// list. Every `Emoji_Presentation=Yes` codepoint is East Asian Wide, so
+/// `unicode-width` reports two columns for it, and `unicode-width` also widens
+/// an emoji-capable codepoint to two when U+FE0F follows. One column alone and
+/// two with U+FE0F therefore means `Emoji=Yes` with `Emoji_Presentation=No`.
+/// `⏺` U+23FA is one; `⏰` U+23F0 is not, because it is already two columns.
+///
+/// **One column is part of the rule, not an accident of the derivation.** A
+/// handful of default-text emoji are East Asian Wide and stay at two columns
+/// with or without U+FE0F, U+3030 and U+1F202 among them, and width cannot tell
+/// those apart from `Emoji_Presentation=Yes`. They are out of scope here: a
+/// colour glyph in a two-column cell occupies the space it was given, so it
+/// neither overflows nor misaligns anything. The defect this closes is a
+/// two-cell colour bitmap painted into a one-cell slot.
+///
+/// Nothing here decides how a cell is drawn on its own. It only says which
+/// cells must not be handed to a colour-emoji face, which is a font-selection
+/// question the shaper answers.
+fn single_column_text_presentation(ch: char) -> bool {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    // ASCII is the overwhelming majority of terminal output and none of it is
+    // emoji-capable, so this is the early-out that keeps the row walk cheap.
+    if ch.is_ascii() || ch.width() != Some(1) {
+        return false;
+    }
+    // At most four bytes for the base plus three for U+FE0F.
+    let mut buf = [0u8; 8];
+    let base = ch.encode_utf8(&mut buf).len();
+    let mut selector = [0u8; 4];
+    let vs16 = '\u{FE0F}'.encode_utf8(&mut selector).len();
+    buf[base..base + vs16].copy_from_slice(&selector[..vs16]);
+    std::str::from_utf8(&buf[..base + vs16]).is_ok_and(|qualified| qualified.width() == 2)
+}
+
 fn load_bundled_font(font_system: &mut FontSystem, face: &'static [u8]) {
     font_system
         .db_mut()
@@ -2248,6 +2343,11 @@ struct PendingCursorGlyph {
     y: f32,
     /// The character under the cursor (drawn in `color`).
     ch: char,
+    /// Whether that cell carried an explicit U+FE0F. The cursor pass makes the
+    /// same presentation choice the pane does and has to make it on the same
+    /// evidence: `ch` alone cannot show a variation selector, so a qualified
+    /// sequence would draw in colour underneath and monochrome on top.
+    emoji_qualified: bool,
     /// Cursor foreground (theme `cursor_text`, or the cell bg under an OSC 12
     /// runtime cursor color so the inverted glyph follows reverse-video).
     color: Rgb,
@@ -2267,6 +2367,7 @@ fn cursor_glyph_damage_key(
     cursor.x.to_bits().hash(&mut hash);
     cursor.y.to_bits().hash(&mut hash);
     cursor.ch.hash(&mut hash);
+    cursor.emoji_qualified.hash(&mut hash);
     cursor.color.r.hash(&mut hash);
     cursor.color.g.hash(&mut hash);
     cursor.color.b.hash(&mut hash);
@@ -2311,6 +2412,10 @@ pub struct Renderer {
     supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
 
     font_system: FontSystem,
+    /// The face to request for a codepoint Unicode renders as text by default,
+    /// when this system has one. `None` leaves such cells on the platform
+    /// fallback cascade, which is what they had before.
+    text_symbol_family: Option<&'static str>,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
@@ -4681,6 +4786,10 @@ impl Renderer {
         let font_system_ms = t_font_system.elapsed().as_secs_f64() * 1000.0;
         let t_bundled = std::time::Instant::now();
         load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
+        // Resolved once: fontdb is already populated and the answer cannot
+        // change while this renderer lives.
+        let text_symbol_family = resolve_text_symbol_family(&mut font_system);
+        log::info!("renderer init: text-presentation face {text_symbol_family:?}");
         // Split, because `FontSystem::new()` is the one people suspect (it
         // enumerates system fonts) and a combined figure cannot exonerate it.
         log::info!(
@@ -4809,6 +4918,7 @@ impl Renderer {
             config,
             supported_alpha_modes,
             font_system,
+            text_symbol_family,
             swash,
             atlas,
             viewport,
@@ -5061,6 +5171,17 @@ impl Renderer {
     /// double-apply the scale factor.
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// The face this renderer requests for codepoints Unicode renders as text,
+    /// or `None` when the system has no candidate that carries them.
+    ///
+    /// Surfaced through `ui_geometry` because the answer depends entirely on
+    /// which fonts the host has. A verification scenario that asserts the
+    /// bullet is monochrome is asserting something the host may be unable to
+    /// produce, and it should say so rather than fail.
+    pub fn text_presentation_face(&self) -> Option<&'static str> {
+        self.text_symbol_family
     }
 
     /// Update the device-pixel scale factor (DPI). Wired to winit's
@@ -8590,17 +8711,26 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gch, gcolor, gclip)) = self
+        if let Some((gx, gy, gch, gqualified, gcolor, gclip)) = self
             .pending_cursor_glyph
             .as_ref()
-            .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
+            .map(|c| (c.x, c.y, c.ch, c.emoji_qualified, c.color, c.clip))
             .filter(|_| need_cursor_prepare)
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
+            // The cursor draws its own glyph last, over the pane's, so it has
+            // to reach the same answer the pane did. Both halves matter: skip
+            // the override and it paints a colour square over a text circle;
+            // ignore the cell's variation selector and it paints a text circle
+            // over the colour square the user explicitly asked for.
+            let cursor_family = self
+                .text_symbol_family
+                .filter(|_| !gqualified && single_column_text_presentation(gch))
+                .unwrap_or(&family);
             self.cursor_glyph_buffer.set_text(
                 gch.encode_utf8(&mut enc),
-                &Attrs::new().family(Family::Name(&family)),
+                &Attrs::new().family(Family::Name(cursor_family)),
                 Shaping::Advanced,
                 None,
             );
@@ -9334,7 +9464,7 @@ impl Renderer {
         // re-prepare), capture (glyph, color) here and draw it in the dedicated
         // cursor-glyph pass on top of the block. The pane buffer then stays
         // byte-identical across a blink, so the prepare is skipped.
-        let mut cursor_glyph_capture: Option<(char, Rgb)> = None;
+        let mut cursor_glyph_capture: Option<(char, Rgb, bool)> = None;
 
         for sc in &snap.cells {
             let row = sc.line;
@@ -9399,7 +9529,8 @@ impl Renderer {
                 // cursor pass draws this recolored copy on top of the block.
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
-                cursor_glyph_capture = Some((sc.c, cursor_fg));
+                cursor_glyph_capture =
+                    Some((sc.c, cursor_fg, sc.zerowidth().contains(&'\u{FE0F}')));
             }
 
             if bg != default_bg {
@@ -9591,12 +9722,13 @@ impl Renderer {
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
                 if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor)) = cursor_glyph_capture
+                    && let Some((gch, gcolor, gqualified)) = cursor_glyph_capture
                 {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
                         y: by,
                         ch: gch,
+                        emoji_qualified: gqualified,
                         color: gcolor,
                         clip: pv.rect,
                     });
@@ -9625,6 +9757,8 @@ impl Renderer {
         // `char index == grid column`. cosmic-text no-ops this when unchanged.
         buf.set_wrap(Wrap::None);
         let ff = font_features(cfg);
+        // Copied out before the `&mut self` borrows below.
+        let text_symbol_family = self.text_symbol_family;
         let default_attrs = Attrs::new()
             .family(Family::Name(family))
             .font_features(ff.clone());
@@ -9713,6 +9847,35 @@ impl Renderer {
                 // from the row defaults (fewer spans = cheaper compares).
                 if a != attrs_list.defaults() {
                     attrs_list.add_span(s..row_text.len(), &a);
+                }
+                // Ask for a text face on the cells Unicode renders as text by
+                // default. Nothing in the stack below consults
+                // `Emoji_Presentation`: cosmic-text takes the first family in
+                // the cascade whose cmap has the codepoint, and on macOS that
+                // is Apple Color Emoji for anything the text faces lack. `⏺`
+                // U+23FA is one cell wide, so a square colour bitmap both
+                // reads wrong and covers the next column. Narrower spans are
+                // added after the run's own, so they win.
+                if let Some(symbol_family) = text_symbol_family
+                    && !text.is_ascii()
+                {
+                    let mut at = s;
+                    let mut chars = text.chars().peekable();
+                    while let Some(ch) = chars.next() {
+                        let len = ch.len_utf8();
+                        // The cell's zero-width marks follow its base char in
+                        // this run, so U+FE0F is simply the next one. It is the
+                        // user asking for emoji presentation explicitly, and
+                        // overriding that would be the same class of bug in the
+                        // other direction.
+                        let qualified = chars.peek() == Some(&'\u{FE0F}');
+                        if !qualified && single_column_text_presentation(ch) {
+                            let text_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
+                                .family(Family::Name(symbol_family));
+                            attrs_list.add_span(at..at + len, &text_attrs);
+                        }
+                        at += len;
+                    }
                 }
             }
             if prev.is_some() {
@@ -16245,6 +16408,249 @@ mod titlebar_glyph_fallback_tests {
             .collect()
     }
 
+    use crate::{
+        SwashCache, TEXT_SYMBOL_PROBE, resolve_text_symbol_family, single_column_text_presentation,
+    };
+
+    /// The width table already knows which codepoints are text by default.
+    ///
+    /// This is the whole selection rule, so it is worth pinning against real
+    /// codepoints rather than trusting the derivation. The `Emoji_Presentation`
+    /// column is the fact each row encodes.
+    #[test]
+    fn text_presentation_is_derived_from_the_width_table() {
+        // Emoji=Yes, Emoji_Presentation=No: one column alone, two with U+FE0F.
+        // `⏺` is the bullet Claude Code prints at the head of every message.
+        for ch in [
+            '\u{23FA}', // ⏺ record button
+            '\u{23F8}', // ⏸ pause
+            '\u{23F9}', // ⏹ stop
+            '\u{25B6}', // ▶ play
+            '\u{2611}', // ☑ ballot box with check
+            '\u{26A0}', // ⚠ warning
+            '\u{2049}', // ⁉ exclamation question
+        ] {
+            assert!(
+                single_column_text_presentation(ch),
+                "U+{:04X} defaults to text presentation",
+                ch as u32
+            );
+        }
+        // Emoji_Presentation=Yes: already two columns, so a colour face is
+        // the right answer and this must not touch them.
+        for ch in [
+            '\u{23F0}',  // ⏰ alarm clock
+            '\u{2B50}',  // ⭐ star
+            '\u{26AB}',  // ⚫ medium black circle
+            '\u{2705}',  // ✅ check mark button
+            '\u{1F600}', // 😀
+        ] {
+            assert!(
+                !single_column_text_presentation(ch),
+                "U+{:04X} is emoji-presentation and must keep its colour face",
+                ch as u32
+            );
+        }
+        // Ordinary text is not emoji-capable at all. ASCII short-circuits
+        // before the width table is consulted at all.
+        for ch in ['a', '0', ' ', '\u{00E9}', '\u{4E00}', '\u{2500}'] {
+            assert!(
+                !single_column_text_presentation(ch),
+                "U+{:04X} is not emoji-capable",
+                ch as u32
+            );
+        }
+        // Out of scope by design: default-text emoji that are East Asian Wide
+        // stay at two columns with or without U+FE0F, so width cannot separate
+        // them from `Emoji_Presentation=Yes`. A colour glyph in a two-column
+        // cell fits the space it was given, which is why they are left alone.
+        for ch in ['\u{3030}', '\u{1F202}'] {
+            assert!(
+                !single_column_text_presentation(ch),
+                "U+{:04X} is wide, so it is outside this rule",
+                ch as u32
+            );
+        }
+    }
+
+    /// An explicit U+FE0F is the user asking for the colour face.
+    ///
+    /// Kettle appends a cell's zero-width marks straight after its base char in
+    /// the run it hands the shaper, so a qualified `⏺️` arrives as two chars in
+    /// one run. Overriding that would be the same defect in the other
+    /// direction: Unicode names `23FA FE0F` an emoji-style sequence.
+    #[test]
+    fn a_variation_selector_keeps_the_colour_face() {
+        let src = crate::production_source();
+        let peek = ["chars.peek() == Some(&'\\u{FE0F}')"].concat();
+        assert!(
+            src.contains(&peek),
+            "the row builder must look at the mark that follows the base char"
+        );
+        let gate = ["if !qualified && single_column_text_", "presentation(ch)"].concat();
+        assert!(
+            src.contains(&gate),
+            "a qualified sequence must skip the override, not merely be noticed"
+        );
+    }
+
+    /// The block cursor reshapes its own glyph and draws it last.
+    ///
+    /// Without the same choice the pane draws a text circle and the cursor
+    /// paints a colour square over it whenever the cursor rests on one.
+    #[test]
+    fn the_block_cursor_makes_the_same_presentation_choice() {
+        let src = crate::production_source();
+        let choice = [
+            "self\n                .text_symbol_family\n                .filter(|_| !gqualified && ",
+            "single_column_text_presentation(gch))",
+        ]
+        .concat();
+        assert!(
+            src.contains(&choice),
+            "the cursor glyph pass must pick the text face for the same cells \
+             the pane does"
+        );
+        let used = ["Family::Name(cursor_", "family)"].concat();
+        assert!(
+            src.contains(&used),
+            "the chosen family must actually reach the cursor buffer"
+        );
+    }
+
+    /// The selection rule has to reach the shaper, not just exist.
+    ///
+    /// A behavioural test cannot get here: it needs a GPU surface, a shaped
+    /// pane buffer and a rasterizer, and the pieces this pins are already
+    /// covered above on their own. What is left is the wiring, so pin it at the
+    /// source. Every needle is built at runtime and matched against
+    /// `production_source()`, so this cannot match itself or any test.
+    #[test]
+    fn the_row_builder_asks_for_a_text_face_on_text_presentation_cells() {
+        let src = crate::production_source();
+        let predicate = ["single_column_text_", "presentation(ch)"].concat();
+        let request = ["Family::Name(symbol_", "family)"].concat();
+        let resolve = ["resolve_text_symbol_", "family(&mut font_system)"].concat();
+
+        assert!(
+            src.contains(&resolve),
+            "the face must be resolved once at renderer init; resolving it per \
+             row would walk fontdb on every frame"
+        );
+        assert!(
+            src.contains(&predicate),
+            "the row builder must consult the presentation rule, or the span \
+             below is never added and the bullet keeps its colour face"
+        );
+        assert!(
+            src.contains(&request),
+            "the span must request the resolved text face by name"
+        );
+        // The narrower span has to come after the run's own or the run
+        // overwrites it and the whole thing is a no-op.
+        let run_span = ["attrs_list.add_span(s..row_", "text.len(), &a);"].concat();
+        let cell_span = ["attrs_list.add_span(at..at + len, &text_", "attrs);"].concat();
+        let (Some(run_at), Some(cell_at)) = (src.find(&run_span), src.find(&cell_span)) else {
+            panic!("both spans must exist in the row builder");
+        };
+        assert!(
+            run_at < cell_at,
+            "the per-cell span must be added after the run's own, or the run \
+             attrs win and every cell keeps the default family"
+        );
+    }
+
+    /// The resolver has to answer against the font system the renderer builds.
+    ///
+    /// This exists because it did not. The first version probed
+    /// `Font::unicode_codepoints`, which is empty unless cosmic-text's
+    /// `monospace_fallback` feature is on, and it is not, so every candidate
+    /// was rejected and the whole change became a no-op that the other tests
+    /// reported as a skip rather than a failure.
+    #[test]
+    fn the_resolver_answers_against_the_renderer_font_system() {
+        let mut fs = FontSystem::new();
+        crate::load_bundled_font(&mut fs, kettle_config::font::REGULAR);
+        let faces = fs.db().faces().count();
+        assert!(
+            faces > 1,
+            "the system font db is empty, so nothing below proves anything"
+        );
+        let resolved = resolve_text_symbol_family(&mut fs);
+        eprintln!("text-presentation face: {resolved:?} out of {faces} faces");
+        // A host may legitimately have no candidate. What it may not do is
+        // answer with a family that does not carry the probe, which is the
+        // failure mode that silently disabled the fix.
+        if let Some(family) = resolved {
+            let ids: Vec<_> = fs
+                .db()
+                .faces()
+                .filter(|face| {
+                    face.families
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(family))
+                })
+                .map(|face| face.id)
+                .collect();
+            assert!(
+                ids.iter().any(
+                    |id| fs.get_font(*id, Default::default()).is_some_and(|font| font
+                        .as_swash()
+                        .charmap()
+                        .map(TEXT_SYMBOL_PROBE)
+                        != 0)
+                ),
+                "{family:?} was chosen without a glyph for the probe"
+            );
+        }
+    }
+
+    /// The face requested for those cells must actually be monochrome.
+    ///
+    /// Picking a family that the system lacks, or one that turns out to be the
+    /// colour-emoji face under another name, would leave the bullet exactly as
+    /// it was. Rasterizing is the only way to tell: font selection is decided
+    /// by cmap coverage, which is a property of the host, not of this crate.
+    #[test]
+    fn the_text_presentation_face_rasterizes_a_monochrome_bullet() {
+        let mut fs = FontSystem::new();
+        for face in kettle_config::font::all() {
+            load_bundled_font(&mut fs, face);
+        }
+        let Some(symbol_family) = resolve_text_symbol_family(&mut fs) else {
+            // A font-poor image has nothing to steer towards, and the code
+            // leaves such a system exactly as it was.
+            eprintln!("no monochrome symbol face installed ... skipped");
+            return;
+        };
+        let metrics = Metrics::new(16.0, 20.0);
+        let mut buf = TextBuffer::new(&mut fs, metrics);
+        buf.set_size(Some(200.0), Some(40.0));
+        buf.set_text(
+            "\u{23FA}",
+            &Attrs::new().family(Family::Name(symbol_family)),
+            Shaping::Advanced,
+            None,
+        );
+        buf.shape_until_scroll(&mut fs, false);
+        let key = buf
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .map(|g| g.physical((0.0, 0.0), 1.0).cache_key)
+            .next()
+            .expect("the bullet shaped to a glyph");
+        let mut swash = SwashCache::new();
+        let image = swash
+            .get_image(&mut fs, key)
+            .as_ref()
+            .expect("the bullet rasterized");
+        assert!(
+            !matches!(image.content, glyphon::cosmic_text::SwashContent::Color),
+            "U+23FA resolved to a colour face through {symbol_family:?}, so \
+             the bullet would still render as a colour square"
+        );
+    }
+
     /// A pane-titlebar-shaped label: leading status glyph (Claude Code's
     /// OSC 0/2 titles lead with one), title text, size text, and the
     /// U+1F514 bell kettle appends itself when `icon-bell` fires. Neither
@@ -16588,6 +16994,7 @@ mod pane_buffer_lifecycle_tests {
             x: 10.0,
             y: 20.0,
             ch: 'x',
+            emoji_qualified: false,
             color: kettle_config::Rgb::new(1, 2, 3),
             clip: (0.0, 0.0, 100.0, 80.0),
         };
@@ -16815,7 +17222,7 @@ mod pane_buffer_lifecycle_tests {
         // The old in-buffer recolor (`fg = if cursor_rt_override...`) is gone:
         // the glyph keeps its normal fg in the buffer and is overdrawn instead.
         assert!(
-            src.contains("cursor_glyph_capture = Some((sc.c, cursor_fg))"),
+            src.contains("cursor_glyph_capture =\n"),
             "the cursor cell must be captured for the overdraw pass, not \
              recolored into the pane span runs"
         );
@@ -20278,7 +20685,7 @@ mod glyph_cell_lock_tests {
         let gate = src
             .split("let grid_upload_needed =")
             .nth(1)
-            .and_then(|s| s.split("if let Some((gx, gy, gch, gcolor, gclip))").next())
+            .and_then(|s| s.split("if let Some((gx, gy, gch,").next())
             .expect("grid upload block present before cursor-glyph prepare");
         assert!(
             !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),

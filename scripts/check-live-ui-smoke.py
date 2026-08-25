@@ -16630,6 +16630,177 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_text_presentation(kettle: str, root: Path) -> Path:
+    """A codepoint Unicode renders as text must not come from a colour face.
+
+    Claude Code heads every message with `⏺` U+23FA, which is `Emoji=Yes` with
+    `Emoji_Presentation=No`: one column wide, text by default. Nothing below
+    kettle consults that property. cosmic-text takes the first family in its
+    cascade whose cmap has the codepoint, and on macOS the text faces lack this
+    one, so it landed on Apple Color Emoji and drew a two-cell colour square
+    over a one-cell slot.
+
+    A monochrome glyph is one ink blended against one background, so every
+    pixel it can produce lies on the straight line between those two colours in
+    RGB space. A colour glyph carries more than one hue and leaves that line:
+    the record button is a white circle on a blue-grey square, and the square
+    sits about thirty units off the line the circle and the background define.
+    Both reference colours are read out of the screenshot, so the oracle does
+    not care which theme supplied the foreground.
+
+    Only the glyph's own cell is read. Window chrome carries the per-window
+    accent hue, which is colourful by design and says nothing about the glyph.
+
+    The block cursor reshapes its own glyph and draws it last, so it makes the
+    same presentation choice in production. That path is deliberately NOT
+    checked here. A phase that parked the cursor on the bullet passed on macOS
+    even with the cursor's choice reverted, and under Xvfb the filled block
+    never appears at all because nothing gives the window focus, so it would
+    have been a phase that neither ran in CI nor detected its own defect. The
+    source guard `the_block_cursor_makes_the_same_presentation_choice` covers
+    the wiring instead.
+    """
+    out = root / f"text-presentation-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = never",
+                "status-bar = off",
+                "scrollbar = never",
+                "restore-session = false",
+                "update-check = false",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                # The oracle reads exact channels, so the window has to be
+                # opaque; `background-opacity` defaults to 0.86 on macOS.
+                "background-opacity = 1.0",
+                "window-blur = false",
+                "window-width = 40",
+                "window-height = 10",
+            ]
+        )
+        + "\n"
+    )
+
+    bullet = "\u23fa"
+    # `-e` so the pane holds one glyph and nothing else. A shell prompt is
+    # colourful and would drown the signal.
+    extra_args = ["-e", "sh", "-c", f"printf '{bullet}\\n'; sleep 120"]
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if bullet in screen_text(live.json_ctl("read_screen")):
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(
+                f"text-presentation smoke: the pane never printed {bullet!r}"
+            )
+        shot = out / "bullet.png"
+        live.screenshot(shot)
+        geometry = live.json_ctl("ui_geometry")
+        # Which face can serve these codepoints is a property of the host. A
+        # runner with no monochrome family that carries U+23FA cannot produce a
+        # monochrome bullet, and kettle deliberately leaves such a system on the
+        # cascade it had, so asserting one here would be asserting something
+        # about the image rather than about kettle.
+        if "text_presentation_face" not in geometry:
+            raise SystemExit(
+                "text-presentation smoke: ui_geometry has no "
+                "`text_presentation_face`; this scenario cannot tell a host "
+                "without a suitable font from a real regression"
+            )
+        face = geometry.get("text_presentation_face")
+        if face is None:
+            print(
+                "text-presentation smoke: skipped (no installed font carries "
+                "U+23FA in a monochrome face, so kettle leaves the platform "
+                "cascade alone here)"
+            )
+            return out
+        width, height, rgba_rows = read_rgba_png(shot)
+        panes = geometry.get("panes")
+        cell = geometry.get("cell")
+        padding = geometry.get("padding")
+        if not (isinstance(panes, list) and panes and isinstance(cell, dict)):
+            raise SystemExit(
+                f"text-presentation smoke: ui_geometry is unusable: {geometry}"
+            )
+        pane_rect = panes[0].get("rect", {})
+        pad_x = padding.get("x", 0.0) if isinstance(padding, dict) else 0.0
+        pad_y = padding.get("y", 0.0) if isinstance(padding, dict) else 0.0
+        x0 = max(0, int(pane_rect.get("x", 0.0) + pad_x))
+        y0 = max(0, int(pane_rect.get("y", 0.0) + pad_y))
+        # Inset by a pixel on every side. The row below holds the cursor, drawn
+        # in the theme foreground, and a rect that reaches its first pixel row
+        # picks up exactly one cell's width of it.
+        x1 = min(width, int(x0 + float(cell["width"]))) - 2
+        y1 = min(height, int(y0 + float(cell["height"]))) - 2
+        x0 += 2
+        y0 += 2
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            raise SystemExit(
+                "text-presentation smoke: the glyph cell is too small to "
+                f"sample: ({x0}, {y0})-({x1}, {y1})"
+            )
+        empty_x = min(width - 2, int(x0 + float(cell["width"]) * 4.0))
+        page_background = tuple(
+            rgba_rows[(y0 + y1) // 2][empty_x * 4 : empty_x * 4 + 3]
+        )
+    def distance_sq(a, b):
+        return sum((int(p) - int(q)) ** 2 for p, q in zip(a, b))
+
+    background = page_background
+
+    analysis = {
+        "codepoint": "U+23FA",
+        "face": face,
+        "cell_rect": [x0, y0, x1, y1],
+    }
+
+    def measure(rows_for_phase, reference) -> Dict[str, object]:
+        """How far the cell's pixels stray from one ink over one background."""
+        pixels = [
+            tuple(rows_for_phase[y][x * 4 : x * 4 + 3])
+            for y in range(y0, y1)
+            for x in range(x0, x1)
+        ]
+        ink = max(pixels, key=lambda px: distance_sq(px, reference))
+        span = [int(i) - int(b) for i, b in zip(ink, reference)]
+        span_len_sq = sum(component * component for component in span)
+        if span_len_sq < 400:
+            raise SystemExit(
+                "text-presentation smoke: the cell is nearly uniform, so the "
+                f"glyph never drew. reference={reference} ink={ink}"
+            )
+        stray: Dict[Tuple[int, int, int], int] = {}
+        for px in pixels:
+            delta = [int(p) - int(b) for p, b in zip(px, reference)]
+            t = min(1.0, max(0.0, sum(d * sp for d, sp in zip(delta, span)) / span_len_sq))
+            if sum((d - t * sp) ** 2 for d, sp in zip(delta, span)) > 12 * 12:
+                stray[px] = stray.get(px, 0) + 1
+        return {
+            "reference": list(reference),
+            "ink": list(ink),
+            "off_line_pixels": sum(stray.values()),
+            "top_off_line": sorted(stray.items(), key=lambda kv: -kv[1])[:4],
+        }
+
+    result = measure(rgba_rows, background)
+    analysis["pane_glyph"] = result
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    if result["off_line_pixels"]:
+        raise SystemExit(
+            f"text-presentation smoke: U+23FA drew {result['off_line_pixels']} "
+            f"pixels that are not a blend of one ink and one background, so it "
+            f"still resolves to a colour-emoji face. {result}"
+        )
+    return out
+
+
 def run_split_exit_resize(kettle: str, root: Path) -> Path:
     """A split closed by its own shell must hand its rows back.
 
@@ -17071,6 +17242,7 @@ def main() -> int:
             "tearoff",
             "split-titlebar",
             "split-exit-resize",
+            "text-presentation",
             "zoom-keybind",
             "underline",
             "agent-tui",
@@ -17189,6 +17361,12 @@ def main() -> int:
     if args.case in ("split-titlebar", "all"):
         out = run_split_titlebar(args.kettle, root)
         print(f"split-titlebar smoke: OK artifacts={out}")
+    if args.case in ("text-presentation", "all"):
+        if platform.system() == "Windows":
+            print("text-presentation smoke: skipped (no `sh` on native Windows)")
+        else:
+            out = run_text_presentation(args.kettle, root)
+            print(f"text-presentation smoke: OK artifacts={out}")
     if args.case in ("split-exit-resize", "all"):
         out = run_split_exit_resize(args.kettle, root)
         print(f"split-exit-resize smoke: OK artifacts={out}")

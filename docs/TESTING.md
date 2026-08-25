@@ -1740,6 +1740,7 @@ session run
 `just tabbar-click-smoke`,
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
+`just text-presentation-smoke`,
 `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
@@ -1891,6 +1892,11 @@ retained compile/regression checks on **windows**:
   seven days. It remains
   `continue-on-error` only during its initial one-week flake-rate observation;
   do not count it as a required gate until that quarantine is removed.
+- A quarantined Linux **live-UI `text-presentation` smoke** prints `⏺` U+23FA
+  alone in a pane and asserts every pixel in that glyph's own cell is a blend of
+  one ink and the background. A monochrome glyph stays on that line; a colour
+  glyph carries more than one hue and leaves it. Both reference colours are read
+  out of the screenshot, so the oracle does not depend on the theme.
 - A quarantined Linux **live-UI `split-exit-resize` smoke** splits a pane,
   lets the new pane's own shell exit, and asserts the survivor returns to its
   exact pre-split columns and rows, then reads the tty winsize back with

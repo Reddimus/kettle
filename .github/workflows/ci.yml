@@ -348,6 +348,30 @@ jobs:
           path: target/diagnostics/live-ui-ci
           if-no-files-found: warn
           retention-days: 7
+      - name: Live UI text-presentation smoke (Linux, quarantined)
+        if: runner.os == 'Linux'
+        # A codepoint Unicode renders as text must not come from a colour face.
+        # Nothing below kettle consults `Emoji_Presentation`, so the answer is
+        # decided by which fonts the host has, which makes it worth checking on
+        # a runner rather than only on a developer machine.
+        # Quarantined like the legs below it: creating a real window under Xvfb
+        # on a hosted runner is the flake source, not what the scenario asserts.
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python3 scripts/check-live-ui-smoke.py text-presentation \
+            --kettle ./target/release/kettle \
+            --out-dir target/diagnostics/live-ui-text-presentation
+      - name: Upload live UI text-presentation evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-ui-text-presentation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/diagnostics/live-ui-text-presentation
+          if-no-files-found: warn
+          retention-days: 7
       - name: Live UI split-exit-resize smoke (Linux, quarantined)
         if: runner.os == 'Linux'
         # A split closed by its own shell exiting must hand its rows back to

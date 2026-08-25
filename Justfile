@@ -379,11 +379,11 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -828,6 +828,15 @@ tab-title-smoke:
 [unix]
 split-titlebar-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release split-titlebar
+
+# Print the bullet Claude Code heads its messages with and prove it is drawn
+# from a monochrome face, not a colour-emoji one. Background and foreground are
+# both greys, so any pixel in the glyph's own cell whose channels differ came
+# from a colour face. Captures the PNG and the sampled cell under
+# target/diagnostics/text-presentation-*.
+[unix]
+text-presentation-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release text-presentation
 
 # Split a pane, close the split by letting its own shell exit, and prove the
 # surviving pane's grid AND tty winsize come back to their pre-split values.
