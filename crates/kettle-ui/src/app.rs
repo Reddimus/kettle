@@ -12388,15 +12388,20 @@ impl App {
             // Capture a just-exited pane's final output before reap drops
             // its sidechannel — otherwise the shell's last line is lost from the trace.
             self.flush_recorder_output(ws);
-            let mux_empty = ws.mux.reap();
-            if clear_stale_title_edit(&ws.mux, &mut ws.editing_title) {
+            let reaped = ws.mux.reap();
+            // `clear_stale_title_edit` mutates `ws.editing_title`, so it is
+            // evaluated into a binding rather than placed on the right of the
+            // `||` where a reaped layout would short-circuit past it and
+            // strand a title edit pinned to a pane that no longer exists.
+            let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
+            if reaped.layout_changed || stale_title {
                 ws.pending_resize = true;
                 if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
             }
             self.hoover_groups(ws);
-            if mux_empty {
+            if reaped.mux_empty {
                 return;
             }
             ws.search_queries
@@ -27640,15 +27645,18 @@ impl App {
         // just-exited pane (covers the shell-exit → process-exit close path,
         // e.g. a fast `-e cmd` session).
         self.flush_recorder_output(ws);
-        let mux_empty = ws.mux.reap();
-        if clear_stale_title_edit(&ws.mux, &mut ws.editing_title) {
+        let reaped = ws.mux.reap();
+        // Binding, not an inline call on the right of `||`: see the matching
+        // reap in `redraw`.
+        let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
+        if reaped.layout_changed || stale_title {
             ws.pending_resize = true;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
         }
         self.hoover_groups(ws);
-        if mux_empty && ws.window.is_some() {
+        if reaped.mux_empty && ws.window.is_some() {
             self.save_session(ws);
             self.request_window_close(ws.seq);
             return None;
@@ -28563,6 +28571,69 @@ mod modal_discipline_guard {
         );
     }
 
+    /// A pane that exits on its own must resize whatever inherits its space.
+    ///
+    /// `Mux::reap` prunes the dead pane and `reap_tabs` promotes the sibling
+    /// into the whole rectangle. The renderer paints from a live layout, so
+    /// the survivor *looks* right immediately; its PTY does not move, gets no
+    /// `SIGWINCH`, and a full-screen TUI keeps drawing into the old box. That
+    /// is why closing a split by typing `exit` used to leave Claude Code
+    /// painting into the top half of a full-height pane while
+    /// `Ctrl+Shift+W` on the same layout worked, since the explicit close
+    /// falls through to `handle_action`'s tail.
+    ///
+    /// Source-level because the behavior needs a live event loop, a window and
+    /// a real child process; `just split-exit-resize-smoke` is the behavioral
+    /// half. Every needle is built at runtime and matched against
+    /// `production_source()`, so the guard can match neither its own text nor
+    /// any test.
+    #[test]
+    fn every_reap_site_schedules_the_survivor_resize() {
+        let source = production_source();
+        let reap_call = ["ws.mux.", "reap()"].concat();
+        let title_clear = [
+            "let stale_title = clear_stale_title_edit(&ws.mux, ",
+            "&mut ws.editing_title);",
+        ]
+        .concat();
+        // The gate itself, not merely the presence of the scheduling lines.
+        // Those lines already existed before this fix, guarded by the title
+        // edit alone; only the reap's own answer reaching the condition is new.
+        let gate = ["if reaped.layout_", "changed || stale_title {"].concat();
+        let schedule = ["ws.pending_", "resize = true;"].concat();
+        let repaint = ["window.request_", "redraw();"].concat();
+        // `clear_stale_title_edit` mutates `ws.editing_title`. Behind a `||`
+        // it stops running whenever a pane died, stranding a title edit on a
+        // pane that no longer exists. The `let` binding above is what keeps
+        // the call unconditional; this needle catches the reordering.
+        let short_circuit = ["|| clear_stale_", "title_edit"].concat();
+
+        let sites = source.split(&reap_call).skip(1).count();
+        assert!(
+            sites >= 2,
+            "expected the redraw and about-to-wait reaps; the needle stopped \
+             matching, so this guard was about to pass vacuously"
+        );
+        let scheduled = source
+            .split(&reap_call)
+            .skip(1)
+            .filter(|tail| {
+                let window = &tail[..tail.len().min(600)];
+                window.contains(&title_clear)
+                    && window.contains(&gate)
+                    && window.contains(&schedule)
+                    && window.contains(&repaint)
+                    && !window.contains(&short_circuit)
+            })
+            .count();
+        assert_eq!(
+            scheduled, sites,
+            "every reap must mark a resize and request the frame that flushes \
+             it, or the pane that inherited the dead pane's space keeps the \
+             rows and columns it had inside the split"
+        );
+    }
+
     #[test]
     fn pane_close_lifecycle_events_precede_pty_teardown() {
         let source = production_source();
@@ -28769,7 +28840,7 @@ mod tests {
                 .expect("pane edit opens");
         edit.input = "dead-target-title".into();
         mux.panes.get_mut(&target).unwrap().closed = true;
-        assert!(!mux.reap(), "the sibling keeps the mux alive");
+        assert!(!mux.reap().mux_empty, "the sibling keeps the mux alive");
         assert_eq!(mux.active_focus(), Some(sibling));
         let mut open_edit = Some(edit.clone());
         assert!(clear_stale_title_edit(&mux, &mut open_edit));
@@ -28780,18 +28851,64 @@ mod tests {
         // The behavioral helper above is wired immediately after every
         // production reap, before either path can return on an empty mux.
         let source = production_source();
-        let reap_sites = source.matches("let mux_empty = ws.mux.reap();").count();
+        // Needle the call, not the binding it lands in. Built at runtime so
+        // this guard cannot match its own source.
+        let reap_call = ["ws.mux.", "reap()"].concat();
+        let reap_sites = source.matches(&reap_call).count();
         assert_eq!(reap_sites, 2, "update this guard when a reap site is added");
         assert_eq!(
             source
-                .split("let mux_empty = ws.mux.reap();")
+                .split(&reap_call)
                 .skip(1)
-                .filter(|tail| tail[..tail.len().min(400)]
+                .filter(|tail| tail[..tail.len().min(600)]
                     .contains("clear_stale_title_edit(&ws.mux, &mut ws.editing_title)"))
                 .count(),
             reap_sites,
             "every reap path must dismiss a title edit whose pinned target died"
         );
+    }
+
+    /// `reap` has to report a removal, and only a removal.
+    ///
+    /// Both call sites turn `layout_changed` into a `pending_resize` plus a
+    /// `request_redraw()`. A version that answered "yes" on every pass would
+    /// look correct in the split-close case and quietly re-drive `resize_all`
+    /// on every frame forever, which nothing else in the suite would catch.
+    /// The second row below is the one that pins that.
+    ///
+    /// It lives here rather than in `mux::node_tests` because `Pane` owns a
+    /// `Terminal` and cannot be built without a PTY, and `title_test_split_mux`
+    /// is the existing helper that spawns one. The name is inherited from its
+    /// first caller; what it builds is a plain two-pane split.
+    #[test]
+    fn reap_reports_whether_it_removed_a_pane() {
+        let (mut mux, target, sibling) = title_test_split_mux();
+
+        mux.panes.get_mut(&target).unwrap().closed = true;
+        let first = mux.reap();
+        assert!(
+            first.layout_changed,
+            "the dead pane's space was handed over"
+        );
+        assert!(!first.mux_empty, "the sibling keeps the mux alive");
+
+        let second = mux.reap();
+        assert!(
+            !second.layout_changed,
+            "a pass that reaps nothing must not ask for a resize, or every \
+             idle frame re-drives resize_all"
+        );
+        assert!(!second.mux_empty);
+
+        mux.panes.get_mut(&sibling).unwrap().closed = true;
+        let last = mux.reap();
+        assert!(last.layout_changed);
+        assert!(last.mux_empty, "the last pane leaves nothing behind");
+
+        // The degenerate case: empty is not the same fact as changed.
+        let empty = Mux::new().reap();
+        assert!(!empty.layout_changed);
+        assert!(empty.mux_empty);
     }
 
     #[test]
@@ -28826,7 +28943,10 @@ mod tests {
                 .expect("split-tab edit opens");
         edit.input = "split-tab-survives".into();
         mux.panes.get_mut(&exiting).unwrap().closed = true;
-        assert!(!mux.reap(), "the split sibling keeps the tab alive");
+        assert!(
+            !mux.reap().mux_empty,
+            "the split sibling keeps the tab alive"
+        );
         assert_eq!(mux.active_focus(), Some(survivor));
         let mut open_edit = Some(edit.clone());
         assert!(!clear_stale_title_edit(&mux, &mut open_edit));
@@ -28883,7 +29003,7 @@ mod tests {
         .expect("group edit opens");
         edit.input = "dead-target-group".into();
         mux.panes.get_mut(&target).unwrap().closed = true;
-        assert!(!mux.reap(), "the sibling keeps the mux alive");
+        assert!(!mux.reap().mux_empty, "the sibling keeps the mux alive");
         assert_eq!(mux.active_focus(), Some(sibling));
         let mut open_edit = Some(edit.clone());
         assert!(clear_stale_title_edit(&mux, &mut open_edit));
