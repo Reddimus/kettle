@@ -835,6 +835,15 @@ split-titlebar-smoke:
 split-exit-resize-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release split-exit-resize
 
+# Hunt for the intermittent "split never loads" report. On demand only: it is a
+# hunt, not a contract, so it is in no gate. The default fixture is a free
+# shell-churn process; `just split-repro --claude` drives a real Claude Code
+# pane. Exit 2 means it reproduced and printed a capture directory holding the
+# cloned argv, the child pid, a process tree, and any swallowed split error.
+[unix]
+split-repro *ARGS:
+    python3 scripts/check-split-repro.py --kettle ./target/release/kettle {{ARGS}}
+
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
 [unix]

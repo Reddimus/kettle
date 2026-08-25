@@ -16673,19 +16673,23 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
             want = f"{baseline[1]}x{baseline[0]}"
             pattern = re.compile(re.escape(token) + r"\s+(\d+)x(\d+)")
             reported = None
-            deadline = time.monotonic() + 10.0
+            last = ""
+            deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
-                found = pattern.findall(screen_text(live.json_ctl("read_screen")))
+                last = screen_text(live.json_ctl("read_screen"))
+                found = pattern.findall(last)
                 if found:
                     reported = f"{found[-1][0]}x{found[-1][1]}"
                     break
                 time.sleep(0.1)
             analysis["tty_winsize"] = {"reported": reported, "expected": want}
             if reported != want:
+                (out / "winsize-screen.txt").write_text(last)
                 raise SystemExit(
                     "split-exit-resize smoke: the grid came back but the tty "
                     f"winsize did not. stty size reported {reported}, expected "
-                    f"{want}. The ioctl never reached the child."
+                    f"{want}. The ioctl never reached the child, or the probe "
+                    f"never ran; the pane is captured in {out}/winsize-screen.txt"
                 )
             live.screenshot(out / "after-close.png")
 
