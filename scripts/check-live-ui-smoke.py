@@ -8217,19 +8217,26 @@ def live_helper_selftest() -> None:
         # Nothing to assert then, and inventing one would be worse.
         state = None
     if state is not None:
+        # The right answer differs by platform, and both are safe. A Linux
+        # pidfd on a zombie is a real handle: the kernel pins the pid until the
+        # fd closes, so nothing can reuse it. macOS has no such object, and a
+        # zombie has no task port to retain, so the only safe answer there is
+        # "vanished". What must never happen on either is a retention failure
+        # that aborts the whole teardown scan.
         try:
-            StableProcessHandle.open(zombie.pid)
+            handle = StableProcessHandle.open(zombie.pid)
         except ProcessLookupError:
-            pass
+            handle = None
         except Exception as error:  # noqa: BLE001
             raise AssertionError(
-                f"a zombie session member must read as vanished, not as a "
-                f"retention failure: {error!r}"
+                f"a zombie session member must read as vanished or retain "
+                f"safely, never as a retention failure: {error!r}"
             ) from error
-        else:
-            raise AssertionError(
-                "a zombie must not produce a retained handle; killing through "
-                "it would signal whatever reuses the pid"
+        if handle is not None:
+            handle.close()
+            assert platform.system() != "Darwin", (
+                "macOS cannot retain a zombie's task port, so a handle here "
+                "means the identity check did not run"
             )
     zombie.wait()
 
