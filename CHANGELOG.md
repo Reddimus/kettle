@@ -6,6 +6,36 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Closing a split by typing `exit` now gives its rows back to the pane that
+  is left.** Splitting away from a full-screen program, then letting the new
+  pane's own shell exit, left the surviving pane's terminal at the size it had
+  inside the split. Claude Code kept painting into the top half of a
+  full-height pane, still running and still updating, simply convinced the
+  terminal was 28 rows instead of 57.
+
+  A pane whose child exits is removed by `Mux::reap`, which prunes it from the
+  split tree and promotes its sibling into the whole rectangle. Nothing told
+  that sibling's PTY. Because the renderer paints from a live layout, the
+  survivor looked correct straight away, which is what made this read as a
+  redraw problem rather than a resize one. No `TIOCSWINSZ` went out, so the
+  kernel sent no `SIGWINCH`, so the program had no reason to repaint at a new
+  size.
+
+  Closing the same split with `Ctrl+Shift+W` always worked, because an explicit
+  close runs through the action tail that schedules a resize, and the
+  confirm-dialog close had already been fixed for this exact reason once
+  before. Reaping was the one close path left without it.
+
+- **A split that fails to start now says so.** Both split actions logged a
+  spawn failure at `warn` and carried on. At the default log level that is
+  invisible, and since a failed split leaves the layout untouched, all the user
+  sees is a keystroke that did nothing. That is also what a pane which spawned
+  and immediately died looks like, so the two arrive as the same report. A
+  failed split now logs at `error` and raises one desktop notice, matching what
+  a failed preference write already did.
+
 ## [4.0.0] — 2026-08-24
 
 ### Changed

@@ -1222,7 +1222,12 @@ text, so its bitmap is already resident).
 - **PTY geometry is one versioned grid-and-pixel transaction.** The UI derives
   exact text-area pixels from fractional renderer metrics and computes each
   restored or newly split leaf before spawning its child, so the process sees
-  the correct initial winsize. Grid reflow, image-cell conversion, and the
+  the correct initial winsize. Removal is the same transaction in reverse:
+  reaping a pane whose child exited promotes its sibling into the whole
+  rectangle, so the reap marks a resize and requests the frame that flushes it.
+  Without that the survivor is painted at its new size from a live layout while
+  its PTY keeps the geometry it had inside the split, and the child is never
+  signalled. Grid reflow, image-cell conversion, and the
   published pixel extent use one `Term`-then-geometry lock order and cannot mix
   two resize generations. Desired geometry is tracked separately from the last
   native geometry that succeeded, which makes a failed native resize retryable
