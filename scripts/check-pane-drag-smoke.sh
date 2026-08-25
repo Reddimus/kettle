@@ -8,6 +8,19 @@
 # live window can show is that the press REACHES that geometry: that the
 # titlebar hit-test, the slop threshold, the drop latch, and the release all
 # agree about which pane is being carried and where it lands.
+#
+# KNOWN BROKEN as of 2026-08-25, and it needs a decision rather than a patch.
+# The gesture arms only in `window_event_inner`, on a native winit pointer
+# press; `ctl_mouse_press` never sets `ws.pane_drag`. So `ctl send_mouse` cannot
+# reach it and this script stops at "press on a pane titlebar did not arm the
+# gesture" on every platform. That is the same native-only property the tearoff
+# smoke documents for `maybe_tear_off`, which is why that one carries a separate
+# xdotool tier for the real-input half.
+#
+# Two ways out, both bigger than this file: let `ctl_mouse_press` arm a pane
+# drag, which widens what an agent can drive and is arguably the consistent
+# thing since it already drives divider drags, or give this script an
+# xdotool tier like the tearoff smoke and accept that it is then X11-only.
 set -euo pipefail
 
 KETTLE="${KETTLE_BIN:-kettle}"
