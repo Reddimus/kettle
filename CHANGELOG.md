@@ -8,6 +8,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- **The bullet Claude Code prints is a circle again, not a coloured square.**
+  `⏺` U+23FA is one cell wide and, per Unicode, renders as text unless a
+  variation selector asks otherwise. Kettle drew it from Apple Color Emoji: a
+  blue-grey rounded square about two cells wide, covering the space after it.
+  Ghostty draws the same character as a plain circle.
+
+  Nothing in the shaping stack consulted `Emoji_Presentation`. cosmic-text takes
+  the first family in its cascade whose cmap has the codepoint, and neither the
+  bundled JetBrains Mono nor the system text faces have this one, so it reached
+  the colour-emoji face by elimination. The width was never wrong; only the face
+  was.
+
+  Cells that Unicode renders as text now ask for a monochrome symbol face.
+  Emoji that are meant to be colourful are untouched, because they are already
+  two cells wide and are excluded by the same rule that selects the text ones. A
+  system with no monochrome symbol face installed keeps exactly what it had.
+
 - **Closing a split by typing `exit` now gives its rows back to the pane that
   is left.** Splitting away from a full-screen program, then letting the new
   pane's own shell exit, left the surviving pane's terminal at the size it had

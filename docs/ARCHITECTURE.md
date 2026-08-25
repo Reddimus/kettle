@@ -1235,6 +1235,19 @@ text, so its bitmap is already resident).
   16-bit boundary and skips synchronous `ResizePseudoConsole` calls when only
   the advisory pixel extent changed; Unix still publishes pixel-only winsize
   changes.
+- **A codepoint Unicode renders as text is asked for a text face.** Nothing in
+  the shaping stack consults `Emoji_Presentation`: cosmic-text takes the first
+  family in its cascade whose cmap has the codepoint, and on macOS that is Apple
+  Color Emoji for anything the text faces lack. So `⏺` U+23FA, which is one cell
+  wide and text by default, drew a square colour bitmap over a one-cell slot and
+  covered the next column. The row builder now adds a per-cell span requesting a
+  monochrome symbol face for those codepoints. Which codepoints those are is
+  read out of the width table rather than a vendored list: every
+  `Emoji_Presentation=Yes` codepoint is East Asian Wide, and `unicode-width`
+  also widens an emoji-capable codepoint when U+FE0F follows, so one column
+  alone and two with U+FE0F means exactly `Emoji=Yes, Emoji_Presentation=No`.
+  The face is resolved once at renderer init from a short per-platform list, and
+  a system with none of them keeps the platform cascade it had.
 - **One parser thread plus one blocking pump thread per pane** — the pump reads
   the PTY master into a bounded recycled-buffer channel; the parser applies
   `Extractor::feed`, records image/side-channel chunks, drives text chunks into
