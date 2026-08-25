@@ -16651,12 +16651,14 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     Only the glyph's own cell is read. Window chrome carries the per-window
     accent hue, which is colourful by design and says nothing about the glyph.
 
-    The second phase parks the block cursor on the bullet, because the cursor
-    reshapes its own glyph and draws it last. Be careful what that phase is
-    taken to prove: it asserts the cell under the cursor is still two colours,
-    and it passed on macOS even with the cursor's presentation choice reverted,
-    so it is not evidence for that path. The source guard
-    `the_block_cursor_makes_the_same_presentation_choice` is what covers it.
+    The block cursor reshapes its own glyph and draws it last, so it makes the
+    same presentation choice in production. That path is deliberately NOT
+    checked here. A phase that parked the cursor on the bullet passed on macOS
+    even with the cursor's choice reverted, and under Xvfb the filled block
+    never appears at all because nothing gives the window focus, so it would
+    have been a phase that neither ran in CI nor detected its own defect. The
+    source guard `the_block_cursor_makes_the_same_presentation_choice` covers
+    the wiring instead.
     """
     out = root / f"text-presentation-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -16685,15 +16687,8 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 
     bullet = "\u23fa"
     # `-e` so the pane holds one glyph and nothing else. A shell prompt is
-    # colourful and would drown the signal. The second phase parks the cursor
-    # back on the bullet: the block cursor reshapes its own glyph and draws it
-    # last, so it can repaint a colour square over a corrected pane glyph.
-    extra_args = [
-        "-e",
-        "sh",
-        "-c",
-        f"printf '{bullet}\\n'; sleep 4; printf '\\033[1;1H'; sleep 120",
-    ]
+    # colourful and would drown the signal.
+    extra_args = ["-e", "sh", "-c", f"printf '{bullet}\\n'; sleep 120"]
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -16736,53 +16731,14 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         page_background = tuple(
             rgba_rows[(y0 + y1) // 2][empty_x * 4 : empty_x * 4 + 3]
         )
-        # Phase two: the program parks the cursor back on the bullet. The
-        # filled block only draws in a focused window, so ask the desktop for
-        # focus first and then wait for the block to actually appear. Without
-        # that wait this phase can measure a cell the cursor never covered,
-        # which would pass against the very defect it exists to catch.
-        focus_live_kettle_window(live)
-        cursor_shot = out / "bullet-under-cursor.png"
-        deadline = time.monotonic() + 20.0
-        while True:
-            if cursor_shot.exists():
-                cursor_shot.unlink()
-            live.screenshot(cursor_shot)
-            probe_w, _, probe_rows = read_rgba_png(cursor_shot)
-            probe = [
-                tuple(probe_rows[y][x * 4 : x * 4 + 3])
-                for y in range(y0, y1)
-                for x in range(x0, x1)
-            ]
-            if max(set(probe), key=probe.count) != page_background:
-                break
-            if time.monotonic() > deadline:
-                raise SystemExit(
-                    "text-presentation smoke: the block cursor never covered "
-                    "the bullet, so the cursor phase would prove nothing. Is "
-                    "the window focused?"
-                )
-            time.sleep(0.5)
-
-    _, _, cursor_rows = read_rgba_png(cursor_shot)
-
     def distance_sq(a, b):
         return sum((int(p) - int(q)) ** 2 for p, q in zip(a, b))
 
     background = page_background
-    # Under the cursor the block fills the cell, so its own most common colour
-    # is the background the glyph is drawn against.
-    cursor_cell = [
-        tuple(cursor_rows[y][x * 4 : x * 4 + 3])
-        for y in range(y0, y1)
-        for x in range(x0, x1)
-    ]
-    cursor_background = max(set(cursor_cell), key=cursor_cell.count)
 
     analysis = {
         "codepoint": "U+23FA",
         "cell_rect": [x0, y0, x1, y1],
-        "phases": {},
     }
 
     def measure(rows_for_phase, reference) -> Dict[str, object]:
@@ -16813,24 +16769,15 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
             "top_off_line": sorted(stray.items(), key=lambda kv: -kv[1])[:4],
         }
 
-    for label, rows_for_phase, reference in (
-        ("pane_glyph", rgba_rows, background),
-        # Under the cursor the block covers the whole cell, so the two colours
-        # are the block and the inverted glyph. The reference is read from the
-        # cell itself rather than from the page background.
-        ("under_cursor", cursor_rows, cursor_background),
-    ):
-        result = measure(rows_for_phase, reference)
-        analysis["phases"][label] = result
-        if result["off_line_pixels"]:
-            (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
-            raise SystemExit(
-                f"text-presentation smoke ({label}): U+23FA drew "
-                f"{result['off_line_pixels']} pixels that are not a blend of "
-                f"one ink and one background, so it still resolves to a "
-                f"colour-emoji face. {result}"
-            )
+    result = measure(rgba_rows, background)
+    analysis["pane_glyph"] = result
     (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    if result["off_line_pixels"]:
+        raise SystemExit(
+            f"text-presentation smoke: U+23FA drew {result['off_line_pixels']} "
+            f"pixels that are not a blend of one ink and one background, so it "
+            f"still resolves to a colour-emoji face. {result}"
+        )
     return out
 
 
