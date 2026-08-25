@@ -16702,6 +16702,25 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         shot = out / "bullet.png"
         live.screenshot(shot)
         geometry = live.json_ctl("ui_geometry")
+        # Which face can serve these codepoints is a property of the host. A
+        # runner with no monochrome family that carries U+23FA cannot produce a
+        # monochrome bullet, and kettle deliberately leaves such a system on the
+        # cascade it had, so asserting one here would be asserting something
+        # about the image rather than about kettle.
+        if "text_presentation_face" not in geometry:
+            raise SystemExit(
+                "text-presentation smoke: ui_geometry has no "
+                "`text_presentation_face`; this scenario cannot tell a host "
+                "without a suitable font from a real regression"
+            )
+        face = geometry.get("text_presentation_face")
+        if face is None:
+            print(
+                "text-presentation smoke: skipped (no installed font carries "
+                "U+23FA in a monochrome face, so kettle leaves the platform "
+                "cascade alone here)"
+            )
+            return out
         width, height, rgba_rows = read_rgba_png(shot)
         panes = geometry.get("panes")
         cell = geometry.get("cell")
@@ -16738,6 +16757,7 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 
     analysis = {
         "codepoint": "U+23FA",
+        "face": face,
         "cell_rect": [x0, y0, x1, y1],
     }
 

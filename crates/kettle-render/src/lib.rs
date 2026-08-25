@@ -80,7 +80,7 @@ const TEXT_SYMBOL_PROBE: char = '\u{23FA}';
 /// The first [`TEXT_SYMBOL_FAMILIES`] entry this system has AND that carries a
 /// glyph for [`TEXT_SYMBOL_PROBE`].
 fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static str> {
-    let probe = TEXT_SYMBOL_PROBE as u32;
+    let probe = TEXT_SYMBOL_PROBE;
     for wanted in TEXT_SYMBOL_FAMILIES.iter().copied() {
         let ids: Vec<fontdb::ID> = font_system
             .db()
@@ -93,9 +93,12 @@ fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static s
             .map(|face| face.id)
             .collect();
         for id in ids {
+            // `Font::unicode_codepoints` is empty unless cosmic-text's
+            // `monospace_fallback` feature is on, which it is not here, so ask
+            // the face's own character map instead.
             if font_system
                 .get_font(id, fontdb::Weight::NORMAL)
-                .is_some_and(|font| font.unicode_codepoints().contains(&probe))
+                .is_some_and(|font| font.as_swash().charmap().map(probe) != 0)
             {
                 return Some(wanted);
             }
@@ -5162,6 +5165,17 @@ impl Renderer {
     /// double-apply the scale factor.
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// The face this renderer requests for codepoints Unicode renders as text,
+    /// or `None` when the system has no candidate that carries them.
+    ///
+    /// Surfaced through `ui_geometry` because the answer depends entirely on
+    /// which fonts the host has. A verification scenario that asserts the
+    /// bullet is monochrome is asserting something the host may be unable to
+    /// produce, and it should say so rather than fail.
+    pub fn text_presentation_face(&self) -> Option<&'static str> {
+        self.text_symbol_family
     }
 
     /// Update the device-pixel scale factor (DPI). Wired to winit's
@@ -16387,7 +16401,9 @@ mod titlebar_glyph_fallback_tests {
             .collect()
     }
 
-    use crate::{SwashCache, resolve_text_symbol_family, single_column_text_presentation};
+    use crate::{
+        SwashCache, TEXT_SYMBOL_PROBE, resolve_text_symbol_family, single_column_text_presentation,
+    };
 
     /// The width table already knows which codepoints are text by default.
     ///
@@ -16535,6 +16551,51 @@ mod titlebar_glyph_fallback_tests {
             "the per-cell span must be added after the run's own, or the run \
              attrs win and every cell keeps the default family"
         );
+    }
+
+    /// The resolver has to answer against the font system the renderer builds.
+    ///
+    /// This exists because it did not. The first version probed
+    /// `Font::unicode_codepoints`, which is empty unless cosmic-text's
+    /// `monospace_fallback` feature is on, and it is not, so every candidate
+    /// was rejected and the whole change became a no-op that the other tests
+    /// reported as a skip rather than a failure.
+    #[test]
+    fn the_resolver_answers_against_the_renderer_font_system() {
+        let mut fs = FontSystem::new();
+        crate::load_bundled_font(&mut fs, kettle_config::font::REGULAR);
+        let faces = fs.db().faces().count();
+        assert!(
+            faces > 1,
+            "the system font db is empty, so nothing below proves anything"
+        );
+        let resolved = resolve_text_symbol_family(&mut fs);
+        eprintln!("text-presentation face: {resolved:?} out of {faces} faces");
+        // A host may legitimately have no candidate. What it may not do is
+        // answer with a family that does not carry the probe, which is the
+        // failure mode that silently disabled the fix.
+        if let Some(family) = resolved {
+            let ids: Vec<_> = fs
+                .db()
+                .faces()
+                .filter(|face| {
+                    face.families
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case(family))
+                })
+                .map(|face| face.id)
+                .collect();
+            assert!(
+                ids.iter().any(
+                    |id| fs.get_font(*id, Default::default()).is_some_and(|font| font
+                        .as_swash()
+                        .charmap()
+                        .map(TEXT_SYMBOL_PROBE)
+                        != 0)
+                ),
+                "{family:?} was chosen without a glyph for the probe"
+            );
+        }
     }
 
     /// The face requested for those cells must actually be monochrome.

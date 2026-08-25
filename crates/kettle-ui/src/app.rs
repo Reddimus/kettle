@@ -18150,6 +18150,14 @@ impl App {
                 "window_focused": target.window_focused,
                 "surface": {"width": surface.0, "height": surface.1},
                 "cell": cell,
+                // Which face serves codepoints Unicode renders as text, or
+                // null when this system has none that carry them. A scenario
+                // checking the bullet is monochrome needs to know whether the
+                // host can produce that at all.
+                "text_presentation_face": target
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| r.text_presentation_face()),
                 "padding": {"x": self.cfg.padding_x, "y": self.cfg.padding_y},
                 "content": rect_json(self.area(target)),
                 // The active tab's pane rects, in the same surface coordinates
