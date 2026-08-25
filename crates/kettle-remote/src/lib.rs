@@ -1149,22 +1149,101 @@ fn is_known_shell(prog: &str) -> bool {
 /// that runs the command and exits immediately, leaving a blank/dead pane
 /// ("new pane but no terminal would load"). Only an interactive shell should be
 /// cloned. Matched per shell family because the one-shot flag grammar differs.
+/// Long options that consume the argument after them, so that argument is a
+/// value rather than the script the shell was told to run.
+const SHELL_LONG_OPTIONS_TAKING_A_VALUE: &[&str] = &[
+    // bash / zsh
+    "--rcfile",
+    "--init-file",
+    // fish
+    "--init-command",
+    // nu
+    "--config",
+    "--env-config",
+    "--plugin-config",
+];
+
+/// Whether one argument is the flag that carries a command inline.
+fn shell_flag_carries_a_command(arg: &str) -> bool {
+    arg == "-c"
+        || arg == "--command"
+        || arg == "--commands"
+        || (arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg.len() >= 2
+            && arg[1..].contains('c'))
+}
+
+/// Whether a POSIX shell invocation runs something and exits rather than being
+/// one a person is typing into.
+///
+/// Two shapes do that, and only the first used to be recognized. `-c` and its
+/// spellings carry the command inline. A plain operand is a *script file*:
+/// `bash /tmp/hook.sh` runs the file and exits. Agents, git hooks, and
+/// installers spawn helpers in exactly that shape, often deleting the script
+/// straight after. Treating one as the pane's interactive shell means a split
+/// clones it, and the new pane runs a command that has already finished or a
+/// script that is already gone. It dies on arrival, which is what "the split
+/// never loaded" looks like from the outside.
+///
+/// Erring toward "runs and exits" is the safe direction. The split then starts
+/// the configured shell, which is somewhere to work. The opposite error is a
+/// dead pane.
+fn posix_shell_runs_and_exits(rest: &[String]) -> bool {
+    let mut args = rest.iter();
+    while let Some(arg) = args.next() {
+        // After the terminator every remaining word is an operand, and the
+        // first operand is the script.
+        if arg == "--" {
+            return args.next().is_some();
+        }
+        if shell_flag_carries_a_command(arg) {
+            return true;
+        }
+        // A bare `-` or `+` means "read from stdin", not a script to run.
+        if arg == "-" || arg == "+" {
+            continue;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            // `-s` reads commands from stdin, which in a pane is the person
+            // typing. Its operands become positional parameters, so `bash -s
+            // worker` never names a script and stays interactive.
+            if !arg.starts_with("--") && arg[1..].contains('s') {
+                return false;
+            }
+            // `--opt=value` carries its own value; `--opt value` eats the next
+            // word, as do the single-letter options that name a shell option.
+            if !arg.contains('=')
+                && (SHELL_LONG_OPTIONS_TAKING_A_VALUE.contains(&arg.as_str())
+                    || (arg.len() == 2 && (arg.ends_with('o') || arg.ends_with('O'))))
+            {
+                args.next();
+            }
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 fn is_noninteractive_shell(argv: &[String]) -> bool {
     let base = argv0_basename(argv.first().map(String::as_str).unwrap_or(""));
     let rest = argv.get(1..).unwrap_or(&[]);
     match base.as_str() {
         // POSIX-ish: `-c`, a combined short cluster containing `c` (`-ic`,
         // `-lc`), or `--command`/`--commands`. `-i`/`-l`/`-il` stay interactive.
-        "bash" | "zsh" | "sh" | "dash" | "ksh" | "tcsh" | "csh" | "fish" | "nu" | "elvish"
-        | "xonsh" => rest.iter().any(|a| {
-            a == "-c"
-                || a == "--command"
-                || a == "--commands"
-                || (a.starts_with('-')
-                    && !a.starts_with("--")
-                    && a.len() >= 2
-                    && a[1..].contains('c'))
-        }),
+        // The classic POSIX family, where `sh [options] command_file` is
+        // standardized, so a bare operand is a script.
+        "bash" | "zsh" | "sh" | "dash" | "ksh" => posix_shell_runs_and_exits(rest),
+        // Everything else keeps the flags-only rule. Their option grammars
+        // carry value-taking flags this code has no table for (`fish -C`,
+        // `nu -I`, `elvish -log`, `xonsh --rc`, and tcsh's `-i` and `-s`, which
+        // suppress script interpretation outright). Reading one of those values
+        // as a script would push a shell a person is typing into onto the
+        // fallback path, and none of them is the shape that produced the bug.
+        "tcsh" | "csh" | "fish" | "nu" | "elvish" | "xonsh" => {
+            rest.iter().any(|arg| shell_flag_carries_a_command(arg))
+        }
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
         // prefix-abbreviated, case-insensitive) all run and exit — UNLESS
         // -NoExit keeps the session open. -EncodedCommand support was added
@@ -5039,6 +5118,12 @@ mod tests {
             &["wsl", "ls"],
             &["wsl", "-e", "bash", "-c", "x"],
             &["wsl", "-d", "Ubuntu", "--", "htop"],
+            // A script-file operand runs and exits just as surely as `-c`.
+            &["bash", "/tmp/hook.sh"],
+            &["bash", "-l", "/tmp/hook.sh"],
+            &["sh", "--", "/tmp/hook.sh"],
+            &["zsh", "script.zsh", "arg"],
+            &["ksh", "deploy.ksh"],
         ] {
             assert!(
                 is_noninteractive_shell(&argv(a)),
@@ -5079,12 +5164,59 @@ mod tests {
                 "--distribution-id",
                 "{12345678-1234-1234-1234-123456789abc}",
             ],
+            // Options that take a value: the value is not a script.
+            &["bash", "--rcfile", "/etc/bashrc"],
+            &["bash", "--rcfile=/etc/bashrc"],
+            &["bash", "-O", "extglob"],
+            &["zsh", "-o", "vi"],
+            &["fish", "--init-command", "set -x FOO 1"],
+            // `-` and `-s` read from stdin; neither names a file, and `-s`
+            // makes its operands positional parameters.
+            &["bash", "-"],
+            &["bash", "-s"],
+            &["bash", "-s", "worker"],
+            &["bash", "--login"],
+            // Shells outside the POSIX family keep the flags-only rule,
+            // because their value-taking options have no table here and
+            // reading one as a script would strand an interactive shell.
+            &["fish", "-C", "init"],
+            &["nu", "-I", "/modules"],
+            &["elvish", "-log", "/tmp/elvish.log"],
+            &["xonsh", "--rc", "rc.xsh"],
+            &["xonsh", "--shell-type", "readline"],
+            &["tcsh", "-i", "worker"],
+            &["csh", "-s", "worker"],
         ] {
             assert!(
                 !is_noninteractive_shell(&argv(a)),
                 "{a:?} should be interactive"
             );
         }
+    }
+
+    /// A shell running a script file is not the pane's interactive shell.
+    ///
+    /// Splitting a pane clones its foreground shell. A foreground agent, git
+    /// hook or installer routinely spawns `bash /tmp/something.sh` and often
+    /// deletes the script immediately. Cloning that argv gives a pane whose
+    /// command has already finished, so it appears and is reaped, which is
+    /// what "the split never loaded" looks like. Only `-c` and its spellings
+    /// used to be recognized, so a script operand read as interactive.
+    ///
+    /// Confirmed against a live window before this test was written: with a
+    /// `bash <script>` helper in the foreground, `list_panes` reported the new
+    /// pane's argv as exactly that script.
+    #[test]
+    fn a_shell_running_a_script_file_is_not_interactive() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_noninteractive_shell(&argv(&["bash", "/tmp/hook.sh"])));
+        assert!(!shell_launch_is_interactive(&argv(&[
+            "bash",
+            "/tmp/hook.sh"
+        ])));
+        // The shell a person is actually typing into keeps its own shape.
+        assert!(shell_launch_is_interactive(&argv(&["bash"])));
+        assert!(shell_launch_is_interactive(&argv(&["zsh", "-l"])));
     }
 
     /// Drift guard: ssh as a direct child of the pane's

@@ -555,6 +555,10 @@ splits keep every leaf; `Node::leaf_ids` DFS-order +
 bookkeeping; `reap_tabs` keeps focus on the same tab
 after a pane death; `close_focused_promotes_sibling_in_two_pane_split`
 (the v1.3.0 fix for `Ctrl+Shift+W` closing whole tabs);
+`reap_reports_whether_it_removed_a_pane` plus the
+`every_reap_site_schedules_the_survivor_resize` source guard pin that a pane
+dying on its own resizes whatever inherits its rectangle, and that an idle
+reap does not, so the flag cannot re-drive `resize_all` every frame;
 `next_context_menu_highlight_skips_separators_and_disabled`
 + `clamp_context_menu_anchor_keeps_panel_on_screen`;
 `classify_tab_activity_picks_the_right_indicator`
@@ -1735,7 +1739,7 @@ session run
 `just image-paste-receipt-smoke`, `just video-paste-receipt-smoke`,
 `just tabbar-click-smoke`,
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
-`just split-titlebar-smoke`,
+`just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
@@ -1757,7 +1761,22 @@ top/bottom-title windows and captures broadcast-off plus broadcast-on
 frames. It combines `ui_geometry` with exact PNG samples to prove the
 titlebar/grid edge and focused/transmit, inactive, and receiving colors;
 the sample gutter excludes title glyphs, icons, and pane accents.
-`analysis.json` records every sample coordinate and grid boundary.
+`analysis.json` records every sample coordinate and grid boundary. The
+split-exit-resize run covers the other half of a split's life: it lets the new
+pane's shell exit on its own, which is the path that goes through `Mux::reap`
+rather than a close action, and asserts the survivor's grid returns to its
+exact pre-split size before reading the same numbers back out of the tty with
+`stty size`. Both numbers matter. The grid commits local geometry even when the
+native resize fails, so the grid alone would not prove the child was told.
+
+`just split-repro` is a hunt rather than a gate and runs in no recipe chain. It
+splits and closes in a loop against a pane whose foreground process keeps
+spawning short-lived `bash <script>` helpers, which is the shape that used to be
+cloned into a pane that died on arrival. Exit 2 means it reproduced and printed
+a capture directory holding the doomed pane's argv, its child pid, a process
+tree rooted at the source pane, and any swallowed split error.
+`just split-repro --claude` drives a real Claude Code pane instead of the
+fixture and skips cleanly when `claude` is not installed.
 The pane-drag run builds a three-pane tab, grabs the focused pane by its own
 titlebar, and walks press -> jitter inside the slop radius -> move onto a
 neighbour's right quarter -> release, asserting the `pane_drag_armed` /
@@ -1858,6 +1877,12 @@ retained compile/regression checks on **windows**:
   seven days. It remains
   `continue-on-error` only during its initial one-week flake-rate observation;
   do not count it as a required gate until that quarantine is removed.
+- A quarantined Linux **live-UI `split-exit-resize` smoke** splits a pane,
+  lets the new pane's own shell exit, and asserts the survivor returns to its
+  exact pre-split columns and rows, then reads the tty winsize back with
+  `stty size` because the grid commits even when the native resize fails.
+  Quarantined for the same reason as `search-history`: creating a window under
+  Xvfb on a hosted runner is the flake source, not the assertion.
 - The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).

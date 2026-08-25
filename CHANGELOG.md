@@ -6,6 +6,59 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Closing a split by typing `exit` now gives its rows back to the pane that
+  is left.** Splitting away from a full-screen program, then letting the new
+  pane's own shell exit, left the surviving pane's terminal at the size it had
+  inside the split. Claude Code kept painting into the top half of a
+  full-height pane, still running and still updating, simply convinced the
+  terminal was 28 rows instead of 57.
+
+  A pane whose child exits is removed by `Mux::reap`, which prunes it from the
+  split tree and promotes its sibling into the whole rectangle. Nothing told
+  that sibling's PTY. Because the renderer paints from a live layout, the
+  survivor looked correct straight away, which is what made this read as a
+  redraw problem rather than a resize one. No `TIOCSWINSZ` went out, so the
+  kernel sent no `SIGWINCH`, so the program had no reason to repaint at a new
+  size.
+
+  Closing the same split with `Ctrl+Shift+W` always worked, because an explicit
+  close runs through the action tail that schedules a resize, and the
+  confirm-dialog close had already been fixed for this exact reason once
+  before. Reaping was the one close path left without it.
+
+- **Splitting away from an agent no longer produces a pane that vanishes.**
+  Splitting clones the focused pane's foreground shell so the new pane lands in
+  the same place you were working. A shell was judged interactive by its flags
+  alone, so `bash /tmp/hook.sh` counted as one. Agents, git hooks and installers
+  spawn helpers in exactly that shape and routinely delete the script straight
+  after, so the clone ran a script that was already gone and the pane was reaped
+  before it drew. Intermittent, because it depended on what the background
+  process scan happened to catch in its last sweep.
+
+  A shell given a script-file operand now counts as running and exiting, the
+  same as `-c`. The split falls back to the configured shell, which is somewhere
+  to work. The rule applies to the POSIX family, where `sh [options] file` is
+  standardized; fish, nu, elvish, xonsh, tcsh and csh keep the flags-only rule
+  because their value-taking options would otherwise read as scripts. Within the
+  POSIX family, options that take a value are consumed, so
+  `bash --rcfile /etc/bashrc` and `zsh -o vi` stay interactive, and `-s` reads
+  from stdin so `bash -s worker` does too.
+
+  Confirmed against a live window in both directions. With a `bash <script>`
+  helper in the foreground, `list_panes` reported the new pane's argv as exactly
+  that script; a 40-cycle split loop reproduced a vanishing pane twice before
+  the fix and ran clean after it.
+
+- **A split that fails to start now says so.** Both split actions logged a
+  spawn failure at `warn` and carried on. At the default log level that is
+  invisible, and since a failed split leaves the layout untouched, all the user
+  sees is a keystroke that did nothing. That is also what a pane which spawned
+  and immediately died looks like, so the two arrive as the same report. A
+  failed split now logs at `error` and raises one desktop notice, matching what
+  a failed preference write already did.
+
 ## [4.0.0] — 2026-08-24
 
 ### Changed

@@ -913,6 +913,20 @@ pub(crate) fn is_reapable(closed: bool, held: bool, exit_observed: bool) -> bool
     closed || (!held && exit_observed)
 }
 
+/// What one [`Mux::reap`] pass changed.
+///
+/// `layout_changed` is the signal a caller needs to re-drive PTY geometry. A
+/// reap prunes the dead pane out of the split tree and the surviving sibling
+/// inherits the whole rectangle, but its PTY is still sized for the split. The
+/// renderer paints from a live layout so it looks right; the child process is
+/// never told, gets no `SIGWINCH`, and keeps drawing into the old box.
+pub struct ReapOutcome {
+    /// No tabs are left, so the window has nothing to show.
+    pub mux_empty: bool,
+    /// At least one pane was removed, so some pane's rectangle grew.
+    pub layout_changed: bool,
+}
+
 /// Whether splitting a pane launched as `argv` should start the configured
 /// shell instead of repeating that launch.
 ///
@@ -3380,7 +3394,7 @@ impl Mux {
     }
 
     /// Reap panes whose child exited; prune empty splits/tabs.
-    pub fn reap(&mut self) -> bool {
+    pub fn reap(&mut self) -> ReapOutcome {
         let dead: Vec<u64> = self
             .panes
             .iter_mut()
@@ -3392,11 +3406,15 @@ impl Mux {
                 }
             })
             .collect();
+        let layout_changed = !dead.is_empty();
         for id in &dead {
             self.panes.remove(id);
         }
         Self::reap_tabs(&mut self.tabs, &mut self.active, &dead);
-        self.tabs.is_empty()
+        ReapOutcome {
+            mux_empty: self.tabs.is_empty(),
+            layout_changed,
+        }
     }
 
     /// Retry collection for a held pane whose ordered PTY EOF beat the direct
@@ -7157,7 +7175,7 @@ mod node_tests {
     fn reap_never_consumes_child_status_ahead_of_the_pty_exit_event() {
         let source = production_source();
         let body = source
-            .split("pub fn reap(&mut self) -> bool {")
+            .split("pub fn reap(&mut self) -> ReapOutcome {")
             .nth(1)
             .and_then(|rest| rest.split("\n    pub(crate) fn reap_tabs").next())
             .expect("Mux::reap body");
