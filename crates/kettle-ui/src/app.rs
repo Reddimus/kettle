@@ -6285,6 +6285,16 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
     crate::queue_desktop_notification(title, body);
 }
 
+/// A split that cannot spawn leaves the layout exactly as it was, so all the
+/// user sees is a keystroke that did nothing. That is indistinguishable from a
+/// split that appeared and never drew, and a `warn!` line is invisible at the
+/// default log level, so the two reports arrive looking identical. Say it out
+/// loud instead, the way a failed preference write already does.
+pub(crate) fn report_split_failure(direction: &str, error: &dyn std::fmt::Display) {
+    log::error!("could not split pane ({direction}): {error}");
+    fire_notify("kettle could not split the pane", &error.to_string());
+}
+
 fn persist_keybind_rebind(
     path: Option<&std::path::Path>,
     stale: &[String],
@@ -14820,8 +14830,7 @@ impl App {
             Action::SplitRight => {
                 // If the focused pane has entered a shell it launched
                 // (e.g. typed `wsl` in pwsh), clone THAT shell + its dir; else
-                // clone the pane's own launch command. Log
-                // a spawn failure instead of swallowing it.
+                // clone the pane's own launch command.
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
                     Some(s) => ws.mux.split_with_geometry(
@@ -14840,7 +14849,7 @@ impl App {
                     ),
                 };
                 if let Err(e) = res {
-                    log::warn!("could not split pane (right): {e}");
+                    report_split_failure("right", &e);
                 }
             }
             Action::SplitDown | Action::SplitAuto => {
@@ -14864,7 +14873,7 @@ impl App {
                     None => ws.mux.split_geometry(dir, &self.cfg, geometry, waker),
                 };
                 if let Err(e) = res {
-                    log::warn!("could not split pane (down): {e}");
+                    report_split_failure("down", &e);
                 }
             }
             Action::ClosePane => {
@@ -28568,6 +28577,42 @@ mod modal_discipline_guard {
         assert!(
             arms.contains("ConfirmAction::ClosePane(target)"),
             "the arms function must be the one holding the match"
+        );
+    }
+
+    /// A split that fails to spawn has to say so.
+    ///
+    /// Both split arms used to log at `warn`, which the default level hides.
+    /// The user then reports "the split did not load", which is also what a
+    /// pane that spawned and died looks like, so the two get conflated. Every
+    /// split arm routes its error through the one reporter that raises the
+    /// level and fires a notification.
+    #[test]
+    fn every_split_arm_reports_a_failure_the_user_can_see() {
+        let source = production_source();
+        // Built at runtime so this guard cannot match its own source.
+        let report = ["report_split_", "failure("].concat();
+        let swallowed = ["could not split pane (", "right): {e}"].concat();
+
+        // One definition plus one call per arm.
+        assert_eq!(
+            source.matches(&report).count(),
+            3,
+            "both split arms must report through the shared reporter; add the \
+             call when you add an arm"
+        );
+        assert!(
+            !source.contains(&swallowed),
+            "a split failure logged inline is invisible at the default level"
+        );
+        let body = source
+            .split("pub(crate) fn report_split_failure(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("report_split_failure body");
+        assert!(
+            body.contains("log::error!") && body.contains("fire_notify("),
+            "the reporter must both raise the log level and surface a notice"
         );
     }
 
