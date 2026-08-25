@@ -77,22 +77,28 @@ fn resolve_text_symbol_family(db: &fontdb::Database) -> Option<&'static str> {
     })
 }
 
-/// Whether Unicode renders this codepoint as text unless a variation selector
-/// asks for emoji.
+/// Whether this codepoint is emoji-capable, text by default, and occupies one
+/// column.
 ///
 /// Derived from the width table rather than a vendored `Emoji_Presentation`
-/// list, because the two are the same fact. Every `Emoji_Presentation=Yes`
-/// codepoint is East Asian Wide, so `unicode-width` reports two columns for it,
-/// and `unicode-width` also widens an emoji-capable codepoint to two when
-/// U+FE0F follows. One column alone and two columns with U+FE0F therefore means
-/// exactly `Emoji=Yes` with `Emoji_Presentation=No`: emoji-capable, text by
-/// default. `⏺` U+23FA is one; `⏰` U+23F0 is not, because it is already two
-/// columns on its own.
+/// list. Every `Emoji_Presentation=Yes` codepoint is East Asian Wide, so
+/// `unicode-width` reports two columns for it, and `unicode-width` also widens
+/// an emoji-capable codepoint to two when U+FE0F follows. One column alone and
+/// two with U+FE0F therefore means `Emoji=Yes` with `Emoji_Presentation=No`.
+/// `⏺` U+23FA is one; `⏰` U+23F0 is not, because it is already two columns.
+///
+/// **One column is part of the rule, not an accident of the derivation.** A
+/// handful of default-text emoji are East Asian Wide and stay at two columns
+/// with or without U+FE0F, U+3030 and U+1F202 among them, and width cannot tell
+/// those apart from `Emoji_Presentation=Yes`. They are out of scope here: a
+/// colour glyph in a two-column cell occupies the space it was given, so it
+/// neither overflows nor misaligns anything. The defect this closes is a
+/// two-cell colour bitmap painted into a one-cell slot.
 ///
 /// Nothing here decides how a cell is drawn on its own. It only says which
 /// cells must not be handed to a colour-emoji face, which is a font-selection
 /// question the shaper answers.
-fn defaults_to_text_presentation(ch: char) -> bool {
+fn single_column_text_presentation(ch: char) -> bool {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
     // ASCII is the overwhelming majority of terminal output and none of it is
     // emoji-capable, so this is the early-out that keeps the row walk cheap.
@@ -8666,9 +8672,19 @@ impl Renderer {
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
+            // The cursor draws its own glyph last, over the pane's. Without the
+            // same presentation choice the pane would draw a text circle and
+            // the cursor would paint a colour square on top of it whenever the
+            // cursor rested on one. `PendingCursorGlyph` carries only the base
+            // char, so an explicit U+FE0F on that cell is not visible here; the
+            // pane glyph underneath still honours it.
+            let cursor_family = self
+                .text_symbol_family
+                .filter(|_| single_column_text_presentation(gch))
+                .unwrap_or(&family);
             self.cursor_glyph_buffer.set_text(
                 gch.encode_utf8(&mut enc),
-                &Attrs::new().family(Family::Name(&family)),
+                &Attrs::new().family(Family::Name(cursor_family)),
                 Shaping::Advanced,
                 None,
             );
@@ -9796,9 +9812,16 @@ impl Renderer {
                     && !text.is_ascii()
                 {
                     let mut at = s;
-                    for ch in text.chars() {
+                    let mut chars = text.chars().peekable();
+                    while let Some(ch) = chars.next() {
                         let len = ch.len_utf8();
-                        if defaults_to_text_presentation(ch) {
+                        // The cell's zero-width marks follow its base char in
+                        // this run, so U+FE0F is simply the next one. It is the
+                        // user asking for emoji presentation explicitly, and
+                        // overriding that would be the same class of bug in the
+                        // other direction.
+                        let qualified = chars.peek() == Some(&'\u{FE0F}');
+                        if !qualified && single_column_text_presentation(ch) {
                             let text_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
                                 .family(Family::Name(symbol_family));
                             attrs_list.add_span(at..at + len, &text_attrs);
@@ -16337,7 +16360,7 @@ mod titlebar_glyph_fallback_tests {
             .collect()
     }
 
-    use crate::{SwashCache, defaults_to_text_presentation, resolve_text_symbol_family};
+    use crate::{SwashCache, resolve_text_symbol_family, single_column_text_presentation};
 
     /// The width table already knows which codepoints are text by default.
     ///
@@ -16358,7 +16381,7 @@ mod titlebar_glyph_fallback_tests {
             '\u{2049}', // ⁉ exclamation question
         ] {
             assert!(
-                defaults_to_text_presentation(ch),
+                single_column_text_presentation(ch),
                 "U+{:04X} defaults to text presentation",
                 ch as u32
             );
@@ -16373,7 +16396,7 @@ mod titlebar_glyph_fallback_tests {
             '\u{1F600}', // 😀
         ] {
             assert!(
-                !defaults_to_text_presentation(ch),
+                !single_column_text_presentation(ch),
                 "U+{:04X} is emoji-presentation and must keep its colour face",
                 ch as u32
             );
@@ -16382,11 +16405,67 @@ mod titlebar_glyph_fallback_tests {
         // before the width table is consulted at all.
         for ch in ['a', '0', ' ', '\u{00E9}', '\u{4E00}', '\u{2500}'] {
             assert!(
-                !defaults_to_text_presentation(ch),
+                !single_column_text_presentation(ch),
                 "U+{:04X} is not emoji-capable",
                 ch as u32
             );
         }
+        // Out of scope by design: default-text emoji that are East Asian Wide
+        // stay at two columns with or without U+FE0F, so width cannot separate
+        // them from `Emoji_Presentation=Yes`. A colour glyph in a two-column
+        // cell fits the space it was given, which is why they are left alone.
+        for ch in ['\u{3030}', '\u{1F202}'] {
+            assert!(
+                !single_column_text_presentation(ch),
+                "U+{:04X} is wide, so it is outside this rule",
+                ch as u32
+            );
+        }
+    }
+
+    /// An explicit U+FE0F is the user asking for the colour face.
+    ///
+    /// Kettle appends a cell's zero-width marks straight after its base char in
+    /// the run it hands the shaper, so a qualified `⏺️` arrives as two chars in
+    /// one run. Overriding that would be the same defect in the other
+    /// direction: Unicode names `23FA FE0F` an emoji-style sequence.
+    #[test]
+    fn a_variation_selector_keeps_the_colour_face() {
+        let src = crate::production_source();
+        let peek = ["chars.peek() == Some(&'\\u{FE0F}')"].concat();
+        assert!(
+            src.contains(&peek),
+            "the row builder must look at the mark that follows the base char"
+        );
+        let gate = ["if !qualified && single_column_text_", "presentation(ch)"].concat();
+        assert!(
+            src.contains(&gate),
+            "a qualified sequence must skip the override, not merely be noticed"
+        );
+    }
+
+    /// The block cursor reshapes its own glyph and draws it last.
+    ///
+    /// Without the same choice the pane draws a text circle and the cursor
+    /// paints a colour square over it whenever the cursor rests on one.
+    #[test]
+    fn the_block_cursor_makes_the_same_presentation_choice() {
+        let src = crate::production_source();
+        let choice = [
+            "self\n                .text_symbol_family\n                .filter(|_| ",
+            "single_column_text_presentation(gch))",
+        ]
+        .concat();
+        assert!(
+            src.contains(&choice),
+            "the cursor glyph pass must pick the text face for the same cells \
+             the pane does"
+        );
+        let used = ["Family::Name(cursor_", "family)"].concat();
+        assert!(
+            src.contains(&used),
+            "the chosen family must actually reach the cursor buffer"
+        );
     }
 
     /// The selection rule has to reach the shaper, not just exist.
@@ -16399,7 +16478,7 @@ mod titlebar_glyph_fallback_tests {
     #[test]
     fn the_row_builder_asks_for_a_text_face_on_text_presentation_cells() {
         let src = crate::production_source();
-        let predicate = ["defaults_to_text_", "presentation(ch)"].concat();
+        let predicate = ["single_column_text_", "presentation(ch)"].concat();
         let request = ["Family::Name(symbol_", "family)"].concat();
         let resolve = ["resolve_text_symbol_", "family(font_system.db())"].concat();
 

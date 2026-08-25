@@ -16650,6 +16650,13 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 
     Only the glyph's own cell is read. Window chrome carries the per-window
     accent hue, which is colourful by design and says nothing about the glyph.
+
+    The second phase parks the block cursor on the bullet, because the cursor
+    reshapes its own glyph and draws it last. Be careful what that phase is
+    taken to prove: it asserts the cell under the cursor is still two colours,
+    and it passed on macOS even with the cursor's presentation choice reverted,
+    so it is not evidence for that path. The source guard
+    `the_block_cursor_makes_the_same_presentation_choice` is what covers it.
     """
     out = root / f"text-presentation-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -16678,8 +16685,15 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 
     bullet = "\u23fa"
     # `-e` so the pane holds one glyph and nothing else. A shell prompt is
-    # colourful and would drown the signal.
-    extra_args = ["-e", "sh", "-c", f"printf '{bullet}\\n'; sleep 120"]
+    # colourful and would drown the signal. The second phase parks the cursor
+    # back on the bullet: the block cursor reshapes its own glyph and draws it
+    # last, so it can repaint a colour square over a corrected pane glyph.
+    extra_args = [
+        "-e",
+        "sh",
+        "-c",
+        f"printf '{bullet}\\n'; sleep 4; printf '\\033[1;1H'; sleep 120",
+    ]
     with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
@@ -16693,81 +16707,130 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         shot = out / "bullet.png"
         live.screenshot(shot)
         geometry = live.json_ctl("ui_geometry")
-
-    width, height, rgba_rows = read_rgba_png(shot)
-    panes = geometry.get("panes")
-    cell = geometry.get("cell")
-    padding = geometry.get("padding")
-    if not (isinstance(panes, list) and panes and isinstance(cell, dict)):
-        raise SystemExit(f"text-presentation smoke: ui_geometry is unusable: {geometry}")
-    pane_rect = panes[0].get("rect", {})
-    pad_x = padding.get("x", 0.0) if isinstance(padding, dict) else 0.0
-    pad_y = padding.get("y", 0.0) if isinstance(padding, dict) else 0.0
-    x0 = max(0, int(pane_rect.get("x", 0.0) + pad_x))
-    y0 = max(0, int(pane_rect.get("y", 0.0) + pad_y))
-    # Inset by a pixel on every side. The row below holds the cursor, drawn in
-    # the theme foreground, and a rect that reaches its first pixel row picks up
-    # exactly one cell's width of it.
-    x1 = min(width, int(x0 + float(cell["width"]))) - 1
-    y1 = min(height, int(y0 + float(cell["height"]))) - 1
-    x0 += 1
-    y0 += 1
-    if x1 - x0 < 3 or y1 - y0 < 3:
-        raise SystemExit(
-            f"text-presentation smoke: the glyph cell is too small to sample: "
-            f"({x0}, {y0})-({x1}, {y1})"
+        width, height, rgba_rows = read_rgba_png(shot)
+        panes = geometry.get("panes")
+        cell = geometry.get("cell")
+        padding = geometry.get("padding")
+        if not (isinstance(panes, list) and panes and isinstance(cell, dict)):
+            raise SystemExit(
+                f"text-presentation smoke: ui_geometry is unusable: {geometry}"
+            )
+        pane_rect = panes[0].get("rect", {})
+        pad_x = padding.get("x", 0.0) if isinstance(padding, dict) else 0.0
+        pad_y = padding.get("y", 0.0) if isinstance(padding, dict) else 0.0
+        x0 = max(0, int(pane_rect.get("x", 0.0) + pad_x))
+        y0 = max(0, int(pane_rect.get("y", 0.0) + pad_y))
+        # Inset by a pixel on every side. The row below holds the cursor, drawn
+        # in the theme foreground, and a rect that reaches its first pixel row
+        # picks up exactly one cell's width of it.
+        x1 = min(width, int(x0 + float(cell["width"]))) - 2
+        y1 = min(height, int(y0 + float(cell["height"]))) - 2
+        x0 += 2
+        y0 += 2
+        if x1 - x0 < 3 or y1 - y0 < 3:
+            raise SystemExit(
+                "text-presentation smoke: the glyph cell is too small to "
+                f"sample: ({x0}, {y0})-({x1}, {y1})"
+            )
+        empty_x = min(width - 2, int(x0 + float(cell["width"]) * 4.0))
+        page_background = tuple(
+            rgba_rows[(y0 + y1) // 2][empty_x * 4 : empty_x * 4 + 3]
         )
+        # Phase two: the program parks the cursor back on the bullet. The
+        # filled block only draws in a focused window, so ask the desktop for
+        # focus first and then wait for the block to actually appear. Without
+        # that wait this phase can measure a cell the cursor never covered,
+        # which would pass against the very defect it exists to catch.
+        focus_live_kettle_window(live)
+        cursor_shot = out / "bullet-under-cursor.png"
+        deadline = time.monotonic() + 20.0
+        while True:
+            if cursor_shot.exists():
+                cursor_shot.unlink()
+            live.screenshot(cursor_shot)
+            probe_w, _, probe_rows = read_rgba_png(cursor_shot)
+            probe = [
+                tuple(probe_rows[y][x * 4 : x * 4 + 3])
+                for y in range(y0, y1)
+                for x in range(x0, x1)
+            ]
+            if max(set(probe), key=probe.count) != page_background:
+                break
+            if time.monotonic() > deadline:
+                raise SystemExit(
+                    "text-presentation smoke: the block cursor never covered "
+                    "the bullet, so the cursor phase would prove nothing. Is "
+                    "the window focused?"
+                )
+            time.sleep(0.5)
 
-    cell_pixels = [
-        tuple(rgba_rows[y][x * 4 : x * 4 + 3])
-        for y in range(y0, y1)
-        for x in range(x0, x1)
-    ]
-    # The background is whatever an empty cell on the same row is painted, read
-    # rather than assumed so a theme or an opacity default cannot shift it.
-    empty_x = min(width - 2, int(x0 + float(cell["width"]) * 4.0))
-    background = tuple(rgba_rows[(y0 + y1) // 2][empty_x * 4 : empty_x * 4 + 3])
+    _, _, cursor_rows = read_rgba_png(cursor_shot)
 
     def distance_sq(a, b):
         return sum((int(p) - int(q)) ** 2 for p, q in zip(a, b))
 
-    ink = max(cell_pixels, key=lambda px: distance_sq(px, background))
-    span = [int(i) - int(b) for i, b in zip(ink, background)]
-    span_len_sq = sum(component * component for component in span)
-    if span_len_sq < 400:
-        raise SystemExit(
-            "text-presentation smoke: the cell is nearly uniform, so the glyph "
-            f"never drew. background={background} ink={ink}"
-        )
-
-    # Distance from the background-to-ink line. A monochrome glyph is one ink
-    # blended against one background and stays on it.
-    tolerance_sq = 12 * 12
-    off_line: Dict[Tuple[int, int, int], int] = {}
-    for px in cell_pixels:
-        delta = [int(p) - int(b) for p, b in zip(px, background)]
-        t = sum(d * s for d, s in zip(delta, span)) / span_len_sq
-        t = min(1.0, max(0.0, t))
-        residual = sum((d - t * s) ** 2 for d, s in zip(delta, span))
-        if residual > tolerance_sq:
-            off_line[px] = off_line.get(px, 0) + 1
+    background = page_background
+    # Under the cursor the block fills the cell, so its own most common colour
+    # is the background the glyph is drawn against.
+    cursor_cell = [
+        tuple(cursor_rows[y][x * 4 : x * 4 + 3])
+        for y in range(y0, y1)
+        for x in range(x0, x1)
+    ]
+    cursor_background = max(set(cursor_cell), key=cursor_cell.count)
 
     analysis = {
         "codepoint": "U+23FA",
         "cell_rect": [x0, y0, x1, y1],
-        "background": list(background),
-        "ink": list(ink),
-        "off_line_pixels": sum(off_line.values()),
-        "top_off_line": sorted(off_line.items(), key=lambda kv: -kv[1])[:4],
+        "phases": {},
     }
+
+    def measure(rows_for_phase, reference) -> Dict[str, object]:
+        """How far the cell's pixels stray from one ink over one background."""
+        pixels = [
+            tuple(rows_for_phase[y][x * 4 : x * 4 + 3])
+            for y in range(y0, y1)
+            for x in range(x0, x1)
+        ]
+        ink = max(pixels, key=lambda px: distance_sq(px, reference))
+        span = [int(i) - int(b) for i, b in zip(ink, reference)]
+        span_len_sq = sum(component * component for component in span)
+        if span_len_sq < 400:
+            raise SystemExit(
+                "text-presentation smoke: the cell is nearly uniform, so the "
+                f"glyph never drew. reference={reference} ink={ink}"
+            )
+        stray: Dict[Tuple[int, int, int], int] = {}
+        for px in pixels:
+            delta = [int(p) - int(b) for p, b in zip(px, reference)]
+            t = min(1.0, max(0.0, sum(d * sp for d, sp in zip(delta, span)) / span_len_sq))
+            if sum((d - t * sp) ** 2 for d, sp in zip(delta, span)) > 12 * 12:
+                stray[px] = stray.get(px, 0) + 1
+        return {
+            "reference": list(reference),
+            "ink": list(ink),
+            "off_line_pixels": sum(stray.values()),
+            "top_off_line": sorted(stray.items(), key=lambda kv: -kv[1])[:4],
+        }
+
+    for label, rows_for_phase, reference in (
+        ("pane_glyph", rgba_rows, background),
+        # Under the cursor the block covers the whole cell, so the two colours
+        # are the block and the inverted glyph. The reference is read from the
+        # cell itself rather than from the page background.
+        ("under_cursor", cursor_rows, cursor_background),
+    ):
+        result = measure(rows_for_phase, reference)
+        analysis["phases"][label] = result
+        if result["off_line_pixels"]:
+            (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+            raise SystemExit(
+                f"text-presentation smoke ({label}): U+23FA drew "
+                f"{result['off_line_pixels']} pixels that are not a blend of "
+                f"one ink and one background, so it still resolves to a "
+                f"colour-emoji face. {result}"
+            )
     (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
-    if off_line:
-        raise SystemExit(
-            "text-presentation smoke: U+23FA drew "
-            f"{sum(off_line.values())} pixels that are not a blend of one ink "
-            f"and the background, so it still resolves to a colour-emoji face. "
-            f"{analysis}"
-        )
     return out
 
 
