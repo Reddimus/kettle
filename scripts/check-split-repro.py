@@ -195,15 +195,20 @@ def main() -> int:
             ctl(args.kettle, pid, "perform_action", params={"action": direction})
 
             reached_two, fell_back, observed = False, False, []
+            first_sighting: List[Dict] = []
             watch = time.monotonic() + 3.0
             while time.monotonic() < watch:
                 observed = panes(args.kettle, pid)
                 if len(observed) >= 2:
+                    if not reached_two:
+                        # The argv of a pane that is about to die is the whole
+                        # answer, and it is gone a moment later. Keep it.
+                        first_sighting = observed
                     reached_two = True
                 elif reached_two:
                     fell_back = True
                     break
-                time.sleep(0.05)
+                time.sleep(0.01)
 
             if not reached_two:
                 bundle = capture(out, cycle, args.kettle, pid, base, observed,
@@ -212,7 +217,8 @@ def main() -> int:
                 print(f"split repro: REPRODUCED on cycle {cycle}: {bundle}")
                 return REPRODUCED
             if fell_back:
-                bundle = capture(out, cycle, args.kettle, pid, base, observed,
+                bundle = capture(out, cycle, args.kettle, pid, base,
+                                 first_sighting or observed,
                                  "the new pane appeared and died: the cloned "
                                  "command exited immediately", log)
                 print(f"split repro: REPRODUCED on cycle {cycle}: {bundle}")

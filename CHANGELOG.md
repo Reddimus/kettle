@@ -28,6 +28,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   confirm-dialog close had already been fixed for this exact reason once
   before. Reaping was the one close path left without it.
 
+- **Splitting away from an agent no longer produces a pane that vanishes.**
+  Splitting clones the focused pane's foreground shell so the new pane lands in
+  the same place you were working. A shell was judged interactive by its flags
+  alone, so `bash /tmp/hook.sh` counted as one. Agents, git hooks and installers
+  spawn helpers in exactly that shape and routinely delete the script straight
+  after, so the clone ran a script that was already gone and the pane was reaped
+  before it drew. Intermittent, because it depended on what the background
+  process scan happened to catch in its last sweep.
+
+  A shell given a script-file operand now counts as running and exiting, the
+  same as `-c`. The split falls back to the configured shell, which is somewhere
+  to work. Options that take a value are not mistaken for scripts, so
+  `bash --rcfile /etc/bashrc` and `zsh -o vi` stay interactive.
+
+  Confirmed against a live window in both directions. With a `bash <script>`
+  helper in the foreground, `list_panes` reported the new pane's argv as exactly
+  that script; a 40-cycle split loop reproduced a vanishing pane twice before
+  the fix and ran clean after it.
+
 - **A split that fails to start now says so.** Both split actions logged a
   spawn failure at `warn` and carried on. At the default log level that is
   invisible, and since a failed split leaves the layout untouched, all the user
