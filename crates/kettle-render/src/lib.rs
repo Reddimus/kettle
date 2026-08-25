@@ -66,15 +66,42 @@ const TEXT_SYMBOL_FAMILIES: &[&str] = &[
     "DejaVu Sans",
 ];
 
-/// The first [`TEXT_SYMBOL_FAMILIES`] entry this system actually has.
-fn resolve_text_symbol_family(db: &fontdb::Database) -> Option<&'static str> {
-    TEXT_SYMBOL_FAMILIES.iter().copied().find(|wanted| {
-        db.faces().any(|face| {
-            face.families
-                .iter()
-                .any(|(family, _)| family.eq_ignore_ascii_case(wanted))
-        })
-    })
+/// The codepoint the candidate faces are probed with.
+///
+/// Being installed is not enough. A stock Ubuntu runner has DejaVu Sans and
+/// DejaVu Sans does not have U+23FA, so requesting it there resolves nothing
+/// and shaping falls straight back through the cascade to the colour face,
+/// which is the state this whole change exists to leave. One probe is
+/// deliberate rather than exhaustive: this is the codepoint the defect was
+/// reported against, and a family that lacks it is not a useful text-symbol
+/// face here. A host where no candidate passes keeps the cascade it had.
+const TEXT_SYMBOL_PROBE: char = '\u{23FA}';
+
+/// The first [`TEXT_SYMBOL_FAMILIES`] entry this system has AND that carries a
+/// glyph for [`TEXT_SYMBOL_PROBE`].
+fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static str> {
+    let probe = TEXT_SYMBOL_PROBE as u32;
+    for wanted in TEXT_SYMBOL_FAMILIES.iter().copied() {
+        let ids: Vec<fontdb::ID> = font_system
+            .db()
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case(wanted))
+            })
+            .map(|face| face.id)
+            .collect();
+        for id in ids {
+            if font_system
+                .get_font(id, fontdb::Weight::NORMAL)
+                .is_some_and(|font| font.unicode_codepoints().contains(&probe))
+            {
+                return Some(wanted);
+            }
+        }
+    }
+    None
 }
 
 /// Whether this codepoint is emoji-capable, text by default, and occupies one
@@ -4752,7 +4779,7 @@ impl Renderer {
         load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
         // Resolved once: fontdb is already populated and the answer cannot
         // change while this renderer lives.
-        let text_symbol_family = resolve_text_symbol_family(font_system.db());
+        let text_symbol_family = resolve_text_symbol_family(&mut font_system);
         log::info!("renderer init: text-presentation face {text_symbol_family:?}");
         // Split, because `FontSystem::new()` is the one people suspect (it
         // enumerates system fonts) and a combined figure cannot exonerate it.
@@ -16480,7 +16507,7 @@ mod titlebar_glyph_fallback_tests {
         let src = crate::production_source();
         let predicate = ["single_column_text_", "presentation(ch)"].concat();
         let request = ["Family::Name(symbol_", "family)"].concat();
-        let resolve = ["resolve_text_symbol_", "family(font_system.db())"].concat();
+        let resolve = ["resolve_text_symbol_", "family(&mut font_system)"].concat();
 
         assert!(
             src.contains(&resolve),
@@ -16522,7 +16549,7 @@ mod titlebar_glyph_fallback_tests {
         for face in kettle_config::font::all() {
             load_bundled_font(&mut fs, face);
         }
-        let Some(symbol_family) = resolve_text_symbol_family(fs.db()) else {
+        let Some(symbol_family) = resolve_text_symbol_family(&mut fs) else {
             // A font-poor image has nothing to steer towards, and the code
             // leaves such a system exactly as it was.
             eprintln!("no monochrome symbol face installed ... skipped");
