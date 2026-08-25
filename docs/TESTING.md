@@ -1768,6 +1768,15 @@ rather than a close action, and asserts the survivor's grid returns to its
 exact pre-split size before reading the same numbers back out of the tty with
 `stty size`. Both numbers matter. The grid commits local geometry even when the
 native resize fails, so the grid alone would not prove the child was told.
+
+`just split-repro` is a hunt rather than a gate and runs in no recipe chain. It
+splits and closes in a loop against a pane whose foreground process keeps
+spawning short-lived `bash <script>` helpers, which is the shape that used to be
+cloned into a pane that died on arrival. Exit 2 means it reproduced and printed
+a capture directory holding the doomed pane's argv, its child pid, a process
+tree rooted at the source pane, and any swallowed split error.
+`just split-repro --claude` drives a real Claude Code pane instead of the
+fixture and skips cleanly when `claude` is not installed.
 The pane-drag run builds a three-pane tab, grabs the focused pane by its own
 titlebar, and walks press -> jitter inside the slop radius -> move onto a
 neighbour's right quarter -> release, asserting the `pane_drag_armed` /
