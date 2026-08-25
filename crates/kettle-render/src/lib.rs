@@ -2343,6 +2343,11 @@ struct PendingCursorGlyph {
     y: f32,
     /// The character under the cursor (drawn in `color`).
     ch: char,
+    /// Whether that cell carried an explicit U+FE0F. The cursor pass makes the
+    /// same presentation choice the pane does and has to make it on the same
+    /// evidence: `ch` alone cannot show a variation selector, so a qualified
+    /// sequence would draw in colour underneath and monochrome on top.
+    emoji_qualified: bool,
     /// Cursor foreground (theme `cursor_text`, or the cell bg under an OSC 12
     /// runtime cursor color so the inverted glyph follows reverse-video).
     color: Rgb,
@@ -2362,6 +2367,7 @@ fn cursor_glyph_damage_key(
     cursor.x.to_bits().hash(&mut hash);
     cursor.y.to_bits().hash(&mut hash);
     cursor.ch.hash(&mut hash);
+    cursor.emoji_qualified.hash(&mut hash);
     cursor.color.r.hash(&mut hash);
     cursor.color.g.hash(&mut hash);
     cursor.color.b.hash(&mut hash);
@@ -8705,23 +8711,22 @@ impl Renderer {
         // text/position/style changed. A main text prepare also forces this tiny
         // prepare because both renderers share an atlas that may have repacked.
         // Menu-highlight and other quad-only frames reuse retained vertices.
-        if let Some((gx, gy, gch, gcolor, gclip)) = self
+        if let Some((gx, gy, gch, gqualified, gcolor, gclip)) = self
             .pending_cursor_glyph
             .as_ref()
-            .map(|c| (c.x, c.y, c.ch, c.color, c.clip))
+            .map(|c| (c.x, c.y, c.ch, c.emoji_qualified, c.color, c.clip))
             .filter(|_| need_cursor_prepare)
         {
             let mut enc = [0u8; 4];
             self.cursor_glyph_buffer.set_metrics(metrics);
-            // The cursor draws its own glyph last, over the pane's. Without the
-            // same presentation choice the pane would draw a text circle and
-            // the cursor would paint a colour square on top of it whenever the
-            // cursor rested on one. `PendingCursorGlyph` carries only the base
-            // char, so an explicit U+FE0F on that cell is not visible here; the
-            // pane glyph underneath still honours it.
+            // The cursor draws its own glyph last, over the pane's, so it has
+            // to reach the same answer the pane did. Both halves matter: skip
+            // the override and it paints a colour square over a text circle;
+            // ignore the cell's variation selector and it paints a text circle
+            // over the colour square the user explicitly asked for.
             let cursor_family = self
                 .text_symbol_family
-                .filter(|_| single_column_text_presentation(gch))
+                .filter(|_| !gqualified && single_column_text_presentation(gch))
                 .unwrap_or(&family);
             self.cursor_glyph_buffer.set_text(
                 gch.encode_utf8(&mut enc),
@@ -9459,7 +9464,7 @@ impl Renderer {
         // re-prepare), capture (glyph, color) here and draw it in the dedicated
         // cursor-glyph pass on top of the block. The pane buffer then stays
         // byte-identical across a blink, so the prepare is skipped.
-        let mut cursor_glyph_capture: Option<(char, Rgb)> = None;
+        let mut cursor_glyph_capture: Option<(char, Rgb, bool)> = None;
 
         for sc in &snap.cells {
             let row = sc.line;
@@ -9524,7 +9529,8 @@ impl Renderer {
                 // cursor pass draws this recolored copy on top of the block.
                 // See `color::cursor_glyph_color` for which colour and why.
                 let cursor_fg = color::cursor_glyph_color(theme, term_colors, bg);
-                cursor_glyph_capture = Some((sc.c, cursor_fg));
+                cursor_glyph_capture =
+                    Some((sc.c, cursor_fg, sc.zerowidth().contains(&'\u{FE0F}')));
             }
 
             if bg != default_bg {
@@ -9716,12 +9722,13 @@ impl Renderer {
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
                 if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor)) = cursor_glyph_capture
+                    && let Some((gch, gcolor, gqualified)) = cursor_glyph_capture
                 {
                     self.pending_cursor_glyph = Some(PendingCursorGlyph {
                         x: bx,
                         y: by,
                         ch: gch,
+                        emoji_qualified: gqualified,
                         color: gcolor,
                         clip: pv.rect,
                     });
@@ -16495,7 +16502,7 @@ mod titlebar_glyph_fallback_tests {
     fn the_block_cursor_makes_the_same_presentation_choice() {
         let src = crate::production_source();
         let choice = [
-            "self\n                .text_symbol_family\n                .filter(|_| ",
+            "self\n                .text_symbol_family\n                .filter(|_| !gqualified && ",
             "single_column_text_presentation(gch))",
         ]
         .concat();
@@ -16987,6 +16994,7 @@ mod pane_buffer_lifecycle_tests {
             x: 10.0,
             y: 20.0,
             ch: 'x',
+            emoji_qualified: false,
             color: kettle_config::Rgb::new(1, 2, 3),
             clip: (0.0, 0.0, 100.0, 80.0),
         };
@@ -17214,7 +17222,7 @@ mod pane_buffer_lifecycle_tests {
         // The old in-buffer recolor (`fg = if cursor_rt_override...`) is gone:
         // the glyph keeps its normal fg in the buffer and is overdrawn instead.
         assert!(
-            src.contains("cursor_glyph_capture = Some((sc.c, cursor_fg))"),
+            src.contains("cursor_glyph_capture =\n"),
             "the cursor cell must be captured for the overdraw pass, not \
              recolored into the pane span runs"
         );
@@ -20677,7 +20685,7 @@ mod glyph_cell_lock_tests {
         let gate = src
             .split("let grid_upload_needed =")
             .nth(1)
-            .and_then(|s| s.split("if let Some((gx, gy, gch, gcolor, gclip))").next())
+            .and_then(|s| s.split("if let Some((gx, gy, gch,").next())
             .expect("grid upload block present before cursor-glyph prepare");
         assert!(
             !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),
