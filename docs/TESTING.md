@@ -1769,6 +1769,20 @@ exact pre-split size before reading the same numbers back out of the tty with
 `stty size`. Both numbers matter. The grid commits local geometry even when the
 native resize fails, so the grid alone would not prove the child was told.
 
+`just pane-drag-smoke` does not currently pass anywhere. The gesture arms only
+in the native winit pointer path; `ctl_mouse_press` never sets `ws.pane_drag`,
+so the control plane cannot reach it and the script stops at "press on a pane
+titlebar did not arm the gesture". That is the same native-only property the
+tearoff smoke documents for `maybe_tear_off`, which is why the tearoff recipe
+carries a separate xdotool tier. Closing it needs either an arming path in
+`ctl_mouse_press` or an xdotool tier here, and the script header records both.
+
+`crates/kettle-config/tests/harness_action_names_resolve.rs` feeds every action
+name these scripts hand to `perform_action` through the real parser. Two dead
+names had accumulated, `toggle_broadcast_all` and `focus_window`, and because
+the scenarios using them are manual rather than gated, both were invisible until
+someone ran them.
+
 `just split-repro` is a hunt rather than a gate and runs in no recipe chain. It
 splits and closes in a loop against a pane whose foreground process keeps
 spawning short-lived `bash <script>` helpers, which is the shape that used to be

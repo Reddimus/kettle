@@ -3060,6 +3060,22 @@ def split_titlebar_rect(value: object, label: str) -> Tuple[float, float, float,
     return rect  # type: ignore[return-value]
 
 
+def split_titlebar_sample_x(bar_x: float, cell_width: float) -> float:
+    """The non-glyph interior point the titlebar colour oracle samples.
+
+    Centre of the SECOND gutter cell. Half a cell in puts the 3x3 patch within
+    two pixels of the bar's left edge, where it catches the pane border and
+    reports two shades. The title label starts after a two-cell gutter, which
+    `analyze_split_titlebar_frame` asserts, so this stays an interior non-glyph
+    point and the patch stays an exact-match oracle.
+
+    Shared with the helper self-test, which corrupts exactly this pixel to prove
+    the oracle still rejects a wrong colour. Moving the point in one place only
+    would make that self-test pass against anything.
+    """
+    return bar_x + cell_width * 1.5
+
+
 def exact_rgb_patch(
     rgba_rows: List[bytes],
     width: int,
@@ -3243,7 +3259,7 @@ def analyze_split_titlebar_frame(
                 "split-titlebar smoke: title label lost its two-cell sampling gutter: "
                 f"{titlebar!r}"
             )
-        sample_x = bar_x + cell_width * 0.5
+        sample_x = split_titlebar_sample_x(bar_x, cell_width)
         sample_y = bar_y + bar_height * 0.5
         state = (
             "transmit"
@@ -7367,6 +7383,32 @@ def capture_live_state(
     }
 
 
+def home_display_path(path: str) -> str:
+    """How kettle reports a cwd in its UI diagnostics.
+
+    A path under the user's home is abbreviated to `~/...`. A harness that
+    compares against the absolute path therefore never matches when its fixture
+    lives under `$HOME`, which is exactly where `target/diagnostics` sits by
+    default.
+
+    Mirrors `abbreviate_home` and `home_dir_string` in
+    `crates/kettle-ui/src/mux.rs` rather than approximating them.
+    `os.path.expanduser` is not the same function: it falls back to the passwd
+    database when the environment variable is unset, where kettle abbreviates
+    nothing, and it does not consider a backslash separator.
+    """
+    home = os.environ.get("USERPROFILE" if os.name == "nt" else "HOME")
+    if not home:
+        return path
+    if path == home:
+        return "~"
+    for sep in ("/", "\\"):
+        prefix = home + sep
+        if path.startswith(prefix):
+            return "~" + sep + path[len(prefix) :]
+    return path
+
+
 def screen_text(screen: Dict[str, object]) -> str:
     return str(screen.get("text", screen.get("screen", "")))
 
@@ -7724,7 +7766,13 @@ def live_shell_command(live: LiveKettle, command: str, marker: str, timeout_ms: 
 def focus_live_kettle_window(
     live: LiveKettle, desktop_point: Optional[Tuple[float, float]] = None
 ) -> None:
-    """Ask the desktop to activate the exact Kettle process under test."""
+    """Ask the desktop to activate the exact Kettle process under test.
+
+    `focus_window` is control-only: `ctl_perform_action` handles it before the
+    keybind catalogue is consulted, so it resolves through no `Action`. It is
+    the only activation step that works on Linux and Windows, where the Swift
+    and osascript paths below do not apply.
+    """
     live.json_ctl("perform_action", {"action": "focus_window"})
     if platform.system() == "Darwin" and shutil.which("swift"):
         env = os.environ.copy()
@@ -9049,8 +9097,21 @@ def live_helper_selftest() -> None:
         bytearray(row)
         for row in titlebar_fixture_rows(wrong_color_geometry, False)
     ]
-    wrong_color_offset = 4 * 4
-    wrong_color_rows[30][wrong_color_offset : wrong_color_offset + 4] = (
+    # Corrupt exactly the pixel the oracle samples, derived from the fixture's
+    # own geometry through the shared helper, so the two cannot drift apart.
+    wrong_color_bar = wrong_color_geometry["pane_titlebars"][0]["rect"]
+    wrong_color_x = int(
+        math.floor(
+            split_titlebar_sample_x(
+                wrong_color_bar["x"], wrong_color_geometry["cell"]["width"]
+            )
+        )
+    )
+    wrong_color_y = int(
+        math.floor(wrong_color_bar["y"] + wrong_color_bar["height"] * 0.5)
+    )
+    wrong_color_offset = wrong_color_x * 4
+    wrong_color_rows[wrong_color_y][wrong_color_offset : wrong_color_offset + 4] = (
         b"\x00\x00\x00\xff"
     )
     try:
@@ -15375,18 +15436,27 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
         states.append(capture_live_state(live, out, "search-open"))
 
+        # Keyed by action rather than written as positional tuples so the
+        # drift guard in kettle-config sees these six the same way it sees
+        # every inline dispatch. As tuples they were invisible to it and could
+        # all have gone stale while it stayed green.
         modal_sequence = [
-            ("ssh", "ssh_launcher", "ssh-launcher"),
-            ("open_layout_picker", "layout_picker", "layout-picker"),
-            ("hint_mode", "hint_mode", "hint-mode"),
-            ("edit_window_title", "title_edit", "title-edit-window"),
-            ("edit_tab_title", "title_edit", "title-edit-tab"),
-            ("edit_pane_title", "title_edit", "title-edit-pane"),
+            {"action": "ssh", "modal": "ssh_launcher", "label": "ssh-launcher"},
+            {"action": "open_layout_picker", "modal": "layout_picker", "label": "layout-picker"},
+            {"action": "hint_mode", "modal": "hint_mode", "label": "hint-mode"},
+            {"action": "edit_window_title", "modal": "title_edit", "label": "title-edit-window"},
+            {"action": "edit_tab_title", "modal": "title_edit", "label": "title-edit-tab"},
+            {"action": "edit_pane_title", "modal": "title_edit", "label": "title-edit-pane"},
         ]
         modal_flags: Dict[str, object] = {}
         previous_shot = out / "search-open.png"
         previous_geo = search_geo
-        for action_name, modal_name, label in modal_sequence:
+        for modal in modal_sequence:
+            action_name, modal_name, label = (
+                modal["action"],
+                modal["modal"],
+                modal["label"],
+            )
             live.ctl("perform_action", params={"action": action_name})
             time.sleep(0.3)
             modal_geo = live.json_ctl("ui_geometry")
@@ -16096,8 +16166,7 @@ def run_tab_title(kettle: str, root: Path) -> Path:
     nested = out / "fixture" / "Repos" / "SPI-1" / "platform"
     nested.mkdir(parents=True, exist_ok=True)
     expected_path = str(nested)
-    home = os.path.expanduser("~")
-    expected_display = "~" + expected_path[len(home) :] if expected_path.startswith(home + os.sep) else expected_path
+    expected_display = home_display_path(expected_path)
     marker = "KETTLE_TAB_TITLE_READY"
     title = "..PI-1/platform"
     command = cwd_title_command(expected_path, title, marker)
@@ -16244,7 +16313,10 @@ def run_split_titlebar_position(
             raise SystemExit(str(error)) from error
 
         action = live.json_ctl(
-            "perform_action", params={"action": "toggle_broadcast_all"}
+            # `toggle_broadcast_all` was never an action name and no longer
+            # resolves at all. `broadcast_all` was deliberately re-pointed at
+            # window scope, so spell the scope this scenario wants.
+            "perform_action", params={"action": "toggle_broadcast_window"}
         )
         receiving_geometry = live.json_ctl("ui_geometry")
         assert_semantics(panes, receiving_geometry, position)
@@ -16304,6 +16376,8 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
     )
     nested.mkdir(parents=True, exist_ok=True)
     expected_path = str(nested)
+    # The titlebar reports the display form, the same as the tab title does.
+    expected_display = home_display_path(expected_path)
     marker = "KETTLE_SPLIT_TITLEBAR_READY"
     truncated_title = "..PI-1/flight-event-line-server-go"
     command = cwd_title_command(expected_path, truncated_title, marker)
@@ -16344,7 +16418,7 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
                     f"split-titlebar smoke ({position}): malformed titlebar: "
                     f"{titlebar}"
                 )
-            if titlebar.get("path") != expected_path:
+            if titlebar.get("path") != expected_display:
                 raise SystemExit(
                     f"split-titlebar smoke ({position}): titlebar path did not "
                     f"track cwd: {titlebar}"
@@ -16372,15 +16446,15 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
                 else 0
             )
             full_path_fits = (
-                title_budget > 0 and len(expected_path) + 2 <= title_budget
+                title_budget > 0 and len(expected_display) + 2 <= title_budget
             )
             fitted_path = fitted.strip() if isinstance(fitted, str) else ""
             if (
                 not fitted_path
-                or (full_path_fits and fitted_path != expected_path)
+                or (full_path_fits and fitted_path != expected_display)
                 or (
                     not full_path_fits
-                    and not fitted_path.endswith(Path(expected_path).name)
+                    and not fitted_path.endswith(Path(expected_display).name)
                 )
             ):
                 raise SystemExit(
@@ -16417,6 +16491,14 @@ def run_split_titlebar(kettle: str, root: Path) -> Path:
                     "unfocused-split-opacity = 1.0",
                     "inactive-color-offset = 1.0",
                     "inactive-bg-color-offset = 1.0",
+                    # This scenario samples exact RGBA. `background-opacity`
+                    # defaults to 0.86 on macOS and Windows, which lands every
+                    # sampled pixel at alpha 219 instead of 255, so the grid
+                    # edge can never match its expected colour. docs/CONFIG.md
+                    # names these two keys as the way to get a fully opaque
+                    # window; the dimming keys above are not enough.
+                    "background-opacity = 1.0",
+                    "window-blur = false",
                     "restore-session = false",
                     "update-check = false",
                     f"title-transmit-bg-color = {SPLIT_TITLEBAR_COLOR_HEX['transmit']}",
