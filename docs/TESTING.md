@@ -1778,6 +1778,13 @@ tearoff smoke documents for `maybe_tear_off`, which is why the tearoff recipe
 carries a separate xdotool tier. Closing it needs either an arming path in
 `ctl_mouse_press` or an xdotool tier here, and the script header records both.
 
+`just live-ui-helper-selftest`, which `just gauntlet` depends on, also pins that
+a zombie session member reads as vanished rather than as a retention failure. A
+zombie answers `kill(pid, 0)` and `getsid` until its parent reaps it but has no
+Mach task port, so macOS returns `KERN_FAILURE` and teardown used to abort. That
+surfaced as an intermittent macOS CI failure, including on the release path
+where `pretest` runs this self-test after the tag is already pushed.
+
 `crates/kettle-config/tests/harness_action_names_resolve.rs` feeds every action
 name these scripts hand to `perform_action` through the real parser. Two dead
 names had accumulated, `toggle_broadcast_all` and `focus_window`, and because

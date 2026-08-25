@@ -233,6 +233,14 @@ def terminate_owned_process_group(
         ) from error
 
 
+def _darwin_process_is_zombie(pid: int) -> bool:
+    """Whether `pid` is a macOS zombie: exited, not yet reaped by its parent."""
+    listed = run(["ps", "-o", "state=", "-p", str(pid)], timeout=5)
+    if listed.returncode != 0:
+        return False
+    return listed.stdout.strip().startswith("Z")
+
+
 @dataclass
 class StableProcessHandle:
     """A signal target whose identity cannot be redirected by PID reuse.
@@ -311,6 +319,14 @@ class StableProcessHandle:
                     raise RuntimeError(
                         f"could not prove whether Darwin process {pid} vanished"
                     ) from error
+                # A zombie answers `kill(pid, 0)` and `getsid` until its parent
+                # reaps it, but it has no task port, so `task_name_for_pid`
+                # returns KERN_FAILURE. It is gone for every purpose this
+                # handle has: nothing left to signal, and no identity left to
+                # confuse with a reused pid. Treat it as vanished, which is
+                # what the caller already knows how to skip.
+                if _darwin_process_is_zombie(pid):
+                    raise ProcessLookupError(pid)
                 raise RuntimeError(
                     f"could not retain Darwin task name for {pid}: kern_return={result}"
                 )
@@ -8184,6 +8200,39 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
+    # A zombie is a session member that cannot be retained and does not need
+    # to be. macOS answers `kill(pid, 0)` and `getsid` for one but has no task
+    # port to vend, so retention used to raise and take the whole teardown with
+    # it. That surfaced as an intermittent CI failure on the release path,
+    # where `pretest` runs this self-test after the tag is already pushed.
+    zombie = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        state = run(["ps", "-o", "state=", "-p", str(zombie.pid)], timeout=5)
+        if state.returncode == 0 and state.stdout.strip().startswith("Z"):
+            break
+        time.sleep(0.05)
+    else:
+        # Some platforms reap so eagerly that the state is never observable.
+        # Nothing to assert then, and inventing one would be worse.
+        state = None
+    if state is not None:
+        try:
+            StableProcessHandle.open(zombie.pid)
+        except ProcessLookupError:
+            pass
+        except Exception as error:  # noqa: BLE001
+            raise AssertionError(
+                f"a zombie session member must read as vanished, not as a "
+                f"retention failure: {error!r}"
+            ) from error
+        else:
+            raise AssertionError(
+                "a zombie must not produce a retained handle; killing through "
+                "it would signal whatever reuses the pid"
+            )
+    zombie.wait()
+
     with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
         fixture = Path(temp) / "fixture.png"
         write_image_receipt_fixture(fixture, 64, 36)
