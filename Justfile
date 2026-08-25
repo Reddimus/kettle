@@ -379,11 +379,11 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -824,6 +824,16 @@ tab-title-smoke:
 [unix]
 split-titlebar-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release split-titlebar
+
+# Split a pane, close the split by letting its own shell exit, and prove the
+# surviving pane's grid AND tty winsize come back to their pre-split values.
+# The tree work is unit-tested in mux.rs and both reap sites are pinned by a
+# source guard; what needs a live window is that a self-exiting PTY drives a
+# real TIOCSWINSZ on the pane that inherits its space. Captures list_panes
+# sizes, the stty readback, and a PNG under target/diagnostics/split-exit-resize-*.
+[unix]
+split-exit-resize-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release split-exit-resize
 
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.

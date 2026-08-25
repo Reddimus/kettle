@@ -16548,6 +16548,151 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_split_exit_resize(kettle: str, root: Path) -> Path:
+    """A split closed by its own shell must hand its rows back.
+
+    `Mux::reap` prunes the dead pane and promotes the sibling into the whole
+    rectangle. The renderer paints from a live layout, so the survivor looks
+    right immediately whether or not its PTY moved; only the grid and the tty
+    winsize tell the truth. Splitting away from an agent CLI and typing `exit`
+    used to leave it painting into the box it had inside the split.
+
+    Two reap sites can service this, the one in `redraw` and the one in
+    `about_to_wait_inner`, and whichever runs first wins. This scenario cannot
+    say which; the source guard `every_reap_site_schedules_the_survivor_resize`
+    pins both. What only a live window can prove is that a self-exiting PTY
+    drives a real resize on the pane that inherits its space.
+
+    Nothing between the `exit` and the assertion dispatches an action. The tail
+    of `handle_action` marks a resize after any action at all, so a stray
+    keystroke or menu call would schedule the resize this test is trying to
+    catch the absence of, and the whole thing would pass against the bug.
+    """
+    out = root / f"split-exit-resize-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                # A split gives every pane a titlebar and a single pane has
+                # none, so the survivor only returns to its exact starting rows
+                # if the inset is given back too.
+                "show-titlebar = true",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 100",
+                "window-height = 40",
+            ]
+        )
+        + "\n"
+    )
+
+    def panes_of(live: LiveKettle) -> List[Dict[str, object]]:
+        listed = live.json_ctl("list_panes")
+        value = listed.get("panes")
+        return [p for p in value if isinstance(p, dict)] if isinstance(value, list) else []
+
+    def wait_panes(
+        live: LiveKettle, want: int, why: str, timeout: float = 10.0
+    ) -> List[Dict[str, object]]:
+        deadline = time.monotonic() + timeout
+        seen: List[Dict[str, object]] = []
+        while time.monotonic() < deadline:
+            seen = panes_of(live)
+            if len(seen) == want:
+                return seen
+            time.sleep(0.1)
+        raise SystemExit(
+            f"split-exit-resize smoke: expected {want} pane(s) {why}, saw {len(seen)}: {seen}"
+        )
+
+    def size_of(panes: List[Dict[str, object]], pane_id: object) -> Tuple[int, int]:
+        for pane in panes:
+            if pane.get("id") == pane_id:
+                return int(pane.get("cols", 0)), int(pane.get("rows", 0))
+        raise SystemExit(f"split-exit-resize smoke: pane {pane_id} vanished: {panes}")
+
+    analysis: Dict[str, object] = {}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        before = wait_panes(live, 1, "before the split")
+        base_id = before[0].get("id")
+        baseline = size_of(before, base_id)
+        analysis["baseline"] = {"id": base_id, "cols": baseline[0], "rows": baseline[1]}
+
+        live.json_ctl("perform_action", {"action": "split_down"})
+        split = wait_panes(live, 2, "after split_down")
+        split_size = size_of(split, base_id)
+        if split_size[1] >= baseline[1]:
+            raise SystemExit(
+                "split-exit-resize smoke: the split did not shrink the source "
+                f"pane, so the test proves nothing: baseline={baseline} "
+                f"split={split_size}"
+            )
+        new_id = next((p.get("id") for p in split if p.get("focused") is True), None)
+        if new_id is None or new_id == base_id:
+            raise SystemExit(f"split-exit-resize smoke: no new focused pane: {split}")
+        analysis["split"] = {"new_id": new_id, "cols": split_size[0], "rows": split_size[1]}
+
+        # From here to the assertion: reads only.
+        live.ctl("send_text", params={"pane": new_id, "text": "exit\r"})
+        wait_panes(live, 1, "after the split shell exited")
+
+        deadline = time.monotonic() + 10.0
+        observed = split_size
+        while time.monotonic() < deadline:
+            observed = size_of(panes_of(live), base_id)
+            if observed == baseline:
+                break
+            time.sleep(0.1)
+        analysis["after_close"] = {"cols": observed[0], "rows": observed[1]}
+        if observed != baseline:
+            raise SystemExit(
+                "split-exit-resize smoke: the surviving pane kept its split "
+                f"size. baseline={baseline} inside the split={split_size} "
+                f"after the split closed={observed}. The pane that inherited "
+                "the space was never resized, so its child got no SIGWINCH."
+            )
+
+        # The grid alone is necessary but not sufficient: `try_resize_geometry`
+        # commits local geometry even when the native resize returns an error.
+        # Ask the tty itself what size it thinks it is.
+        if platform.system() != "Windows":
+            token = "KETTLE_WINSZ" + "_OK"
+            live.ctl(
+                "send_text",
+                params={
+                    "pane": base_id,
+                    "text": f"printf '{token} %s\\n' \"$(stty size | tr ' ' x)\"\r",
+                },
+            )
+            want = f"{baseline[1]}x{baseline[0]}"
+            pattern = re.compile(re.escape(token) + r"\s+(\d+)x(\d+)")
+            reported = None
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                found = pattern.findall(screen_text(live.json_ctl("read_screen")))
+                if found:
+                    reported = f"{found[-1][0]}x{found[-1][1]}"
+                    break
+                time.sleep(0.1)
+            analysis["tty_winsize"] = {"reported": reported, "expected": want}
+            if reported != want:
+                raise SystemExit(
+                    "split-exit-resize smoke: the grid came back but the tty "
+                    f"winsize did not. stty size reported {reported}, expected "
+                    f"{want}. The ioctl never reached the child."
+                )
+            live.screenshot(out / "after-close.png")
+
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def run_touchpad_scroll(kettle: str, root: Path) -> Path:
     """Reproduce a Windows Precision Touchpad scroll gesture end to end.
 
@@ -16806,6 +16951,7 @@ def main() -> int:
             "tab-title",
             "tearoff",
             "split-titlebar",
+            "split-exit-resize",
             "zoom-keybind",
             "underline",
             "agent-tui",
@@ -16924,6 +17070,9 @@ def main() -> int:
     if args.case in ("split-titlebar", "all"):
         out = run_split_titlebar(args.kettle, root)
         print(f"split-titlebar smoke: OK artifacts={out}")
+    if args.case in ("split-exit-resize", "all"):
+        out = run_split_exit_resize(args.kettle, root)
+        print(f"split-exit-resize smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")
