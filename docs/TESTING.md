@@ -1434,7 +1434,29 @@ injects those failures and a `KeyboardInterrupt` across the actual
 post-launch startup boundary, models identity reuse across two stable
 identities, and proves an internal member-recheck failure closes its
 complete partial handle batch. A preliminary session-query failure after
-earlier handles were acquired closes that partial batch as well. Native
+earlier handles were acquired closes that partial batch as well.
+
+That fail-closed rule has one narrow exception, and it is the exit-teardown
+window rather than a tolerance. macOS destroys a process's Mach task while
+its BSD proc entry is still in the session, so a dying member briefly
+answers `kill(pid, 0)` and `getsid` as a live member that
+`task_name_for_pid` refuses to retain with `kern_return=5`. Forking 24,000
+children on an M-series Mac hit that window six times; every hit resolved by
+leaving the session, none lasted longer than 49 microseconds, and one retry
+always settled it. A loaded runner widens it enough to be sampled: `build
+(macos-latest)` aborted a whole scan on `could not retain PTY session member
+9105: kern_return=5`, and the same commit passed on rerun. The scan now
+rechecks membership under a one-second deadline rather than once
+instantaneously. A pid that stays a member and stays unretainable for the
+full deadline still fails the scan closed, so the change cannot become a way
+to drop a live member; the worst case is the behavior that shipped before.
+Two self-test injections pin both directions, and each fails on its own: a
+member that leaves the session between retries must be skipped without
+aborting, and one that never leaves must still abort with its partial batch
+closed. The injections replace the retention primitive outright, so Linux CI
+runs them too.
+
+Native
 Windows creates the unpredictable named kill-on-close Job before creating
 the sandbox, registers cleanup immediately after creation, and makes the
 exact PowerShell pane self-assign before sandboxed Neovim starts. A real
