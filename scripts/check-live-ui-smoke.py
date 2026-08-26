@@ -696,6 +696,62 @@ def _process_state(
     return sampled.stdout.strip()
 
 
+# macOS tears a process's Mach task down during exit while its BSD proc entry is
+# still in the session, so for a few microseconds a dying process reads as a live
+# member that `task_name_for_pid` refuses to retain. Locally that window measured
+# 29-49us across six hits in 24,000 forks, every one resolving by leaving the
+# session on the first recheck. A loaded runner widens it enough to be sampled:
+# `build (macos-latest)` aborted a whole scan on `could not retain PTY session
+# member 9105: kern_return=5` while `kill(pid, 0)` still succeeded for that pid.
+# Recheck under a deadline rather than once instantaneously. This is strictly no
+# weaker than the single recheck it replaces: a pid that stays a member and stays
+# unretainable for the full window still fails the scan closed, so the worst case
+# is the behavior that shipped before.
+MEMBER_RETAIN_TEARDOWN_DEADLINE = 1.0
+MEMBER_RETAIN_TEARDOWN_INTERVAL = 0.001
+
+
+def _retain_session_member(
+    pid: int, session_id: int
+) -> Optional[StableProcessHandle]:
+    """Retain one session member, tolerating only the exit-teardown window.
+
+    Returns `None` once the pid has left the session, which is the caller's
+    signal to skip it. Re-raises the retention failure when the pid is still a
+    member after the deadline, so a genuinely unretainable live member can never
+    be silently dropped from a cleanup scan.
+    """
+    deadline = time.monotonic() + MEMBER_RETAIN_TEARDOWN_DEADLINE
+    retried = False
+    while True:
+        try:
+            return StableProcessHandle.open(pid)
+        except (ProcessLookupError, OSError, RuntimeError):
+            try:
+                sampled = os.getsid(pid)
+            except ProcessLookupError:
+                # The proc entry is gone, which is how all 18 observed teardowns
+                # resolved. There is no longer a process here to own.
+                return None
+            if sampled != session_id:
+                if retried:
+                    # It reported this session when the retry began and is a
+                    # live member of a different one now, so it detached under
+                    # the scan rather than finishing teardown. The single sample
+                    # this replaces would have aborted on that pid; keep
+                    # aborting, so waiting can never launder a detach into a
+                    # silent skip.
+                    raise
+                # First sample, unchanged from before the deadline existed: it
+                # had already left the session, so it is not this scan's to own
+                # and the exact-environment pass is what covers it.
+                return None
+            if time.monotonic() >= deadline:
+                raise
+            retried = True
+            time.sleep(MEMBER_RETAIN_TEARDOWN_INTERVAL)
+
+
 def _session_process_handles(
     anchor: StableProcessHandle, session_id: int
 ) -> Dict[Tuple[int, ...], StableProcessHandle]:
@@ -728,23 +784,19 @@ def _session_process_handles(
                 f"could not inspect PTY session member {pid}: {error}{detail}"
             ) from error
         try:
-            handle = StableProcessHandle.open(pid)
+            handle = _retain_session_member(pid, session_id)
         except (ProcessLookupError, OSError, RuntimeError) as error:
-            try:
-                still_member = os.getsid(pid) == session_id
-            except ProcessLookupError:
-                still_member = False
-            if still_member:
-                close_errors = _close_stable_process_handles(handles)
-                detail = (
-                    "; retained-handle close failures: "
-                    + "; ".join(str(item) for item in close_errors)
-                    if close_errors
-                    else ""
-                )
-                raise RuntimeError(
-                    f"could not retain PTY session member {pid}: {error}{detail}"
-                ) from error
+            close_errors = _close_stable_process_handles(handles)
+            detail = (
+                "; retained-handle close failures: "
+                + "; ".join(str(item) for item in close_errors)
+                if close_errors
+                else ""
+            )
+            raise RuntimeError(
+                f"could not retain PTY session member {pid}: {error}{detail}"
+            ) from error
+        if handle is None:
             continue
         try:
             current_member = os.getsid(pid) == session_id and handle.matches_current()
@@ -10938,6 +10990,164 @@ def live_helper_selftest() -> None:
                 getsid_anchor.close()
                 if getsid_batch.returncode is None:
                     terminate_owned_process_group(getsid_batch, grace_s=0.1)
+
+            # A member caught in the Darwin exit-teardown window: its Mach task
+            # is already gone, so retention fails, but its BSD proc entry has not
+            # left the session yet, so an instantaneous recheck still calls it a
+            # member. That window measured 29-49us locally and is what aborted a
+            # `build (macos-latest)` scan on `could not retain PTY session member
+            # 9105: kern_return=5`. The injection is portable because it replaces
+            # the retention primitive outright, so Linux CI pins it too.
+            teardown_batch = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import os,time\n"
+                        "child=os.fork()\n"
+                        "if child == 0: time.sleep(60); raise SystemExit(0)\n"
+                        "print(child,flush=True)\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            assert teardown_batch.stdout is not None
+            teardown_child = int(teardown_batch.stdout.readline().strip())
+            teardown_anchor = StableProcessHandle.open(teardown_batch.pid)
+            original_open = StableProcessHandle.__dict__["open"]
+            original_getsid = os.getsid
+            original_run = globals()["run"]
+            # Track handle objects rather than pids. `matches_current` opens and
+            # closes a temporary handle for the anchor through this same patched
+            # `open`, so a pid-keyed close list would already be satisfied before
+            # the abort path ran and could not tell a leak from that bookkeeping.
+            teardown_opened: List[Tuple[StableProcessHandle, int]] = []
+            teardown_closed: Set[int] = set()
+            teardown_attempts = {"count": 0}
+            teardown_vanishes = {"enabled": True}
+            teardown_detaches = {"session": None}
+
+            def teardown_open(
+                cls: type[StableProcessHandle], pid: int
+            ) -> StableProcessHandle:
+                if pid == teardown_child:
+                    teardown_attempts["count"] += 1
+                    raise RuntimeError(
+                        f"could not retain Darwin task name for {pid}: kern_return=5"
+                    )
+                handle = original_open.__func__(cls, pid)
+                original_close = handle.close
+
+                def record_close() -> None:
+                    teardown_closed.add(id(handle))
+                    original_close()
+
+                handle.close = record_close  # type: ignore[method-assign]
+                teardown_opened.append((handle, pid))
+                return handle
+
+            def teardown_getsid(pid: int) -> int:
+                if pid == teardown_child:
+                    # Still in the session for the recheck that follows the first
+                    # failed retention, and gone once the retry samples again.
+                    if teardown_vanishes["enabled"] and teardown_attempts["count"] >= 2:
+                        raise ProcessLookupError(pid)
+                    detached = teardown_detaches["session"]
+                    if detached is not None and teardown_attempts["count"] >= 2:
+                        return detached
+                    return teardown_batch.pid
+                return original_getsid(pid)
+
+            def teardown_leaks() -> List[int]:
+                return [
+                    pid
+                    for handle, pid in teardown_opened
+                    if id(handle) not in teardown_closed
+                ]
+
+            def list_teardown_session(
+                argv: List[str], **kwargs: object
+            ) -> subprocess.CompletedProcess:
+                if argv == ["ps", "-axo", "pid="]:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        f"{teardown_batch.pid}\n{teardown_child}\n",
+                        "",
+                    )
+                return original_run(argv, **kwargs)
+
+            StableProcessHandle.open = classmethod(teardown_open)
+            os.getsid = teardown_getsid  # type: ignore[assignment]
+            globals()["run"] = list_teardown_session
+            try:
+                scanned = _session_process_handles(teardown_anchor, teardown_batch.pid)
+                try:
+                    assert teardown_attempts["count"] >= 2, (
+                        "a teardown-window member was skipped without a retry, so "
+                        "this case cannot distinguish the deadline from a one-shot "
+                        "recheck"
+                    )
+                    assert teardown_anchor.identity in scanned, (
+                        "a teardown-window member cost the scan its retained anchor"
+                    )
+                    assert teardown_child not in [
+                        handle.pid for handle in scanned.values()
+                    ], "a member that left the session was retained anyway"
+                finally:
+                    for error in _close_stable_process_handles(scanned):
+                        raise AssertionError(error)
+
+                # The other direction: a member that stays live and stays
+                # unretainable must still fail the scan closed after the
+                # deadline, so the retry can never become a way to drop one.
+                teardown_vanishes["enabled"] = False
+                teardown_attempts["count"] = 0
+                teardown_opened.clear()
+                teardown_closed.clear()
+                try:
+                    _session_process_handles(teardown_anchor, teardown_batch.pid)
+                except RuntimeError as error:
+                    assert "could not retain PTY session member" in str(error), error
+                else:
+                    raise AssertionError(
+                        "an unretainable live session member did not fail the scan"
+                    )
+                assert not teardown_leaks(), (
+                    "an unretainable live member leaked retained handles for "
+                    f"{teardown_leaks()}"
+                )
+
+                # A member that reports a different live session mid-retry
+                # detached under the scan rather than finishing teardown. Waiting
+                # must not launder that into a silent skip: the single sample
+                # this deadline replaced would have aborted on it.
+                teardown_attempts["count"] = 0
+                teardown_opened.clear()
+                teardown_closed.clear()
+                teardown_detaches["session"] = teardown_child
+                try:
+                    _session_process_handles(teardown_anchor, teardown_batch.pid)
+                except RuntimeError as error:
+                    assert "could not retain PTY session member" in str(error), error
+                else:
+                    raise AssertionError(
+                        "a member that detached mid-retry was silently skipped"
+                    )
+                assert not teardown_leaks(), (
+                    "a mid-retry detach leaked retained handles for "
+                    f"{teardown_leaks()}"
+                )
+            finally:
+                globals()["run"] = original_run
+                os.getsid = original_getsid  # type: ignore[assignment]
+                StableProcessHandle.open = original_open
+                teardown_anchor.close()
+                if teardown_batch.returncode is None:
+                    terminate_owned_process_group(teardown_batch, grace_s=0.1)
 
             partial_batch = subprocess.Popen(
                 [
