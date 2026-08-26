@@ -5,6 +5,62 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 4.0.1 cut — 2026-08-25
+
+Host: macOS 26.6.2 (Darwin 25G83), Apple silicon. Bundle: a universal
+ad-hoc-signed `kettle.app` built from the exact clean cut
+`2234a26587da5fa7d4b6e43af0a88c16a32bcf68`, replicating `release.yml`'s
+`Build (macOS universal)` and `Package (macOS .app bundle)` steps: both
+`--target` release builds, `lipo`, `scripts/compile-macos-app-icon.sh`, and the
+PlistBuddy version patch. `lipo -archs` reports `x86_64 arm64` and the bundle's
+`CFBundleShortVersionString` is `4.0.1`. The plist was patched through a copy so
+the cut worktree stayed clean at that SHA, verified after the run.
+
+Window frames were captured with `screencapture -l<windowid>`, which reads only
+kettle's own window layer. An earlier full-screen capture was taken, found to
+contain unrelated application content, and deleted unread; nothing outside
+kettle was analysed or kept.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| Default 86% opacity and native blur | Across every top row, the material is `(31,35,42,255)` from four pixels inside the left end of the opaque span to four pixels inside the right end, with zero clear pixels inside the span. The narrowing spans (`26..789` at y=0 through `0..815` at y=32) are the corner radius itself, not a gap. |
+| Alpha on, blur off | Same measurements: uniform `(31,35,42,255)` to both corners, zero clear pixels. AppKit supplied a backdrop rather than exposing a clear strip. |
+| Opaque surface, blur left on | Identical, with the single titlebar/grid edge at y=62. No titlebar-only material seam. |
+| `background-opacity = 1.0`, `window-blur = false` | The theme reached both rounded top corners with no clear or mismatched strip, confirmed both in the frame samples and composited over a controlled backdrop. |
+| Material over a saturated backdrop | The window's own layer reads identically whatever sits behind it, so translucency was confirmed compositionally instead: over an opaque `#f0b000` surface the dark material still reached both rounded corners, with the blur's warmth visible in the titlebar against the neutral grid. |
+| Resize and full-screen round trip | Resized to 1100×700, `content` became `1100×659.5` at `y = 40.5`; full screen gave `3456×2127.5`; leaving full screen returned to exactly `1100×659.5` at `y = 40.5`. |
+| `borderless = true` full-screen round trip | `816×479.5` → `3456×2127.5` → exactly `816×479.5`, and the window returned to its 408×260 frame. In full screen the terminal stayed visible through the sharp-alpha fallback with an on-screen sentinel legible and no material view over it. |
+| Runtime light/dark switching | Five `next_theme` switches on one open window moved the NSWindow titlebar `(225,225,225)` → `(31,35,42)` across four dark themes → `(255,255,255)`, so the window background tracked the palette across the light/dark boundary rather than only the grid. |
+| Start on a light theme with macOS Dark | With the system in Dark, Alabaster **started** white — titlebar and grid both `(255,255,255)` — and the complete title sat beside clean traffic lights, not across them. This is the [#251](https://github.com/Reddimus/kettle/issues/251) shape, checked at startup rather than through the toggle. |
+| `AppIcon.icns` at 256 px | The outer corner is clipped by the system mask, the inset face keeps clear rim space (left-edge alpha stays 0 through x=16 before ramping), and the `>_` mark is centred and legible. |
+| Both icon resource paths present | `Assets.car` (500,744 bytes) and the loose `AppIcon.icns` fallback are both in `Contents/Resources`, so Finder, the Dock item and the app switcher cannot disagree for lack of artwork. |
+
+### Not run
+
+**Live Reduce Transparency toggle.** Toggling it means changing a system
+accessibility setting, which this session does not do unattended. The setting
+was confirmed off (`reduceTransparency = 0`) and left untouched. Not covered by
+any other check here: run it by hand before trusting the material under Reduce
+Transparency.
+
+**Dock magnification, and the running / closed-but-pinned Dock items.**
+Magnification is likewise a system setting. The Dock also never reached a
+capture: screenshots in this session are composited at the allowlist level, and
+the Dock is not one of the granted applications, so it is filtered out. The
+icon evidence above is the bundle's own resources, not what the Dock drew.
+
+**App-switcher icon.** The global Command-Tab switcher cannot be held open for
+an application-scoped capture, unchanged from the 4.0.0 run.
+
+**`Assets.car` rendered appearance.** Only its presence and size were checked
+this cycle; the 4.0.0 run rendered both 256 px paths and compared them.
+
+No system setting was changed during this run. The appearance stayed Dark,
+Reduce Transparency stayed off, and the cut worktree was clean at
+`2234a265` afterwards.
+
 ## 4.0.0 pre-release — 2026-08-24
 
 Host: macOS 26.6.2 (Darwin 25G83), Apple silicon. Bundle: a universal
