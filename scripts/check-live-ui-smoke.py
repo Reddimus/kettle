@@ -722,18 +722,33 @@ def _retain_session_member(
     be silently dropped from a cleanup scan.
     """
     deadline = time.monotonic() + MEMBER_RETAIN_TEARDOWN_DEADLINE
+    retried = False
     while True:
         try:
             return StableProcessHandle.open(pid)
         except (ProcessLookupError, OSError, RuntimeError):
             try:
-                still_member = os.getsid(pid) == session_id
+                sampled = os.getsid(pid)
             except ProcessLookupError:
-                still_member = False
-            if not still_member:
+                # The proc entry is gone, which is how all 18 observed teardowns
+                # resolved. There is no longer a process here to own.
+                return None
+            if sampled != session_id:
+                if retried:
+                    # It reported this session when the retry began and is a
+                    # live member of a different one now, so it detached under
+                    # the scan rather than finishing teardown. The single sample
+                    # this replaces would have aborted on that pid; keep
+                    # aborting, so waiting can never launder a detach into a
+                    # silent skip.
+                    raise
+                # First sample, unchanged from before the deadline existed: it
+                # had already left the session, so it is not this scan's to own
+                # and the exact-environment pass is what covers it.
                 return None
             if time.monotonic() >= deadline:
                 raise
+            retried = True
             time.sleep(MEMBER_RETAIN_TEARDOWN_INTERVAL)
 
 
@@ -11005,9 +11020,15 @@ def live_helper_selftest() -> None:
             original_open = StableProcessHandle.__dict__["open"]
             original_getsid = os.getsid
             original_run = globals()["run"]
-            teardown_closes: List[int] = []
+            # Track handle objects rather than pids. `matches_current` opens and
+            # closes a temporary handle for the anchor through this same patched
+            # `open`, so a pid-keyed close list would already be satisfied before
+            # the abort path ran and could not tell a leak from that bookkeeping.
+            teardown_opened: List[Tuple[StableProcessHandle, int]] = []
+            teardown_closed: Set[int] = set()
             teardown_attempts = {"count": 0}
             teardown_vanishes = {"enabled": True}
+            teardown_detaches = {"session": None}
 
             def teardown_open(
                 cls: type[StableProcessHandle], pid: int
@@ -11021,10 +11042,11 @@ def live_helper_selftest() -> None:
                 original_close = handle.close
 
                 def record_close() -> None:
-                    teardown_closes.append(pid)
+                    teardown_closed.add(id(handle))
                     original_close()
 
                 handle.close = record_close  # type: ignore[method-assign]
+                teardown_opened.append((handle, pid))
                 return handle
 
             def teardown_getsid(pid: int) -> int:
@@ -11033,8 +11055,18 @@ def live_helper_selftest() -> None:
                     # failed retention, and gone once the retry samples again.
                     if teardown_vanishes["enabled"] and teardown_attempts["count"] >= 2:
                         raise ProcessLookupError(pid)
+                    detached = teardown_detaches["session"]
+                    if detached is not None and teardown_attempts["count"] >= 2:
+                        return detached
                     return teardown_batch.pid
                 return original_getsid(pid)
+
+            def teardown_leaks() -> List[int]:
+                return [
+                    pid
+                    for handle, pid in teardown_opened
+                    if id(handle) not in teardown_closed
+                ]
 
             def list_teardown_session(
                 argv: List[str], **kwargs: object
@@ -11074,7 +11106,8 @@ def live_helper_selftest() -> None:
                 # deadline, so the retry can never become a way to drop one.
                 teardown_vanishes["enabled"] = False
                 teardown_attempts["count"] = 0
-                teardown_closes.clear()
+                teardown_opened.clear()
+                teardown_closed.clear()
                 try:
                     _session_process_handles(teardown_anchor, teardown_batch.pid)
                 except RuntimeError as error:
@@ -11083,8 +11116,30 @@ def live_helper_selftest() -> None:
                     raise AssertionError(
                         "an unretainable live session member did not fail the scan"
                     )
-                assert teardown_batch.pid in teardown_closes, (
-                    "an unretainable live member leaked the acquired handle batch"
+                assert not teardown_leaks(), (
+                    "an unretainable live member leaked retained handles for "
+                    f"{teardown_leaks()}"
+                )
+
+                # A member that reports a different live session mid-retry
+                # detached under the scan rather than finishing teardown. Waiting
+                # must not launder that into a silent skip: the single sample
+                # this deadline replaced would have aborted on it.
+                teardown_attempts["count"] = 0
+                teardown_opened.clear()
+                teardown_closed.clear()
+                teardown_detaches["session"] = teardown_child
+                try:
+                    _session_process_handles(teardown_anchor, teardown_batch.pid)
+                except RuntimeError as error:
+                    assert "could not retain PTY session member" in str(error), error
+                else:
+                    raise AssertionError(
+                        "a member that detached mid-retry was silently skipped"
+                    )
+                assert not teardown_leaks(), (
+                    "a mid-retry detach leaked retained handles for "
+                    f"{teardown_leaks()}"
                 )
             finally:
                 globals()["run"] = original_run
