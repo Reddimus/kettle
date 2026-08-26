@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.0.1] — 2026-08-25
+
 ### Fixed
 
 - **The bullet Claude Code prints is a circle again, not a coloured square.**
