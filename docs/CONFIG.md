@@ -94,7 +94,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
 | `bell-flash-intensity` (`bell_flash_intensity`) | float 0–1 | `0.10` | Peak alpha of the visual-bell flash. The flash is a full-surface wash of the theme foreground that decays to nothing over 300 ms, so this sets how bright its first frame is. The most frequent bell in practice is an empty Tab completion, which does not warrant a bright wash; raise this if you want the old, stronger flash, or set `0` to drop the flash while keeping window attention. Full-surface flashes are also the part of a terminal most likely to affect a photosensitive user |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read. Target `c` uses the regular clipboard; target `p`/`s` uses Linux PRIMARY without cross-target fallback (platforms without a separate selection use their one clipboard). DA1 advertises clipboard extension `52` only when writes are enabled and the platform clipboard is available; live reload updates that advertisement for existing panes |
-| `macos-option-as-alt` | `none`\|`left`\|`right`\|`both` | `none` | Selects which macOS Option key behaves as terminal Alt. `none` preserves normal macOS composition on both sides, so Option-produced symbols and accented characters reach the PTY without a Meta/ESC prefix. A selected side uses the unmodified key character and keeps `Alt` for keybinds, legacy xterm encoding, Kitty keyboard encoding, and modifier parameters. Ctrl+Option and Cmd+Option chords keep `Alt` in every mode, matching macOS's suppression of Option composition for those chords — they keep it for keybind matching and Kitty encoding; a Cmd-bearing chord has no legacy PTY encoding and is not written at all (see [`TERMINAL-CLIENT-COMPATIBILITY.md`](TERMINAL-CLIENT-COMPATIBILITY.md)). Applies to existing windows on live reload. The key remains parseable but is reported inert on non-macOS platforms so one shared config works everywhere |
+| `macos-option-as-alt` | `none`\|`left`\|`right`\|`both` | `none` | Selects which macOS Option key behaves as terminal Alt **for keys that produce text**. `none` preserves normal macOS composition on both sides, so Option-produced symbols and accented characters reach the PTY without a Meta/ESC prefix. Keys that compose no character — Backspace, Delete, the arrows, Home/End, Page Up/Down, Insert and the F-keys — always carry `Alt` to the PTY, on every setting and from either side, because there is no composition for the policy to protect: `⌥⌫` is `ESC DEL` (readline's `backward-kill-word`) and `⌥←`/`⌥→` are word-wise motions. kitty draws the same line. A selected side uses the unmodified key character and keeps `Alt` for keybinds, legacy xterm encoding, Kitty keyboard encoding, and modifier parameters. Ctrl+Option and Cmd+Option chords keep `Alt` in every mode, matching macOS's suppression of Option composition for those chords — they keep it for keybind matching and Kitty encoding; a Cmd-bearing chord has no legacy PTY encoding and is not written at all (see [`TERMINAL-CLIENT-COMPATIBILITY.md`](TERMINAL-CLIENT-COMPATIBILITY.md)). Applies to existing windows on live reload. The key remains parseable but is reported inert on non-macOS platforms so one shared config works everywhere |
 | `modify-other-keys` (`modify_other_keys`) | `auto`\|`always`\|`off` | `auto` | Controls only Kettle's modified-Enter fallback before an application queries or sets a keyboard protocol. `auto` recognizes Codex, Claude Code, Gemini, and OpenCode. On Unix/macOS it requires noncanonical input and a fresh foreground process-group match to either the direct launch identity or the background process snapshot. On Windows it requires a running command with one unambiguous shell-child branch containing a recognized composer, or a direct composer launch; helper forks below that composer are supported. Nested shells, readline/libedit programs, SSH/WSL transports, wrappers, and snapshots without a recognized composer receive plain Enter, preventing the literal `;2;13~` suffix an unsolicited xterm sequence can leave behind. Use `always` for an unrecognized or unobservable client, including one inside SSH/WSL; legacy `enter` is its alias. `off` removes the fallback. All modes still honor application-selected xterm levels and Kitty CSI-u, which take precedence. Reloads live, and GUI, control-plane `send_keys`, and broadcast input evaluate the policy separately for each target pane |
 | `paste-images` (`paste-image`) | bool | `on` | Turn a clipboard bitmap into an owner-only temporary PNG and paste its quoted path. Kettle keeps at most 64 files and 256 MiB of final PNG data per process, rejects source buffers above 256 MiB, removes partial writes, and deletes successful files at exit. `off` disables bitmap materialization without changing ordinary file paste. See [Architecture](ARCHITECTURE.md#private-clipboard-images-and-video-receipts) for the descriptor, identity, and crash-cleanup model |
 | `paste-image-preview` (`paste_image_preview`) | bool | `on` | After the initiating pane accepts its own Kettle-created bitmap path, show a pane-local thumbnail receipt. It expands for four seconds, then contracts until its 30-second lifetime ends. Hover pauses that timer, but a two-minute hard limit always removes the receipt. The newest media paste replaces the previous receipt, and later keyboard, paste, or control input dismisses it because the command line may have changed. The card reports the image dimensions and never claims the client attached or opened it. Click the body to open the retained PNG or `×` to dismiss it. Remote panes warn that the path is local. `off` avoids creating or retaining preview pixels without disabling bitmap-to-path paste. Arbitrary paths are never previewed |
@@ -459,7 +459,8 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 **digits** `0`..`9` (e.g. `alt+1`..`alt+9` for `goto_tab:N`), and **punctuation**
 (e.g. `ctrl+,` for `open_settings`). Plus the named keys: `f1`..`f12`,
 `up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
-`prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`, and the symbolic
+`prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`,
+`backspace` (alias `bs`), `delete` (alias `del`), and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
 GTK's accelerator syntax works too, unchanged from a Terminator config:
@@ -564,7 +565,28 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state),
-`reload_config`, `detach_tab` (Unix-only cross-window tab tear-off).
+`reload_config`, `detach_tab` (Unix-only cross-window tab tear-off),
+`text:BYTES` (send literal text to the focused pane, as though typed).
+
+`text:` takes a payload rather than a name, so it is spelled out here rather
+than listed by `--list-actions`. Escapes: `\n` `\r` `\t` `\e` `\a` `\b` `\f`
+`\v` `\0` `\xHH` (hex, `00`–`7f`) and `\\`. An `=` must be written `\x3d`,
+because a `keybind` line is split on its last `=`. Anything else after a
+backslash is an error rather than a literal backslash, so `--check-config`
+names the line. The payload is capped at 256 bytes: this is a chord, not a
+paste.
+
+```ini
+# What macOS text fields do, for terminal apps that only speak Control codes.
+keybind = cmd+backspace = text:\x15   # ^U — delete to start of line (default on macOS)
+keybind = cmd+left      = text:\x01   # ^A — start of line
+keybind = cmd+right     = text:\x05   # ^E — end of line
+```
+
+Only the first is bound by default, and only on macOS. The other two are left
+out because `^A` increments the number under the cursor in Vim's normal mode,
+which edits the buffer silently. `^U` merely scrolls there. Turn the default
+off with `keybind = cmd+backspace=unbind`.
 
 > This list covers the common actions. For the **complete** set of bindable
 > action names, including every alias, run `kettle --list-actions`. It prints a
@@ -572,8 +594,9 @@ the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 > in CI derives every name the parser accepts and fails if the table omits one.
 > Each alias appears once, in its underscore spelling; hyphens and underscores
 > are interchangeable everywhere (`bell_off` and `bell-off` both parse). What
-> cannot be enumerated — the parametric `goto_tab:N`, `switch_to_tab_N` and
-> `new_tab_shell_N`, and the `unbind` sentinel — is printed as trailing notes.
+> cannot be enumerated — the parametric `goto_tab:N`, `switch_to_tab_N`,
+> `new_tab_shell_N` and `text:BYTES`, and the `unbind` sentinel — is printed as
+> trailing notes.
 
 The action `unbind` (also `none`, `null`, `false`, or an empty string) removes
 the default binding for that trigger — useful when a default like

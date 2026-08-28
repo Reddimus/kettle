@@ -207,6 +207,10 @@ mod tests {
             InsertPanePadded,
             InsertPaneName,
             OpenCwdInFileManager,
+            // Parametric, and the payload IS the command — there is nothing to
+            // enumerate and nothing a fixed row could send. Reachable by
+            // keybind, which is the point of it.
+            SendText(String::new()),
             // The update-banner actions only do anything
             // while the update banner is on screen (a no-op + debug log
             // otherwise), so they'd be dead rows in the palette most of the
@@ -340,6 +344,10 @@ mod tests {
             // parametric like GotoTab (the dropdown + Ctrl+Shift+N reach it).
             About,
             NewTabShell(0),
+            // Same sentinel spelling the `excluded` row uses: that check is
+            // value equality, so the two have to agree exactly (as GotoTab(0)
+            // and NewTabShell(0) already do).
+            SendText(String::new()),
             MovePaneLeft,
             MovePaneRight,
             MovePaneUp,
@@ -472,6 +480,7 @@ mod tests {
                 | MovePaneDown
                 | GotoTab(_)
                 | NewTabShell(_)
+                | SendText(_)
                 | About => {}
             }
         }

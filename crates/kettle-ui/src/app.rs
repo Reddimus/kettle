@@ -15261,6 +15261,16 @@ impl App {
             // Useful for shell line-editors that consume Enter
             // normally but expect explicit `\n` for line
             // continuation (multi-line readline prompts).
+            // Ghostty's `text:` action, and what gives `⌘⌫` something to mean.
+            // Unlike the five other text-writing actions this goes through
+            // `write_terminal_input` rather than `feed_input`: it stands in for
+            // a keystroke, so it should clear the selection, scroll on
+            // keystroke and reach every pane of a broadcast, exactly as typing
+            // the same bytes would. That helper also invalidates the affected
+            // pane's media-paste receipt, which every authored-input route owes.
+            Action::SendText(text) => {
+                self.write_terminal_input(ws, text.as_bytes());
+            }
             Action::SendNewline => {
                 if let Some(pane_id) = ws.mux.active_focus()
                     && let Some(p) = ws.mux.panes.get(&pane_id)
@@ -22553,6 +22563,10 @@ fn to_kkey(key: &Key) -> Option<KKey> {
             NamedKey::End => KKey::End,
             NamedKey::Enter => KKey::Enter,
             NamedKey::Tab => KKey::Tab,
+            // Without these two the `cmd+backspace` default parses out of the
+            // config and then never matches a real key press.
+            NamedKey::Backspace => KKey::Backspace,
+            NamedKey::Delete => KKey::Delete,
             NamedKey::F1 => KKey::F(1),
             NamedKey::F2 => KKey::F(2),
             NamedKey::F3 => KKey::F(3),
