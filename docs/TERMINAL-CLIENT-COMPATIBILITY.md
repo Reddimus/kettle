@@ -171,6 +171,19 @@ either Option key, because there is no composition to protect: `⌥⌫` is
 `ESC DEL` and `⌥←`/`⌥→` are `CSI 1;3D`/`CSI 1;3C`. kitty draws the same line,
 and for the same reason.
 
+What the application does with `ESC DEL` is then its own business, and one
+client is worth naming. Neovim leaves `<M-BS>` unmapped, so `⌥⌫` does not
+delete a word there — in any terminal, since they all send this same sequence.
+Its mapped word delete is `<C-w>` (`i_CTRL-W`). One line closes the gap:
+
+```lua
+vim.keymap.set("i", "<M-BS>", "<C-w>")
+```
+
+`⌘⌫` needs nothing: `^U` is `i_CTRL-U` in insert mode, which deletes the
+entered characters on the line. In normal mode it scrolls instead, which is
+the trade the shipped binding makes.
+
 The negotiated `modifyOtherKeys` resource always starts at level zero. An
 application can select levels zero, one, or two with `CSI > 4 ; Pv m`, and
 `CSI ? 4 m` reports only that state as `CSI > 4 ; Pv m`. Omitting `Pv` restores

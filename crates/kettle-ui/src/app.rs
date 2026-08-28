@@ -29898,8 +29898,10 @@ mod tests {
         use kettle_core::TermMode;
         use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-        let mut cfg = Config::default();
-        cfg.backspace_binding = BackspaceBinding::ControlH;
+        let cfg = Config {
+            backspace_binding: BackspaceBinding::ControlH,
+            ..Config::default()
+        };
         let key = Key::Named(NamedKey::Backspace);
         let raw = ModifiersState::ALT;
         let masked = macos_effective_modifiers(raw, MacosOptionAsAlt::None, true, false);

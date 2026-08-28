@@ -26,6 +26,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   unreachable: `⌥⌫`, `⌥Delete` and `⌥←`/`⌥→` there now delete and move by word,
   which is what that code was always written to do.
 
+  Verified byte-for-byte against the clients this is used with: zsh, Claude
+  Code and Codex CLI all delete the previous word on `ESC DEL` and clear the
+  line on `^U`, and tmux passes both through. Neovim is the exception and it is
+  not a Kettle one — it leaves `<M-BS>` unmapped, so `⌥⌫` does not word-delete
+  there in any terminal; `vim.keymap.set("i", "<M-BS>", "<C-w>")` closes it.
+  See [Terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md).
+
 ### Added
 
 - **`Cmd+Backspace` deletes to the start of the line on macOS.** Super has no
