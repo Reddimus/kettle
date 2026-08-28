@@ -1341,8 +1341,9 @@ fn main() -> anyhow::Result<()> {
          dropdown entry, Ctrl+Shift+1..9 by default)"
         );
         println!(
-            "text:BYTES    (parametric; sends literal text to the focused pane — escapes \
-         \\n \\r \\t \\e \\a \\b \\f \\v \\0 \\xHH (00-7f) \\\\, and `=` must be written \\x3d)"
+            "text:BYTES    (parametric; types literal text into the focused pane, or \
+         every pane in scope while broadcast is on — escapes \\n \\r \\t \\e \\a \\b \\f \\v \\0 \
+         \\xHH (00-7f) \\\\, and `=` must be written \\x3d)"
         );
         println!("unbind        (sentinel; removes the default — also: none, null, false, empty)");
         return Ok(());

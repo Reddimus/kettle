@@ -566,7 +566,9 @@ the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state),
 `reload_config`, `detach_tab` (Unix-only cross-window tab tear-off),
-`text:BYTES` (send literal text to the focused pane, as though typed).
+`text:BYTES` (send literal text to the focused pane, as though typed — so
+while broadcast is on it reaches every pane in scope, exactly as typing the
+same bytes would).
 
 `text:` takes a payload rather than a name, so it is spelled out here rather
 than listed by `--list-actions`. Escapes: `\n` `\r` `\t` `\e` `\a` `\b` `\f`
@@ -578,9 +580,14 @@ paste.
 
 ```ini
 # What macOS text fields do, for terminal apps that only speak Control codes.
-keybind = cmd+backspace = text:\x15   # ^U — delete to start of line (default on macOS)
-keybind = cmd+left      = text:\x01   # ^A — start of line
-keybind = cmd+right     = text:\x05   # ^E — end of line
+# `#` starts a comment only at the beginning of a line, so these cannot carry a
+# trailing one — anything after the payload would become part of the payload.
+# ^U — delete to start of line (bound by default on macOS)
+keybind = cmd+backspace = text:\x15
+# ^A — start of line
+keybind = cmd+left      = text:\x01
+# ^E — end of line
+keybind = cmd+right     = text:\x05
 ```
 
 Only the first is bound by default, and only on macOS. The other two are left

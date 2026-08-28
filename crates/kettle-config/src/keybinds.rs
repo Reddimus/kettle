@@ -635,7 +635,10 @@ pub enum Action {
     /// Windows Terminal's; also reachable from the command palette.
     About,
     /// Write a literal byte string to the focused pane, as though the user had
-    /// typed it. Ghostty's `text:` action, and the only way to give a chord the
+    /// typed it — which means broadcast carries it to every pane in scope, and
+    /// a payload holding `\r` submits a line in each of them. Deliberate: this
+    /// action stands in for a keystroke, so it delivers where a keystroke
+    /// would. Ghostty's `text:` action, and the only way to give a chord the
     /// Super key holds meaning for: Super has no legacy PTY encoding at all
     /// (`docs/TERMINAL-CLIENT-COMPATIBILITY.md`), so `⌘⌫` reached applications
     /// as nothing until something claimed it. Bound to `\x15` on macOS.
