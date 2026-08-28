@@ -26,6 +26,11 @@ pub enum Key {
     End,
     Enter,
     Tab,
+    /// Edit keys. macOS binds `Cmd+Backspace` to delete-to-line-start by
+    /// default; before these existed the chord could not be written in a
+    /// config file at all, which is why `⌘⌫` did nothing.
+    Backspace,
+    Delete,
     F(u8),
 }
 
@@ -81,10 +86,96 @@ impl Trigger {
             Key::End => "End".into(),
             Key::Enter => "Enter".into(),
             Key::Tab => "Tab".into(),
+            Key::Backspace => "Backspace".into(),
+            Key::Delete => "Delete".into(),
             Key::F(n) => format!("F{n}"),
         });
         parts.join("+")
     }
+}
+
+/// Maximum decoded payload for a `text:` binding. Keystroke-sized on purpose:
+/// this stands in for a chord, not a paste, and the bounded-input rule applies
+/// to anything on its way to a PTY.
+pub(crate) const MAX_SEND_TEXT_BYTES: usize = 256;
+
+/// Decode the payload of a `text:` action. Ghostty's spelling and its escapes.
+///
+/// Four rules are load-bearing rather than cosmetic:
+///
+/// * A raw `=` is rejected in favour of `\x3d`. `apply_keybind` splits a
+///   `keybind =` line on its LAST `=` and relies on action names never
+///   containing one; `apply_exclusive_keybind` and `detect_malformed_values`
+///   share that assumption. Requiring the escape keeps all three correct.
+/// * `\xHH` stops at `7f`. The payload is a `String`, so admitting a lone
+///   `\x80` would put invalid UTF-8 on the way to the PTY. Non-ASCII is
+///   written literally instead and encoded as UTF-8.
+/// * An unknown escape is an error rather than a literal backslash, so
+///   `--check-config` names the bad line instead of quietly sending something
+///   the user did not write. Raw control bytes are rejected for the same
+///   reason: the config tokenizer trims the value, so they cannot round-trip.
+/// * An empty payload returns `None`, leaving `is_unbind_token` to own the
+///   empty case and keeping the bare `text:` prefix out of the `from_name`
+///   literal census that backs `--list-actions`.
+fn parse_send_text_payload(raw: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        let decoded = match c {
+            '=' => return None,
+            c if (c as u32) < 0x20 || c == '\x7f' => return None,
+            '\\' => match chars.next()? {
+                '\\' => '\\',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'e' => '\x1b',
+                'a' => '\x07',
+                'b' => '\x08',
+                'f' => '\x0c',
+                'v' => '\x0b',
+                '0' => '\0',
+                'x' => {
+                    let hi = chars.next()?.to_digit(16)?;
+                    let lo = chars.next()?.to_digit(16)?;
+                    let value = hi * 16 + lo;
+                    if value > 0x7f {
+                        return None;
+                    }
+                    char::from_u32(value)?
+                }
+                _ => return None,
+            },
+            c => c,
+        };
+        out.push(decoded);
+        if out.len() > MAX_SEND_TEXT_BYTES {
+            return None;
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Render a `text:` payload back in the spelling the user would type it, so
+/// that no label, `--list-keybinds` row or conflict dialog ever puts a raw
+/// control byte on the user's own terminal.
+fn escape_send_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x1b' => out.push_str("\\e"),
+            '=' => out.push_str("\\x3d"),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// User-facing label for one `Action`. Most variants use Rust's `Debug`
@@ -97,6 +188,10 @@ pub fn action_label(a: &Action) -> String {
     match a {
         Action::GotoTab(i) => format!("Goto tab {}", i + 1),
         Action::NewTabShell(i) => format!("New tab: dropdown shell {}", i + 1),
+        // Never `{:?}` this one: the label reaches `--list-keybinds`, `describe`
+        // and the Settings conflict dialog, and a payload like `\x15` must not
+        // arrive there as a raw control byte.
+        Action::SendText(text) => format!("Send text \"{}\"", escape_send_text(text)),
         other => format!("{other:?}"),
     }
 }
@@ -539,6 +634,15 @@ pub enum Action {
     /// update status, GitHub link) — the dropdown's bottom row, mirroring
     /// Windows Terminal's; also reachable from the command palette.
     About,
+    /// Write a literal byte string to the focused pane, as though the user had
+    /// typed it — which means broadcast carries it to every pane in scope, and
+    /// a payload holding `\r` submits a line in each of them. Deliberate: this
+    /// action stands in for a keystroke, so it delivers where a keystroke
+    /// would. Ghostty's `text:` action, and the only way to give a chord the
+    /// Super key holds meaning for: Super has no legacy PTY encoding at all
+    /// (`docs/TERMINAL-CLIENT-COMPATIBILITY.md`), so `⌘⌫` reached applications
+    /// as nothing until something claimed it. Bound to `\x15` on macOS.
+    SendText(String),
 }
 
 /// Every accepted action token, in the canonical form the user types in
@@ -844,7 +948,18 @@ impl Action {
         // with a hyphen and no underscore twin (pinned by
         // `every_action_name_resolves_in_both_spellings`), so folding this
         // direction cannot shadow one.
-        let lowered = s.trim().to_ascii_lowercase().replace('-', "_");
+        //
+        // `text:` is the exception to all of that. Its payload is data, not a
+        // name: the folding below would rewrite `text:Hello-World` into
+        // `text:hello_world`, so the prefix has to be claimed first and the
+        // payload passed through verbatim.
+        let trimmed = s.trim();
+        if let Some(head) = trimmed.get(..5)
+            && head.eq_ignore_ascii_case("text:")
+        {
+            return parse_send_text_payload(&trimmed[5..]).map(SendText);
+        }
+        let lowered = trimmed.to_ascii_lowercase().replace('-', "_");
         Some(match lowered.as_str() {
             "copy_to_clipboard" | "copy" => Copy,
             "paste_from_clipboard" | "paste" => Paste,
@@ -1120,6 +1235,8 @@ fn parse_key(s: &str) -> Option<Key> {
         "end" => Key::End,
         "enter" | "return" => Key::Enter,
         "tab" => Key::Tab,
+        "backspace" | "bs" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
         "plus" => Key::Char('+'),
         "minus" => Key::Char('-'),
         "equal" => Key::Char('='),
@@ -1421,6 +1538,17 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
         bind(su, Char('0'), ResetFontSize);
         bind(su, Up, JumpPrevPrompt);
         bind(su, Down, JumpNextPrompt);
+        // Cmd+Backspace deletes to the start of the line in every native macOS
+        // text field, and Super reaches a terminal application through nothing
+        // but the Kitty protocol — so without a binding the chord was simply
+        // dead. `\x15` is what Ghostty ships and what iTerm2's Natural Text
+        // Editing preset sends: `unix-line-discard` in readline,
+        // `kill-whole-line` in zsh's emacs keymap, `i_CTRL-U` in nvim insert
+        // mode. A binding rather than an encoder fallback on purpose: it fires
+        // whatever the client negotiated, where a fallback would defer to the
+        // Kitty protocol and go dead in exactly the TUIs that negotiate it.
+        // `keybind = cmd+backspace=unbind` turns it off.
+        bind(su, Backspace, SendText("\x15".into()));
         for n in 1u8..=9 {
             bind(su, Char((b'0' + n) as char), GotoTab(n - 1));
         }
@@ -2833,6 +2961,132 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with("Ctrl+Shift+E") && l.contains("SplitRight")),
             "expected the Ctrl+Shift+E split binding, got {lines:?}"
+        );
+    }
+
+    /// `⌘⌫` was dead because the chord could not be written down: `Key` had no
+    /// Backspace variant, so `parse_trigger` returned `None` and every
+    /// `cmd+backspace` line in a config file was a malformed value.
+    #[test]
+    fn backspace_and_delete_are_bindable_triggers() {
+        let sb = Trigger::new(Mods::SUPER, Key::Backspace);
+        assert_eq!(parse_trigger("cmd+backspace"), Some(sb));
+        assert_eq!(parse_trigger("super+bs"), Some(sb));
+        assert_eq!(parse_trigger("CMD+Backspace"), Some(sb));
+        let cd = Trigger::new(Mods::CTRL, Key::Delete);
+        assert_eq!(parse_trigger("ctrl+delete"), Some(cd));
+        assert_eq!(parse_trigger("ctrl+del"), Some(cd));
+        // Both keys round-trip through the label, like every other trigger.
+        for t in [sb, cd] {
+            assert_eq!(parse_trigger(&t.label()), Some(t), "label {}", t.label());
+        }
+    }
+
+    /// The payload of a `text:` binding is data, not an action name. Three of
+    /// these rules exist to keep a payload from breaking something else:
+    /// `=` is the `keybind =` separator, `\xHH` past 7f would be invalid UTF-8
+    /// on the way to a PTY, and an unrecognized escape has to surface in
+    /// `--check-config` rather than be sent as a literal backslash.
+    #[test]
+    fn send_text_payload_decodes_and_rejects() {
+        let text = |s: &str| Action::from_name(s);
+        assert_eq!(text("text:\\x15"), Some(Action::SendText("\x15".into())));
+        assert_eq!(text("text:\\e[A"), Some(Action::SendText("\x1b[A".into())));
+        assert_eq!(
+            text("text:\\n\\r\\t\\a\\b\\f\\v\\0\\\\"),
+            Some(Action::SendText("\n\r\t\x07\x08\x0c\x0b\0\\".into()))
+        );
+        // Case and hyphens survive: the folding that normalizes action names
+        // must not reach the payload.
+        assert_eq!(
+            text("text:Hello-World"),
+            Some(Action::SendText("Hello-World".into()))
+        );
+        // Non-ASCII is written literally and encoded as UTF-8.
+        assert_eq!(text("text:é"), Some(Action::SendText("é".into())));
+        // `TEXT:` is the same prefix; only the payload is case-sensitive.
+        assert_eq!(text("TEXT:Ab"), Some(Action::SendText("Ab".into())));
+        // `=` must be escaped, because `apply_keybind` splits on the last one.
+        assert_eq!(text("text:a=b"), None);
+        assert_eq!(text("text:a\\x3db"), Some(Action::SendText("a=b".into())));
+        // Rejections.
+        assert_eq!(text("text:"), None, "empty payload is not an action");
+        assert_eq!(text("text:\\q"), None, "unknown escape");
+        assert_eq!(text("text:\\x80"), None, "would be invalid UTF-8");
+        assert_eq!(text("text:\\xzz"), None, "not hex");
+        assert_eq!(text("text:\\"), None, "truncated escape");
+        assert_eq!(text("text:\\x1"), None, "truncated hex escape");
+        let long = format!("text:{}", "a".repeat(MAX_SEND_TEXT_BYTES));
+        assert!(text(&long).is_some(), "at the cap");
+        let too_long = format!("text:{}", "a".repeat(MAX_SEND_TEXT_BYTES + 1));
+        assert_eq!(text(&too_long), None, "over the cap");
+    }
+
+    /// Two `text:` bindings with different payloads are different actions, so
+    /// rebinding one does not silently unbind the other. Same property
+    /// `GotoTab(N)` relies on in `apply_exclusive_keybind`.
+    #[test]
+    fn send_text_payloads_are_independent_bindings() {
+        let mut m: Bindings = Bindings::new();
+        apply_keybind(&mut m, "ctrl+shift+y=text:\\x01");
+        apply_keybind(&mut m, "ctrl+shift+u=text:\\x05");
+        assert_eq!(
+            m.get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('y'))),
+            Some(&Action::SendText("\x01".into()))
+        );
+        assert_eq!(
+            m.get(&Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('u'))),
+            Some(&Action::SendText("\x05".into()))
+        );
+    }
+
+    /// The label reaches `--list-keybinds`, `describe` and the Settings
+    /// conflict dialog — all of which print to the user's own terminal. A
+    /// `Debug`-derived label would have put a raw `0x15` there.
+    #[test]
+    fn send_text_label_never_emits_a_raw_control_byte() {
+        let label = action_label(&Action::SendText("\x15".into()));
+        assert_eq!(label, r#"Send text "\x15""#);
+        for a in [
+            Action::SendText("\x1b[A".into()),
+            Action::SendText("a\nb\tc\\d=e".into()),
+            Action::SendText("\x7f".into()),
+        ] {
+            let label = action_label(&a);
+            assert!(
+                !label.chars().any(|c| (c as u32) < 0x20 || c == '\x7f'),
+                "label leaked a control byte: {label:?}"
+            );
+        }
+        // And the escaped form is what the user would type back.
+        assert_eq!(
+            action_label(&Action::SendText("\x1b[A".into())),
+            r#"Send text "\e[A""#
+        );
+    }
+
+    /// `⌘⌫` is documented in the README's Common keys table, and in this repo a
+    /// documented chord is a pinned chord.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_binds_command_backspace_to_delete_to_line_start() {
+        assert_eq!(
+            defaults().get(&Trigger::new(Mods::SUPER, Key::Backspace)),
+            Some(&Action::SendText("\x15".into())),
+            "Cmd+Backspace must send ^U, as Ghostty and iTerm2's natural-text \
+             preset do"
+        );
+    }
+
+    /// The chord is macOS-native, so it must not appear anywhere else.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn non_macos_defaults_leave_backspace_alone() {
+        assert!(
+            defaults()
+                .keys()
+                .all(|t| !matches!(t.key, Key::Backspace | Key::Delete)),
+            "Backspace/Delete defaults are macOS-only"
         );
     }
 }

@@ -241,6 +241,83 @@ fn macos_effective_modifiers(
     raw
 }
 
+/// Whether `macos-option-as-alt` has any business masking Option for this key.
+///
+/// The policy answers exactly one question: does Option compose text (`⌥e` →
+/// `´`) or act as Meta? That question does not arise for a key macOS composes
+/// no character from, and answering it anyway is what made `⌥⌫` delete a single
+/// character instead of a word. The encoder's `ESC DEL` arm was always correct
+/// (`input::encode`, the `(false, true)` Backspace case); it simply never saw
+/// the ALT bit, because `macos_effective_modifiers` had already dropped it.
+///
+/// Backspace is the one entry that cannot be derived. winit reports the legacy
+/// C0 `\x08` from `NamedKey::Backspace.to_text()`, so a plain
+/// `to_text().is_none()` test excludes the very key this exists for.
+#[cfg(any(target_os = "macos", test))]
+fn option_is_meta_for(key: &Key) -> bool {
+    match key {
+        Key::Named(NamedKey::Backspace) => true,
+        Key::Named(named) => named.to_text().is_none(),
+        // Exactly what the policy protects. Restoring ALT for a character key
+        // would prefix ESC to a glyph macOS has already composed, so `⌥e` would
+        // send `ESC ´` instead of `´`.
+        _ => false,
+    }
+}
+
+/// The modifiers the PTY encoder should see, as against the ones the rest of
+/// the UI sees. Identical to `masked` except on the keys `option_is_meta_for`
+/// exempts, where a physically-held Option is restored.
+///
+/// The `left`/`right` policy sides are deliberately not consulted: a side that
+/// cannot compose text has nothing to choose between. kitty draws the same
+/// line — `macos_option_as_alt = no` still sends `ESC DEL` for `⌥⌫`, because
+/// that setting governs only the text path.
+#[cfg(any(target_os = "macos", test))]
+fn macos_pty_modifiers(masked: ModifiersState, raw: ModifiersState, key: &Key) -> ModifiersState {
+    if raw.alt_key() && option_is_meta_for(key) {
+        return masked | ModifiersState::ALT;
+    }
+    masked
+}
+
+/// `ws.mods` as the PTY key encoder should read it. Every other consumer —
+/// keybind matching above all — keeps the masked value, so no chord starts
+/// firing an action it did not fire before.
+///
+/// Cross-platform on purpose, with the `cfg` inside the body: splitting at the
+/// call site would leave a `ws.mods` in `write_terminal_key_event` for the
+/// source census to find on every target.
+fn pty_key_modifiers(ws: &WindowState, key: &Key) -> ModifiersState {
+    #[cfg(target_os = "macos")]
+    {
+        macos_pty_modifiers(ws.mods, ws.macos_raw_mods, key)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = key;
+        ws.mods
+    }
+}
+
+/// Whether Option is physically down, whatever `macos-option-as-alt` says.
+///
+/// The search bar binds its word-wise motions to Option on macOS and gates only
+/// Backspace, Delete and the horizontal arrows with them — every one a key
+/// `option_is_meta_for` exempts. So the composition policy has no say here
+/// either, and reading the masked `ws.mods` left `delete_word_backward` and
+/// `move_left(by_word)` written, tested and unreachable.
+fn option_physically_held(ws: &WindowState) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        ws.macos_raw_mods.alt_key()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ws.mods.alt_key()
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn set_macos_option_as_alt(window: &Window, policy: MacosOptionAsAlt) {
     use winit::platform::macos::{OptionAsAlt, WindowExtMacOS as _};
@@ -7907,14 +7984,15 @@ impl App {
         event: &winit::event::KeyEvent,
         prepare_input: bool,
     ) {
-        let modified_enter = key_is_modified_enter(&event.logical_key, ws.mods);
+        let mods = pty_key_modifiers(ws, &event.logical_key);
+        let modified_enter = key_is_modified_enter(&event.logical_key, mods);
         if !ws.mux.is_broadcast_on() {
             let mode = ws
                 .mux
                 .focused()
                 .map(|pane| pane.effective_key_mode(self.cfg.modify_other_keys, modified_enter))
                 .unwrap_or_else(kettle_core::TermMode::empty);
-            let Some(bytes) = encode_key_event_for_mode(&self.cfg, event, ws.mods, mode) else {
+            let Some(bytes) = encode_key_event_for_mode(&self.cfg, event, mods, mode) else {
                 return;
             };
             if prepare_input {
@@ -7935,7 +8013,6 @@ impl App {
         let scroll_to_bottom = prepare_input && self.cfg.scroll_on_keystroke;
         let scope = ws.mux.broadcast.clone();
         let cfg = &self.cfg;
-        let mods = ws.mods;
         let receipt_pane = prepare_input
             .then(|| Self::media_paste_receipt_pane(ws))
             .flatten();
@@ -15184,6 +15261,16 @@ impl App {
             // Useful for shell line-editors that consume Enter
             // normally but expect explicit `\n` for line
             // continuation (multi-line readline prompts).
+            // Ghostty's `text:` action, and what gives `⌘⌫` something to mean.
+            // Unlike the five other text-writing actions this goes through
+            // `write_terminal_input` rather than `feed_input`: it stands in for
+            // a keystroke, so it should clear the selection, scroll on
+            // keystroke and reach every pane of a broadcast, exactly as typing
+            // the same bytes would. That helper also invalidates the affected
+            // pane's media-paste receipt, which every authored-input route owes.
+            Action::SendText(text) => {
+                self.write_terminal_input(ws, text.as_bytes());
+            }
             Action::SendNewline => {
                 if let Some(pane_id) = ws.mux.active_focus()
                     && let Some(p) = ws.mux.panes.get(&pane_id)
@@ -18437,9 +18524,19 @@ impl App {
         }
 
         let previous_mods = ws.mods;
+        #[cfg(target_os = "macos")]
+        let previous_raw_mods = ws.macos_raw_mods;
         let mut applied = 0usize;
         for (mods, key) in &parsed {
             ws.mods = *mods;
+            // The word-edit gates read the raw Option shadow rather than the
+            // masked value (`option_physically_held`), so a control-plane
+            // `alt+backspace` has to set both. Setting only `ws.mods` would let
+            // a live smoke pass against code that never restores Option.
+            #[cfg(target_os = "macos")]
+            {
+                ws.macos_raw_mods = *mods;
+            }
             // Mirror `winit`: `KeyEvent::text` is present for a character key
             // under every modifier except Control — Command included, which is
             // the exact case this whole change exists to handle. Suppressing
@@ -18469,6 +18566,10 @@ impl App {
             }
         }
         ws.mods = previous_mods;
+        #[cfg(target_os = "macos")]
+        {
+            ws.macos_raw_mods = previous_raw_mods;
+        }
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
@@ -20428,7 +20529,7 @@ impl App {
             ws.mods.control_key()
         };
         let word_modifier = if cfg!(target_os = "macos") {
-            ws.mods.alt_key()
+            option_physically_held(ws)
         } else {
             ws.mods.control_key()
         };
@@ -22462,6 +22563,10 @@ fn to_kkey(key: &Key) -> Option<KKey> {
             NamedKey::End => KKey::End,
             NamedKey::Enter => KKey::Enter,
             NamedKey::Tab => KKey::Tab,
+            // Without these two the `cmd+backspace` default parses out of the
+            // config and then never matches a real key press.
+            NamedKey::Backspace => KKey::Backspace,
+            NamedKey::Delete => KKey::Delete,
             NamedKey::F1 => KKey::F(1),
             NamedKey::F2 => KKey::F(2),
             NamedKey::F3 => KKey::F(3),
@@ -28750,14 +28855,15 @@ mod tests {
         context_menu_surface_can_fit_row, count_rows_fitting, ctl_input_error, filter_disabled,
         find_menu_row_y, fit_context_menu_row, group_scope_is_globally_stale,
         input_rejection_message, key_is_modified_enter, layout_picker_list,
-        local_paste_within_limit, macos_effective_modifiers, modal_swallows_pointer,
-        osc52_clipboard_channel, output_generation_advanced, output_wakeup_needs_paint,
-        pane_cursor_blinking_with, pane_snapshot_keys_match, parse_remote_command_batch,
-        paste_paths_into_target, paste_text_into_target, picker_context_menu,
-        picker_overlay_context_menu, picker_scroll_offset, production_source, rank_layouts,
-        rank_ssh_hosts, sanitize_native_window_title, sanitize_title, selected_ssh_target,
-        selection_kind, session_sweep_due, should_notify_input_rejection,
-        should_poll_remote_window, should_restore_session, should_reveal_after_renderer_init,
+        local_paste_within_limit, macos_effective_modifiers, macos_pty_modifiers,
+        modal_swallows_pointer, option_is_meta_for, osc52_clipboard_channel,
+        output_generation_advanced, output_wakeup_needs_paint, pane_cursor_blinking_with,
+        pane_snapshot_keys_match, parse_remote_command_batch, paste_paths_into_target,
+        paste_text_into_target, picker_context_menu, picker_overlay_context_menu,
+        picker_scroll_offset, production_source, rank_layouts, rank_ssh_hosts,
+        sanitize_native_window_title, sanitize_title, selected_ssh_target, selection_kind,
+        session_sweep_due, should_notify_input_rejection, should_poll_remote_window,
+        should_restore_session, should_reveal_after_renderer_init,
         should_reveal_before_first_surface_frame, ssh_picker_list, stage_applied_remote_probe,
         stage_output_generations_for_frame, stage_remote_targets, stamp_accepted_input,
         startup_inner_size_px, typeahead_match,
@@ -29600,6 +29706,262 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The exemption list, both halves of it.
+    ///
+    /// `macos-option-as-alt` decides whether Option composes text or acts as
+    /// Meta. That question only exists for keys macOS composes a character
+    /// from, and answering it for the rest is what made `⌥⌫` delete one
+    /// character. The negative half matters more than the positive one: adding
+    /// Enter, Space, Tab, Escape or any character key here is how kettle would
+    /// start printing escape text into a pane.
+    #[test]
+    fn only_keys_that_compose_no_text_treat_option_as_meta() {
+        use winit::keyboard::{Key, NamedKey};
+
+        for named in [
+            NamedKey::Backspace,
+            NamedKey::Delete,
+            NamedKey::ArrowUp,
+            NamedKey::ArrowDown,
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+            NamedKey::Home,
+            NamedKey::End,
+            NamedKey::PageUp,
+            NamedKey::PageDown,
+            NamedKey::Insert,
+            NamedKey::F1,
+            NamedKey::F12,
+        ] {
+            assert!(
+                option_is_meta_for(&Key::Named(named)),
+                "{named:?} composes no character, so Option must reach the encoder"
+            );
+        }
+
+        for named in [
+            NamedKey::Enter,
+            NamedKey::Space,
+            NamedKey::Tab,
+            NamedKey::Escape,
+        ] {
+            assert!(
+                !option_is_meta_for(&Key::Named(named)),
+                "{named:?} produces text; restoring ALT would ESC-prefix it"
+            );
+        }
+        for text in ["e", "a", "´", "8"] {
+            assert!(
+                !option_is_meta_for(&Key::Character(text.into())),
+                "character keys are exactly what the policy protects ({text})"
+            );
+        }
+
+        // The trap this list exists to avoid: winit reports the legacy C0
+        // `\x08` from `NamedKey::Backspace.to_text()`, so the tempting
+        // `to_text().is_none()` predicate excludes the very key at issue.
+        assert_eq!(NamedKey::Backspace.to_text(), Some("\u{8}"));
+    }
+
+    /// Restoring Option at the encode seam, across every policy and both sides.
+    #[test]
+    fn option_reaches_the_encoder_for_exempt_keys_under_every_policy() {
+        use kettle_config::MacosOptionAsAlt::{Both, Left, None as NoneAlt, Right};
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let raw = ModifiersState::ALT;
+        let backspace = Key::Named(NamedKey::Backspace);
+        let letter = Key::Character("e".into());
+
+        for (policy, left, right) in [
+            (NoneAlt, true, false),
+            (NoneAlt, false, true),
+            (Left, false, true),
+            (Right, true, false),
+            (Both, true, false),
+        ] {
+            let masked = macos_effective_modifiers(raw, policy, left, right);
+            // The whole bug, in one row: under the shipped default the mask
+            // has already dropped ALT before the encoder ever runs.
+            assert_eq!(
+                macos_pty_modifiers(masked, raw, &backspace),
+                ModifiersState::ALT,
+                "Option must be Meta for Backspace under {policy:?} (left={left}, right={right})"
+            );
+            // …and must still not be, for a key macOS composes from.
+            assert_eq!(
+                macos_pty_modifiers(masked, raw, &letter),
+                masked,
+                "character keys follow the policy under {policy:?}"
+            );
+        }
+
+        // No Option held: nothing to restore, whatever the key.
+        let none = ModifiersState::empty();
+        assert_eq!(macos_pty_modifiers(none, none, &backspace), none);
+        // Other modifiers are carried through untouched.
+        let shift = ModifiersState::SHIFT;
+        assert_eq!(
+            macos_pty_modifiers(shift, raw | ModifiersState::SHIFT, &backspace),
+            shift | ModifiersState::ALT
+        );
+    }
+
+    /// The edge case that motivated the allow-list: nothing kettle sends for a
+    /// composing chord may gain an ESC prefix or an xterm `CSI 27` form, because
+    /// a client that negotiated neither prints those as literal characters.
+    #[test]
+    fn option_composition_keys_never_gain_an_escape_prefix() {
+        use kettle_config::MacosOptionAsAlt;
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let raw = ModifiersState::ALT;
+        let masked = macos_effective_modifiers(raw, MacosOptionAsAlt::None, true, false);
+        assert!(!masked.alt_key(), "the shipped default masks bare Option");
+
+        let encode = |key: &Key, text: Option<&str>| {
+            let mods = macos_pty_modifiers(masked, raw, key);
+            crate::input::encode(key, text, mods, TermMode::empty())
+                .unwrap_or_else(|| panic!("no encoding for {key:?}"))
+        };
+
+        // Composing keys keep their unmodified bytes.
+        assert_eq!(encode(&Key::Named(NamedKey::Enter), None), b"\r".to_vec());
+        assert_eq!(encode(&Key::Named(NamedKey::Space), None), vec![0x20]);
+        assert_eq!(encode(&Key::Named(NamedKey::Tab), None), b"\t".to_vec());
+        assert_eq!(encode(&Key::Named(NamedKey::Escape), None), vec![0x1b]);
+        // A glyph macOS composed arrives as itself, not as ESC + glyph.
+        assert_eq!(
+            encode(&Key::Character("´".into()), Some("´")),
+            "´".as_bytes().to_vec()
+        );
+
+        // And the keys the fix is for do change.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Backspace), None),
+            vec![0x1b, 0x7f],
+            "Alt+Backspace is readline's backward-kill-word"
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Delete), None),
+            b"\x1b[3;3~".to_vec()
+        );
+        assert_eq!(
+            encode(&Key::Named(NamedKey::ArrowLeft), None),
+            b"\x1b[1;3D".to_vec()
+        );
+    }
+
+    /// The search bar's word-wise editing is bound to Option on macOS and is
+    /// gated only on Backspace, Delete and the horizontal arrows — every one of
+    /// them a key `option_is_meta_for` exempts. Reading the masked `ws.mods`
+    /// there left `delete_word_backward` and `move_left(by_word)` written,
+    /// tested, and unreachable on the shipped default.
+    #[test]
+    fn the_search_bar_word_modifier_reads_the_physical_option_key() {
+        let src = production_source();
+        let body = src
+            .split("fn search_key(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("search_key body");
+        let word_modifier = body
+            .split("let word_modifier =")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("search_key computes a word modifier");
+        assert!(
+            word_modifier.contains("option_physically_held(ws)"),
+            "macOS word editing must read the physical Option key, not the \
+             masked modifiers: {word_modifier}"
+        );
+        assert!(
+            !word_modifier.contains("ws.mods.alt_key()"),
+            "the masked value is exactly what made these motions dead"
+        );
+    }
+
+    /// `backspace-binding` must not swallow the word delete.
+    ///
+    /// That remap only ever replaces the UNMODIFIED encoding, and it tests the
+    /// encoded bytes rather than the modifier state — so restoring Option
+    /// cannot collide with it: `⌥⌫` is `ESC DEL`, which is not the plain form.
+    /// Worth pinning because restoring ALT also flips `uses_kitty_sequence`
+    /// true once a pane negotiates the Kitty protocol, which skips the remap
+    /// entirely; both routes have to reach the same word delete.
+    #[test]
+    fn a_backspace_binding_remap_still_leaves_the_word_delete_alone() {
+        use kettle_config::{BackspaceBinding, Config, MacosOptionAsAlt};
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let cfg = Config {
+            backspace_binding: BackspaceBinding::ControlH,
+            ..Config::default()
+        };
+        let key = Key::Named(NamedKey::Backspace);
+        let raw = ModifiersState::ALT;
+        let masked = macos_effective_modifiers(raw, MacosOptionAsAlt::None, true, false);
+        let mods = macos_pty_modifiers(masked, raw, &key);
+
+        // Legacy pane: ESC DEL survives the remap.
+        let legacy = crate::input::encode(&key, None, mods, TermMode::empty()).expect("legacy");
+        assert_eq!(
+            apply_bs_del_binding(&cfg, &key, legacy),
+            vec![0x1b, 0x7f],
+            "the remap replaces only the unmodified Backspace"
+        );
+        // …and an unmodified Backspace still honours the user's choice.
+        let plain = crate::input::encode(&key, None, ModifiersState::empty(), TermMode::empty())
+            .expect("plain");
+        assert_eq!(apply_bs_del_binding(&cfg, &key, plain), vec![0x08]);
+
+        // Kitty pane: the chord becomes CSI-u and carries the alt bit there.
+        let kitty = TermMode::KITTY_KEYBOARD_PROTOCOL | TermMode::DISAMBIGUATE_ESC_CODES;
+        let sequence = crate::input::encode_key_press(&key, mods, kitty).expect("kitty");
+        assert_eq!(
+            sequence,
+            b"\x1b[127;3u".to_vec(),
+            "alt+backspace in a Kitty pane is CSI 127;3u"
+        );
+    }
+
+    /// The PTY key path must read the key-aware modifiers, never `ws.mods`.
+    ///
+    /// `write_terminal_key_event` is the single funnel for all three encode
+    /// calls — focused pane, local broadcast, foreign-window broadcast — plus
+    /// the modified-Enter probe. Reverting any one of them to `ws.mods` puts
+    /// `⌥⌫` back to deleting a single character in that path alone, which is
+    /// exactly the kind of partial regression a byte test would miss.
+    #[test]
+    fn the_pty_key_path_never_reads_the_masked_modifiers() {
+        let src = production_source();
+        let body = src
+            .split("fn write_terminal_key_event(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("write_terminal_key_event body");
+
+        assert_eq!(
+            body.matches("pty_key_modifiers(ws, &event.logical_key)")
+                .count(),
+            1,
+            "the key-aware modifiers are computed exactly once, at the top"
+        );
+        assert!(
+            !body.contains("ws.mods"),
+            "every modifier read in this function must go through \
+             pty_key_modifiers, or Option stops reaching the encoder"
+        );
+        assert_eq!(
+            body.matches("encode_key_event_for_mode(").count(),
+            3,
+            "focused pane, local broadcast and foreign broadcast; a fourth \
+             encode site needs the same modifiers"
+        );
     }
 
     /// A modal question has to outrank the overlay that asked it. Rebinding a

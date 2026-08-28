@@ -6,6 +6,52 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Opt+Backspace` deletes a word again on macOS, and `Opt+Arrow` moves by
+  one.** `macos-option-as-alt` decides whether Option composes text (`⌥e` →
+  `´`) or acts as Meta. Kettle applied that decision to every key, so under the
+  shipped default (`none`) the Alt bit was stripped before the encoder ran and
+  `⌥⌫` arrived as a plain Backspace: one character per press. The `ESC DEL`
+  encoding was correct all along and simply never saw the modifier.
+
+  Option composes nothing from Backspace, Delete, an arrow, Home/End, Page
+  Up/Down, Insert or an F-key, so the policy no longer masks it for those. They
+  carry Alt on every setting and from either Option key, which is the line
+  kitty draws too. Keys that do produce text — Enter, Space, Tab, Escape and
+  every character key — are untouched, so `⌥e` still composes `´` rather than
+  sending `ESC ´`, and nothing gains a stray escape prefix.
+
+  The same mask had also made word editing in Kettle's own search bar
+  unreachable: `⌥⌫`, `⌥Delete` and `⌥←`/`⌥→` there now delete and move by word,
+  which is what that code was always written to do.
+
+  Verified byte-for-byte against the clients this is used with: zsh, Claude
+  Code and Codex CLI all delete the previous word on `ESC DEL` and clear the
+  line on `^U`, and tmux passes both through. Neovim is the exception and it is
+  not a Kettle one — it leaves `<M-BS>` unmapped, so `⌥⌫` does not word-delete
+  there in any terminal; `vim.keymap.set("i", "<M-BS>", "<C-w>")` closes it.
+  See [Terminal client compatibility](docs/TERMINAL-CLIENT-COMPATIBILITY.md).
+
+### Added
+
+- **`Cmd+Backspace` deletes to the start of the line on macOS.** Super has no
+  legacy terminal encoding at all, so the chord previously reached applications
+  as nothing, and no config could fix it: `backspace` was not a bindable
+  trigger and no action could send literal bytes. Both now exist. `backspace`
+  and `delete` (aliases `bs`, `del`) join the keybind grammar, and the new
+  `text:BYTES` action writes a literal byte string to the focused pane as
+  though typed — Ghostty's spelling, with `\n` `\r` `\t` `\e` `\a` `\b`
+  `\f` `\v` `\0` `\xHH` and `\\` escapes, a 256-byte cap, and `=` written
+  `\x3d` because a `keybind` line is split on its last `=`.
+
+  macOS ships `keybind = cmd+backspace = text:\x15`, the `^U` that Ghostty and
+  iTerm2's Natural Text Editing preset send. It is a binding rather than a key
+  encoding so that it works whatever the client negotiated; in Vim's normal
+  mode `^U` scrolls, so `keybind = cmd+backspace=unbind` gives the chord back.
+  `Cmd+Left`/`Cmd+Right` are documented as one-line opt-ins rather than
+  defaults, because `^A` silently edits the buffer in that same mode.
+
 ## [4.0.1] — 2026-08-25
 
 ### Fixed

@@ -154,6 +154,36 @@ while the same chord in a legacy pane sends nothing. The agent control plane
 follows the same rule — `send_keys` reports an error for a Super chord the
 target pane cannot encode rather than silently dropping the modifier.
 
+A keybinding is therefore the only way to give a Super chord meaning in a
+legacy pane, and macOS ships one: `Cmd+Backspace` is bound to `text:\x15`,
+the `^U` that deletes to the start of the line. A binding is deliberate here
+rather than an encoder fallback — it fires whatever the client negotiated,
+where a fallback would defer to the Kitty protocol and so go dead in exactly
+the TUIs that negotiate it. `keybind = cmd+backspace=unbind` gives the chord
+back to the application.
+
+Option is a separate question from Super, and `macos-option-as-alt` decides
+only half of it. The policy exists so `⌥e` can compose `´` instead of sending
+`ESC e`, which is a question about keys that produce text. Keys that compose
+no character — Backspace, Delete, the arrows, Home/End, Page Up/Down, Insert
+and the F-keys — always carry Alt to the encoder, on every setting and from
+either Option key, because there is no composition to protect: `⌥⌫` is
+`ESC DEL` and `⌥←`/`⌥→` are `CSI 1;3D`/`CSI 1;3C`. kitty draws the same line,
+and for the same reason.
+
+What the application does with `ESC DEL` is then its own business, and one
+client is worth naming. Neovim leaves `<M-BS>` unmapped, so `⌥⌫` does not
+delete a word there — in any terminal, since they all send this same sequence.
+Its mapped word delete is `<C-w>` (`i_CTRL-W`). One line closes the gap:
+
+```lua
+vim.keymap.set("i", "<M-BS>", "<C-w>")
+```
+
+`⌘⌫` needs nothing: `^U` is `i_CTRL-U` in insert mode, which deletes the
+entered characters on the line. In normal mode it scrolls instead, which is
+the trade the shipped binding makes.
+
 The negotiated `modifyOtherKeys` resource always starts at level zero. An
 application can select levels zero, one, or two with `CSI > 4 ; Pv m`, and
 `CSI ? 4 m` reports only that state as `CSI > 4 ; Pv m`. Omitting `Pv` restores

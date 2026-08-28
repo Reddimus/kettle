@@ -76,11 +76,15 @@ the active file and `kettle --check-config` to validate it.
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |
 | Zoom pane | `Ctrl+Shift+X` |
+| Delete word / line, macOS | `Opt+Backspace` or `Cmd+Backspace` |
 
 On Linux, `Alt+Arrow` moves only when a split exists in that
 direction. At an outer edge, the running program receives the chord. macOS
-keeps bare Option available for text entry unless `macos-option-as-alt` is on.
-macOS also provides `Cmd+T`, `Cmd+C/V`, `Cmd+F`, and `Cmd+,`.
+keeps bare Option available for text entry unless `macos-option-as-alt` is on
+— but only for keys that produce text, so `Opt+Backspace` deletes a word and
+`Opt+Arrow` moves by one on every setting, and `Cmd+Backspace` deletes to the
+start of the line. macOS also provides `Cmd+T`, `Cmd+C/V`, `Cmd+F`, and
+`Cmd+,`.
 
 Use `kettle --list-keybinds` for the effective map and
 `kettle --list-actions` for every bindable action.

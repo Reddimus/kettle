@@ -863,6 +863,13 @@ split-repro *ARGS:
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
+# Prove both backspace chords end to end: the text: action and, on macOS, the
+# Cmd+Backspace default; plus Option word-delete inside the search bar.
+# Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.
+[unix]
+line-edit-chords-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release line-edit-chords
+
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
 [unix]
