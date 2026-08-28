@@ -16840,6 +16840,145 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_line_edit_chords(kettle: str, root: Path) -> Path:
+    """The two backspace chords macOS users arrive with, end to end.
+
+    `Cmd+Backspace` reached applications as nothing: Super has no legacy
+    terminal encoding, and no config could claim the chord either, because
+    `backspace` was not a bindable trigger and no action sent literal bytes.
+    Both halves are driven here — the `text:` action on every platform through
+    `perform_action`, and the shipped macOS default through the same keybind
+    resolver the window key path uses.
+
+    `Opt+Backspace` in the search bar is the same root cause inside Kettle's own
+    chrome: `word_modifier` read the masked modifiers, so `delete_word_backward`
+    was written, tested and unreachable. The oracle is a query that matches only
+    if a whole word was deleted — one character short still finds nothing — and
+    it is read from `ui_geometry.search.has_match`, which reports match state
+    without exposing the private query.
+
+    What this canNOT reach is the mask itself. `send_keys` builds its modifiers
+    straight from the token and never consults `macos-option-as-alt`, so it
+    would deliver `ESC DEL` against the broken code too. The winit-to-`ws.mods`
+    link is covered by unit tests, a source census, and one manual key press.
+    """
+
+    out = root / f"line-edit-chords-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    darwin = platform.system() == "Darwin"
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "scrollback = 2000",
+                "window-width = 100",
+                "window-height = 30",
+                "search-case-sensitive = always",
+            ]
+        )
+        + "\n"
+    )
+
+    # The word delete has to be the difference between a match and no match:
+    # `SEEDWORD ZZZZ` finds nothing, and so does `SEEDWORD ZZZ` — only removing
+    # the whole word leaves `SEEDWORD `, which the seeded line carries.
+    seed = "KETTLEBSSEED"
+    seeded_line = f"{seed} marker"
+    typed = "KETTLEBSTYPED"
+    appended = "APPENDED"
+
+    def wait_for_match(live: LiveKettle, expected: bool, label: str) -> Dict[str, object]:
+        deadline = time.monotonic() + 12.0
+        last: Dict[str, object] = {}
+        while time.monotonic() < deadline:
+            last = live.json_ctl("ui_geometry")
+            search = last.get("search")
+            if isinstance(search, dict) and search.get("has_match") is expected:
+                return last
+            time.sleep(0.05)
+        raise SystemExit(
+            f"line-edit-chords smoke: {label}: expected has_match={expected}, "
+            f"got search={last.get('search')}"
+        )
+
+    analysis: Dict[str, object] = {"platform": platform.system()}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        # ---- 1. `text:` writes literal bytes to the focused pane ----
+        live.ctl("send_text", params={"text": f"echo {typed}"})
+        live.wait_for_text(typed)
+        dispatched = live.json_ctl("perform_action", {"action": f"text:{appended}"})
+        (out / "send-text.dispatch.json").write_text(json.dumps(dispatched, indent=2) + "\n")
+        live.wait_for_text(typed + appended)
+        analysis["send_text"] = dispatched
+
+        # ---- 2. Cmd+Backspace clears the line, where it is bound ----
+        binding = live.json_ctl(
+            "dispatch_keybind", {"logical": "backspace", "mods": "super"}
+        )
+        (out / "cmd-backspace.dispatch.json").write_text(json.dumps(binding, indent=2) + "\n")
+        analysis["cmd_backspace"] = binding
+        if darwin:
+            if binding.get("dispatched") is not True:
+                raise SystemExit(
+                    "line-edit-chords smoke: Cmd+Backspace resolved to nothing; "
+                    f"the macOS default is missing: {binding}"
+                )
+            if binding.get("action") != r'Send text "\x15"':
+                raise SystemExit(
+                    f"line-edit-chords smoke: Cmd+Backspace bound to {binding.get('action')!r}"
+                )
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                if typed not in screen_text(live.json_ctl("read_screen")):
+                    break
+                time.sleep(0.05)
+            else:
+                raise SystemExit(
+                    "line-edit-chords smoke: ^U did not clear the typed line"
+                )
+        else:
+            if binding.get("dispatched") is not False:
+                raise SystemExit(
+                    "line-edit-chords smoke: Cmd+Backspace is a macOS-only default "
+                    f"and must not resolve here: {binding}"
+                )
+            live.ctl("send_keys", params={"keys": ["ctrl+u"]})
+
+        # ---- 3. Option word-delete inside Kettle's own search bar ----
+        live.ctl("send_text", params={"text": f"printf '%s\\n' '{seeded_line}'\r"})
+        live.wait_for_text(seeded_line)
+        opened = live.json_ctl("dispatch_keybind", {"logical": "f", "mods": "ctrl+shift"})
+        if opened.get("action") != "StartSearch" or opened.get("dispatched") is not True:
+            raise SystemExit(f"line-edit-chords smoke: search did not open: {opened}")
+
+        query = f"{seed} ZZZZ"
+        applied = live.json_ctl("dispatch_ui_key", {"keys": list(query)})
+        if int(applied.get("keys", 0)) != len(query) or applied.get("open") is not True:
+            raise SystemExit(f"line-edit-chords smoke: query not fully applied: {applied}")
+        no_match = wait_for_match(live, False, "before the word delete")
+        (out / "search-no-match.geometry.json").write_text(json.dumps(no_match, indent=2) + "\n")
+
+        chord = "alt+backspace" if darwin else "ctrl+backspace"
+        deleted = live.json_ctl("dispatch_ui_key", {"keys": [chord]})
+        (out / "word-delete.dispatch.json").write_text(json.dumps(deleted, indent=2) + "\n")
+        matched = wait_for_match(live, True, f"after {chord}")
+        (out / "search-match.geometry.json").write_text(json.dumps(matched, indent=2) + "\n")
+        search_state = matched.get("search")
+        if isinstance(search_state, dict) and query in json.dumps(search_state):
+            raise SystemExit("line-edit-chords smoke: ui_geometry exposed the private query")
+        analysis["word_delete"] = {"chord": chord, "dispatch": deleted}
+
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def run_text_presentation(kettle: str, root: Path) -> Path:
     """A codepoint Unicode renders as text must not come from a colour face.
 
@@ -17454,6 +17593,7 @@ def main() -> int:
             "split-exit-resize",
             "text-presentation",
             "zoom-keybind",
+            "line-edit-chords",
             "underline",
             "agent-tui",
             "search-history",
@@ -17583,6 +17723,9 @@ def main() -> int:
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")
+    if args.case in ("line-edit-chords", "all"):
+        out = run_line_edit_chords(args.kettle, root)
+        print(f"line-edit-chords smoke: OK artifacts={out}")
     if args.case in ("underline", "all"):
         missing = missing_commands("git", "delta", "less")
         if missing:
