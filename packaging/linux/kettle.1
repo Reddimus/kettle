@@ -650,26 +650,6 @@ jump to previous OSC 133 prompt
 .TP
 .B Ctrl+Down
 jump to next OSC 133 prompt
-.SS Line editing (macOS)
-.TP
-.B Opt+Backspace
-delete the previous word
-.RB ( "ESC DEL" ,
-readline's
-.BR backward\-kill\-word ).
-Keys that compose no character always carry Alt to the terminal, whatever
-.B macos\-option\-as\-alt
-is set to, so
-.B Opt+Arrow
-moves word\-wise on every setting.
-.TP
-.B Cmd+Backspace
-delete to the start of the line
-.RB ( ^U ).
-Super has no legacy terminal encoding, so this is a shipped keybinding
-.RB ( "text:\\x15" )
-rather than a key encoding; remove it with
-.BR "keybind = cmd+backspace=unbind" .
 .SS Scrollback movement
 .TP
 .B Ctrl+Shift+Up/Down
