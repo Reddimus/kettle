@@ -29884,6 +29884,49 @@ mod tests {
         );
     }
 
+    /// `backspace-binding` must not swallow the word delete.
+    ///
+    /// That remap only ever replaces the UNMODIFIED encoding, and it tests the
+    /// encoded bytes rather than the modifier state — so restoring Option
+    /// cannot collide with it: `⌥⌫` is `ESC DEL`, which is not the plain form.
+    /// Worth pinning because restoring ALT also flips `uses_kitty_sequence`
+    /// true once a pane negotiates the Kitty protocol, which skips the remap
+    /// entirely; both routes have to reach the same word delete.
+    #[test]
+    fn a_backspace_binding_remap_still_leaves_the_word_delete_alone() {
+        use kettle_config::{BackspaceBinding, Config, MacosOptionAsAlt};
+        use kettle_core::TermMode;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let mut cfg = Config::default();
+        cfg.backspace_binding = BackspaceBinding::ControlH;
+        let key = Key::Named(NamedKey::Backspace);
+        let raw = ModifiersState::ALT;
+        let masked = macos_effective_modifiers(raw, MacosOptionAsAlt::None, true, false);
+        let mods = macos_pty_modifiers(masked, raw, &key);
+
+        // Legacy pane: ESC DEL survives the remap.
+        let legacy = crate::input::encode(&key, None, mods, TermMode::empty()).expect("legacy");
+        assert_eq!(
+            apply_bs_del_binding(&cfg, &key, legacy),
+            vec![0x1b, 0x7f],
+            "the remap replaces only the unmodified Backspace"
+        );
+        // …and an unmodified Backspace still honours the user's choice.
+        let plain = crate::input::encode(&key, None, ModifiersState::empty(), TermMode::empty())
+            .expect("plain");
+        assert_eq!(apply_bs_del_binding(&cfg, &key, plain), vec![0x08]);
+
+        // Kitty pane: the chord becomes CSI-u and carries the alt bit there.
+        let kitty = TermMode::KITTY_KEYBOARD_PROTOCOL | TermMode::DISAMBIGUATE_ESC_CODES;
+        let sequence = crate::input::encode_key_press(&key, mods, kitty).expect("kitty");
+        assert_eq!(
+            sequence,
+            b"\x1b[127;3u".to_vec(),
+            "alt+backspace in a Kitty pane is CSI 127;3u"
+        );
+    }
+
     /// The PTY key path must read the key-aware modifiers, never `ws.mods`.
     ///
     /// `write_terminal_key_event` is the single funnel for all three encode
