@@ -300,6 +300,24 @@ fn pty_key_modifiers(ws: &WindowState, key: &Key) -> ModifiersState {
     }
 }
 
+/// Whether Option is physically down, whatever `macos-option-as-alt` says.
+///
+/// The search bar binds its word-wise motions to Option on macOS and gates only
+/// Backspace, Delete and the horizontal arrows with them — every one a key
+/// `option_is_meta_for` exempts. So the composition policy has no say here
+/// either, and reading the masked `ws.mods` left `delete_word_backward` and
+/// `move_left(by_word)` written, tested and unreachable.
+fn option_physically_held(ws: &WindowState) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        ws.macos_raw_mods.alt_key()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ws.mods.alt_key()
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn set_macos_option_as_alt(window: &Window, policy: MacosOptionAsAlt) {
     use winit::platform::macos::{OptionAsAlt, WindowExtMacOS as _};
@@ -18496,9 +18514,19 @@ impl App {
         }
 
         let previous_mods = ws.mods;
+        #[cfg(target_os = "macos")]
+        let previous_raw_mods = ws.macos_raw_mods;
         let mut applied = 0usize;
         for (mods, key) in &parsed {
             ws.mods = *mods;
+            // The word-edit gates read the raw Option shadow rather than the
+            // masked value (`option_physically_held`), so a control-plane
+            // `alt+backspace` has to set both. Setting only `ws.mods` would let
+            // a live smoke pass against code that never restores Option.
+            #[cfg(target_os = "macos")]
+            {
+                ws.macos_raw_mods = *mods;
+            }
             // Mirror `winit`: `KeyEvent::text` is present for a character key
             // under every modifier except Control — Command included, which is
             // the exact case this whole change exists to handle. Suppressing
@@ -18528,6 +18556,10 @@ impl App {
             }
         }
         ws.mods = previous_mods;
+        #[cfg(target_os = "macos")]
+        {
+            ws.macos_raw_mods = previous_raw_mods;
+        }
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
@@ -20487,7 +20519,7 @@ impl App {
             ws.mods.control_key()
         };
         let word_modifier = if cfg!(target_os = "macos") {
-            ws.mods.alt_key()
+            option_physically_held(ws)
         } else {
             ws.mods.control_key()
         };
@@ -29806,6 +29838,35 @@ mod tests {
         assert_eq!(
             encode(&Key::Named(NamedKey::ArrowLeft), None),
             b"\x1b[1;3D".to_vec()
+        );
+    }
+
+    /// The search bar's word-wise editing is bound to Option on macOS and is
+    /// gated only on Backspace, Delete and the horizontal arrows — every one of
+    /// them a key `option_is_meta_for` exempts. Reading the masked `ws.mods`
+    /// there left `delete_word_backward` and `move_left(by_word)` written,
+    /// tested, and unreachable on the shipped default.
+    #[test]
+    fn the_search_bar_word_modifier_reads_the_physical_option_key() {
+        let src = production_source();
+        let body = src
+            .split("fn search_key(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("search_key body");
+        let word_modifier = body
+            .split("let word_modifier =")
+            .nth(1)
+            .and_then(|rest| rest.split(';').next())
+            .expect("search_key computes a word modifier");
+        assert!(
+            word_modifier.contains("option_physically_held(ws)"),
+            "macOS word editing must read the physical Option key, not the \
+             masked modifiers: {word_modifier}"
+        );
+        assert!(
+            !word_modifier.contains("ws.mods.alt_key()"),
+            "the masked value is exactly what made these motions dead"
         );
     }
 
