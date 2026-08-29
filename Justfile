@@ -379,11 +379,11 @@ gauntlet-full: gauntlet-strict full-native-gates
     @echo "This is not a PASS for native legs on other operating systems."
 
 [linux]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
