@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.1.0] — 2026-08-28
+
 ### Fixed
 
 - **`Opt+Backspace` deletes a word again on macOS, and `Opt+Arrow` moves by
