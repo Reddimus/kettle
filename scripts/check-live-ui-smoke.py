@@ -16959,7 +16959,12 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
             raise SystemExit(f"line-edit-chords smoke: search did not open: {opened}")
 
         query = f"{seed} ZZZZ"
-        applied = live.json_ctl("dispatch_ui_key", {"keys": list(query)})
+        # `parse_ui_key` splits a token on `+` and then trims it, so a bare
+        # " " token trims to the empty string and is rejected. The space bar
+        # has a name for exactly this reason. (`run_search_history` types a
+        # single-word query and never met it.)
+        keys = ["space" if c == " " else c for c in query]
+        applied = live.json_ctl("dispatch_ui_key", {"keys": keys})
         if int(applied.get("keys", 0)) != len(query) or applied.get("open") is not True:
             raise SystemExit(f"line-edit-chords smoke: query not fully applied: {applied}")
         no_match = wait_for_match(live, False, "before the word delete")
