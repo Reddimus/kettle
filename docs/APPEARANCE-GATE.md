@@ -5,6 +5,70 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 4.2.0 cut — 2026-09-02
+
+Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
+universal `kettle.app` built from the clean cut commit `c57b0328`, replicating
+`release.yml`'s `Build (macOS universal)` and `Package (macOS .app bundle)`
+steps exactly — both `--target` release builds, `lipo`,
+`scripts/compile-macos-app-icon.sh` through Xcode 26.6, and the PlistBuddy
+version patch. `lipo -archs` reports `x86_64 arm64` and
+`CFBundleShortVersionString` is `4.2.0`. The plist was patched through a copy,
+so the cut worktree stayed clean at that SHA; verified after the run.
+
+This release adds a macOS Dock context menu. It touches the application
+delegate and `NSApplication.windowsMenu`, but no rendering, material, window
+chrome or icon code — so the window and icon checks below are run as policy,
+while the Dock row is the one the diff actually puts at risk.
+
+Window frames were captured with `screencapture -l<windowid>`, which reads only
+kettle's own window layer. No full-screen capture was taken, so nothing outside
+kettle was recorded at any point.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| Default 86% opacity, native blur on | Zero clear pixels inside the opaque span on every sampled row. The titlebar material is a uniform `(33,34,36,255)` from four pixels inside the left end of the span to four pixels inside the right end, at both y=8 and y=16. The span narrows to `26..789` at y=0 and widens to `3..812` by y=16 — that is the corner radius itself, not a gap. |
+| Alpha on, blur off | Byte-identical measurements to the row above: uniform `(33,34,36,255)` to both corners, zero clear pixels. AppKit supplied its standard titlebar backdrop rather than exposing a clear desktop strip. |
+| Opaque surface, blur left on | Same uniform material to both corners, zero clear pixels, and no titlebar-only seam. |
+| Opaque surface, blur off | Identical. The active theme reaches both rounded top corners with no clear or mismatched strip. |
+| `borderless = true` | No titlebar; the span is the full `0..815` from y=0. Rows 0..30 are kettle's own tab bar; the first terminal row below it, sampled at y=60, is a uniform `(29,33,44,219)` across 810 of 816 pixels. Alpha 219 is the configured 86%, so the terminal remains visible through the documented sharp-alpha fallback instead of being covered by a material view. |
+| Full-screen round trip | `ui_geometry`'s `content` rect is byte-identical before and after: `{"height": 447.5, "width": 816.0, "x": 0.0, "y": 40.5}` → fullscreen `{"height": 2127.5, "width": 3456.0, ...}` → back to the original values exactly. |
+| Light theme at **startup** under a Dark system ([#251](https://github.com/Reddimus/kettle/issues/251)) | Measured through the accessibility API rather than by eye. Traffic lights occupy x=668..730 (close 668, minimize 691, full-screen 714, each 16 wide); the title element starts at **x=742**, width 69, value `~ — kettle`. The title therefore begins 12 px to the right of the last button and sits beside the cluster, not across it. This is the startup path, not the runtime toggle. |
+| NSWindow background follows a live palette change | Driven with `perform_action next_theme` and re-captured each time. The titlebar and content both read `(255,255,255,255)` on the light theme at startup and `(33,34,36,255)` after switching to a dark one, so the NSWindow background tracks the palette at runtime and not only at startup. |
+| **Dock context menu (new in this release)** | Read from the shipping bundle's own Dock tile through the accessibility API, selecting the tile by `AXIsApplicationRunning` so the pinned-but-not-running `kettle.app` tile cannot be mistaken for it. The menu enumerates `~ — kettle`, separator, `New Window`, `New Tab`, separator, `Options`, `Show All Windows`, `Hide`, `Hide Others`, `Quit`, `Force Quit`. Both the kettle-supplied rows and the AppKit window-title list are present; before this release the same enumeration returned only the system section. `just dock-menu-smoke` additionally clicks New Window and reads the window count 1 → 2 back over the control plane. |
+| Icon geometry | `AppIcon.icns` 256 px rendering: rim L21 R21 T23 B19, horizontal centre offset 0.0 px — the inset face is parallel to the system mask with clear rim space on every side. `Assets.car` carries one `AppIcon` set spanning 32, 64, 128, 256, 512 and 1024 px across 7 `Icon Image` renditions plus a MultiSized Image and dark/light vector assets, so Finder, the Dock item and the app switcher all draw from one compiled asset and cannot disagree. |
+
+### Not run
+
+**Live blur compositing.** `screencapture -l<windowid>` reads kettle's own layer
+and does not composite what is behind the window, so the blur-on and blur-off
+scenarios produce identical bytes by construction — directly visible above,
+where the default-86-blur-on and alpha-on-blur-off rows are byte-for-byte the
+same. What the measurements establish is that no clear strip or seam exists and
+that the material reaches both corners in every configuration, not that the blur
+is visibly compositing. The 4.0.1 run has the working method for that question
+(a second kettle instance as an opaque backdrop, judged from a composited
+screenshot); it was not repeated here because no rendering code changed.
+
+**Toggling Reduce Transparency live.** Not attempted. It is a system
+accessibility setting, and this session does not change system settings. The
+portable policy tests still cover the Reduce Transparency state; what stays
+unproven is that the material disappears and returns *live*.
+
+**Dock magnification, and the running / closed-but-pinned Dock icon
+appearance.** Magnification renders only under the pointer, and the Dock is
+still filtered out of automation screen captures at the allowlist level, so no
+image of the drawn tile could be obtained. The 256 px asset the Dock draws was
+measured directly above. Note the distinction from the row that did pass: the
+Dock *menu* is reachable through accessibility and was read from the live tile;
+the Dock *icon pixels* remain uncapturable.
+
+**The app switcher.** Cmd-Tab must be held for its window to stay up. The icon
+it shows comes from the same `Assets.car` measured above, which contains a
+single AppIcon set for every size.
+
 ## 4.1.0 cut — 2026-08-28
 
 Host: macOS 26.6.2, Apple silicon, system appearance **Dark**. Bundle: a
