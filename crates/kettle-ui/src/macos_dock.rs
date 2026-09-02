@@ -204,6 +204,17 @@ mod imp {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
+
+        // The open-window title list, gated purely on this property being
+        // non-nil. AppKit fills and maintains the menu itself, and it is never
+        // installed in the menu bar, so no chord is claimed and the menu bar is
+        // unchanged; winit's later `setMainMenu:` does not clear it. Installed
+        // before the delegate work below because the two are independent — a
+        // future winit that supplies its own dock menu must not silently take
+        // the window list down with it.
+        let windows_menu = NSMenu::new(mtm);
+        unsafe { app.setWindowsMenu(Some(&windows_menu)) };
+
         let Some(delegate) = (unsafe { app.delegate() }) else {
             log::warn!("dock menu: no application delegate to extend");
             return;
@@ -280,13 +291,6 @@ mod imp {
         // ivars so the instance size is unchanged, and it overrides nothing.
         let previous = unsafe { AnyObject::set_class(delegate_obj, subclass) };
         debug_assert_eq!(previous.name(), delegate_class.name());
-
-        // The open-window title list. Gated purely on this property being
-        // non-nil; AppKit populates and maintains the menu itself, and it is
-        // never installed in the menu bar, so no chord is claimed and the menu
-        // bar is unchanged. winit's later `setMainMenu:` does not clear it.
-        let windows_menu = NSMenu::new(mtm);
-        unsafe { app.setWindowsMenu(Some(&windows_menu)) };
 
         log::debug!("dock menu: installed on {}", delegate_obj.class().name());
     }
@@ -365,6 +369,32 @@ mod tests {
         assert!(
             !preceding.contains("#[cfg("),
             "the Dock install call site must not be platform-gated;              keep the cfg inside macos_dock::imp"
+        );
+    }
+
+    /// The window list and the Dock menu are separate AppKit features that
+    /// happen to share one install function. Every early return past this
+    /// point belongs to the delegate work, so the window list must be wired
+    /// first or a future winit with its own `applicationDockMenu:` would take
+    /// the window titles away as a side effect.
+    #[test]
+    fn the_window_list_is_installed_before_the_delegate_work() {
+        let source = kettle_test_support::production_source(include_str!("macos_dock.rs"));
+        let install = source
+            .split("pub(super) fn install(")
+            .nth(1)
+            .and_then(|body| body.split("\n#[cfg(").next())
+            .expect("install body");
+        let windows_menu = install
+            .find("app.setWindowsMenu(")
+            .expect("install wires the windows menu");
+        let swizzle = install
+            .find("AnyObject::set_class(")
+            .expect("install swizzles the delegate");
+        assert!(
+            windows_menu < swizzle,
+            "setWindowsMenu must run before the delegate swizzle, so the \
+             Dock-menu early returns cannot disable the window list"
         );
     }
 
