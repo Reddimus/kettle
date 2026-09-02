@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.2.0] — 2026-09-02
+
 ### Added
 
 - **A macOS Dock menu: right-click kettle's Dock icon for New Window and New
