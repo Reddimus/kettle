@@ -38,6 +38,8 @@ mod ctl_server;
 mod gpu_diagnostics;
 mod input;
 mod lua;
+// macOS Dock context menu (right-click the Dock icon). No-op elsewhere.
+mod macos_dock;
 mod modal_input;
 mod mux;
 mod native_material;
