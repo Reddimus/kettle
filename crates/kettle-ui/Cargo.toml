@@ -174,7 +174,7 @@ objc2-06 = { package = "objc2", version = "0.6" }
 # titlebar background with Kettle's palette. The application icon is compiled
 # into the bundle by Xcode's asset pipeline, so runtime AppKit icon mutation is
 # deliberately not enabled here.
-objc2-app-kit = { version = "0.2", features = ["NSAccessibility", "NSColor", "NSGraphics", "NSLayoutAnchor", "NSLayoutConstraint", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.2", features = ["NSAccessibility", "NSApplication", "NSColor", "NSGraphics", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
 objc2-foundation = { version = "0.2", features = ["block2", "NSNotification", "NSOperation", "NSString", "NSThread"] }
 objc2-core-foundation-03 = { package = "objc2-core-foundation", version = "0.3.2" }
 objc2-core-graphics-03 = { package = "objc2-core-graphics", version = "0.3.2" }

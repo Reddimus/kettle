@@ -6,6 +6,43 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **A macOS Dock menu: right-click kettle's Dock icon for New Window and New
+  Tab, above the list of open windows.** The menu previously showed only what
+  macOS supplies on its own — Options, Show All Windows, Hide, Quit — with no
+  way to open a window and not even the window-title list nearly every Mac app
+  has.
+
+  Two independent causes. Every row above the system section comes from
+  `applicationDockMenu:`, an optional `NSApplicationDelegate` method; there is
+  no `NSApplication.dockMenu` property, and the Info.plist route needs a
+  compiled nib. winit owns the application delegate, implements exactly two
+  methods, and neither is that one — so kettle, which had no delegate code at
+  all, contributed nothing. Separately, the open-window list is not free for
+  apps with ordinary `NSWindow`s: it is gated on `NSApplication.windowsMenu`
+  being non-nil, which winit never sets.
+
+  kettle cannot install a delegate of its own. winit's `ApplicationDelegate::get`
+  panics on any other delegate object and runs from the swizzled `sendEvent:`
+  and both run-loop observers, so a replacement or forwarding delegate dies
+  within milliseconds. The fix builds a runtime subclass of winit's own
+  delegate class carrying just `applicationDockMenu:` and isa-swizzles the live
+  delegate onto it: a true subclass, no added ivars so the instance size is
+  unchanged, nothing overridden, and winit's `isKindOfClass:` check keeps
+  passing. Both rows map onto actions kettle already had, so no new action
+  exists and the command palette is unaffected. Choosing a row also activates
+  the app, without which the new window opened behind whatever was frontmost.
+
+  Drift guards pin the parts that would rot silently: the install call site
+  must stay free of `#[cfg]`, both platform arms of the module must exist, the
+  AppKit menu features must be declared rather than inherited from winit
+  through Cargo feature unification, and the winit version pin is held because
+  the subclass depends on a private class name that is not public API. A new
+  `just dock-menu-smoke` drives the real Dock through accessibility and clicks
+  New Window; the manual right-click is recorded in the appearance gate,
+  because the Dock is filtered out of automation screenshots.
+
 ## [4.1.0] — 2026-08-28
 
 ### Fixed

@@ -58,6 +58,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
 | Broadcast / group input | ✅ `Super+G` (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
 | **Right-click context menu** | ✅ floating panel, 8 entries (v1.3.0/v1.3.2) | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
+| **macOS Dock menu** | ✅ New Window + New Tab + open-window list | ✅ | ✅ New OS Window | ✅ | — | ⛔ (open since 2022) |
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
@@ -306,8 +307,12 @@ Future → Done since the v1.0 cut of this matrix"):
 - **Persistent in-terminal annotations** (iTerm2 — distinct from
   the v1.4.0 screenshot caption). Scrollback-position metadata +
   sticky-note overlay + search-jump-to. L effort.
-- **Native macOS menu bar**. Needs macOS to test interactively;
-  a separate effort once a maintainer with macOS commits to drive it.
+- **Native macOS menu bar** (the menu bar only; the Dock menu shipped
+  separately). It is `setMainMenu` and never touches the application
+  delegate, so it shares nothing with the Dock work, and it carries a hazard
+  the Dock menu does not: AppKit consumes a menu's Cmd key equivalents before
+  they reach the window, so every chord a main menu claims stops reaching the
+  PTY.
 - **Windows MSI installer.** Needs a Windows code-signing certificate; not
   doable from the public CI matrix. The macOS half is now implemented: official
   tags use the protected signing environment to Developer ID sign, notarize,

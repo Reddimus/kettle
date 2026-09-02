@@ -16840,6 +16840,236 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+DOCK_MENU_ROWS = ("New Window", "New Tab")
+
+
+def _dock_osascript(out: Path, name: str, body: str) -> str:
+    """Run one AppleScript in the Aqua session and return its stdout.
+
+    Claude Code and CI shells sit in launchd's `Background` bootstrap, which
+    cannot reach the window server; `launchctl asuser` crosses into `Aqua`
+    without needing root. The script is kept as an artifact so a failed run can
+    be replayed by hand.
+    """
+
+    path = out / f"{name}.applescript"
+    path.write_text(body)
+    proc = subprocess.run(
+        ["launchctl", "asuser", str(os.getuid()), "osascript", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    (out / f"{name}.stdout").write_text(proc.stdout)
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"dock-menu smoke: {name} failed ({proc.returncode}): {proc.stderr.strip()}"
+        )
+    return proc.stdout.strip()
+
+
+# Selects the Dock tile by whether its application is actually running, never by
+# name or index. A pinned-but-not-running kettle.app owns a second tile with the
+# same name, and Dock indices shift as apps come and go.
+_RUNNING_KETTLE_TILE = """
+tell application "System Events"
+  tell process "Dock"
+    set target to missing value
+    repeat with tile_ref in (every UI element of list 1 whose name is "kettle")
+      try
+        if (value of attribute "AXIsApplicationRunning" of tile_ref) is true then
+          set target to tile_ref
+        end if
+      end try
+    end repeat
+    if target is missing value then error "no running kettle Dock tile"
+"""
+
+
+def _dock_dismiss(out: Path) -> None:
+    with contextlib.suppress(BaseException):
+        _dock_osascript(
+            out,
+            "dismiss",
+            'tell application "System Events" to key code 53\n',
+        )
+
+
+def run_dock_menu(kettle: str, root: Path) -> Path:
+    """The macOS Dock context menu, end to end through the real Dock.
+
+    Right-clicking kettle's Dock icon used to show only what macOS supplies:
+    Options, Show All Windows, Hide, Quit. Rows above those come from
+    `applicationDockMenu:`, an optional `NSApplicationDelegate` method that
+    winit does not implement and kettle had no delegate code to add. The open
+    window list is separately gated on `NSApplication.windowsMenu`, which winit
+    never sets, so that was missing too.
+
+    Both halves are asserted here against the live Dock, plus the effect: this
+    clicks New Window and reads the window count back through the control
+    plane. Screenshots deliberately play no part — `docs/APPEARANCE-GATE.md`
+    records that the Dock is filtered out of automation captures at the
+    allowlist level. Accessibility enumeration is a different surface and does
+    reach it, though it returns empty often enough to need the retry below; an
+    empty enumeration is a failure, never a pass.
+    """
+
+    if platform.system() != "Darwin":
+        raise SystemExit("dock-menu smoke: cannot run (macOS only)")
+
+    out = root / f"dock-menu-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "window-width = 90",
+                "window-height = 24",
+            ]
+        )
+        + "\n"
+    )
+
+    def running_kettles() -> List[str]:
+        found = subprocess.run(
+            ["pgrep", "-x", "kettle"], capture_output=True, text=True
+        )
+        return [line for line in found.stdout.split() if line]
+
+    # Two live kettles own two identically named tiles and the running-app test
+    # can no longer tell them apart, so refuse rather than risk driving the
+    # wrong one.
+    already = running_kettles()
+    if already:
+        raise SystemExit(
+            "dock-menu smoke: cannot run (another kettle is already running: "
+            f"{', '.join(already)}). The Dock tile would be ambiguous."
+        )
+
+    analysis: Dict[str, object] = {"platform": platform.system()}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        live_pids = running_kettles()
+        if len(live_pids) != 1:
+            raise SystemExit(
+                f"dock-menu smoke: expected exactly one kettle, saw {live_pids}"
+            )
+
+        before = live.json_ctl("get_state")
+        (out / "state.before.json").write_text(json.dumps(before, indent=2) + "\n")
+        if before.get("windows") != 1:
+            raise SystemExit(
+                f"dock-menu smoke: expected one window at startup, got {before!r}"
+            )
+
+        # ---- 1. the Dock menu carries kettle's rows and the window list ----
+        rows: List[str] = []
+        for attempt in range(6):
+            listing = _dock_osascript(
+                out,
+                f"enumerate-{attempt}",
+                _RUNNING_KETTLE_TILE
+                + """
+    perform action "AXShowMenu" of target
+    delay 1.2
+    set collected to {}
+    repeat with menu_ref in (menus of target)
+      repeat with menu_entry in (menu items of menu_ref)
+        set end of collected to (name of menu_entry)
+      end repeat
+    end repeat
+    key code 53
+    set AppleScript's text item delimiters to linefeed
+    return collected as text
+  end tell
+end tell
+""",
+            )
+            rows = [line.strip() for line in listing.splitlines() if line.strip()]
+            if all(row in rows for row in DOCK_MENU_ROWS):
+                break
+            time.sleep(1.0)
+        analysis["rows"] = rows
+        (out / "rows.json").write_text(json.dumps(rows, indent=2) + "\n")
+
+        if not rows:
+            raise SystemExit(
+                "dock-menu smoke: the Dock menu enumerated empty after 6 tries; "
+                "an empty accessibility read is a failure, not a pass"
+            )
+        missing_rows = [row for row in DOCK_MENU_ROWS if row not in rows]
+        if missing_rows:
+            raise SystemExit(
+                f"dock-menu smoke: {missing_rows} absent from the Dock menu; "
+                f"applicationDockMenu: is not installed. Saw: {rows}"
+            )
+        # The window list is AppKit's, gated on a non-nil `windowsMenu`. It sits
+        # above kettle's own rows, so anything before "New Window" is a title.
+        if rows.index(DOCK_MENU_ROWS[0]) == 0:
+            raise SystemExit(
+                "dock-menu smoke: no open-window title above the kettle rows; "
+                f"NSApp.windowsMenu is nil. Saw: {rows}"
+            )
+
+        # ---- 2. choosing New Window actually opens one ----
+        # Re-shown menus populate slower than the first, so this retries the
+        # same way the enumeration does rather than treating one empty read as
+        # a missing row.
+        clicked = ""
+        for attempt in range(6):
+            clicked = _dock_osascript(
+                out,
+                f"click-new-window-{attempt}",
+                _RUNNING_KETTLE_TILE
+                + """
+    perform action "AXShowMenu" of target
+    delay 1.5
+    repeat with menu_ref in (menus of target)
+      repeat with menu_entry in (menu items of menu_ref)
+        if name of menu_entry is "New Window" then
+          click menu_entry
+          return "clicked"
+        end if
+      end repeat
+    end repeat
+    key code 53
+    return "not-found"
+  end tell
+end tell
+""",
+            )
+            if clicked == "clicked":
+                break
+            time.sleep(1.0)
+        if clicked != "clicked":
+            _dock_dismiss(out)
+            raise SystemExit(
+                "dock-menu smoke: could not click New Window after 6 tries; "
+                f"last result {clicked!r} (it enumerated as {rows})"
+            )
+
+        deadline = time.monotonic() + 12.0
+        after: Dict[str, object] = {}
+        while time.monotonic() < deadline:
+            after = live.json_ctl("get_state")
+            if after.get("windows") == 2:
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit(
+                f"dock-menu smoke: New Window did not open a window: {after!r}"
+            )
+        (out / "state.after.json").write_text(json.dumps(after, indent=2) + "\n")
+        analysis["windows"] = [before.get("windows"), after.get("windows")]
+
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def run_line_edit_chords(kettle: str, root: Path) -> Path:
     """The two backspace chords macOS users arrive with, end to end.
 
@@ -17599,6 +17829,7 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "dock-menu",
             "underline",
             "agent-tui",
             "search-history",
@@ -17731,6 +17962,11 @@ def main() -> int:
     if args.case in ("line-edit-chords", "all"):
         out = run_line_edit_chords(args.kettle, root)
         print(f"line-edit-chords smoke: OK artifacts={out}")
+    # macOS-only and driven through the real Dock via accessibility, so it is
+    # deliberately out of "all".
+    if args.case == "dock-menu":
+        out = run_dock_menu(args.kettle, root)
+        print(f"dock-menu smoke: OK artifacts={out}")
     if args.case in ("underline", "all"):
         missing = missing_commands("git", "delta", "less")
         if missing:

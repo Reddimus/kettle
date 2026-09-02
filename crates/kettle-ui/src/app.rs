@@ -1250,6 +1250,12 @@ pub enum UserEvent {
     /// The recurring in-session update timer fired; re-run the due check with
     /// the current config so a long-lived window keeps itself current.
     UpdateCheckTick,
+    /// A row in the macOS Dock context menu was chosen. AppKit delivers that on
+    /// the main thread but outside winit's dispatch, with no `ActiveEventLoop`
+    /// and no `&mut App`, so it is re-serialized through the event-loop proxy
+    /// exactly as `AccessibilityAction` is.
+    #[cfg(target_os = "macos")]
+    DockCommand(crate::macos_dock::DockCommand),
 }
 
 /// Decode kettle's embedded PNG into a winit window icon for the
@@ -6547,6 +6553,9 @@ impl App {
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
+        // `build` is what registers and installs winit's application delegate,
+        // so the Dock menu can only be grafted on once it has returned.
+        crate::macos_dock::install(proxy.clone());
         let activation = startup.activation.take().and_then(|primary| {
             match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
                 Ok(inbox) => Some(inbox),
@@ -22967,6 +22976,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.user_event_inner(&mut ws, el, UserEvent::RemoteCommand);
                 self.finish_window_dispatch(el, seq, ws);
             }
+            // A Dock row acts on the focused window: NewWindow opens a
+            // sibling of it and NewTab adds to it. Explicit rather than left to
+            // the wildcard below so the no-window case is deliberate — kettle
+            // exits once the last window closes, so an empty map means the
+            // process is already on its way out and the row has nothing to do.
+            #[cfg(target_os = "macos")]
+            UserEvent::DockCommand(command) => {
+                let seq = self.focused_seq;
+                let Some(mut ws) = self.windows.remove(&seq) else {
+                    log::debug!("dock menu: {command:?} arrived with no window to act on");
+                    return;
+                };
+                self.user_event_inner(&mut ws, el, UserEvent::DockCommand(command));
+                self.finish_window_dispatch(el, seq, ws);
+            }
             // Ctl / remote / update-banner events act on the focused window.
             _ => {
                 let seq = self.focused_seq;
@@ -25970,6 +25994,13 @@ impl App {
                     self.cfg.update_policy,
                     self.cfg.update_check_interval_hours,
                 );
+            }
+            // Every Dock row maps onto an action kettle already has, so this
+            // reuses the keybind path wholesale — including NewWindow's
+            // fall-back to a new tab when a window cannot be created.
+            #[cfg(target_os = "macos")]
+            UserEvent::DockCommand(command) => {
+                self.handle_action(ws, command.action(), _el);
             }
         }
     }

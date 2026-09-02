@@ -383,7 +383,7 @@ full-native-gates: icons-check-required package-templates update-manifest-test r
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -869,6 +869,15 @@ zoom-keybind-smoke:
 [unix]
 line-edit-chords-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release line-edit-chords
+
+# Prove the macOS Dock context menu end to end through the real Dock: the
+# New Window / New Tab rows and the open-window title list are read back with
+# accessibility, then New Window is clicked and the window count checked over
+# the control plane. Needs an unlocked Aqua session, and refuses to run while
+# another kettle is up (two instances own two identically named Dock tiles).
+[macos]
+dock-menu-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release dock-menu
 
 # Reproduce underline scrolling with git diff | delta under repeated j/k input.
 # Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.

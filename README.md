@@ -54,6 +54,7 @@ the active file and `kettle --check-config` to validate it.
 ## Highlights
 
 * Tabs, splits, multiple windows, pane movement, and broadcast input
+* A macOS Dock menu with New Window, New Tab, and your open windows
 * GPU rendering, bounded scrollback, search, and inline image protocols
 * An IDE style completion card driven by the shell
 * File drop, copied media paths, and private image or video previews
