@@ -51,7 +51,9 @@ unrelated fixes.
 * Add persistent in-terminal annotations with scrollback-stable positions.
 * Add CPU and memory widgets to the status bar without polling on the render
   path.
-* Add a native macOS menu bar.
+* Add a native macOS menu bar. The Dock context menu is done and shares no
+  code with this: the menu bar is `setMainMenu`, and every Cmd chord it
+  claims stops reaching the PTY.
 
 ## Packaging and distribution
 

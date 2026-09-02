@@ -1625,6 +1625,26 @@ was a shell, Codex, or another TUI, while the shell keeps the check
 deterministic and credential-independent. Commands are typed literally and
 submitted with `send_keys enter`; a raw `\n` is not an Enter key on ConPTY
 and would leave the Windows child alive without testing the reap path.
+#### macOS Dock menu
+
+`just dock-menu-smoke` drives the real Dock. It reads the menu back through
+accessibility, requires the New Window and New Tab rows plus at least one
+open-window title above them, then clicks New Window and requires the window
+count to reach two over the control plane. Screenshots play no part: the Dock
+is filtered out of automation captures at the allowlist level, which is why
+five release runs recorded in `APPEARANCE-GATE.md` could not judge the Dock
+from a screen capture. Accessibility enumeration is a different surface and
+does reach it, though it returns empty often enough that both phases retry;
+an empty read fails rather than passing. The tile is selected by
+`AXIsApplicationRunning`, never by name or index, because a
+pinned-but-not-running `kettle.app` owns a second identically named tile and
+Dock indices shift as apps come and go; two *running* kettles would defeat
+even that, so the smoke refuses to start while another kettle is up. It needs
+an unlocked Aqua session, so it is macOS-only, excluded from `all`, wired into
+the macOS `full-native-gates`, and never a required CI check. The menu model,
+the command-to-action mapping, and the platform split carry portable unit
+coverage that runs on every target.
+
 #### Selection drag at pane edges
 
 `just selection-autoscroll-smoke` uses
