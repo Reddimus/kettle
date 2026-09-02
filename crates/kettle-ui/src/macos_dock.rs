@@ -237,7 +237,19 @@ mod imp {
         });
 
         let subclass = match AnyClass::get(DELEGATE_SUBCLASS) {
-            Some(existing) => existing,
+            // Objective-C class names are process-global. A class this
+            // function did not create could carry a different superclass,
+            // instance size or method table, and `set_class` would then be
+            // undefined behavior rather than a no-op. `install` runs exactly
+            // once per process, so reaching this arm means something else
+            // claimed the name: leave the delegate alone.
+            Some(_) => {
+                log::warn!(
+                    "dock menu: a class named {DELEGATE_SUBCLASS} is already \
+                     registered and was not created here; not swizzling"
+                );
+                return;
+            }
             None => {
                 let Some(mut builder) = ClassBuilder::new(DELEGATE_SUBCLASS, delegate_class) else {
                     log::warn!("dock menu: could not allocate {DELEGATE_SUBCLASS}");
@@ -378,6 +390,10 @@ mod tests {
     /// winit's public API. A version bump has to be reviewed against
     /// `macos_dock::imp::install` — in particular the already-implements check,
     /// which defers to winit if it ever grows its own dock menu.
+    ///
+    /// The manifest requirement is a caret, so it alone would let an ordinary
+    /// `cargo update` move to another 0.30.x without review. The lockfile is
+    /// what actually gets compiled, so that is what this pins.
     #[test]
     fn dock_menu_pins_the_winit_version_it_subclasses() {
         let manifest = include_str!("../Cargo.toml");
@@ -385,6 +401,18 @@ mod tests {
             manifest.contains("winit = { version = \"0.30.13\""),
             "the Dock menu subclasses winit's private application delegate; \
              re-verify macos_dock::imp::install before changing this pin"
+        );
+        let lock = include_str!("../../../Cargo.lock");
+        let resolved = lock
+            .split("name = \"winit\"\nversion = \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("Cargo.lock resolves winit");
+        assert_eq!(
+            resolved, "0.30.13",
+            "winit resolved to {resolved}, but the Dock menu subclasses its \
+             private WinitApplicationDelegate — re-verify \
+             macos_dock::imp::install against the new version before bumping"
         );
     }
 
