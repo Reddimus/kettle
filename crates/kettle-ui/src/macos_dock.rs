@@ -388,13 +388,15 @@ mod tests {
         let windows_menu = install
             .find("app.setWindowsMenu(")
             .expect("install wires the windows menu");
-        let swizzle = install
-            .find("AnyObject::set_class(")
-            .expect("install swizzles the delegate");
+        let delegate = install
+            .find("app.delegate()")
+            .expect("install reads the application delegate");
         assert!(
-            windows_menu < swizzle,
-            "setWindowsMenu must run before the delegate swizzle, so the \
-             Dock-menu early returns cannot disable the window list"
+            windows_menu < delegate,
+            "setWindowsMenu must run before the delegate is even fetched — \
+             anchoring on the swizzle instead would let it slip below the \
+             `applicationDockMenu:` early return and silently disable the \
+             window list again"
         );
     }
 
@@ -433,6 +435,16 @@ mod tests {
              re-verify macos_dock::imp::install before changing this pin"
         );
         let lock = include_str!("../../../Cargo.lock");
+        // Cargo can resolve two semver-incompatible winits at once, and the
+        // lock lists them in version order — so reading the first entry could
+        // report an old 0.30.13 pulled in by something else while kettle-ui
+        // built against a newer one.
+        assert_eq!(
+            lock.matches("name = \"winit\"\n").count(),
+            1,
+            "Cargo.lock resolves more than one winit; this guard cannot tell \
+             which one kettle-ui subclasses"
+        );
         let resolved = lock
             .split("name = \"winit\"\nversion = \"")
             .nth(1)
