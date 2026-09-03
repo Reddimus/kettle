@@ -1217,7 +1217,7 @@ fn main() -> anyhow::Result<()> {
         let path = resolve_config_path(&cli).ok_or_else(|| {
             anyhow::anyhow!("could not resolve a config path (no HOME / XDG / APPDATA?)")
         })?;
-        match write_default_config(&path)? {
+        match write_default_config(&path, resolved_config_trust(&cli))? {
             DefaultConfigWrite::Written => {
                 println!("Wrote a default config to {}.", path.display());
                 println!(
@@ -2094,7 +2094,14 @@ enum DefaultConfigWrite {
 /// while the message still promised we refuse to clobber. `create_new` asks the
 /// OS to make "does not already exist" and "this is the file I wrote" one
 /// atomic decision, and refuses to follow a symlink.
-fn write_default_config(path: &std::path::Path) -> anyhow::Result<DefaultConfigWrite> {
+///
+/// Implicit default and profile paths use Kettle's private-state creator.
+/// Explicit `--config` paths use the user-selected-file creator so shared and
+/// synced parent directories remain supported. Both create the leaf owner-only.
+fn write_default_config(
+    path: &std::path::Path,
+    trust: kettle_config::ConfigTrust,
+) -> anyhow::Result<DefaultConfigWrite> {
     if let Some(dir) = path.parent() {
         // Private from creation: `--write-default-config` is often the very
         // first thing to make `~/.config/kettle`, so it decides the mode every
@@ -2103,31 +2110,43 @@ fn write_default_config(path: &std::path::Path) -> anyhow::Result<DefaultConfigW
             anyhow::anyhow!("could not create config directory {}: {e}", dir.display())
         })?;
     }
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let write = |file: &mut dyn std::io::Write| {
+        file.write_all(include_str!("../../../docs/kettle.example.config").as_bytes())
+            .and_then(|()| file.flush())
+            .map_err(|e| anyhow::anyhow!("could not write config {}: {e}", path.display()))
+    };
+    let create_error = |e: std::io::Error| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists || path.symlink_metadata().is_ok() {
+            Ok(DefaultConfigWrite::AlreadyPresent)
+        } else {
+            Err(anyhow::anyhow!(
+                "could not write config {}: {e}",
+                path.display()
+            ))
+        }
+    };
+
+    if trust == kettle_config::ConfigTrust::ExplicitPath {
+        return match kettle_state::create_user_selected_file_new(path) {
+            Ok(mut file) => {
+                write(&mut file)?;
+                drop(file.persist());
+                Ok(DefaultConfigWrite::Written)
+            }
+            Err(e) => create_error(e),
+        };
+    }
+
+    match kettle_state::create_private_file_new(path) {
         Ok(mut file) => {
-            use std::io::Write as _;
-            file.write_all(include_str!("../../../docs/kettle.example.config").as_bytes())
-                .and_then(|()| file.flush())
-                .map_err(|e| anyhow::anyhow!("could not write config {}: {e}", path.display()))?;
+            write(&mut file)?;
             Ok(DefaultConfigWrite::Written)
         }
         // A directory at the config path is also "something is already here,
         // leave it alone" — but Windows reports it as a permission error rather
         // than AlreadyExists, so testing only for the latter turned a friendly
         // exit 0 into `Access is denied` and exit 1.
-        Err(e)
-            if e.kind() == std::io::ErrorKind::AlreadyExists || path.symlink_metadata().is_ok() =>
-        {
-            Ok(DefaultConfigWrite::AlreadyPresent)
-        }
-        Err(e) => Err(anyhow::anyhow!(
-            "could not write config {}: {e}",
-            path.display()
-        )),
+        Err(e) => create_error(e),
     }
 }
 
@@ -2704,7 +2723,8 @@ mod tests {
         let existing = dir.path().join("config");
         std::fs::write(&existing, b"mine").expect("seed");
         assert_eq!(
-            write_default_config(&existing).expect("an existing file is not an error"),
+            write_default_config(&existing, kettle_config::ConfigTrust::VerifyDirectory)
+                .expect("an existing file is not an error"),
             DefaultConfigWrite::AlreadyPresent
         );
         assert_eq!(
@@ -2718,7 +2738,7 @@ mod tests {
         let as_dir = dir.path().join("config-dir");
         std::fs::create_dir(&as_dir).expect("seed dir");
         assert_eq!(
-            write_default_config(&as_dir)
+            write_default_config(&as_dir, kettle_config::ConfigTrust::VerifyDirectory)
                 .expect("a directory at the config path must not be a hard error"),
             DefaultConfigWrite::AlreadyPresent
         );
@@ -2728,7 +2748,8 @@ mod tests {
         // directories and all.
         let fresh = dir.path().join("missing").join("parents").join("config");
         assert_eq!(
-            write_default_config(&fresh).expect("a free path must be writable"),
+            write_default_config(&fresh, kettle_config::ConfigTrust::VerifyDirectory)
+                .expect("a free path must be writable"),
             DefaultConfigWrite::Written
         );
         assert_eq!(
@@ -2739,8 +2760,71 @@ mod tests {
 
         // And running it twice is idempotent rather than destructive.
         assert_eq!(
-            write_default_config(&fresh).expect("second run"),
+            write_default_config(&fresh, kettle_config::ConfigTrust::VerifyDirectory)
+                .expect("second run"),
             DefaultConfigWrite::AlreadyPresent
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_default_config_is_private_under_a_permissive_umask() {
+        const CHILD_ENV: &str = "KETTLE_DEFAULT_CONFIG_UMASK_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::write_default_config_is_private_under_a_permissive_umask",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "permissive-umask child failed: {status}");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config");
+        // SAFETY: this branch runs in the isolated child process above before
+        // it starts application threads.
+        unsafe { libc::umask(0o002) };
+        assert_eq!(
+            write_default_config(&path, kettle_config::ConfigTrust::VerifyDirectory)
+                .expect("write default config"),
+            DefaultConfigWrite::Written
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_default_config_accepts_an_explicit_shared_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o775))
+            .expect("make parent group-writable");
+        let path = dir.path().join("project.config");
+
+        assert_eq!(
+            write_default_config(&path, kettle_config::ConfigTrust::ExplicitPath)
+                .expect("explicit shared config"),
+            DefaultConfigWrite::Written
+        );
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            0o775,
+            "an explicit trust grant must not tighten its parent directory"
+        );
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the created leaf should still be owner-only"
         );
     }
 
