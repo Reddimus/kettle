@@ -309,7 +309,8 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
             }
             b'"' => {
                 i += 1;
-                // raster attrs: Pan;Pad;Ph;Pw — use Pw,Ph as a size hint.
+                // Raster attributes: Pan;Pad;Ph;Pv. Ph is the horizontal
+                // extent (width), and Pv is the vertical extent (height).
                 let mut vals = [0i64; 4];
                 for (k, slot) in vals.iter_mut().enumerate() {
                     let (v, ni) = read_num(data, i);
@@ -322,9 +323,9 @@ pub(crate) fn decode_with_budget(data: &[u8], budget: &GraphicsBudget) -> Option
                     }
                 }
                 if vals[2] > 0 && vals[3] > 0 {
-                    // Raster-attribute size hint (Pw, Ph): pre-grow once so the
+                    // Raster-attribute size hint (Ph, Pv): pre-grow once so the
                     // common (hinted) case allocates a single time.
-                    canvas.ensure(vals[3] as usize, vals[2] as usize);
+                    canvas.ensure(vals[2] as usize, vals[3] as usize);
                 }
             }
             b'$' => {
@@ -496,13 +497,21 @@ mod tests {
     }
 
     #[test]
+    fn raster_attributes_use_horizontal_then_vertical_extent() {
+        // DEC Sixel raster attributes are Pan;Pad;Ph;Pv. A non-square hint
+        // catches accidental width/height reversal.
+        let img = decode(b"\"1;1;13;7").expect("raster hint should size the canvas");
+        assert_eq!((img.width, img.height), (13, 7));
+    }
+
+    #[test]
     fn tmux_3_4_normalized_sixel_decodes() {
         // Captured from tmux 3.4 built with --enable-sixel. With a 16x32 outer
         // cell, tmux adds raster attributes, a background register, and empty
         // columns while scaling Kettle's 24x12 magenta fixture.
         let body = b"\"1;1;32;30#0;0;0;0;0#1;2;100;0;100#1!24~!8?-#1!24~!8?";
         let img = decode(body).expect("tmux-normalized SIXEL decodes");
-        assert_eq!((img.width, img.height), (32, 32));
+        assert_eq!((img.width, img.height), (32, 30));
 
         let pixel = |x: usize, y: usize| {
             let start = (y * img.width as usize + x) * 4;
