@@ -20,7 +20,7 @@
 //!
 //! Spec: `kitty/docs/graphics-protocol.rst`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 
 use base64::Engine;
@@ -158,6 +158,53 @@ pub struct Delete {
 pub struct PlacementKey {
     pub image_id: u32,
     pub placement_id: u32,
+}
+
+/// Return the transitive placement-deletion closure for a relative graph.
+///
+/// Each relation is `(child, parent)`. A parent placement id of zero follows
+/// Kitty's anonymous-parent behavior: removing any placement of that image
+/// removes the child. The reverse walk visits each relation at most once and
+/// terminates even when malformed input left a cycle in the registry.
+pub fn relative_deletion_closure(
+    relations: impl IntoIterator<Item = (PlacementKey, PlacementKey)>,
+    removed: impl IntoIterator<Item = PlacementKey>,
+) -> HashSet<PlacementKey> {
+    let mut exact_dependants: HashMap<PlacementKey, Vec<PlacementKey>> = HashMap::new();
+    let mut image_dependants: HashMap<u32, Vec<PlacementKey>> = HashMap::new();
+    for (child, parent) in relations {
+        if parent.placement_id == 0 {
+            image_dependants
+                .entry(parent.image_id)
+                .or_default()
+                .push(child);
+        } else {
+            exact_dependants.entry(parent).or_default().push(child);
+        }
+    }
+
+    let mut removed_keys: HashSet<PlacementKey> = removed.into_iter().collect();
+    let mut pending: VecDeque<PlacementKey> = removed_keys.iter().copied().collect();
+    let mut expanded_images = HashSet::new();
+    while let Some(parent) = pending.pop_front() {
+        if let Some(children) = exact_dependants.remove(&parent) {
+            for child in children {
+                if removed_keys.insert(child) {
+                    pending.push_back(child);
+                }
+            }
+        }
+        if expanded_images.insert(parent.image_id)
+            && let Some(children) = image_dependants.remove(&parent.image_id)
+        {
+            for child in children {
+                if removed_keys.insert(child) {
+                    pending.push_back(child);
+                }
+            }
+        }
+    }
+    removed_keys
 }
 
 /// One animation frame of an image (`a=f`). `img` is the *fully composed*
@@ -1128,45 +1175,40 @@ impl KittyState {
         if removed.is_empty() {
             return;
         }
+        let initial_removed: HashSet<PlacementKey> = removed.iter().copied().collect();
         if remove_virtual {
             self.virtual_placements
                 .retain(|&(image_id, placement_id), _| {
-                    !removed
-                        .iter()
-                        .any(|key| key.image_id == image_id && key.placement_id == placement_id)
+                    !initial_removed.contains(&PlacementKey {
+                        image_id,
+                        placement_id,
+                    })
                 });
         }
 
-        // Relative placements depend on a concrete parent placement. Cascade
-        // until stable so deleting a root also removes every descendant.
-        let mut removed_keys = removed.to_vec();
-        loop {
-            let before = self.rel.len();
-            let mut cascaded = Vec::new();
-            self.rel.retain(|&(image_id, placement_id), relative| {
-                let own = removed_keys
-                    .iter()
-                    .any(|key| key.image_id == image_id && key.placement_id == placement_id);
-                let parent = removed_keys.iter().any(|key| {
-                    key.image_id == relative.parent_img
-                        && (relative.parent_placement == 0
-                            || key.placement_id == relative.parent_placement)
-                });
-                if own || parent {
-                    cascaded.push(PlacementKey {
-                        image_id,
-                        placement_id,
-                    });
-                    false
-                } else {
-                    true
-                }
-            });
-            if self.rel.len() == before {
-                break;
-            }
-            removed_keys.extend(cascaded);
-        }
+        let removed_keys = relative_deletion_closure(
+            self.rel
+                .iter()
+                .map(|(&(image_id, placement_id), relative)| {
+                    (
+                        PlacementKey {
+                            image_id,
+                            placement_id,
+                        },
+                        PlacementKey {
+                            image_id: relative.parent_img,
+                            placement_id: relative.parent_placement,
+                        },
+                    )
+                }),
+            initial_removed,
+        );
+        self.rel.retain(|&(image_id, placement_id), _| {
+            !removed_keys.contains(&PlacementKey {
+                image_id,
+                placement_id,
+            })
+        });
     }
 
     fn free_image_data(&mut self, id: u32) {
@@ -1736,6 +1778,63 @@ mod tests {
         assert!(k.relative_placement(2, 8).is_some());
         k.feed("a=d,d=i,i=2");
         assert!(k.relative_placement(2, 8).is_none());
+    }
+
+    #[test]
+    fn relative_placement_deletion_cascades_through_the_full_budget() {
+        let mut state = KittyState::default();
+        let cap = state.budget.limits().placements as u32;
+        state.feed(&format!("a=t,i=1,f=32,s=1,v=1;{PX}"));
+        for placement in 1..=cap {
+            assert!(matches!(
+                state.feed(&format!(
+                    "a=p,i=1,p={placement},P=1,Q={}",
+                    placement.saturating_sub(1)
+                )),
+                KittyOut::Relative { .. }
+            ));
+        }
+
+        state.feed("a=d,d=i,i=1,p=1");
+
+        for placement in 1..=cap {
+            assert!(state.relative_placement(1, placement).is_none());
+        }
+    }
+
+    #[test]
+    fn relative_deletion_closure_preserves_protocol_parent_semantics() {
+        let key = |image_id, placement_id| PlacementKey {
+            image_id,
+            placement_id,
+        };
+        let relations = [
+            (key(2, 1), key(1, 7)),
+            (key(3, 1), key(2, 1)),
+            // Q=0 is tied to any removed placement of image 3.
+            (key(4, 1), key(3, 0)),
+            // This cycle is disconnected from the removed root and survives.
+            (key(5, 1), key(6, 1)),
+            (key(6, 1), key(5, 1)),
+            // A missing parent also survives until that concrete key is removed.
+            (key(7, 1), key(99, 4)),
+        ];
+
+        let removed = relative_deletion_closure(relations, [key(1, 7), key(1, 7)]);
+
+        assert_eq!(
+            removed,
+            HashSet::from([key(1, 7), key(2, 1), key(3, 1), key(4, 1)])
+        );
+
+        let cycle_removed = relative_deletion_closure(relations, [key(5, 1)]);
+        assert_eq!(cycle_removed, HashSet::from([key(5, 1), key(6, 1)]));
+
+        let missing_parent_removed = relative_deletion_closure(relations, [key(99, 4)]);
+        assert_eq!(
+            missing_parent_removed,
+            HashSet::from([key(7, 1), key(99, 4)])
+        );
     }
 
     #[test]

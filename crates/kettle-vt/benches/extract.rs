@@ -22,8 +22,8 @@
 //! not gate on these (Surface-class hardware variance), they are a local
 //! before/after instrument.
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use kettle_vt::Extractor;
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use kettle_vt::{Extractor, kitty::KittyState};
 
 fn payload_plain() -> Vec<u8> {
     let mut v = Vec::with_capacity(1 << 20);
@@ -94,5 +94,28 @@ fn bench_extract(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_extract);
+fn maximum_depth_relative_chain() -> KittyState {
+    let mut state = KittyState::default();
+    state.feed("a=t,i=1,f=32,s=1,v=1;AAAA/w==");
+    let cap = kettle_vt::GraphicsLimits::default().placements as u32;
+    for placement in 1..=cap {
+        state.feed(&format!(
+            "a=p,i=1,p={placement},P=1,Q={}",
+            placement.saturating_sub(1)
+        ));
+    }
+    state
+}
+
+fn bench_relative_delete(c: &mut Criterion) {
+    c.bench_function("kitty_delete/max_depth_relative_chain", |b| {
+        b.iter_batched(
+            maximum_depth_relative_chain,
+            |mut state| state.feed("a=d,d=i,i=1,p=1"),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+criterion_group!(benches, bench_extract, bench_relative_delete);
 criterion_main!(benches);

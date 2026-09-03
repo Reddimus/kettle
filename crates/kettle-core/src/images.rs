@@ -1,11 +1,12 @@
 //! Registry of decoded images placed in a terminal, anchored to an absolute
 //! grid line (history-aware) so they scroll with the text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub use kettle_vt::kitty::{AnimationState, current_frame};
+use kettle_vt::kitty::{PlacementKey, relative_deletion_closure};
 pub use kettle_vt::{ImageData, Placed, PlacementParams};
 
 /// Pixel-space sub-rectangle sampled by one image placement. The renderer
@@ -98,6 +99,58 @@ pub struct RelEntry {
 /// Per-terminal registry of relative placements, keyed by
 /// `(child image id, child placement id)`.
 pub type Relatives = Arc<Mutex<HashMap<(u32, u32), RelEntry>>>;
+
+/// Remove every relative placement whose parent is already removed, including
+/// transitive descendants. This owns the core registry mutation used by both
+/// the live PTY reader and the synchronized graphics replay path.
+#[doc(hidden)]
+pub fn cascade_removed_relatives(
+    relatives: &mut HashMap<(u32, u32), RelEntry>,
+    removed_keys: &mut HashSet<PlacementKey>,
+    removed_ids: &mut HashSet<u32>,
+) {
+    let initial_removed = removed_keys.clone();
+    let closure = relative_deletion_closure(
+        relatives.iter().map(|(&(image_id, placement_id), entry)| {
+            (
+                PlacementKey {
+                    image_id,
+                    placement_id,
+                },
+                PlacementKey {
+                    image_id: entry.parent_img,
+                    placement_id: entry.parent_placement,
+                },
+            )
+        }),
+        removed_keys.iter().copied(),
+    );
+    let removed_image_ids = closure
+        .iter()
+        .map(|key| key.image_id)
+        .collect::<HashSet<_>>();
+    relatives.retain(|&(image_id, placement_id), entry| {
+        let key = PlacementKey {
+            image_id,
+            placement_id,
+        };
+        let parent_removed = if entry.parent_placement == 0 {
+            removed_image_ids.contains(&entry.parent_img)
+        } else {
+            closure.contains(&PlacementKey {
+                image_id: entry.parent_img,
+                placement_id: entry.parent_placement,
+            })
+        };
+        // A spatially selected ordinary anonymous placement can share its
+        // `(image_id, 0)` key with a relative that did not match the selector.
+        // Preserve that collision unless this relative's parent was also
+        // removed. Callers already removed directly matched relatives.
+        !closure.contains(&key) || (initial_removed.contains(&key) && !parent_removed)
+    });
+    removed_ids.extend(closure.iter().map(|key| key.image_id));
+    *removed_keys = closure;
+}
 
 /// The on-screen origin of a relative placement: its parent placement's
 /// top-left cell `(min_abs, min_col)` offset by `(h, v)` cells (positive =
@@ -192,9 +245,11 @@ pub fn prune(images: &Images, oldest_abs: u64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AnimEntry, AnimationState, ImageData, Placement, prune, relative_origin, resolve_chain,
+        AnimEntry, AnimationState, ImageData, Placement, PlacementParams, RelEntry,
+        cascade_removed_relatives, prune, relative_origin, resolve_chain,
     };
-    use std::collections::HashMap;
+    use kettle_vt::kitty::PlacementKey;
+    use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -239,6 +294,40 @@ mod tests {
         assert_eq!(relative_origin(10, 4, 0, 0), (10, 4));
         // Negative past the origin clamps to 0 (no wrap/underflow).
         assert_eq!(relative_origin(1, 1, -9, -9), (0, 0));
+    }
+
+    #[test]
+    fn cascade_preserves_a_relative_that_only_collides_with_a_seed_key() {
+        let key = |image_id, placement_id| PlacementKey {
+            image_id,
+            placement_id,
+        };
+        let relative = |parent_img, parent_placement| RelEntry {
+            img: px(1),
+            parent_img,
+            parent_placement,
+            h: 0,
+            v: 0,
+            z: 0,
+            params: PlacementParams::default(),
+        };
+        let mut relatives = HashMap::from([
+            ((5, 0), relative(99, 4)),
+            ((6, 1), relative(5, 0)),
+            ((7, 0), relative(8, 1)),
+        ]);
+        let mut removed_keys = HashSet::from([key(5, 0), key(7, 0), key(8, 1)]);
+        let mut removed_ids = HashSet::from([5, 7, 8]);
+
+        cascade_removed_relatives(&mut relatives, &mut removed_keys, &mut removed_ids);
+
+        assert!(relatives.contains_key(&(5, 0)));
+        assert!(!relatives.contains_key(&(6, 1)));
+        assert!(!relatives.contains_key(&(7, 0)));
+        assert_eq!(
+            removed_keys,
+            HashSet::from([key(5, 0), key(6, 1), key(7, 0), key(8, 1)])
+        );
     }
 
     #[test]

@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Kitty relative-placement deletion now builds one parent-to-children index
+  and walks each stored relation once in both the decoder and terminal
+  registries. Deleting the root of a full 256-placement chain no longer
+  repeatedly rescans every remaining relation and every removed parent.
+
 ## [4.2.0] — 2026-09-02
 
 ### Added

@@ -30,7 +30,8 @@ use portable_pty::{CommandBuilder, PtySize};
 use crate::event::{EventProxy, OutputWakeGate, TermEvent, Waker};
 use crate::images::{
     AnimEntry, Animations, ImageSourceCrop, ImageSourceRect, Images, Placement, PlacementParams,
-    RelEntry, Relatives, VirtualEntry, Virtuals, prune, relative_origin, resolve_chain,
+    RelEntry, Relatives, VirtualEntry, Virtuals, cascade_removed_relatives, prune, relative_origin,
+    resolve_chain,
 };
 use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 
@@ -7011,6 +7012,9 @@ impl Terminal {
                                                 );
                                             }
                                         }
+                                        // This arm's depth makes rustfmt reflow unrelated PTY
+                                        // reader code whenever its body changes.
+                                        #[rustfmt::skip]
                                         Chunk::DeleteImages(delete) => {
                                             let (
                                                 delete_geometry,
@@ -7223,40 +7227,11 @@ impl Terminal {
                                                     },
                                                 );
 
-                                                // A relative placement cannot survive deletion of
-                                                // its concrete parent. Repeat to cover chains.
-                                                loop {
-                                                    let before = relative_placements.len();
-                                                    relative_placements.retain(
-                                                        |&(image_id, placement_id), entry| {
-                                                            let parent_removed = removed_keys
-                                                                .iter()
-                                                                .any(|key| {
-                                                                    key.image_id
-                                                                        == entry.parent_img
-                                                                        && (entry
-                                                                            .parent_placement
-                                                                            == 0
-                                                                            || key.placement_id
-                                                                                == entry
-                                                                                    .parent_placement)
-                                                                });
-                                                            if parent_removed {
-                                                                removed_ids.insert(image_id);
-                                                                removed_keys.insert(PlacementKey {
-                                                                    image_id,
-                                                                    placement_id,
-                                                                });
-                                                                false
-                                                            } else {
-                                                                true
-                                                            }
-                                                        },
-                                                    );
-                                                    if relative_placements.len() == before {
-                                                        break;
-                                                    }
-                                                }
+                                                cascade_removed_relatives(
+                                                    &mut relative_placements,
+                                                    &mut removed_keys,
+                                                    &mut removed_ids,
+                                                );
                                             }
 
                                             let mut freed_ids = Vec::new();
@@ -10172,30 +10147,11 @@ fn apply_kitty_delete_at(
             }
         });
 
-        // A relative placement cannot survive deletion of its concrete parent.
-        loop {
-            let before = relative_placements.len();
-            relative_placements.retain(|&(image_id, placement_id), entry| {
-                let parent_removed = removed_keys.iter().any(|key| {
-                    key.image_id == entry.parent_img
-                        && (entry.parent_placement == 0
-                            || key.placement_id == entry.parent_placement)
-                });
-                if parent_removed {
-                    removed_ids.insert(image_id);
-                    removed_keys.insert(PlacementKey {
-                        image_id,
-                        placement_id,
-                    });
-                    false
-                } else {
-                    true
-                }
-            });
-            if relative_placements.len() == before {
-                break;
-            }
-        }
+        cascade_removed_relatives(
+            &mut relative_placements,
+            &mut removed_keys,
+            &mut removed_ids,
+        );
     }
 
     let mut freed_ids = Vec::new();
@@ -15885,6 +15841,23 @@ mod image_lifecycle_tests {
     fn kitty_image(id: u32, placement: u32, columns: u32, rows: u32) -> Vec<u8> {
         format!("\x1b_Ga=T,i={id},p={placement},f=32,s=1,v=1,c={columns},r={rows};AQIDBA==\x1b\\")
             .into_bytes()
+    }
+
+    #[test]
+    fn terminal_delete_cascades_through_the_full_relative_budget() {
+        let mut harness = SyncGraphicsHarness::new();
+        harness.feed(&kitty_image(1, 1, 1, 1));
+        let cap = kettle_vt::GraphicsLimits::default().placements as u32;
+        for placement in 2..=cap + 1 {
+            harness.feed(
+                format!("\x1b_Ga=p,i=1,p={placement},P=1,Q={}\x1b\\", placement - 1).as_bytes(),
+            );
+        }
+        assert_eq!(harness.relatives.lock().unwrap().len(), cap as usize);
+
+        harness.feed(b"\x1b_Ga=d,d=i,i=1,p=1\x1b\\");
+
+        assert!(harness.relatives.lock().unwrap().is_empty());
     }
 
     fn placement_at(id: u32, abs_line: u64, rows: usize) -> Placement {
