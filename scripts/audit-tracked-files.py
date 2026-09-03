@@ -192,7 +192,8 @@ def audit_structure(path: str, text: str) -> list[str]:
 def local_markdown_links(root: Path, path: str, text: str) -> Iterable[tuple[str, bool]]:
     parent = PurePosixPath(path).parent
     prose = MARKDOWN_FENCE.sub("", text)
-    prose = MARKDOWN_CODE_SPAN.sub("", prose)
+    # Preserve link delimiters around inline-code labels while masking code.
+    prose = MARKDOWN_CODE_SPAN.sub(lambda match: " " * len(match.group()), prose)
     for match in MARKDOWN_LINK.finditer(prose):
         raw = match.group(1).strip("<>")
         if raw.startswith(("#", "http://", "https://", "mailto:")):

@@ -5961,9 +5961,9 @@ cell-height = 1.2\n";
         // The repo's early development wove numbered audit bookkeeping
         // markers through code comments, docs, scripts, and build
         // files. Those markers were removed wholesale — provenance
-        // lives in git history and CHANGELOG.md, whose historical
+        // lives in git history and the changelog files, whose historical
         // entries are the record the old markers pointed into (and
-        // which is therefore the one deliberate exemption below).
+        // which are therefore the deliberate exemptions below).
         // This guard keeps the shapes from drifting back into any
         // living source: it walks every workspace Rust file plus the
         // doc/script/packaging text surfaces and fails on the numbered
@@ -6084,7 +6084,7 @@ cell-height = 1.2\n";
             }
         });
 
-        // Living text surfaces. CHANGELOG.md is deliberately absent.
+        // Living text surfaces. The root changelog is deliberately absent.
         for rel in [
             "README.md",
             "CONTRIBUTING.md",
@@ -6104,9 +6104,10 @@ cell-height = 1.2\n";
                 scan(&p, &mut offenders);
             }
         }
+        let changelog_archives = repo_root.join("docs/changelog");
         for dir in ["docs", "scripts", "packaging", ".github", ".githooks"] {
             walk(&repo_root.join(dir), &mut |p| {
-                if !is_binary(p) {
+                if !is_binary(p) && !p.starts_with(&changelog_archives) {
                     scan(p, &mut offenders);
                 }
             });
@@ -6115,8 +6116,8 @@ cell-height = 1.2\n";
         assert!(
             offenders.is_empty(),
             "internal audit-marker references must not reappear outside \
-             CHANGELOG.md; reword the rationale in timeless prose (see \
-             CONTRIBUTING.md):\n{}",
+             the root CHANGELOG.md or docs/changelog archives; reword the \
+             rationale in timeless prose (see CONTRIBUTING.md):\n{}",
             offenders.join("\n")
         );
     }

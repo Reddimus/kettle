@@ -1078,7 +1078,9 @@ audits every entry for path/case collisions, index/worktree hashes, UTF-8 and LF
 hygiene, parseable TOML/JSON, local Markdown link targets, and bounded SFNT/PNG
 tables. It writes the full per-file SHA-256 ledger to
 `target/diagnostics/tracked-files-audit.json`. Add `--require-clean-index` when
-auditing a staged release tree.
+auditing a staged release tree. The Markdown scan masks fenced and inline code,
+but retains the link delimiters around inline-code labels so those links cannot
+bypass target validation.
 
 **Search regressions.** Search changes need focused tests at all three owning
 boundaries:
@@ -2113,6 +2115,9 @@ Separate workflows:
   Linux packaging baseline builds both GNU targets on Ubuntu 22.04 and rejects
   any binary whose `readelf --version-info` requirements exceed glibc 2.35.
   This keeps the one-line installer compatible with the documented ABI floor.
+  Each Linux tarball and the macOS app resources include the root
+  `CHANGELOG.md` plus `docs/changelog/`, so the root changelog's archive links
+  keep the same paths in the packaged documentation.
   The
   finalizer validates all archives and sidecars, requires the signing secret
   to match the checked-in production trust root, signs and verifies the update

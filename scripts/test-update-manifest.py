@@ -251,6 +251,27 @@ class ManifestTests(unittest.TestCase):
         ):
             self.assertIn("--locked", cargo_line)
 
+    def test_release_packages_complete_changelog_history(self):
+        release_workflow = (
+            ROOT / ".github" / "workflows" / "release.yml"
+        ).read_text(encoding="utf-8")
+        linux_package = release_workflow.split(
+            "      - name: Package (Linux)\n", 1
+        )[1].split("      - name: Package (macOS .app bundle)\n", 1)[0]
+        macos_package = release_workflow.split(
+            "      - name: Package (macOS .app bundle)\n", 1
+        )[1].split("      - name: Sign and notarize (macOS)\n", 1)[0]
+
+        self.assertIn("mkdir -p dist/kettle/docs", linux_package)
+        self.assertIn("cp -R docs/changelog dist/kettle/docs/", linux_package)
+        self.assertIn(
+            'mkdir -p "$APP/Contents/Resources/docs"', macos_package
+        )
+        self.assertIn(
+            'cp -R docs/changelog "$APP/Contents/Resources/docs/"',
+            macos_package,
+        )
+
     def test_macos_signing_selector_requires_one_distribution_identity(self):
         selector = ROOT / "scripts" / "select-macos-signing-identity.py"
         first = "A" * 40

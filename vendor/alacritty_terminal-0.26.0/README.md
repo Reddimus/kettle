@@ -80,7 +80,8 @@ On Windows, the config file will be looked for in:
 ## Contributing
 
 A guideline about contributing to Alacritty can be found in the
-[`CONTRIBUTING.md`](CONTRIBUTING.md) file.
+[`CONTRIBUTING.md`](https://github.com/alacritty/alacritty/blob/v0.16.1/CONTRIBUTING.md)
+file.
 
 ## FAQ
 

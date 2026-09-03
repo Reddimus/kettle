@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -44,6 +45,28 @@ def write_lf(path: Path, text: str) -> None:
 
 
 class TrackedFileAuditTests(unittest.TestCase):
+    def test_missing_local_markdown_link_with_inline_code_label_is_fatal(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_lf(root / "README.md", "[`guide`](docs/missing.md)\n")
+            initialize_repository(root)
+
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", str(root)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn(
+                "README.md: unresolved local link docs/missing.md",
+                result.stderr,
+            )
+
     def test_missing_local_markdown_link_is_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
