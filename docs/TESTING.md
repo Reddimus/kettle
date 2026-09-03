@@ -308,9 +308,13 @@ sticky overflow/current-screen snapshot, recovery after drain, and exact
 preservation, 1047 exit clearing, 1049 entry clearing plus exit preservation,
 primary-store restoration, ED 2 active-only clearing, RIS clearing of both
 stores, and fail-safe two-buffer clearing/resynchronization after overflow or
-an inconsistent sequence. Direct VTE tests pin unforgeable marker ordering at
-exact byte offsets, nested synchronized-update boundaries, and the 256-marker
-cap. Extractor tests prove Sixel, Kitty, and iTerm2 controls retain their
+an inconsistent sequence. A full-budget Kitty chain regression crosses the
+terminal graphics interface and deletes all 256 relative placements from one
+root. `cargo bench -p kettle-core --bench relative_delete` measures that core
+registry path separately from kettle-vt's decoder benchmark. Direct VTE tests
+pin unforgeable marker ordering at exact byte offsets, nested synchronized-update
+boundaries, and the 256-marker cap. Extractor tests prove Sixel, Kitty, and
+iTerm2 controls retain their
 exact terminators while deferred and that a deferred Kitty transmit does not
 mutate decoder state before replay. Core DEC 2026 regressions interleave
 images with 1049 enter/leave in both orders, prove image cursor movement

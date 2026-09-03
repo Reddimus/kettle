@@ -1974,6 +1974,7 @@ version = "4.2.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "criterion",
  "crossbeam-channel",
  "fs4",
  "kettle-state",

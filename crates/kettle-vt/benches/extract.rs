@@ -97,7 +97,8 @@ fn bench_extract(c: &mut Criterion) {
 fn maximum_depth_relative_chain() -> KittyState {
     let mut state = KittyState::default();
     state.feed("a=t,i=1,f=32,s=1,v=1;AAAA/w==");
-    for placement in 1..=256_u32 {
+    let cap = kettle_vt::GraphicsLimits::default().placements as u32;
+    for placement in 1..=cap {
         state.feed(&format!(
             "a=p,i=1,p={placement},P=1,Q={}",
             placement.saturating_sub(1)

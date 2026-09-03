@@ -1,11 +1,12 @@
 //! Registry of decoded images placed in a terminal, anchored to an absolute
 //! grid line (history-aware) so they scroll with the text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub use kettle_vt::kitty::{AnimationState, current_frame};
+use kettle_vt::kitty::{PlacementKey, relative_deletion_closure};
 pub use kettle_vt::{ImageData, Placed, PlacementParams};
 
 /// Pixel-space sub-rectangle sampled by one image placement. The renderer
@@ -98,6 +99,40 @@ pub struct RelEntry {
 /// Per-terminal registry of relative placements, keyed by
 /// `(child image id, child placement id)`.
 pub type Relatives = Arc<Mutex<HashMap<(u32, u32), RelEntry>>>;
+
+/// Remove every relative placement whose parent is already removed, including
+/// transitive descendants. This owns the core registry mutation used by both
+/// the live PTY reader and the synchronized graphics replay path.
+#[doc(hidden)]
+pub fn cascade_removed_relatives(
+    relatives: &mut HashMap<(u32, u32), RelEntry>,
+    removed_keys: &mut HashSet<PlacementKey>,
+    removed_ids: &mut HashSet<u32>,
+) {
+    let closure = relative_deletion_closure(
+        relatives.iter().map(|(&(image_id, placement_id), entry)| {
+            (
+                PlacementKey {
+                    image_id,
+                    placement_id,
+                },
+                PlacementKey {
+                    image_id: entry.parent_img,
+                    placement_id: entry.parent_placement,
+                },
+            )
+        }),
+        removed_keys.iter().copied(),
+    );
+    relatives.retain(|&(image_id, placement_id), _| {
+        !closure.contains(&PlacementKey {
+            image_id,
+            placement_id,
+        })
+    });
+    removed_ids.extend(closure.iter().map(|key| key.image_id));
+    *removed_keys = closure;
+}
 
 /// The on-screen origin of a relative placement: its parent placement's
 /// top-left cell `(min_abs, min_col)` offset by `(h, v)` cells (positive =
