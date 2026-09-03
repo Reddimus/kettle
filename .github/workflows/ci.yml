@@ -72,7 +72,7 @@ jobs:
     # Per-job timeout. GitHub Actions defaults each job
     # to 360 min (6 hours); a hung test or runaway loop would burn
     # the full default before failing. Real ci.yml job time is
-    # ~15-25 min (cold-cache Rust build × 3 OSes); 45 min is ~2×
+    # ~15-25 min (cold-cache Rust build × 2 OSes); 45 min is ~2×
     # headroom for a slow runner without giving a hang the full
     # 6-hour budget. Pairs with the cancel-in-progress
     # concurrency block above — both budget-protection measures per the
@@ -81,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
@@ -112,39 +112,30 @@ jobs:
           cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
           cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
       - name: Vendored portable-pty patch — native unit and doctest
-        # Linux covers the retained Unix package surface. Windows is required:
-        # it alone compiles and executes the PIPE_NOWAIT ConPTY regression.
-        # serde_support pins compatibility for the containment opt-in. macOS
-        # would duplicate the Unix package check without adding a cfg.
-        if: runner.os == 'Linux' || runner.os == 'Windows'
+        # Linux covers the retained Unix package surface. serde_support pins
+        # compatibility for the containment opt-in. macOS would duplicate the
+        # Unix package check without adding a cfg.
+        if: runner.os == 'Linux'
         run: cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --features serde_support
       - name: Vendored portable-pty patch — native clippy
-        if: runner.os == 'Linux' || runner.os == 'Windows'
+        if: runner.os == 'Linux'
         run: cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets --features serde_support -- -D warnings
-      - name: Live UI helper self-test (Windows)
-        if: runner.os == 'Windows'
-        run: python scripts/check-live-ui-smoke.py self-test
-      - name: Live UI helper self-test (Unix)
-        if: runner.os != 'Windows'
+      - name: Live UI helper self-test
         run: python3 scripts/check-live-ui-smoke.py self-test
       # The session recorder is now a runtime toggle (config `record = on` /
       # `--record`) compiled into every build, so the default build/clippy/test
       # above exercise it directly — no separate feature leg is needed.
-      # Verify the Justfile parses on every OS — catches
+      # Verify the Justfile parses on both supported CI hosts — catches
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a
-      # confused contributor's "why doesn't `just gauntlet` work on
-      # Windows?" bug report. The Justfile was originally bash-only
+      # confused contributor's parse error. The Justfile was originally bash-only
       # (RUSTDOCFLAGS prefix, /tmp paths, ./scripts/install.sh
-      # invocations) and never exercised by CI; the cross-platform
-      # rewrite makes a parse-smoke worthwhile.
+      # invocations); the cross-platform rewrite makes a parse-smoke worthwhile.
       #
       # `taiki-e/install-action` is cached so the install is
       # ~1s after first run. `just --summary` prints every recipe
-      # across all platforms (including [unix]+[windows] gated
-      # ones), validating the entire file parses. `just --list`
-      # then filters to the current OS, confirming the gating logic
-      # returns a non-empty set on each runner.
+      # across all platforms, validating the entire file parses. `just --list`
+      # then filters to the current OS and confirms a non-empty recipe set.
       - name: Install just
         uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
         with:
@@ -178,8 +169,8 @@ jobs:
       - name: Shell integration snippets — native interpreters
         # The source/CLI string checks below cannot see interpreter behavior.
         # macOS supplies stock zsh with PROMPT_SUBST off and /bin/bash 3.2;
-        # Linux installs Fish above; Windows supplies Windows PowerShell 5.1
-        # and PowerShell 7.
+        # Linux installs Fish above. PowerShell source and parser behavior keep
+        # portable coverage, but CI no longer runs a native PowerShell host.
         run: just shell-integration-check
       - name: Packaging smoke — macOS native AppIcon
         # Compile the Icon Composer package on every macOS CI build through
@@ -189,25 +180,6 @@ jobs:
           out=$(mktemp -d /tmp/kettle-app-icon.XXXXXX)
           trap 'rm -rf "$out"' EXIT
           scripts/compile-macos-app-icon.sh "$out"
-      - name: Packaging smoke — Windows .ico
-        # Windows remains a compile/regression CI target after distribution
-        # support ends. build.rs deliberately skips a missing icon, so this
-        # explicit check keeps the retained compatibility resource present,
-        # well-formed, and multi-resolution.
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          test -f packaging/windows/kettle.ico
-          # `file` on Windows comes with Git for Windows — covers our use.
-          file packaging/windows/kettle.ico | grep -q "MS Windows icon" \
-            || { echo "kettle.ico is not a Windows icon"; file packaging/windows/kettle.ico; exit 1; }
-          # Multi-resolution check: the `file` output includes the
-          # number of icons. The release recipe asks for 7 sizes; floor
-          # at 4 to keep headroom for future tweaks.
-          count=$(file packaging/windows/kettle.ico | grep -oE '[0-9]+ icons' | grep -oE '^[0-9]+')
-          test "${count:-0}" -ge 4 \
-            || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
-          echo "kettle.ico OK (${count} resolutions)"
       - name: Icon rasters match the Pillow generator
         # The generated vectors and rasters once had no gate: the generator was
         # run by hand and dispatched by nothing, so drift shipped silently.
@@ -226,28 +198,20 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/check-package-templates.sh
       - name: Signed update manifest generator
-        # Linux covers the portable feed fixtures. macOS additionally exercises
+        # Linux covers the portable feed fixtures. macOS also exercises
         # the native Security.framework search-list helper against disposable
         # keychains with quote and backslash characters in their filenames.
-        if: runner.os != 'Windows'
         run: python3 scripts/test-update-manifest.py
       - name: Exact draft-release asset verifier
         if: runner.os == 'Linux'
         run: python3 scripts/test-verify-release-assets.py
       - name: Release preparation script
-        if: runner.os != 'Windows'
         run: python3 scripts/test-release.py
       - name: Inner package manifest generator and verifier
-        # Extraction is a native filesystem security boundary. Run its portable
-        # fixtures on every runner so macOS aliases and Windows path semantics
-        # cannot regress behind a Linux-only green check.
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            python scripts/test-package-manifest.py
-          else
-            python3 scripts/test-package-manifest.py
-          fi
+        # Extraction is a native filesystem security boundary. Run its
+        # portable fixtures on Linux and macOS so native path semantics cannot
+        # regress behind a single-OS green check.
+        run: python3 scripts/test-package-manifest.py
       - name: Hardened online installer fixtures
         if: runner.os == 'Linux'
         run: python3 scripts/test-install-online.py
@@ -263,15 +227,14 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
-      - name: Build release binary (Linux/macOS)
+      - name: Build release binary
         # The GPU/render smokes below invoke
         # ./target/release/kettle. Build it once here for both Linux and
         # macOS — previously this `cargo build --release` lived inside the
         # Linux-only headless smoke, so the macOS --gpu-info /
         # --screenshot / --screenshot-menu smokes (added for
         # real-Metal-hardware render verification) would have had no
-        # binary to run. Windows stays out (its smokes are bash-only).
-        if: runner.os != 'Windows'
+        # binary to run.
         run: cargo build --release -p kettle
       - name: Agent CLI non-interactive smoke (macOS)
         # The mandatory Kettle-owned PTY/JSON/MCP probes run on every attempt.
@@ -286,28 +249,6 @@ jobs:
         # helper handling and SHA-256 verification stay covered.
         if: runner.os == 'Linux'
         run: scripts/check-linux-installers.sh
-      - name: Build release binary + CLI smoke (Windows)
-        # The Linux/macOS leg builds the release binary and
-        # smokes it, but Windows was skipped — so a release-PROFILE Windows
-        # regression (the GUI-subsystem + conditional console-attach path,
-        # the winresource .ico embed, panic=abort codegen) only
-        # surfaced at tag time in release.yml, not on every PR. Build it here
-        # and smoke `--version` through a pwsh pipe: capturing the output
-        # redirects stdout, the exact inherited-handle case the GUI-subsystem
-        # binary must still write to, so this verifies
-        # that behavior on real Windows under PowerShell 7 (the v2.0.0 default
-        # shell) — not just that it compiles.
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo build --release -p kettle
-          $ver = (& ".\target\release\kettle.exe" --version | Out-String).Trim()
-          Write-Host "kettle --version => $ver"
-          if ($ver -notmatch 'kettle \d+\.\d+\.\d+') {
-            Write-Error "unexpected --version output (GUI-subsystem piped stdout may be broken): $ver"
-            exit 1
-          }
-          Write-Host "Windows release build + piped --version smoke OK"
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:
@@ -408,9 +349,7 @@ jobs:
         # ification later) catches here, not in a user bug report.
         # Also run on macOS — the runner has a real Metal GPU,
         # giving genuine macOS-hardware verification of adapter resolution
-        # (LIBGL_ALWAYS_SOFTWARE is a harmless no-op there). Bash-only step,
-        # so Windows (pwsh default) stays excluded.
-        if: runner.os != 'Windows'
+        # (LIBGL_ALWAYS_SOFTWARE is a harmless no-op there).
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -430,7 +369,6 @@ jobs:
         # render path is verified on macOS hardware, not just Linux's
         # software-Vulkan. `wc -c <` instead of GNU `stat -c%s` keeps
         # the size check portable to BSD/macOS stat.
-        if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -463,7 +401,6 @@ jobs:
         # actual draw + readback + image::save path). This is the
         # achievable automated macOS render-behavior verification absent
         # a windowed/interactive Mac. `wc -c <` is BSD/macOS-portable.
-        if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
@@ -483,25 +420,13 @@ jobs:
           test "$size" -gt 10000 \
             || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
           echo "screenshot OK ($size bytes)"
-      - name: CLI smoke (all OSes)
-        # This block deliberately uses one POSIX contract on every matrix leg.
-        # GitHub's Windows default is PowerShell, which cannot parse `if [ ... ]`;
-        # select the Git-for-Windows Bash that hosted runners provide.
-        shell: bash
+      - name: CLI smoke
         run: |
           # First run the shared cross-platform contract. It always performs a
           # locked rebuild and requires the binary's exact 12-character
           # Git/dirty identity, so a stale artifact cannot satisfy this step.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            python scripts/check-cli-smoke.py
-          else
-            python3 scripts/check-cli-smoke.py
-          fi
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            KETTLE_CI_BIN="./target/debug/kettle.exe"
-          else
-            KETTLE_CI_BIN="./target/debug/kettle"
-          fi
+          python3 scripts/check-cli-smoke.py
+          KETTLE_CI_BIN="./target/debug/kettle"
           if [ ! -x "$KETTLE_CI_BIN" ]; then
             cargo build --locked -q -p kettle
           fi
@@ -595,15 +520,10 @@ jobs:
           # malformed value, then assert the EXIT CODE goes non-zero
           # when --profile is set (--check-config exits non-zero
           # whenever it finds issues).
-          # This assertion was pivoted from grep-on-output (flaky on Windows
-          # bash where the if-condition's pipe semantics differed)
-          # to a direct exit-code check.
+          # Assert the exit code directly so pipeline semantics cannot mask it.
           # Pin the config dir via XDG_CONFIG_HOME (the cross-platform
-          # override, honored on every OS). kettle uses %APPDATA% on Windows
-          # and deliberately ignores a stray HOME (the config split-brain fix), so
-          # a profile written under ~/.config would NOT be found by the Windows
-          # binary. Using XDG_CONFIG_HOME — set to the same $HOME/.config the test
-          # already wrote to — keeps this smoke platform-independent.
+          # override). Setting it to the same $HOME/.config path the test already
+          # wrote keeps the smoke independent of host defaults.
           export XDG_CONFIG_HOME="$HOME/.config"
           mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
           echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
@@ -633,9 +553,8 @@ jobs:
           # invariant in every snippet's header — if a maintainer
           # rewrites the script without that comment, this fails
           # and they have to touch this smoke step on purpose.
-          # `powershell` is included — it's the one
-          # shell-integration target Windows users actually use
-          # (install.ps1 -WithShellIntegration), so it must be smoked too.
+          # `powershell` remains included because generation is portable even
+          # though current CI has no native PowerShell interpreter.
           for sh in bash zsh fish powershell; do
             "$KETTLE_CI_BIN" --shell-integration "$sh" > "/tmp/k.${sh}"
             grep -q "OSC 133" "/tmp/k.${sh}"
@@ -682,11 +601,8 @@ jobs:
           fi
           # And the happy path: passing the bootstrap config we just
           # wrote should round-trip through --config-path. Match on the
-          # basename only — Git-Bash on Windows translates the bash-side
-          # `/tmp/k.cfg` arg into a Windows path (`C:\Users\runneradmin
-          # \AppData\Local\Temp\k.cfg`) before kettle sees it, so
-          # `--config-path` echoes the Windows form. The basename is
-          # invariant across all three OSes.
+          # basename only so the assertion stays independent of temporary-root
+          # aliases on the host.
           "$KETTLE_CI_BIN" --config /tmp/k.cfg --config-path \
             | grep -qE 'k\.cfg$'
 
@@ -698,8 +614,7 @@ jobs:
   # install kettle` on a slightly-stale toolchain) could hit a
   # compile error if we accidentally use a Rust-1.90+ feature.
   # Linux-only because MSRV is a "does this compile" question, not a
-  # platform-portability question — the platform matrix above already
-  # covers OS portability under stable. Build + test only (clippy /
+  # supported-platform matrix. Build + test only (clippy /
   # fmt / rustdoc lints have their own evolving baselines and aren't
   # meaningful on a pinned-old toolchain).
   msrv:
@@ -708,7 +623,7 @@ jobs:
     # Same timeout rationale as the matrix `build` job above. MSRV job runs the
     # same gauntlet as the matrix `build` job on a pinned toolchain.
     # 30 min is ~2× the observed time; tighter than `build` because
-    # this job is Linux-only (no Windows runner overhead).
+    # this job is Linux-only.
     timeout-minutes: 30
     # The `menu_visual.rs` integration test
     # initializes wgpu (it renders a PNG via the same `capture_png_with`

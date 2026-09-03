@@ -23,6 +23,7 @@ Download a package from the
 
 Windows support ended with 3.3.0. Archived Windows packages remain attached to
 their historical releases, but 4.0 and later do not ship or update Windows.
+Current CI follows the supported platform list and runs on Linux and macOS.
 
 Linux installs for the current user under `~/.local`:
 

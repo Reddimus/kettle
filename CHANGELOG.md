@@ -12,6 +12,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and walks each stored relation once in both the decoder and terminal
   registries. Deleting the root of a full 256-placement chain no longer
   repeatedly rescans every remaining relation and every removed parent.
+- **CI now matches the supported platform list.** The main build matrix runs on
+  Linux and macOS only. The unsupported Windows leg and two ignored PowerShell
+  host tests have been removed; portable tests still cover PowerShell parsing,
+  shell-integration construction, and process-tree behavior. Retained Windows
+  conditional code no longer has a hosted native gate.
 
 ## [4.2.0] — 2026-09-02
 

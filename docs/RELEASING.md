@@ -132,9 +132,9 @@ route remained available when v4.0.0 went public. This one-release exception
 does not change the policy above.
 
 Starting with 4.0.0, release CI keeps only Linux x86_64, Linux aarch64, and
-macOS universal packages. The Windows CI runner remains a portability check for
-retained conditional code; it is not a release package, installer, or supported
-platform claim.
+macOS universal packages. Pull-request CI also runs only on Linux and macOS.
+Retained Windows conditional code has no hosted native gate and must not be
+treated as a package, installer, or supported-platform claim.
 
 Any later 3.3.x hotfix must branch from the `v3.3.0` tag, not from post-removal
 `main`. It must retain the four-package and four-target contract: Linux x86_64,
