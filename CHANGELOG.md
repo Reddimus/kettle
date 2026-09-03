@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Linux self-update keeps future changelog archives installable.** The
+  updater now installs every manifest-verified
+  `docs/changelog/CHANGELOG-<major>.x.md` file instead of stopping at the
+  current `3.x` archive. It rejects other names and nested entries before they
+  can add an install destination.
+
 ## [4.3.0] — 2026-09-04
 
 ### Added

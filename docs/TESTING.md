@@ -2117,7 +2117,10 @@ Separate workflows:
   This keeps the one-line installer compatible with the documented ABI floor.
   Each Linux tarball and the macOS app resources include the root
   `CHANGELOG.md` plus `docs/changelog/`, so the root changelog's archive links
-  keep the same paths in the packaged documentation.
+  keep the same paths in the packaged documentation. Linux updater coverage
+  adds a synthetic `CHANGELOG-4.x.md`, then checks deterministic publication,
+  mode normalization, invalid names, nested entries, collisions, and a
+  symlinked destination with rollback.
   The
   finalizer validates all archives and sidecars, requires the signing secret
   to match the checked-in production trust root, signs and verifies the update
