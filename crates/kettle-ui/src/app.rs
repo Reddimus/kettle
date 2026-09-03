@@ -22433,8 +22433,9 @@ fn resolve_keybind_action(
 /// Match the trigger and action as a pair. A user who deliberately binds
 /// `Alt+Up` to some other action must get that action, not an implicit terminal
 /// fallback, and actions invoked from menus or automation have no physical
-/// chord to reinterpret. macOS keeps its `Ctrl+Cmd+Arrow` focus map and leaves
-/// Option+Arrow entirely to the terminal.
+/// chord to reinterpret. macOS keeps its explicit focus chords
+/// (`Cmd+Opt+Arrow` and `Ctrl+Cmd+Arrow`) and leaves Option+Arrow entirely to
+/// the terminal.
 fn adaptive_alt_focus_direction(
     trigger: Trigger,
     action: &Action,
@@ -33819,7 +33820,7 @@ mod tests {
                 false,
             ),
             None,
-            "macOS leaves Option+Arrow to the PTY and uses Ctrl+Cmd for focus"
+            "macOS leaves Option+Arrow to the PTY and focuses with Cmd+Opt or Ctrl+Cmd"
         );
 
         let trigger = Trigger::new(Mods::ALT, KKey::Up);
