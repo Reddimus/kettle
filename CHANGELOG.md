@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and walks each stored relation once in both the decoder and terminal
   registries. Deleting the root of a full 256-placement chain no longer
   repeatedly rescans every remaining relation and every removed parent.
+- **Windows distribution remains retired while retained code stays in CI.**
+  Version 3.3.0 remains the final Windows package. The `windows-latest` leg
+  still compiles and tests conditional code, including the CLI, ConPTY,
+  PowerShell shell integration, and the retained icon resource, without
+  producing an installer or release artifact. Two obsolete ignored `pwsh`
+  probes were removed; required native and portable regressions remain.
 
 ## [4.2.0] — 2026-09-02
 

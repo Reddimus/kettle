@@ -189,11 +189,11 @@ jobs:
           out=$(mktemp -d /tmp/kettle-app-icon.XXXXXX)
           trap 'rm -rf "$out"' EXIT
           scripts/compile-macos-app-icon.sh "$out"
-      - name: Packaging smoke — Windows .ico
+      - name: Windows .ico resource smoke
         # Windows remains a compile/regression CI target after distribution
-        # support ends. build.rs deliberately skips a missing icon, so this
-        # explicit check keeps the retained compatibility resource present,
-        # well-formed, and multi-resolution.
+        # ends. build.rs deliberately skips a missing icon, so this explicit
+        # check keeps the retained resource present, well-formed, and
+        # multi-resolution without creating a package.
         if: runner.os == 'Windows'
         shell: bash
         run: |
@@ -201,9 +201,9 @@ jobs:
           # `file` on Windows comes with Git for Windows — covers our use.
           file packaging/windows/kettle.ico | grep -q "MS Windows icon" \
             || { echo "kettle.ico is not a Windows icon"; file packaging/windows/kettle.ico; exit 1; }
-          # Multi-resolution check: the `file` output includes the
-          # number of icons. The release recipe asks for 7 sizes; floor
-          # at 4 to keep headroom for future tweaks.
+          # Multi-resolution check: the `file` output includes the number of
+          # icons. The retained resource has 7 sizes; floor at 4 to keep
+          # headroom for future tweaks.
           count=$(file packaging/windows/kettle.ico | grep -oE '[0-9]+ icons' | grep -oE '^[0-9]+')
           test "${count:-0}" -ge 4 \
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
@@ -286,13 +286,12 @@ jobs:
         # helper handling and SHA-256 verification stay covered.
         if: runner.os == 'Linux'
         run: scripts/check-linux-installers.sh
-      - name: Build release binary + CLI smoke (Windows)
-        # The Linux/macOS leg builds the release binary and
-        # smokes it, but Windows was skipped — so a release-PROFILE Windows
-        # regression (the GUI-subsystem + conditional console-attach path,
-        # the winresource .ico embed, panic=abort codegen) only
-        # surfaced at tag time in release.yml, not on every PR. Build it here
-        # and smoke `--version` through a pwsh pipe: capturing the output
+      - name: Windows release-profile binary + CLI smoke
+        # The core matrix builds all targets in the debug profile. This extra
+        # build protects the retained GUI-subsystem + conditional console-attach
+        # path, the winresource .ico embed, and panic=abort codegen without
+        # packaging or publishing a Windows artifact. Smoke `--version` through
+        # a pwsh pipe: capturing the output
         # redirects stdout, the exact inherited-handle case the GUI-subsystem
         # binary must still write to, so this verifies
         # that behavior on real Windows under PowerShell 7 (the v2.0.0 default
@@ -307,7 +306,7 @@ jobs:
             Write-Error "unexpected --version output (GUI-subsystem piped stdout may be broken): $ver"
             exit 1
           }
-          Write-Host "Windows release build + piped --version smoke OK"
+          Write-Host "Windows release-profile build + piped --version smoke OK"
       - name: Headless GPU smoke (Linux)
         if: runner.os == 'Linux'
         env:
@@ -633,9 +632,8 @@ jobs:
           # invariant in every snippet's header — if a maintainer
           # rewrites the script without that comment, this fails
           # and they have to touch this smoke step on purpose.
-          # `powershell` is included — it's the one
-          # shell-integration target Windows users actually use
-          # (install.ps1 -WithShellIntegration), so it must be smoked too.
+          # `powershell` remains retained code, so generation stays in the
+          # cross-platform CLI contract even though no installer ships it.
           for sh in bash zsh fish powershell; do
             "$KETTLE_CI_BIN" --shell-integration "$sh" > "/tmp/k.${sh}"
             grep -q "OSC 133" "/tmp/k.${sh}"

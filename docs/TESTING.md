@@ -209,6 +209,11 @@ Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
 not publish or support a Windows package, installer, GPU smoke, or live-window
 harness. Historical native Windows and Parallels ARM evidence belongs to the
 3.3.0-and-earlier record, not to current release coverage.
+The runner does not use `--ignored`. The former manual `pwsh` OSC 7/ConPTY and
+sysinfo cwd probes were removed rather than presented as required CI evidence.
+The required PowerShell script fixtures, workspace tests, CLI smoke, and
+vendored ConPTY regression remain.
+
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.

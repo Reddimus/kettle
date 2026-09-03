@@ -21,8 +21,10 @@ Download a package from the
 | Linux, glibc 2.35+ | `kettle-linux-*.tar.gz` | Run the command below |
 | macOS 11+ | `kettle-macos-universal.zip` | Move `kettle.app` to Applications |
 
-Windows support ended with 3.3.0. Archived Windows packages remain attached to
-their historical releases, but 4.0 and later do not ship or update Windows.
+Windows distribution ended with 3.3.0. Archived Windows packages remain
+attached to their historical releases, but 4.0 and later do not ship or update
+Windows. CI still compiles and tests retained Windows code. That coverage does
+not restore distribution or supported-platform status.
 
 Linux installs for the current user under `~/.local`:
 
