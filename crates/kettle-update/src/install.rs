@@ -3020,8 +3020,6 @@ fn is_linux_changelog_archive_name(name: &str) -> bool {
 fn linux_install_map<'a>(
     package_files: impl IntoIterator<Item = &'a Path>,
 ) -> Result<Vec<LinuxInstallEntry>, UpdateError> {
-    const STATIC_DOC_ENTRIES: usize = 6;
-
     let static_entry = |(source, destination, mode): &(&str, &str, u32)| LinuxInstallEntry {
         source: PathBuf::from(source),
         destination: PathBuf::from(destination),
@@ -3066,16 +3064,11 @@ fn linux_install_map<'a>(
     }
     changelogs.sort_by(|left, right| left.source.cmp(&right.source));
 
-    let mut map = LINUX_STATIC_INSTALL_MAP[..STATIC_DOC_ENTRIES]
+    let mut map = LINUX_STATIC_INSTALL_MAP
         .iter()
         .map(static_entry)
         .collect::<Vec<_>>();
     map.extend(changelogs);
-    map.extend(
-        LINUX_STATIC_INSTALL_MAP[STATIC_DOC_ENTRIES..]
-            .iter()
-            .map(static_entry),
-    );
 
     let mut destinations = std::collections::HashSet::new();
     for entry in &map {
@@ -8028,23 +8021,27 @@ mod tests {
 
         let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
         apply_verified_linux_update(&mut transaction, &package, &install, &fake_update()).unwrap();
-        let changelog_publications = transaction
-            .journal
-            .entries
+        let expected_publications = LINUX_STATIC_INSTALL_MAP
             .iter()
-            .map(|entry| entry.relative.as_str())
-            .filter(|path| path.starts_with(LINUX_CHANGELOG_DESTINATION))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            changelog_publications,
-            [
+            .map(|(_, destination, _)| *destination)
+            .chain([
                 "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
                 "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
                 "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
                 "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
                 "share/doc/kettle/docs/changelog/CHANGELOG-4.x.md",
-            ],
-            "changelog publication order must not depend on archive order"
+            ])
+            .collect::<Vec<_>>();
+        let publications = transaction
+            .journal
+            .entries
+            .iter()
+            .map(|entry| entry.relative.as_str())
+            .take(expected_publications.len())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            publications, expected_publications,
+            "static payloads must retain their declared order before sorted changelogs"
         );
         transaction.commit().unwrap();
 
