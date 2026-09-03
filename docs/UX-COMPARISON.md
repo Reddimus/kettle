@@ -53,6 +53,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Duplicate tab / pane** | ✅ clone argv + cwd (v1.3.0) | ⛔ | ⛔ | ✅ | ⛔ | — |
 | **Splits/panes** | ✅ binary tree | ✅ | ✅ (layouts) | ✅ | ✅ | ⛔ |
 | Split keybinds | ✅ Terminator-exact | ✅ | ✅ | ✅ | ✅ (origin) | — |
+| macOS directional focus chord | ✅ `Cmd+Opt+Arrow` + `Ctrl+Cmd+Arrow` | ✅ `super+alt+arrow` | ⛔ none by default | 🟡 `Ctrl+Shift+Arrow` (portable, not macOS-native) | — (Linux only) | — |
 | Unfocused-pane dimming | ✅ `unfocused-split-opacity` 0.7 | ✅ (origin) | 🟡 | 🟡 | ⛔ | — |
 | Pane zoom/maximize | ✅ `Ctrl+Shift+X` | ✅ | ✅ | ✅ `is_zoomed` | ✅ | — |
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
@@ -95,6 +96,28 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
   `split_horiz = '<Shift><Control>o'`, `split_vert = '<Shift><Control>e'`.
   kettle now matches exactly (`Ctrl+Shift+O` → top/bottom, `Ctrl+Shift+E`
   → left/right) — see `kettle-config/src/keybinds.rs`.
+- **macOS directional focus chord** — a plurality, not a consensus. Ghostty and
+  WezTerm were read off the installed binaries; iTerm2's default comes from its
+  documentation, and kitty's from the docs shipped in its app bundle.
+  Ghostty `+show-config --default`:
+  `keybind = super+alt+arrow_left=goto_split:left`, with `super+ctrl+arrow`
+  taken for `resize_split`. iTerm2 documents `Cmd+Opt+Arrow` for Select Split
+  Pane. WezTerm `show-keys`: `SHIFT|CTRL LeftArrow →
+  ActivatePaneDirection(Left)`, the same on every platform, so it disagrees.
+  kitty ships no directional default; its `neighboring_window` mappings are a
+  suggestion in the bundled `layouts.html`, not a binding. kettle binds
+  `Cmd+Opt+Arrow` for the iTerm2/Ghostty habit and keeps `Ctrl+Cmd+Arrow`. It
+  leaves `Ctrl+Opt+Arrow` alone because that is the VoiceOver modifier.
+- **Why no `Cmd+[` / `Cmd+]`** — iTerm2 and Ghostty both cycle splits with the
+  bracket chords, and kettle deliberately does not. Brackets sit behind Option
+  on the German, French, Italian, Spanish and Nordic layouts, and macOS reports
+  the modifierless character once Command is held, so a character binding is
+  unreachable there. Binding the physical bracket position instead collides:
+  `UCKeyTranslate` on this machine reports the physical `]` key as `+` on
+  German, which kettle already binds to `Cmd++` (increase font size), and as a
+  dead key on Spanish. Reaching this correctly needs physical-key triggers in
+  the config grammar, which kettle does not have. `Ctrl+Shift+N` /
+  `Ctrl+Shift+P` cycles panes on every layout in the meantime.
 - **Unfocused-split dimming** — Ghostty `src/config/Config.zig:1071`
   (`@"unfocused-split-opacity": f64 = 0.7`) and the clamp at
   `Config.zig:4676` (`@min(1.0, @max(0.15, …))`). kettle: same key, default

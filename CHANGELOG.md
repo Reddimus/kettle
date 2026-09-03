@@ -6,6 +6,42 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **macOS directional pane focus now answers `Cmd+Opt+Arrow`.** The chord was
+  unbound, so a user arriving from iTerm2 or Ghostty pressed it and got
+  nothing: no movement, no error, and no hint that a different chord existed.
+  Silent failure is the one kind a user cannot recover from by trying harder.
+
+  A plurality among peer terminals, not a consensus. Ghostty ships
+  `super+alt+arrow_left=goto_split:left` and iTerm2 documents the same chord
+  for Select Split Pane, but WezTerm uses the portable `Ctrl+Shift+Arrow` and
+  kitty ships no directional default at all. Ghostty's and WezTerm's defaults
+  were read off the installed binaries; iTerm2's and kitty's come from their
+  documentation.
+
+  `Ctrl+Cmd+Arrow` keeps working and is not deprecated. Unbinding it would not
+  hand the chord to anything better, because a Cmd-bearing chord has no PTY
+  encoding and would simply go dead. `Ctrl+Opt+Arrow` is deliberately left
+  alone: Ctrl+Option is the VoiceOver modifier, and VO+Arrow moves the
+  VoiceOver cursor. Bare `Option+Arrow` still reaches the shell as word motion.
+  Linux and Windows keep Terminator's `Alt+Arrow`.
+
+  iTerm2 and Ghostty also cycle splits with `Cmd+[` / `Cmd+]`, which kettle
+  does not adopt. Brackets sit behind Option on the German, French, Italian,
+  Spanish and Nordic layouts and macOS reports the modifierless character once
+  Command is held, so a character binding is unreachable there; binding the
+  physical position instead lands on `+` on German, which is already
+  `Cmd++` (increase font size). `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
+  every platform and layout.
+
+  Verified with real keystrokes through the window server, not control-API
+  injection: a deterministic 2x2 split, asserting the expected target pane for
+  every direction from every pane, 16/16 for the new chord and 16/16 for the
+  old one. Every new and extended guard was confirmed to fail against its own
+  bug, over six mutations, including one that reproduces a README rewrite
+  deleting the pane-focus rows while every test stayed green.
+
 ### Changed
 
 - Kitty relative-placement deletion now builds one parent-to-children index
