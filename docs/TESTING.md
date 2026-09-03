@@ -1,10 +1,11 @@
 # Testing
 
 kettle is verified by a fast, deterministic test suite plus native CI smoke
-runs on Linux and macOS. Retained Windows conditional code has no hosted native
-gate. Most parser, state, and UI-decision tests need neither a GPU nor a PTY.
-The full workspace suite intentionally also opens an offscreen wgpu device and
-runs a small number of native PTY lifecycle tests. An
+runs on Linux and macOS. A Windows CI leg retains compile and regression
+coverage for conditional code, but it does not represent a supported package or
+installer. Most parser, state, and UI-decision tests need neither a GPU nor a
+PTY. The full workspace suite intentionally also opens an offscreen wgpu
+device and runs a small number of native PTY/ConPTY lifecycle tests. An
 adapter-less host can soft-skip the GPU test and a restricted sandbox can
 soft-skip the PTY tests, but that is reduced coverage and must not be reported
 as a native GPU or PTY pass.
@@ -60,9 +61,8 @@ effect is initialized from the content frame, constrains all four edges to the
 Winit content view, stays below its Metal layer, stops below an opaque native
 titlebar, and has no competing geometry setter. Portable policy tests keep the effect out of
 borderless windows, where it would cover the Metal view, and out of an otherwise
-opaque window, where it would create a titlebar-only seam. Portable tests pin
-the Windows DWM color byte order and minimum caption-text contrast. Linux tests
-require both a
+opaque window, where it would create a titlebar-only seam. Windows tests pin DWM
+color byte order and minimum caption-text contrast. Linux tests require both a
 Wayland handle and the KWin blur global, cache that registry probe per process,
 and prove the 99% fallback is Linux-only; renderer tests prove the fallback
 survives the replacing pane-base pass in the live window but does not change
@@ -81,10 +81,9 @@ interactive `zsh -f` with `PROMPT_SUBST` off and its system Bash 3.2, while
 Linux CI installs Fish and executes its OSC 133 event hooks and OSC 7 cwd report.
 A separate Ubuntu 24.04 job asserts Fish 3.7.x before running the same suite, so
 the oldest supported completion binding cannot drift with `ubuntu-latest`.
-PowerShell source and parser fixtures run portably, but current CI does not run
-the prompt-status and PSReadLine binding fixture under a native PowerShell host.
-Other hosts run the interpreters they have and print explicit skips for native
-legs that belong to the CI matrix.
+Windows runs the PowerShell prompt-status and PSReadLine binding fixture
+under each installed PowerShell host. Other hosts run the interpreters they have
+and print explicit skips for native legs that belong to the CI matrix.
 
 The same gate exercises completion metadata. Portable fixtures pin UTF-8-safe
 field truncation and custom-binding preservation in all four snippets. The Zsh
@@ -125,9 +124,8 @@ state tests prove that session remains accepted and a fresh sync may replace
 it. PowerShell pins both stock-direction bindings, its quoted-directory edit,
 multi-page absolute positions, the 64 KiB wire cap, and the same source-memory
 limits. Its prefix and replacement token are rejected before grapheme indexing
-when an editor line exceeds their presentation bounds. The retained native
-Windows fixture drives this path with PSReadLine, but it has no current CI
-runner. Parser and terminal tests bound malformed control strings,
+when an editor line exceeds their presentation bounds. Native Windows runs
+that fixture with PSReadLine. Parser and terminal tests bound malformed control strings,
 compare every split of private metadata through the screen and raw-output
 filters, sweep private-message starts around the exact recovery boundary, keep
 absolute positions when unsafe rows are skipped, and reject stale replies after
@@ -158,10 +156,11 @@ targets, doctests, and warnings-denied clippy targets with:
 just vendor-check
 ```
 
-CI runs `vte`, its `alacritty_terminal` consumer, and `portable-pty` on Linux.
-The retained `PIPE_NOWAIT` ConPTY regression requires a native Windows build,
-which current CI does not provide. A local non-Windows `just vendor-check` is
-therefore not evidence that the native Windows patch passed.
+CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
+`portable-pty` on Linux and Windows because only the Windows runner compiles
+and executes the `PIPE_NOWAIT` ConPTY regression. A local non-Windows
+`just vendor-check` is therefore not evidence that the native Windows patch
+passed.
 
 The vendored trees intentionally preserve their upstream release formatting so
 the retained patch remains reviewable against the published source. Do not run
@@ -176,10 +175,9 @@ For full Linux coverage, install the source-build dependencies from
 [INSTALL.md](INSTALL.md#from-source) plus `libvulkan1` and
 `mesa-vulkan-drivers`. No graphical session is needed for
 `gpu_pipelines_compile_and_render_offscreen`, but a working Vulkan loader and
-hardware or software adapter are. macOS uses Metal. Retained Windows renderer
-code selects DX12/WARP or another available wgpu backend, but current CI does
-not exercise it. Native PTY checks on supported hosts need permission to create
-`/dev/ptmx` children.
+hardware or software adapter are. Windows uses DX12/WARP or another available
+wgpu backend; macOS uses Metal. The native PTY checks also need permission to
+create `/dev/ptmx` children on Unix or a ConPTY on Windows.
 
 Native ARM guest checks complement, but do not replace, the hosted release
 matrix. The maintained guest is the migrated Ubuntu 26.04 aarch64 installation
@@ -206,11 +204,16 @@ session. Both runs selected Vulkan through Mesa llvmpipe and reported
 `Adapter type: Cpu`. This proves the software-rendered Vulkan and Wayland
 paths. It does not prove accelerated virtio GPU rendering.
 
-Retained Windows code, including ConPTY and PowerShell fixtures, has no hosted
-native runner. Kettle 4.0 does not publish or support a Windows package,
-installer, GPU smoke, or live-window harness. Historical native Windows and
-Parallels ARM evidence belongs to the 3.3.0-and-earlier record, not to current
-release coverage.
+The retained Windows CI runner compiles and tests portable and conditional
+Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
+not publish or support a Windows package, installer, GPU smoke, or live-window
+harness. Historical native Windows and Parallels ARM evidence belongs to the
+3.3.0-and-earlier record, not to current release coverage.
+The runner does not use `--ignored`. The former manual `pwsh` OSC 7/ConPTY and
+sysinfo cwd probes were removed rather than presented as required CI evidence.
+The required PowerShell script fixtures, workspace tests, CLI smoke, and
+vendored ConPTY regression remain.
+
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
 coverage instead of treating the exit code alone as platform validation.
@@ -263,9 +266,6 @@ below are
 deliberately range-stable rather than exact, because the workspace grows by one
 to three tests per feature landed and an exact figure is wrong again within a
 release. [CHANGELOG.md](../CHANGELOG.md) records what was added when.
-
-Entries below that name native Windows tests document retained source coverage.
-Current hosted CI does not compile or run those target-gated tests.
 
 The `user_facing_docs_have_no_internal_cycle_refs` drift guard scans
 user-facing docs for hardcoded "N workspace tests" claims that go stale. This
@@ -440,11 +440,11 @@ The split-handle loopback and
 same-user kernel credential path run on every native CI OS. A deterministic
 failed-identity injection proves clients reject before sending protocol
 bytes. Stalled readers prove deadline and cancellation exits from both a
-client handle and an accepted server handle with an 8 MiB write. The retained
-native Windows test exercises the formerly synchronous server-side arm on a
-real overlapped named-pipe handle. Unix also asserts the shared open-file
-description remains stably nonblocking while a cloned reader retains blocking
-semantics. Control-server regressions occupy all eight slots with
+client handle and an accepted server handle with an 8 MiB write. Windows
+therefore exercises the formerly synchronous server-side arm on a real
+overlapped named-pipe handle. Unix additionally asserts the shared open-file
+description remains stably nonblocking while a cloned reader retains
+blocking semantics. Control-server regressions occupy all eight slots with
 idle peers, slow-drip an incomplete frame, and stop reading a subscribed
 stream; each waits for reclamation and then completes an independent fresh
 request. Activation starts an incomplete client in its own worker and proves
@@ -721,8 +721,7 @@ subscription cannot retain its candidate handle. Re-executed cache-resolver
 tests exercise each platform environment branch without mutating the shared
 test process. Trust fixtures reproduce mode-bit mutation on Unix, extended
 ACL mutation on macOS, and both generic-write and generic-all DACL grants on
-Windows; the latter requires a native Windows run and has no current CI gate.
-Diagnostics fixtures use
+Windows; the latter remains a native-runner gate. Diagnostics fixtures use
 explicit private creation so `umask 002` still reaches the parser/size
 assertions they exist to test. Process-level guards require one config load
 followed by application to every mapped window while preserving per-window
@@ -1042,18 +1041,17 @@ cannot satisfy it, so deleting the procfs scan makes the test fail. It also
 proves the freeze phase observes stopped states before its final scan. Separate Linux unit
 coverage pins `/proc/stat` parsing, pidfd-backed identities, rejection of a
 vanished or start-time-mismatched leader before numeric targeting, and reports a
-local or shared procfs work bound instead of silently truncating cleanup. The
-retained native Windows vendor test opens a real ConPTY, services its startup DSR,
+local or shared procfs work bound instead of silently truncating cleanup. Native
+Windows vendor coverage opens a real ConPTY, services its startup DSR,
 re-executes the small native test helper whose first action creates a descendant,
 retains that process handle before teardown, and proves the pre-resume Job
 Object kill reaches it. A product integration fixture then lets the direct
 child exit while its same-console descendant waits two seconds before writing,
 proving Job accounting postpones quiet close until that tail is delivered. A
 real native process exit of 259 separately pins handle-signalled liveness rather
-than the ambiguous `STILL_ACTIVE` value. The vendored gate enables
-`serde_support`, so Linux compiles both a serialized builder from before the
-containment field and a true containment round trip. The Windows build of that
-contract is not part of current CI.
+than the ambiguous `STILL_ACTIVE` value. The vendored gate enables `serde_support`, so both a
+serialized builder from before the containment field and a true containment
+round trip are compiled on Linux and Windows.
 The native integration
 suites continue to cover streamed stdout, replayable asciicast output, explicit
 raw-mode EOF, query replies, and child status propagation through the real
@@ -1275,8 +1273,8 @@ These need a real display and are run by hand (or on real hardware):
 - **Perf**: `cat` a ~100 MB file / fast `yes` stays responsive.
 - **Platform compatibility**: before a release, verify the shipped binaries on
   Ubuntu and macOS. Windows 11 and WSL were release checks through 3.3.0; in
-  4.0 they remain historical baselines, not current CI or required live evidence
-  for a supported package.
+  4.0 they remain historical baselines and compile/regression CI coverage, not
+  required live evidence for a supported package.
 
 ### Agent gauntlet
 
@@ -1497,8 +1495,8 @@ credentials should fail the run.
 The Windows/WSL live-agent recipe retired with the final
 Windows-supported 3.3.0 line. Its prior contract remains in the `v3.3.0`
 documentation and source history. The portable helper self-tests still protect
-retained parsing and cleanup code on Linux and macOS, but no current native
-runner or release claims a Windows or WSL live-window pass.
+retained parsing and cleanup code on the Windows CI runner, but no current
+release claims a Windows or WSL live-window pass.
 
 The artifact directory writes its initial `provenance.json` before Kettle
 launches. After configured Neovim has completed any first-run bootstrap,
@@ -1932,11 +1930,11 @@ name the shape of bug each pass caught.
 
 ## CI
 
-`.github/workflows/ci.yml` runs the supported build matrix on **Ubuntu and
-macOS**:
+`.github/workflows/ci.yml` runs supported runtime checks on **ubuntu/macos** and
+retained compile/regression checks on **windows**:
 
 - `fmt --check`, `build --all-targets`, `clippy -D warnings`,
-  `cargo test --workspace` on both matrix hosts.
+  `cargo test --workspace` on every OS.
 - `cargo doc --no-deps` with `RUSTDOCFLAGS=-D warnings` (Linux only —
   catches broken intra-doc-links, malformed examples; rustdoc is
   platform-agnostic so one runner suffices).
@@ -1971,10 +1969,9 @@ macOS**:
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).
 - Native shell-integration fixtures: stock interactive `zsh -f` and system
-  Bash 3.2 on macOS, plus Fish 3.7/4.2/4.8 behavior on Linux. Portable source
-  and parser fixtures retain PowerShell coverage without claiming a native
-  host run. The Fish leg drives real Emacs and Vi key maps, requires the private
-  completion OSC within 750 ms, and pins release
+  Bash 3.2 on macOS, Fish 3.7/4.2/4.8 behavior on Linux, plus PowerShell
+  prompt/Enter behavior on Windows. The Fish leg drives real Emacs and Vi key
+  maps, requires the private completion OSC within 750 ms, and pins release
   archives by SHA-256. Geometry and renderer tests cover prompt-relative
   anchoring to the editable command column, right-edge clamping, the header
   lane, lookahead, scroll math, content-fit width,
@@ -1991,7 +1988,7 @@ macOS**:
 - The macOS comparator score self-test and the mandatory Kettle-owned portion of
   `just agent-cli-smoke` on macOS; unavailable third-party clients are recorded
   as skips rather than claimed as covered.
-- A CLI smoke on both matrix hosts: locked rebuild plus exact 12-character Git/dirty
+- A CLI smoke on every OS: locked rebuild plus exact 12-character Git/dirty
   identity matching, `--version` shape,
   `--check-config` lead line, `--config-path`, `--list-themes`
   > 400, `--list-actions` > 50, `--list-keybinds` > 40,
@@ -2001,18 +1998,19 @@ macOS**:
   malformed-profile diagnostics from an owner-private fixture created under a
   deliberate Unix `002` umask (every directory/file mode is named explicitly),
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
-  exit codes, and a happy-path basename round-trip.
+  exit codes, happy-path basename round-trip
+  (Windows path-translation parity).
 - The **MSRV verification job** — pinned `dtolnay/rust-
   toolchain@1.89` builds + tests the workspace at the declared
   floor, catches a future transitive-dep MSRV bump at PR time
   instead of release time.
-- The **icon raster and actool packaging smokes**. The Linux generator gate
-  compares the SVG, `AppIcon.icon`, every PNG, and all seven ICO resolutions.
-  The macOS leg compiles the Icon Composer document and requires `Assets.car`,
-  `AppIcon.icns`, `CFBundleIconName`, and `CFBundleIconFile`. The retained
-  Windows resource embed has no native CI gate. Source guards pin that window
-  creation plus palette changes synchronize the native titlebar and Windows/X11
-  icon. These checks prove wiring and input
+- The **icon raster, actool, and ico packaging smokes** — the cross-platform
+  generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
+  all seven ICO resolutions. The macOS leg compiles the Icon Composer document
+  and requires `Assets.car`, `AppIcon.icns`, `CFBundleIconName`, and
+  `CFBundleIconFile`; the Windows leg validates and embeds the existing `.ico`.
+  Source guards pin that window creation plus palette changes synchronize the
+  native titlebar and Windows/X11 icon. These checks prove wiring and input
   assets; they pin the two strokes of `>_` at 16 and 24 px, exact dark/light
   palette inversion, separate adaptive Icon Composer sources, and the inset
   face geometry. These checks
@@ -2064,9 +2062,8 @@ macOS**:
   same VM (`session::` 6 failed on both, `paste_image::` 13 failed on both),
   because the VM runs them as root on tmpfs. Windows: **not run locally** — the
   Windows 11 VM could not build `ring`'s custom build script for lack of a C/asm
-  toolchain. At the time, `build (windows-latest)` supplied the Windows evidence.
-  That job has since retired, so this record does not establish current Windows
-  coverage.
+  toolchain. Windows coverage for this change comes from
+  `build (windows-latest)` in `ci.yml`, not from a local run.
 - The modified-Enter matrix pairs the live line-discipline result with a
   recognized foreground composer, rejects nested/raw shell and readline cases,
   and exercises direct versus shell-hosted Windows clients. Process-snapshot
@@ -2077,8 +2074,7 @@ macOS**:
   cannot satisfy the assertion before the child actually prints them.
 - The Windows installer and fault-injection smoke retired with 3.3.0. Its
   historical contract remains in the `v3.3.0` source and documentation. The
-  former Windows CI leg did not install, upgrade, uninstall, or package Kettle,
-  and current CI has no Windows leg.
+  Windows CI leg in 4.0 does not install, upgrade, uninstall, or package Kettle.
 - **Session recording** — recording is a runtime toggle (`record = on` /
   `--record`) compiled into every build, so the default build/clippy/test
   exercise the GUI recording flags, input tokens, markers, and status UI
@@ -2103,8 +2099,8 @@ Separate workflows:
   derivation executes tests only for the root-independent `kettle-vt` and
   `kettle-remote` crates: its Linux sandbox presents `/` as uid 65534 while the
   builder is uid 1000, so Kettle's private-path policy intentionally rejects
-  positive private-file operations beneath that ancestry. Native Linux and
-  macOS CI plus the Linux Rust 1.89 MSRV job remain authoritative for the
+  positive private-file operations beneath that ancestry. Native Linux, macOS,
+  and Windows CI plus the Linux Rust 1.89 MSRV job remain authoritative for the
   complete workspace, including private-state, configuration persistence,
   screenshots, recording, local IPC, and updater tests. The separately named
   launch check proves the appended
