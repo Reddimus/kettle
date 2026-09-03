@@ -2007,6 +2007,62 @@ mod tests {
     }
 
     #[test]
+    fn readme_still_documents_how_to_move_between_panes() {
+        // `readme_documented_chords_are_actually_bound` checks the other
+        // direction: that a chord the README names still does what the row
+        // claims. It cannot notice a row being *deleted*, and that is not
+        // hypothetical — a README rewrite dropped all three pane-focus rows
+        // and every test stayed green. Splits are the feature users ask about
+        // first, so the README has to keep saying how to move between them.
+        //
+        // Textual, like `man_page_documents_load_bearing_default_keybinds`: the
+        // README writes chords as prose, not as `Action` names. Scoped to the
+        // "Common keys" table rather than the whole file, so a chord that
+        // happens to appear in surrounding prose cannot hold this green while
+        // the table itself has lost the row.
+        const README: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"));
+
+        let after = README
+            .split_once("## Common keys")
+            .expect("README lost its Common keys section")
+            .1;
+        let table = after
+            .split_once("\n## ")
+            .map_or(after, |(before, _)| before);
+        let rows: Vec<&str> = table
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('|'))
+            .collect();
+        // A markdown table starts with a header row and a `|---|` separator.
+        // Requiring both means an emptied or reformatted-away table fails here
+        // rather than passing vacuously with zero rows to search.
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Action") && row.contains("Key")),
+            "README's Common keys table lost its header row"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_matches('|').trim().starts_with("---")),
+            "README's Common keys table lost its separator row"
+        );
+
+        for chord in [
+            "Alt+Arrow",      // Linux and Windows directional focus
+            "Cmd+Opt+Arrow",  // macOS directional focus, iTerm2 and Ghostty
+            "Ctrl+Cmd+Arrow", // macOS directional focus, Kettle's original
+            "Ctrl+Shift+N",   // the cycle chord that works on every platform
+        ] {
+            assert!(
+                rows.iter().any(|row| row.contains(chord)),
+                "the README's Common keys table no longer has a row for {chord}, \
+                 so a reader cannot find out how to move between panes"
+            );
+        }
+    }
+
+    #[test]
     fn defaults_has_no_shadow_collisions() {
         // Systemic guard against shadow collisions. An earlier fix
         // caught a single shadow collision (Ctrl+Shift+Up/Down both
