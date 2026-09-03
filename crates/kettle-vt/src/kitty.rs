@@ -20,7 +20,7 @@
 //!
 //! Spec: `kitty/docs/graphics-protocol.rst`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 
 use base64::Engine;
@@ -1128,45 +1128,71 @@ impl KittyState {
         if removed.is_empty() {
             return;
         }
+        let initial_removed: HashSet<PlacementKey> = removed.iter().copied().collect();
         if remove_virtual {
             self.virtual_placements
                 .retain(|&(image_id, placement_id), _| {
-                    !removed
-                        .iter()
-                        .any(|key| key.image_id == image_id && key.placement_id == placement_id)
+                    !initial_removed.contains(&PlacementKey {
+                        image_id,
+                        placement_id,
+                    })
                 });
         }
 
         // Relative placements depend on a concrete parent placement. Cascade
-        // until stable so deleting a root also removes every descendant.
-        let mut removed_keys = removed.to_vec();
-        loop {
-            let before = self.rel.len();
-            let mut cascaded = Vec::new();
-            self.rel.retain(|&(image_id, placement_id), relative| {
-                let own = removed_keys
-                    .iter()
-                    .any(|key| key.image_id == image_id && key.placement_id == placement_id);
-                let parent = removed_keys.iter().any(|key| {
-                    key.image_id == relative.parent_img
-                        && (relative.parent_placement == 0
-                            || key.placement_id == relative.parent_placement)
-                });
-                if own || parent {
-                    cascaded.push(PlacementKey {
-                        image_id,
-                        placement_id,
-                    });
-                    false
-                } else {
-                    true
-                }
-            });
-            if self.rel.len() == before {
-                break;
+        // through a reverse index so deleting a root visits each relation once.
+        // A zero parent-placement id matches any placement of that image, so
+        // those dependants have their own image-level index.
+        let mut exact_dependants: HashMap<PlacementKey, Vec<PlacementKey>> = HashMap::new();
+        let mut image_dependants: HashMap<u32, Vec<PlacementKey>> = HashMap::new();
+        for (&(image_id, placement_id), relative) in &self.rel {
+            let child = PlacementKey {
+                image_id,
+                placement_id,
+            };
+            if relative.parent_placement == 0 {
+                image_dependants
+                    .entry(relative.parent_img)
+                    .or_default()
+                    .push(child);
+            } else {
+                exact_dependants
+                    .entry(PlacementKey {
+                        image_id: relative.parent_img,
+                        placement_id: relative.parent_placement,
+                    })
+                    .or_default()
+                    .push(child);
             }
-            removed_keys.extend(cascaded);
         }
+
+        let mut removed_keys = initial_removed;
+        let mut pending: VecDeque<PlacementKey> = removed_keys.iter().copied().collect();
+        let mut expanded_images = HashSet::new();
+        while let Some(parent) = pending.pop_front() {
+            if let Some(children) = exact_dependants.remove(&parent) {
+                for child in children {
+                    if removed_keys.insert(child) {
+                        pending.push_back(child);
+                    }
+                }
+            }
+            if expanded_images.insert(parent.image_id)
+                && let Some(children) = image_dependants.remove(&parent.image_id)
+            {
+                for child in children {
+                    if removed_keys.insert(child) {
+                        pending.push_back(child);
+                    }
+                }
+            }
+        }
+        self.rel.retain(|&(image_id, placement_id), _| {
+            !removed_keys.contains(&PlacementKey {
+                image_id,
+                placement_id,
+            })
+        });
     }
 
     fn free_image_data(&mut self, id: u32) {
@@ -1736,6 +1762,28 @@ mod tests {
         assert!(k.relative_placement(2, 8).is_some());
         k.feed("a=d,d=i,i=2");
         assert!(k.relative_placement(2, 8).is_none());
+    }
+
+    #[test]
+    fn relative_placement_deletion_cascades_through_the_full_budget() {
+        let mut state = KittyState::default();
+        let cap = state.budget.limits().placements as u32;
+        state.feed(&format!("a=t,i=1,f=32,s=1,v=1;{PX}"));
+        for placement in 1..=cap {
+            assert!(matches!(
+                state.feed(&format!(
+                    "a=p,i=1,p={placement},P=1,Q={}",
+                    placement.saturating_sub(1)
+                )),
+                KittyOut::Relative { .. }
+            ));
+        }
+
+        state.feed("a=d,d=i,i=1,p=1");
+
+        for placement in 1..=cap {
+            assert!(state.relative_placement(1, placement).is_none());
+        }
     }
 
     #[test]
