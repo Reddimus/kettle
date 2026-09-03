@@ -17,8 +17,9 @@ releases remain authoritative for what has actually shipped.
 - Current workspace version: `4.3.0`
 - Release headings inspected: 173 across the root `CHANGELOG.md` and
   `docs/changelog/` archives. That count comprises `[Unreleased]` and 172 dated
-  versions from `v0.1.0` through `v4.3.0`. Those dated headings currently have
-  172 matching Git tags.
+  versions from `v0.1.0` through `v4.3.0`.
+  During release preparation, the newest dated heading has no tag yet;
+  `scripts/tag-release.sh` creates it after the release commit merges.
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot

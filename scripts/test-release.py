@@ -46,8 +46,9 @@ HISTORY = """# Version history
 - Current workspace version: `3.3.0`
 - Release headings inspected: 3 across the root `CHANGELOG.md` and
   `docs/changelog/` archives. That count comprises `[Unreleased]` and 2 dated
-  versions from `v0.1.0` through `v3.3.0`. Those dated headings currently have
-  1 matching Git tags.
+  versions from `v0.1.0` through `v3.3.0`.
+  During release preparation, the newest dated heading has no tag yet;
+  `scripts/tag-release.sh` creates it after the release commit merges.
 
 ## Planned platform transition
 
@@ -214,7 +215,14 @@ class ReleaseScriptTests(unittest.TestCase):
             )
             self.assertIn("`[Unreleased]` and 2 dated", history)
             self.assertIn("`v0.1.0` through `v4.0.0`", history)
-            self.assertIn("1 matching Git tags", history)
+            self.assertIn(
+                "During release preparation, the newest dated heading has no tag yet",
+                history,
+            )
+            self.assertIn(
+                "`scripts/tag-release.sh` creates it after the release commit merges",
+                history,
+            )
             self.assertIn("`v3.3.0` is the final Windows-supported release", history)
             self.assertIn("blob/v3.3.0/scripts/install.ps1", history)
             self.assertIn("`v2.29.0` to `v3.3.0`", history)

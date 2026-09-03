@@ -299,11 +299,8 @@ replace_matching_line docs/VERSION-HISTORY.md \
     '^  `docs/changelog/` archives[.] That count comprises `[[]Unreleased[]]` and [0-9][0-9]* dated$' \
     "  \`docs/changelog/\` archives. That count comprises \`[Unreleased]\` and ${DATED_HEADING_COUNT} dated"
 replace_matching_line docs/VERSION-HISTORY.md \
-    '^  versions from `v0[.]1[.]0` through `v[0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*`[.] Those dated headings currently have$' \
-    "  versions from \`v0.1.0\` through \`v${VERSION}\`. Those dated headings currently have"
-replace_matching_line docs/VERSION-HISTORY.md \
-    '^  [0-9][0-9]* matching Git tags[.]$' \
-    "  ${TAG_COUNT} matching Git tags."
+    '^  versions from `v0[.]1[.]0` through `v[0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*`[.]$' \
+    "  versions from \`v0.1.0\` through \`v${VERSION}\`."
 
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
