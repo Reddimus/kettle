@@ -101,6 +101,14 @@ class PackageTemplateTests(unittest.TestCase):
                 '(share_dir/"doc/kettle").install "#{doc_dir}/shell-integration"',
                 formula,
             )
+            self.assertIn(
+                '(share_dir/"doc/kettle/docs").install "#{doc_dir}/docs/changelog"',
+                formula,
+            )
+            self.assertIn(
+                'install -m644 docs/changelog/*.md',
+                pkgbuild,
+            )
 
             second = self.run_renderer(root)
             self.assertEqual(second.returncode, 0, second.stderr)

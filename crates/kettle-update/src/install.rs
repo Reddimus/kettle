@@ -2949,6 +2949,26 @@ fn apply_verified_linux_update(
         ("README.md", "share/doc/kettle/README.md", 0o644),
         ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
         (
+            "docs/changelog/CHANGELOG-0.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-1.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-2.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-3.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
+            0o644,
+        ),
+        (
             "packaging/linux/kettle.desktop",
             "share/applications/kettle.desktop",
             0o644,
@@ -3224,6 +3244,26 @@ fn apply_staged_update(
         ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
         ("README.md", "share/doc/kettle/README.md", 0o644),
         ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
+        (
+            "docs/changelog/CHANGELOG-0.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-1.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-2.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
+            0o644,
+        ),
+        (
+            "docs/changelog/CHANGELOG-3.x.md",
+            "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
+            0o644,
+        ),
         (
             "packaging/linux/kettle.desktop",
             "share/applications/kettle.desktop",
@@ -7703,6 +7743,10 @@ mod tests {
             ("NOTICE", b"notice".as_slice(), 0o644),
             ("README.md", b"readme".as_slice(), 0o644),
             ("CHANGELOG.md", b"changes".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-0.x.md", b"0.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-1.x.md", b"1.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-2.x.md", b"2.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-3.x.md", b"3.x".as_slice(), 0o644),
             (
                 "packaging/linux/kettle.desktop",
                 b"[Desktop Entry]\nType=Application\nName=Kettle\nTerminal=false\nExec=kettle\nTryExec=kettle\nIcon=kettle\n"
@@ -7870,6 +7914,22 @@ mod tests {
             ("NOTICE", "share/doc/kettle/NOTICE"),
             ("README.md", "share/doc/kettle/README.md"),
             ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md"),
+            (
+                "docs/changelog/CHANGELOG-0.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-1.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-2.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-3.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
+            ),
             (
                 "packaging/linux/kettle.svg",
                 "share/icons/hicolor/scalable/apps/kettle.svg",
@@ -8161,6 +8221,10 @@ mod tests {
             ("NOTICE", "notice"),
             ("README.md", "readme"),
             ("CHANGELOG.md", "changes"),
+            ("docs/changelog/CHANGELOG-0.x.md", "0.x"),
+            ("docs/changelog/CHANGELOG-1.x.md", "1.x"),
+            ("docs/changelog/CHANGELOG-2.x.md", "2.x"),
+            ("docs/changelog/CHANGELOG-3.x.md", "3.x"),
             (
                 "packaging/linux/kettle.desktop",
                 "[Desktop Entry]\nType=Application\nName=Kettle\nTerminal=false\nExec=kettle\nTryExec=kettle\nIcon=kettle\n",
@@ -8197,6 +8261,10 @@ mod tests {
         .unwrap();
         transaction.commit().unwrap();
         assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"new-binary");
+        assert_eq!(
+            fs::read(prefix.join("share/doc/kettle/docs/changelog/CHANGELOG-3.x.md")).unwrap(),
+            b"3.x"
+        );
         let desktop_path = prefix.join("share/applications/kettle.desktop");
         let desktop = fs::read_to_string(&desktop_path).unwrap();
         let executable = prefix.join("bin/kettle");

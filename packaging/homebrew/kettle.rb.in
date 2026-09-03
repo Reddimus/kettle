@@ -107,6 +107,9 @@ class Kettle < Formula
 
         (share_dir/"doc/kettle").install "#{doc_dir}/#{f}"
       end
+      if File.directory?("#{doc_dir}/docs/changelog")
+        (share_dir/"doc/kettle/docs").install "#{doc_dir}/docs/changelog"
+      end
       if File.directory?("#{doc_dir}/shell-integration")
         (share_dir/"doc/kettle").install "#{doc_dir}/shell-integration"
       end

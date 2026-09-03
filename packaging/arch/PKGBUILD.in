@@ -85,6 +85,9 @@ package() {
     install -Dm644 NOTICE    "${pkgdir}/usr/share/doc/kettle/NOTICE"
     install -Dm644 README.md "${pkgdir}/usr/share/doc/kettle/README.md"
     install -Dm644 CHANGELOG.md "${pkgdir}/usr/share/doc/kettle/CHANGELOG.md"
+    install -d "${pkgdir}/usr/share/doc/kettle/docs/changelog"
+    install -m644 docs/changelog/*.md \
+        "${pkgdir}/usr/share/doc/kettle/docs/changelog/"
 
     # Man page so `man kettle` works after install.
     install -Dm644 packaging/linux/kettle.1 \

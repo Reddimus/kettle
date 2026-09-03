@@ -281,8 +281,8 @@ replace_exact_line docs/INSTALL.md \
 
 echo "refreshing docs/VERSION-HISTORY.md current baseline"
 replace_exact_line docs/VERSION-HISTORY.md \
-    "- Latest version in this tree: \`v${PREV}\` — carried by the changelog and the" \
-    "- Latest version in this tree: \`v${VERSION}\` — carried by the changelog and the"
+    "- Latest version in this tree: \`v${PREV}\`, with matching source version," \
+    "- Latest version in this tree: \`v${VERSION}\`, with matching source version,"
 replace_exact_line docs/VERSION-HISTORY.md \
     "- Current workspace version: \`${PREV}\`" \
     "- Current workspace version: \`${VERSION}\`"
@@ -290,18 +290,20 @@ replace_exact_line docs/VERSION-HISTORY.md \
 # release.sh runs after the new changelog heading is committed but before its
 # tag exists, so the heading count leads the real tag count by one.
 TAG_COUNT=$(git tag -l 'v[0-9]*' | wc -l | tr -d '[:space:]')
-HEADING_COUNT=$((TAG_COUNT + 1))
-NEWEST_TAG=$(git tag -l 'v[0-9]*' --sort=-version:refname | head -1)
-if [ -z "${NEWEST_TAG}" ]; then
-    echo "::error::cannot refresh docs/VERSION-HISTORY.md without a release tag" >&2
-    exit 1
-fi
+DATED_HEADING_COUNT=$((TAG_COUNT + 1))
+TOTAL_HEADING_COUNT=$((DATED_HEADING_COUNT + 1))
 replace_matching_line docs/VERSION-HISTORY.md \
-    '^- Release records inspected: [0-9][0-9]* Git tags and [0-9][0-9]* changelog headings, from$' \
-    "- Release records inspected: ${TAG_COUNT} Git tags and ${HEADING_COUNT} changelog headings, from"
+    '^- Release headings inspected: [0-9][0-9]* across the root `CHANGELOG.md` and$' \
+    "- Release headings inspected: ${TOTAL_HEADING_COUNT} across the root \`CHANGELOG.md\` and"
 replace_matching_line docs/VERSION-HISTORY.md \
-    "^  \`v0[.]1[.]0\` through \`v[0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*\`[.] The counts are equal after a release tag is\$" \
-    "  \`v0.1.0\` through \`${NEWEST_TAG}\`. The counts are equal after a release tag is"
+    '^  `docs/changelog/` archives[.] That count comprises `[[]Unreleased[]]` and [0-9][0-9]* dated$' \
+    "  \`docs/changelog/\` archives. That count comprises \`[Unreleased]\` and ${DATED_HEADING_COUNT} dated"
+replace_matching_line docs/VERSION-HISTORY.md \
+    '^  versions from `v0[.]1[.]0` through `v[0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*`[.] Those dated headings currently have$' \
+    "  versions from \`v0.1.0\` through \`v${VERSION}\`. Those dated headings currently have"
+replace_matching_line docs/VERSION-HISTORY.md \
+    '^  [0-9][0-9]* matching Git tags[.]$' \
+    "  ${TAG_COUNT} matching Git tags."
 
 # Refresh Cargo.lock so the workspace + lockfile agree. Failing
 # here means a real build error — release shouldn't proceed.
