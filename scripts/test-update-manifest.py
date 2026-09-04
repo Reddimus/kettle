@@ -22,6 +22,63 @@ assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
+# A workflow shaped like release.yml, with one extra step between the two
+# the changelog test reads. Slicing from one step heading to another
+# reports that extra step's script as part of the Linux step.
+SPLIT_TRAP_WORKFLOW = """jobs:
+  package:
+    steps:
+      - name: Package (Linux)
+        run: |
+          mkdir -p dist/kettle/packaging/linux
+          cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
+      - name: Stage extra documentation
+        run: |
+          mkdir -p dist/kettle/docs
+          cp -R docs/changelog dist/kettle/docs/
+      - name: Package (macOS .app bundle)
+        run: |
+          mkdir -p "$APP/Contents/Resources/docs"
+          cp -R docs/changelog "$APP/Contents/Resources/docs/"
+      - name: Sign and notarize (macOS)
+        run: codesign --sign "$SIGNING_IDENTITY" "$APP"
+"""
+
+STEP_HEADING = re.compile(r"^(?P<indent> *)- name: (?P<name>.*?) *$")
+
+
+def workflow_step(workflow: str, name: str) -> str:
+    """Return the workflow step named `name`, heading line included.
+
+    Bounding a step with the name of the step that follows it ties the
+    slice to an unrelated heading: insert a step between the two and the
+    slice quietly grows to cover it, so assertions about the first step
+    pass on the inserted step's script. Give the following step a new
+    name and the slice runs to the end of the file instead, still
+    silently. This locates the step by its own heading, requires that
+    heading to appear exactly once, and ends the step where its block
+    ends -- at the first line indented no deeper than the heading's `-`.
+    """
+    lines = workflow.splitlines(keepends=True)
+    headings = [
+        (index, match)
+        for index, line in enumerate(lines)
+        if (match := STEP_HEADING.match(line)) and match.group("name") == name
+    ]
+    if len(headings) != 1:
+        raise LookupError(
+            f"{len(headings)} workflow steps are named {name!r}, expected 1"
+        )
+    start, heading = headings[0]
+    indent = len(heading.group("indent"))
+    for end in range(start + 1, len(lines)):
+        body = lines[end].lstrip(" ")
+        if not body.strip():
+            continue
+        if len(lines[end]) - len(body) <= indent:
+            return "".join(lines[start:end])
+    return "".join(lines[start:])
+
 
 class ManifestTests(unittest.TestCase):
     def assets(self, root: Path):
@@ -251,16 +308,46 @@ class ManifestTests(unittest.TestCase):
         ):
             self.assertIn("--locked", cargo_line)
 
+    def test_workflow_step_ends_where_its_own_block_ends(self):
+        # A step read as "everything between my heading and the next
+        # heading I happen to name" absorbs whatever is inserted between
+        # the two, so an assertion about the first step passes on text
+        # that belongs to a later one. Here the changelog copy lives in
+        # the step after the Linux one, and must not be found in it.
+        linux = workflow_step(SPLIT_TRAP_WORKFLOW, "Package (Linux)")
+
+        self.assertIn("mkdir -p dist/kettle/packaging/linux", linux)
+        self.assertNotIn("cp -R docs/changelog dist/kettle/docs/", linux)
+        self.assertNotIn("Stage extra documentation", linux)
+        self.assertNotIn("Package (macOS .app bundle)", linux)
+
+    def test_workflow_step_keeps_the_whole_step_it_was_asked_for(self):
+        macos = workflow_step(SPLIT_TRAP_WORKFLOW, "Package (macOS .app bundle)")
+
+        self.assertIn('mkdir -p "$APP/Contents/Resources/docs"', macos)
+        self.assertIn(
+            'cp -R docs/changelog "$APP/Contents/Resources/docs/"', macos
+        )
+        self.assertNotIn("Sign and notarize (macOS)", macos)
+
+    def test_workflow_step_refuses_a_name_it_cannot_place_exactly_once(self):
+        # Slicing on a missing name returns the rest of the file instead
+        # of failing, which is the silent half of the same defect.
+        with self.assertRaises(LookupError):
+            workflow_step(SPLIT_TRAP_WORKFLOW, "Package (Windows)")
+        with self.assertRaises(LookupError):
+            workflow_step(
+                SPLIT_TRAP_WORKFLOW + SPLIT_TRAP_WORKFLOW, "Package (Linux)"
+            )
+
     def test_release_packages_complete_changelog_history(self):
         release_workflow = (
             ROOT / ".github" / "workflows" / "release.yml"
         ).read_text(encoding="utf-8")
-        linux_package = release_workflow.split(
-            "      - name: Package (Linux)\n", 1
-        )[1].split("      - name: Package (macOS .app bundle)\n", 1)[0]
-        macos_package = release_workflow.split(
-            "      - name: Package (macOS .app bundle)\n", 1
-        )[1].split("      - name: Sign and notarize (macOS)\n", 1)[0]
+        linux_package = workflow_step(release_workflow, "Package (Linux)")
+        macos_package = workflow_step(
+            release_workflow, "Package (macOS .app bundle)"
+        )
 
         self.assertIn("mkdir -p dist/kettle/docs", linux_package)
         self.assertIn("cp -R docs/changelog dist/kettle/docs/", linux_package)
@@ -271,6 +358,10 @@ class ManifestTests(unittest.TestCase):
             'cp -R docs/changelog "$APP/Contents/Resources/docs/"',
             macos_package,
         )
+        # Each step carries its own copy; neither assertion above may be
+        # satisfied by the other step's text.
+        self.assertNotIn("$APP/Contents/Resources", linux_package)
+        self.assertNotIn("dist/kettle/docs", macos_package)
 
     def test_macos_signing_selector_requires_one_distribution_identity(self):
         selector = ROOT / "scripts" / "select-macos-signing-identity.py"
