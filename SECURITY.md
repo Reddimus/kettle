@@ -66,8 +66,9 @@ Reports that fit any of these are welcome:
   resource-exhaustion (1 MiB per `send_text`, 8 KiB per `notify`
   field, 1024-command queue length) — bypassing those caps to OOM
   kettle from a sandboxed script is in scope too. `lua-sandbox =
-  trusted` is opt-in and explicitly carries the same surface as
-  native Lua — out of scope.
+  trusted` is opt-in and restores the full Lua command and file APIs —
+  out of scope. The `debug` library and native module loading remain
+  unavailable because mlua's safe state removes them unconditionally.
 
   **What `safe` does not mean.** It nils the stdlib routes to a
   process, but `kettle.send_text` types into the focused shell and a

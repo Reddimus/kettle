@@ -95,8 +95,10 @@ Each change has the same shape:
    see [docs/TESTING.md](docs/TESTING.md)). `just deny` (`cargo deny check`) and
    `just machete` (`cargo machete`) mirror the supply-chain CI
    workflows so a stale dependency-ignore entry is caught
-   at the local pre-flight. `just gauntlet-strict` chains
-   gauntlet + deny + machete for release-cut pre-flight.
+   at the local pre-flight. `just gauntlet-strict` chains `gauntlet` with the
+   release-cut supply-chain and vendor gates: `vendor-check`, `deny`, `audit`,
+   `ttf-parser-scope`, `lru-scope`, `machete`, `tracked-audit`,
+   `mermaid-check`, and `release-script-test`.
    The supported Linux and macOS jobs run the same gate. A retained Windows
    job compiles and tests portable and conditional code, but does not claim a
    supported Windows package or installer. CI also runs a headless GPU smoke

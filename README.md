@@ -45,8 +45,11 @@ kettle --check-update
 kettle update
 ```
 
-Set `update-policy = off` to disable background checks. On macOS, the updater
-replaces `kettle.app` in place and refuses a copy owned by Homebrew.
+Kettle defaults to `update-policy = auto`: it checks the signed release feed at
+most once a day and installs a newer release in the background, taking effect
+on the next restart. Set `update-policy = notify` for a banner only, or
+`update-policy = off` to make no automatic network request. On macOS, the
+updater replaces `kettle.app` in place and refuses a copy owned by Homebrew.
 
 ## First run
 

@@ -348,7 +348,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` action. `false` keeps in-window tab switching and reordering but disables detach |
 | `ask-before-closing` | enum | `multiple-terminals` | Close-confirmation policy: `always`, `multiple-terminals`, or `never`. Applies to the close-window, close-tab, and close-pane **actions** (`Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`, middle-clicking a tab); panes sitting idle at an integrated-shell prompt do not count as work to lose. The **titlebar `✕` and `Alt+F4` are exempt** and close immediately: those are OS window-destroy requests rather than Kettle commands, and a terminal has no unsaved-document state to veto them with. Set `always` if you want them to ask too. Also on the right-click **Preferences ▸** menu as a radio group |
-| `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` enables the full library. Read any plugin before enabling it. See [`docs/examples/init.lua`](examples/init.lua) |
+| `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` restores the command and file APIs (`os.execute`, `io.open`, `io.popen`, `loadfile`, `dofile`); the `debug` library and native C-module loading stay unavailable at every level because the VM is always mlua's safe state. Read any plugin before enabling it. See [`docs/examples/init.lua`](examples/init.lua) |
 
 The automatically discovered `<config-dir>/init.lua` uses the same trusted
 directory and leaf checks as the default config because even `safe` Lua can type
@@ -391,6 +391,7 @@ inert so the compatibility boundary is explicit.
 |---|---|
 | `cursor-color-default` | Kettle uses one setting: set `cursor-color` to override it or remove the line to return to the theme |
 | `http-proxy` | Parsed but not consumed. Update traffic is process-wide and does not inherit a per-profile terminal proxy |
+| `audible-bell` | Kettle ships no audio bell; use `bell = visual`, `attention`, or `both` |
 
 #### Genuine future work — parsed for forward-compat
 
@@ -400,6 +401,7 @@ moves a key into the main table without changing its parser arm.
 | Key | Intended behavior | Why it is future work |
 |---|---|---|
 | `extra-styling` | Render bold/italic with styled-font features even when palette lacks variants | Render glyph-attribute change |
+| `enabled-plugins` | Terminator plugin-enable list | Kettle loads `<config-dir>/init.lua` instead; use `lua-sandbox` to set its trust level |
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
