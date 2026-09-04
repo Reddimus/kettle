@@ -14,13 +14,13 @@ the version below is present in the changelog but not yet as a Git tag or a
 GitHub release. Git tags and GitHub releases remain authoritative for what has
 actually shipped.
 
-- Latest version in this tree: `v4.2.0` — carried by the changelog and the
+- Latest version in this tree: `v4.3.0` — carried by the changelog and the
   version-bearing source files. It becomes a release when release CI publishes
   the tag; until then the entry above it is the newest thing that actually
   shipped.
-- Current workspace version: `4.2.0`
-- Release records inspected: 170 Git tags and 171 changelog headings, from
-  `v0.1.0` through `v4.1.0`. The counts are equal after a release tag is
+- Current workspace version: `4.3.0`
+- Release records inspected: 171 Git tags and 172 changelog headings, from
+  `v0.1.0` through `v4.2.0`. The counts are equal after a release tag is
   published; during release preparation the changelog leads by one until
   `tag-release.sh` creates that tag.
 - Version-bearing source files that must stay in lockstep: workspace
