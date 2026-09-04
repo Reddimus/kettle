@@ -25,7 +25,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: anthropics/claude-code-action@8569a83495a3f6f0c50a90e46351d3816fed1a75 # v1
+      - id: review
+        uses: anthropics/claude-code-action@ef8bb1e43bf303cff727a1dd0b8837029fe982a2 # v1.0.215
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -39,3 +40,24 @@ jobs:
           claude_args: >-
             --allowedTools
             "mcp__github_inline_comment__create_inline_comment,Bash(gh api --method GET:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+      # The action strips the SDK result message's `result` field out of the job
+      # log (anthropics/claude-code-action#880), so a run that dies before its
+      # first model call reports only `is_error: true` with no cause. The
+      # unsanitized messages are written to the execution file; print that one
+      # message's error fields, not the tool output sanitization exists to hide.
+      - name: Report the suppressed review error
+        if: failure()
+        env:
+          EXECUTION_FILE: >-
+            ${{ steps.review.outputs.execution_file
+            || format('{0}/claude-execution-output.json', runner.temp) }}
+        run: |
+          if [ ! -f "$EXECUTION_FILE" ]; then
+            echo "No execution file at $EXECUTION_FILE"
+            exit 0
+          fi
+          jq '[.[] | select(.type == "result")] | last
+              | {subtype, is_error, num_turns, duration_ms, total_cost_usd,
+                 result, errors}' "$EXECUTION_FILE" \
+            || echo "Could not parse $EXECUTION_FILE"
