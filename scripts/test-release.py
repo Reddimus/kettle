@@ -42,10 +42,13 @@ Historical download: https://github.com/Reddimus/kettle/releases/download/v3.3.0
 
 HISTORY = """# Version history
 
-- Latest version in this tree: `v3.3.0` — carried by the changelog and the
+- Latest version in this tree: `v3.3.0`, with matching source version,
 - Current workspace version: `3.3.0`
-- Release records inspected: 1 Git tags and 2 changelog headings, from
-  `v0.1.0` through `v3.3.0`. The counts are equal after a release tag is
+- Release headings inspected: 3 across the root `CHANGELOG.md` and
+  `docs/changelog/` archives. That count comprises `[Unreleased]` and 2 dated
+  versions from `v0.1.0` through `v3.3.0`.
+  During release preparation, the newest dated heading has no tag yet;
+  `scripts/tag-release.sh` creates it after the release commit merges.
 
 ## Planned platform transition
 
@@ -207,10 +210,19 @@ class ReleaseScriptTests(unittest.TestCase):
             self.assertIn("Latest version in this tree: `v4.0.0`", history)
             self.assertIn("Current workspace version: `4.0.0`", history)
             self.assertIn(
-                "Release records inspected: 1 Git tags and 2 changelog headings",
+                "Release headings inspected: 3 across the root `CHANGELOG.md`",
                 history,
             )
-            self.assertIn("`v0.1.0` through `v3.3.0`", history)
+            self.assertIn("`[Unreleased]` and 2 dated", history)
+            self.assertIn("`v0.1.0` through `v4.0.0`", history)
+            self.assertIn(
+                "During release preparation, the newest dated heading has no tag yet",
+                history,
+            )
+            self.assertIn(
+                "`scripts/tag-release.sh` creates it after the release commit merges",
+                history,
+            )
             self.assertIn("`v3.3.0` is the final Windows-supported release", history)
             self.assertIn("blob/v3.3.0/scripts/install.ps1", history)
             self.assertIn("`v2.29.0` to `v3.3.0`", history)

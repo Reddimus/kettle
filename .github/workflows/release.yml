@@ -249,8 +249,10 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/kettle/packaging/linux
+          mkdir -p dist/kettle/docs
           cp target/release/kettle dist/kettle/
           cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
+          cp -R docs/changelog dist/kettle/docs/
           # Desktop integration assets — packaged at the SAME relative
           # paths the in-tree `scripts/install.sh` expects, so a user
           # who extracts the tarball can run `./kettle/install.sh` and
@@ -317,6 +319,8 @@ jobs:
           cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
           cp target/release/kettle "$APP/Contents/MacOS/kettle"
           cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
+          mkdir -p "$APP/Contents/Resources/docs"
+          cp -R docs/changelog "$APP/Contents/Resources/docs/"
           # Shell-integration snippets in Resources/ so a
           # macOS user can read them alongside the LICENSE / NOTICE
           # without needing the source tree. Same content as the

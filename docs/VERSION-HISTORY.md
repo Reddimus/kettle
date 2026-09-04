@@ -1,28 +1,25 @@
 # Version history
 
-This page summarizes Kettle's release history. `CHANGELOG.md`, Git tags, and
-GitHub releases remain the authoritative sources for exact change lists and
-artifacts.
+This page summarizes Kettle's release history. The root `CHANGELOG.md` and the
+files under `docs/changelog/` together contain the authoritative, complete
+change history. Git tags and GitHub releases remain authoritative for shipped
+versions and artifacts.
 
 ## Current baseline
 
-These entries describe the version **this tree carries**, which the release
-commit must set before the tag exists — release CI compares the tag against
-`Cargo.toml`, `flake.nix`, and the changelog, so the files necessarily lead the
-tag. Between the release commit landing on `main` and release CI publishing,
-the version below is present in the changelog but not yet as a Git tag or a
-GitHub release. Git tags and GitHub releases remain authoritative for what has
-actually shipped.
+These entries describe the version **this tree carries**. During release
+preparation, the release commit sets `Cargo.toml`, `flake.nix`, and the
+changelog before `tag-release.sh` creates the matching tag. Git tags and GitHub
+releases remain authoritative for what has actually shipped.
 
-- Latest version in this tree: `v4.3.0` — carried by the changelog and the
-  version-bearing source files. It becomes a release when release CI publishes
-  the tag; until then the entry above it is the newest thing that actually
-  shipped.
+- Latest version in this tree: `v4.3.0`, with matching source version,
+  changelog heading, and Git tag.
 - Current workspace version: `4.3.0`
-- Release records inspected: 171 Git tags and 172 changelog headings, from
-  `v0.1.0` through `v4.2.0`. The counts are equal after a release tag is
-  published; during release preparation the changelog leads by one until
-  `tag-release.sh` creates that tag.
+- Release headings inspected: 173 across the root `CHANGELOG.md` and
+  `docs/changelog/` archives. That count comprises `[Unreleased]` and 172 dated
+  versions from `v0.1.0` through `v4.3.0`.
+  During release preparation, the newest dated heading has no tag yet;
+  `scripts/tag-release.sh` creates it after the release commit merges.
 - Version-bearing source files that must stay in lockstep: workspace
   `Cargo.toml`, `flake.nix`, and the changelog. Release CI renders the Homebrew
   formula and Arch `PKGBUILD` from verified archives so their checksums cannot

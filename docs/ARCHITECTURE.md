@@ -237,6 +237,13 @@ with the recorded replacement fingerprint and preserves later writes on
 conflict. A committed journal retains the last-known-good bytes until a process
 at the target version reaches the managed startup checkpoint.
 
+The Linux install plan keeps fixed payload files in one explicit map. It adds
+changelog archives only from manifest-verified files named exactly
+`docs/changelog/CHANGELOG-<major>.x.md`, where `<major>` is `0` or a decimal
+without a leading zero. It sorts those entries and installs them with mode
+`0644`. Other files or nested directories below `docs/changelog/` make the
+package unsafe instead of creating a new install destination.
+
 Linux retains the open descriptor-relative parent until each destination
 snapshot leaf is opened; a `/proc/self/fd/...` capability can therefore never
 be converted into a dangling path that misclassifies an existing file as new.

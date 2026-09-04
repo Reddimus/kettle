@@ -113,6 +113,28 @@ This ordering closes the tag-before-changelog race recorded in
 `scripts/release.sh`: the release workflow once reached its platform jobs before
 one job rejected the missing version heading.
 
+### Cutting the previous major into an archive
+
+`CHANGELOG.md` carries only the current major. Each earlier one lives in
+`docs/changelog/CHANGELOG-<major>.x.md`, listed under `## Older releases` at the
+end of the root file.
+
+When the version being prepared is `X.0.0`, that pull request is the one
+exception to changing only `CHANGELOG.md`. It also moves every `(X-1).y.z`
+section verbatim into a new `docs/changelog/CHANGELOG-(X-1).x.md`, rewrites
+`](docs/` to `](../` inside the moved text so those links still resolve from one
+directory deeper, and adds a line for the new file to the `## Older releases`
+index. Nothing is reworded and nothing else moves. `just tracked-audit` fails on
+any local link the move left unresolved.
+
+The root file has to keep the current major: `scripts/release.sh` and the
+release workflow's consistency guard both look for `## [X.Y.Z] — YYYY-MM-DD` in
+`CHANGELOG.md` alone. Cutting only at a major boundary means no later release
+has to move a section between files. A new archive needs no code change — the
+release workflow copies `docs/changelog/` into the Linux tarball and the macOS
+bundle, the package templates install the directory, and a Linux self-update
+installs any manifest-verified file named `CHANGELOG-<major>.x.md`.
+
 ### Windows retirement sequence
 
 Publish Windows-supported 3.3.0 before merging the 4.0 distribution removal.

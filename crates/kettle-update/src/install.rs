@@ -2589,6 +2589,9 @@ fn load_linux_package(
                 "unpacked data exceeds the safety limit".into(),
             ));
         }
+        let relative = path.strip_prefix("kettle").map_err(|_| {
+            UpdateError::UnsafeArchive(format!("invalid release root: {}", path.display()))
+        })?;
         if entry_type.is_dir() {
             if declared_size != 0 {
                 return Err(UpdateError::UnsafeArchive(format!(
@@ -2596,11 +2599,16 @@ fn load_linux_package(
                     path.display()
                 )));
             }
+            if relative.starts_with(LINUX_CHANGELOG_DIRECTORY)
+                && relative != Path::new(LINUX_CHANGELOG_DIRECTORY)
+            {
+                return Err(UpdateError::UnsafeArchive(format!(
+                    "unexpected changelog archive directory {}",
+                    path.display()
+                )));
+            }
             continue;
         }
-        let relative = path.strip_prefix("kettle").map_err(|_| {
-            UpdateError::UnsafeArchive(format!("invalid release root: {}", path.display()))
-        })?;
         if relative.as_os_str().is_empty() {
             return Err(UpdateError::UnsafeArchive(
                 "the kettle archive root cannot be a file".into(),
@@ -2927,6 +2935,156 @@ fn apply_staged_update(
 }
 
 #[cfg(target_os = "linux")]
+const LINUX_CHANGELOG_DIRECTORY: &str = "docs/changelog";
+
+#[cfg(target_os = "linux")]
+const LINUX_CHANGELOG_DESTINATION: &str = "share/doc/kettle/docs/changelog";
+
+#[cfg(target_os = "linux")]
+const LINUX_STATIC_INSTALL_MAP: &[(&str, &str, u32)] = &[
+    ("install.sh", "share/kettle/install.sh", 0o755),
+    ("install-unix.py", "share/kettle/install-unix.py", 0o755),
+    ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
+    ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
+    ("README.md", "share/doc/kettle/README.md", 0o644),
+    ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
+    (
+        "packaging/linux/kettle.desktop",
+        "share/applications/kettle.desktop",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle.svg",
+        "share/icons/hicolor/scalable/apps/kettle.svg",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-16.png",
+        "share/icons/hicolor/16x16/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-24.png",
+        "share/icons/hicolor/24x24/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-32.png",
+        "share/icons/hicolor/32x32/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-48.png",
+        "share/icons/hicolor/48x48/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-64.png",
+        "share/icons/hicolor/64x64/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-128.png",
+        "share/icons/hicolor/128x128/apps/kettle.png",
+        0o644,
+    ),
+    (
+        "packaging/linux/kettle-256.png",
+        "share/icons/hicolor/256x256/apps/kettle.png",
+        0o644,
+    ),
+    ("packaging/linux/kettle.1", "share/man/man1/kettle.1", 0o644),
+];
+
+#[cfg(target_os = "linux")]
+struct LinuxInstallEntry {
+    source: PathBuf,
+    destination: PathBuf,
+    mode: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_changelog_archive_name(name: &str) -> bool {
+    let Some(major) = name
+        .strip_prefix("CHANGELOG-")
+        .and_then(|name| name.strip_suffix(".x.md"))
+    else {
+        return false;
+    };
+    !major.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && (major == "0" || !major.starts_with('0'))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_install_map<'a>(
+    package_files: impl IntoIterator<Item = &'a Path>,
+) -> Result<Vec<LinuxInstallEntry>, UpdateError> {
+    let static_entry = |(source, destination, mode): &(&str, &str, u32)| LinuxInstallEntry {
+        source: PathBuf::from(source),
+        destination: PathBuf::from(destination),
+        mode: *mode,
+    };
+    let mut changelogs = Vec::new();
+    for source in package_files {
+        if !source.starts_with(LINUX_CHANGELOG_DIRECTORY) {
+            continue;
+        }
+        validate_archive_path(source)?;
+        let relative = source
+            .strip_prefix(LINUX_CHANGELOG_DIRECTORY)
+            .map_err(|_| {
+                UpdateError::UnsafeArchive(format!(
+                    "invalid changelog archive path {}",
+                    source.display()
+                ))
+            })?;
+        let mut components = relative.components();
+        let name = match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) => name.to_str(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            UpdateError::UnsafeArchive(format!(
+                "unexpected changelog archive path {}",
+                source.display()
+            ))
+        })?;
+        if !is_linux_changelog_archive_name(name) {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "unexpected changelog archive file {}",
+                source.display()
+            )));
+        }
+        changelogs.push(LinuxInstallEntry {
+            source: source.to_path_buf(),
+            destination: Path::new(LINUX_CHANGELOG_DESTINATION).join(name),
+            mode: 0o644,
+        });
+    }
+    changelogs.sort_by(|left, right| left.source.cmp(&right.source));
+
+    let mut map = LINUX_STATIC_INSTALL_MAP
+        .iter()
+        .map(static_entry)
+        .collect::<Vec<_>>();
+    map.extend(changelogs);
+
+    let mut destinations = std::collections::HashSet::new();
+    for entry in &map {
+        validate_archive_path(&entry.destination)?;
+        let destination = relative_to_string(&entry.destination)?.to_ascii_lowercase();
+        if !destinations.insert(destination) {
+            return Err(UpdateError::UnsafeArchive(format!(
+                "duplicate Linux install destination {}",
+                entry.destination.display()
+            )));
+        }
+    }
+    Ok(map)
+}
+
+#[cfg(target_os = "linux")]
 fn apply_verified_linux_update(
     transaction: &mut Transaction,
     package: &VerifiedPackage,
@@ -2941,60 +3099,7 @@ fn apply_verified_linux_update(
     // carried it -- which is exactly why the tests stayed green.
     package.file(Path::new("install-unix.py"))?;
     let previous_provenance = read_linux_install_provenance(&install.prefix)?;
-    let map = [
-        ("install.sh", "share/kettle/install.sh", 0o755),
-        ("install-unix.py", "share/kettle/install-unix.py", 0o755),
-        ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
-        ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
-        ("README.md", "share/doc/kettle/README.md", 0o644),
-        ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
-        (
-            "packaging/linux/kettle.desktop",
-            "share/applications/kettle.desktop",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle.svg",
-            "share/icons/hicolor/scalable/apps/kettle.svg",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-16.png",
-            "share/icons/hicolor/16x16/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-24.png",
-            "share/icons/hicolor/24x24/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-32.png",
-            "share/icons/hicolor/32x32/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-48.png",
-            "share/icons/hicolor/48x48/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-64.png",
-            "share/icons/hicolor/64x64/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-128.png",
-            "share/icons/hicolor/128x128/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-256.png",
-            "share/icons/hicolor/256x256/apps/kettle.png",
-            0o644,
-        ),
-        ("packaging/linux/kettle.1", "share/man/man1/kettle.1", 0o644),
-    ];
+    let map = linux_install_map(package.files.iter().map(|file| file.relative.as_path()))?;
     let shell_files = package
         .files
         .iter()
@@ -3002,7 +3107,7 @@ fn apply_verified_linux_update(
         .collect::<Vec<_>>();
     let mut destinations = map
         .iter()
-        .map(|(_, destination, _)| PathBuf::from(destination))
+        .map(|entry| entry.destination.clone())
         .collect::<Vec<_>>();
     for source in &shell_files {
         let relative = source
@@ -3025,24 +3130,24 @@ fn apply_verified_linux_update(
     // later self-update refused to run. `install_unix_provenance` below merges
     // these with what the previous release already owned.
     let mut provenance_files = Vec::with_capacity(destinations.len());
-    for (source, destination, mode) in map {
-        let bytes = package.bytes(Path::new(source))?;
-        if destination.ends_with("kettle.desktop") {
+    for entry in map {
+        let bytes = package.bytes(&entry.source)?;
+        if entry.destination.ends_with("kettle.desktop") {
             let desktop = render_linux_desktop_bytes(bytes, &install.prefix)?;
-            transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+            transaction.install_bytes(&entry.destination, desktop.as_bytes(), Some(entry.mode))?;
             provenance_files.push(UnixInstallFile {
-                path: destination.to_string(),
+                path: relative_to_string(&entry.destination)?,
                 size: desktop.len() as u64,
                 sha256: sha256_bytes(desktop.as_bytes()),
-                mode,
+                mode: entry.mode,
             });
         } else {
-            transaction.install_bytes(Path::new(destination), bytes, Some(mode))?;
+            transaction.install_bytes(&entry.destination, bytes, Some(entry.mode))?;
             provenance_files.push(UnixInstallFile {
-                path: destination.to_string(),
+                path: relative_to_string(&entry.destination)?,
                 size: bytes.len() as u64,
                 sha256: sha256_bytes(bytes),
-                mode,
+                mode: entry.mode,
             });
         }
     }
@@ -3217,65 +3322,25 @@ fn apply_staged_update(
     require_file(&root.join("install-unix.py"), "kettle/install-unix.py")?;
     let previous_provenance = read_linux_install_provenance(&install.prefix)?;
 
-    let map = [
-        ("install.sh", "share/kettle/install.sh", 0o755),
-        ("install-unix.py", "share/kettle/install-unix.py", 0o755),
-        ("LICENSE", "share/doc/kettle/LICENSE", 0o644),
-        ("NOTICE", "share/doc/kettle/NOTICE", 0o644),
-        ("README.md", "share/doc/kettle/README.md", 0o644),
-        ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md", 0o644),
-        (
-            "packaging/linux/kettle.desktop",
-            "share/applications/kettle.desktop",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle.svg",
-            "share/icons/hicolor/scalable/apps/kettle.svg",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-16.png",
-            "share/icons/hicolor/16x16/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-24.png",
-            "share/icons/hicolor/24x24/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-32.png",
-            "share/icons/hicolor/32x32/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-48.png",
-            "share/icons/hicolor/48x48/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-64.png",
-            "share/icons/hicolor/64x64/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-128.png",
-            "share/icons/hicolor/128x128/apps/kettle.png",
-            0o644,
-        ),
-        (
-            "packaging/linux/kettle-256.png",
-            "share/icons/hicolor/256x256/apps/kettle.png",
-            0o644,
-        ),
-        ("packaging/linux/kettle.1", "share/man/man1/kettle.1", 0o644),
-    ];
+    let staged_files = collect_files(&root)?;
+    let staged_relative = staged_files
+        .iter()
+        .map(|source| {
+            source
+                .strip_prefix(&root)
+                .map(Path::to_path_buf)
+                .map_err(|_| UpdateError::UnsafeArchive(source.display().to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let map = linux_install_map(staged_relative.iter().map(PathBuf::as_path))?;
     let shell_root = root.join("shell-integration");
-    let shell_sources = collect_files(&shell_root)?;
+    let shell_sources = staged_files
+        .into_iter()
+        .filter(|source| source.starts_with(&shell_root))
+        .collect::<Vec<_>>();
     let mut destinations = map
         .iter()
-        .map(|(_, destination, _)| PathBuf::from(destination))
+        .map(|entry| entry.destination.clone())
         .collect::<Vec<_>>();
     for source in &shell_sources {
         let relative = source
@@ -3289,8 +3354,8 @@ fn apply_staged_update(
 
     transaction.preflight_destinations(&destinations)?;
     let mut provenance_files = Vec::with_capacity(destinations.len() - 1);
-    for (source, destination, mode) in map {
-        let source = root.join(source);
+    for entry in map {
+        let source = root.join(&entry.source);
         require_file(
             &source,
             source
@@ -3298,22 +3363,22 @@ fn apply_staged_update(
                 .unwrap_or(&source)
                 .to_string_lossy(),
         )?;
-        if destination.ends_with("kettle.desktop") {
+        if entry.destination.ends_with("kettle.desktop") {
             let desktop = render_linux_desktop(&source, &install.prefix)?;
-            transaction.install_bytes(Path::new(destination), desktop.as_bytes(), Some(mode))?;
+            transaction.install_bytes(&entry.destination, desktop.as_bytes(), Some(entry.mode))?;
             provenance_files.push(UnixInstallFile {
-                path: destination.to_string(),
+                path: relative_to_string(&entry.destination)?,
                 size: desktop.len() as u64,
                 sha256: sha256_bytes(desktop.as_bytes()),
-                mode,
+                mode: entry.mode,
             });
         } else {
-            transaction.install(Path::new(destination), &source, Some(mode))?;
+            transaction.install(&entry.destination, &source, Some(entry.mode))?;
             provenance_files.push(UnixInstallFile {
-                path: destination.to_string(),
+                path: relative_to_string(&entry.destination)?,
                 size: source.metadata()?.len(),
                 sha256: sha256_file(&source)?,
-                mode,
+                mode: entry.mode,
             });
         }
     }
@@ -6839,6 +6904,7 @@ mod tests {
             "../kettle",
             "/kettle",
             "kettle/..",
+            "kettle/docs/changelog/../CHANGELOG-4.x.md",
             "kettle/file:stream",
             "kettle/trailing.",
             "kettle/CON.txt",
@@ -7691,7 +7757,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn test_linux_package_tar(version: &str) -> Vec<u8> {
-        let payloads = [
+        test_linux_package_tar_with(version, &[], &[])
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_linux_package_tar_with(
+        version: &str,
+        additional_payloads: &[(&str, &[u8], u32)],
+        additional_directories: &[&str],
+    ) -> Vec<u8> {
+        let mut payloads: Vec<(&str, &[u8], u32)> = vec![
             ("kettle", b"verified-binary".as_slice(), 0o755),
             ("install.sh", b"verified-installer".as_slice(), 0o755),
             // The real release archive ships this (release.yml installs
@@ -7703,6 +7778,11 @@ mod tests {
             ("NOTICE", b"notice".as_slice(), 0o644),
             ("README.md", b"readme".as_slice(), 0o644),
             ("CHANGELOG.md", b"changes".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-3.x.md", b"3.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-1.x.md", b"1.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-4.x.md", b"4.x".as_slice(), 0o755),
+            ("docs/changelog/CHANGELOG-0.x.md", b"0.x".as_slice(), 0o644),
+            ("docs/changelog/CHANGELOG-2.x.md", b"2.x".as_slice(), 0o644),
             (
                 "packaging/linux/kettle.desktop",
                 b"[Desktop Entry]\nType=Application\nName=Kettle\nTerminal=false\nExec=kettle\nTryExec=kettle\nIcon=kettle\n"
@@ -7724,20 +7804,23 @@ mod tests {
                 0o644,
             ),
         ];
+        payloads.extend_from_slice(additional_payloads);
+        let mut manifest_files = payloads
+            .iter()
+            .map(|(path, bytes, mode)| PackageFile {
+                path: (*path).into(),
+                size: bytes.len() as u64,
+                sha256: sha256_bytes(bytes),
+                mode: Some(*mode),
+            })
+            .collect::<Vec<_>>();
+        manifest_files.sort_by(|left, right| left.path.cmp(&right.path));
         let package_manifest = serde_json::to_vec(&PackageManifest {
             schema: 1,
             product: "kettle".into(),
             target: current_target().unwrap().into(),
             version: version.into(),
-            files: payloads
-                .iter()
-                .map(|(path, bytes, mode)| PackageFile {
-                    path: (*path).into(),
-                    size: bytes.len() as u64,
-                    sha256: sha256_bytes(bytes),
-                    mode: Some(*mode),
-                })
-                .collect(),
+            files: manifest_files,
         })
         .unwrap();
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -7749,6 +7832,16 @@ mod tests {
             header.set_cksum();
             archive
                 .append_data(&mut header, format!("kettle/{path}"), bytes)
+                .unwrap();
+        }
+        for path in additional_directories {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_mode(0o755);
+            header.set_size(0);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, format!("kettle/{path}"), &[][..])
                 .unwrap();
         }
         let mut header = tar::Header::new_gnu();
@@ -7763,6 +7856,134 @@ mod tests {
             )
             .unwrap();
         archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_package_rejects_nested_changelog_directories() {
+        let archive =
+            test_linux_package_tar_with("99.0.0", &[], &["docs/changelog/future-release-assets"]);
+
+        let error = match load_linux_package(&archive, &fake_update()) {
+            Ok(_) => panic!("a nested changelog directory must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected changelog archive directory"),
+            "unexpected nested-directory error: {error}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_package_verification_rejects_changelog_path_collisions() {
+        for collision in [
+            "docs/changelog/CHANGELOG-4.x.md",
+            "docs/changelog/changelog-4.x.md",
+        ] {
+            let archive =
+                test_linux_package_tar_with("99.0.0", &[(collision, b"collision", 0o644)], &[]);
+
+            let error = match load_linux_package(&archive, &fake_update()) {
+                Ok(_) => panic!("a changelog path collision must be rejected"),
+                Err(error) => error,
+            };
+
+            assert!(
+                error.to_string().contains("duplicate or case-aliased"),
+                "unexpected collision error for {collision}: {error}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_rejects_noncanonical_changelog_files_before_preflight() {
+        for invalid in [
+            "docs/changelog/README.md",
+            "docs/changelog/changelog-5.x.md",
+            "docs/changelog/CHANGELOG-5.md",
+            "docs/changelog/CHANGELOG-5.x.md.bak",
+            "docs/changelog/CHANGELOG-next.x.md",
+            "docs/changelog/CHANGELOG-05.x.md",
+            "docs/changelog/5/CHANGELOG-5.x.md",
+        ] {
+            let root = test_tempdir();
+            let prefix = root.path().join("install");
+            fs::create_dir_all(prefix.join("bin")).unwrap();
+            fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+            seed_linux_install_provenance(&prefix);
+            let archive =
+                test_linux_package_tar_with("99.0.0", &[(invalid, b"invalid", 0o644)], &[]);
+            let package = load_linux_package(&archive, &fake_update()).unwrap();
+            let install = ManagedInstall {
+                prefix: prefix.clone(),
+                executable: prefix.join("bin/kettle"),
+                marker_path: prefix.join("share/kettle/install.json"),
+            };
+            let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+
+            let error =
+                apply_verified_linux_update(&mut transaction, &package, &install, &fake_update())
+                    .unwrap_err();
+
+            assert!(
+                error.to_string().contains("unexpected changelog archive"),
+                "unexpected error for {invalid}: {error}"
+            );
+            assert!(
+                transaction.journal.entries.is_empty(),
+                "{invalid} reached destination preflight"
+            );
+            assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"old-binary");
+            transaction.rollback().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_rolls_back_unsafe_changelog_destinations_without_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_tempdir();
+        let outside = test_tempdir();
+        let prefix = root.path().join("install");
+        fs::create_dir_all(prefix.join("bin")).unwrap();
+        fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
+        seed_linux_install_provenance(&prefix);
+        fs::create_dir_all(prefix.join("share/doc/kettle/docs")).unwrap();
+        symlink(
+            outside.path(),
+            prefix.join("share/doc/kettle/docs/changelog"),
+        )
+        .unwrap();
+        let archive = test_linux_package_tar("99.0.0");
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path: prefix.join("share/kettle/install.json"),
+        };
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+
+        let error =
+            apply_verified_linux_update(&mut transaction, &package, &install, &fake_update())
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("install path component cannot be opened safely"),
+            "unexpected unsafe-destination error: {error}"
+        );
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        transaction.rollback().unwrap();
+        assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"old-binary");
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
     }
 
     /// A managed Linux update must leave the installation still managed.
@@ -7800,6 +8021,28 @@ mod tests {
 
         let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
         apply_verified_linux_update(&mut transaction, &package, &install, &fake_update()).unwrap();
+        let expected_publications = LINUX_STATIC_INSTALL_MAP
+            .iter()
+            .map(|(_, destination, _)| *destination)
+            .chain([
+                "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-4.x.md",
+            ])
+            .collect::<Vec<_>>();
+        let publications = transaction
+            .journal
+            .entries
+            .iter()
+            .map(|entry| entry.relative.as_str())
+            .take(expected_publications.len())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            publications, expected_publications,
+            "static payloads must retain their declared order before sorted changelogs"
+        );
         transaction.commit().unwrap();
 
         assert_eq!(
@@ -7810,6 +8053,17 @@ mod tests {
             fs::read(prefix.join("share/kettle/install.sh")).unwrap(),
             b"verified-installer"
         );
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode =
+                fs::metadata(prefix.join("share/doc/kettle/docs/changelog/CHANGELOG-4.x.md"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+            assert_eq!(mode, 0o644, "changelog archives must remain read-only");
+        }
 
         // The record was regenerated, not left describing the old files.
         let after = read_linux_install_provenance(&prefix).unwrap();
@@ -7870,6 +8124,26 @@ mod tests {
             ("NOTICE", "share/doc/kettle/NOTICE"),
             ("README.md", "share/doc/kettle/README.md"),
             ("CHANGELOG.md", "share/doc/kettle/CHANGELOG.md"),
+            (
+                "docs/changelog/CHANGELOG-0.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-1.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-1.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-2.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-2.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-3.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-3.x.md",
+            ),
+            (
+                "docs/changelog/CHANGELOG-4.x.md",
+                "share/doc/kettle/docs/changelog/CHANGELOG-4.x.md",
+            ),
             (
                 "packaging/linux/kettle.svg",
                 "share/icons/hicolor/scalable/apps/kettle.svg",
@@ -8161,6 +8435,11 @@ mod tests {
             ("NOTICE", "notice"),
             ("README.md", "readme"),
             ("CHANGELOG.md", "changes"),
+            ("docs/changelog/CHANGELOG-0.x.md", "0.x"),
+            ("docs/changelog/CHANGELOG-1.x.md", "1.x"),
+            ("docs/changelog/CHANGELOG-2.x.md", "2.x"),
+            ("docs/changelog/CHANGELOG-3.x.md", "3.x"),
+            ("docs/changelog/CHANGELOG-4.x.md", "4.x"),
             (
                 "packaging/linux/kettle.desktop",
                 "[Desktop Entry]\nType=Application\nName=Kettle\nTerminal=false\nExec=kettle\nTryExec=kettle\nIcon=kettle\n",
@@ -8197,6 +8476,10 @@ mod tests {
         .unwrap();
         transaction.commit().unwrap();
         assert_eq!(fs::read(prefix.join("bin/kettle")).unwrap(), b"new-binary");
+        assert_eq!(
+            fs::read(prefix.join("share/doc/kettle/docs/changelog/CHANGELOG-4.x.md")).unwrap(),
+            b"4.x"
+        );
         let desktop_path = prefix.join("share/applications/kettle.desktop");
         let desktop = fs::read_to_string(&desktop_path).unwrap();
         let executable = prefix.join("bin/kettle");
