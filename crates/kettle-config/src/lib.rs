@@ -6592,14 +6592,17 @@ cell-height = 1.2\n";
             ),
         );
         // XDG set → wins on EVERY OS (the explicit cross-platform override),
-        // even with a Windows-style APPDATA also present.
+        // even with a Windows-style APPDATA also present. Reuse
+        // `absolute_root` so the override is absolute on this platform;
+        // a POSIX "/x" is relative on Windows, so the probe would reject
+        // it and APPDATA would win, which is not what this case checks.
         assert_eq!(
             Config::default_path_from(from(&[
-                ("XDG_CONFIG_HOME", "/x"),
+                ("XDG_CONFIG_HOME", absolute_root),
                 ("HOME", "/h"),
                 ("APPDATA", r"C:\u\AppData\Roaming"),
             ])),
-            Some(PathBuf::from("/x").join("kettle").join("config")),
+            Some(PathBuf::from(absolute_root).join("kettle").join("config")),
         );
         // All set-but-empty → None (rather than the previous relative
         // `"kettle/config"`).
