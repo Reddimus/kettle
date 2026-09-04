@@ -12,12 +12,12 @@ preparation, the release commit sets `Cargo.toml`, `flake.nix`, and the
 changelog before `tag-release.sh` creates the matching tag. Git tags and GitHub
 releases remain authoritative for what has actually shipped.
 
-- Latest version in this tree: `v4.3.0`, with matching source version,
+- Latest version in this tree: `v4.3.1`, with matching source version,
   changelog heading, and Git tag.
-- Current workspace version: `4.3.0`
-- Release headings inspected: 173 across the root `CHANGELOG.md` and
-  `docs/changelog/` archives. That count comprises `[Unreleased]` and 172 dated
-  versions from `v0.1.0` through `v4.3.0`.
+- Current workspace version: `4.3.1`
+- Release headings inspected: 174 across the root `CHANGELOG.md` and
+  `docs/changelog/` archives. That count comprises `[Unreleased]` and 173 dated
+  versions from `v0.1.0` through `v4.3.1`.
   During release preparation, the newest dated heading has no tag yet;
   `scripts/tag-release.sh` creates it after the release commit merges.
 - Version-bearing source files that must stay in lockstep: workspace
