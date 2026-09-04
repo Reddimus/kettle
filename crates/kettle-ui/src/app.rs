@@ -30556,7 +30556,8 @@ mod tests {
         // (so it clears the base overlay quads), and the settings panel's dim
         // backdrop — pushed to the same list afterwards, therefore drawn over
         // it — stops above the bar rather than greying it out.
-        let render = include_str!("../../kettle-render/src/lib.rs");
+        let render =
+            kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         for guarded_arm in [
             "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.search_query",
