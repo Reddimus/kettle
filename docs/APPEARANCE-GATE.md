@@ -5,6 +5,49 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 4.3.0 cut — 2026-09-04
+
+Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
+universal `kettle.app` built from the clean cut commit `5c12f96f`, replicating
+`release.yml`'s `Build (macOS universal)` and `Package (macOS .app bundle)`
+steps exactly — both `--target` release builds, `lipo`,
+`scripts/compile-macos-app-icon.sh` through Xcode 26.6, and the PlistBuddy
+version patch. `lipo -archs` reports `x86_64 arm64` and
+`CFBundleShortVersionString` is `4.3.0`. The plist was patched through a copy,
+so the cut worktree stayed clean at that SHA; verified after the run.
+
+This release adds a macOS keybinding default and changes no rendering,
+material, window chrome or icon code. The window and icon checks below are
+therefore run as policy; the chord row is the one the diff actually puts at
+risk.
+
+Window frames were captured with `screencapture -l<windowid>`, which reads only
+kettle's own window layer. No full-screen capture was taken, so nothing outside
+kettle was recorded at any point.
+
+### Passed
+
+| Check | Result |
+|---|---|
+| Default 86% opacity, native blur on | Zero clear pixels inside the opaque span at every sampled row. The titlebar at y=8 is a uniform `(34,36,39,255)` from four pixels inside the left end of the span to four inside the right. The span widens from `10..805` at y=0 to `1..814` at y=8 and `0..815` by y=16 — the corner radius, not a gap. |
+| Alpha on, blur off | Byte-identical titlebar measurements to the row above: uniform `(34,36,39,255)`, zero clear pixels. AppKit supplied its standard titlebar backdrop rather than exposing a clear desktop strip. The terminal row at y=60 reads `(29,33,44,219)`; alpha 219 is the configured 86%. |
+| Opaque surface, blur left on | Same uniform titlebar to both corners, zero clear pixels, no titlebar-only seam. Terminal row `(26,27,38,255)`, fully opaque. |
+| Opaque surface, blur off | Identical to the row above. The active theme reaches both rounded top corners with no clear or mismatched strip. |
+| `borderless = true` | No titlebar; the span is the full `0..815` from y=0. Rows 0..30 are kettle's own tab bar, so they are legitimately non-uniform. The first terminal row below it, at y=60, is a uniform `(29,33,44,219)` across the full width — alpha 219 is the configured 86%, so the terminal stays visible through the documented sharp-alpha fallback instead of being covered by a material view. |
+| Full-screen round trip | `ui_geometry`'s `content` rect is byte-identical before and after: `{"height": 463.75, "width": 816.0, "x": 0.0, "y": 24.25}` → fullscreen `{"height": 1055.75, "width": 1920.0, ...}` → back to the original values exactly. |
+| Light theme at **startup** under a Dark system ([#251](https://github.com/Reddimus/kettle/issues/251)) | Measured through the accessibility API rather than by eye. Traffic lights sit at x=560, 583 and 606; the title element starts at **x=634**, value `~ — kettle`. The last button ends near x=622, so the title begins beside the cluster rather than across it. This is the startup path, not the runtime toggle. |
+| NSWindow background follows a live palette change | Started on Catppuccin Latte and captured: titlebar `(255,255,255,255)`, content `(239,241,245,255)`. After `perform_action next_theme`: titlebar `(34,36,39,255)`, content `(36,39,58,255)`. The NSWindow background tracks the palette at runtime, not only at startup. |
+| **`Cmd+Opt+Arrow` split focus (new in this release)** | Driven as real keystrokes through the window server against this bundle's own binary, in a deterministic 2x2 split, asserting the expected target pane for every direction from every pane: **16/16**. `Ctrl+Cmd+Arrow` scored **16/16** in the same run, so the pre-existing chord did not regress. `Cmd+]` / `Cmd+[` were confirmed inert, which is deliberate — see the layout note in `docs/UX-COMPARISON.md`. |
+
+### Not run
+
+| Check | Why |
+|---|---|
+| Reduce Transparency toggle | **Not attempted.** It is a system accessibility setting, and changing system settings is outside what this environment does. Unchanged from the 4.2.0 cut. |
+| Dock icon screenshots, running and closed-but-pinned | The Dock is filtered out of automation captures at the allowlist level. The Dock *menu* remains reachable through the accessibility API and `just dock-menu-smoke` passed in `full-native-gates`, but the drawn icon still cannot be photographed here. |
+| Signed, notarized, stapled bundle | No Developer ID or App Store Connect secrets exist on this machine; the bundle above is unsigned. `release.yml`'s `macos-signing` environment performs signing, notarization, stapling and the Gatekeeper assessment, and the published archive is verified after the tag. |
+| Non-US keyboard layout, live | Switching the active input source is a system setting. Layout behaviour was measured instead by calling `UCKeyTranslate` through `TISInputSource` for each installed layout, read-only, which is what settled the `Cmd+[` / `Cmd+]` decision. |
+
 ## 4.2.0 cut — 2026-09-02
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
