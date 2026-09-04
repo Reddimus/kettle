@@ -349,6 +349,13 @@ pub fn cursor_glyph_color(theme: &Theme, colors: &TermColors, cell_bg: Rgb) -> R
     }
 }
 
+/// The focused block cursor's fill color, with OSC 12 overriding the theme.
+pub fn cursor_block_color(theme: &Theme, colors: &TermColors) -> Rgb {
+    colors[258]
+        .map(|rgb| Rgb::new(rgb.r, rgb.g, rgb.b))
+        .unwrap_or(theme.cursor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +425,7 @@ mod tests {
             Some(theme.cursor),
             "and it resolves to the theme's cursor colour"
         );
+        assert_eq!(cursor_block_color(&theme, &colors), theme.cursor);
 
         // After an OSC 12, the override exists and wins.
         colors[258] = Some(alacritty_terminal::vte::ansi::Rgb { r: 1, g: 2, b: 3 });
@@ -427,6 +435,7 @@ mod tests {
             Some(Rgb::new(1, 2, 3)),
             "and it takes precedence over the theme"
         );
+        assert_eq!(cursor_block_color(&theme, &colors), Rgb::new(1, 2, 3));
     }
 
     /// The endpoint must be chosen by how far the colour has to TRAVEL, not by

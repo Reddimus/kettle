@@ -3019,11 +3019,11 @@ impl Config {
     }
 
     /// Inner of `default_path` parameterized on the env-var lookup so
-    /// the probe order + empty-value filter are unit-testable without
+    /// the probe order + absolute-value filter are unit-testable without
     /// mutating the real process env (which would race against the
     /// rest of the parallel suite).
     ///
-    /// Empty env-var values are treated as unset and the probe
+    /// Empty or relative env-var values are treated as unset and the probe
     /// continues to the next variable. Previously,
     /// `XDG_CONFIG_HOME=""` (rare but possible in stripped CI
     /// containers or after a misconfigured `unset`/`export X=`)
@@ -3036,7 +3036,12 @@ impl Config {
     pub(crate) fn default_path_from(
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Option<PathBuf> {
-        let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
+        let var = |k: &str| {
+            lookup(k)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
         // `XDG_CONFIG_HOME` is the explicit cross-platform override on every OS.
         // Config split-brain: the per-OS fallback then differs.
         // On Windows the canonical per-user dir is `%APPDATA%\kettle` — a stray
@@ -3049,14 +3054,12 @@ impl Config {
         // `XDG_CONFIG_HOME` (honored above on all platforms).
         let os_fallback = || {
             if cfg!(windows) {
-                var("APPDATA").map(PathBuf::from)
+                var("APPDATA")
             } else {
-                var("HOME").map(|h| PathBuf::from(h).join(".config"))
+                var("HOME").map(|home| home.join(".config"))
             }
         };
-        let base = var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(os_fallback)?;
+        let base = var("XDG_CONFIG_HOME").or_else(os_fallback)?;
         Some(base.join("kettle").join("config"))
     }
 
@@ -6523,6 +6526,24 @@ cell-height = 1.2\n";
                     .join("config"),
             ),
         );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                Config::default_path_from(from(
+                    &[("XDG_CONFIG_HOME", "relative"), ("HOME", "/h"),]
+                )),
+                Some(
+                    PathBuf::from("/h")
+                        .join(".config")
+                        .join("kettle")
+                        .join("config"),
+                ),
+            );
+            assert_eq!(
+                Config::default_path_from(from(&[("HOME", "relative")])),
+                None
+            );
+        }
         // On Windows, a stray HOME is IGNORED (it would split-brain the GUI vs a
         // shell launch); APPDATA is the canonical per-user dir. This is the exact
         // regression a git-bash/WSL `HOME` caused.

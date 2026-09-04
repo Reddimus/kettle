@@ -245,6 +245,18 @@ pub mod menu {
     /// Minimum panel width — overrides the chars-based math when the
     /// longest label is tiny.
     pub const MIN_W: f32 = 180.0;
+    /// Convert a content-column budget into the natural context-menu width.
+    pub fn panel_width(max_columns: f32, cell_width: f32) -> f32 {
+        (max_columns * cell_width + H_PAD).max(MIN_W)
+    }
+
+    /// Recover the number of text columns that fit inside a panel width.
+    pub fn panel_columns(panel_width: f32, cell_width: f32) -> usize {
+        if cell_width <= 0.0 {
+            return 0;
+        }
+        ((panel_width - H_PAD).max(0.0) / cell_width).floor() as usize
+    }
     /// Top + bottom breathing room reserved when clamping the panel
     /// height to the surface (for scrollable submenus). Keeps
     /// the menu from kissing the window edge.
@@ -363,9 +375,16 @@ fn production_source() -> String {
 #[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
-        ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width,
+        ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
         menu_chrome_quads, menu_row_chars,
     };
+
+    #[test]
+    fn menu_width_and_inverse_share_one_formula() {
+        assert_eq!(menu::panel_width(20.0, 8.0), 200.0);
+        assert_eq!(menu::panel_columns(200.0, 8.0), 20);
+        assert_eq!(menu::panel_width(1.0, 8.0), menu::MIN_W);
+    }
 
     #[test]
     fn row_budget_uses_display_columns() {
@@ -653,7 +672,7 @@ fn context_menu_panel_width(menu: &ContextMenu, cell_width: f32) -> f32 {
             .map(menu_row_chars)
             .max()
             .unwrap_or(0) as f32;
-        (max_columns * cell_width + menu::H_PAD).max(menu::MIN_W)
+        menu::panel_width(max_columns, cell_width)
     };
     if width.is_finite() {
         width.max(1.0)
@@ -2465,6 +2484,10 @@ pub struct Renderer {
     span_scratch: Vec<(String, Rgb, bool, bool)>,
     /// Pooled scratch for `build_pane`'s line-break indices.
     span_breaks_scratch: Vec<usize>,
+    /// Per-frame cache for WCAG foreground lifts. Visible grids repeat a small
+    /// palette across thousands of cells, while the lift itself performs a
+    /// bisection with many nonlinear color conversions.
+    minimum_contrast_cache: MinimumContrastCache,
     /// v2.20.0 P1 (perf): per-pane, per-row content keys for the line-level
     /// shaping cache. `build_pane` hashes each grid row's style runs (text,
     /// fg, bold, italic); a row whose key matches last frame is SKIPPED
@@ -4935,6 +4958,7 @@ impl Renderer {
             span_scratch: Vec::new(),
             quad_scratch: Vec::new(),
             span_breaks_scratch: Vec::new(),
+            minimum_contrast_cache: MinimumContrastCache::default(),
             pane_line_keys: Vec::new(),
             pane_style_keys: Vec::new(),
             line_text_scratch: String::new(),
@@ -6309,6 +6333,7 @@ impl Renderer {
         // Reset the focused-cursor glyph; the focused pane's `build_pane` re-sets
         // it this frame if a solid block cursor is visible.
         self.pending_cursor_glyph = None;
+        self.minimum_contrast_cache.clear();
         // Inline image instances share one renderer/window budget. Allocate it
         // across panes before iterating so pane order cannot monopolize all
         // slots. Offscreen placements consume no quota.
@@ -6711,12 +6736,18 @@ impl Renderer {
         let mut have_search = false;
         let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
         let mut search_text_top = None;
+        // Confirmation chrome is drawn in the final menu pass, so its text
+        // must use the companion menu text renderer. Other bottom bars remain
+        // in the ordinary chrome text pass.
+        let mut search_text_on_menu = false;
         // Text color for the shared bottom-bar buffer. `None` means "theme
         // foreground", which is right for every arm that paints itself on the
         // ordinary chrome background. The confirm bar is the exception: it
         // paints a saturated `palette[1]` and has to raise its own contrast.
         let mut search_text_color = None;
-        if let Some(search) = &overlay.search {
+        if overlay.confirm_dialog.is_none()
+            && let Some(search) = overlay.search.as_ref()
+        {
             have_search = true;
             let geometry = search_bar_geometry(sw, sh, cw, ch);
             search_rect = geometry.rect;
@@ -6779,11 +6810,22 @@ impl Renderer {
             if let Some((a, b)) = search.selection {
                 let (start, end) = if a <= b { (a, b) } else { (b, a) };
                 if start != end {
-                    let start_col = search_query_column(&search.query, start)
-                        .saturating_sub(search.horizontal_scroll);
-                    let end_col = search_query_column(&search.query, end)
-                        .saturating_sub(search.horizontal_scroll);
-                    let inner_cols = (geometry.editor.2 / cw).floor().max(2.0) as usize - 2;
+                    let focused = search.focused == SearchControl::Editor;
+                    let start_col = search_query_painted_column(
+                        &search.query,
+                        start,
+                        search.cursor_byte,
+                        search.horizontal_scroll,
+                        focused,
+                    );
+                    let end_col = search_query_painted_column(
+                        &search.query,
+                        end,
+                        search.cursor_byte,
+                        search.horizontal_scroll,
+                        focused,
+                    );
+                    let inner_cols = search_bar_columns(geometry.editor.2, cw).saturating_sub(2);
                     let start_col = start_col.min(inner_cols);
                     let end_col = end_col.min(inner_cols);
                     if end_col > start_col {
@@ -6820,7 +6862,9 @@ impl Renderer {
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(q) = &overlay.search_query {
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(q) = &overlay.search_query
+        {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
@@ -6859,7 +6903,9 @@ impl Renderer {
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(q) = &overlay.palette_query {
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(q) = &overlay.palette_query
+        {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
@@ -6882,7 +6928,9 @@ impl Renderer {
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(q) = &overlay.layout_picker_query {
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(q) = &overlay.layout_picker_query
+        {
             // Terminator parity, layoutlauncher.py:
             // layout picker input. The ranked layouts live in the shared
             // context-menu panel above this lane.
@@ -6908,7 +6956,9 @@ impl Renderer {
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(q) = &overlay.ssh_query {
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(q) = &overlay.ssh_query
+        {
             have_search = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
@@ -6931,7 +6981,9 @@ impl Renderer {
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-        } else if let Some(edit) = &overlay.edit_title {
+        } else if overlay.confirm_dialog.is_none()
+            && let Some(edit) = &overlay.edit_title
+        {
             // Terminator parity, edit-title overlay UX:
             // a thin bar in app chrome mirroring the shape of the
             // palette + ssh-input overlays without covering terminal rows.
@@ -6978,6 +7030,7 @@ impl Renderer {
             // path mirrors this text layout so keyboard and mouse activation
             // dispatch through the same confirmation state machine.
             have_search = true;
+            search_text_on_menu = true;
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             // Red-ish accent (palette[1]) to signal "destructive
@@ -7430,19 +7483,22 @@ impl Renderer {
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
                 buf.set_metrics(metrics);
-                buf.set_size(Some(panel_w), Some(row_h));
+                let text_w = (panel_w - 32.0).max(cw);
+                let fitted = settings_fit_line(line, panel_w, cw);
+                buf.set_size(Some(text_w), Some(row_h));
+                buf.set_wrap(Wrap::None);
                 // v2.38.2 P1b: moving the focused row only changes 2 of N
                 // lines (the old/new `▸` mark) — this per-row gate spares the
                 // other N-2 rows a reshape even on a frame where the overlay
                 // memoization above DID recompute `lines`.
-                if self.settings_texts[i] != *line {
+                if self.settings_texts[i] != fitted {
                     buf.set_text(
-                        line,
+                        &fitted,
                         &Attrs::new().family(Family::Name(&family)),
                         Shaping::Advanced,
                         None,
                     );
-                    self.settings_texts[i].clone_from(line);
+                    self.settings_texts[i] = fitted;
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
@@ -8313,7 +8369,7 @@ impl Renderer {
             }
         }
         if have_search {
-            areas.push(TextArea {
+            let area = TextArea {
                 buffer: &self.search_buffer,
                 left: search_rect.0,
                 top: search_text_top
@@ -8327,7 +8383,12 @@ impl Renderer {
                 },
                 default_color: search_text_color.unwrap_or(GColor::rgb(fg.r, fg.g, fg.b)),
                 custom_glyphs: &[],
-            });
+            };
+            if search_text_on_menu {
+                menu_areas.push(area);
+            } else {
+                areas.push(area);
+            }
         }
         // Status-bar text area. Left-padded 8 px, baseline
         // nudged 3 px below the strip top so descenders don't clip.
@@ -8488,11 +8549,14 @@ impl Renderer {
             // `self.settings_lines_cache` was just (re)computed for this
             // exact `set` above, in the same `render_frame` call.
             let lines = &self.settings_lines_cache;
-            let row_h = ch + 6.0;
-            let panel_w = (settings_panel_cols(lines) * cw + 48.0).min((sw - 40.0).max(120.0));
-            let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
-            let px = ((sw - panel_w) * 0.5).max(0.0);
-            let py = ((sh - panel_h) * 0.5).max(0.0);
+            let layout = settings_panel_layout(set, lines, cw, ch, sw, sh);
+            let (row_h, panel_w, panel_h, px, py) = (
+                layout.row_h,
+                layout.panel_w,
+                layout.panel_h,
+                layout.px,
+                layout.py,
+            );
             // Multi-window: the settings overlay's accent follows
             // this WINDOW's chrome accent, so it matches the focus border +
             // active tab rather than always-blue.
@@ -8526,13 +8590,19 @@ impl Renderer {
             menu_q.push(rect(px + panel_w - 2.0, py, 2.0, panel_h, acc, 1.0));
             // Focused field-row highlight.
             let hi_line = SETTINGS_FIELD_START + set.focused_row;
-            let hi_y = py + 12.0 + hi_line as f32 * row_h;
+            let hi_y = py + 12.0 + (hi_line - layout.first_line) as f32 * row_h;
             menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
             let sfg = theme.foreground;
             // v2.24.0: a disabled field row (inapplicable to the current state)
             // renders dimmed — blended halfway toward the panel background.
             let dim = color::dim(sfg, theme.background);
-            for (i, _line) in lines.iter().enumerate() {
+            for (visible_index, (i, _line)) in lines
+                .iter()
+                .enumerate()
+                .skip(layout.first_line)
+                .take(layout.visible_lines)
+                .enumerate()
+            {
                 if i >= self.settings_buffers.len() {
                     break;
                 }
@@ -8549,7 +8619,7 @@ impl Renderer {
                 menu_areas.push(TextArea {
                     buffer: &self.settings_buffers[i],
                     left: px + 16.0,
-                    top: py + 12.0 + i as f32 * row_h + 3.0,
+                    top: py + 12.0 + visible_index as f32 * row_h + 3.0,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: px as i32,
@@ -8560,6 +8630,14 @@ impl Renderer {
                     default_color: GColor::rgb(row_color.r, row_color.g, row_color.b),
                     custom_glyphs: &[],
                 });
+            }
+            let cue_w = 12.0;
+            let cue_x = px + (panel_w - cue_w) * 0.5;
+            if layout.first_line > 0 {
+                menu_q.push(rect(cue_x, py + 2.0, cue_w, 3.0, acc, 0.85));
+            }
+            if layout.first_line + layout.visible_lines < lines.len() {
+                menu_q.push(rect(cue_x, py + panel_h - 5.0, cue_w, 3.0, acc, 0.85));
             }
         }
 
@@ -9506,14 +9584,14 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
-            fg = resolved_cell_foreground(
+            fg = resolved_cell_foreground_cached(
                 fg,
                 bg,
                 highlight,
-                flags.contains(Flags::DIM),
-                bold,
+                (flags.contains(Flags::DIM), bold),
                 cfg,
                 theme,
+                &mut self.minimum_contrast_cache,
             );
             // Recolor the glyph sitting under a focused solid block cursor.
             // The second arm catches a cursor parked on the spacer half of a
@@ -9692,7 +9770,7 @@ impl Renderer {
                 // cursor and broadcast-mode yellow.
                 theme.palette[5]
             } else {
-                color::resolve_query(258, theme, term_colors).unwrap_or(theme.cursor)
+                color::cursor_block_color(theme, term_colors)
             };
             // Hollow outline only when the running program requests
             // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
@@ -11380,6 +11458,91 @@ fn settings_panel_cols(lines: &[String]) -> f32 {
     lines.iter().map(|l| l.width()).max().unwrap_or(44).max(44) as f32
 }
 
+fn settings_fit_line(line: &str, panel_w: f32, cell_w: f32) -> String {
+    let text_w = (panel_w - 32.0).max(cell_w);
+    let text_cols = (text_w / cell_w).floor().max(1.0) as usize;
+    fit_single_line_label(line, text_cols)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsPanelLayout {
+    panel_w: f32,
+    panel_h: f32,
+    px: f32,
+    py: f32,
+    row_h: f32,
+    first_line: usize,
+    visible_lines: usize,
+}
+
+/// Live settings geometry shared with `ui_geometry` diagnostics. The renderer
+/// remains the source of truth for scrolling, so automation addresses the row
+/// that is actually painted instead of reconstructing the panel math.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SettingsPanelGeometry {
+    pub rect: Rect4,
+    pub focused_rect: Rect4,
+    pub first_line: usize,
+    pub visible_lines: usize,
+}
+
+fn settings_panel_layout(
+    set: &SettingsOverlay,
+    lines: &[String],
+    cell_w: f32,
+    cell_h: f32,
+    surface_w: f32,
+    surface_h: f32,
+) -> SettingsPanelLayout {
+    let row_h = cell_h + 6.0;
+    let panel_w = (settings_panel_cols(lines) * cell_w + 48.0).min((surface_w - 40.0).max(120.0));
+    let panel_h = (lines.len() as f32 * row_h + 24.0).min((surface_h - 40.0).max(80.0));
+    let px = ((surface_w - panel_w) * 0.5).max(0.0);
+    let py = ((surface_h - panel_h) * 0.5).max(0.0);
+    let visible_lines =
+        (((panel_h - 24.0).max(row_h) / row_h).floor() as usize).clamp(1, lines.len().max(1));
+    let focused_line = (SETTINGS_FIELD_START + set.focused_row).min(lines.len().saturating_sub(1));
+    let max_first = lines.len().saturating_sub(visible_lines);
+    let first_line = focused_line
+        .saturating_add(1)
+        .saturating_sub(visible_lines)
+        .min(max_first);
+    SettingsPanelLayout {
+        panel_w,
+        panel_h,
+        px,
+        py,
+        row_h,
+        first_line,
+        visible_lines,
+    }
+}
+
+pub fn settings_panel_geometry(
+    set: &SettingsOverlay,
+    cell_w: f32,
+    cell_h: f32,
+    surface_w: f32,
+    surface_h: f32,
+) -> SettingsPanelGeometry {
+    let lines = settings_display_lines(set);
+    let layout = settings_panel_layout(set, &lines, cell_w, cell_h, surface_w, surface_h);
+    let focused_line = (SETTINGS_FIELD_START + set.focused_row).min(lines.len().saturating_sub(1));
+    let focused_y =
+        layout.py + 12.0 + focused_line.saturating_sub(layout.first_line) as f32 * layout.row_h;
+    SettingsPanelGeometry {
+        rect: (layout.px, layout.py, layout.panel_w, layout.panel_h),
+        focused_rect: (
+            layout.px + 6.0,
+            focused_y,
+            layout.panel_w - 12.0,
+            layout.row_h,
+        ),
+        first_line: layout.first_line,
+        visible_lines: layout.visible_lines,
+    }
+}
+
 /// What a click on the settings overlay landed on (v2.24.0 mouse control). The
 /// geometry is recomputed here from the SAME inputs the draw uses
 /// (`settings_display_lines` + the panel math in `render_frame_with_status`),
@@ -11410,11 +11573,14 @@ pub fn settings_hit_test(
 ) -> SettingsHit {
     let (cw, ch, sw, sh) = (cell_w, cell_h, surface_w, surface_h);
     let lines = settings_display_lines(set);
-    let row_h = ch + 6.0;
-    let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
-    let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
-    let px = ((sw - panel_w) * 0.5).max(0.0);
-    let py = ((sh - panel_h) * 0.5).max(0.0);
+    let layout = settings_panel_layout(set, &lines, cw, ch, sw, sh);
+    let (row_h, panel_w, panel_h, px, py) = (
+        layout.row_h,
+        layout.panel_w,
+        layout.panel_h,
+        layout.px,
+        layout.py,
+    );
     if cursor_x < px || cursor_x >= px + panel_w || cursor_y < py || cursor_y >= py + panel_h {
         return SettingsHit::Outside;
     }
@@ -11423,7 +11589,10 @@ pub fn settings_hit_test(
     if rel < 0.0 {
         return SettingsHit::Inert;
     }
-    let line = (rel / row_h) as usize;
+    let line = layout.first_line + (rel / row_h) as usize;
+    if line >= layout.first_line + layout.visible_lines {
+        return SettingsHit::Inert;
+    }
     if line >= lines.len() {
         return SettingsHit::Inert;
     }
@@ -11695,7 +11864,7 @@ pub fn search_bar_geometry(
 /// The epsilon is far larger than the f32 error (~1e-7 relative) and far
 /// smaller than the fraction of a cell that a genuinely clamped control loses
 /// at the surface edge, so a control cut off by the window still floors down.
-fn search_bar_columns(rect_width: f32, cell_width: f32) -> usize {
+pub fn search_bar_columns(rect_width: f32, cell_width: f32) -> usize {
     if cell_width <= 0.0 {
         return 0;
     }
@@ -11725,7 +11894,7 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
         geometry.label,
         if label_cols >= 6 { "Search" } else { "?" }.to_string(),
     );
-    let editor_cols = (geometry.editor.2 / cell_width).floor().max(1.0) as usize;
+    let editor_cols = search_bar_columns(geometry.editor.2, cell_width).max(1);
     add(geometry.editor, search_editor_label(search, editor_cols));
     add(geometry.previous, "‹ Prev".to_string());
     add(geometry.next, "Next ›".to_string());
@@ -11852,6 +12021,23 @@ fn search_query_column(query: &str, byte: usize) -> usize {
         byte -= 1;
     }
     display_width(&query[..byte])
+}
+
+/// Map a query byte boundary to the column occupied by the painted editor.
+/// The caret is a real one-column glyph, so boundaries strictly to its right
+/// move by one while the editor has focus.
+pub fn search_query_painted_column(
+    query: &str,
+    byte: usize,
+    cursor_byte: usize,
+    horizontal_scroll: usize,
+    focused: bool,
+) -> usize {
+    let byte = byte.min(query.len());
+    let cursor_byte = cursor_byte.min(query.len());
+    search_query_column(query, byte)
+        .saturating_add(usize::from(focused && byte > cursor_byte))
+        .saturating_sub(horizontal_scroll)
 }
 
 /// Minimum contrast the confirm bar's text holds against its own background.
@@ -12946,7 +13132,7 @@ fn pane_backdrop_rect(
 /// deliberately: each substitutes a colour paired with its OWN background, so
 /// lifting them against the cell's background would measure the ratio against a
 /// surface that is not behind them.
-fn attributed_foreground(
+fn transformed_foreground(
     fg: Rgb,
     bg: Rgb,
     dim: bool,
@@ -12961,10 +13147,60 @@ fn attributed_foreground(
     if bold && cfg.bold_is_bright {
         fg = color::bright_for_bold(fg, theme);
     }
-    if cfg.minimum_contrast > 1.0 {
-        fg = color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64);
-    }
     fg
+}
+
+#[cfg(test)]
+fn attributed_foreground(
+    fg: Rgb,
+    bg: Rgb,
+    dim: bool,
+    bold: bool,
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+) -> Rgb {
+    let fg = transformed_foreground(fg, bg, dim, bold, cfg, theme);
+    if cfg.minimum_contrast > 1.0 {
+        color::with_min_contrast(fg, bg, cfg.minimum_contrast as f64)
+    } else {
+        fg
+    }
+}
+
+#[derive(Default)]
+struct MinimumContrastCache {
+    entries: std::collections::HashMap<(u32, u32, u64), Rgb>,
+    misses: usize,
+}
+
+impl MinimumContrastCache {
+    fn color_key(color: Rgb) -> u32 {
+        (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+    }
+
+    fn resolve(&mut self, fg: Rgb, bg: Rgb, minimum: f64) -> Rgb {
+        if minimum <= 1.0 {
+            return fg;
+        }
+        let key = (Self::color_key(fg), Self::color_key(bg), minimum.to_bits());
+        if let Some(resolved) = self.entries.get(&key) {
+            return *resolved;
+        }
+        let resolved = color::with_min_contrast(fg, bg, minimum);
+        self.entries.insert(key, resolved);
+        self.misses += 1;
+        resolved
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.misses = 0;
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -12974,6 +13210,7 @@ enum CellHighlight {
     Search(bool),
 }
 
+#[cfg(test)]
 fn resolved_cell_foreground(
     fg: Rgb,
     bg: Rgb,
@@ -13002,6 +13239,35 @@ fn resolved_cell_foreground(
         ),
         CellHighlight::None => attributed_foreground(fg, bg, dim, bold, cfg, theme),
     }
+}
+
+fn resolved_cell_foreground_cached(
+    fg: Rgb,
+    bg: Rgb,
+    highlight: CellHighlight,
+    attributes: (bool, bool),
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    cache: &mut MinimumContrastCache,
+) -> Rgb {
+    let (dim, bold) = attributes;
+    let (fg, bg, dim, bold) = match highlight {
+        CellHighlight::Search(true) => (
+            cfg.search_foreground.unwrap_or(theme.background),
+            cfg.search_background.unwrap_or(theme.palette[3]),
+            false,
+            false,
+        ),
+        CellHighlight::Search(false) | CellHighlight::Selection => (
+            theme.selection_foreground,
+            theme.selection_background,
+            false,
+            false,
+        ),
+        CellHighlight::None => (fg, bg, dim, bold),
+    };
+    let fg = transformed_foreground(fg, bg, dim, bold, cfg, theme);
+    cache.resolve(fg, bg, cfg.minimum_contrast as f64)
 }
 
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
@@ -17786,7 +18052,7 @@ mod search_bar_tests {
     use super::{
         HighlightRect, SearchBarGeometry, SearchCaseMode, SearchControl, SearchOverlay,
         SearchStatus, drop_cols_front, search_bar_geometry, search_bar_text, search_editor_label,
-        search_highlight_at,
+        search_highlight_at, search_query_painted_column,
     };
 
     fn center(rect: (f32, f32, f32, f32)) -> (f32, f32) {
@@ -18078,6 +18344,24 @@ mod search_bar_tests {
         assert!(!label.contains('\n'));
         assert!(!label.contains('\t'));
         assert!(super::display_width(&label) <= 8);
+    }
+
+    #[test]
+    fn backward_selection_accounts_for_the_painted_caret_column() {
+        let query = "abcdef";
+        assert_eq!(search_query_painted_column(query, 4, 4, 0, true), 4);
+        assert_eq!(search_query_painted_column(query, 6, 4, 0, true), 7);
+        assert_eq!(search_query_painted_column(query, 4, 6, 0, true), 4);
+        assert_eq!(search_query_painted_column(query, 6, 6, 0, true), 6);
+    }
+
+    #[test]
+    fn editor_width_uses_the_rounding_safe_column_helper() {
+        let src = super::production_source();
+        assert!(
+            src.contains("let editor_cols = search_bar_columns(geometry.editor.2, cell_width)"),
+            "the editor must use the same f32 rounding-safe width as every sibling control"
+        );
     }
 
     #[test]
@@ -19106,6 +19390,22 @@ mod title_fit_tests {
         );
     }
 
+    /// The confirmation background is menu chrome, which renders after the
+    /// ordinary text pass. Its label must travel through the matching menu
+    /// text pass or the opaque bar covers the prompt and button labels.
+    #[test]
+    fn confirm_text_renders_above_its_menu_chrome_background() {
+        let src = production_source();
+        assert!(
+            src.contains("search_text_on_menu = true;"),
+            "the confirmation arm must select the topmost text pass"
+        );
+        assert!(
+            src.contains("if search_text_on_menu {\n                menu_areas.push(area);"),
+            "confirmation text must be queued after menu chrome, not under it"
+        );
+    }
+
     /// The confirm bar must never clip its own button row.
     ///
     /// It composed to `floor(sw/cw)` and was then fitted to
@@ -19442,7 +19742,8 @@ mod title_fit_tests {
 mod settings_hit_test_tests {
     use super::{
         SETTINGS_FIELD_START, SettingsHit, SettingsOverlay, SettingsRow, settings_display_lines,
-        settings_hit_test, settings_panel_cols,
+        settings_fit_line, settings_hit_test, settings_panel_cols, settings_panel_geometry,
+        settings_panel_layout,
     };
 
     fn overlay() -> SettingsOverlay {
@@ -19529,6 +19830,62 @@ mod settings_hit_test_tests {
             settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, x1, y),
             SettingsHit::Category(1)
         );
+    }
+
+    #[test]
+    fn focused_row_stays_inside_a_short_settings_panel() {
+        let mut set = overlay();
+        set.rows = (0..12)
+            .map(|index| SettingsRow {
+                label: format!("Setting {index}"),
+                value: index.to_string(),
+                disabled: false,
+            })
+            .collect();
+        set.focused_row = 11;
+
+        let lines = settings_display_lines(&set);
+        let layout = settings_panel_layout(&set, &lines, 8.0, 16.0, 400.0, 200.0);
+        let focused_line = SETTINGS_FIELD_START + set.focused_row;
+
+        assert!(layout.first_line > 0, "the tall panel must scroll");
+        assert!(focused_line >= layout.first_line);
+        assert!(focused_line < layout.first_line + layout.visible_lines);
+        let highlight_y =
+            layout.py + 12.0 + (focused_line - layout.first_line) as f32 * layout.row_h;
+        assert!(highlight_y >= layout.py);
+        assert!(highlight_y + layout.row_h <= layout.py + layout.panel_h);
+
+        let public = settings_panel_geometry(&set, 8.0, 16.0, 400.0, 200.0);
+        assert_eq!(public.first_line, layout.first_line);
+        assert_eq!(public.visible_lines, layout.visible_lines);
+        assert_eq!(public.focused_rect.1, highlight_y);
+        assert!(public.focused_rect.1 + public.focused_rect.3 <= public.rect.1 + public.rect.3);
+
+        assert_eq!(
+            settings_hit_test(
+                &set,
+                8.0,
+                16.0,
+                400.0,
+                200.0,
+                layout.px + 40.0,
+                highlight_y + layout.row_h * 0.5,
+            ),
+            SettingsHit::Field(11)
+        );
+    }
+
+    #[test]
+    fn narrow_settings_rows_are_ellipsized_to_one_line() {
+        let fitted = settings_fit_line(
+            "  Background image          /Users/example/a/very/long/wallpaper.png",
+            208.0,
+            8.0,
+        );
+
+        assert_eq!(super::display_width(&fitted), 22);
+        assert!(fitted.ends_with('…'));
     }
 }
 
@@ -19779,7 +20136,10 @@ mod inline_placement_budget_tests {
 
 #[cfg(test)]
 mod attributed_foreground_tests {
-    use super::{CellHighlight, Rgb, attributed_foreground, color, resolved_cell_foreground};
+    use super::{
+        CellHighlight, MinimumContrastCache, Rgb, attributed_foreground, color,
+        resolved_cell_foreground,
+    };
     use kettle_config::{Config, Theme};
 
     /// `minimum-contrast` must survive `bold-is-bright`.
@@ -19986,6 +20346,59 @@ mod attributed_foreground_tests {
             color::bright_for_bold(cfg.search_foreground.unwrap(), &theme),
             cfg.search_foreground.unwrap(),
             "the bold-is-bright fixture must visibly remap the configured search foreground"
+        );
+    }
+
+    #[test]
+    fn minimum_contrast_cache_computes_each_colour_pair_once_per_frame() {
+        let fg = Rgb::new(0x77, 0x77, 0x77);
+        let bg = Rgb::new(0x78, 0x78, 0x78);
+        let mut cache = MinimumContrastCache::default();
+
+        let first = cache.resolve(fg, bg, 4.5);
+        for _ in 0..10_000 {
+            assert_eq!(cache.resolve(fg, bg, 4.5), first);
+        }
+
+        assert_eq!(cache.misses, 1);
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    #[ignore = "release-mode diagnostic benchmark"]
+    fn minimum_contrast_cache_benchmark() {
+        let pairs = [
+            (Rgb::new(0x77, 0x77, 0x77), Rgb::new(0x78, 0x78, 0x78)),
+            (Rgb::new(0x88, 0x88, 0x88), Rgb::new(0x89, 0x89, 0x89)),
+            (Rgb::new(0x99, 0x99, 0x99), Rgb::new(0x9a, 0x9a, 0x9a)),
+            (Rgb::new(0xaa, 0xaa, 0xaa), Rgb::new(0xab, 0xab, 0xab)),
+        ];
+        let iterations = 100_000;
+
+        let started = std::time::Instant::now();
+        let mut uncached = Rgb::new(0, 0, 0);
+        for index in 0..iterations {
+            let (fg, bg) = pairs[index % pairs.len()];
+            uncached = std::hint::black_box(color::with_min_contrast(fg, bg, 4.5));
+        }
+        let uncached_elapsed = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let mut cache = MinimumContrastCache::default();
+        let mut cached = Rgb::new(0, 0, 0);
+        for index in 0..iterations {
+            let (fg, bg) = pairs[index % pairs.len()];
+            cached = std::hint::black_box(cache.resolve(fg, bg, 4.5));
+        }
+        let cached_elapsed = started.elapsed();
+
+        assert_eq!(cached, uncached);
+        eprintln!(
+            "minimum-contrast {iterations} cells, {} pairs: uncached={uncached_elapsed:?}, cached={cached_elapsed:?}, misses={}",
+            pairs.len(),
+            cache.misses,
         );
     }
 }

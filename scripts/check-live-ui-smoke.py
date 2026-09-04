@@ -6553,6 +6553,28 @@ def changed_pixels(a_path: Path, b_path: Path, y0: float, y1: float) -> List[Tup
     return changed
 
 
+def foreground_pixels_on_solid_bar(
+    path: Path, y0: float, y1: float, minimum_rgb_distance: int = 96
+) -> int:
+    """Count pixels visibly distinct from a solid bar's dominant colour."""
+    width, height, rows = read_rgba_png(path)
+    samples: Dict[bytes, int] = {}
+    for y in range(max(0, math.ceil(y0)), min(height, math.ceil(y1))):
+        row = rows[y]
+        for x in range(width):
+            rgba = bytes(row[x * 4 : x * 4 + 4])
+            samples[rgba] = samples.get(rgba, 0) + 1
+    if not samples:
+        return 0
+    background = max(samples, key=samples.get)  # type: ignore[arg-type]
+    return sum(
+        count
+        for rgba, count in samples.items()
+        if sum(abs(rgba[channel] - background[channel]) for channel in range(3))
+        >= minimum_rgb_distance
+    )
+
+
 def selection_drag_points(cells: Dict[str, object], content: Dict[str, float]) -> Tuple[float, float, float, float]:
     rows = max(1, int(cells.get("rows", 1)))
     cols = max(1, int(cells.get("cols", 1)))
@@ -6764,6 +6786,29 @@ def visible_context_row(geometry: Dict[str, object], label: str) -> Dict[str, ob
 def modal_open(geometry: Dict[str, object], name: str) -> bool:
     modals = geometry.get("modals", {})
     return isinstance(modals, dict) and bool(modals.get(name))
+
+
+def assert_modal_accessibility(
+    geometry: Dict[str, object], modal: str, focused_roles: Tuple[str, ...]
+) -> Dict[str, object]:
+    accessibility = geometry.get("accessibility")
+    if not isinstance(accessibility, dict):
+        raise SystemExit(
+            f"interaction smoke: {modal} omitted its accessibility projection"
+        )
+    focused = accessibility.get("focused")
+    if (
+        accessibility.get("modal") != modal
+        or int(accessibility.get("root_count", 0)) < 1
+        or not isinstance(focused, dict)
+        or focused.get("role") not in focused_roles
+        or not str(focused.get("label", "")).strip()
+    ):
+        raise SystemExit(
+            f"interaction smoke: {modal} has no usable modal accessibility focus: "
+            f"{accessibility!r}"
+        )
+    return accessibility
 
 
 def rect_intersects(a: Dict[str, object], b: Dict[str, object]) -> bool:
@@ -15341,6 +15386,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "background = #090909",
                 "foreground = #f5f5f5",
                 "minimum-contrast = 0",
+                "ask-before-closing = always",
                 "window-padding-x = 8",
                 "window-padding-y = 8",
                 "window-width = 110",
@@ -15520,20 +15566,78 @@ def run_interaction(kettle: str, root: Path) -> Path:
         live.screenshot(out / "settings-open.png")
         if not modal_open(settings_geo, "settings"):
             raise SystemExit("interaction smoke: Settings row did not open the settings modal")
+        settings_accessibility = assert_modal_accessibility(
+            settings_geo, "settings", ("listboxoption",)
+        )
         settings_changes = len(changed_pixels(out / "menu-before.png", out / "settings-open.png", 0.0, float(geo["surface"]["height"])))  # type: ignore[index]
         if settings_changes < 500:
             raise SystemExit(f"interaction smoke: settings overlay changed too few pixels ({settings_changes})")
         settings_surface = settings_geo["surface"]  # type: ignore[index]
-        close_x = float(settings_surface["width"]) - 2.0  # type: ignore[index]
-        close_y = float(settings_surface["height"]) - 2.0  # type: ignore[index]
-        live.ctl("send_mouse", params={"event": "move", "x": close_x, "y": close_y})
-        live.ctl("send_mouse", params={"event": "press", "x": close_x, "y": close_y, "button": "left"})
-        live.ctl("send_mouse", params={"event": "release", "x": close_x, "y": close_y, "button": "left"})
+        settings_cells = live.read_cells()
+        original_width = int(settings_surface["width"])  # type: ignore[index]
+        original_height = int(settings_surface["height"])  # type: ignore[index]
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        live.ctl("resize_window", params={"width": 420, "height": 220})
+        wait_for_resize(
+            live,
+            original_width,
+            original_height,
+            int(settings_cells.get("cols", 0)),
+            int(settings_cells.get("rows", 0)),
+        )
+        live.json_ctl("perform_action", {"action": "open_settings"})
         time.sleep(0.2)
+        # Appearance -> Background -> Behavior, then its final (twelfth) row.
+        live.json_ctl(
+            "dispatch_ui_key", {"keys": ["tab", "tab"] + ["down"] * 11}
+        )
+        time.sleep(0.2)
+        settings_scrolled_geo = live.json_ctl("ui_geometry")
+        (out / "settings-scrolled.geometry.json").write_text(
+            json.dumps(settings_scrolled_geo, indent=2) + "\n"
+        )
+        live.screenshot(out / "settings-scrolled.png")
+        settings_scrolled = settings_scrolled_geo.get("settings")
+        if not isinstance(settings_scrolled, dict):
+            raise SystemExit("interaction smoke: resized Settings lost its geometry")
+        panel_rect = settings_scrolled.get("rect")
+        focused_rect = settings_scrolled.get("focused_rect")
+        if not isinstance(panel_rect, dict) or not isinstance(focused_rect, dict):
+            raise SystemExit("interaction smoke: Settings omitted panel/focus rectangles")
+        if int(settings_scrolled.get("first_line", 0)) <= 0:
+            raise SystemExit(
+                "interaction smoke: short Settings did not scroll to its last Behavior row"
+            )
+        panel_top = float(panel_rect["y"])
+        panel_bottom = panel_top + float(panel_rect["height"])
+        focused_top = float(focused_rect["y"])
+        focused_bottom = focused_top + float(focused_rect["height"])
+        if focused_top < panel_top or focused_bottom > panel_bottom:
+            raise SystemExit(
+                "interaction smoke: focused Settings row is outside the painted panel: "
+                f"panel={panel_rect!r} focused={focused_rect!r}"
+            )
+        settings_scrolled_accessibility = assert_modal_accessibility(
+            settings_scrolled_geo, "settings", ("listboxoption",)
+        )
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        resized_surface = settings_scrolled_geo["surface"]  # type: ignore[index]
+        resized_cells = live.read_cells()
+        live.ctl(
+            "resize_window",
+            params={"width": original_width, "height": original_height},
+        )
+        wait_for_resize(
+            live,
+            int(resized_surface["width"]),  # type: ignore[index]
+            int(resized_surface["height"]),  # type: ignore[index]
+            int(resized_cells.get("cols", 0)),
+            int(resized_cells.get("rows", 0)),
+        )
         settings_closed_geo = live.json_ctl("ui_geometry")
         (out / "settings-closed.geometry.json").write_text(json.dumps(settings_closed_geo, indent=2) + "\n")
         if modal_open(settings_closed_geo, "settings"):
-            raise SystemExit("interaction smoke: click outside settings did not close the modal")
+            raise SystemExit("interaction smoke: Escape did not close the settings modal")
 
         live.ctl("send_mouse", params={"event": "click", "x": mx, "y": my, "button": "right"})
         time.sleep(0.2)
@@ -15552,6 +15656,68 @@ def run_interaction(kettle: str, root: Path) -> Path:
         split_marker = "KETTLE_INTERACTION_SPLIT_RIGHT"
         live_shell_command(live, command_with_marker("printf 'split-right-live\\n'" if platform.system() != "Windows" else "Write-Output split-right-live", split_marker), split_marker)
         states.append(capture_live_state(live, out, "split-right"))
+
+        # An idle integrated shell intentionally skips close confirmation, so
+        # keep the focused split busy long enough to exercise the real prompt.
+        busy_command = (
+            "Start-Sleep -Seconds 30" if platform.system() == "Windows" else "sleep 30"
+        )
+        live.ctl("send_text", params={"text": busy_command})
+        live.ctl("send_keys", params={"keys": ["enter"]})
+        time.sleep(0.2)
+        live.screenshot(out / "confirm-before.png")
+        confirm_dispatch = live.json_ctl("perform_action", {"action": "close_pane"})
+        (out / "confirm.dispatch.json").write_text(
+            json.dumps(confirm_dispatch, indent=2) + "\n"
+        )
+        time.sleep(0.2)
+        confirm_geo = live.json_ctl("ui_geometry")
+        (out / "confirm-open.geometry.json").write_text(
+            json.dumps(confirm_geo, indent=2) + "\n"
+        )
+        live.screenshot(out / "confirm-open.png")
+        if not modal_open(confirm_geo, "confirm_dialog"):
+            raise SystemExit(
+                "interaction smoke: close_pane did not open its confirmation dialog"
+            )
+        confirm_accessibility = assert_modal_accessibility(
+            confirm_geo, "confirm_dialog", ("button",)
+        )
+        confirm_changes = len(
+            changed_pixels(
+                out / "confirm-before.png",
+                out / "confirm-open.png",
+                0.0,
+                float(confirm_geo["surface"]["height"]),  # type: ignore[index]
+            )
+        )
+        if confirm_changes < 100:
+            raise SystemExit(
+                f"interaction smoke: confirmation changed too few pixels ({confirm_changes})"
+            )
+        confirm_bar_top = float(confirm_geo["surface"]["height"]) - (  # type: ignore[index]
+            float(confirm_geo["cell"]["height"]) + 10.0  # type: ignore[index]
+        )
+        confirm_foreground_pixels = foreground_pixels_on_solid_bar(
+            out / "confirm-open.png",
+            confirm_bar_top,
+            float(confirm_geo["surface"]["height"]),  # type: ignore[index]
+        )
+        if confirm_foreground_pixels < 100:
+            raise SystemExit(
+                "interaction smoke: confirmation background is visible but its "
+                f"prompt/buttons are not ({confirm_foreground_pixels} foreground pixels)"
+            )
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        confirm_closed_geo = live.json_ctl("ui_geometry")
+        if modal_open(confirm_closed_geo, "confirm_dialog"):
+            raise SystemExit("interaction smoke: Escape did not close confirmation")
+        if len(live.json_ctl("list_panes").get("panes", [])) != len(
+            panes_after_split.get("panes", [])
+        ):
+            raise SystemExit("interaction smoke: cancelling confirmation closed a pane")
+        live.ctl("send_keys", params={"keys": ["ctrl+c"]})
+        states.append(capture_live_state(live, out, "confirm-cancelled"))
 
         # Keep the same focused scenario embedded in the broad interaction
         # walk, while also exposing it alone for virtual surfaces that cannot
@@ -15626,6 +15792,9 @@ def run_interaction(kettle: str, root: Path) -> Path:
         live.screenshot(out / "palette-open.png")
         if not modal_open(palette_geo, "palette"):
             raise SystemExit("interaction smoke: Command palette row did not open the palette modal")
+        palette_accessibility = assert_modal_accessibility(
+            palette_geo, "palette", ("listboxoption", "textinput")
+        )
         palette_changes = len(changed_pixels(out / "palette-before.png", out / "palette-open.png", 0.0, float(palette_before["surface"]["height"])))  # type: ignore[index]
         if palette_changes < 250:
             raise SystemExit(f"interaction smoke: command palette changed too few pixels ({palette_changes})")
@@ -15675,6 +15844,16 @@ def run_interaction(kettle: str, root: Path) -> Path:
             live.screenshot(modal_shot)
             if not modal_open(modal_geo, modal_name):
                 raise SystemExit(f"interaction smoke: perform_action {action_name} did not open {modal_name}")
+            modal_accessibility = assert_modal_accessibility(
+                modal_geo,
+                modal_name,
+                {
+                    "ssh_launcher": ("listboxoption", "textinput"),
+                    "layout_picker": ("listboxoption", "textinput"),
+                    "hint_mode": ("listbox",),
+                    "title_edit": ("textinput",),
+                }[modal_name],
+            )
             if modal_name == "title_edit":
                 title_edit = modal_geo.get("title_edit")
                 content = modal_geo.get("content")
@@ -15708,6 +15887,7 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "action": action_name,
                 "changed_pixels": changed,
                 "modals": modal_geo.get("modals"),
+                "accessibility": modal_accessibility,
             }
             states.append(capture_live_state(live, out, label))
             previous_shot = modal_shot
@@ -15719,8 +15899,15 @@ def run_interaction(kettle: str, root: Path) -> Path:
                 "states": states,
                 "menu_changed_pixels": menu_changes,
                 "settings_changed_pixels": settings_changes,
+                "settings_accessibility": settings_accessibility,
+                "settings_scrolled": settings_scrolled,
+                "settings_scrolled_accessibility": settings_scrolled_accessibility,
                 "palette_changed_pixels": palette_changes,
+                "palette_accessibility": palette_accessibility,
                 "search_changed_pixels": search_changes,
+                "confirm_changed_pixels": confirm_changes,
+                "confirm_foreground_pixels": confirm_foreground_pixels,
+                "confirm_accessibility": confirm_accessibility,
                 "selection_changed_pixels": selection_changes,
                 "scroll_offset": int(scrolled.get("display_offset", 0)),
                 "tabs_before": len(tabs_before.get("tabs", [])),

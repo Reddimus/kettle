@@ -166,34 +166,49 @@ pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
 pub(crate) fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
         kettle_state::create_private_dirs(dir)?;
-        let metadata = std::fs::symlink_metadata(dir)?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "control directory is not owned by the current user: {}",
-                    dir.display()
-                ),
-            ));
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        let metadata = std::fs::symlink_metadata(dir)?;
-        if metadata.mode() & 0o077 != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "control directory is group- or world-accessible: {}",
-                    dir.display()
-                ),
-            ));
-        }
     }
     #[cfg(not(unix))]
     std::fs::create_dir_all(dir)?;
+    if !private_dir_is_valid(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("control directory is not private: {}", dir.display()),
+        ));
+    }
     Ok(())
+}
+
+pub(crate) fn private_dir_is_valid(dir: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
+    }
+    #[cfg(windows)]
+    {
+        discovery::owned_by_current_user(dir)
+    }
+}
+
+#[cfg(test)]
+mod private_directory_owner_tests {
+    #[test]
+    fn discovery_and_presence_share_the_crate_privacy_helpers() {
+        let discovery = include_str!("discovery.rs");
+        let presence = include_str!("presence.rs");
+        assert!(!discovery.contains("fn registry_dir_is_private"));
+        assert!(!presence.contains("fn ensure_private_dir"));
+        assert!(!presence.contains("fn private_dir_is_valid"));
+        assert!(discovery.contains("crate::private_dir_is_valid"));
+        assert!(presence.contains("crate::private_dir_is_valid"));
+    }
 }
 
 #[cfg(test)]

@@ -3928,10 +3928,11 @@ enum PtyPumpSend {
 /// short timed wait preserves bounded backpressure during normal operation
 /// while making teardown observation independent of parser progress.
 fn forward_pty_buffer_or_drain(
-    raw_tx: &crossbeam_channel::Sender<Option<(u64, Vec<u8>)>>,
+    raw_tx: &crossbeam_channel::Sender<Option<(u64, Vec<u8>, usize)>>,
     drain_output: &AtomicBool,
     generation: u64,
     mut buffer: Vec<u8>,
+    read_len: usize,
 ) -> PtyPumpSend {
     loop {
         if drain_output.load(Ordering::Acquire) {
@@ -3939,11 +3940,11 @@ fn forward_pty_buffer_or_drain(
         }
 
         match raw_tx.send_timeout(
-            Some((generation, buffer)),
+            Some((generation, buffer, read_len)),
             std::time::Duration::from_millis(10),
         ) {
             Ok(()) => return PtyPumpSend::Forwarded,
-            Err(crossbeam_channel::SendTimeoutError::Timeout(Some((_, returned)))) => {
+            Err(crossbeam_channel::SendTimeoutError::Timeout(Some((_, returned, _)))) => {
                 buffer = returned;
             }
             Err(crossbeam_channel::SendTimeoutError::Timeout(None)) => {
@@ -3960,9 +3961,9 @@ fn forward_pty_buffer_or_drain(
 /// of ready data, and flushing immediately when EOF makes a terminator impossible.
 fn receive_pty_chunk(
     processor: &mut Processor,
-    raw_rx: &crossbeam_channel::Receiver<Option<(u64, Vec<u8>)>>,
+    raw_rx: &crossbeam_channel::Receiver<Option<(u64, Vec<u8>, usize)>>,
     context: &mut SyncFlushContext<'_>,
-) -> Option<(u64, Vec<u8>)> {
+) -> Option<(u64, Vec<u8>, usize)> {
     loop {
         match processor.sync_timeout().sync_timeout() {
             Some(deadline) => {
@@ -6588,7 +6589,7 @@ impl Terminal {
                     // applies backpressure instead of retaining an unbounded
                     // queue of fresh 64 KiB allocations.
                     let (raw_tx, raw_rx) = crossbeam_channel::bounded::<
-                        Option<(u64, Vec<u8>)>,
+                        Option<(u64, Vec<u8>, usize)>,
                     >(PTY_PUMP_QUEUE_DEPTH);
                     let (recycle_tx, recycle_rx) =
                         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_PUMP_QUEUE_DEPTH + 1);
@@ -6759,7 +6760,6 @@ impl Terminal {
                                         Ok(n) => {
                                             #[cfg(unix)]
                                             startup_slave_guard.take();
-                                            buffer.truncate(n);
                                             // Publish activity before this chunk can block behind
                                             // either the parser queue or a lossless raw-output
                                             // subscriber. ConPTY completion must not treat that
@@ -6770,6 +6770,7 @@ impl Terminal {
                                                 &pump_drain_output,
                                                 read_generation,
                                                 buffer,
+                                                n,
                                             ) {
                                                 PtyPumpSend::Forwarded => {}
                                                 PtyPumpSend::Drain(buffer) => {
@@ -6890,7 +6891,7 @@ impl Terminal {
                                 proxy.send_event_exit();
                                 break;
                             }
-                            Some((read_generation, buffer)) => {
+                            Some((read_generation, buffer, n)) => {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
@@ -6902,7 +6903,8 @@ impl Terminal {
                                 let tap_raw = log_active
                                     .load(std::sync::atomic::Ordering::Relaxed)
                                     || output_tx.is_some();
-                                let raw_output = private_output_filter.feed(&buffer, tap_raw);
+                                let raw_output =
+                                    private_output_filter.feed(&buffer[..n], tap_raw);
                                 if !raw_output.is_empty() {
                                     // Publish at most once per PTY read. OSC-heavy output can
                                     // produce thousands of parser chunks, while the logger and
@@ -6935,7 +6937,7 @@ impl Terminal {
                                 // Raw consumers are handled once above; parser chunks now serve
                                 // only the terminal and semantic side channels.
                                 extractor.set_raw_tap(false);
-                                extractor.feed_with(&buffer, |extractor, chunk| {
+                                extractor.feed_with(&buffer[..n], |extractor, chunk| {
                                     let chunk = match chunk {
                                         Chunk::Raw(_) => return,
                                         chunk => chunk,
@@ -7016,6 +7018,10 @@ impl Terminal {
                                         // reader code whenever its body changes.
                                         #[rustfmt::skip]
                                         Chunk::DeleteImages(delete) => {
+                                            let relative_snapshot = relatives
+                                                .lock()
+                                                .map(|placements| placements.clone())
+                                                .unwrap_or_default();
                                             let (
                                                 delete_geometry,
                                                 placeholder_cells,
@@ -7046,9 +7052,13 @@ impl Terminal {
                                                                     cursor.line.0,
                                                                 ),
                                                                 cursor.column.0,
-                                                                Terminal::placeholder_cells_from_term(
-                                                                    &t,
-                                                                ),
+                                                                if relative_snapshot.is_empty() {
+                                                                    Vec::new()
+                                                                } else {
+                                                                    Terminal::placeholder_cells_from_term(
+                                                                        &t,
+                                                                    )
+                                                                },
                                                             )
                                                         },
                                                     );
@@ -7073,12 +7083,11 @@ impl Terminal {
                                             // Resolve relative-placement origins before mutating
                                             // any registry. Physical selectors use the same
                                             // render-time parent chain as Terminal::relative_tiles.
-                                            let image_snapshot =
-                                                images.lock().map(|v| v.clone()).unwrap_or_default();
-                                            let relative_snapshot = relatives
-                                                .lock()
-                                                .map(|v| v.clone())
-                                                .unwrap_or_default();
+                                            let image_snapshot = if relative_snapshot.is_empty() {
+                                                Vec::new()
+                                            } else {
+                                                images.lock().map(|v| v.clone()).unwrap_or_default()
+                                            };
                                             let mut origins =
                                                 std::collections::HashMap::<u32, (u64, usize)>::new();
                                             let mut note_origin =
@@ -8301,9 +8310,14 @@ impl Terminal {
         // Maximal same-row contiguous runs of placeholder cells.
         let mut runs: Vec<Vec<(RawCell, u64, usize)>> = Vec::new();
         let mut last: Option<(i32, i32)> = None;
+        let placement_limit = kettle_vt::GraphicsLimits::default().placements;
+        let mut placeholder_count = 0usize;
         for ind in content.display_iter {
             let (cell, p) = (ind.cell, ind.point);
-            if cell.c == placeholder::PLACEHOLDER {
+            if placeholder::is_placeholder(cell.c) {
+                if placeholder_count >= placement_limit {
+                    break;
+                }
                 let contiguous = matches!(
                     last,
                     Some((r, c)) if r == p.line.0 && c + 1 == p.column.0 as i32
@@ -8311,7 +8325,6 @@ impl Terminal {
                 if !contiguous || runs.is_empty() {
                     runs.push(Vec::new());
                 }
-                let marks: Vec<char> = cell.zerowidth().map(|z| z.to_vec()).unwrap_or_default();
                 // `runs` is non-empty here (we either just pushed an
                 // empty Vec or `contiguous` held with runs already non-empty).
                 // Use `if let` rather than `expect()` so the invariant can never
@@ -8324,11 +8337,12 @@ impl Terminal {
                             // Underline color carries the placement id (0/absent
                             // ⇒ any placement); spec §"Unicode placeholders".
                             placement_id: cell.underline_color().map(fg_id_bits).unwrap_or(0),
-                            diacritics: CellDiacritics::parse(&marks),
+                            diacritics: CellDiacritics::parse(cell.zerowidth().unwrap_or(&[])),
                         },
                         stable_grid_line_id(history_origin, history_size, p.line.0),
                         p.column.0,
                     ));
+                    placeholder_count += 1;
                 }
                 last = Some((p.line.0, p.column.0 as i32));
             } else {
@@ -10014,6 +10028,11 @@ fn apply_kitty_delete_at(
     context: GraphicsActionContext<'_>,
     extractor: &mut Extractor,
 ) {
+    let relative_snapshot = context
+        .relatives
+        .lock()
+        .map(|placements| placements.clone())
+        .unwrap_or_default();
     let grid = term.grid();
     let delete_geometry = KittyDeleteGeometry {
         screen_top: stable_grid_line_id(grid.history_origin(), grid.history_size(), 0),
@@ -10025,7 +10044,11 @@ fn apply_kitty_delete_at(
         ),
         cursor_col: grid.cursor.point.column.0,
     };
-    let placeholder_cells = Terminal::placeholder_cells_from_term(term);
+    let placeholder_cells = if relative_snapshot.is_empty() {
+        Vec::new()
+    } else {
+        Terminal::placeholder_cells_from_term(term)
+    };
     let render_geometry = context
         .geometry
         .lock()
@@ -10033,16 +10056,15 @@ fn apply_kitty_delete_at(
         .unwrap_or_else(|_| PtyGeometry::new(1, 1, 1, 1));
 
     // Resolve relative-placement origins before mutating any registry.
-    let image_snapshot = context
-        .images
-        .lock()
-        .map(|placements| placements.clone())
-        .unwrap_or_default();
-    let relative_snapshot = context
-        .relatives
-        .lock()
-        .map(|placements| placements.clone())
-        .unwrap_or_default();
+    let image_snapshot = if relative_snapshot.is_empty() {
+        Vec::new()
+    } else {
+        context
+            .images
+            .lock()
+            .map(|placements| placements.clone())
+            .unwrap_or_default()
+    };
     let mut origins = std::collections::HashMap::<u32, (u64, usize)>::new();
     let mut note_origin = |id: u32, abs: u64, col: usize| {
         origins
@@ -10450,6 +10472,37 @@ mod cwd_reporting_tests {
 /// detect a future indirect lock hidden behind a macro or another helper.
 #[cfg(test)]
 mod placeholder_lock_order_tests {
+    #[test]
+    fn placeholder_scan_is_allocation_bounded_before_resolution() {
+        let src = super::production_source();
+        let body = src
+            .split("fn placeholder_cells_from_term(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn virtuals_snapshot(").next())
+            .expect("placeholder scan body");
+        assert!(
+            body.contains("CellDiacritics::parse(cell.zerowidth().unwrap_or(&[]))"),
+            "combining-mark slices must not be cloned per placeholder cell"
+        );
+        assert!(
+            body.contains("placeholder::is_placeholder(cell.c)"),
+            "placeholder scans must use the shared protocol predicate"
+        );
+        assert!(
+            body.contains("if placeholder_count >= placement_limit"),
+            "the scan must stop materializing cells at the placement cap"
+        );
+    }
+
+    #[test]
+    fn kitty_delete_skips_origin_snapshots_without_relative_placements() {
+        let src = super::production_source();
+        assert!(
+            src.matches("if relative_snapshot.is_empty() {").count() >= 2,
+            "both kitty-delete paths must skip the grid/image origin snapshots when no relative placement can consume them"
+        );
+    }
+
     #[test]
     fn placeholder_tiles_reaches_virtuals_only_through_the_owned_snapshot() {
         // Normalized, like every other source guard in this file: the split
@@ -10967,7 +11020,7 @@ mod home_dir_tests {
     fn session_log_raw_publisher_only_uses_bounded_worker_admission() {
         let source = super::production_source();
         let publisher = source
-            .split("let raw_output = private_output_filter.feed(&buffer, tap_raw);")
+            .split("private_output_filter.feed(&buffer[..n], tap_raw);")
             .nth(1)
             .and_then(|body| body.split("extractor.set_raw_tap(false);").next())
             .expect("per-read raw-output publisher");
@@ -13584,7 +13637,7 @@ mod teardown_tests {
     fn full_pump_queue_yields_to_teardown_drain() {
         let (raw_tx, raw_rx) = crossbeam_channel::bounded(1);
         raw_tx
-            .send(Some((1, vec![1])))
+            .send(Some((1, vec![1], 1)))
             .expect("fill bounded parser handoff");
 
         let drain_output = std::sync::Arc::new(AtomicBool::new(false));
@@ -13594,7 +13647,7 @@ mod teardown_tests {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let pump = std::thread::spawn(move || {
             pump_start.wait();
-            let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, 2, vec![2]);
+            let result = forward_pty_buffer_or_drain(&raw_tx, &drain_for_pump, 2, vec![2], 1);
             done_tx.send(result).expect("publish pump handoff result");
         });
 
@@ -13610,7 +13663,7 @@ mod teardown_tests {
         assert_eq!(drained, PtyPumpSend::Drain(vec![2]));
         assert_eq!(
             raw_rx.recv().expect("original queued parser chunk"),
-            Some((1, vec![1]))
+            Some((1, vec![1], 1))
         );
         pump.join().expect("pump handoff model thread");
     }
@@ -13636,6 +13689,14 @@ mod teardown_tests {
         assert_eq!(progress.load().pending_chunks, 0);
         progress.set_status(PtyReadStatus::Eof);
         assert_eq!(progress.load().status, PtyReadStatus::Eof);
+    }
+
+    #[test]
+    fn pty_recycle_keeps_the_full_read_buffer_length() {
+        let source = super::production_source();
+        assert!(!source.contains("buffer.truncate(n)"));
+        assert!(source.contains("private_output_filter.feed(&buffer[..n], tap_raw)"));
+        assert!(source.contains("extractor.feed_with(&buffer[..n]"));
     }
 
     /// Regression guard (runtime). Dropping a `Terminal` whose
@@ -15305,7 +15366,7 @@ mod sync_update_flush_guard {
         );
 
         let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
-        tx.send(Some((7, b"next chunk".to_vec()))).unwrap();
+        tx.send(Some((7, b"next chunk".to_vec(), 10))).unwrap();
         let generation = AtomicU64::new(0);
         let wakes = Arc::new(AtomicUsize::new(0));
         let wakes_for_callback = wakes.clone();
@@ -15328,7 +15389,7 @@ mod sync_update_flush_guard {
 
         let chunk = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
             .expect("queued chunk is preserved after the flush");
-        assert_eq!(chunk, (7, b"next chunk".to_vec()));
+        assert_eq!(chunk, (7, b"next chunk".to_vec(), 10));
         assert!(processor.sync_timeout().sync_timeout().is_none());
         assert_eq!(generation.load(Ordering::Acquire), 1);
         assert_eq!(wakes.load(Ordering::Relaxed), 1);
@@ -15446,7 +15507,7 @@ mod sync_update_flush_guard {
             processor.advance(&mut *term, b"\x1b[?2026h\x1b[2;3Hupdated");
         }
         let (tx, rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
-        tx.send(Some((8, b"\x1b[?2026l".to_vec()))).unwrap();
+        tx.send(Some((8, b"\x1b[?2026l".to_vec(), 8))).unwrap();
         let generation = AtomicU64::new(0);
         let waker: Waker = Arc::new(|| panic!("no timeout wake expected"));
         let output_wake = OutputWakeGate::new(waker);
@@ -15463,10 +15524,11 @@ mod sync_update_flush_guard {
             output_wake: &output_wake,
         };
 
-        let (read_generation, close) = receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
-            .expect("close sequence received");
+        let (read_generation, close, close_len) =
+            receive_pty_chunk(&mut processor, &rx, &mut sync_flush)
+                .expect("close sequence received");
         assert_eq!(read_generation, 8);
-        processor.advance(&mut *term.lock().unwrap(), &close);
+        processor.advance(&mut *term.lock().unwrap(), &close[..close_len]);
 
         assert!(processor.sync_timeout().sync_timeout().is_none());
         assert_eq!(generation.load(Ordering::Acquire), 0);

@@ -15,9 +15,8 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 
 /// True for a cell that only pads out a wide glyph (the trailing space cell, or
 /// the leading spacer used when a wide glyph would straddle the last column).
-fn is_spacer(cell: &Cell) -> bool {
-    cell.flags
-        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+pub(crate) fn is_spacer(flags: Flags) -> bool {
+    flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
 }
 
 /// Rebuild row `line`'s text into `text` (cleared first), pushing to
@@ -42,7 +41,7 @@ pub fn row_text_into(
     col_of_byte.clear();
     for c in 0..cols {
         let cell = &grid[Point::new(Line(line), Column(c))];
-        if is_spacer(cell) {
+        if is_spacer(cell.flags) {
             continue;
         }
         let ch = cell.c;
@@ -70,7 +69,7 @@ pub fn row_text_into(
 pub fn append_row_text(grid: &Grid<Cell>, line: i32, cols: usize, out: &mut String) {
     for c in 0..cols {
         let cell = &grid[Point::new(Line(line), Column(c))];
-        if is_spacer(cell) {
+        if is_spacer(cell.flags) {
             continue;
         }
         out.push(cell.c);

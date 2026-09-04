@@ -462,14 +462,26 @@ fn server_loop_until(
 ) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let ledger = Arc::new(LaunchLedger::default());
+    let mut consecutive_errors = 0u32;
     loop {
         if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
             break;
         }
         let stream = match primary.listener.accept() {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                consecutive_errors = 0;
+                stream
+            }
             Err(error) => {
-                log::warn!("Kettle activation accept failed: {error}");
+                consecutive_errors += 1;
+                if consecutive_errors > 32 {
+                    log::warn!(
+                        "Kettle activation accept loop ending after repeated errors: {error}"
+                    );
+                    return;
+                }
+                log::debug!("Kettle activation accept failed transiently: {error}");
+                std::thread::sleep(Duration::from_millis(20));
                 continue;
             }
         };
@@ -724,6 +736,23 @@ fn activation_paths_with_temp(base: &Path, private_temp_dir: &Path) -> Activatio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_accept_errors_back_off_and_eventually_release_primary() {
+        let source = kettle_test_support::production_source(include_str!("activation.rs"));
+        let body = source
+            .split("fn server_loop_until(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn handle_client(").next())
+            .expect("activation accept loop");
+        for needle in [
+            "consecutive_errors",
+            "Duration::from_millis(20)",
+            "if consecutive_errors > 32",
+        ] {
+            assert!(body.contains(needle), "accept loop lost {needle:?}");
+        }
+    }
 
     fn request(recording_key: Option<&str>) -> ActivationRequest {
         ActivationRequest::new(
