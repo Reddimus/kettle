@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Kettle
+GenericName=Terminal
+Comment=A fast cross-platform GPU terminal emulator
+Exec=kettle
+TryExec=kettle
+Icon=kettle
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=shell;prompt;command;terminal;tty;console;gpu;tabs;splits;
+MimeType=application/x-terminal-emulator;
+StartupNotify=true
+StartupWMClass=kettle

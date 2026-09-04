@@ -1,0 +1,182 @@
+[package]
+name = "kettle-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# See `kettle-config/Cargo.toml`: each crate's `description` overrides the
+# workspace default because that default describes the `kettle` binary, not
+# the library sub-crates.
+description = "kettle: windowing, tabs, splits, overlays, and session restore"
+
+[lints]
+workspace = true
+
+[dependencies]
+accesskit = "0.24.1"
+accesskit_winit = "0.33.2"
+anyhow.workspace = true
+# `image-data` is enabled for clipboard-bitmap PASTE (a screenshot puts a raw
+# bitmap on the clipboard with no file and no text behind it — see
+# src/paste_image.rs). An earlier comment here claimed the feature "pulls
+# `image` with default features (= every format incl. avif/rav1e)"; that was
+# wrong. arboard pins `default-features = false` on `image` for every target and
+# asks only for `png`+`bmp` on Windows, `png` on Linux, `tiff` on macOS — and
+# kettle-render already builds `image` with png/jpeg/webp/bmp/gif, so the
+# Windows and Linux graphs gain NO new crate. macOS adds `tiff` + `fax`.
+# Verified with `cargo tree --target x86_64-pc-windows-msvc`.
+# kettle still never WRITES an image to the clipboard; only reads one.
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
+crossbeam-channel = "0.5.15"
+# Decode the embedded PNG app icon into a winit window icon so
+# the title bar (system-menu glyph), taskbar button, and Alt-Tab show
+# kettle's icon for the *running* window. Only the `png` feature — the icon
+# assets are PNG. `image` is already built for the workspace (kettle-render
+# pulls it), so this adds no new crate to the dependency graph. The build.rs
+# winresource step embeds the same art as an .exe resource, which covers
+# Explorer / the file glyph / a pinned shortcut but NOT the live window's
+# WM_SETICON — hence this runtime path.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+kettle-config.workspace = true
+# `asciicast` is enabled unconditionally: the GUI session recorder is a
+# runtime toggle (config `record = on` / `--record`) present in every build,
+# not a compile-time feature. The recorder engine lives in kettle-core
+# (`record.rs`); this feature compiles it in.
+kettle-core = { workspace = true, features = ["asciicast"] }
+# The App hosts the control server over kettle-ctl's transport + protocol so
+# an agent (or `kettle ctl`/`kettle mcp`) can read the screen and drive panes.
+# The protocol/transport live in the leaf crate so the future kettle-muxd
+# daemon can re-host the same server side.
+kettle-ctl.workspace = true
+kettle-render.workspace = true
+kettle-state.workspace = true
+kettle-update.workspace = true
+# SSH, Docker, Podman, and kubectl session detection. The UI owns the polling
+# loop while non-UI consumers remain isolated from the sysinfo dependency.
+kettle-remote.workspace = true
+log.workspace = true
+# The `--lua-script PATH` flag runs a startup script with a `kettle`
+# introspection namespace. Future work adds text input and event hooks.
+mlua.workspace = true
+notify = "8.2.0"
+notify-rust.workspace = true
+# 5.4.0 hardens launcher argument handling against option and shell injection.
+open = "5.4.0"
+pollster = "1.0.1"
+# Triggers (`kettle_config::OutputTrigger`) compile to `regex::Regex`
+# in the App layer (not kettle-core) — the matching engine reads
+# the focused-pane viewport via the existing Mux API, no reader-
+# thread plumbing needed. Workspace-pinned via deny.toml's license
+# allow-list.
+regex.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.11"
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+# v2.33.1 scoped RUSTSEC-2026-0192 by turning winit default features off,
+# which also (unacknowledged at the time) dropped `wayland-csd-adwaita` — so
+# GNOME/Wayland users got smithay-client-toolkit's FallbackFrame ("the
+# default ugly frame": flat gray bar, filled-square close button, no title).
+# Mutter implements no server-side decorations (xdg-decoration protocol,
+# GNOME/mutter#217), so on GNOME the frame winit draws IS the titlebar.
+#
+# v2.34.0 restores Adwaita-style decorations via `wayland-csd-adwaita-notitle`:
+# it enables `sctk-adwaita` WITHOUT a text renderer, so the ab_glyph →
+# owned_ttf_parser → ttf-parser route stays out of the graph (the RUSTSEC
+# scope guard `scripts/check-ttf-parser-scope.sh` keeps proving that) and the
+# aarch64 cross-build stays free of C font libs (the crossfont variant needs
+# FreeType). Trade-off: the CSD bar renders buttons but no title text — the
+# title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title, and
+# kettle's own tab bar labels the window content. Do NOT switch this to
+# `wayland-csd-adwaita` (ab_glyph) while RUSTSEC-2026-0192 is open — the
+# `winit_wayland_csd_stays_notitle` drift guard in src/app.rs pins it.
+winit = { version = "0.30.13", default-features = false, features = [
+    "rwh_06",
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita-notitle",
+] }
+
+# SCM_RIGHTS fd-passing for detachable-tabs Bucket-D. Unix-only
+# (Linux + macOS + BSDs); Windows + Wayland get the
+# Action::MoveTabToNewWindow keyboard-driven fallback.
+[target.'cfg(unix)'.dependencies]
+# Distinguish fdopendir/readdir EOF from an enumeration error without
+# platform-specific errno accessors.
+errno = "0.3"
+libc = "0.2"
+
+# v2.40.0 (tear-off UX): live screen-pointer queries during torn-tab drags —
+# the X11 counterpart of the Windows GetCursorPos drift correction. The WM's
+# move-grab anchor drifts from the tear-time grab offset (measured 55-86px
+# under Mutter), so dock hit-testing and the frozen-drag rescue tick need the
+# REAL cursor. Already in-tree transitively via winit's x11 backend; queried
+# only while torn-drag tracking is active, never on Wayland (connect fails or
+# the call sites are gated off there).
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
+# Winit's Wayland blur hint is implemented only through KWin's private blur
+# protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
+# near-opaque fallback instead of silently showing sharp, washed-out alpha.
+[target.'cfg(target_os = "linux")'.dependencies]
+md-5 = "0.10"
+png = "0.18.1"
+url = "2.5"
+wayland-client = "0.31"
+
+# ITaskbarList3 for OSC 9;4 taskbar progress. `Write-Progress` and `winget`
+# drive the taskbar button. The `windows` crate gives safe COM wrappers and is
+# already in the workspace lockfile. The feature set is narrow and Windows-only,
+# so Linux and macOS builds are unaffected.
+# `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
+# FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
+# taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
+# v2.19.0 (tear-off UX): `Win32_Graphics_Dwm` adds DwmGetWindowAttribute /
+# DWMWA_CLOAKED so the re-dock hit-test's z-order walk can skip cloaked
+# windows (suspended UWP apps park full-screen cloaked windows in the
+# z-order that would otherwise read as "a foreign window covers the band").
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_ProcessStatus",
+] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true
+tempfile = "3"
+
+# objc2 / objc2-app-kit for the macOS `sticky = true` window
+# behavior (NSWindowCollectionBehavior::CanJoinAllSpaces) that winit 0.30 no
+# longer exposes natively. Versions pinned to match winit 0.30's own
+# objc2-app-kit (0.2 / objc2 0.5) so the window-management class types stay
+# compatible. Quick Look uses objc2 0.6 through separately named dependencies;
+# both major lines are intentional and macOS-only.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.5"
+block2-06 = { package = "block2", version = "0.6" }
+objc2 = "0.5"
+objc2-06 = { package = "objc2", version = "0.6" }
+# Class features must be opted into (objc2-app-kit ships none by default).
+# NSView + NSWindow support sticky windows; NSColor synchronizes the native
+# titlebar background with Kettle's palette. The application icon is compiled
+# into the bundle by Xcode's asset pipeline, so runtime AppKit icon mutation is
+# deliberately not enabled here.
+objc2-app-kit = { version = "0.2", features = ["NSAccessibility", "NSApplication", "NSColor", "NSGraphics", "NSLayoutAnchor", "NSLayoutConstraint", "NSMenu", "NSMenuItem", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "NSWorkspace"] }
+objc2-foundation = { version = "0.2", features = ["block2", "NSNotification", "NSOperation", "NSString", "NSThread"] }
+objc2-core-foundation-03 = { package = "objc2-core-foundation", version = "0.3.2" }
+objc2-core-graphics-03 = { package = "objc2-core-graphics", version = "0.3.2" }
+objc2-foundation-03 = { package = "objc2-foundation", version = "0.3.2" }
+objc2-quick-look-thumbnailing = "0.3.2"

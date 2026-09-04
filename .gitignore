@@ -1,0 +1,16 @@
+/target
+/kettle-target
+/*/kettle-target
+/vendor/target/
+/vendor/*/target/
+/vendor/*/Cargo.lock
+**/*.rs.bk
+Cargo.lock.orig
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Per-developer Claude Code state (memory, project metadata). Not
+# kettle source. Added after `scripts/release.sh` flagged the
+# untracked directory.
+.claude/

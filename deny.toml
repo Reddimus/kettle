@@ -1,0 +1,121 @@
+# cargo-deny config. Catches supply-chain issues that `cargo audit`
+# doesn't (license violations, git-based deps, banned crates) — the
+# two tools complement each other.
+#
+# Local run:
+#
+#   cargo install cargo-deny
+#   cargo deny check
+#
+# CI runs the same on every Cargo.lock change via
+# `.github/workflows/deny.yml`.
+
+[graph]
+# Match what release.yml + ci.yml build for.
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  # aarch64-linux is built by release.yml and checked by ci.yml, so the
+  # supply-chain graph must cover it too — the comment above promised "match
+  # what release.yml + ci.yml build for" but this triple had been omitted, so
+  # a Linux/ARM-only advisory or banned-dep pull-in could have slipped past
+  # `cargo deny`.
+  { triple = "aarch64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-pc-windows-msvc" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# Advisories are handled by the dedicated `audit.yml` workflow
+# (`rustsec/audit-check` on every Cargo.lock change + daily cron).
+# Listing the section here with permissive defaults keeps
+# `cargo deny check` happy without double-running the advisory scan.
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = [
+  # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains through
+  # `glyphon → cosmic-text → fontdb`. The avoidable `winit →
+  # sctk-adwaita → ab_glyph` path stays disabled: v2.34.0 re-enables
+  # sctk-adwaita for GNOME Wayland titlebar decorations via winit's
+  # `wayland-csd-adwaita-notitle` feature, which carries NO text
+  # renderer and therefore no ab_glyph/ttf-parser edge
+  # (scripts/check-ttf-parser-scope.sh verifies the graph). Remove
+  # this once glyphon ships a compatible fontdb-free stack.
+  "RUSTSEC-2026-0192",
+  # RUSTSEC-2026-0253 is an unsoundness warning in `lru 0.16.4`'s
+  # `LruCache::pop()`. The only product consumer is glyphon 0.12.0, whose
+  # Copy key cannot panic on drop and which never calls that method. The
+  # version and inverse path are pinned by scripts/check-lru-scope.py; remove
+  # this exception when glyphon accepts lru >=0.18.2, then close #207.
+  "RUSTSEC-2026-0253",
+]
+# Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
+# here while it reached kettle via `image → rav1e → paste` (AVIF
+# decoder). Verified gone with `cargo tree -i paste` / `cargo tree
+# -i rav1e` (both return "did not match any packages"); the ignore
+# was made stale by the upstream resolution and was removed.
+
+[licenses]
+# SPDX expressions every workspace dep is allowed to carry. The
+# OSI-approved permissive set every Rust project uses, plus the
+# small handful of "data file" licenses (Unicode tables, Mozilla
+# CA bundle, etc.) crates.io needs:
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "CC0-1.0",
+  "MPL-2.0",
+  # `unicode-ident` etc. — DFS-style Unicode data tables.
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  # The Mozilla CA-certificate bundle (`webpki-roots`, the TLS trust anchors
+  # for the in-app update checker's rustls HTTPS GET) ships under the
+  # Community Data License Agreement — a permissive *data-file* license, exactly
+  # the "Mozilla CA bundle" case the section comment above anticipates.
+  "CDLA-Permissive-2.0",
+  # Public-domain-equivalent free text.
+  "0BSD",
+  "Unlicense",
+  # The OFL is for fonts — kettle bundles JetBrains Mono Nerd Font
+  # (`packaging/linux/`, embedded via include_bytes in
+  # `kettle-config/src/font.rs`).
+  "OFL-1.1",
+  # MSWord-like "I have an internal license but it's permissive."
+  "BSL-1.0",
+]
+# `confidence-threshold` rules out a fuzzy SPDX match; we want exact.
+confidence-threshold = 0.93
+
+[bans]
+# Warn on duplicate versions of the same crate so a future
+# Cargo.lock that pulls in *three* hashbrowns is noticed — but
+# don't fail CI, because the current dep tree carries a handful of
+# upstream-bound splits (cfg_aliases v0.1 / v0.2 via portable-pty
+# vs wgpu; foldhash + hashbrown minor splits; etc.). Those would
+# need an upstream coordination to unify.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# No crates are banned outright today. List entries here when a
+# crate becomes unmaintained / vulnerable / replaced — same shape
+# `cargo deny check` flags for review.
+deny = []
+
+[sources]
+# crates.io only — refuses git-based or path-based deps from
+# *outside* the workspace. Intra-workspace path deps are fine
+# because `cargo deny` treats workspace members specially.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

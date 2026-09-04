@@ -1,0 +1,15 @@
+# Disable blank issues — every bug/feature should pick a template so it
+# arrives with the context the cycle-driven review process needs.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Reddimus/kettle/security/advisories/new
+    about: >-
+      Please report security issues privately via GitHub's advisory form
+      (see SECURITY.md). Do not open a public issue.
+  - name: Question / discussion
+    url: https://github.com/Reddimus/kettle/discussions
+    about: >-
+      For usage questions, "how do I configure …", and design discussion
+      use Discussions instead of an issue.

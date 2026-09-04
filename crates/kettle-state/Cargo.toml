@@ -1,0 +1,33 @@
+[package]
+name = "kettle-state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Durable atomic file replacement and advisory locking for kettle state"
+
+[lints]
+workspace = true
+
+[dependencies]
+fs4 = "1.1"
+getrandom.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true

@@ -1,0 +1,873 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # (2026-05-23): test-before-release gate. Before
+  # release.yml started running `cargo test` the package job built
+  # release artifacts blindly — if the tagged commit was a broken
+  # one (rare, but possible if a hotfix branch was tagged without
+  # ci.yml having run on it yet), we'd ship broken binaries. The
+  # Linux-only quick gauntlet here is ~5 min and runs before the
+  # ~30-40 min per-OS package builds; cheap insurance.
+  pretest:
+    name: pretest (release gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a GitHub-verified annotated tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}")
+          type=$(jq -r '.object.type' <<<"$ref")
+          sha=$(jq -r '.object.sha' <<<"$ref")
+          if [ "$type" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is lightweight; releases require a signed annotated tag"
+            exit 1
+          fi
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq '.verification.verified')
+          if [ "$verified" != true ]; then
+            echo "::error::$GITHUB_REF_NAME does not have a GitHub-verified signature"
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          tagged_commit=$(git rev-list -n 1 "$GITHUB_REF_NAME")
+          main_commit=$(git rev-parse origin/main)
+          if [ "$tagged_commit" != "$main_commit" ]; then
+            echo "::error::$GITHUB_REF_NAME points to $tagged_commit, not origin/main $main_commit"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is an annotated tag with a verified signature"
+      # The tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # consistency gate runs HERE in the single-Linux pretest — before any
+      # per-OS package build — so a version mismatch fails fast and BLOCKS all
+      # platform builds. Previously it lived in the package matrix gated on
+      # `runner.os == 'Linux'`, so macOS/Windows could build + upload artifacts
+      # while only the Linux leg caught the mismatch (a partial-release risk).
+      - name: Tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG consistency
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          # `github.ref_name` for a tag push is the bare tag string
+          # (e.g. `v1.3.9`). Strip the leading `v`.
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CARGO_VER=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies version $TAG_VER but Cargo.toml says $CARGO_VER"
+            echo "::error::either retag with v$CARGO_VER or bump Cargo.toml to $TAG_VER first"
+            exit 1
+          fi
+          # CHANGELOG.md must carry the dated '## [X.Y.Z] —
+          # YYYY-MM-DD' section for this version (matches scripts/release.sh).
+          if ! grep -qE "^## \[${TAG_VER}\] — [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md; then
+            echo "::error::tag $GITHUB_REF_NAME but CHANGELOG.md has no '## [$TAG_VER] — YYYY-MM-DD' section"
+            echo "::error::promote the [Unreleased] block to '## [$TAG_VER] — YYYY-MM-DD' (with the date) before tagging"
+            exit 1
+          fi
+          # flake.nix's hardcoded version must match (release.sh
+          # auto-bumps it; a forgotten bump should fail the release, not ship a
+          # Nix derivation with wrong metadata).
+          if [ -f flake.nix ]; then
+            FLAKE_VER=$(awk -F\" '/^[[:space:]]*version = "/ { print $2; exit }' flake.nix)
+            if [ -z "$FLAKE_VER" ]; then
+              echo "::error::could not extract a version from flake.nix"
+              exit 1
+            fi
+            if [ "$TAG_VER" != "$FLAKE_VER" ]; then
+              echo "::error::tag $GITHUB_REF_NAME but flake.nix says $FLAKE_VER"
+              echo "::error::scripts/release.sh auto-bumps this — re-run it or edit flake.nix"
+              exit 1
+            fi
+          fi
+          echo "tag, Cargo.toml, flake.nix, and CHANGELOG.md all agree on version $TAG_VER"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.1
+      - name: Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-pretest
+      - run: cargo test --locked --workspace
+      - name: Test patched vendor crates directly
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
+
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    environment: ${{ matrix.environment }}
+    # Package only runs after pretest passes. A red
+    # `cargo test --workspace` blocks the per-OS builds before
+    # they consume runner minutes.
+    needs: pretest
+    # Budget cap. Release builds compile in --release mode
+    # (slow), bundle assets, hash, and upload — real time runs
+    # ~25-40 min per OS. 75 min is ~2× headroom for a slow runner
+    # without giving a hang the full 6-hour default. NOTE: unlike
+    # ci.yml, release.yml is NOT covered by cancel-in-
+    # progress concurrency — a release must always complete, never
+    # be canceled mid-upload (a lesson from the v1.43.0 partial
+    # release, which shipped macOS/Windows assets but no Linux one).
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep the prebuilt GNU/Linux ABI at the documented glibc 2.35
+          # floor. Building on ubuntu-24.04 would silently require glibc 2.39
+          # and strand Ubuntu 22.04 users of the one-line installer.
+          - os: ubuntu-22.04
+            artifact: kettle-linux-x86_64.tar.gz
+            environment: release-build
+          - os: macos-26
+            artifact: kettle-macos-universal.zip
+            environment: macos-signing
+          # ARM64 Linux (Raspberry Pi 4/5, ARM servers/VPS, ARM
+          # laptops on Linux). Cross-compiled on the x86_64 ubuntu runner — the
+          # ci.yml early-warning job proves this target builds. Windowing deps
+          # load via dlopen, so only the GNU cross-linker is needed.
+          - os: ubuntu-22.04
+            artifact: kettle-linux-aarch64.tar.gz
+            rust_target: aarch64-unknown-linux-gnu
+            environment: release-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tag ↔ Cargo.toml ↔ flake.nix ↔ CHANGELOG
+      # consistency gate moved to the `pretest` job (single Linux, runs before
+      # any per-OS build) so a version mismatch blocks ALL platform builds,
+      # rather than letting macOS/Windows publish artifacts while only the Linux
+      # package leg caught it (partial-release risk). See the `pretest` job above.
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.1
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        # Key the cache per artifact so the two ubuntu-22.04
+        # legs (x86_64 + aarch64) don't share one cache and thrash each other's
+        # target dir — mirrors how ci.yml keys its msrv/nightly/aarch64 legs.
+        with:
+          shared-key: ${{ matrix.artifact }}
+      # The root workspace excludes patched upstream crates. Exercise their
+      # package-owned tests on every native release OS so a directly tagged
+      # hotfix cannot bypass the platform-specific vendor gates in ci.yml.
+      # The aarch64 cross leg is covered by the Linux-native pretest above.
+      - name: Test patched vendor crates on native release runner
+        if: matrix.rust_target == ''
+        run: cargo test --locked --manifest-path vendor/Cargo.toml --workspace
+      # Build: macOS gets a real universal2 binary — the
+      # artifact has been named `kettle-macos-universal.zip` since the
+      # project's earliest releases, but the underlying binary was
+      # single-arch from whatever runner architecture macos-latest
+      # happened to be until this build step fixed it.
+      # Linux x86_64: native release build.
+      - name: Build (macOS universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin -p kettle
+          cargo build --locked --release --target aarch64-apple-darwin -p kettle
+          mkdir -p target/release
+          lipo -create \
+            target/x86_64-apple-darwin/release/kettle \
+            target/aarch64-apple-darwin/release/kettle \
+            -output target/release/kettle
+          file target/release/kettle
+      - name: Build (Linux x86_64)
+        if: runner.os != 'macOS' && matrix.rust_target == ''
+        run: cargo build --locked --release -p kettle
+
+      # ARM64 Linux cross-build. The runner is x86_64; install the
+      # aarch64 std + GNU cross-linker and build for the target, then copy the
+      # binary to the host-build path so the unchanged Package (Linux) step
+      # picks it up. Mirrors ci.yml's aarch64 early-warning job.
+      - name: Build (Linux aarch64 cross)
+        if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu
+          cargo build --locked --release --target aarch64-unknown-linux-gnu -p kettle
+          mkdir -p target/release
+          cp target/aarch64-unknown-linux-gnu/release/kettle target/release/kettle
+
+      - name: Verify Linux glibc ABI floor
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t glibc_versions < <(
+            readelf --version-info target/release/kettle \
+              | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+              | sort -Vu
+          )
+          if [[ ${#glibc_versions[@]} -eq 0 ]]; then
+            echo "release binary exposes no inspectable GLIBC version requirements" >&2
+            exit 1
+          fi
+          newest=${glibc_versions[${#glibc_versions[@]}-1]}
+          allowed=GLIBC_2.35
+          if [[ $(printf '%s\n' "$newest" "$allowed" | sort -V | tail -n1) != "$allowed" ]]; then
+            echo "release binary requires $newest, newer than the $allowed floor" >&2
+            exit 1
+          fi
+          printf 'verified glibc ABI floor: newest requirement %s <= %s\n' \
+            "$newest" "$allowed"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist/kettle/packaging/linux
+          cp target/release/kettle dist/kettle/
+          cp LICENSE NOTICE README.md CHANGELOG.md dist/kettle/
+          # Desktop integration assets — packaged at the SAME relative
+          # paths the in-tree `scripts/install.sh` expects, so a user
+          # who extracts the tarball can run `./kettle/install.sh` and
+          # get the binary + icon + .desktop entry installed under
+          # ~/.local/ without any further steps.
+          cp packaging/linux/kettle.desktop dist/kettle/packaging/linux/
+          cp packaging/linux/kettle.svg     dist/kettle/packaging/linux/
+          # No `|| true` here — a missing or renamed icon raster
+          # must FAIL the release loudly rather than silently ship an
+          # iconless tarball. The rasters are committed and regenerated by
+          # scripts/gen-icons.sh, so the glob always matches in a clean tree.
+          # It also picks up kettle-light-256.png, which no Linux consumer
+          # installs; the package templates glob kettle-[0-9]* to skip it.
+          cp packaging/linux/kettle-*.png   dist/kettle/packaging/linux/
+          # Man page ships with the Linux tarball so the
+          # bundled install.sh can drop it into ~/.local/share/man/man1.
+          cp packaging/linux/kettle.1       dist/kettle/packaging/linux/
+          install -Dm755 scripts/install.sh dist/kettle/install.sh
+          install -Dm755 scripts/install-unix.py dist/kettle/install-unix.py
+          # Also ship the OSC 133 shell-integration snippets
+          # so a user can read/customize them before sourcing. The same
+          # bodies are embedded into the binary via include_str!,
+          # so `./kettle/kettle --shell-integration bash >> ~/.bashrc`
+          # works without these files; they're a discoverability +
+          # source-of-truth aid, not a runtime requirement.
+          cp -r shell-integration dist/kettle/
+          VERSION=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          TARGET="${{ matrix.rust_target }}"
+          if [ -z "$TARGET" ]; then
+            TARGET=x86_64-unknown-linux-gnu
+          fi
+          python3 scripts/package-manifest.py generate \
+            --root dist/kettle --target "$TARGET" --version "$VERSION"
+          python3 scripts/package-manifest.py verify \
+            --root dist/kettle --target "$TARGET" --version "$VERSION"
+          tar -C dist -czf ${{ matrix.artifact }} kettle
+
+      - name: Package (macOS .app bundle)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=dist/kettle.app
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          # Compile one native AppIcon for every macOS surface. Xcode emits
+          # Assets.car for current systems and a loose AppIcon.icns generated
+          # for the deployment target, so Finder, the closed and running Dock
+          # item, and the app switcher never disagree. Icon Composer and macOS
+          # own the TokyoNight canvas and outer mask; Kettle's SVG contains only
+          # its borderless terminal-kettle mark, avoiding the double-rounded
+          # gutter.
+          ICON_OUT="$RUNNER_TEMP/kettle-app-icon"
+          mkdir -p "$ICON_OUT"
+          scripts/compile-macos-app-icon.sh "$ICON_OUT"
+          cp "$ICON_OUT/Assets.car" "$ICON_OUT/AppIcon.icns" \
+            "$APP/Contents/Resources/"
+          # Patch the Info.plist version from the workspace Cargo.toml
+          # at release time so a CFBundleVersion drift from a forgotten
+          # manual bump can't ship. PlistBuddy is built into macOS.
+          VERSION=$(awk -F\" '/^version = / { print $2; exit }' Cargo.toml)
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" \
+            packaging/macos/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+            packaging/macos/Info.plist
+          cp packaging/macos/Info.plist "$APP/Contents/Info.plist"
+          cp target/release/kettle "$APP/Contents/MacOS/kettle"
+          cp LICENSE NOTICE README.md CHANGELOG.md "$APP/Contents/Resources/"
+          # Shell-integration snippets in Resources/ so a
+          # macOS user can read them alongside the LICENSE / NOTICE
+          # without needing the source tree. Same content as the
+          # binary's embedded copies.
+          cp -r shell-integration "$APP/Contents/Resources/"
+
+      # Sign and notarize after the final bundle layout exists. App resources
+      # are part of the outer seal, and stapling rewrites that signed bundle;
+      # packaging or hashing before either operation publishes stale bytes.
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$APPLE_CERT_P12" ]; then
+            if [ "$GITHUB_REPOSITORY" = "Reddimus/kettle" ] \
+              && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              echo "::error::Apple signing credentials are absent; an official tag must not publish an unsigned macOS app."
+              exit 1
+            fi
+            echo "::warning::Building an unsigned macOS preview because signing credentials are absent."
+            exit 0
+          fi
+          APP=dist/kettle.app
+          KEYCHAIN="$RUNNER_TEMP/kettle-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
+          CERT="$RUNNER_TEMP/kettle-developer-id.p12"
+          API_KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          for required in APPLE_CERT_PASSWORD APPLE_TEAM_ID \
+            APPLE_API_KEY_ID APPLE_API_ISSUER_ID \
+            APPLE_API_PRIVATE_KEY; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::$required is absent from the macos-signing environment."
+              exit 1
+            fi
+          done
+          printf '%s' "$APPLE_CERT_P12" | base64 -D > "$CERT"
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$API_KEY"
+          chmod 600 "$CERT" "$API_KEY"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # `codesign --keychain` narrows identity matching but does not make an
+          # off-list identity usable. Apple's codesign contract requires the
+          # identity's keychain to be on the calling user's search list; keep
+          # the runner's existing entries behind this ephemeral one so the
+          # certificate chain remains resolvable too.
+          xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift add "$KEYCHAIN"
+          security import "$CERT" -k "$KEYCHAIN" \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          # The final positional argument scopes the ACL update to the same
+          # ephemeral keychain the certificate was imported into. Omitting it
+          # searches only the default list, where this keychain is absent.
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          # Select the identity that was actually imported, not a separately
+          # maintained display-name secret. The latter can drift from the P12
+          # while `security import` still succeeds, making codesign fail with
+          # the opaque "no identity found" error. Exactly one valid Developer
+          # ID Application identity is required; development certificates and
+          # ambiguous bundles fail closed.
+          SIGNING_IDENTITY=$(
+            security find-identity -v -p codesigning "$KEYCHAIN" \
+              | python3 scripts/select-macos-signing-identity.py
+          )
+
+          while IFS= read -r -d '' candidate; do
+            if file -b "$candidate" | grep -q 'Mach-O'; then
+              codesign --force --timestamp --options runtime \
+                --entitlements packaging/macos/kettle.entitlements \
+                --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" \
+                "$candidate"
+            fi
+          done < <(find "$APP/Contents" -type f -print0)
+          codesign --force --timestamp --options runtime \
+            --entitlements packaging/macos/kettle.entitlements \
+            --sign "$SIGNING_IDENTITY" --keychain "$KEYCHAIN" "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          SIGNED_TEAM=$(
+            codesign -d --verbose=4 "$APP" 2>&1 \
+              | sed -n 's/^TeamIdentifier=//p'
+          )
+          if [ "$SIGNED_TEAM" != "$APPLE_TEAM_ID" ]; then
+            echo "::error::signed app has TeamIdentifier=$SIGNED_TEAM, expected $APPLE_TEAM_ID"
+            exit 1
+          fi
+
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/kettle-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/kettle-notarize.zip" \
+            --key "$API_KEY" --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" --wait --timeout 30m
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+
+      - name: Verify macOS signing policy
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=dist/kettle.app
+          if [ -n "$APPLE_CERT_P12" ]; then
+            codesign --verify --deep --strict --verbose=2 "$APP"
+            xcrun stapler validate "$APP"
+            spctl --assess --type execute --verbose=4 "$APP"
+          else
+            echo "unsigned preview policy already checked"
+          fi
+
+      - name: Package signed/stapled macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        # Generic recursive ZIP tools drop the extended attributes/resource-
+        # fork data used by a stapled notarization ticket. `ditto` is Apple's
+        # bundle-aware path and preserves the exact app Gatekeeper assessed.
+        run: ditto -c -k --keepParent dist/kettle.app ${{ matrix.artifact }}
+
+      - name: Remove ephemeral Apple signing material
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/kettle-signing.keychain-db"
+          if ! xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift remove "$KEYCHAIN"; then
+            echo "::warning::could not remove the signing keychain from the search list before deletion"
+          fi
+          if [ -e "$KEYCHAIN" ] && ! security delete-keychain "$KEYCHAIN"; then
+            echo "::warning::security delete-keychain failed; final cleanup checks will decide the job"
+          fi
+
+          cleanup_status=0
+          if ! xcrun swift -suppress-warnings \
+            scripts/configure-macos-signing-keychain.swift verify-absent "$KEYCHAIN"; then
+            echo "::error::the ephemeral signing keychain remains searchable"
+            cleanup_status=1
+          fi
+          if [ -e "$KEYCHAIN" ]; then
+            echo "::error::the ephemeral signing keychain still exists at $KEYCHAIN"
+            cleanup_status=1
+          fi
+          for material in "$RUNNER_TEMP/kettle-developer-id.p12" \
+            "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/kettle-notarize.zip"; do
+            rm -f "$material"
+            if [ -e "$material" ]; then
+              echo "::error::ephemeral Apple signing material remains at $material"
+              cleanup_status=1
+            fi
+          done
+          exit "$cleanup_status"
+
+      # Generate a SHA-256 sidecar for the artifact so users (and the
+      # `install-online.sh` one-liner) can verify a download
+      # before extracting. Output format matches `sha256sum` / `shasum
+      # -a 256` so the standard verification incantation works as-is:
+      #     sha256sum -c kettle-linux-x86_64.tar.gz.sha256
+      # Each runner uses the native tool: `sha256sum` on Linux and
+      # `shasum -a 256` on macOS.
+      - name: Generate SHA-256 (Linux)
+        if: runner.os == 'Linux'
+        run: sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - name: Generate SHA-256 (macOS)
+        if: runner.os == 'macOS'
+        run: shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          retention-days: 7
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
+
+  finalize:
+    name: validate and sign release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pretest, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete platform artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          required=(
+            kettle-linux-x86_64.tar.gz
+            kettle-linux-aarch64.tar.gz
+            kettle-macos-universal.zip
+          )
+          for artifact in "${required[@]}"; do
+            test -s "$artifact"
+            test -s "$artifact.sha256"
+            expected_sidecar=$(mktemp)
+            printf '%s  %s\n' \
+              "$(sha256sum "$artifact" | awk '{print $1}')" \
+              "$artifact" > "$expected_sidecar"
+            if ! cmp -s "$expected_sidecar" "$artifact.sha256"; then
+              echo "::error::$artifact.sha256 is not its one exact canonical SHA-256 record"
+              rm -f "$expected_sidecar"
+              exit 1
+            fi
+            rm -f "$expected_sidecar"
+          done
+
+      - name: Safely extract and verify final package archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          extracted=$(mktemp -d)
+          trap 'rm -rf "$extracted"' EXIT
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-x86_64.tar.gz \
+            --root "$extracted/linux-x86_64" \
+            --target x86_64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-aarch64.tar.gz \
+            --root "$extracted/linux-aarch64" \
+            --target aarch64-unknown-linux-gnu --version "$VERSION"
+
+      - name: Build deterministic signed update feed
+        shell: bash
+        env:
+          KETTLE_UPDATE_SIGNING_KEY_PEM: ${{ secrets.KETTLE_UPDATE_SIGNING_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KETTLE_UPDATE_SIGNING_KEY_PEM" ]; then
+            echo "::error::release-signing environment is missing KETTLE_UPDATE_SIGNING_KEY_PEM"
+            exit 1
+          fi
+          published_at=$(git show -s --format=%cI "$GITHUB_SHA")
+          python3 scripts/make-update-manifest.py \
+            --tag "$GITHUB_REF_NAME" \
+            --published-at "$published_at" \
+            --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
+            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
+            --asset "universal-apple-darwin=dist/kettle-macos-universal.zip" \
+            --output dist/kettle-update-manifest.json
+
+          key=$(mktemp)
+          payload=$(mktemp)
+          signature=$(mktemp)
+          derived_public_der=$(mktemp)
+          trusted_public_der=$(mktemp)
+          trap 'rm -f "$key" "$payload" "$signature" "$derived_public_der" "$trusted_public_der"' EXIT
+          chmod 600 "$key"
+          printf '%s\n' "$KETTLE_UPDATE_SIGNING_KEY_PEM" > "$key"
+          openssl pkey -in "$key" -pubout -outform DER -out "$derived_public_der"
+          openssl pkey -pubin -in packaging/update-public.pem \
+            -outform DER -out "$trusted_public_der"
+          if ! cmp -s "$derived_public_der" "$trusted_public_der"; then
+            echo "::error::release signing secret does not match packaging/update-public.pem"
+            exit 1
+          fi
+
+          printf 'kettle-update-manifest-v1\0' > "$payload"
+          cat dist/kettle-update-manifest.json >> "$payload"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in "$payload" -out "$signature"
+          base64 -w 0 "$signature" > dist/kettle-update-manifest.json.sig
+          printf '\n' >> dist/kettle-update-manifest.json.sig
+
+          openssl pkeyutl -verify -rawin -pubin -inkey packaging/update-public.pem \
+            -in "$payload" -sigfile "$signature"
+          (
+            cd dist
+            sha256sum kettle-update-manifest.json > kettle-update-manifest.json.sha256
+            sha256sum kettle-update-manifest.json.sig > kettle-update-manifest.json.sig.sha256
+            sha256sum -c kettle-update-manifest.json.sha256
+            sha256sum -c kettle-update-manifest.json.sig.sha256
+          )
+
+      - name: Render package-manager metadata from verified archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/render-package-templates.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --release-manifest dist/kettle-update-manifest.json \
+            --macos-archive dist/kettle-macos-universal.zip \
+            --linux-aarch64-archive dist/kettle-linux-aarch64.tar.gz \
+            --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
+            --output-dir dist/package-metadata
+          grep -q "/releases/download/${GITHUB_REF_NAME}/kettle-update-manifest.json" \
+            dist/package-metadata/kettle.rb
+          grep -q "^pkgver=${GITHUB_REF_NAME#v}$" dist/package-metadata/PKGBUILD
+
+      - name: Stage the exact signed release set for the tokenless boundary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: kettle-signed-release-assets
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            dist/kettle-linux-x86_64.tar.gz
+            dist/kettle-linux-x86_64.tar.gz.sha256
+            dist/kettle-linux-aarch64.tar.gz
+            dist/kettle-linux-aarch64.tar.gz.sha256
+            dist/kettle-macos-universal.zip
+            dist/kettle-macos-universal.zip.sha256
+            dist/kettle-update-manifest.json
+            dist/kettle-update-manifest.json.sig
+            dist/kettle-update-manifest.json.sha256
+            dist/kettle-update-manifest.json.sig.sha256
+            dist/package-metadata/kettle.rb
+            dist/package-metadata/PKGBUILD
+
+  publish:
+    name: publish verified release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [finalize]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kettle-signed-release-assets
+          path: dist
+
+      - name: Reverify the tokenless finalized asset set
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          expected = {
+              "kettle-linux-x86_64.tar.gz",
+              "kettle-linux-x86_64.tar.gz.sha256",
+              "kettle-linux-aarch64.tar.gz",
+              "kettle-linux-aarch64.tar.gz.sha256",
+              "kettle-macos-universal.zip",
+              "kettle-macos-universal.zip.sha256",
+              "kettle-update-manifest.json",
+              "kettle-update-manifest.json.sig",
+              "kettle-update-manifest.json.sha256",
+              "kettle-update-manifest.json.sig.sha256",
+              "package-metadata/kettle.rb",
+              "package-metadata/PKGBUILD",
+          }
+          root = Path("dist")
+          entries = list(root.rglob("*"))
+          if any(path.is_symlink() for path in entries):
+              raise SystemExit("finalized asset artifact contains a symbolic link")
+          actual = {
+              path.relative_to(root).as_posix()
+              for path in entries
+              if path.is_file()
+          }
+          if actual != expected:
+              raise SystemExit(
+                  f"finalized local asset set mismatch"
+                  f"\nexpected={expected}\nactual={actual}"
+              )
+          PY
+
+          (
+            cd dist
+            for artifact in \
+              kettle-linux-x86_64.tar.gz \
+              kettle-linux-aarch64.tar.gz \
+              kettle-macos-universal.zip \
+              kettle-update-manifest.json \
+              kettle-update-manifest.json.sig
+            do
+              expected_sidecar=$(mktemp)
+              printf '%s  %s\n' \
+                "$(sha256sum "$artifact" | awk '{print $1}')" \
+                "$artifact" > "$expected_sidecar"
+              cmp -s "$expected_sidecar" "$artifact.sha256" || {
+                echo "::error::$artifact.sha256 is not its canonical SHA-256 record"
+                rm -f "$expected_sidecar"
+                exit 1
+              }
+              rm -f "$expected_sidecar"
+            done
+          )
+
+          payload=$(mktemp)
+          signature=$(mktemp)
+          extracted=$(mktemp -d)
+          rendered=$(mktemp -d)
+          trap 'rm -f "$payload" "$signature"; rm -rf "$extracted" "$rendered"' EXIT
+          printf 'kettle-update-manifest-v1\0' > "$payload"
+          cat dist/kettle-update-manifest.json >> "$payload"
+          base64 -d dist/kettle-update-manifest.json.sig > "$signature"
+          test "$(wc -c < "$signature")" -eq 64
+          openssl pkeyutl -verify -rawin -pubin \
+            -inkey packaging/update-public.pem \
+            -in "$payload" -sigfile "$signature"
+
+          # The update feed covers every platform with a self-updater. macOS
+          # joined it in 3.2.0; its archive is additionally bound by the
+          # canonical sidecar and the regenerated Homebrew metadata below.
+          python3 scripts/make-update-manifest.py \
+            --verify-existing dist/kettle-update-manifest.json \
+            --tag "$GITHUB_REF_NAME" \
+            --asset "x86_64-unknown-linux-gnu=dist/kettle-linux-x86_64.tar.gz" \
+            --asset "aarch64-unknown-linux-gnu=dist/kettle-linux-aarch64.tar.gz" \
+            --asset "universal-apple-darwin=dist/kettle-macos-universal.zip"
+
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-x86_64.tar.gz \
+            --root "$extracted/linux-x86_64" \
+            --target x86_64-unknown-linux-gnu --version "$VERSION"
+          python3 scripts/package-manifest.py extract \
+            --archive dist/kettle-linux-aarch64.tar.gz \
+            --root "$extracted/linux-aarch64" \
+            --target aarch64-unknown-linux-gnu --version "$VERSION"
+
+          python3 scripts/render-package-templates.py \
+            --version "$VERSION" \
+            --release-manifest dist/kettle-update-manifest.json \
+            --macos-archive dist/kettle-macos-universal.zip \
+            --linux-aarch64-archive dist/kettle-linux-aarch64.tar.gz \
+            --linux-x86-64-archive dist/kettle-linux-x86_64.tar.gz \
+            --output-dir "$rendered"
+          cmp -s "$rendered/kettle.rb" dist/package-metadata/kettle.rb
+          cmp -s "$rendered/PKGBUILD" dist/package-metadata/PKGBUILD
+
+      - name: Upload a complete draft, verify it, then publish once
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          release_assets_json=$(mktemp)
+          trap 'rm -f "$release_assets_json"' EXIT
+          # Every lookup here goes through the list endpoint, which is the only
+          # one that sees drafts. Addressing a draft by tag returns 404, so a
+          # re-run of this job would otherwise fail to notice its own leftover
+          # draft and then fail again trying to recreate it.
+          #
+          # The tag reaches jq through the environment rather than string
+          # interpolation: a tag carrying a quote or backslash would otherwise
+          # be spliced into the filter itself.
+          find_release() {
+            RELEASE_TAG="$tag" gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq 'map(select(.tag_name == env.RELEASE_TAG)) | .[0] |
+                    if . == null then empty else "\(.id) \(.draft)" end'
+          }
+
+          # A newly created release is not always in the list endpoint's
+          # response immediately, so poll rather than demanding it on the first
+          # read — the point of this whole step is to stop losing to GitHub's
+          # eventual consistency, not to lose to it somewhere new.
+          await_release() {
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              found=$(find_release)
+              if [ -n "$found" ]; then
+                printf '%s' "$found"
+                return 0
+              fi
+              sleep 3
+            done
+            return 1
+          }
+
+          existing=$(find_release)
+          if [ -n "$existing" ]; then
+            release_id=${existing%% *}
+            is_draft=${existing##* }
+            if [ "$is_draft" != true ]; then
+              echo "::error::release $tag already exists and is public"
+              exit 1
+            fi
+          else
+            gh release create "$tag" --verify-tag --draft --generate-notes --title "$tag"
+            if ! existing=$(await_release); then
+              echo "::error::created release $tag but it never appeared in the release list"
+              exit 1
+            fi
+            release_id=${existing%% *}
+          fi
+
+          files=(
+            dist/kettle-linux-x86_64.tar.gz
+            dist/kettle-linux-x86_64.tar.gz.sha256
+            dist/kettle-linux-aarch64.tar.gz
+            dist/kettle-linux-aarch64.tar.gz.sha256
+            dist/kettle-macos-universal.zip
+            dist/kettle-macos-universal.zip.sha256
+            dist/kettle-update-manifest.json
+            dist/kettle-update-manifest.json.sig
+            dist/kettle-update-manifest.json.sha256
+            dist/kettle-update-manifest.json.sig.sha256
+            dist/package-metadata/kettle.rb
+            dist/package-metadata/PKGBUILD
+          )
+          for attempt in 1 2 3; do
+            if gh release upload "$tag" "${files[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::release asset upload failed after 3 attempts"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          verified=
+          for attempt in 1 2 3 4 5; do
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+              > "$release_assets_json"
+            verify_args=()
+            for file in "${files[@]}"; do
+              verify_args+=(--asset "$file")
+            done
+            if python3 scripts/verify-release-assets.py \
+              --api-json "$release_assets_json" --tag "$tag" \
+              "${verify_args[@]}"
+            then
+              verified=1
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::uploaded release assets did not converge to the exact local size and SHA-256 set"
+              exit 1
+            fi
+            sleep 5
+          done
+          test "$verified" = 1
+          # Publish by id for the same reason, so the transition cannot depend
+          # on GitHub having associated the tag with a still-draft release.
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false -f make_latest=true >/dev/null

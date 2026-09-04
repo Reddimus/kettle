@@ -1,0 +1,46 @@
+{
+  "fill" : {
+    "solid" : "srgb:0.10196,0.10588,0.14902,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "hidden" : false,
+          "image-name-specializations" : [
+            {
+              "value" : "kettle-light.svg"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "kettle-dark.svg"
+            }
+          ],
+          "name" : "Kettle Terminal",
+          "position" : {
+            "scale" : 2,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0.5
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+
+    ],
+    "squares" : "shared"
+  }
+}

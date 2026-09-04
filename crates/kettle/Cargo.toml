@@ -1,0 +1,106 @@
+[package]
+name = "kettle"
+default-run = "kettle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+authors.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "kettle"
+path = "src/main.rs"
+
+[[bin]]
+name = "kettle-console"
+path = "src/bin/kettle-console.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.6.1", features = ["derive"] }
+# bash/zsh/fish/elvish/powershell completion scripts
+# emitted by `kettle --print-completions <shell>`. clap_complete
+# tracks clap itself so the MSRV constraints are aligned.
+clap_complete = "4.6"
+kettle-config.workspace = true
+# (agent-first A1) `kettle exec` drives a real PTY headlessly
+# (no GPU/window) via kettle-core directly — construct `Terminal`, stream the
+# verbatim output sidechannel to stdout, and answer the child's terminal
+# queries (DSR/DA1) off the event channel so TUIs don't hang.
+# `asciicast` enables `kettle exec --record` (the session recorder,
+# output-only here) in release builds — it's an audit feature, not dev-only.
+kettle-core = { workspace = true, features = ["asciicast"] }
+crossbeam-channel = "0.5.15"
+# (agent-first A2) `kettle ctl` client + `kettle mcp` bridge connect
+# to a running kettle's control server over this crate's protocol + transport.
+kettle-ctl.workspace = true
+kettle-render.workspace = true
+kettle-state.workspace = true
+kettle-update.workspace = true
+kettle-ui.workspace = true
+tracing-subscriber.workspace = true
+log.workspace = true
+serde.workspace = true
+# (agent-first A1) `kettle exec --json` NDJSON event stream; also
+# the JSON-RPC/MCP surface and the ctl client.
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# kettle is a GUI-subsystem app (`#![cfg_attr(all(windows,
+# not(test)), windows_subsystem = "windows")]` in main.rs), so NO console
+# is auto-allocated on Explorer/Start-menu launch (zero phantom-console
+# flash). When launched from a terminal, `attach_parent_console_if_needed`
+# attaches the parent console and reopens CONOUT$/CONIN$ ONLY for std
+# handles that weren't already inherited — so piped/redirected output
+# (`kettle --flag | grep`, `… > $PROFILE`) is never clobbered (the bug an
+# earlier unconditional-AttachConsole attempt introduced). See
+# `crates/kettle/src/main.rs` (~`fn main()`).
+#
+# windows-sys is a transitive dep already (wgpu / winit / sysinfo all pull
+# it), so this is a near-zero binary-size cost.
+# `Win32_System_Console` → AttachConsole / Get/SetStdHandle / STD_* /
+#   ATTACH_PARENT_PROCESS; `Win32_Storage_FileSystem` → CreateFileW /
+#   GetFileType / FILE_TYPE_* / FILE_SHARE_* / OPEN_EXISTING;
+# `Win32_Foundation` → INVALID_HANDLE_VALUE / GetLastError;
+# `Win32_System_Pipes` + `Win32_Security` → the native anonymous-pipe
+#   `PIPE_NOWAIT` saturation regression.
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+# Embed packaging/windows/kettle.ico into the .exe so Explorer, the
+# taskbar, Alt-Tab, and the Start menu all show the kettle icon
+# instead of the generic Rust .exe glyph. winresource is the
+# maintained fork of `winres` (which is unmaintained as of 2024).
+winresource = "0.1"
+
+# `winresource` is a Windows-only build-dependency used
+# from `build.rs` (not from any `src/` file), so cargo-machete
+# (which only scans `src/`) flags it as unused. The `package.metadata`
+# section is the standard escape hatch for known false positives.
+# The flag must include `winresource` only — every other dep on this
+# crate is genuinely imported in source.
+[package.metadata.cargo-machete]
+ignored = ["winresource"]
+
+[dev-dependencies]
+kettle-test-support.workspace = true
+tempfile = "3"

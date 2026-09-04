@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Compatible pre-rounded source for Linux, Windows and macOS 11-15. Geometry below is generated from icon_primitives. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="32" y="32" width="448" height="448" rx="92" fill="#7aa2f7"/>
+  <rect x="54" y="54" width="404" height="404" rx="70" fill="#1a1b26"/>
+  <polyline points="128,172 228,256 128,340" fill="none" stroke="#7aa2f7" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="270,320 387,320" fill="none" stroke="#7aa2f7" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,895 @@
+# kettle — task runner for common dev workflows.
+#
+# Install `just` from https://just.systems (Rust ecosystem standard):
+#
+#   cargo install just         # or `brew install just`, `apt install just`,
+#                              # `winget install Casey.Just` on Windows
+#
+# Run `just` (no args) to see the recipe list; `just <recipe>` to run.
+# `just gauntlet` mirrors the CI matrix job's *core Rust gate*
+# (fmt/clippy/build/test/doc) on every OS — the fast loop to run before
+# every commit. It deliberately does NOT cover the packaging/installer/
+# update-manifest/GPU-render checks `.github/workflows/ci.yml` also runs
+# (those need a release build, platform-specific tooling, or a GPU
+# adapter that isn't always available locally). `just gauntlet-full`
+# adds every one of those CI-only checks so a green `gauntlet-full` is
+# the closest local match to "every ci.yml step passed" — run it before
+# a release cut or before touching packaging/*, scripts/install*,
+# scripts/*manifest*.{py,ps1}, or the renderer, not just before a
+# routine commit.
+#
+# The supported development hosts are Linux and macOS. Platform-neutral Cargo
+# recipes still parse on Windows so the hosted compile/test leg can use them,
+# but Windows-only installer, performance, and live-UI recipes were retired
+# with the Windows distribution in 4.0.0. Two patterns remain:
+#
+#   - `export RUSTDOCFLAGS := "-D warnings"` below makes the env
+#     var visible to all recipes without a shell-prefix (`FOO=bar
+#     cmd` is bash-only; just's `export` is shell-agnostic).
+#   - `[unix]`, `[linux]`, and `[macos]` recipe attributes gate native checks.
+
+# Use Windows PowerShell (preinstalled on every Windows 10+
+# machine) as the recipe shell on Windows. Just's default is `sh` which
+# requires Git Bash on PATH — not a thing on a fresh Win11 install.
+# `-NoLogo -Command` suppresses the PS startup banner and accepts a
+# script body. All recipe bodies in this file are cargo / @echo /
+# explicit cmdlets — all of which work in PowerShell 5.1+.
+#
+# Native-command exit codes: just halts the recipe if any single line
+# returns non-zero (just's default --shell-arg flag is `-c` which
+# preserves native exit codes), so we don't need `$ErrorActionPreference
+# = 'Stop'` injection inside every recipe.
+set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
+
+# Surface rustdoc-lint denials to every recipe (doc,
+# gauntlet) without a bash-only env-var prefix. Just exports this
+# at recipe-entry as a real env var, working under bash, zsh,
+# PowerShell, and cmd. Previously the `doc` + `gauntlet` recipes ran
+# `RUSTDOCFLAGS="-D warnings" cargo doc …` which broke under
+# PowerShell (the inline `FOO=bar cmd` prefix is bash-only).
+export RUSTDOCFLAGS := "-D warnings"
+
+# OS-appropriate temp dir for default screenshot output.
+# Just has no `tempdir()` builtin (cache/data/config-directory yes;
+# temp deliberately omitted since temp semantics vary across OSes).
+# The `if os_family()` ternary picks `%TEMP%` on Windows (always
+# set) and `/tmp` on Linux/macOS (always present), so the
+# `screenshot` / `menu` recipes can default to a writable location
+# everywhere. They used to default to `/tmp/...` which doesn't
+# exist on Windows.
+TMPDIR := if os_family() == "windows" { env_var("TEMP") } else { "/tmp" }
+
+# Default recipe: show the list when `just` is invoked with no args.
+default:
+    @just --list
+
+# === Daily dev loop ================================================
+
+# Format every crate's source in place (matches `cargo fmt` defaults
+# enforced by .editorconfig + the CI fmt --check step).
+fmt:
+    cargo fmt --all
+
+# `clippy -D warnings` across the whole workspace, all targets
+# (lib + bins + tests + benches + examples). Same flag set the CI
+# `ci.yml` `cargo clippy` step uses.
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
+
+# Build `kettle-core` on its own with DEFAULT features.
+#
+# A workspace build cannot see this: kettle-ui and the bin crate both enable
+# `asciicast`, so any accidental dependence on an optional dependency compiles
+# there and fails only for someone building the crate alone. That is exactly
+# how session logging came to use `kettle-state` while it was still optional.
+# Feature unification makes `--workspace` structurally unable to catch it, so
+# the check has to name the crate.
+core-default-features-check:
+    cargo clippy -p kettle-core --all-targets -- -D warnings
+
+# `cargo test --workspace` — runs the complete workspace unit and integration
+# suite. Use the command's summary for the current count.
+test:
+    cargo test --workspace
+
+# `cargo doc` with `-D warnings` — rustdoc has its own warning class
+# (broken intra-doc-links, missing docs on public items) that
+# `clippy -D warnings` doesn't catch. CI runs this on Linux only
+# (rustdoc is platform-agnostic); same here. RUSTDOCFLAGS exported
+# at the top.
+doc:
+    cargo doc --workspace --no-deps
+
+# === Supply chain ==================================================
+
+# `cargo deny check` — supply-chain gate covering duplicate-version bans,
+# allowed licenses, and crates.io-only sources in both the product and direct
+# vendor-test lock graphs. CI runs this on every Cargo.lock change via
+# `.github/workflows/deny.yml`. Local runs mirror CI exactly so a green
+# `just deny` means the workflow will not catch a new policy issue.
+# Requires `cargo install cargo-deny` (one-time).
+deny:
+    cargo deny check licenses sources bans
+    cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
+
+# RustSec advisory coverage for both committed lock graphs. The product graph
+# retains two narrowly guarded upstream exceptions; the vendor graph has no
+# product exceptions. Missing cargo-audit is a hard command failure.
+audit:
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
+    cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
+
+# `cargo machete` — finds unused workspace dependencies. CI runs
+# this on every PR via `.github/workflows/machete.yml`. Local
+# pre-flight before adding a `Cargo.toml` dep, since a forgotten
+# leftover trips CI later. Requires `cargo install cargo-machete`.
+machete:
+    cargo machete
+
+# Run every retained unit target, doctest, and warnings-denied clippy target
+# owned by the patched parser crates. These crates are deliberately outside the
+# product workspace, so `cargo test --workspace` cannot cover them. The
+# committed vendor validation lock keeps this direct test graph reproducible.
+vendor-parser-check:
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --features ansi
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p vte --all-targets --features ansi -- -D warnings
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p alacritty_terminal --all-targets -- -D warnings
+
+# Exercise the patched portable-pty package on the current native platform.
+# Run this on both Unix and Windows: only Windows compiles and executes the
+# PIPE_NOWAIT/ConPTY regression, while Linux covers the retained Unix package
+# surface. `serde_support` also pins backward compatibility for the added
+# containment field. CI runs both native legs.
+vendor-pty-check:
+    cargo test --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --features serde_support
+    cargo clippy --locked --manifest-path vendor/Cargo.toml --target-dir target/vendor-check -p portable-pty --all-targets --features serde_support -- -D warnings
+
+# Complete direct validation for all patched crates on the current OS.
+vendor-check: vendor-parser-check vendor-pty-check
+
+# Audit every Git-tracked path: index/worktree object identity, path/case
+# uniqueness, UTF-8/LF hygiene, manifests, Markdown links, and binary font/image
+# bounds. The focused self-test pins that a missing Markdown target is fatal.
+# The JSON ledger is written under ignored target/diagnostics.
+
+# Verify the generated platform icon set against the canonical geometry model.
+# The check compares the Linux SVG, the native AppIcon.icon document and its
+# SVG artwork, 17 decoded PNGs, all 7 ICO resolutions, and required PNG
+# mode/bit depth; it ignores only
+# encoder-dependent compression and chunk ordering. Skips without Pillow so a
+# contributor is not blocked; CI and `gauntlet-full` pass
+# --require-tooling so the gate cannot quietly stop running.
+[unix]
+icons-check:
+    python3 scripts/test-gen-icons.py
+    python3 scripts/gen-icons.py --check
+
+[unix]
+icons-check-required:
+    python3 scripts/test-gen-icons.py
+    python3 scripts/gen-icons.py --check --require-tooling
+
+[unix]
+tracked-audit:
+    python3 scripts/test-audit-tracked-files.py
+    python3 scripts/audit-tracked-files.py --output target/diagnostics/tracked-files-audit.json
+
+# Compile every ```mermaid block in tracked Markdown. A diagram that does not
+# parse renders as a red error panel on GitHub, which reads as a broken
+# document rather than a broken snippet — one shipped that way unnoticed.
+# Skips without a Node toolchain or a Chrome unless KETTLE_MERMAID_REQUIRED=1,
+# which CI sets so the gate cannot quietly stop running.
+[unix]
+mermaid-check:
+    python3 scripts/check-mermaid.py
+
+# Run the macOS bundle updater against a real, notarized release archive.
+# Unit tests cover staging, refusal, and swap with a stub verifier, because
+# nothing in CI can notarize a synthesized bundle. This is the complement: it
+# proves a published archive still satisfies codesign and spctl after plain zip
+# extraction, which is the assumption the whole design rests on. Downloads the
+# archive once into target/diagnostics/ and caches it. macOS only.
+[unix]
+macos-update-smoke TAG="":
+    ./scripts/check-macos-update-smoke.sh {{TAG}}
+
+# Guard the temporary RUSTSEC-2026-0192 ignore. This must pass while #36 is
+# open, and should print the "remove ignores" instruction once upstream makes
+# `ttf-parser` disappear from the tree.
+[unix]
+ttf-parser-scope:
+    python3 scripts/check-ttf-parser-scope.py
+
+# Guard the accepted RUSTSEC-2026-0253 warning while #207 is open. The
+# affected `LruCache::pop()` method is not used by glyphon 0.12.0, but any
+# dependency-path or reviewed-version change fails until reachability is
+# reassessed. Unlike the older ttf-parser guard, resolution also fails with
+# cleanup instructions so an obsolete advisory ignore cannot linger silently.
+[unix]
+lru-scope:
+    ./scripts/check-lru-scope.sh
+
+# === Packaging & release metadata ==================================
+# These four wrap CI checks that used to have NO `just` entry point at
+# all — a contributor could only discover them by reading ci.yml, run
+# `just gauntlet` clean, and still get an unrelated CI failure on a
+# packaging-only change. Folded into `gauntlet-full` above.
+
+# Validate the Homebrew/AUR package templates and their renderer
+# (scripts/render-package-templates.py). At an exact clean release tag,
+# default `--auto` mode also checks the published assets; feature
+# branches validate source rendering without comparing against an older
+# tag that happens to share the current Cargo version. Mirrors CI's
+# Linux-only "Package template lockstep" step; the script is portable
+# Bash 3.2 + Python 3 and also runs unmodified on macOS.
+[unix]
+package-templates:
+    ./scripts/check-package-templates.sh
+
+# Hermetic unit tests for scripts/make-update-manifest.py (the signed
+# update-manifest generator). Mirrors CI's Linux-only "Signed update
+# manifest generator" step.
+[unix]
+update-manifest-test:
+    python3 scripts/test-update-manifest.py
+
+# Validate the exact GitHub draft-release shape and local size/SHA-256 binding
+# used by the token-only publisher job.
+[unix]
+release-assets-test:
+    python3 scripts/test-verify-release-assets.py
+
+# Execute release.sh against a disposable Git repository. The fixture pins the
+# exact live-document anchors and proves historical tag/download references are
+# immutable across a version bump.
+[unix]
+release-script-test:
+    python3 scripts/test-release.py
+
+# Hermetic unit tests for scripts/package-manifest.py (the inner
+# release-tarball manifest generator/verifier). Mirrors CI's
+# Linux-only "Inner package manifest generator and verifier" step.
+[unix]
+package-manifest-test:
+    python3 scripts/test-package-manifest.py
+
+# Hermetic Linux/POSIX tests for install-online.sh. A private fake curl serves
+# authenticated fixtures so the safe archive path, modern no-downgrade policy,
+# sidecar parser, and malicious tar rejection run without network access.
+[unix]
+online-installer-test:
+    python3 scripts/test-install-online.py
+
+# Compile the maintained Icon Composer package through the same Xcode asset
+# pipeline the release uses. Require Assets.car, a loose AppIcon.icns fallback,
+# and both plist keys: without any one of them Finder, a closed Dock item, or
+# the running application can silently fall back to different artwork. Xcode's
+# actool ships with macOS only; other OS recipes classify this as inapplicable.
+# Output lands under
+# `{{TMPDIR}}` like the `screenshot`/`menu` recipes.
+[macos]
+icns-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v xcrun >/dev/null 2>&1 \
+      || { echo "error: icns-smoke requires Xcode's actool on macOS" >&2; exit 1; }
+    out=$(mktemp -d "{{TMPDIR}}/kettle-app-icon.XXXXXX")
+    scripts/compile-macos-app-icon.sh "$out"
+
+[linux]
+icns-smoke:
+    @echo "icns-smoke requires macOS Xcode actool and is not a Linux gate."
+
+# === Builds ========================================================
+
+# Dev build (fast incremental) — what `cargo build` would do anyway,
+# scoped to the workspace.
+build:
+    cargo build --workspace --all-targets
+
+# Release build of just the binary crate — what gets shipped in the
+# release tarballs. Use this to test the same artifact CI would build.
+release:
+    cargo build --locked --release -p kettle
+
+# === Verification gauntlet =========================================
+
+# Execute the shipped snippets rather than merely checking that their source
+# text is non-empty. macOS supplies the stock zsh configuration and Bash 3.2
+# needed for those regressions; Windows runs each installed PowerShell host.
+[unix]
+shell-integration-check:
+    python3 scripts/check-shell-integration.py
+
+[windows]
+shell-integration-check:
+    python scripts/check-shell-integration.py
+
+# Exercise the macOS QEMU launcher with a fake executable so CI can verify its
+# network boundary without booting or reading the private guest disk.
+[unix]
+vm-launcher-test:
+    python3 scripts/test-vm-launcher.py
+
+[windows]
+vm-launcher-test:
+    python scripts/test-vm-launcher.py
+
+# Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
+# measurements cannot count as competitive evidence. The fixture is GUI-free
+# and portable even though the comparator it guards is macOS-specific.
+[unix]
+macos-compare-score-self-test:
+    python3 scripts/perf/macos-compare-score-self-test.py
+
+# The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
+# the live-UI-helper and native shell-integration fixtures. This is the fast
+# pre-commit loop; run
+# it before every commit. It does NOT cover the packaging/installer/
+# update-manifest/GPU-render checks ci.yml also runs — see
+# `gauntlet-full` below for those.
+gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
+    cargo fmt --all --check
+    cargo clippy --locked --workspace --all-targets -- -D warnings
+    # Feature unification hides a crate that leans on an optional dependency,
+    # so the workspace lint above structurally cannot catch it.
+    cargo clippy --locked -p kettle-core --all-targets -- -D warnings
+    cargo build --locked --workspace --all-targets
+    cargo test --locked --workspace
+    cargo doc --locked --workspace --no-deps
+    @echo ""
+    @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
+
+# Strict gate: gauntlet + direct patched-crate validation + supply-chain
+# hygiene (adds the cargo-deny stale-ignore catch and cargo-machete
+# unused-deps catch as separate CI workflows triggered on Cargo.lock
+# changes), plus the documentation gates. `mermaid-check` belongs here because
+# it previously had no caller in any gauntlet tier: it ran only in ci.yml, so a
+# clean `just gauntlet-full` could still be hiding a diagram that renders as a
+# red error panel on GitHub. It fails open without Node or Chrome, which is why
+# it is safe in a tier people run locally, and CI sets
+# KETTLE_MERMAID_REQUIRED=1 so it cannot quietly stop running there. Run `just gauntlet-strict` before a release cut so all CI gates
+# pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
+# (one-time). The current-OS vendor check is supplemented by Linux + Windows
+# native vendor legs in CI.
+[unix]
+gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
+    @echo ""
+    @echo "STRICT GAUNTLET PASSED — core, patched crates, RustSec product/vendor audits, release preparation, ttf-parser/lru scopes, deny, machete, tracked-file audit, and mermaid rendering are green."
+
+# The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
+# installer, update-manifest, and GPU-render check ci.yml runs that
+# `gauntlet`/`gauntlet-strict` don't touch. Every dependency below is
+# platform-gated (see each recipe's own comment for exactly
+# what it covers and on which OS it's a real check vs. an informational
+# stub), so this either exercises the full ci.yml surface reachable on
+# the current OS, or tells you plainly what it couldn't run here. Needs
+# a release build (several dependencies exercise target/release/kettle);
+# `release` runs once and is shared across every recipe that needs it.
+# Run this before a release cut, or before any change to packaging/*,
+# scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
+# `gauntlet`/`gauntlet-strict` alone won't catch a regression there. The
+# platform-specific dependency set contains no successful stubs: every listed
+# dependency performs a real check, and missing required tooling fails.
+[unix]
+gauntlet-full: gauntlet-strict full-native-gates
+    @echo ""
+    @echo "CURRENT-OS FULL GAUNTLET PASSED — every required native gate listed above is green."
+    @echo "This is not a PASS for native legs on other operating systems."
+
+[linux]
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test linux-installer-smoke headless-gpu-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke
+    @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
+
+[macos]
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test agent-cli-smoke
+    @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
+
+# === End-to-end smoke ==============================================
+
+# Headless parser/command-generation guards for the cross-platform live UI
+# harness. In particular, this rejects authenticated-agent false positives when
+# a shell command fails but an old native exit code and echoed prompt remain.
+[unix]
+live-ui-helper-selftest:
+    python3 scripts/check-live-ui-smoke.py self-test
+
+[windows]
+live-ui-helper-selftest:
+    python scripts/check-live-ui-smoke.py self-test
+
+# Render the canonical "kettle in a terminal" screenshot — exercises
+# the full GPU pipeline (wgpu adapter + offscreen Vulkan device +
+# glyphon text + quad + image pipelines + image::save PNG encode).
+# Default OUT lands in the platform's temp dir (`/tmp` on Linux,
+# `$env:TEMP` on Windows). Pass `OUT=path` to override.
+#
+# Uses `cargo run` (cargo handles the `.exe`
+# suffix automatically on Windows) and `TMPDIR` (OS-aware temp
+# dir, set at the top of this Justfile) instead of hardcoded
+# `/tmp/kettle.png`.
+screenshot OUT=(TMPDIR / "kettle.png"):
+    cargo run --release -p kettle -- --screenshot {{OUT}}
+    @echo "wrote {{OUT}}"
+
+# Render the synthetic right-click context menu — useful for visually
+# verifying menu rendering changes. Pixel-level CI smoke
+# (tests/menu_visual.rs) covers the regression class; this gives you
+# a PNG to eyeball when tweaking colors / padding / etc.
+menu OUT=(TMPDIR / "kettle-menu.png"):
+    cargo run --release -p kettle -- --screenshot-menu {{OUT}}
+    @echo "wrote {{OUT}}"
+
+# Run a real windowed kettle under Xvfb for a few seconds and assert it
+# neither panics nor exits with an unexpected code. `xvfb-run` is
+# Linux/X11-only (no macOS/Windows equivalent), so this self-skips with
+# a clear message elsewhere rather than failing on missing tooling.
+# Mirrors CI's Linux-only "Headless GPU smoke" step. Needs a release
+# binary.
+[linux]
+headless-gpu-smoke: release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v xvfb-run >/dev/null 2>&1; then
+      echo "error: headless-gpu-smoke requires xvfb-run on Linux" >&2
+      exit 1
+    fi
+    export LIBGL_ALWAYS_SOFTWARE=1
+    log="{{TMPDIR}}/kettle-headless-smoke.log"
+    # The `bash -c '…$rc…'` invocation is single-quoted on purpose so
+    # the inner `$rc` expands inside the *nested* bash, not this one.
+    xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
+      grep -qiE "panic|thread .* panicked" '"$log"' && { echo "panic in run"; cat '"$log"'; exit 1; }; \
+      test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat '"$log"'; exit 1; }; \
+      echo "headless run OK (exit $rc)"'
+
+[macos]
+headless-gpu-smoke:
+    @echo "headless-gpu-smoke requires Linux/Xvfb and is not a macOS gate."
+
+# Bundle of ci.yml's Linux/macOS-only offscreen render smokes:
+# `--gpu-info` (adapter resolution + key:value output shape),
+# `--screenshot-menu` (the v1.3.0/v1.3.1 blank-menu regression class),
+# and `--screenshot` (the full text+quad+image render + PNG encode
+# path). Needs a release binary; LIBGL_ALWAYS_SOFTWARE is a harmless
+# no-op outside Linux's software-Vulkan path. Mirrors CI's
+# "--gpu-info diagnostic smoke", "--screenshot-menu visual regression",
+# and "--screenshot end-to-end" steps (all `runner.os != 'Windows'`).
+[unix]
+gpu-render-smoke: release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export LIBGL_ALWAYS_SOFTWARE=1
+    out_dir="{{TMPDIR}}/kettle-gpu-render-smoke"
+    mkdir -p "$out_dir"
+    ./target/release/kettle --gpu-info | tee "$out_dir/gpu-info.txt"
+    grep -qE '^Backend:[[:space:]]+' "$out_dir/gpu-info.txt"
+    grep -qE '^Adapter:[[:space:]]+' "$out_dir/gpu-info.txt"
+    grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' "$out_dir/gpu-info.txt"
+    ./target/release/kettle --screenshot-menu "$out_dir/kettle-menu.png"
+    head -c 4 "$out_dir/kettle-menu.png" | xxd | grep -q "8950 4e47"
+    # Floor at 40 KB — well above the byte-identical blank-menu
+    # regression, well below the typical 55+ KB the real render outputs.
+    size=$(wc -c < "$out_dir/kettle-menu.png")
+    test "$size" -gt 40000 \
+      || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
+    echo "screenshot-menu OK ($size bytes)"
+    ./target/release/kettle --screenshot "$out_dir/kettle-ci.png"
+    head -c 4 "$out_dir/kettle-ci.png" | xxd | grep -q "8950 4e47"
+    size=$(wc -c < "$out_dir/kettle-ci.png")
+    test "$size" -gt 10000 \
+      || { echo "kettle-ci.png is too small ($size bytes)"; exit 1; }
+    echo "screenshot OK ($size bytes)"
+    echo "gpu-render-smoke PASSED (gpu-info + screenshot-menu + screenshot)"
+
+# Faithful local mirror of ci.yml's "CLI smoke (all OSes)" step: drives
+# every introspection flag (--version, --help, --check-config,
+# --list-themes/--actions/--keybinds/--ssh-hosts, --print-default-config,
+# --profile, --shell-integration, --print-completions, --config-path)
+# and asserts both the happy-path output shape and the error-path exit
+# codes. Rebuilds the debug binary so a prior checkout cannot make the smoke
+# report success against stale code.
+# Artifacts land under {{TMPDIR}}/kettle-cli-smoke instead of a CI
+# runner's throwaway workspace. The CI script's `$RUNNER_OS` branch
+# collapses to the non-Windows binary path — Git Bash on Windows
+# resolves the extensionless name to `kettle.exe` on its own, so this
+# also works if invoked under Git Bash, hence [unix] rather than a hard
+# OS check.
+[unix]
+cli-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The shared helper always rebuilds from Cargo.lock and compares the full
+    # 12-character Git/dirty identity before the legacy shell assertions below.
+    python3 scripts/check-cli-smoke.py
+    umask 077
+    out_dir="{{TMPDIR}}/kettle-cli-smoke"
+    mkdir -p "$out_dir"
+    chmod 700 "$out_dir"
+    # Every config assertion below describes an empty CI-style profile. Keep
+    # it independent of the developer machine: a real ~/.config/kettle made
+    # the "no config" hint disappear and failed this smoke on Ubuntu.
+    export XDG_CONFIG_HOME="$out_dir/xdg-config"
+    rm -rf "$XDG_CONFIG_HOME"
+    KETTLE_CI_BIN="./target/debug/kettle"
+    cargo build --locked -q -p kettle
+    # --version exercises the build.rs git-SHA capture.
+    "$KETTLE_CI_BIN" --version | tee "$out_dir/kettle-version.txt"
+    grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' "$out_dir/kettle-version.txt"
+    # --help: pin clap's usage prelude plus the load-bearing flags.
+    "$KETTLE_CI_BIN" --help > "$out_dir/kettle-help.txt"
+    grep -qE '^Usage: kettle' "$out_dir/kettle-help.txt"
+    grep -q -- '--config' "$out_dir/kettle-help.txt"
+    grep -q -- '--screenshot' "$out_dir/kettle-help.txt"
+    grep -q -- '--gpu-info' "$out_dir/kettle-help.txt"
+    grep -q -- '--shell-integration' "$out_dir/kettle-help.txt"
+    grep -q -- '--print-completions' "$out_dir/kettle-help.txt"
+    grep -q -- '--print-default-config' "$out_dir/kettle-help.txt"
+    # --check-config falls back to defaults + "status: OK" with no config.
+    "$KETTLE_CI_BIN" --check-config | grep -E '^kettle:  [0-9]'
+    "$KETTLE_CI_BIN" --check-config \
+      | grep -E '^hint: +kettle --print-default-config > '
+    "$KETTLE_CI_BIN" --config-path
+    # --list-themes should always be 500+ entries (bundled iTerm2-Color-Schemes).
+    "$KETTLE_CI_BIN" --list-themes > "$out_dir/themes.txt"
+    test "$(wc -l < "$out_dir/themes.txt")" -gt 400
+    # --list-actions: every action name + aliases.
+    "$KETTLE_CI_BIN" --list-actions > "$out_dir/actions.txt"
+    test "$(wc -l < "$out_dir/actions.txt")" -gt 50
+    # --list-keybinds: the default Terminator-compatible chord set.
+    "$KETTLE_CI_BIN" --list-keybinds > "$out_dir/keybinds.txt"
+    test "$(wc -l < "$out_dir/keybinds.txt")" -gt 40
+    # --list-ssh-hosts with none configured emits an explicit fallback line.
+    "$KETTLE_CI_BIN" --list-ssh-hosts \
+      | grep -E '^\(no ssh-host entries configured\)$'
+    # --print-default-config emits the embedded example config; round-trip
+    # it through --check-config.
+    "$KETTLE_CI_BIN" --print-default-config > "$out_dir/k.cfg"
+    test "$(wc -l < "$out_dir/k.cfg")" -gt 50
+    "$KETTLE_CI_BIN" --config "$out_dir/k.cfg" --check-config \
+      | grep -E '^status: +OK'
+    # --profile NAME must be honored by every introspection flag, not
+    # silently ignored in favor of the default path. Write a profile with
+    # a deliberately malformed value under a scratch XDG_CONFIG_HOME
+    # (never the user's real config dir) and assert --check-config's
+    # exit code goes non-zero.
+    mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
+    echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
+    out=$("$KETTLE_CI_BIN" --profile cibad --check-config 2>&1) && \
+        { echo "--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
+          echo "$out"; \
+          exit 1; }
+    if echo "$out" | grep -q 'font-size'; then
+        echo "--profile cibad --check-config surfaces malformed font-size"
+    else
+        echo "--profile cibad output missing 'font-size' diagnostic"
+        echo "$out"
+        exit 1
+    fi
+    # --shell-integration <shell>: every known shell emits a non-trivial
+    # snippet containing the OSC 133 marker; an unknown shell errors.
+    for sh in bash zsh fish powershell; do
+      "$KETTLE_CI_BIN" --shell-integration "$sh" > "$out_dir/k.${sh}"
+      grep -q "OSC 133" "$out_dir/k.${sh}"
+      test "$(wc -l < "$out_dir/k.${sh}")" -gt 8
+    done
+    if "$KETTLE_CI_BIN" --shell-integration tcsh 2>/dev/null; then
+      echo "expected --shell-integration tcsh to error"; exit 1
+    fi
+    # --print-completions <shell>: every known shell mentions `kettle`;
+    # an unknown shell errors.
+    for sh in bash zsh fish powershell; do
+      "$KETTLE_CI_BIN" --print-completions "$sh" > "$out_dir/k.completions.${sh}"
+      test "$(wc -c < "$out_dir/k.completions.${sh}")" -gt 200
+      grep -q "kettle" "$out_dir/k.completions.${sh}"
+    done
+    if "$KETTLE_CI_BIN" --print-completions tcsh 2>/dev/null; then
+      echo "expected --print-completions tcsh to error"; exit 1
+    fi
+    # A missing --config / --working-directory path must exit non-zero,
+    # not silently fall back to defaults.
+    typo="$out_dir/kettle-ci-definitely-no-such-path-$RANDOM"
+    rm -rf "$typo"
+    if "$KETTLE_CI_BIN" --config "$typo" --config-path 2>/dev/null; then
+      echo "expected --config $typo to exit nonzero"; exit 1
+    fi
+    if "$KETTLE_CI_BIN" --working-directory "$typo" --config-path 2>/dev/null; then
+      echo "expected --working-directory $typo to exit nonzero"; exit 1
+    fi
+    # Happy path: the bootstrap config round-trips through --config-path
+    # (basename-only match, since path-separator style varies by OS).
+    "$KETTLE_CI_BIN" --config "$out_dir/k.cfg" --config-path \
+      | grep -qE 'k\.cfg$'
+    rm -rf "$XDG_CONFIG_HOME"
+    echo "cli-smoke PASSED"
+
+# Reproduce the docs/PERFORMANCE.md local baseline. Runs each measurement
+# five times through the Unix timing harness.
+[unix]
+bench:
+    ./scripts/bench.sh
+
+# Compare Kettle against installed Linux peer terminals using Hyperfine.
+# Terminator and Ghostty are required, Alacritty is included when present.
+# This is desktop-local by design (needs a graphical Linux session) and gates
+# the Ubuntu "better than Terminator, close to Ghostty" requirement across
+# startup, ASCII flood, and SGR/underline flood timings, plus advisory RSS
+# output under target/perf-results/linux-local/.
+[unix]
+linux-perf:
+    ./scripts/perf/linux-compare.sh
+
+# Compare Kettle against installed macOS peer terminals using Hyperfine, native
+# max-RSS accounting, quiet-window CPU samples, and a top-half rank gate. This
+# is desktop-local by design and writes target/perf-results/macos-local/.
+[macos]
+macos-perf:
+    ./scripts/perf/macos-compare.sh
+
+[linux]
+macos-perf:
+    @echo "macos-perf is a macOS desktop benchmark."
+
+# === Install / uninstall ===========================================
+
+# Drop a build under ~/.local/ (scripts/install.sh — Linux
+# only). Same path the `install-online.sh` curl|sh wrapper
+# uses for online installs.
+#
+[unix]
+install:
+    ./scripts/install.sh
+
+# Remove everything `just install` placed.
+[unix]
+uninstall:
+    ./scripts/install.sh --uninstall
+
+# Build the current release binary and reinstall it in one step, so the desktop
+# launcher and PATH resolve to this build. `just install`
+# alone installs whatever is already in target/release/ (which may be stale or
+# absent); this recipe rebuilds first, closing the "built but forgot to reinstall"
+# gap. Run after any change you want reflected in the installed app — and after
+# every release cut — to keep the installed app synced to the repo.
+#
+# `--skip-build` after the `release` dependency keeps local deployment from
+# compiling the same release binary twice.
+[unix]
+install-local: release
+    ./scripts/install.sh --skip-build
+    @echo "local install synced to the current release build"
+
+# Linux install that auto-records each Super-key launch into a local asciicast
+# directory (the desktop launcher gets KETTLE_RECORD_DIR wired in). Recording
+# now ships in every build, so this is a normal release build — equivalently,
+# set `record = on` + `record-dir` in the config file.
+[unix]
+install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
+    cargo build --release -p kettle
+    ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
+    @printf 'recording install synced to %s\n' {{quote(RECORD_DIR)}}
+
+# Exercise scripts/install.sh's real install/uninstall paths (default
+# per-user prefix, custom --prefix, the release-tarball layout,
+# --record-dir validation, and — once the current tag is published —
+# the curl|sh online installer) inside an isolated temp prefix that
+# never touches the real ~/.local. Needs a release binary (copies and
+# restores target/release/kettle around the run). Mirrors CI's
+# Linux-only "Linux installer smoke" step.
+[unix]
+linux-installer-smoke: release
+    ./scripts/check-linux-installers.sh
+
+# === Misc ==========================================================
+
+# Run kettle in a real window (Linux: needs X11 / Wayland; Windows:
+# native; macOS: native). Useful when verifying interactive behavior
+# the offscreen `--screenshot*` paths can't reach.
+run:
+    cargo run --release -p kettle
+
+# Capture a screenshot of the right-click context menu via
+# scrot + xdotool. Useful for visual regression of the context-menu
+# UX overhaul. Output lands in `target/menu-shots/`. Pass
+# `--name <slug>` to label the file; `--hold` to leave kettle running.
+#
+# Linux-only by design — uses xdotool / scrot which only
+# exist on X11. Windows / macOS can use the offscreen `just menu`
+# recipe instead (the tests/menu_visual.rs pixel-level CI smoke
+# covers the same regression class without needing a real desktop).
+[unix]
+menu-shot *ARGS:
+    ./scripts/menu-screenshot.sh {{ARGS}}
+
+# Start a real kettle window with `text-renderer = grid`, capture live
+# screenshots through `kettle ctl screenshot`, and assert cursor blink changes
+# only a cursor-sized region. This needs a visible Linux X11/Wayland or unlocked
+# macOS Aqua session and complements the CI offscreen renderer tests.
+[unix]
+live-render-smoke: release
+    KETTLE_BIN=./target/release/kettle ./scripts/check-live-render-smoke.sh
+
+# Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
+# tmux, and clean/configured Neovim marker + split states. Captures
+# PNG/readback artifacts under target/diagnostics/agent-tui-*. Set
+# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
+# `--cargo-release` selects Cargo's reported executable, including custom target
+# directories/triples, instead of assuming `target/release`.
+[unix]
+agent-tui-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release --shell-mode native agent-tui
+
+# Exercise Kettle's non-interactive PTY, JSON-event, and MCP agent surfaces,
+# plus bounded probes for installed Codex, Claude, Neovim, and tmux clients.
+# The Kettle-owned probes are mandatory; unavailable third-party tools are
+# reported as explicit skips. macOS CI runs this recipe against the release
+# binary. KETTLE_BIN may override the binary for diagnostics or fixtures.
+[unix]
+agent-cli-smoke: release
+    KETTLE_BIN="${KETTLE_BIN:-./target/release/kettle}" ./scripts/check-agent-cli-smoke.sh
+
+# Drive broader live UI interactions: multiline text entry, scrollback wheel,
+# selection drag, tab creation, context-menu split dispatch, and screenshots.
+[unix]
+interaction-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release interaction
+
+# Exercise a pointer-held selection at both vertical pane edges. macOS uses the
+# native pointer; Linux and Windows use the same portable control path that
+# drives the production selection handler.
+[macos]
+selection-autoscroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
+
+[linux]
+selection-autoscroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release selection-autoscroll
+
+# Replace the desktop clipboard with a generated bitmap, drive the real Paste
+# action, and capture expanded, compact, and hover-expanded receipt frames.
+# Artifacts land under target/diagnostics/image-paste-receipt-*.
+[unix]
+image-paste-receipt-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release image-paste-receipt
+
+# Copy two generated local videos, drive the real Paste action, and capture the
+# bounded native-poster receipt. Requires ffmpeg and a graphical session.
+# Artifacts land under target/diagnostics/video-paste-receipt-*.
+[unix]
+video-paste-receipt-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release video-paste-receipt
+
+# Focus only the cross-pane hover-wheel contract and require no surface-copy
+# support. Useful on virtual GLES adapters that render normally but cannot copy
+# a live swapchain image into the screenshot pipeline.
+[unix]
+hover-wheel-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release hover-wheel
+
+# Terminate one detached window's child through the PTY reap path and prove the
+# sibling OS window and its pane remain live. Linux requires X11 + xdotool; the
+# helper forces winit's X11 backend because Wayland has no portable independent
+# top-level-window inventory.
+[unix]
+window-close-isolation-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release window-close-isolation
+
+# Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
+# deltas (the units winit actually reports) instead of pre-quantized whole
+# lines. Guards the v2.41.0 fix where every such event rounded to zero on its
+# own and touchpad scrolling was completely dead. Drives `wheel_delta`, the
+# only synthetic path that runs the real accumulator — the older integer
+# `wheel_lines` form enters downstream of the conversion and cannot reproduce
+# it. Artifacts under target/diagnostics/touchpad-scroll-*.
+[unix]
+touchpad-scroll-smoke: release
+    python3 scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
+
+# Reproduce and guard the multi-tab mouse-click visual state. Captures full
+# window PNGs and tab geometry JSON under target/diagnostics/tabbar-click-*.
+[unix]
+tabbar-click-smoke: release
+    KETTLE_BIN=./target/release/kettle ./scripts/check-tabbar-click-smoke.sh
+
+# Terminator parity: drag a terminal to another position in its tab. Drives the
+# press/move/release through the control plane and checks the gesture reaches
+# the tree -- the pure drop-zone geometry is unit-tested in mux.rs, but only a
+# live window shows that a titlebar press ever gets there.
+#
+# KNOWN BROKEN: the gesture arms only on a native pointer press, so
+# `ctl send_mouse` cannot reach it and this stops at "did not arm the gesture".
+# See the script header for the two ways out.
+[unix]
+pane-drag-smoke: release
+    KETTLE_BIN=./target/release/kettle ./scripts/check-pane-drag-smoke.sh
+
+# v2.40.0 (tear-off UX): tear-off regression guards, two tiers. The ctl tier
+# proves the mouseless move_tab_to_new_window tear + tab_moved broadcast; the
+# live tier drives xdotool REAL pointer input through the full gesture
+# (tear -> follow -> re-dock merge -> Esc cancel), because `maybe_tear_off`
+# and re-dock only respond to native winit pointer events — synthetic
+# `ctl send_mouse` cannot reach them by design. Live tier is X11-desktop-only
+# (skips cleanly elsewhere); artifacts under target/diagnostics/tearoff-*.
+[unix]
+tearoff-smoke: release
+    python3 scripts/check-live-ui-smoke.py --cargo-release tearoff
+    KETTLE_BIN=./target/release/kettle ./scripts/check-tearoff-live-smoke.sh
+
+# Reproduce cwd-derived title recovery for shell-truncated tab titles.
+# Captures list_panes/list_tabs/ui_geometry under target/diagnostics/tab-title-*.
+[unix]
+tab-title-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release tab-title
+
+# Reproduce cwd-derived split titlebars at both pane edges and verify their
+# focused/receiving/inactive PNG colors against ui_geometry-derived samples.
+# Captures screenshots/list_panes/ui_geometry/analysis under split-titlebar-*.
+[unix]
+split-titlebar-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release split-titlebar
+
+# Print the bullet Claude Code heads its messages with and prove it is drawn
+# from a monochrome face, not a colour-emoji one. Background and foreground are
+# both greys, so any pixel in the glyph's own cell whose channels differ came
+# from a colour face. Captures the PNG and the sampled cell under
+# target/diagnostics/text-presentation-*.
+[unix]
+text-presentation-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release text-presentation
+
+# Split a pane, close the split by letting its own shell exit, and prove the
+# surviving pane's grid AND tty winsize come back to their pre-split values.
+# The tree work is unit-tested in mux.rs and both reap sites are pinned by a
+# source guard; what needs a live window is that a self-exiting PTY drives a
+# real TIOCSWINSZ on the pane that inherits its space. Captures list_panes
+# sizes, the stty readback, and a PNG under target/diagnostics/split-exit-resize-*.
+[unix]
+split-exit-resize-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release split-exit-resize
+
+# Hunt for the intermittent "split never loads" report. On demand only: it is a
+# hunt, not a contract, so it is in no gate. The default fixture is a free
+# shell-churn process; `just split-repro --claude` drives a real Claude Code
+# pane. Exit 2 means it reproduced and printed a capture directory holding the
+# cloned argv, the child pid, a process tree, and any swallowed split error.
+[unix]
+split-repro *ARGS:
+    python3 scripts/check-split-repro.py --kettle ./target/release/kettle {{ARGS}}
+
+# Reproduce app-level zoom keybind matching without compositor key injection.
+# Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
+[unix]
+zoom-keybind-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
+
+# Prove both backspace chords end to end: the text: action and, on macOS, the
+# Cmd+Backspace default; plus Option word-delete inside the search bar.
+# Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.
+[unix]
+line-edit-chords-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release line-edit-chords
+
+# Prove the macOS Dock context menu end to end through the real Dock: the
+# New Window / New Tab rows and the open-window title list are read back with
+# accessibility, then New Window is clicked and the window count checked over
+# the control plane. Needs an unlocked Aqua session, and refuses to run while
+# another kettle is up (two instances own two identically named Dock tiles).
+[macos]
+dock-menu-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release dock-menu
+
+# Reproduce underline scrolling with git diff | delta under repeated j/k input.
+# Captures PNG frames and read_cells JSON under target/diagnostics/underline-scroll-*.
+[unix]
+underline-scroll-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release underline
+
+# Clean every build artifact — `cargo clean` plus any temp PNGs
+# the screenshot / menu / bench recipes may have left in the OS
+# temp dir.
+#
+[unix]
+clean:
+    cargo clean
+    rm -f /tmp/kettle.png /tmp/kettle-menu.png /tmp/kettle-bench.png /tmp/kettle-bench-menu.png

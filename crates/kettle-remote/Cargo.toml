@@ -1,0 +1,44 @@
+[package]
+name = "kettle-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Isolated from kettle-core (per TERMINATOR-REMOTE-DESIGN.md) so the
+# eventual sysinfo dep doesn't propagate to non-UI consumers (the
+# headless --screenshot path, the --check-config validator). So far
+# this crate ships the RemoteContext type + a no-op detect() stub;
+# the actual sysinfo walk lands in a follow-up change.
+description = "kettle: SSH / Docker / Podman / kubectl remote-session detection for the focused pane"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Removed the `log` workspace dep. cargo-machete on Win11
+# (Surface Book 3, 2026-05-23) flagged it as unused -- kettle-remote
+# has no `log::` calls anywhere in src/. The dep was declared at
+# crate creation for the eventual remote-detection diagnostic
+# logging path that never materialized (the actual diagnostics
+# live in kettle-ui's per-pane state log). cargo-machete in CI
+# hadn't caught this sooner because the `.github/workflows/
+# machete.yml` workflow only fires on Cargo.{toml,lock} changes,
+# and this manifest had gone untouched for a long stretch while a
+# later ProcessTree refactor landed purely in src/ -- no manifest
+# change, no machete re-run.
+# Cross-platform process-tree walking (per
+# TERMINATOR-REMOTE-DESIGN.md). sysinfo handles
+# /proc on Linux, libproc on macOS, NtQuerySystemInformation on
+# Windows behind a single Rust API. Isolated to this crate so
+# the dep doesn't propagate to non-UI consumers (the headless
+# --screenshot path, --check-config validator).
+#
+# Default features turn on a lot of unused refreshers (disk, net,
+# components). We only need process enumeration; opt-out + opt-in
+# the bare minimum.
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true

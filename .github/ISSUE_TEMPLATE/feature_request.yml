@@ -1,0 +1,47 @@
+name: Feature request
+description: A new feature, escape-sequence conformance gap, or UX improvement.
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem first. If a published standard or prior
+        implementation defines the behavior, link to it so the expected
+        contract is testable.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or hard to do today? Concrete is better than abstract.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: How would you like it to work? Include keybinds / config keys / CLI flags if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Prior art
+      description: |
+        Link to a standard, protocol, or implementation that already defines
+        the behavior. Include the useful part of the reference, not just a name.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I checked [CHANGELOG.md](../CHANGELOG.md) and [version history](../docs/VERSION-HISTORY.md) and this is not already shipped.
+          required: true
+        - label: I searched existing issues + discussions for a duplicate.
+          required: true

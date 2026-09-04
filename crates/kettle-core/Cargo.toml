@@ -1,0 +1,73 @@
+[package]
+name = "kettle-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# See `kettle-config/Cargo.toml` for the per-crate-description rationale.
+description = "kettle: PTY + alacritty_terminal VT glue, scrollback search, hyperlink/URL/path/IP detection, kitty/Sixel/iTerm2 image registries"
+
+[lints]
+workspace = true
+
+[features]
+# The asciicast v2 session recorder (`record.rs`). OFF by default at the
+# kettle-core level; enabled unconditionally by both kettle-ui (GUI `--record`
+# / `record = on`, a runtime toggle in every build) and the bin crate
+# (`kettle exec --record`). Pulls in serde_json for JSON escaping and fs4 for
+# cross-platform active-cast locks.
+asciicast = ["dep:serde_json", "dep:fs4"]
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow.workspace = true
+crossbeam-channel = "0.5.15"
+kettle-vt.workspace = true
+# Required, not optional: per-pane session logging creates its log through
+# kettle-state's private-file helper, and that path is not behind a feature.
+# While it was optional, `cargo build -p kettle-core` failed without
+# `asciicast` — invisible to CI, because a workspace build turns the feature
+# on via another crate.
+kettle-state.workspace = true
+portable-pty = "0.9.0"
+regex.workspace = true
+regex-automata.workspace = true
+# Only used by the `asciicast` recorder (optional) + its JSON escaping;
+# a dev-dependency too (the `replays_asciicast_v2_output_into_grid` test
+# parses .cast).
+fs4 = { version = "1.1", optional = true }
+# PTY worker failures must remain observable even when the optional recorder is
+# disabled.
+log.workspace = true
+serde_json = { version = "1", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Dropdown parity: Git-for-Windows discovery via the registry
+# (HKLM/HKCU `SOFTWARE\GitForWindows\InstallPath`). Zero new lockfile
+# entries — winreg 0.10 is already in the graph as portable-pty's own dep.
+winreg = "0.56"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+# Parses asciicast v2 (.cast) traces in the e2e replay test — the format
+# record.rs writes — so a recorded session can be replayed through the VT
+# pipeline deterministically. Dev-only; not in the shipped crate.
+# `record.rs` is compiled under `cfg(test)` (feature off) so its unit
+# tests + the replay test run in the plain suite.
+fs4 = "1.1"
+kettle-test-support.workspace = true
+serde_json = "1"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "relative_delete"
+harness = false

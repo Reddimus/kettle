@@ -1,0 +1,77 @@
+# Dependabot keeps the Cargo + GitHub Actions surface patched without us
+# noticing the advisory. We group patch/minor updates so the review queue
+# stays one PR per ecosystem per week, not ten.
+version: 2
+updates:
+  # Rust / Cargo workspace at the repo root. Hits both
+  # `[workspace.dependencies]` and every per-crate Cargo.toml in `crates/`.
+  - package-ecosystem: cargo
+    directory: "/"
+    # Vendored manifests are immutable upstream snapshots plus reviewed local
+    # patches. Updating them independently would invalidate provenance and can
+    # silently drop Kettle fixes. Refresh vendor/Cargo.lock only as part of an
+    # intentional vendor-source update.
+    exclude-paths:
+      - "vendor/**"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "deps"
+      include: scope
+    groups:
+      # Bundle non-breaking bumps so a slow review week doesn't pile up
+      # 15 PRs. Major bumps stay on their own so we can weigh each one.
+      cargo-patch-and-minor:
+        update-types:
+          - patch
+          - minor
+    ignore:
+      # `sysinfo` (kettle-remote process-tree walk) is pinned at 0.32.x: its
+      # 0.33+ line progressively raised its own MSRV — 0.39.3 requires rustc
+      # 1.95, six releases past kettle's declared MSRV 1.89 (Cargo.toml
+      # `rust-version`). The bump (PR #9) is freshness only — 0.32.1 carries no
+      # RustSec advisory (the `cargo audit` workflow is the security backstop
+      # and would force a deliberate bump + MSRV review if that changed). Lift
+      # this ignore when kettle's MSRV next moves to >= the then-current
+      # sysinfo floor, and apply the one-line `ProcessRefreshKind::new()` ->
+      # `nothing()` migration at the same time.
+      - dependency-name: "sysinfo"
+      # `objc2` + `objc2-app-kit` (kettle-ui macOS `sticky = true` window) are
+      # pinned at 0.5 / 0.2 together — `crates/kettle-ui/Cargo.toml` requires
+      # matched versions so the ObjC class types are compatible. objc2-app-kit
+      # 0.3 needs objc2 0.6 AND changes the AppKit API the sticky-window code
+      # uses, so the split bumps (PRs #14/#16) break the macOS build. Bump both
+      # together with the kettle-ui macOS migration in one change verified on
+      # macOS CI (`build (macos-latest)`); ignore the recurring split proposals
+      # until then. `cargo audit` remains the security backstop.
+      - dependency-name: "objc2"
+      - dependency-name: "objc2-app-kit"
+
+  # GitHub Actions used across the workflow set. Same weekly cadence so the
+  # review surface lands together; version comments keep SHA pins updateable.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci(deps)"
+      include: scope
+    groups:
+      actions-patch-and-minor:
+        update-types:
+          - patch
+          - minor

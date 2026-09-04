@@ -1,0 +1,43 @@
+name: Nix packaging
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: flake check and build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+        with:
+          determinate: false
+      - name: Evaluate supported systems
+        run: nix flake check --all-systems --no-build --no-update-lock-file
+      - name: Build and test package
+        run: >-
+          nix build .#checks.x86_64-linux.cargo-test
+          --no-link --no-update-lock-file --print-build-logs
+      - name: Verify installed package contents
+        run: >-
+          nix build .#checks.x86_64-linux.package-contents
+          --no-link --no-update-lock-file --print-build-logs
+      - name: Launch installed package under Xvfb
+        run: >-
+          nix build .#checks.x86_64-linux.runtime-smoke
+          --no-link --no-update-lock-file --print-build-logs
+      - name: Build package
+        run: nix build .#packages.x86_64-linux.default --no-link --no-update-lock-file --print-build-logs

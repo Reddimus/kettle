@@ -1,0 +1,176 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kettle-test-support",
+    "crates/kettle-state",
+    "crates/kettle-update",
+    "crates/kettle-config",
+    "crates/kettle-core",
+    "crates/kettle-vt",
+    "crates/kettle-render",
+    "crates/kettle-remote",
+    "crates/kettle-ctl",
+    "crates/kettle-ui",
+    "crates/kettle",
+]
+exclude = [
+    "vendor/alacritty_terminal-0.26.0",
+    "vendor/portable-pty-0.9.0",
+    "vendor/vte-0.15.0",
+]
+
+[workspace.package]
+version = "4.3.0"
+# The edition was "2021" but every crate's Cargo.toml declared
+# "2024" individually. Bumped here to match reality and let crates
+# inherit via `edition.workspace = true`.
+edition = "2024"
+# MSRV declaration. The workspace uses let-chains (`if X && let
+# Y = ... && Z`) in kettle-vt / kettle-config / kettle-render /
+# kettle, which stabilized in Rust 1.88 (the original floor). The
+# *effective* MSRV is now 1.89 because two transitive deps
+# (`cosmic-text 0.19.0`, `smol_str 0.3.6`) bumped their floors to
+# 1.89; declaring 1.88 here misled `cargo install` users into a
+# confusing transitive-dep failure instead of the clean cargo
+# "package requires rustc 1.89" message. The `msrv` CI job builds +
+# tests on exactly the declared rustc so a future dep bump that
+# raises the effective floor again fails CI instead of silently
+# breaking `cargo install`. This is a floor, not a ceiling; we
+# still develop and CI on stable.
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/Reddimus/kettle"
+homepage = "https://github.com/Reddimus/kettle"
+readme = "README.md"
+authors = ["kettle contributors"]
+description = "A fast, cross-platform GPU terminal workspace with tabs, splits, and automation"
+keywords = ["terminal", "terminal-emulator", "tui", "gpu", "wgpu"]
+categories = ["command-line-utilities"]
+
+# Workspace-wide dependency policy (enforced in CI):
+#
+#   - `cargo audit`   (audit.yml)   — RustSec security advisories.
+#   - `cargo deny`    (deny.yml)    — license SPDX allow-list,
+#                                     source restrictions (crates.io
+#                                     only, no `git = …`), banned
+#                                     crates, wildcard `*` denied.
+#   - `cargo machete` (machete.yml) — every dep listed here + in
+#                                     per-crate manifests is actually
+#                                     imported in source. An earlier
+#                                     pass removed 11 unused workspace
+#                                     deps in one go; this guard
+#                                     prevents another accumulation.
+#   - MSRV verify     (ci.yml)      — workspace builds + tests on
+#                                     exactly the declared
+#                                     rust-version.
+#
+# Before adding a dep: check it's not transitively available via an
+# existing one (often the case for `pollster`, `bytemuck`, etc.) and
+# that its license is in deny.toml's allow-list. After adding: run
+# `cargo machete` locally to confirm it actually gets imported.
+[workspace.dependencies]
+# Declare every internal kettle-* crate as a workspace dep so
+# version + path stay in lockstep across every consumer manifest.
+# Previously each `crates/*/Cargo.toml` hardcoded `version = "1.2.0"`
+# on its internal path deps while the workspace was at 1.45.1; the
+# literal version diverged every release because nobody updated the
+# path-dep pins. Workspace-deps make the next `release.sh` version
+# bump update one line instead of ten.
+kettle-config = { path = "crates/kettle-config", version = "4.3.0" }
+kettle-state = { path = "crates/kettle-state", version = "4.3.0" }
+kettle-test-support = { path = "crates/kettle-test-support", version = "4.3.0" }
+kettle-update = { path = "crates/kettle-update", version = "4.3.0" }
+kettle-core = { path = "crates/kettle-core", version = "4.3.0" }
+kettle-vt = { path = "crates/kettle-vt", version = "4.3.0" }
+kettle-render = { path = "crates/kettle-render", version = "4.3.0" }
+kettle-remote = { path = "crates/kettle-remote", version = "4.3.0" }
+kettle-ctl = { path = "crates/kettle-ctl", version = "4.3.0" }
+kettle-ui = { path = "crates/kettle-ui", version = "4.3.0" }
+
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+regex = "1"
+regex-automata = "0.4"
+getrandom = "0.3"
+unicode-width = "0.2"
+unicode-segmentation = "1.13.2"
+# Lua scripting.
+# `vendored` builds Lua 5.4 from bundled C source — no system
+# liblua dependency, deterministic across OSes. `send` makes the
+# `Lua` handle Send+Sync so it can be parked on App's struct
+# (mlua's default is single-threaded). `error-send` makes
+# `mlua::Error` Send+Sync so anyhow integration works cleanly.
+mlua = { version = "0.12", features = ["lua54", "vendored", "send", "error-send"] }
+# Cross-platform desktop notifications for kettle.notify
+# (Lua plugin API). Backends: libnotify on Linux (D-Bus), NSUserNotification
+# on macOS, Toast on Windows. Pure-Rust + small. Fallback to log::info
+# on platforms where notifications aren't available.
+notify-rust = "4"
+
+[workspace.lints.clippy]
+# Forward-guard against three patterns we never want
+# committed to main. `clippy -- -D warnings` already denies the
+# default clippy levels; this block opts each lint up to deny so
+# it survives a future `--warnings=allow` invocation and is
+# visible policy in the manifest rather than a CI flag.
+#
+# - `dbg_macro` — `dbg!(x)` is fine while debugging but leaks
+#   debug prints into release builds + tests if forgotten.
+# - `todo` / `unimplemented` — `todo!()` and `unimplemented!()`
+#   panic at runtime; they belong in scratchpads, not in committed
+#   main. A real not-yet-implemented surface should return a
+#   typed error so callers can decide.
+#
+# The codebase has zero occurrences of all three today, so this
+# is purely "lock the door before someone walks through it." If a
+# legitimate case ever arises (`todo!()` inside a freshly stubbed-
+# out branch during an in-progress feature), the contributor adds
+# `#[allow(clippy::todo)]` with a one-line justification, the same
+# pattern used everywhere else.
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[patch.crates-io]
+# alacritty_terminal 0.26.0 evicts from `title_stack` when the keyboard
+# mode stack reaches its depth cap. That can panic with an empty title stack
+# and corrupts unrelated title state. Its active-mode query/screen bookkeeping
+# also loses direct flag changes. Kettle additionally needs correct DEC
+# 47/1047/1049 screen semantics, monotonic document-row identities, post-scroll
+# removal of fully evicted selections, and a bounded ordered journal of
+# graphics-relevant lifecycle and margin-scroll mutations. Keep the released
+# source local until an upstream release carries every patch; `vendor/README.md`
+# records the exact scope.
+alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
+# portable-pty's ConPTY writer uses a synchronous anonymous-pipe handle.
+# Kettle's bounded priority workers require partial/nonblocking progress so a
+# full child-input buffer cannot monopolize the worker ahead of protocol
+# replies or pane shutdown. The local extension opts only Kettle's writer into
+# PIPE_NOWAIT while retaining the synchronous handle required by ConPTY.
+portable-pty = { path = "vendor/portable-pty-0.9.0" }
+# vte 0.15.0 has no out-of-band synchronization markers. Kettle needs an
+# unforgeable marker channel inside the existing DEC 2026 byte buffer so
+# extracted graphics controls can replay at their exact wire position without
+# becoming visible before the synchronized update commits.
+vte = { path = "vendor/vte-0.15.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# Strip symbols from the shipped binary. Cross-platform and
+# toolchain-native — ELF/Mach-O have their symbol tables removed in place
+# (~several MB smaller; the release artifacts were unstripped), and on MSVC
+# debuginfo already lives in a separate (unshipped) `.pdb`, so this is a no-op
+# there. panic=abort means no backtraces are expected in release anyway. If
+# post-mortem symbolication is ever wanted, switch to `strip = "debuginfo"` +
+# `split-debuginfo = "packed"` and archive the sidecar.
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

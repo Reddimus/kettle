@@ -1,0 +1,102 @@
+# Maintainer: kettle contributors <see github.com/Reddimus/kettle>
+#
+# PKGBUILD template for the AUR `kettle-bin` package. The release finalizer
+# renders the ready-to-use `PKGBUILD` release asset after verifying the Linux
+# archive. Do not submit this unresolved `.in` file directly.
+#
+# The generated package installs the prebuilt
+# Linux x86_64 binary from a tagged GitHub release. Source-build
+# variant (`kettle`) would build from `cargo build --release` instead;
+# this template tracks the binary so users skip the ~3-minute build.
+#
+# To submit / update on the AUR:
+#
+#   1. Clone the AUR repo (one-time):
+#        ssh aur:kettle-bin.git
+#        # or if it doesn't exist yet:
+#        ssh aur:kettle-bin   # AUR creates the repo on first push
+#   2. Copy the generated `PKGBUILD` release asset into the clone.
+#   3. Regenerate .SRCINFO:
+#        makepkg --printsrcinfo > .SRCINFO
+#   4. Commit + push to AUR.
+#
+# Per-release version and digest maintenance is performed by
+# `scripts/render-package-templates.py` from the verified archive bytes.
+
+pkgname=kettle-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Fast, cross-platform, GPU-accelerated terminal emulator written in Rust"
+arch=('x86_64')
+url="https://github.com/Reddimus/kettle"
+license=('MIT')
+# Runtime deps mirror the dynamic linkage of the release binary
+# (built on ubuntu-22.04 in release.yml). These are the libraries
+# kettle's wgpu / winit / glyphon / portable-pty / fontconfig stacks
+# need at runtime. `pkg-config` etc. are *build* deps and not needed
+# here.
+depends=('fontconfig' 'freetype2' 'libxkbcommon' 'libxkbcommon-x11'
+         'libx11' 'libwayland-client' 'libxcb' 'vulkan-icd-loader'
+         'mesa')
+# `conflicts` + `provides` lets users swap between the binary and
+# the (future) source-build `kettle` PKGBUILD without uninstalling
+# first.
+provides=('kettle')
+conflicts=('kettle')
+source=("kettle-linux-x86_64-${pkgver}.tar.gz::https://github.com/Reddimus/kettle/releases/download/v${pkgver}/kettle-linux-x86_64.tar.gz")
+# SHA-256 computed from the archive published alongside this file.
+sha256sums=('@LINUX_X86_64_SHA256@')
+options=('!strip')   # Already stripped by the release runner.
+
+package() {
+    cd "${srcdir}/kettle"
+
+    # Binary itself — drops into /usr/bin so it lands on every
+    # user's PATH without rcfile edits.
+    install -Dm755 kettle "${pkgdir}/usr/bin/kettle"
+
+    # XDG launcher + scalable icon + raster fallbacks so kettle
+    # shows up in GNOME Activities / KDE Krunner / rofi the same
+    # way install.sh wires it up at the user level.
+    install -Dm644 packaging/linux/kettle.desktop \
+        "${pkgdir}/usr/share/applications/kettle.desktop"
+    install -Dm644 packaging/linux/kettle.svg \
+        "${pkgdir}/usr/share/icons/hicolor/scalable/apps/kettle.svg"
+
+    # The release tarball ships per-size PNGs under `kettle-NNN.png`
+    # — re-locate them to the hicolor `<size>x<size>/apps/kettle.png`
+    # paths the freedesktop spec expects.
+    #
+    # `kettle-[0-9]*` and not `kettle-*`: the tarball also carries
+    # `kettle-light-256.png`, whose name yields a size of `light-256` and
+    # installs into `hicolor/light-256xlight-256/apps/`, a directory no icon
+    # theme reads.
+    for png in packaging/linux/kettle-[0-9]*.png; do
+        # Extract NNN from `kettle-256.png`.
+        size=$(basename "${png}" .png | sed 's/^kettle-//')
+        install -Dm644 "${png}" \
+            "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/kettle.png"
+    done
+
+    # Docs ship in /usr/share/doc/kettle so an offline user can
+    # read the README / CHANGELOG / SECURITY policy without
+    # network access.
+    install -Dm644 LICENSE   "${pkgdir}/usr/share/licenses/kettle/LICENSE"
+    install -Dm644 NOTICE    "${pkgdir}/usr/share/doc/kettle/NOTICE"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/kettle/README.md"
+    install -Dm644 CHANGELOG.md "${pkgdir}/usr/share/doc/kettle/CHANGELOG.md"
+
+    # Man page so `man kettle` works after install.
+    install -Dm644 packaging/linux/kettle.1 \
+        "${pkgdir}/usr/share/man/man1/kettle.1"
+
+    # Shell-integration snippets so users can source them
+    # directly rather than going through `kettle --shell-integration
+    # <shell>` (which embeds the same bodies via include_str!).
+    for sh in bash zsh fish; do
+        if [ -f "shell-integration/kettle.${sh}" ]; then
+            install -Dm644 "shell-integration/kettle.${sh}" \
+                "${pkgdir}/usr/share/doc/kettle/shell-integration/kettle.${sh}"
+        fi
+    done
+}

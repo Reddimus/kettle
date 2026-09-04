@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# kettle — pre-commit hook (opt-in)
+#
+# Runs the local-only quality gate kettle's CONTRIBUTING.md
+# recommends ("a green `just gauntlet` locally is the same gate
+# every PR runs on every OS"). Skips the gate for commits that
+# touch ONLY paths Rust code doesn't depend on at compile time
+# (CHANGELOG.md, README.md, docs/*, packaging/*, .github/*,
+# .githooks/*, NOTICE, LICENSE, SECURITY.md, CODE_OF_CONDUCT.md,
+# CONTRIBUTING.md, deny.toml, .gitignore) so doc-only / CI-only /
+# license-only edits stay fast.
+#
+# Paths NOT excluded (and thus trigger the gauntlet):
+#   - crates/**/*.rs
+#   - Cargo.toml + Cargo.lock (a dep bump can break clippy/tests)
+#   - assets/* (build.rs scans assets/themes/ for the embedded set)
+#   - scripts/* (release.sh + install*.sh are exercised by `cargo
+#     test` if a contributor adds shellcheck-tested helpers)
+#   - shell-integration/* (snippet content is include_str!'d at
+#     build time)
+#   - tests/ (anything we want compiled)
+#
+# Install (one-time per checkout):
+#
+#     git config core.hooksPath .githooks
+#
+# Or disable on a per-commit basis:
+#
+#     git commit --no-verify -m "..."
+#
+# A doc-list clippy regression once landed across several commits
+# without anyone running clippy locally. This hook makes the
+# regression class catchable at commit time rather than at the
+# next manual `just gauntlet` invocation.
+
+set -euo pipefail
+
+# Detect doc-only commits (skip the heavy gate for them).
+# Include D (deletions) in the filter — a commit that
+# ONLY deletes .rs files would otherwise skip the gate, but
+# deleting code can break the build (lost call site, broken
+# import, etc).
+non_doc=$(git diff --cached --name-only --diff-filter=ACMRD \
+    | grep -vE '^(CHANGELOG\.md|README\.md|docs/|packaging/|\.github/|\.githooks/|NOTICE|LICENSE|SECURITY\.md|CODE_OF_CONDUCT\.md|CONTRIBUTING\.md|deny\.toml|\.gitignore)' \
+    || true)
+
+if [ -z "$non_doc" ]; then
+    echo "pre-commit: doc-only change; skipping gauntlet (use --no-verify to skip on code changes too)" >&2
+    exit 0
+fi
+
+# Code paths touched — run the quality gate. Log elapsed time so
+# a contributor running a slow-clippy commit knows it's the
+# linter taking 30-90s on a cold cache, not a hung hook.
+# Warm-cache incremental rebuilds finish in <5s.
+start_sec=$(date +%s)
+
+# If any shell scripts are touched, run shellcheck against those shell scripts
+# only. The old directory-only filter also passed scripts/*.py and *.ps1 to
+# shellcheck, so an unrelated Python/PowerShell edit failed before the real
+# gate started. Exclude deleted paths from direct linters, and use an array so
+# a legal path containing spaces remains one argument.
+shell_changes=()
+while IFS= read -r -d '' path; do
+    case "$path" in
+        scripts/*.sh|.githooks/*.sh|.githooks/pre-commit)
+            shell_changes+=("$path")
+            ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+if [ "${#shell_changes[@]}" -gt 0 ] && command -v shellcheck >/dev/null 2>&1; then
+    echo "pre-commit: running shellcheck on ${shell_changes[*]}..." >&2
+    shellcheck "${shell_changes[@]}"
+fi
+
+echo "pre-commit: running cargo fmt --check + cargo clippy + cargo test + cargo doc ..." >&2
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+# Rustdoc gate. The local gauntlet used to skip
+# `cargo doc -D warnings`; a `<unix>-<pid>` placeholder in a doc
+# comment slipped past local clippy (which doesn't run rustdoc
+# lints) and only failed in CI's `cargo doc` step. The
+# CONTRIBUTING.md promise was that local gauntlet = CI gate; this
+# closes that gap. Catches `rustdoc::invalid-html-tags` +
+# `rustdoc::broken-intra-doc-links` at commit time.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+elapsed=$(($(date +%s) - start_sec))
+# Render 0s as "<1s" so an incremental rebuild that completed
+# faster than seconds-resolution doesn't print a misleading "(0s)".
+# Also handles the wall-clock-jumped-backward case (NTP correction,
+# manual clock set, container time jump) by treating any non-
+# positive elapsed as "<1s" rather than a misleading negative.
+if [ "$elapsed" -le 0 ]; then
+    echo "pre-commit: PASSED (<1s)" >&2
+else
+    echo "pre-commit: PASSED (${elapsed}s)" >&2
+fi

@@ -1,0 +1,1891 @@
+# kettle architecture
+
+kettle is a Cargo workspace of focused crates. PTY bytes are split by an
+**image-protocol extractor** before the VT engine sees them; the engine owns a
+shared grid that the GPU renderer reads each frame; side-channels (prompts,
+cwd, images, clipboard, title) flow back to the UI.
+
+## Crates
+
+```mermaid
+graph TD
+    bin["kettle (bin)<br/>CLI · entry · exec/ctl/mcp subcommands"] --> ui
+    bin --> ctl
+    bin --> update
+    ui["kettle-ui<br/>winit multi-window app · per-window tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
+    ui --> core
+    ui --> cfg
+    ui --> remote
+    ui --> ctl
+    ui --> state
+    ui --> update
+    ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
+    render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
+    render --> cfg
+    core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
+    cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
+    vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
+    remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
+    update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
+    state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
+```
+
+`kettle-state` is the leaf persistence boundary shared by configuration,
+sessions, and the updater. It stages with `create_new` beside the destination,
+applies the final permissions/security descriptor to that open inode, syncs it
+before publication, and syncs the parent directory on Unix. It preserves
+existing permissions when asked and rejects symlink destinations by default.
+Private files use mode `0600` on Unix. Before allocating a new staged name it
+reclaims only exact same-destination temp names whose canonical creator PID is
+definitively dead and whose opened object proves current-user ownership,
+single-link regular-file identity, and no reparse/symlink substitution. Scan
+and removal counts are bounded; live-PID, malformed, multi-link, and nonregular
+lookalikes are untouched. Windows passes `CreateFileW` an explicit owner-and-DACL security
+descriptor: the effective user owns the file and one protected ACE grants only
+that user full access before any content is written. Existing leaves are
+opened as reparse points and rejected; parent handles and file identities pin
+the non-reparse parent across each open or publication. A failed creation is
+discarded through its still-open handle, so cleanup cannot delete a path that
+was swapped after the create.
+
+Crash-remnant scans run through one process-wide best-effort reaper, not on the
+caller that requested an atomic write. Its synchronous queue holds at most 32
+destinations. The scheduler distinguishes in-flight work from completed work,
+tracks at most 256 destinations in total, and expires completed keys after a
+five-minute cooldown. Old completions are evicted before rejecting a new key;
+spawn, queue, disconnect, and worker-guard failures cancel or complete the
+reservation so a transient failure cannot suppress that destination forever.
+
+Private Windows replacement moves that already-secured staged file into place,
+so a permissive legacy destination DACL is never applied to new private bytes.
+Permission-preserving replacement captures the old DACL while holding that
+object against deletion, applies it to the staged handle, syncs that final
+state, and then publishes that same object by handle. Hardening an existing
+object requires effective-user ownership even when its DACL already looks
+exact, because a different owner retains implicit authority to rewrite that
+DACL. Elevated creation explicitly selects the user SID as owner instead of
+trusting the token's possibly group-valued default owner. Win32 alias spellings
+and alternate-data-stream leaves are rejected, and every child path is derived
+from the already-held parent rather than resolved again through a mutable DOS
+drive mapping. State and lock files, recordings, remote-command payloads,
+terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
+share these primitives. Advisory locks let callers serialize compound
+operations; configuration persistence holds one across the complete read,
+validate, backup, and replacement transaction.
+
+Screenshot persistence has two deliberately separate policies. UI/default
+screenshots are private state and therefore require Kettle-owned, verified
+ancestors. An explicit ctl/MCP `path` is a user-selected export: its parent must
+already exist, but it may be an ordinary user directory. Both policies stream
+into a randomly named owner-only sibling; the requested leaf remains absent
+until a complete, durably flushed inode is atomically linked without
+replacement. Filesystems without hard-link support use the platform's atomic
+no-replace rename operation instead.
+Creation and publication pin the selected parent, derive both children from the
+held object, and verify file identity. Unix uses `openat`/`linkat` and
+`renameat2`/`renameatx_np` fallback plus identity-matched descriptor-relative
+cleanup. Because Darwin ACLs can grant
+read access independently of mode bits, macOS first creates an empty owner-only,
+ACL-free staging directory in the selected parent and secures the sibling there;
+the requested name is never visible with an inherited ACL or partial content.
+Windows denies parent deletion through publication, creates the sibling under a
+protected current-user DACL, and rejects NUL, alternate-stream, and trailing
+dot/space aliases before Win32 normalization can erase them. Neither policy
+overwrites or follows an existing leaf. A writable export parent can still
+rename or remove the staging name or published pathname; the open file object
+remains the one Kettle created, publication then fails closed, and cleanup
+removes only that object when it still occupies the staging sibling. Cleanup
+failure is reported and a replacement is never removed, but the pathname is not
+a durable capability. This policy is not a substitute for private-state storage
+and is never used implicitly.
+
+Configuration reads carry provenance across the CLI/UI boundary. Default and
+named-profile paths open through `kettle-state` while their verified parent
+handles remain live; Unix rejects writable or untrusted directory edges,
+writable or multiply-linked leaves, and symlink substitution. Dotfile-manager
+leaf links remain supported, but the link object is owner/link-count checked
+and resolved relative to the held parent before the target receives the same
+full-chain verification. macOS also
+inspects each held object's extended ACL for mutation grants to untrusted
+identities; Windows applies the equivalent owner, reparse-point, hard-link, and
+mutation-DACL checks, including generic access masks. The config watcher uses
+the same read-only directory verifier after a best-effort repair, so a safe
+read-only mount can still reload and an unsafe directory cannot turn an edit
+into a `RunCommand` trigger. An explicit `--config FILE` is represented as a
+separate provenance value and intentionally retains bounded regular-file
+loading for project/shared configs. A failed live read leaves the last
+known-good configuration installed rather than replacing it with defaults.
+Each filesystem guard retains only the immediate-parent capability used for
+relative operations; ancestor identities are recorded and the complete chain
+is reopened and revalidated around publication. This keeps steady descriptor
+use O(1) per guard rather than O(path depth) without weakening path-swap checks.
+
+### Private clipboard images and video receipts
+
+Pasted clipboard bitmaps add a narrower ephemeral-file lifecycle on top of
+those primitives. One process owns at most 64 PNG handles and 256 MiB of final
+encoded PNG bytes; the streaming writer refuses a write that would cross the
+remaining aggregate budget and removes a failed/partial object through its
+creating handle. An empty bootstrap object establishes and identifies the
+owner-private session directory before any clipboard content is written.
+Every Unix PNG is then created with `openat` beneath that held descriptor, so a
+rename/path replacement cannot redirect screenshot bytes; Windows pins the
+directory name by denying delete-sharing before real PNG creation. A successful
+object is reopened relative to the held session directory (`/proc/self/fd` or
+`/dev/fd` on Unix) and must match the creator's kernel identity before that
+creator is released; the retained handle and descriptor-relative path are the
+authority used at shutdown. The session directory is never recursively
+deleted: Windows transitions from the lifetime pin through an identity-matched
+cooperative handle to a DELETE-capable handle, then marks that exact empty
+directory for deletion; Unix compares the held
+device/inode, owner, and `0700` mode immediately before removing the empty name
+beneath the sticky or private scratch root. The remaining Unix check/remove
+window is limited to the same effective UID; sticky/private parent policy
+prevents a different principal from replacing the session name.
+
+The UI keeps a separate, bounded renderer copy beside each retained PNG: at
+most 256 by 160 RGBA pixels, scaled once when the paste file is created. A
+receipt can be constructed only by resolving the exact path back through that
+retained-image table, and it is shown only after the initiating pane accepts
+its own path bytes. A broadcast accepted only by another pane cannot put
+success chrome over an initiating pane that rejected the paste. File-list
+paste, ordinary drag and drop, terminal output, and arbitrary path text never
+enter that one-shot lookup. Cancelling or rejecting the bitmap paste discards
+its preview, so reusing the managed path later cannot resurrect a thumbnail.
+Receipt state is window-local and pane-pinned; moving focus never projects it
+over another split. Paint, pointer blocking, and accessibility all use the same
+geometry result, while the image has its own single-instance GPU pipeline so
+terminal glyphs cannot cover the thumbnail and the thumbnail cannot cover its
+labels. Before handing the private path to the OS launcher, Kettle reopens the
+PNG through the held session directory and requires it to match the retained
+kernel identity. The owner-only session directory prevents another principal
+from replacing the name between that check and the path-based launch.
+
+Explicit video file lists use the same receipt geometry without sharing the
+managed-image trust root. The event loop only classifies absolute path syntax
+and pastes it normally. Once the initiating pane accepts the paste, one of two
+background threads sends the first video path through a bounded eight-job queue
+to the current executable's hidden worker. The child requires a non-link regular
+file whose file and parent chain reject mutation by an untrusted principal. It
+holds the file open and compares kernel identity, timestamps, size, and a bounded
+first/middle/last SHA-256 sample before and after extraction. Each child has a
+two-second deadline and can return at most 256 by 160 RGBA pixels. A deadline
+failure gets one fresh-child retry, so a job can spend at most four seconds in
+worker deadlines. Other failures remain final. If a child cannot be reaped, its
+queue thread sends a failure for the current receipt and retires instead of
+risking another job beside an unbounded child. A changed, missing, or untrusted
+source gets no receipt. The video card has no open action, so the parent never
+reopens the path after validation. A primary press on its body or dismiss target
+consumes the hidden terminal click and removes the card. Pending window state
+has a 38-second deadline, long enough for one surviving thread to drain the full
+queue at the bounded retry limit, with finite slack for dispatch. An unusually
+loaded host drops the optional receipt rather than retaining pending state
+indefinitely. The hidden worker dispatches before update recovery and
+application startup, so poster work never takes install locks or launches an
+update helper.
+
+The child delegates thumbnail extraction instead of bundling a video decoder:
+[Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
+on macOS, [IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
+in a fresh Windows STA, and the
+[Freedesktop thumbnail cache](https://specifications.freedesktop.org/thumbnail-spec/latest/)
+on Linux. Linux opens one PNG through a held, trusted parent chain, verifies its
+owner, mode, `Thumb::URI`, and `Thumb::MTime`, then decodes that same descriptor.
+A missing or untrusted cache entry leaves the generic poster visible. No
+platform path runs a video codec inside the Kettle process.
+
+Crash cleanup recognizes only
+`kettle-paste-<canonical-pid>-<canonical-u128-nonce>` directories and canonical
+zero-padded `0001.png` through `0064.png` children. Cleanup runs on a background
+thread so a damaged namespace cannot delay event-loop/window creation. It stops
+after 250 ms, 8,192 root entries, 64 stale attempts, or 32 successful sessions;
+each session is capped at 64 files. A candidate must be older than 24 hours,
+its creator must be definitively dead (`ESRCH` on Unix; queryable
+non-`STILL_ACTIVE`/invalid PID on Windows), and every child must open relative
+to the held directory as a current-user/private, non-reparse, single-link
+regular file. Handles for all children are acquired before deletion begins;
+unknown, malformed, linked, nonregular, untrusted, live-PID, or
+time-indeterminate candidates fail closed. PID reuse therefore delays
+reclamation rather than risking a live sibling.
+
+`kettle-update` composes those primitives into one managed-install
+transaction. Kettle 4.0 uses that transaction for supported Linux installs.
+Windows distribution ended after 3.3.0; the Windows updater description below
+records the final supported design rather than current install architecture.
+Its complete source, including `scripts/install.ps1`, is archived at the
+`v3.3.0` tag.
+
+The archived Windows path named archive/helper/backup/quarantine state from one
+exact decimal PID-and-epoch-nanoseconds id. Its schema-3 pending capsule carried
+the exact signed release document and signature, selected asset digest, inner
+package manifest, and retained archive/helper identities. The helper rechecked
+that capsule against the compiled Ed25519 key and freshness window after taking
+the update and running locks, read the actually installed version from the held
+PE version resource, and accepted only a strict upgrade.
+
+The Linux path and archived Windows path parse the digest-verified archive
+directly and materialize its manifest-verified members into immutable byte
+buffers; transaction publication
+never returns to an extracted pathname. The release grammar is capped at 128
+entries and 512 MiB. Before a backup pathname can appear, the schema-2 journal
+durably records a transaction-bound `backing_up` intent with the destination's
+prior size and hash. Recovery accepts an absent or partial backup only for that
+one intent and only while the live destination still matches the recorded prior
+bytes; established backups must exactly match the journal's paths, sizes, and
+hashes before rollback or cleanup. Rollback also compares each live destination
+with the recorded replacement fingerprint and preserves later writes on
+conflict. A committed journal retains the last-known-good bytes until a process
+at the target version reaches the managed startup checkpoint.
+
+Linux retains the open descriptor-relative parent until each destination
+snapshot leaf is opened; a `/proc/self/fd/...` capability can therefore never
+be converted into a dangling path that misclassifies an existing file as new.
+Linux installer layouts add a second, user-visible provenance layer at
+`share/kettle/install-files.json`: it binds the normalized prefix and owner to
+the sorted path/mode/size/SHA-256 identity of every managed file and records
+only directories that Kettle created. Install, authenticated update, and
+uninstall walk components without following links, validate owner/write modes,
+and verify the complete prior record before mutation. Uninstall consequently
+unlinks only recorded leaves and removes only recorded empty directories; it
+does not recursively delete a shared XDG prefix or adopt a legacy tree. Startup
+and explicit update first authenticate the marker, layout, prefix ownership, and
+update journal under the update lock; they recover an incomplete transaction
+before checking file-content provenance, so the old record cannot strand the
+recovery data after a crash between publication and provenance replacement.
+The archived Windows lock order was update then running; the helper released
+running then update after durable commit and pending-record removal, before
+asking a fully qualified system PowerShell to execute the exact
+archive-verified `install.ps1` while a no-write/no-delete handle remained held.
+The PowerShell installer implemented the same byte-range and sharing contract
+while retaining non-reparse directory handles from the drive root through the
+prefix, so validation and
+leaf-only mutation cannot be redirected through an exchanged ancestor.
+The archived Windows installer separately protected permanent state: every
+created root, managed directory, coordination file, staged payload, and
+published file had an explicit protected DACL for the initiating identity,
+SYSTEM, and Administrators.
+It held and validated the fixed-volume ancestor chain before root creation,
+rejected untrusted replacement rights, and required that exact ACL on an
+existing root. An opt-in legacy migration from a trusted external installer
+accepted only the bounded known tree before replacing inherited ACLs.
+On archived Windows installs, a pending helper could not replace the mapped
+`kettle.exe`/`kettle.com` images until the old process released its
+running-install guard and exited, so that process could not transparently
+re-exec the replacement and still propagate its eventual status. A bare GUI
+handoff could exit zero, but any invocation with arguments printed that no
+requested work ran and exited 75 (`EX_TEMPFAIL`). This kept help/version,
+configuration checks, CLI subcommands, and MCP launchers truthful while the
+verified update waited for other windows to close.
+After extraction, the supported Linux updater and archived Windows updater
+verify any inner package manifest that is present. Signed release archives from
+v2.36.0 onward must contain that manifest; older archives may omit it for
+compatibility, but do not bypass verification when one is present.
+
+Managed-recording retention also deletes through these primitives. It keeps
+the candidate locked while `kettle-state` proves the path still identifies the
+open private object; Windows marks that kernel object for deletion through a
+reopened handle, while Unix unlinks the verified leaf relative to its held
+parent directory.
+
+## Agent control plane
+
+The agent-first control surface (see [AGENT.md](AGENT.md) for the full
+reference) is owned by **kettle-ctl**, a UI-free crate that defines the
+control-plane protocol (NDJSON request/response/event), the local-IPC transport
+(a Unix domain socket or a Windows named pipe), the discovery registry, and a
+blocking client. It is **off by default**: nothing binds a socket or writes a
+registry entry unless the operator opts in (`agent-server = read-only|full`, or
+`--agent-server <mode>`).
+
+```mermaid
+graph LR
+    bin2["kettle (bin)"] --> exec["kettle exec<br/>headless one-shot<br/>(real PTY, no window)"]
+    bin2 --> ctlcli["kettle ctl<br/>kettle-ctl client"]
+    bin2 --> mcp["kettle mcp<br/>MCP bridge over stdio"]
+    ctlcli --> ipc["local IPC<br/>(Unix socket /<br/>Windows named pipe)"]
+    mcp --> ipc
+    ipc --> srv["control SERVER<br/>(hosted in kettle-ui)"]
+    srv -->|UserEvent::Ctl| app["App main thread<br/>(windows map)"]
+    reg["discovery registry<br/>reserved kind field<br/>(&quot;gui&quot; today, &quot;muxd&quot; later)"] -.-> ipc
+```
+
+Two roles split cleanly across the bin and the GUI:
+
+- The **GUI (kettle-ui)** hosts the control **server**. Requests arriving over
+  the transport are dispatched on the App main thread via `UserEvent::Ctl`, so
+  they observe and mutate the same per-window `Mux` trees the renderer reads —
+  no separate lock on the pane tree.
+- The **bin (kettle)** hosts the three opt-in entry points: `kettle exec` (a
+  headless one-shot that runs a command under a real PTY and streams its output
+  to stdout, no GUI), `kettle ctl` (the kettle-ctl client that drives a running
+  kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
+  as native agent tools).
+
+The surface is multi-window aware (v2.18.0): `get_state` reports
+`{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
+window and tag each entry with its `window`; `--pane N` resolves across
+windows (pane ids are process-global); and a live tab tear-off emits a
+`tab_moved` event (`{from_window, to_window, tab}`) on the subscription
+feed.
+
+Protocol v1 uses a typed method table as the authorization source of truth:
+each method declares read/mutate capability and UI/connection execution. The
+wire remains additive JSON, with exact `v: 1`, 1 MiB request and 768 KiB
+response/event bounds, and snapshot paging for large live reads. Discovery
+records are atomically replaced and private. Both sides authenticate the
+documented same-user boundary before protocol bytes flow: Unix compares peer
+credentials with the effective uid; Windows servers compare the client process
+token-user SID and clients compare the pipe object's exact owner with their own
+token-user SID. Windows pipes are created with exact token-user ownership and a
+protected owner/SYSTEM/Administrators DACL; another administrator's connection
+still fails the exact SID check. This is not a per-client consent boundary:
+every same-user process receives the selected `read-only` or terminal-wide
+`full` authority once the operator enables the server. The MCP bridge
+negotiates `2025-11-25` or `2025-06-18` and
+dispatches tool calls through a four-worker, 16-request bounded queue with
+JSON-RPC cancellation tracking. The blocking control client reads frames
+incrementally under method-aware deadlines, preserves events interleaved before
+a response, and treats malformed frames or mismatched response ids as terminal
+protocol errors. Terminal is literal: a request that ends without its response
+being read off the wire — a deadline, a cancellation, an event bound, malformed
+data, a partly written request — retires the connection, because the response
+still in flight would otherwise be correlated to the next call. Retiring closes
+the transport and releases what the abandoned exchange had buffered, so the
+server's connection slot is freed then rather than whenever the caller drops
+the client. A request that never put a byte on the wire is not one of these
+cases: the server never learned of it, so the connection stays in step. Callers
+reconnect; a cancelled mutation may still have executed, and nothing on that
+connection can report whether it did. Unix connections enter nonblocking mode
+once, before cloning;
+the transport restores ordinary blocking `Read`/`Write` semantics with
+`poll(2)` and serializes complete deadline-aware writes through one
+connection-wide gate. No operation toggles `O_NONBLOCK` on a shared open-file
+description, while macOS retains the fd-level nonblocking behavior required to
+make a full AF_UNIX send buffer deadline-aware. Windows client and accepted
+server handles both use overlapped I/O; deadline/cancellation paths issue
+`CancelIoEx` for the exact operation and drain its completion before releasing
+the `OVERLAPPED`. Named-pipe `flush` is deliberately a no-op because
+`FlushFileBuffers` on the server end waits for the client to drain buffered
+bytes and would bypass the write deadline.
+
+The UI server caps admission at eight peers. Request inactivity is 30 seconds;
+once a frame starts, its newline has an absolute five-second deadline that
+slow-drip bytes cannot reset. Every response/event write has five seconds,
+UI-dispatched replies have 610 seconds to accommodate the 600-second
+`run_command` maximum, and subscribers get a bounded keepalive every 20
+seconds. Registry/presence walks stop after 1,024 directory entries, JSON is
+bounded during serialization, NDJSON readers preserve a scan offset, and UI
+collection/grid/screen/key limits are checked before duplicate allocation or
+enumeration.
+
+Registry and presence records name their owner by pid *and* by that process's
+OS-reported start time, so a pid the system later hands to an unrelated program
+cannot keep a dead server advertised or a dead window's accent claimed. A
+record without that token (an older build, an OS that cannot report one) keeps
+the historical bare-pid answer rather than being pruned on suspicion. Pruning
+runs the same rule in reverse: a record is named on disk by the pid it belongs
+to, so a delete re-reads the file first and does nothing unless it is still the
+record that was judged. Otherwise the recycled pid's *new* owner — which has
+already registered at that path — would lose an entry it can never rewrite,
+since a server registers once at startup and never heartbeats. On Linux the
+token is boot-relative while the fallback base directory can outlive a reboot;
+that mismatch can only keep a leftover record, never delete a live one.
+
+The discovery registry reserves a `kind` field — `"gui"` today — as the
+forward-compat seam for the optional `kettle-muxd` session daemon (see
+[MUX-SERVER-DESIGN.md](MUX-SERVER-DESIGN.md)): when `kettle-muxd` lands it can
+re-host the same server side as `kind = "muxd"` without breaking any client.
+
+App-owned modal input stays distinct from pane input. `send_keys` encodes keys
+through the active terminal modes and writes them to the PTY;
+`dispatch_ui_key` accepts a bounded, pre-parsed batch only while a supported
+Kettle modal is open and never enters the PTY path. `ui_geometry` exposes the
+search bar's rectangles, focused control, modes, status, target pane, and
+truncation flag; its Search object deliberately omits the query and matched
+terminal text.
+
+Pane-bound bytes never block the App thread. Each pane owns two bounded input
+lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
+control requests) and higher-priority terminal protocol replies. Both lanes
+have 64-message channels and independent byte budgets; the worker advances a
+message in at most 8 KiB writes and checks the reply lane between user chunks.
+The enqueue boundary returns `PaneInputResult::{Queued, ReadOnly,
+Backpressured, Oversize, Failed}`. GUI callers provide throttled visible
+feedback for transient/size failures, read-only remains visible in pane chrome,
+and a failed worker is sticky and closes the pane. Control RPCs preserve the
+distinction as `read_only`, `busy`, `bad_params`, and `internal` errors. A
+local paste over 4 MiB is rejected before wrapping or fan-out; it is never
+silently shortened.
+
+## In-process multi-window
+
+On macOS, decorated windows keep AppKit's title, traffic lights, drag region,
+shadow, and rounded window mask. Native blur is a sibling behind Winit's Metal
+view and is constrained to the content rect below the caption. AppKit owns the
+opaque titlebar and follows Kettle's selected light or dark appearance. Kettle's
+background color backs the content during resize. The effect is shown only when
+the renderer's creation-time surface is translucent. Reduce Transparency makes
+the window opaque again. Borderless macOS
+windows do not install the effect: without AppKit's decorated frame, the
+sibling material composites over Winit's Metal layer. They keep ordinary alpha
+transparency so terminal content remains visible.
+
+Windows applies the same raised surface and a contrast-checked text color
+through DWM while requesting its system backdrop. Linux probes the live
+Wayland registry before enabling Winit's KWin blur path. X11 and Wayland
+compositors without that protocol get a 99% opacity floor on the live underlay
+and replacing pane-base pass. That floor is applied only to the swapchain
+render, so offscreen screenshots retain the configured alpha and config files
+are never rewritten.
+
+The content view is deliberately *not* full-size: tabs, terminal cells, pointer
+hit-testing, and ctl geometry all stay below the traffic lights without a
+platform-specific synthetic inset. Extending the renderer under the titlebar
+would require compensating every one of those coordinate systems for AppKit's
+content layout rect; no such hidden geometry shift is introduced for a cosmetic
+fix.
+
+The generated application icon uses the historical, font-independent `>_`
+mark on every platform. Dark appearance uses a TokyoNight blue system-masked
+field, an inset dark face, and a blue mark; light appearance swaps those two
+colors exactly. The inset is 24 px in the 256 px macOS rendition and its 24 px
+radius follows the system mask instead of competing with it. Icon Composer
+owns the adaptive outer mask and lighting. Linux and Windows retain compatible
+pre-rounded assets; their live Windows/X11 icon switches with the active theme.
+The 16 px raster uses a thicker optical-size version of the same two strokes.
+Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
+metadata, and a loose previous-release `.icns` for the macOS 11 deployment
+target. Finder, the closed and running Dock item, and the app switcher therefore
+resolve the same adaptive asset. This removes the old running-versus-closed split.
+The native visual result remains a release gate rather than something inferred
+from SVG source or a Linux generator test.
+
+Since v2.18.0 every kettle window lives in one process. `App` holds
+`windows: BTreeMap<u64, WindowState>`
+(`crates/kettle-ui/src/window_state.rs`) — every per-window field (the
+winit window, its renderer, its `Mux` tab/split tree, input + overlay
+state) lives in `WindowState`, while `App` keeps the process globals
+(config, event-loop proxy, ctl server, Lua VM).
+
+A no-argument GUI launch first uses the private activation endpoint under the
+per-user runtime/state directory. One advisory lock elects a primary; the
+endpoint accepts only a versioned `open_window` request capped at 8 KiB and
+verifies same-user peers, while the connecting secondary authenticates the
+primary before sending its launch identity. Accepted clients run in independent
+workers (at most 16), and every frame read/write has a five-second deadline, so
+one incomplete or unread connection cannot serialize later launches. A
+capacity-32 handoff reaches the winit thread, and
+the secondary exits only after that thread confirms OS-window creation. Because
+the window opens before the response is written, delivery is at-least-once and
+every request carries a per-launch idempotency key: the primary remembers what
+it did for that key (bounded, expiring) and answers a retry from the record, so
+a response lost to a slow cold start cannot open a second window for one click.
+A retry that arrives while the first attempt is still in the handler waits for
+its outcome instead of racing it — for less than one frame deadline, since the
+requester is already reading under a deadline that started earlier and an
+answer produced after it would be written to nobody. A busy,
+incompatible, timed-out, or failed request falls back to a separate process so
+a launcher click is never discarded. Any explicit argument bypasses activation;
+`--new-process` provides a discoverable isolation escape hatch for an otherwise
+default launch. Dev-record builds also compare a bounded path fingerprint and
+raw-input policy before joining, preventing recording-policy drift without
+putting a user path on the wire.
+
+- **Take-out/put-back dispatch** — the `ApplicationHandler` entry points
+  remove the addressed window from the map, run the inner handlers with
+  disjoint `&mut App` + `&mut WindowState` borrows, then reinsert it.
+  Window closes route through a single funnel
+  (`pending_window_closes: BTreeSet<window id>` →
+  `finish_window_dispatch`). A request can be consumed only by the window id
+  that produced it, including when ctl dispatch temporarily checks out a
+  mapped sibling. The funnel exits the event loop only when no windows remain.
+- **One GPU context** — the wgpu `GpuContext { instance, adapter,
+  device, queue }` is created with window 1 and shared; each subsequent
+  window gets its own surface via `Renderer::new_with_gpu` (synchronous —
+  no adapter request, no watchdog needed). Live windows, `--gpu-info`,
+  screenshots, offscreen tests, detection, and recovery share one adapter
+  policy. A config-pinned GPU (`gpu-vendor-id` /
+  `-device-id` / `-name`, set via Settings → Graphics) wins; `gpu-backend`
+  applies with or without that physical pin. Auto backend order is deterministic
+  (DX12 first on Windows, Metal on macOS, Vulkan elsewhere), and unavailable
+  explicit backends log an observable fallback to native order. The common
+  unpinned Auto path enables and probes one backend at a time, so successful
+  Windows DX12 startup does not initialize the Vulkan ICD. Pins and explicit
+  low/high preference use one cross-backend enumeration; low/high ranks the
+  physical GPU before backend and preserves the platform-preferred adapter for
+  equal-class ties. Live instances retain winit's event-loop-owned
+  `OwnedDisplayHandle` so the GLES fallback can present under Wayland without
+  keeping window 1 alive. An absent pin
+  (eGPU unplugged, driver swap) falls through to the power policy, so a stale
+  portable config never prevents startup. Because the device/surface graph
+  can't hot-swap and every window shares the one adapter, GPU changes apply on
+  the next launch (the settings panel shows a "restart to apply" hint).
+  Device creation retains the adapter's full 2D texture dimension for large
+  high-DPI surfaces but clamps every other WebGPU default to the adapter's
+  advertised limit. That common policy covers live windows, screenshots,
+  offscreen checks, and renderer tests. It permits graphics-only virtual GLES
+  adapters that advertise zero compute workgroups without inflating Kettle's
+  resource envelope to every hardware maximum; Kettle has no compute pipeline.
+  A fatal wgpu error latches one bounded in-memory `GpuFault`; the event loop
+  then rebuilds every renderer on a pure settle/backoff state machine
+  (same physical GPU through an alternate backend → surface-preferred GPU →
+  another physical hardware GPU → software) without dropping PTYs.
+  Driver callbacks never perform filesystem I/O. The event-loop thread writes
+  capped, rotated, terminal-content-free JSONL incident records under the
+  per-user cache. Surface acquisition treats both `Success` and `Suboptimal`
+  outcomes as renderable; a suboptimal frame is submitted and presented before
+  the surface is reconfigured for the next acquisition. Rendering is a UI
+  transaction: `Renderer::render_frame*` returns `Presented`, `RetryLater`,
+  `Occluded`, or `SurfaceLost`, and the normal `kettle-ui` render path commits
+  output-generation counters, the paint timestamp, and flood-pacing state only
+  for `Presented`. Candidate output-generation maps are recycled and swapped on
+  commit, so this correctness boundary adds no steady-state per-frame
+  allocation. Visible startup windows are a lifecycle exception: they are
+  revealed immediately after renderer initialization, before the first redraw.
+  Genuine device loss is the other deliberate exception: the redraw guard
+  snapshots output generations without presentation so a streaming PTY cannot
+  spin while all renderers are being recovered. Paint scheduling uses the same
+  occluded/minimized/explicitly-invisible predicate as animation and retry
+  scheduling, retains terminal damage while hidden, and repaints on restore.
+  Transport wakeups are a separate concern: an opt-in recorder or Lua output
+  sidechannel keeps them enabled so its bounded queue can drain, but those
+  event-loop wakes do not authorize a hidden-window paint.
+  Before releasing a failed device, every window retains a CPU-only recovery
+  snapshot of its live font family/size, cell scaling, resolved accent, and any
+  queued screenshot completion. The snapshot survives failed adapter
+  escalations; an all-or-nothing successful rebuild reapplies it at the
+  window's current monitor scale and size, invalidates stale pane snapshots,
+  and reflows every nonzero surface exactly once.
+  Timeout and `Outdated` retain damage and enter a capped, deadline-driven
+  per-window retry. Hidden, minimized, or compositor-occluded windows leave that
+  repair armed without a wake deadline. wgpu 30 `Lost` recreates the affected
+  surface/renderer through `Instance::create_surface` while keeping the healthy
+  shared device; only the device-lost callback, out-of-memory, or internal GPU
+  errors enter process-wide adapter/device recovery. Other render errors rebuild
+  the affected renderer's retained resources on their own capped backoff.
+- **Presentation and readback respect the window-system boundary** — every live
+  frame calls winit's `pre_present_notify` after queue submission and
+  immediately before `present`, which is required for correct compositor frame
+  tracking. A live screenshot renders one scene into a process-budgeted,
+  transient offscreen target before swapchain acquisition, copies that texture
+  in the same submission when a drawable exists (or in its own submission when
+  it does not), then hands the staging buffer to one bounded worker for finite
+  GPU-wait intervals, mapping, and conversion. The target,
+  staging buffer, and their separate process-budget reservations are admitted
+  before encoding and travel with that job until submission completion or
+  device loss; one wait timeout retains rather than undercounts them, while two
+  consecutive timeouts classify the shared device as wedged and enter ordinary
+  device recovery. Once readback reaches bounded CPU memory, those GPU objects
+  and reservations drop immediately; crop, PNG encoding, inode sync, and atomic
+  publication run in one process-wide fixed two-worker persistence pool shared
+  by every window and replacement renderer. Thus one cancelled
+  save stuck in the filesystem cannot retain capture admission indefinitely,
+  while the pool bounds stranded CPU buffers. This makes
+  capture independent of Metal occlusion and surface `COPY_SRC` without
+  weakening the retained terminal-image limit. The event-loop thread never
+  waits for a GPU readback; targets known hidden/minimized fail promptly, while
+  a backend that cannot report those states falls back to the bounded control
+  timeout. Encoding and the staged-inode durability flush remain cancellable;
+  cancellation and publication use one atomic final transition immediately
+  before the no-replace link/rename, so the destination is never a partial
+  file. A finite post-commit grace period reports an uncertain destination
+  instead of blocking a control thread indefinitely if publication itself
+  stalls. Publication errors distinguish "not published" from
+  "destination may exist" after durability, verification, or staging-cleanup
+  failure. A wedged worker explicitly wakes the event loop after destroying the
+  device, and genuine wgpu loss callbacks use the same process-wide wake, so an
+  occluded application enters recovery. A concurrent GPU capture receives an
+  explicit busy result; persistence accepts at most two jobs.
+- **Runtime diagnostics are phase-only** — a watchdog observes fixed event-loop
+  phase names (`resumed`, `gpu_init`, `window_event`, `redraw`, `user_event`,
+  `about_to_wait`) and writes one private, rotated record after a bounded stall.
+  An event-loop backend error writes the same record shape on exit. Records
+  include only version, pid, display backend, phase, elapsed time, window count,
+  and a sanitized bounded error; terminal bytes, commands, environment values,
+  and paths never cross this boundary. The logging subscriber bridges both
+  `log` and `tracing`, preserving winit's Wayland protocol error in stderr and
+  the journal.
+- **PTY wakeups fan out** to all windows, gated per window by a per-pane
+  output-generation counter — plain output emits no `TermEvent`, so the
+  counter is the only reliable "this pane has new bytes" signal. The reader
+  publishes that counter with release ordering before requesting its per-pane
+  gate for text, images, animation, progress, and notification side channels;
+  parser callbacks never bypass this ordered path.
+- **Filesystem notifications are hints, not commands** — the config and legacy
+  remote-command watchers observe a containing directory so atomic replacement
+  remains portable, then require the exact target path and a create, modify, or
+  remove event. Non-mutating access events are rejected: on Linux, reading a
+  watched file can itself emit `Access(Open)`, so treating access as a change
+  creates a reload feedback loop. Each watcher also has a one-in-flight atomic
+  latch. Config changes settle for 75 ms through winit's `WaitUntil` control
+  flow, with no event-thread sleep, then load and compile process-wide state
+  once before applying renderer changes to every window. The latch re-arms
+  immediately before the read so a racing genuine edit is not lost. Remote
+  commands share an advisory lock between sender append and receiver claim.
+  Current `--remote-send` writers encode each exact argument as one
+  `send-text-json <JSON_STRING>` line, preserving literal backslash escapes,
+  LF, CR, NUL, and command-looking text without allowing payload lines to
+  become operations. The receiver accepts the older lossy `send-text` form for
+  direct-writer compatibility; malformed JSON contributes only to the
+  coalesced unknown-line count, and diagnostics never include payload content.
+  The spool is capped at 1 MiB and a claimed batch at 1,024 operations; an
+  over-limit batch is rejected before any retained prefix is dispatched, and
+  unknown-line diagnostics are coalesced. A busy lock or backpressured pane
+  arms an event-loop deadline rather than sleeping. A claim reads and
+  truncates one batch under the lock, then dispatches its parsed commands from
+  an ordered in-memory FIFO before claiming another batch. This makes notification
+  coalescing safe but the legacy file transport deliberately **at-most-once**:
+  process failure after claim can lose the claimed suffix. `kettle ctl` is the
+  acknowledged alternative and returns only after enqueue success or a typed
+  input error.
+- **Pane ids are process-global** (the `NEXT_PANE_ID` atomic), so the
+  agent control plane and the session file address panes unambiguously
+  across windows.
+- **Per-window accents (Peacock), on by default** — `accent-color =
+  auto` (the default) gives each window a distinct theme-pool hue;
+  cross-process dedupe goes through a presence registry in kettle-ctl
+  (`crates/kettle-ctl/src/presence.rs`: one `<pid>-w<seq>.json` per
+  window under `<runtime base>/kettle/instances`, a sibling of the ctl
+  discovery dir; RAII guard, dead-owner pruning, best-effort). The directory and
+  leaves are current-user private on Unix; reads are no-follow and capped at
+  4 KiB, and version, filename identity, PID, owner start-time token, and
+  `#rrggbb` fields are validated before a claim participates in color
+  selection.
+  `accent-color = theme|off|none` opts out; a hex value pins one color.
+
+## Search architecture
+
+Search crosses core, UI, and renderer boundaries without materializing the
+whole scrollback buffer:
+
+- **`kettle-core` owns matching.** `CompiledSearch` validates strict Rust
+  regex syntax and the 4096-byte UTF-8 input cap, then runs
+  `regex-automata`'s meta engine over a bounded terminal-grid adapter. The meta
+  engine retains Rust leftmost-first behavior and Unicode assertions such as
+  word boundaries. Compilation admits at most 512 KiB of Thompson NFA, 256 KiB
+  of one-pass state, a 256 KiB hybrid cache, and 40 KiB of DFA state. It uses
+  `WhichCaptures::Implicit`, so only the implicit whole-match capture is built;
+  subgroup captures are unnecessary because the UI consumes grid spans, not
+  capture values. A syntactically valid expression that exceeds an engine
+  ceiling is **Pattern too complex**, distinct from Invalid pattern. Public
+  `SearchPoint`/`SearchSpan` coordinates use signed lines so historical rows
+  (negative in the engine's coordinate system) are not discarded. Bounds,
+  direction, wrap outcome, layout snapshots, scan tokens, and truncation are
+  explicit values rather than sentinel integers. Materialization maps soft
+  wraps, wide cells, combining marks, variation selectors, and ZWJ sequences
+  back to grid spans. Regex matches that consume no bytes are suppressed in
+  the engine's single leftmost-first pass; consequently, a nullable alternative
+  that wins with an empty match can shadow a later consuming alternative at
+  the same position.
+- **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
+  search state and an in-memory per-pane query map; moving between panes does
+  not leak a query into another pane, and no search state is process-global.
+  The Unicode editor moves, selects, and deletes by grapheme boundary. A scan
+  token combines pane output generation, query revision, and terminal layout.
+  Query changes and reflow restart work from a fresh viewport anchor. Plain PTY
+  output preserves and advances an existing chunk cursor so a continuously
+  writing process cannot starve deep-history search. Because rows can drift,
+  only a non-navigation scan schedules fresh verification after 500 ms quiet.
+  If output interrupts an explicit Previous/Next operation, its ordering cannot
+  be reconstructed by the default-direction retry; it remains Results limited
+  until the user explicitly retries navigation.
+- **Work is hybrid and bounded.** Typing searches at most 1000 physical lines
+  around the viewport immediately. When that finds nothing, a 500 ms idle
+  deadline advances through nominal 1000-line history ranges, with at most one
+  bounded core work slice per event-loop turn; explicit Next/Previous starts
+  the same resumable traversal immediately. Nearby highlights cover the visible
+  viewport plus 100 physical lines on each side.
+  One synchronous regex invocation receives at most 64 KiB of UTF-8. One
+  bounded core call has the same 64 KiB aggregate text ceiling plus limits of
+  262,144 inspected terminal cells and 256 complete logical-line haystacks.
+  Reaching an aggregate work ceiling returns an exact continuation at the first
+  unscanned hard logical line; it never splits a complete logical line, never
+  sets Results limited, and the UI resumes it on a later event-loop turn. The
+  nearby phase, background traversal, and visible projection each run at most
+  one such core work slice per turn; visible projection yields to foreground
+  navigation and resumes on the next turn.
+
+  A single soft-wrapped logical haystack is separately capped at 256 physical
+  rows, 64 KiB of UTF-8, and 262,144 inspected cells (including spacer/context
+  inspection). Reaching one of those capacities inside the logical line is an
+  accuracy barrier: exact matches wholly before it may still be painted, but
+  traversal stops immediately, returns no continuation past uninspected cells,
+  and reports **Results limited** instead of a definitive first, last, wrap, or
+  miss. One projection retains at most 65,536 spans. Retained search memory is
+  therefore independent of total history size.
+- **`kettle-render` owns layout and drawing.** One responsive bottom lane uses
+  one row on wide windows and as many additional rows as needed on narrow
+  windows, so every control remains present without painting over pane cells,
+  the status bar, or update banner. Highlight
+  projection consumes sorted signed spans in a single pass with the visible
+  cells (`O(cells + spans)`). The active result uses the theme search colors;
+  nearby results use the normal selection treatment. The bar intentionally
+  renders statuses such as Searching, Match, Wrapped, Start, End, No match,
+  Invalid pattern, Pattern too complex, Query too long, and Results limited
+  rather than an eagerly computed global count.
+
+Opening captures a viewport-relative anchor. Closing preserves the selected
+match at the same screen row (or restores the pre-open offset when there was no
+selection), which prevents the bar's reserved rows from making content jump.
+Wrap, case mode (Smart/Match/Ignore), and invert are persisted through the same
+config transaction as Settings. All editor and navigation input is handled
+before pane encoding, so it is not forwarded to tmux, AstroNvim, Codex CLI,
+Claude Code CLI, or other programs in the PTY. Native keyboard, IME,
+accessibility, and renderer behavior still requires platform-specific evidence.
+
+## Per-pane data flow
+
+```mermaid
+sequenceDiagram
+    participant Shell
+    participant PTY as portable-pty
+    participant Pump as blocking pump
+    participant Reader as parser thread
+    participant Ext as kettle-vt Extractor
+    participant VT as vte + alacritty Term
+    participant Side as images/prompts/cwd
+    participant Input as bounded two-lane input worker
+    participant Proxy as EventProxy
+    participant UI as winit loop
+    participant GPU as wgpu/glyphon
+
+    Shell->>PTY: stdout bytes
+    PTY->>Pump: read()
+    Pump->>Reader: bounded recycled buffer
+    Reader->>Ext: feed(bytes)
+    Ext-->>Side: Image/DeleteImages/VirtualImage/Animation/<br/>RelativePlacement/Prompt(OSC133)/Cwd(OSC7)
+    Ext->>VT: Pass(bytes) → Processor::advance(&mut Term)
+    VT->>Input: DSR/DA/OSC replies (priority lane)
+    VT->>Proxy: Title/Bell/Clipboard/ColorRequest/Wakeup
+    Proxy->>UI: EventLoopProxy.send_event(Wakeup)
+    UI->>UI: request_redraw() (coalesced)
+    UI->>GPU: render_frame(panes, images+placeholder/relative tiles, tabbar, overlay)
+    GPU->>UI: present
+    UI->>Input: key / mouse / paste / focus bytes (user lane)
+    Input->>PTY: bounded nonblocking chunks
+```
+
+The blocking PTY `read()` runs on a small pump thread so the parser thread can
+still wake at a DEC 2026 synchronized-update deadline while no bytes arrive.
+Their handoff is a four-slot synchronous channel with recycled 64 KiB buffers:
+output flood applies bounded backpressure instead of growing an unbounded
+queue. Pump-thread creation failure is logged and closes the pane through its
+normal exit event instead of leaving the parser parked on a senderless channel.
+The parser force-ends an omitted synchronized update at its deadline before
+returning any simultaneously ready chunk, so a sustained output queue cannot
+starve the flush. EOF/disconnect flushes immediately because no terminator can
+still arrive. The parser then bumps the output generation and wakes the UI for
+the now-visible frame after releasing the terminal lock.
+
+Graphics controls inside DEC 2026 use the same atomic commit boundary. While
+an update is open, the extractor retains each complete Sixel, Kitty, or iTerm2
+control string without decoding it and inserts a bounded, out-of-band VTE
+marker at the current synchronized byte offset. PTY bytes cannot forge a
+marker. When VTE commits the buffered text, marker callbacks first apply the
+terminal engine's preceding screen/cursor journal events and then replay that
+one graphics control against the exact buffer and cursor state at its wire
+position. Image cursor movement therefore precedes later buffered text. The
+reader suppresses its normal generation increment and redraw wake while an
+update is pending; a close, deadline, or EOF publishes only after every marker
+has replayed. The marker and deferred-control queues each cap at 256 entries.
+Overflow or a journal/marker mismatch is sticky for that update and fails
+closed by clearing both buffer-local graphics stores and resynchronizing the
+extractor to the engine's active screen.
+
+The optional raw-output tap has an explicit delivery policy. Lua output hooks
+use a bounded best-effort sender and may drop under plugin backpressure;
+recording and `kettle exec` use lossless delivery. `kettle exec` pairs that
+policy with a four-slot queue, so a slow stdout pipe blocks the PTY reader before
+it takes the terminal lock and bounds memory without creating a lock cycle.
+Terminal construction starts that reader first and waits for the pump before
+spawning the child. A thread can still be descheduled between announcing
+readiness and entering `read`, so Unix hands Kettle's parent-side slave
+descriptor to the pump after spawn. The pump retains it until it reads the first
+bytes, or a non-reaping child-status probe proves the command exited silently.
+This makes short-command capture an ownership guarantee rather than relying on
+the scheduler or the OS to retain output written before a read is pending.
+Rendered stdout commands cross a second four-slot queue to a dedicated writer,
+keeping blocking OS writes off the lifecycle thread. The lifecycle counts
+admitted commands and polls their completion plus the final flush/join; timeout
+and cancellation therefore remain observable after child exit, while ordinary
+completion still drains losslessly.
+Every stdout write and flush returns through a worker-outcome channel to the
+lifecycle thread. A genuine write/flush failure is not an abandonment: Kettle
+diagnoses it on stderr, terminates and reaps the owned process scope, finalizes
+any recording, and returns 74 (`EX_IOERR`) when teardown is verified (125
+otherwise) instead of the child's status. A deadline
+that finds a merely stalled consumer retains the separate bounded-abandonment
+contract and its `stdout was not fully delivered` warning, and returns 124 when
+teardown is verified even if the direct child already reported success: the
+deadline covers the complete lossless-delivery operation.
+
+PTY completion is a separate platform contract. The core reader publishes
+`Reading`, orderly `Eof`, sticky `Failed`, or `EofTimeout` before its sole
+raw-output sender drops, so a disconnected channel cannot relabel an
+unexpected read error as success. Failure does not discard earlier admitted
+chunks: completion waits for the parser handoff, raw channel, and stdout worker
+to drain, then returns 125.
+If the parser itself disappears while its source counter still names work only
+that parser could retire, the disconnected transport fails immediately rather
+than preserving an impossible pending count forever.
+Unix construction closes a separate race before this completion policy begins.
+The pump is running before the child is spawned, then retains Kettle's slave
+descriptor through the first successful master read. A child-only exit releases
+it before waiting for EOF; when macOS reports output and `NOTE_EXIT` together,
+the exit timestamp is recorded but the descriptor is released only after the
+read, because closing it first discards the tail. Linux waits on the master and
+a pidfd in one `poll`; macOS registers
+master readability and `NOTE_EXIT` in one kqueue. Other Unix targets use a
+bounded exponential `poll` plus non-reaping `waitid(WNOWAIT)` fallback. The
+primary paths are event-driven, so a quiet long-running pane does not incur a
+timer wake. In the windowed UI, pane reaping is similarly ordered: the event
+drain latches the reader's exit event and applies `exit-action` before
+`Mux::reap` may remove the pane. A direct `try_wait` in `reap` would consume the
+status too early, while the upstream `ChildExit(status)` notification can
+precede the final PTY drain; neither is a lifecycle boundary. Only the ordered
+`Exit` event can drop the pane after preceding bytes have been parsed and
+drained. They need not have been presented in a frame first. A held pane whose
+status was not ready at that boundary is polled once per second until it is
+collected; the grid remains visible, but no zombie is retained indefinitely.
+Unix has no elapsed-time success fallback: it requires that orderly EOF, with a
+five-second no-EOF bound that fails status 125. The pump retains its child
+observer after startup and drains every readable master chunk until that bound,
+so a `setsid()` descendant retaining the slave cannot park GUI exit policy or
+the headless lifecycle forever. Direct-child exit is observed without reaping
+through `waitid(WNOWAIT)`; the retained zombie remains a Linux identity anchor
+until ordinary output/recording completion. ConPTY may retain its output handle
+after the final repaint, so a bounded quiet interval starts an asynchronous
+pseudoconsole close while the reader remains live, after a Job Object accounting
+query proves that no same-console descendant remains able to write. Windows
+still requires the resulting EOF and reader-channel disconnect before headless
+success; a stuck close fails after five seconds. The windowed path independently
+waits on a duplicated child-process handle only for interactive panes. The
+single process edge is a semantic wake, independent of output generation and
+window visibility; the event loop owns both deadlines instead of keeping the
+observer thread asleep. It begins ConPTY close after five seconds and starts a
+second five-second bound only after the close worker was created. A failed
+worker start is an explicit retry state, never a false "close in progress" that
+could apply Hold while the master remained live. If the lifecycle exits while
+that close is still blocked, the
+close worker—not `Terminal::drop`—publishes reader stop after
+`ClosePseudoConsole` really returns. Reader status, source generation, and
+pending work occupy one atomic state word, so the quiet check cannot combine
+fields from different moments. A stdout command already accepted by the writer
+remains non-idle until its OS-facing write returns. The final source-progress
+sample is therefore taken behind an authoritative disconnect, when no new pump
+read can race it. Linux process teardown uses the session created for the PTY
+as its ownership boundary. Session membership survives reparenting and cannot be
+joined by an unrelated process. Before any numeric group signal or session scan,
+teardown stops the original leader through its pidfd and revalidates its PID plus
+start time; that unreaped anchor prevents the kernel from recycling the
+session/group ids. If the anchor cannot be proven, numeric targeting is refused.
+Each discovered member is then opened and revalidated through its own pidfd, so
+PID reuse cannot redirect a signal. Scanning all session members also covers
+children created by non-leader threads and workers which closed their PTY
+descriptor. The complete procfs
+inspection has explicit time and process bounds and reports when it exhausts
+them. SIGSTOP delivery is acknowledged through each retained identity before a
+scan is called stable, so a still-running member cannot fork after the final
+scan. If procfs or pidfds are unavailable, teardown says that the complete
+session could not be proven, refuses unauthenticated numeric targeting, and
+returns an unverified outcome that the exec lifecycle surfaces as status 125
+rather than a successful timeout/cancellation. On
+Windows, the vendored ConPTY backend
+creates an opted-in headless command suspended, assigns a kill-on-close Job
+Object, and resumes only after assignment succeeds; timeout containment exists
+before arbitrary child code can create a descendant. The Job handle is shared
+infallibly by cloned killers, Job termination errors are never normalized as an
+already-exited direct process, and spawn rollback waits for the suspended child
+to terminate before returning an assignment/resume error. Process completion is
+determined by a zero-time handle wait before reading the exit status, because
+the Win32 `STILL_ACTIVE` value is also a valid process exit code (259).
+Its independent PTY writer arbiter gives the bounded 64-message terminal-reply
+lane priority over forwarded stdin and incremental Unix VEOF injection. Reply
+admission and the arbiter's final reply recheck plus one nonblocking VEOF
+attempt share a short ordering gate. The producer holds it only for
+`try_send`; the arbiter drops it before yielding or retrying. An admitted reply
+therefore cannot be overtaken by an EOF attempt based on a stale empty-channel
+observation, while PTY capacity can never extend the critical section. Reply
+queue overflow, disconnect, and semantic-event overflow fail the command
+explicitly instead of dropping terminal protocol state. The guarantee begins at
+reply admission; a query generated after the kernel accepted a VEOF cannot
+retroactively overtake that byte.
+Unix permits exactly one live `PtyStdin` arbiter handle per terminal. Duplicated
+PTY descriptors share one open-file description, so independently restoring
+`O_NONBLOCK` from overlapping handles would let an older drop change a newer
+handle's I/O mode. Lease setup rolls back on failure, successful drop restores
+the captured flags before releasing the lease, and a restoration failure
+latches the terminal closed to future stdin handles rather than treating the
+still-nonblocking state as a new baseline.
+Windows ConPTY also forwards piped input. Its caller-owned pipe writer alone is
+put into `PIPE_NOWAIT` and advances in bounded 1 KiB steps; the synchronous
+handle passed into `CreatePseudoConsole` is unchanged. Windows anonymous pipes
+do not provide the Unix-style PTY EOF half-close used by canonical VEOF
+planning, so an EOF-waiting child must use an explicit input delimiter or a
+finite command timeout.
+GUI development recording subscribes to the same fan-out used by normal redraw
+and close drains, so consuming output for a recorder cannot steal it from Lua or
+skip a pane's final bytes. The shared asciicast writer stops at a complete event
+boundary before 512 MiB. Managed directories use private unique files, active
+file locks, and namespace-scoped 50-file / 5-GiB retention; explicit paths are
+locked before truncation.
+
+Asciicast events and per-pane session-log chunks use the same bounded
+persistence transport: 128 messages, a 4 MiB aggregate reservation, and 128 KiB
+per item. Producers use only nonblocking admission. A full queue closes that
+capture explicitly, drains writes already accepted, and publishes an overload
+state to the CLI or GUI; worker-side write/flush failure publishes the parallel
+I/O state. Saturation deliberately does not attempt an in-band marker: the full
+queue cannot guarantee that marker admission, so pretending otherwise would
+reintroduce a silent loss. The GUI instead displays `[REC INCOMPLETE]` plus a
+desktop notification, the CLI writes an explicit incomplete-trace diagnostic,
+and pane logging emits its own stop notification. The worker owns secure
+recording/session-log open, timed flush, and file
+destruction, so neither the GUI event loop, the exec lifecycle, nor the parser
+can enter filesystem I/O. Complete cast records are buffered as a batch and a
+short write is truncated back to its prior file boundary, preserving a valid
+NDJSON prefix. `flush_deadline` compatibility now returns no caller wake because
+the worker waits on that precise deadline itself.
+
+Ordinary `kettle exec` completion starts recorder finalization and polls it from
+normal lifecycle turns alongside stdout completion, retaining timeout and
+cancellation checks. It joins only after the worker reports finished and marks
+an over-bound finalization as I/O failure. An imposed stop performs only a
+zero-duration completion probe, reports an unfinished trace as failed, and
+detaches the worker; it never waits in a join.
+
+The input worker is a separate per-pane boundary from the output pump/parser
+pair. User messages are capped at 4 MiB plus the bracketed-paste envelope, with
+a slightly larger aggregate reservation for interactive input already queued.
+Protocol replies have a separate 2 MiB message/aggregate budget; rejecting one
+is terminal because silently losing a reply corrupts the terminal protocol.
+Broadcast fan-out returns the strongest result across its targets and scrolls
+only panes that accepted the write. Paste fan-out builds at most one raw and
+one bracketed immutable payload regardless of pane count.
+
+## kitty graphics pipeline
+
+The biggest VT extension. Decoding lives in `kettle-vt::kitty` (pure,
+heavily unit-tested); per-terminal registries live on `kettle-core::Terminal`
+and are populated by the parser worker; the renderer reads them each frame.
+
+`kettle-vt::GraphicsLimits` is the single allocation envelope for this path.
+Escape sequences are capped at 16 MiB; kitty transmissions at 96 MiB with at
+most eight/128 MiB in flight; decoded images and individual textures at 64 MiB;
+animation payloads at 128 frames/128 MiB; and placements at 256. RAII leases
+charge Kettle-owned decoded buffers, image textures, custom glyph atlases, and
+instance buffers to a 256 MiB terminal/window scope and 512 MiB process
+accounts. Decoders reserve before allocation, image clones share one lease,
+copy-on-write reserves a second image, and GPU caches release non-visible
+textures before admitting replacements. An oversized, unterminated control
+string is quarantined for at most one additional 64 KiB recovery window before
+the extractor returns to ground state. The 256-placement limit applies to
+inline terminal images; the independent wallpaper pipeline permits up to 4096
+tile instances and batches consecutive tiles that share a texture.
+
+Kitty placement intent stays attached to each placement rather than being
+rounded into cells once. The core re-resolves source crop (`x/y/w/h`),
+destination columns/rows (`c/r`), in-cell offsets (`X/Y`), one-axis
+aspect-preserving sizing, and `C=1` cursor suppression against the current
+cell/pixel geometry after a DPI change. Deletion covers every spatial/id
+selector plus frame deletion, distinguishes lowercase retain-data from
+uppercase free-data, and feeds the actual removed placement keys back into the
+decoder before later APCs in the same PTY read are parsed.
+Regular and placeholder placements use the grid's monotonic `history_origin`
+plus their grid-relative row, not a reusable `history_size + line` coordinate.
+Snapshots carry that origin to the renderer; the parser prunes a placement only
+when its half-open row span is wholly older than retained history, including
+after a synchronized-update timeout, and resize performs the same cleanup after
+history-limit changes. Placeholder projection adds `display_iter`'s already
+scrollback-relative line exactly once.
+
+Before upload, each inline image draw instance is clipped on the CPU to the
+intersection of the pane interior and exact terminal grid. The destination and
+source UV rectangles move by the same normalized fractions, preserving pixel
+scale while excluding padding, borders, top/bottom pane titlebars, sibling
+panes, and window chrome. Fully outside, degenerate, non-finite, and zero-line
+viewport placements produce zero-sized indexed slots so existing same-texture
+batch offsets remain stable. The independent wallpaper pass has no pane clip.
+
+The active graphics registries are buffer-local. Mode 47 switches to and from a
+persistent alternate graphics store. Mode 1047 preserves that store on entry
+and clears it on exit. Mode 1049 saves/restores the text cursor, clears
+alternate graphics on entry, and preserves them on exit. Every mode parks and
+restores the primary Sixel/Kitty/iTerm2 registries and switches the extractor
+between independent Kitty image-id stores. ED 2 clears only the active
+registries/store; RIS clears both and returns graphics extraction to primary.
+
+The vendored terminal engine reports these committed mutations through an
+authoritative journal in parser execution order, rather than making the image
+extractor infer terminal state from bytes. Each terminal retains at most 256
+events. Compatible adjacent scrolls coalesce while preserving the first and
+last monotonic screen-top ids; overflow is sticky until the next drain. The
+parser worker drains the journal after each text chunk; during DEC 2026 replay,
+it also drains through the matching unforgeable marker before applying the
+deferred graphics control at that exact ordering point. A natural close and
+forced timeout/EOF use the same replay path. If either bounded journal
+overflows, a marker does not match its deferred control, or the final
+active-screen snapshot disagrees with the applied sequence, Kettle clears both
+graphics buffers and resynchronizes extraction to the engine's active screen.
+
+Scroll events carry direction, page margins, count, pre/post screen-top ids,
+and screen height. A placement wholly inside the margins moves with the text;
+if the move crosses a margin, its destination height and normalized source
+range are permanently cropped by the same fraction. That range composes with
+any existing Kitty source rectangle. The original Kitty placement parameters
+remain attached to the fragment: a later monitor/DPI change re-resolves the
+source rectangle and horizontal/natural geometry, reapplies the composed crop
+to the new full destination height, and preserves the fragment's post-scroll
+document anchor and fractional y offset. Removed pixels therefore stay removed
+without freezing natural-size or one-axis-auto geometry at the old monitor's
+cell dimensions. A placement already crossing a margin stays at its visual row.
+Top-anchored scrolling uses the complete monotonic screen-top delta, so
+coalescing more scrolls than the page height still preserves document anchors;
+rows fixed outside the region are reanchored to keep their viewport position.
+
+Column reflow clears regular/relative placements whose document rows cannot be
+mapped exactly, but retains virtual prototypes and animations because the
+Unicode placeholder cells themselves are reflowed by the grid.
+
+This remains a deliberately partial Kitty implementation. Immediate
+acknowledgement/query replies, replacement cleanup when new pixels reuse an
+existing image id, and exact `Q=` parent-placement selection when an image has
+multiple concrete placements are tracked in
+[AUDIT-DEFERRED.md](AUDIT-DEFERRED.md).
+
+```mermaid
+graph LR
+    apc["APC G payload"] --> kit["kittyState::feed"]
+    kit -->|"a=t/T, a=p"| place["images registry<br/>(at cursor, z-ordered)"]
+    kit -->|"a=p,U=1"| virt["virtuals registry<br/>rows×cols box"]
+    kit -->|"a=f / a=a / a=c"| anim["anims registry<br/>frames + AnimationState"]
+    kit -->|"a=p,P=,Q="| rel["relatives registry<br/>(parent, h, v)"]
+    grid["U+10EEEE cells<br/>(fg=id, diacritics=row/col)"] --> ph["placeholder_tiles()<br/>resolve_run + source rect"]
+    virt --> ph
+    anim --> clk["current_frame(clock)<br/>swaps Placement.img"]
+    rel --> rt["relative_tiles()<br/>resolve_chain(depth≤8)"]
+    grid --> rt
+    place & ph & rt & clk --> draw["render_frame: shared texture + per-instance UVs"]
+```
+
+## Render pass order
+
+The renderer's per-pane text buffers, per-row shaping keys, style keys, and
+titlebar caches are indexed by the process-global pane id carried in
+`PaneView`. Visible pane order can change when a split is rotated, a tab moves
+between windows, or a pane is re-tiled; the renderer swaps cache slots to keep
+already-shaped rows attached to the same terminal pane instead of the same
+screen index.
+
+Font loading is also staged on the live renderer path. The bundled Regular face
+is loaded during `Renderer::new` so the first visible frame can measure and draw
+normal terminal text. Bundled Bold, Italic, and Bold Italic are loaded once the
+snapshot contains styled text, then text cache keys are invalidated so future
+shaping sees the complete family. Headless screenshot paths still load the full
+family because they render a single static image and do not benefit from a later
+warm-up frame.
+
+Each frame the renderer issues ten passes (grid mode; nine in legacy) against
+the same wgpu render-pass encoder, in this order. The order matters: a quad pass
+paints over text drawn before it, and text drawn after a quad covers
+that quad's pixels.
+
+```mermaid
+flowchart LR
+    clear["Clear color<br/>(theme bg + opacity)"] --> bgimg["0. bg_imgs.draw<br/>background image<br/>(wallpaper, at the back)"]
+    bgimg --> quads["1. quads.draw<br/>pane bg, tab bar,<br/>chrome quads + cursor block"]
+    quads --> imgs["2. imgs.draw<br/>sixel · kitty · iTerm2<br/>inline image overlays"]
+    imgs --> glyph["3. glyph_pipeline.draw<br/>pane text, CELL-LOCKED<br/>(grid mode; v2.25.0)"]
+    glyph --> text["4. text_renderer.render<br/>tab / titlebar text<br/>(+ pane text in legacy)"]
+    text --> overlay["5. overlay_quads.draw<br/>pane dimming · scrollbar<br/>(NOT menu chrome)"]
+    overlay --> menuq["6. menu_quads.draw<br/>shadow · panel bg ·<br/>border · row highlight"]
+    menuq --> receipt["7. media_receipt_img.draw<br/>bounded clipboard thumbnail<br/>(when visible)"]
+    receipt --> menut["8. menu_text_renderer.render<br/>context menu + settings overlay<br/>row labels"]
+    menut --> curg["9. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
+```
+
+**Pass 3 (v2.25.0) — cell-locked pane text.** In the default `text-renderer =
+grid` mode pane cell text is drawn by `glyph_pipeline`
+(`crates/kettle-render/src/glyphpipe.rs`), an instanced glyph renderer that pins
+every glyph to its grid cell (`pane_origin + col × cell_w`) — the
+Alacritty / kitty / WezTerm / Ghostty model. `build_pane` still shapes each row
+with cosmic-text (the per-line shaping cache is unchanged), but instead of handing
+the whole `Buffer` to glyphon, `emit_pane_glyphs` walks the laid-out glyphs and
+emits one pinned instance each, rasterized through cosmic-text's own `SwashCache`
+into a private mask+color atlas. The fragment shader replicates glyphon's exactly
+(mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas), so
+antialiasing, gamma and theme colors are identical — only the X position is
+substituted. This fixes glyph drift: previously a glyph whose advance differed from
+the cell width (fallback-font CJK / color emoji / some symbols, ligature clusters,
+a mismatched-width bold/italic face) shifted every following glyph off the
+`col × cell_w` grid that the selection highlight, cursor and mouse hit-testing all
+use. Emission runs on the same `need_prepare` damage gate as the glyphon prepares
+it replaces: a steady frame re-draws the retained instance buffer for free, and a
+frame that re-prepares for any reason (a pane row changed, a chrome label changed,
+or a cursor blink to a new glyph) re-emits the pane instances — the same cadence
+the old glyphon pane prepare ran at, so it is at parity, not a regression.
+`text-renderer = legacy` keeps the old continuous-glyphon pane path (pass 4) as a
+rollback escape hatch; pass 3 is then an empty no-op. Since v2.25.1 the grid pass
+has its own damage gate: pane text/style/geometry changes refresh glyph
+instances, while cursor blink updates only cursor quads and the cursor-glyph
+pass. A blink must never invalidate or stale-draw ordinary pane glyphs.
+
+Pass 0 (v2.23.0) is the **background (wallpaper)** in its own pipeline, drawn at
+the very back so the cell/chrome quads (pass 1) composite *opaquely on top* of it
+— the standard kitty / WezTerm / Alacritty layering. The wallpaper lives in
+`bg_imgs` (a decoded image texture), separate from the **inline** sixel/kitty/
+iTerm2 images in `imgs` (pass 2, which sit over cell backgrounds). Before v2.23.0
+the wallpaper shared `imgs` and drew *after* the quads, which (a) hid every cell
+background under an opaque wallpaper and (b) bled the animation through the tab
+bar / status bar. The chrome strips now resolve an opaque fill via
+`chrome-background` (theme / auto-from-wallpaper / black / white).
+
+**v2.24.0 — procedural starfield.** When `background-type = starfield`, pass 0
+instead draws `starfield` (`crates/kettle-render/src/starfield.rs`): a fullscreen
+triangle whose WGSL fragment shader *generates* a slow forward-flight star field
+per-pixel from a tiny uniform `{resolution, time}`. It's a **fixed built-in
+example** (v2.24.1) — the look (speed `0.009`, `NSTARS = 55`, glow, and the
+fade-in: center stars fully invisible, cubic `prog³` proximity ramp) is baked
+into the shader as WGSL constants, not config-driven. No decoded frames → ~zero memory, true-color (no GIF banding), a
+perfect loop, and crisp at any resolution. It is mutually exclusive with `bg_imgs` and composites
+identically (chrome opaque on top). The animation tick reuses the GIF machinery
+via a **synthetic fps clock**: `bg_current_frame_index` / `bg_anim_interval_ms`
+quantize the continuous drift to a ~10 fps cap (`STARFIELD_FPS`) so the existing
+edge-trigger + wake-scheduling in `App::about_to_wait_inner` advance it at low
+idle cost, while the shader's `time` uniform stays continuous so each repaint
+shows the exact position. The animated background (starfield or image) now plays
+by default even when unfocused, but the event loop **freezes the wake when the
+window is minimized or occluded** (`window_occluded` + `is_minimized`), so a
+hidden window costs zero idle.
+
+The **settings overlay is mouse-driven** (v2.24.0): `kettle_render::settings_hit_test`
+recomputes the panel geometry from the SAME `settings_display_lines` + panel math
+the draw uses (single source of truth) and maps a cursor position to a category
+tab / field row / outside; `App::settings_mouse` dispatches that into the existing
+`settings_adjust` (left-click = cycle forward, right-click = back, wheel =
+adjust). The Background settings page edits the image path through an inline text
+prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
+
+Steps 6 and 8 own the right-click context menu so its labels land **on
+top of** the panel background. Splitting them out fixed the v1.3.0 /
+v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
+step 5 (`overlay_quads`), painting over the menu text that had
+already been rendered.
+
+Step 9 (v2.21.0) draws the inverted glyph **under a focused solid
+block cursor** in its own 1-glyph renderer, on top of the block quad
+(step 1). Decoupling it from the pane text buffer — rather than
+recoloring the glyph in-place — means a cursor blink leaves the pane
+buffer byte-identical, so the **damage gate** can skip the expensive
+whole-viewport `text_renderer.prepare` (which re-encodes every visible
+glyph's vertices) and its paired `atlas.trim`: `build_pane` reports
+whether any row reshaped, and `prepare` runs only when a pane row
+changed, a chrome label changed, or a text overlay is open. The 6–9
+passes are cheap no-ops while idle (empty/unchanged buffers). The
+`TextRenderer` instances share one `TextAtlas` and `Viewport` —
+glyphon batches glyphs by atlas, not by renderer, so each pass reuses
+already-cached glyphs (the cursor glyph is part of the visible pane
+text, so its bitmap is already resident).
+
+## Threading model
+
+- **Main thread** — winit event loop, *all* GPU work, every window's
+  tab/split tree (the `windows` map; dispatch is take-out/put-back, see
+  above), input encoding, search/SSH overlays, session save/restore,
+  cursor-blink and visual-bell timers (scheduled via
+  `ControlFlow::WaitUntil` only while something animates, so an idle
+  terminal does no work). Blink phase advances at the timer edge before the
+  redraw request, so a delayed Wayland frame callback cannot enqueue the same
+  phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
+  do not reposition IME or request another frame unless visible preedit state
+  actually changed.
+- **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
+  command-completion, and internal diagnostic toast enters a 64-message
+  `try_send` queue. The worker preserves order while calling the OS backend.
+  Notification services are allowed to block or fail without holding winit's
+  event loop; saturation drops later notifications and logs once per saturated
+  interval instead of freezing terminal rendering, input, or control replies.
+  Backend panics are caught per message so one platform failure cannot silently
+  disconnect the dispatcher. The worker handle remains process-owned, and a
+  normal GUI exit gives admitted messages a bounded 250 ms flush. If the OS
+  service remains hung, Kettle favors a prompt exit over guaranteed desktop
+  notification delivery.
+- **Monitor-DPI transitions are one layout transaction per window.** winit
+  delivers Windows `WM_DPICHANGED` as `ScaleFactorChanged` before the
+  `SetWindowPos`-driven physical `Resized`. The renderer adopts the new glyph
+  scale in the first event, while a per-window coalescer defers surface, grid,
+  recorder, and PTY resizing until the usable physical size arrives. An
+  `about_to_wait` fallback commits from the live inner size only if no resize
+  arrived. Zero-sized/minimized windows and renderer or GPU recovery retain the
+  pending transition, so Kettle never sends an intermediate grid or duplicate
+  `SIGWINCH` merely because a window crossed mixed-DPI monitors.
+- **PTY geometry is one versioned grid-and-pixel transaction.** The UI derives
+  exact text-area pixels from fractional renderer metrics and computes each
+  restored or newly split leaf before spawning its child, so the process sees
+  the correct initial winsize. Removal is the same transaction in reverse:
+  reaping a pane whose child exited promotes its sibling into the whole
+  rectangle, so the reap marks a resize and requests the frame that flushes it.
+  Without that the survivor is painted at its new size from a live layout while
+  its PTY keeps the geometry it had inside the split, and the child is never
+  signalled. Grid reflow, image-cell conversion, and the
+  published pixel extent use one `Term`-then-geometry lock order and cannot mix
+  two resize generations. Desired geometry is tracked separately from the last
+  native geometry that succeeded, which makes a failed native resize retryable
+  on the next layout pass. Windows clamps ConPTY rows/columns to its signed
+  16-bit boundary and skips synchronous `ResizePseudoConsole` calls when only
+  the advisory pixel extent changed; Unix still publishes pixel-only winsize
+  changes.
+- **A codepoint Unicode renders as text is asked for a text face.** Nothing in
+  the shaping stack consults `Emoji_Presentation`: cosmic-text takes the first
+  family in its cascade whose cmap has the codepoint, and on macOS that is Apple
+  Color Emoji for anything the text faces lack. So `⏺` U+23FA, which is one cell
+  wide and text by default, drew a square colour bitmap over a one-cell slot and
+  covered the next column. The row builder now adds a per-cell span requesting a
+  monochrome symbol face for those codepoints. Which codepoints those are is
+  read out of the width table rather than a vendored list: every
+  `Emoji_Presentation=Yes` codepoint is East Asian Wide, and `unicode-width`
+  also widens an emoji-capable codepoint when U+FE0F follows, so one column
+  alone and two with U+FE0F means exactly `Emoji=Yes, Emoji_Presentation=No`.
+  The face is resolved once at renderer init from a short per-platform list, and
+  a system with none of them keeps the platform cascade it had.
+- **One parser thread plus one blocking pump thread per pane** — the pump reads
+  the PTY master into a bounded recycled-buffer channel; the parser applies
+  `Extractor::feed`, records image/side-channel chunks, drives text chunks into
+  the `alacritty_terminal::Term` (behind a `Mutex` shared with the renderer),
+  and wakes the UI. This split preserves parser deadlines without unbounded
+  buffering. **Teardown invariant** (`Terminal::Drop`,
+  `crates/kettle-core/src/term.rs`): it runs on the UI thread (a pane close drops the owned
+  `Pane.term`), so it must **never `join()`** these workers. On Windows a
+  ConPTY `read()` only unblocks once the pseudoconsole is *closed*, while
+  `ClosePseudoConsole` itself can wait for conout to drain. Joining a worker or
+  destroying that master on the UI thread can therefore make the window "not
+  responding". Drop closes the writer when immediately available, moves child
+  kill/reap and master destruction to a detached teardown worker, and
+  **detaches** the parser handle. Before starting that worker, Drop switches
+  the pump into direct discard/drain mode; an interruptible bounded handoff
+  lets it bypass a full parser queue, so draining cannot depend on parser or UI
+  progress. The pump remains live while the worker closes the master; only
+  after that close returns does the worker publish the reader stop flag. This
+  is required before Windows 11 24H2, where
+  [`ClosePseudoConsole`](https://learn.microsoft.com/en-us/windows/console/closepseudoconsole)
+  may wait indefinitely if the output pipe is not closed
+  or continuously drained. Windows 11 24H2 returns from that API immediately,
+  but uses the same safe ordering. The workers own only moved values or `Arc`
+  clones (no borrow of `Terminal`) and exit on their own. If teardown thread
+  creation fails, Kettle logs, stops the reader cooperatively, and intentionally
+  retains the native handles rather than entering an unbounded platform close
+  on the UI thread.
+- Output floods use a per-pane atomic wake gate and a per-window paint state
+  machine. A renderable pane publishes at most one pending event-loop wake.
+  Hidden, minimized, occluded, or renderer-unavailable panes retain paint
+  damage without a redraw deadline and publish one paint wake when
+  renderability returns. If a pane has an opt-in recorder/Lua output
+  sidechannel, transport wakes remain enabled while hidden so its bounded queue
+  drains; the visibility/recovery guards still prevent those wakes from
+  entering presentation. The paint pacer
+  advances `deferred → queued → presenting → idle` only after a presented
+  frame; a failed presentation returns to `deferred` without a busy deadline.
+  The pane latch stays closed throughout a deferred interval and reopens only
+  when a real frame is about to snapshot generations. A queued wake that was
+  already covered by a presented frame is acknowledged and then resampled,
+  closing the race between the stale check and rearm. Visibility, recovery,
+  reap, and renderer guards run before the pacer can enter `presenting`, so an
+  early return cannot strand the state machine or create a near-zero wake loop.
+  Per-pane
+  registries (`images`, `virtuals`, `anims`, `relatives`, `prompts`, `cwd`)
+  are `Arc<Mutex<…>>` snapshotted cheaply for rendering; a running kitty
+  animation schedules a ~30 fps redraw tick (otherwise idle, no CPU). The
+  extractor caps in-flight sequences (16 MiB) so a hostile stream can't hang
+  or OOM — the cap is security-relevant: an SSH session into a constrained
+  container can otherwise OOM-kill kettle by emitting unbounded image data.
+- **Context-menu redraws are terminal-lock-free when safe.** Pointer/keyboard
+  highlight changes arm a one-shot snapshot-reuse hint. Before taking the fast
+  path, the UI compares every visible pane's stable id, atomic output
+  generation, columns, rows, and order with the pooled snapshot keys. Any
+  intervening input/user event clears the hint, active pointer gestures disable
+  reuse, and any key mismatch falls back to the full drain/snapshot path.
+  Opening a menu also ends selection/scrollbar/split/tab gestures so
+  `CursorMoved` cannot mutate terminal state behind it. A reused snapshot
+  stages its exact visible-pane output generations into the presentation
+  transaction while preserving the last committed generations for background
+  panes, so racing output stays pending. It also carries the captured
+  cursor-blink bit; both overlay construction and the event-loop blink
+  scheduler use it instead of reacquiring the focused `Term`.
+  Renderer text damage excludes the highlighted menu row but includes labels,
+  enabled state, theme colors, anchor, and scroll window. The renderer still
+  walks the cached snapshots and rebuilds its quad batches; the optimization
+  avoids terminal capture and retained-text preparation, not all frame work.
+  Menu measurement uses Unicode display columns with grapheme-safe ellipsis.
+  The UI, renderer, and agent geometry endpoint consume the same clamped panel
+  dimensions and expose or hit-test only rows that fit completely. Pointer
+  hit-testing streams separator flags without a temporary collection, and the
+  wheel clamp finds its final fitting suffix in one reverse pass; both are
+  O(menu items).
+- **Lua VM** is parked on the App struct (single-threaded
+  `LuaEngine`) — `mlua`'s `send` feature makes the handle `Send + Sync`
+  but kettle never clones it across threads. Event hooks
+  (`LuaEvent::Startup` / `TabAdd` / `TabClose` / `Bell` / `Output` /
+  `PaneClose` / `PaneFocus` / `TitleChanged` / `UrlClicked`) fire
+  synchronously on the App thread. Lua side-effects (`SendText`,
+  `ExecAction`, `Notify`, `SetTheme`) first enter the Lua engine's
+  bounded queue, then move immediately into one process-wide App FIFO.
+  Both boundaries cap the queue at 1,024 commands and pending `SendText` at
+  8 MiB; each `send_text` call is capped at 1 MiB. Side-effect calls return a
+  Lua boolean reporting admission to the first queue, not eventual delivery.
+  The App runs at most 16
+  commands and 1 MiB of sends per event-loop turn. A backpressured head is
+  retained byte-for-byte and retried on a 10–250 ms exponential deadline, so
+  later actions cannot overtake it. Its target pane is latched on first
+  attempt and a closed target is dropped visibly rather than rerouted.
+  Registries are closed and bounded: only the nine emitted event names are
+  accepted, with 256 callbacks per event, 256 menu items, and 256 URL
+  handlers; menu labels are capped at 1 KiB, URL handler names at 256 bytes,
+  and URL patterns at 4 KiB before Rust allocation. Registration returns a
+  Lua admission boolean and a rejected entry does not mutate the registry. A
+  broken Lua plugin
+  `log::warn`s and is skipped — it never aborts the terminal
+  ("broken plugin can't take down kettle" contract).
+- **Broadcast fan-out** (via the `BroadcastScope` enum) is App-side
+  target selection: on every keystroke the App
+  walks `compute_broadcast_targets(scope, focus, in_tab, all)` and
+  computes each target's effective keyboard mode independently before encoding.
+  In particular, the pre-negotiation modified-Enter policy samples that pane's
+  live Unix PTY line discipline plus foreground process group, or Windows OSC
+  133 command state, and pairs it with the bounded background process snapshot.
+  Only a narrow allowlist of known agent composers receives the unnegotiated
+  fallback; nested shells, readline clients, unknown process trees, and stale
+  Unix snapshots fail closed to plain Enter. A composer and the shell's own line
+  editor in the same broadcast group therefore receive the safe encoding for
+  their own context rather than the focused pane's encoding. The App then queues
+  the encoded bytes to each target pane's input worker. The reader threads of
+  the receiving panes pick up the echo through their
+  normal byte-stream path.
+- **Adaptive directional focus** is decided only for a physical non-macOS
+  `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
+  edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
+  chord and receives focus, while an outside-edge press stays unconsumed and is
+  encoded for the PTY. A zoom that hides sibling panes keeps the chord
+  application-owned as a no-op; a one-leaf tab passes it through even if its
+  persisted zoom bit remains set. A two-set press/release ledger ensures that
+  once any repeated press reaches the PTY, terminal ownership stays sticky
+  through its release; otherwise the UI-owned press suppresses that release.
+  Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /
+  `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
+- **Allocation hot-paths**: `App::drain_events`
+  has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
+  Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the
+  byte slice into a fresh `Vec<u8>` for the Lua callback (no
+  shared ownership because mlua's `IntoLuaMulti` consumes the
+  argument); `ContextMenuRow.label` clones the visible row text
+  each frame the menu is open (~512 clones/frame in the worst
+  case — Theme submenu drilled-in). The menu allocation is bounded
+  by user interaction (only allocates while the menu is OPEN) so
+  the steady-state allocator pressure is zero. A `Cow<'static, str>`
+  refactor of `ContextMenuRow.label` is the natural next step if
+  this ever shows up in a profile; today it's not measurable
+  against winit's per-frame work.
+- **Synchronization and unsafe-code audit**: unsafe code is confined to narrow
+  OS FFI/handle ownership boundaries (Windows named pipes/window APIs, libc
+  `sendmsg`/`recvmsg`/SCM_RIGHTS, signal setup, `pre_exec`, and raw-fd
+  adoption) plus UTF-8 conversion after an explicit valid-prefix check. Each
+  site documents its ownership or validity contract. There is no `transmute`
+  and no custom `Send`/`Sync` implementation. Per-pane `Arc<Mutex<...>>` are contended only on PTY
+  read or App snapshot; lock-hold times are O(bytes) — designed to
+  stay well under one frame's budget per drain even on fast scrolling.
+
+## Why the extractor sits *in front of* the VT engine
+
+The vendored VT engine has no image/graphics support and ignores OSC 7/133. The
+`Extractor` is a small state machine that pulls Sixel (DCS), APC `G`, and OSC
+1337 image sequences, plus OSC 7 (cwd) and OSC 133 (shell
+integration), out of the byte stream. It also consumes Kettle's bounded private
+OSC 777 completion metadata before the VT engine can see it. A separate bounded
+filter removes only that private sequence from logs and output hooks once per
+PTY read; parser chunking can therefore never flood their bounded queues.
+Everything else is forwarded
+**byte-for-byte** (terminator preserved: BEL vs ST) so the engine still sees a
+correct, untouched VT stream. This keeps us on a battle-tested engine while
+adding modern features it lacks.
+
+Completion protocol v4 adds two bounded presentation hints to the v3 sequenced
+envelope. Fish and PowerShell capture the replacement token and current-line
+input prefix before their first replacement, then retain both while cycling.
+The VT parser bounds token hints at 128 bytes and prefix hints at 1024 bytes.
+Unsafe, malformed, or oversized presentation hints degrade to no emphasis or
+alignment instead of hiding safe candidates. The renderer may emphasize the
+first ASCII case-insensitive label occurrence (or exact non-ASCII occurrence)
+and derive the command's start column, but
+neither hint can filter, rank, quote, insert, or execute a candidate. Versions
+1 through 3 keep their existing wire shape and render without emphasis from the
+grid edge.
+Unsafe candidate labels are omitted. An unsafe optional description is reduced
+to an empty string instead of removing its safe label, so the shell's selected
+candidate stays the selected row in Kettle's card.
+
+The completion card uses one geometry function for paint, pointer blocking, and
+AccessKit. It prefers to grow upward from the editable command column with its
+bottom edge a half cell above the first prompt row. When the upper lane cannot
+fit the requested page and the lower lane can show more, it flips below the
+final wrapped command row without leaving the terminal grid. The terminal pairs
+a request's captured cursor with that reply's input prefix. Ordinary cycling
+keeps the pair stable. UI-only dismissal across Ctrl-L, focus changes, shell clears, pointer
+dismissal, or a grace timeout hides the card without discarding that pair, so a
+same-prefix reply cannot jump to a cursor moved by candidate insertion. A real
+editor mutation or command boundary retires both halves. A shell that
+re-captures completion after a singleton replacement updates both halves
+together. Geometry clamps the card back inside the grid near the right edge.
+The header is part of the list container, not an option.
+Candidate bounds begin below it, the selected row retains one row of lookahead,
+and a prompt without enough space suppresses the card rather than covering
+terminal input. A text-and-Tab remote batch discards its stale pre-typing cursor
+anchor and uses the safe grid-edge fallback.
+
+Only the 7-bit introducers (`ESC P` / `ESC _` / `ESC ]`) open a control string.
+The 8-bit C1 equivalents `0x90` / `0x9f` / `0x9d` are passed through as text,
+which is a deliberate refusal rather than an omission — an implementation was
+built, reviewed twice, and rejected.
+
+In a UTF-8 stream a raw C1 byte is not distinguishable from mojibake, and the
+cost of guessing wrong is the rest of the line. `0x9d` is `¥` in CP437, so a
+Windows console program in a legacy codepage printing `¥100 units` hands the
+extractor the exact bytes an OSC introducer would produce; the implementation
+measured 32 bytes of that line reaching the grid as 7. Narrowing the guess by
+requiring a plausible next byte does not help, because a digit is precisely
+what follows a currency sign. Recognising the values also means a second scan
+pass over every byte of every PTY read, which measured ~1.9× on plain ASCII —
+paid by everyone, for a form nothing emits: every terminal library in ordinary
+use writes the 7-bit sequences.
+
+The audited gap this leaves is real and small: an application that emits a
+Sixel, a kitty image, or an OSC 7 cwd report with a raw C1 introducer gets no
+image and no cwd update. None is known to. If one appears, the honest fix is
+a mode the host opts into (S8C1T, `ESC SP G`), not a heuristic applied to
+every byte of untrusted output.
+
+OSC 133 prompt marks are not raw grid line numbers. The small vendored grid
+patch maintains a monotonic `history_origin` whenever retained history is
+evicted or cleared; Kettle combines it with the current history size and row to
+form a stable document-row id. Prompt navigation converts retained ids back to
+display offsets, prunes only ids older than the current origin, clears marks on
+reset/reflow where identity cannot be preserved, and leaves normal-screen
+marks untouched while the alternate screen is active. A resize may rebase the
+latest active prompt when it is provably a single row: widening is safe, while
+narrowing is safe only if the cursor remains on the same row. Other reflows
+still clear the ring rather than guessing which history row survived.
+
+Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
+`TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
+selection, and renders the captured native state. The UI's `ViState` stores
+only the owning pane and whether visual selection is active. This single-owner
+model keeps viewport following, reflow, scrollback rotation, and selection
+invalidation consistent with the grid.
+
+## Key design choices
+
+| Concern | Choice | Why |
+|---|---|---|
+| VT engine | `alacritty_terminal` + `vte` | Battle-tested vs vttest/vim/tmux; avoids re-deriving the xterm long tail. |
+| Images/OSC | in-house `Extractor` ahead of the engine | Adds Sixel/kitty/iTerm2 + OSC 7/133 without forking the engine. |
+| Text | `glyphon` (cosmic-text) + a cell-locked instanced glyph pass | Pure-Rust shaping + fallback + GPU atlas; ligatures + Nerd glyphs. Pane text (v2.25.0) is pinned to the cell grid via `glyphpipe.rs` using cosmic-text's `SwashCache`; glyphon still draws chrome / menus / the cursor glyph. |
+| Window/GPU | `winit` + `wgpu` | One codebase for X11/Wayland/Win32/Cocoa; offscreen self-test in CI. |
+| PTY | `portable-pty` | Uniform Unix + Windows ConPTY. |
+| Config | Ghostty `key = value` | Ships the Ghostty theme set verbatim; familiar to users. |
+
+Correctness is guarded by an extensive workspace test suite —
+end-to-end VT-conformance driving this exact `vte`+`alacritty_terminal`
+path, plus pure-unit coverage of the kitty decoder / placeholder /
+animation / relative logic, the fuzzy matcher and command palette.
+See [TESTING.md](TESTING.md) for the per-crate breakdown
+(run `cargo test --workspace` for today's count — it grows ~1/cycle).
+Comparative analysis behind these choices (with citations) is in
+[RESEARCH.md](RESEARCH.md) and [UX-COMPARISON.md](UX-COMPARISON.md).
+
+The main solid-quad instance remains deliberately minimal because terminal
+cell backgrounds dominate it. Pane outlines that meet a decorated macOS
+window's rounded bottom corners use the separate instanced pipeline in
+`crates/kettle-render/src/outline.rs`: one outline per affected pane, a per-corner
+mask so internal split corners stay square, and derivative-based antialiasing.
+This avoids adding radius/mask fields to every cell quad and keeps other
+platforms on their exact existing four-strip path. The UI supplies only the
+native decoration/fullscreen policy; the renderer owns pane geometry and is
+therefore responsible for selecting which pane corners touch the surface.
+
+## Terminator-parity subsystems
+
+Four major subsystems modeled after GNOME Terminator. Each has its own
+design doc under `docs/TERMINATOR-*.md`; the architectural integration is
+summarized here. Subsequent v1.32+ releases hardened the plugin contract,
+extended drift guards, surfaced opt-in keys via `--check-config` echo
+lines, scrubbed internal cycle refs from every user-facing doc surface
+(including binary stdout), added an opt-in pre-commit hook
+(`.githooks/pre-commit`) that catches clippy / fmt / test / shellcheck /
+rustdoc regressions at commit time, and shipped the per-pane right-click
+context menu polish (hover-to-highlight, disabled-row hiding, scrollable
+submenus, mnemonics + typeahead, atomic config write-back via
+`persist_config_toggle`, and the **Preferences ▸** submenu wiring 13
+runtime toggles).
+
+The most recent additions:
+
+- **kettle-remote crate** (SSH / Docker / Podman / kubectl / lxc
+  detection) — drives per-pane title prefixes and the right-click "Clone
+  session" entry. A detected context carries the options that select the
+  endpoint (ssh port / ProxyJump / identity / config file; container client
+  context, daemon address, namespace, config file, in-pod container) so the
+  reconnect command reproduces the original session rather than whatever the
+  client's defaults reach; an option that cannot be reproduced faithfully
+  suppresses the menu entry instead. Windows and macOS retain the
+  cross-platform `sysinfo`
+  snapshot. One coalescing worker owns process enumeration for all windows and
+  wakes the event loop only after publishing a complete latest snapshot.
+  Linux starts from known PTY child PIDs and follows bounded
+  `/proc/<pid>/task/*/children` trees, including children created by non-leader
+  threads. Each scan is capped by 1 MiB per file, 4 MiB aggregate content,
+  4096 nodes, 1024 task-file reads, bounded argv count/decoded bytes, and a
+  25 ms deadline; an incomplete scan never replaces the last applied state.
+  Cwd is read on demand only for each pane's selected local foreground pid,
+  while detected remotes, direct nonlocal clients, and nested WSL sessions
+  suppress the misleading host cwd. Per-pane detection reuses scanner-owned
+  BFS scratch, idle windows receive explicit redraw/title events, and
+  Split/Duplicate consumes the cached foreground-shell result rather than
+  walking processes on the input path. The public full-snapshot API remains
+  available for one-shot callers.
+- **named-broadcast-groups subsystem** (`BroadcastScope` enum with
+  per-tab / per-window / cross-tab named scopes).
+- **right-click drill-in submenu UX** (Theme + Profile + Preferences).
+- **vertical tab strips** and a **wgpu offscreen-scene screenshot path**.
+- **in-app Settings overlay** (`Ctrl+,`) with a full **interactive keybind
+  editor** — a keyboard-navigable preferences panel with live persist + reload
+  (see the dedicated subsection below).
+
+See [`docs/TERMINATOR-AUDIT.md`](TERMINATOR-AUDIT.md) for the full
+Terminator parity inventory; see [CHANGELOG.md](../CHANGELOG.md) for the
+change-by-change history.
+
+### Plugin system
+
+```mermaid
+flowchart TD
+    A["init.lua (auto-load)"]
+    A --> B["LuaEngine"]
+    B -->|registers| C["kettle.on / notify / set_theme<br/>send_text / exec_action<br/>add_url_handler / add_menu_item"]
+    B --> D["App.lua_engine"]
+    D -->|fire_event| E["Startup · Bell · TabAdd · TabClose ·<br/>Output(bytes) ·<br/>PaneFocus(prev?, cur) ·<br/>TitleChanged(pane, str) ·<br/>UrlClicked(uri)"]
+    D --> F["LuaCommand queue"]
+    F -->|drain| G["App dispatch:<br/>SendText · ExecAction ·<br/>Notify · SetTheme"]
+```
+
+`lua-sandbox = safe` (default) nils unsafe stdlib APIs (os.execute,
+io.open, etc); `trusted` mode opt-in. Neither of those is a containment
+boundary — `kettle.send_text` types into the shell and a newline runs the
+line — so `restricted` is the level for a plugin you have not read: it
+refuses `send_text` and `exec_action` and leaves the rest working. See
+[`docs/TERMINATOR-PLUGIN-DESIGN.md`](TERMINATOR-PLUGIN-DESIGN.md).
+The auto-loaded `init.lua` therefore shares the implicit-config trust policy:
+its requested and resolved directories and opened leaf must reject untrusted
+mutation. `--lua-script FILE` is explicit provenance and may intentionally run
+a project-local or shared script. Both paths read once through a held handle
+with a 4 MiB cap, so a path replacement cannot bypass the size decision.
+
+### Settings overlay + interactive keybind editor
+
+A keyboard-navigable, non-technical-friendly preferences panel — the overlay
+evolution of the right-click **Preferences ▸** submenu. Opens via **Ctrl+,** or
+right-click ▸ **Settings…**. `crates/kettle-ui/src/settings.rs` is the *pure*
+catalogue (categories → fields, free functions over `&Config`, unit-tested
+without a window); `app.rs` owns the live `SettingsNav` state + input routing +
+persistence; `kettle-render` draws it through the **same menu pipeline**
+(render-pass steps 5–6 above). Every value edit writes straight to the user's
+config via the atomic `persist_pref` → `persist_config_toggle` path and
+live-reloads, so changes take effect without hand-editing the file. The
+**Keybinds** category is a full interactive rebinder: activating a row captures
+the next chord and appends a `keybind = <chord>=<action>` line via
+`kettle_config::append_keybind`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Browsing: Ctrl+, / right-click ▸ Settings…
+    Browsing --> Browsing: ↑/↓ select field · Tab/⇧Tab switch category
+    Browsing --> EditValue: ←/→ step · Space/Enter toggle-or-cycle
+    EditValue --> Browsing: persist_pref(key,value) → reload_config()
+    Browsing --> Capturing: Space/Enter on a Keybind row
+    Capturing --> Browsing: Esc cancels
+    Capturing --> Browsing: chord → keybinds.insert + append_keybind()
+    Browsing --> Closed: Esc
+    Closed --> [*]
+```
+
+Categories are **Appearance · Behavior · Keybinds**; field kinds are **Toggle ·
+Choice · Number · Keybind**. Field values are always read fresh from `Config`,
+so an external edit / live-reload is reflected immediately, and an unknown
+catalogue key degrades to "—" rather than panicking (`settings::read`,
+guarded by the `catalogue_keys_are_all_readable` drift test). See
+[`docs/SETTINGS.md`](SETTINGS.md) for the per-field reference.
+
+### Per-pane titlebar
+
+Renders ONLY when a tab has >1 pane (single-pane tab uses the OS
+window title). Layout:
+
+```
+┌─────────────────────────────────────────────────┐  ← per-pane bar
+│  [group] pane title   80x24   🔔                │     (top OR bottom
+├─────────────────────────────────────────────────┤      per cfg)
+│                                                 │
+│              cell content                       │  ← cell-grid render
+│              (shifted by bar height)            │
+│                                                 │
+└─────────────────────────────────────────────────┘
+```
+
+Three color variants based on broadcast state: transmit (focused
+source), receive (group member), inactive (idle). Click on the bar
+focuses the pane; click again opens `EditPaneTitle`. `EditPaneGroup`
+action edits the broadcast-group label. See
+[`docs/TERMINATOR-PANE-TITLEBAR-DESIGN.md`](TERMINATOR-PANE-TITLEBAR-DESIGN.md).
+
+### Background image
+
+```mermaid
+flowchart LR
+    A["cfg.background_image"] --> B["decode_bg_image<br/>(PNG / JPEG / WebP /<br/>BMP / GIF)"]
+    B --> C["Optional box blur<br/>3-pass separable"]
+    C --> D["BgImage<br/>(Arc-cached by path)"]
+    D --> E["imgpipe"]
+    E --> F["Render BEFORE pane<br/>backgrounds with UV-mode<br/>dispatch (stretch /<br/>tile / center / scale)"]
+```
+
+Decoded at config-load (one-shot), kept in a path-keyed cache, rendered
+via the cell-image pipeline. UV-modes + align-horiz/vert configurable.
+See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
+
+### Detachable tabs (Chromium-style live tear-off + re-dock)
+
+Tab tear-off is a live, in-process move: the tab's panes — PTYs,
+scrollback, running programs — transfer untouched into a new window in
+the same process. Since v2.19.0 the tear is the Chromium model: it
+happens **mid-drag at a distance threshold**, the torn window appears
+instantly under the pointer, and the OS's native move loop carries it
+from there.
+
+```mermaid
+flowchart TD
+    A["mouse-down on a tab"] --> B["detach::DragState FSM<br/>armed"]
+    B --> C["CursorMoved drives it<br/>(distance = click-vs-drag,<br/>band distance = tear decision)"]
+    C -->|"≥1.5×bar_h from the tab band"| D["Mux::detach_tab →<br/>open_window(AdoptTab)<br/>source size, cursor − grab"]
+    D --> E["drag_window(): native OS<br/>move loop carries the window<br/>(WM_NCLBUTTONDOWN / HTCAPTION,<br/>_NET_WM_MOVERESIZE, NSWindow drag)"]
+    E -->|"Moved events stream"| G["dock hit-test vs sibling<br/>tab bands (z-order-verified<br/>on Windows) → insertion<br/>marker + translucency"]
+    G -->|"release on a band"| H["attach_tab at the slot;<br/>emptied window closes via<br/>the pending_window_close funnel"]
+    G -->|"release elsewhere"| I["independent window"]
+    C -->|"Esc / focus loss<br/>before the tear"| F["cancel (tab stays put)"]
+```
+
+Mechanics worth knowing (all verified against the vendored winit 0.30.13
+source and live):
+
+- **Tear threshold** is pure Euclidean distance from the tab *band*
+  (`tear_threshold_crossed`), so the hysteresis is uniform in every
+  direction and dragging along the strip still reorders.
+- The torn window is positioned `cursor − grab` (grab = pointer offset
+  into the dragged segment, frame-relative) and **re-anchored from the
+  live `GetCursorPos` right before the handoff** — the pointer keeps
+  sliding during the ~100ms window creation, and the Windows modal loop
+  anchors at the *current* cursor.
+- **Drop detection**: winit synthesizes a `WM_LBUTTONUP` to the torn
+  window when the Windows modal loop exits (`WM_EXITSIZEMOVE`); on
+  X11/macOS the first client pointer event after the WM's grab ends
+  serves the same role (clients receive no pointer events during the
+  move). A 120s `about_to_wait` failsafe abandons orphaned tracking.
+- **Re-dock hit-testing** runs on the torn window's `Moved` stream
+  (`WM_WINDOWPOSCHANGED` keeps firing inside the modal loop), preferring
+  the live cursor over the frame+grab approximation everywhere a query
+  source exists — `GetCursorPos` on Windows and, since v2.40.0, x11rb
+  `QueryPointer` on X11. The approximation alone misses: the WM anchors
+  its move grab at the *press* position while `grab` is computed at
+  *tear* time, a drift a session recording measured at 55-86px under
+  Mutter — more than the whole band. The latched target's strip paints a
+  cross-platform accent **wash + pane-edge border + capped insertion
+  marker** (`kettle_render::tab_drag`); on Windows the dragged window
+  additionally goes translucent (`WS_EX_LAYERED` + `LWA_ALPHA`, verified
+  compatible with the wgpu flip-model swapchain); a hidden single-tab
+  `auto` bar **materializes** while hovered so the drop target is
+  visible.
+- **Frozen-drag rescue (v2.40.0, X11)**: a native handoff the WM accepts
+  but never acts on (e.g. `_NET_WM_MOVERESIZE` racing a just-created,
+  unmapped window) used to leave the torn window frozen mid-air once the
+  pointer left the capture-holding source window's bounds. An
+  `about_to_wait` tick (`torn_drag_pointer_tick`, 16ms while active) now
+  polls the real pointer, demotes a stalled handoff on
+  travel-without-`Moved` evidence (a single incidental placement `Moved`
+  is not proof of health), carries the torn window itself, and keeps the
+  dock hit-test live. Commit-time revalidation distinguishes an
+  Esc-cancel from a real drop by PHYSICAL button state — the X11
+  `QueryPointer` button mask, the same tell the Windows release path
+  reads via `GetAsyncKeyState` — because position heuristics cannot: Esc
+  moves the frame, never the pointer, and the WM's restore `Moved`
+  re-syncs any frame-anchor estimate before the commit event arrives.
+- **Cursor + pre-tear affordance (v2.40.0)**: the OS cursor shows
+  `Grab`/`Grabbing` for the whole armed/dragging gesture (first in the
+  `sync_cursor_icon` priority chain so it cannot flicker mid-drag), and
+  the reorder ghost's shadow/opacity escalate with `TabBar::tear_lift`
+  (0→1 over the band-to-threshold distance) so the tear point is
+  telegraphed instead of springing a new window unannounced.
+- A **lone-tab** window's tab drags the whole window (`drag_window()`
+  with dock tracking, no detach) — Chromium semantics, and the way a
+  torn-off window merges back.
+- **Wayland** can't position windows client-side and validates move
+  serials, so it keeps the v2.18.0 tear-at-release path (the FSM's
+  `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
+  Wayland tab-drag protocol (KWin 6+/Mutter 48+) — is not exposed by
+  winit 0.30; tracked as a follow-up.
+
+The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
+performs the same live in-process move. The old cross-process handoff
+*senders* (Unix SCM_RIGHTS socketpair + the JSON-file fallback) are
+deleted — they respawned shells rather than moving live PTYs; the
+`--tab-handoff` receive parsing stays for one release, deprecated. See
+[`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md)
+for the historical multi-process design this replaced.
+
+### Session restore
+
+Per-pane working directory + tab/split tree are captured live as the
+user works and atomically written to `session.json`. Since v2.18.0 the
+session is **multi-window**: `Session` carries `windows: Vec<SWindow {
+tabs, active, geometry }>` and restore reopens *every* window at its
+(monitor-clamped) saved position. Replay on the next
+launch is **opt-in**: by default a new window opens fresh (a single pane
+in the default cwd, like every mainstream terminal), and the
+session is *saved* only in restore mode so a fresh window never clobbers
+a saved layout. Set `restore-session = true` (or pass `--restore` for a
+one-shot) to "continue where you left off":
+
+Before creating any native window, renderer, or PTY, restore validates the
+entire normalized session: at most 16 non-empty windows and 256 pane leaves,
+with no surface above 32 Mi pixels and no more than 64 Mi pixels
+across all restored windows. Every saved rectangle is clamped to the current
+monitor layout. The first approved geometry is applied before native creation,
+and restored windows remain hidden until a frame is presented, avoiding a
+default-size flash and attacker-controlled partial restore.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Shell as Shell (PTY)
+    participant Core as kettle-core
+    participant Mux as kettle-ui::Mux
+    participant FS as session.json (atomic)
+    participant App as App (next launch)
+
+    Note over Shell,Mux: Per-keystroke / per-cd
+    Shell->>Core: OSC 7 (file://host/path/cwd)
+    Core->>Mux: Pane::cwd = path
+    Mux->>Mux: mark_dirty()
+
+    Note over Mux,FS: Debounced autosave
+    Mux->>Mux: structural change (new tab / split / close)
+    Mux->>FS: private staged sibling + file sync
+    FS->>FS: atomic replace → session.json<br/>parent-directory sync
+
+    Note over App,FS: Next launch — restore is opt-in
+    App->>App: restore-session = true OR --restore?<br/>(else open a fresh single-pane window)
+    App->>FS: read session.json
+    FS-->>App: windows → tab trees + per-pane cwds
+    App->>Mux: rehydrate each window's split layout<br/>(at its monitor-clamped saved geometry)
+    Mux->>Core: spawn shell per pane<br/>(working_directory = saved cwd)
+    Note over Core,App: Pane reappears in same<br/>tab/split/cwd as last exit
+```
+
+Four notable invariants preserved by this flow:
+
+- **Durable private write** — `session.json` is staged beside its destination,
+  synced, atomically replaced, and followed by a parent-directory sync. It is
+  mode `0600` on Unix (including when replacing a permissive legacy file), and
+  a symbolic-link destination is refused. A power loss cannot expose a
+  truncated/partial JSON snapshot.
+- **OSC 7 catchup** — kettle parses the shell's OSC 7 stream
+  continuously, not just at startup; pane cwd updates the moment
+  the user `cd`s.
+- **No replay of failed spawns** — if a saved cwd is gone (deleted /
+  unmounted), the pane spawns in `$HOME` and logs a warning instead
+  of aborting the whole restore.
+- **Two on-disk vintages** — `windows_normalized()` reads both the
+  v2.18.0 `windows` array and the legacy single-window top-level
+  fields, and save dual-writes window 1 into those legacy fields, so
+  an older kettle can still read a new `session.json`. (v2.18.0 also
+  repaired a latent gate bug: the `--layout` / `--restore` /
+  `--tab-handoff` loads were dead because `resumed()` `mem::take`'d
+  the whole CLI-options struct before the gates read it.)
+
+See the [version history](VERSION-HISTORY.md) for the shipped session-restore
+hardening ledger.
+
+## Archived Windows performance evidence boundary
+
+Kettle 4.0 removed the Windows PowerShell comparison suite from `scripts/perf/`.
+The complete final harness is archived at the `v3.3.0` tag. This section keeps
+its implementation history; none of the paths or commands below are part of the
+current test or release architecture.
+
+The archived suite was a release-evidence system, not a collection of ad-hoc
+timers. Its orchestrator created a new result directory, resolved and read-locked
+every production harness script and generated comparator configuration,
+recorded their SHA-256 identities, and held those locks until the live run
+finished. Release evidence compared a clean current checkout with an exact
+executable from a verified prior release; both candidates carried full
+source-commit and binary identities.
+
+```mermaid
+flowchart LR
+    O["perf-all.ps1<br/>lock harness + configs<br/>capture machine/display/toolchain"] --> S["Williams-balanced<br/>terminal schedules"]
+    S --> P["startup / idle / latency /<br/>throughput / hover / monitor probes"]
+    P --> C["current-user named pipes<br/>nonce + exact client PID<br/>bounded binary/JSON frames"]
+    W["pinned WSL launcher +<br/>pinned vtebench source"] --> R["locked Windows relay<br/>private binary stderr frame"]
+    R --> C
+    C --> E["raw JSON and DAT evidence"]
+    E --> V["retained no-follow snapshot<br/>strict UTF-8 + bounded tree"]
+    V --> G["score.ps1<br/>schema + provenance +<br/>statistics gates"]
+    G --> U["sanitized JSON-only bundle<br/>exact-handle revalidation"]
+```
+
+Several archived boundaries were deliberate:
+
+- Live result transfer never trusted a predictable temporary pathname.
+  Throughput and vtebench relays used current-user-only named pipes, random
+  capabilities, exact client-process ancestry, bounded frames, strict UTF-8
+  where the payload is textual, and finite connect/read/process deadlines.
+- WSL vtebench inherited terminal output so the emulator received the real
+  workload, while a separate binary control frame carried only the exit status
+  and bounded DAT evidence back to the locked Windows relay. The Windows WSL
+  launcher, relay, Linux source revision, built binary, and workload runner were
+  part of the recorded toolchain rather than ambient command-name lookups.
+- Scoring opened a bounded, no-follow snapshot of every authoritative input and
+  retained identity locks for the full evaluation. Duplicate or
+  case-equivalent JSON keys, byte-order marks, invalid UTF-8, oversized files,
+  reparse points, and post-open identity changes were fatal.
+- Publication copied only the allowlisted JSON result set into a newly created
+  staging tree. The sanitizer retained exact handles, revalidated the complete
+  tree after the move, and rolled back if a path, stream, child set, or content
+  identity changed. Raw evidence remained private and was never modified in
+  place.
+- Physical-display identity accepted WMI only as a same-instance
+  monitor/connection pair with an explicitly physical Windows output
+  technology. Miracast and indirect display paths were excluded. If that
+  connection was absent, the fallback bound one desktop source to one active
+  physical CCD monitor/connection pair, required its exact
+  `GUID_DEVINTERFACE_MONITOR` class, derived a single registry location from
+  that strict path, and validated the complete EDID and CCD identifiers. It
+  never mixed WMI monitor identity with a CCD connection or scanned registry
+  instances by model. The scorer distrusted the serialized acquisition,
+  reconstructed unique monitor/connection/screen mappings, and re-applied the
+  physical allowlist; missing, ambiguous, synthetic, or inconsistent evidence
+  remained unidentified.
+- Display topology was part of the run identity. Only the dedicated transition
+  probe could move Kettle between the two pinned EDID-backed screens; any other
+  topology change invalidated release evidence. Virtual or fallback displays
+  could exercise the manifest and synthetic protocol paths but could not
+  support a comparative release claim.
+
+At `v3.3.0`, `docs/TESTING.md` defines the suite's validation gates and
+`docs/PERFORMANCE.md` defines the claims that could be made from a passing run.

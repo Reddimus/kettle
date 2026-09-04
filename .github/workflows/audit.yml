@@ -1,0 +1,152 @@
+# Security audit — runs `cargo audit` against the RustSec advisory DB so a
+# newly-published vulnerability in any transitive dep surfaces as a CI
+# failure within a day instead of at the next release cut.
+#
+# Runs on:
+#   - every push/PR that touches Cargo.lock or this workflow (fast feedback)
+#   - a daily 06:00 UTC cron so an advisory published *after* a Cargo.lock
+#     change still surfaces on its own (dependabot picks up the patched
+#     dep on Monday; this catches the window in between).
+#
+# Linux-only — `cargo audit` is platform-agnostic and the advisory DB lives
+# in one place; running on three OSes would be triple cache + triple noise.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "scripts/check-ttf-parser-scope.sh"
+      - "scripts/check-ttf-parser-scope.py"
+      - "scripts/check-lru-scope.sh"
+      - "scripts/check-lru-scope.py"
+      - "scripts/test-lru-scope.py"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "scripts/check-ttf-parser-scope.sh"
+      - "scripts/check-ttf-parser-scope.py"
+      - "scripts/check-lru-scope.sh"
+      - "scripts/check-lru-scope.py"
+      - "scripts/test-lru-scope.py"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # 06:00 UTC daily — far enough off Dependabot's Monday-08:00 cadence to
+    # catch the gap, far enough off CI-peak hours to keep Actions queues quiet.
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  pull-request-audit:
+    name: read-only pull request audit
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      # The checked-out scripts and manifests are pull-request-controlled.
+      # Keep this job read-only and do not place even its read token in Git's
+      # credential configuration.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Guard scoped ttf-parser exception
+        run: ./scripts/check-ttf-parser-scope.sh
+      - name: Guard scoped lru advisory
+        run: ./scripts/check-lru-scope.sh
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      - name: Audit product graph with scoped upstream exceptions
+        run: cargo audit --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
+      - name: Audit vendor validation graph without product exceptions
+        run: cargo audit --file vendor/Cargo.lock
+
+  trusted-audit:
+    name: cargo audit (${{ matrix.workspace.name }})
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The RustSec action annotates Checks and synchronizes one tracking
+      # issue per advisory only for trusted push/schedule executions.
+      checks: write
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace:
+          - name: product
+            path: .
+          - name: vendor-validation
+            path: vendor
+    # Budget cap. cargo-audit completes in <2 min; 10 min
+    # is 5× headroom for a slow advisory-DB fetch.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - name: Guard scoped ttf-parser exception
+        if: matrix.workspace.name == 'product'
+        run: ./scripts/check-ttf-parser-scope.sh
+      - name: Guard scoped lru advisory
+        if: matrix.workspace.name == 'product'
+        run: ./scripts/check-lru-scope.sh
+      - name: Install cargo-audit enforcement CLI
+        run: cargo install cargo-audit --version 0.22.1 --locked
+      # Official RustSec action. Vendors `cargo-audit`, runs against the
+      # advisory DB, posts a Checks-API annotation per finding, and on
+      # `push` to `main` syncs a per-advisory tracking issue. The token
+      # is the standard GITHUB_TOKEN; permissions come from the
+      # trusted job-level `permissions:` block above. It is passed only to
+      # these action steps and is never persisted by checkout.
+      #
+      # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains only through
+      # upstream text-rendering stacks (`glyphon → cosmic-text → fontdb`).
+      # The avoidable `winit → sctk-adwaita → ab_glyph` route stays removed:
+      # v2.34.0 uses winit's `wayland-csd-adwaita-notitle` feature (GNOME
+      # Wayland titlebar decorations, sctk-adwaita WITHOUT a text renderer),
+      # which adds no ttf-parser edge — the scope guard above proves it on
+      # every run. Remove this ignore once glyphon publishes a compatible
+      # stack without `fontdb`/`ttf-parser`.
+      #
+      # RUSTSEC-2026-0253 affects `LruCache::pop()` in lru 0.16.4. Glyphon
+      # 0.12.0 is the sole consumer; its Copy key cannot panic on drop and it
+      # never calls that method. The second scope guard pins both versions and
+      # the complete inverse path. Remove this ignore when glyphon accepts
+      # lru >=0.18.2, then close #207.
+      - name: Audit product graph with scoped upstream exceptions
+        if: matrix.workspace.name == 'product'
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ignore: RUSTSEC-2026-0192,RUSTSEC-2026-0253
+          working-directory: ${{ matrix.workspace.path }}
+      - name: Audit vendor validation graph without product exceptions
+        if: matrix.workspace.name == 'vendor-validation'
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: ${{ matrix.workspace.path }}
+      # On scheduled runs audit-check files or updates an issue but deliberately
+      # does not fail the job. Keep that reporting and independently enforce the
+      # result so the daily advisory window can turn this workflow red.
+      - name: Enforce product audit result
+        if: matrix.workspace.name == 'product'
+        run: cargo audit --deny warnings --ignore RUSTSEC-2026-0192 --ignore RUSTSEC-2026-0253
+      - name: Enforce vendor validation audit result
+        if: matrix.workspace.name == 'vendor-validation'
+        run: cargo audit --deny warnings --file vendor/Cargo.lock

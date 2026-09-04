@@ -1,0 +1,41 @@
+[package]
+name = "kettle-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# See `kettle-config/Cargo.toml` for the per-crate-description rationale.
+description = "kettle: wgpu + glyphon GPU renderer — quads, images, text, overlay pass, headless offscreen self-test"
+
+[lints]
+workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+glyphon = "0.12.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+kettle-config.workspace = true
+kettle-core.workspace = true
+kettle-state.workspace = true
+log.workspace = true
+pollster = "1.0.1"
+raw-window-handle = "0.6.2"
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+wgpu = "30.0.0"
+
+[dev-dependencies]
+# Temp PNG output for the menu-visual integration test
+# (tests/menu_visual.rs). Standard crate for this; tiny dep, only
+# pulled in for test compilation.
+tempfile = "3"
+kettle-test-support.workspace = true
+# audit v2.32.0: the snapshot zerowidth round-trip test builds a real
+# `Term<EventProxy>`, whose `EventProxy::new` needs a crossbeam Sender.
+# Same version kettle-core already pins; test-only.
+crossbeam-channel = "0.5.15"
+serde_json = "1"

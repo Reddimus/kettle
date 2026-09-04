@@ -1,0 +1,37 @@
+[package]
+name = "kettle-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Per-crate description: workspace.package's
+# description is the binary's blurb ("…GPU terminal emulator…") —
+# correct for `kettle` itself but misleading on every library
+# sub-crate. Each library crate overrides with what *it* does.
+description = "kettle: configuration parsing, themes, key bindings, and fuzzy matching"
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags = "2.11.1"
+kettle-state.workspace = true
+log.workspace = true
+# `detect_malformed_values` validates `trigger = REGEX`
+# patterns at --check-config time. The regex crate is already a
+# transitive workspace dep via kettle-core (hint-mode matching) and
+# kettle-ui (OutputTrigger matching), so adding it here just
+# imports the type — no new transitive deps. Cheaper than
+# reinventing a fragile syntactic regex sanity check.
+regex.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+kettle-test-support.workspace = true

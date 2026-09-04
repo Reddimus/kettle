@@ -1,0 +1,889 @@
+.\" kettle.1 - manual page for kettle terminal emulator
+.\" Format: man-pages macros. Render preview: `man -l packaging/linux/kettle.1`
+.\" Render to text: `groff -man -Tutf8 packaging/linux/kettle.1 | less`
+.TH KETTLE 1 "2026-07-26" "kettle" "User Commands"
+.
+.SH NAME
+kettle \- fast GPU-accelerated terminal emulator for Linux and macOS
+.
+.SH SYNOPSIS
+.B kettle
+.RI [ OPTIONS ]
+.RI [ \-e
+.IR PROGRAM " [" ARGS... ]]
+.br
+.B kettle exec
+.RI [ OPTIONS ]
+.B \-\-
+.IR CMD ...
+.br
+.B kettle ctl
+.I METHOD
+.RI [ OPTIONS ]
+.br
+.B kettle mcp
+.RI [ \-\-self\-test ]
+.br
+.B kettle update
+.RI [ \-\-yes ]
+.
+.SH DESCRIPTION
+.B kettle
+is a fast GPU terminal workspace for Linux and macOS.
+.PP
+Features include split panes,
+multiple tabs with drag-to-reorder, live tear-off into a new
+window (running programs move untouched), + activity / silence /
+bell indicators, inline images, OSC 8 hyperlinks, OSC 133
+shell-integration jump-to-prompt, ligatures, byte- and line-bounded scrollback,
+fuzzy-search overlays (command palette, themes, SSH-host
+launcher), strict-regex scrollback search, undo close tab, duplicate tab/pane, per-window accent
+colors, and broadcast / group-input mode.
+.PP
+Without arguments
+.B kettle
+launches a windowed session running the user's default shell.
+.
+.SH OPTIONS
+.SS Launch
+.TP
+.BI \-e \ "PROGRAM \fR[\fIARGS...\fR]"
+Run
+.I PROGRAM
+instead of the default shell. Everything after
+.B \-e
+is treated as the command and its arguments.
+.TP
+.BI \-\-working-directory \ "DIR" \fR,\fP\fB\ \-d\ \fIDIR
+Set the initial working directory for the launched program.
+Hard-fails with a non-zero exit status if
+.I DIR
+does not exist (catches typos at launch time, not at the first
+.B cd
+inside the running shell).
+.TP
+.B \-\-new\-process
+Force an isolated Kettle process for a default launch. With no arguments, a
+launcher click normally asks the primary Kettle process to open another OS
+window; every launch carrying other arguments is already isolated.
+.TP
+.BI \-\-config \ FILE
+Load configuration from
+.I FILE
+instead of the auto-detected path. Hard-fails if the path doesn't exist.
+Supplying this flag explicitly trusts the selected regular file; the
+auto-detected config instead requires trusted directory, link, and target
+provenance before kettle reads or live-reloads it.
+.
+.SS Introspection (prints and exits)
+.TP
+.B \-\-version
+Print version string (with the git SHA on git checkouts) and exit.
+.TP
+.B \-\-help
+Print every flag and its description.
+.TP
+.B \-\-config-path
+Print the resolved config-file path (or the fallback message if no
+config is loaded) and exit.
+.TP
+.B \-\-check-config
+Validate the resolved config and print every effective setting +
+diagnostic lines for unknown keys / malformed values.
+.TP
+.B \-\-print-default-config
+Print the fully commented starter config embedded from
+.BR docs/kettle.example.config .
+Uncomment only the settings to override. Useful as a starting point for
+.IR ~/.config/kettle/config .
+.TP
+.B \-\-gpu-info
+Print the
+.B wgpu
+adapter / backend / driver / texture-limit details kettle would
+use on this machine. Useful for "blank window" / "no GPU adapter"
+bug reports.
+.TP
+.B \-\-list-themes
+Print every bundled theme name.
+.TP
+.B \-\-list-actions
+Print every recognized keybind action name, including every alias, one
+per line in its underscore spelling (hyphens and underscores are
+interchangeable). The parametric forms and the
+.B unbind
+sentinel follow as trailing notes.
+.TP
+.B \-\-list-keybinds
+Print every active keybind (default + user-overridden), grouped
+by trigger.
+.TP
+.B \-\-list-ssh-hosts
+Print every
+.BR ssh-host
+declaration in the resolved config, sorted by name.
+.TP
+.B \-\-list-layouts
+Print every saved layout name
+.RI ( "<config-dir>/layouts/*.json" ).
+Launch one with
+.BR "\-\-layout NAME" .
+.TP
+.B \-\-list-profiles
+Print every named config profile
+.RI ( "<config-dir>/profiles/*.config" ).
+Launch one with
+.BR "\-\-profile NAME" .
+.TP
+.B \-m ", " \-\-maximise ", " \-\-maximize
+Maximise the window at launch. Overrides the
+.B window-state
+config for this launch.
+.TP
+.B \-f ", " \-\-fullscreen
+Fullscreen the window at launch. Overrides
+.B window-state
+for this launch.
+.TP
+.B \-b ", " \-\-borderless
+Launch with no window decorations. Overrides the
+.B borderless
+config for this launch.
+.TP
+.B \-H ", " \-\-hidden
+Launch hidden \(em useful for a Quake-style dropdown paired with a
+global hotkey bound to
+.BR "kettle \-\-toggle" .
+When combined with
+.B \-m
+or
+.BR \-f ,
+hidden wins (then fullscreen, then maximise).
+.TP
+.BI \-T \ "TEXT" ", " \-\-title \ "TEXT"
+Force the window title to
+.I TEXT
+for this launch, overriding
+.BR window-title-format .
+.TP
+.BI \-\-shell-integration \ "SHELL"
+Print the OSC 133 shell-integration snippet for
+.I SHELL
+(one of:
+.BR bash ", " zsh ", " fish ", " powershell ).
+Append to your rc file to enable jump-to-prompt
+.RB ( "Ctrl+Up" " / " "Ctrl+Down" )
+inside kettle:
+.PP
+.RS 4
+.EX
+kettle --shell-integration bash >> ~/.bashrc
+.EE
+.RE
+.TP
+.BI \-\-print-completions \ SHELL
+Print a tab-completion script for the kettle CLI in
+.IR SHELL 's
+native format. Supports
+.BR bash ", " zsh ", " fish ", " powershell ", "
+and
+.BR elvish .
+.
+.SS Debug / capture
+.TP
+.BI \-\-screenshot \ PATH
+Render one frame of the canonical kettle layout (single pane,
+using the configured or default theme) to a PNG file at
+.IR PATH .
+Honors
+.BR \-\-cols ", " \-\-rows ", and " \-\-config .
+Used by the visual-regression CI smoke + the
+.IR docs/PERFORMANCE.md
+baseline.
+.TP
+.BI \-\-screenshot-menu \ PATH
+Same as
+.B \-\-screenshot
+but renders with a synthetic right-click context menu open over
+the pane. Useful for visually verifying the menu's render path
+without an interactive window, and for pixel-level visual-
+regression tests in CI.
+.TP
+.BI \-\-cols \ "N\fR, \fP\fB\-\-rows \ N"
+Override the rendered grid size (in cells) for
+.BR \-\-screenshot " / " \-\-screenshot-menu .
+Default 96x28.
+.TP
+.BI \-\-tab\-handoff \ PATH
+.B Deprecated
+(receive parsing kept for one release, for handoff files written
+by older kettles). Restore a tab from a JSON handoff file.
+Nothing writes these files any more: tab tear-off is now a live
+in-process move \(em drag a tab outside the window, or use the
+.B move_tab_to_new_window
+action \(em and the tab's running programs, PTYs and scrollback
+transfer to the new window untouched.
+The handoff file is deleted after read (one-shot).
+.TP
+.BI \-\-tab\-handoff\-fd \ FD
+.B Deprecated
+receive-side counterpart of
+.BR \-\-tab\-handoff :
+accept a tab handoff via SCM_RIGHTS over the named inherited
+file descriptor. kettle no longer sends these (see above).
+Unix-only.
+.TP
+.BI \-\-remote\-send \ TEXT
+Send
+.I TEXT
+to the running kettle's focused pane via the file-based IPC.
+TEXT is transported exactly after shell argument parsing; Kettle does not
+reinterpret backslash escapes. Use shell-native quoting to include control
+characters, for example
+.B "kettle \-\-remote\-send $'printf ready\\n'"
+in Bash or zsh.
+Current senders use a reversible
+.B send-text-json
+JSON-string frame; receivers retain the legacy, lossy
+.B send-text
+line format for direct writers.
+Cross-platform (no D-Bus needed). Pair with
+.B \-\-remote\-file
+to address a non-default kettle instance.
+The private spool is locked and capped at 1 MiB; an append that
+would cross the cap fails without changing commands already queued.
+A receiver accepts at most 1,024 operations per claimed batch and rejects an
+over-limit batch before dispatching any prefix.
+.TP
+.BI \-\-remote\-file \ PATH
+Override the IPC drop path used by
+.B \-\-remote\-send " / " \-\-toggle .
+Default is the per-user state dir; useful when running multiple
+kettle instances each with their own remote-control endpoint.
+.TP
+.B \-\-toggle
+Show or hide the running kettle window. Bind a compositor, desktop, or OS
+global hotkey to
+.B kettle \-\-toggle
+for one-key drop-down access.
+.TP
+.BI \-\-profile \ NAME
+Launch with the named profile. Profiles live in the
+config file as
+.B profile = name=...
+entries — argv-supplied profile overrides the default-startup one
+without editing the config.
+.TP
+.BI \-\-layout \ NAME
+Restore a named saved layout on startup. Layouts are stored
+under
+.IR ~/.config/kettle/layouts/ " ;"
+see
+.B Action::SaveLayoutAs " / " Action::RestoreLayout
+for in-window save/restore.
+.TP
+.B \-\-restore
+Restore the previous session (windows, tabs, splits, working
+directories) for this launch \(em every saved window reopens at its
+(monitor-clamped) saved position. By default kettle opens a fresh window \(em a single
+pane in the default working directory, matching mainstream terminals.
+Use this flag for a one-shot "continue where I left off" without setting
+.B restore-session = true
+in the config.
+.TP
+.BI \-\-agent\-server \ MODE
+Enable kettle's agent control server for this launch, overriding the
+.B agent\-server
+config key.
+.B MODE
+is one of
+.BR off ", " read\-only ", or " full .
+The server is a local\-IPC surface over a Unix socket that
+.BR "kettle ctl" ", " "kettle mcp" ", or an AI agent can drive: list panes,"
+read the screen, and (in
+.BR full )
+send text + run commands. OFF by default. See
+.B docs/AGENT.md
+for the threat model.
+.TP
+.BI \-\-record \ PATH
+Record this session to an asciicast-compatible trace at
+.I PATH
+(replay with
+.BR "asciinema play" ).
+Captures terminal output, resizes, redacted keystroke tokens, and UI markers.
+Also honored via the
+.B KETTLE_RECORD
+environment variable and the persistent
+.B record = on
+config key. Output is captured verbatim \(em review a trace before sharing it.
+See
+.B docs/RECORDING.md .
+.TP
+.BI \-\-record\-dir \ DIRECTORY
+Write every launch to a new collision-safe asciicast file inside
+.IR DIRECTORY .
+Also honored via
+.B KETTLE_RECORD_DIR
+and the
+.B record\-dir
+config key.
+.B \-\-record
+and
+.B KETTLE_RECORD
+take precedence.
+.TP
+.B \-\-record\-raw\-input
+With
+.BR \-\-record ,
+capture RAW typed characters instead of redacted key tokens.
+.B WARNING:
+the trace can then contain typed passwords; leave it off unless you need
+byte-exact input. The window title shows
+.B [REC RAW]
+while active.
+.TP
+.BI \-\-accent \ COLOR
+Pin this window's chrome tint (peacock parity) to the
+named or hex color. Accepts
+.B "#RRGGBB"
+or any palette name from
+.BR \-\-list\-themes .
+Per-window accents are on by default
+.RB ( "accent\-color = auto" ):
+every window \(em deduped across all kettle windows and processes
+\(em claims a distinct theme-pool hue, so multiple windows are
+visually distinct without any flag. Set the
+.B accent\-color
+config key to
+.BR theme ", " off ", or " none
+to opt out; a hex value (or this flag) pins one color.
+.TP
+.BI \-\-lua\-script \ PATH
+Load
+.I PATH
+as the init script instead of the default
+.IR ~/.config/kettle/init.lua .
+The script runs in the
+.B lua-sandbox = safe
+sandbox by default. Supplying this flag explicitly trusts
+.IR PATH ;
+the automatically discovered init script instead requires the same trusted
+directory and file provenance as the default configuration.
+.TP
+.BI \-\-annotate \ TEXT
+Overlay
+.I TEXT
+as a single caption along the bottom of the
+.B \-\-screenshot
+/
+.B \-\-screenshot\-menu
+output. This is a single non-repeatable bottom
+caption \(em not a per-cell annotation.
+.TP
+.B \-\-write\-default\-config
+Write the embedded default configuration to the resolved config path, creating
+the parent directory, then exit. Refuses to overwrite an existing file. The
+preferred way to bootstrap a config without relying on shell redirect
+semantics.
+.TP
+.B \-\-check\-update
+Check the authenticated stable release feed once for a newer kettle version,
+print the result, and exit. This explicit command bypasses the background
+throttle and update policy.
+.TP
+.B \-\-update
+Interactive convenience alias for
+.BR "kettle update" .
+.
+.SH SUBCOMMANDS
+The bare
+.B kettle
+command (above) is the GUI launcher. These subcommands are the
+non-interactive / agent control surface; each returns before any window or GPU
+work. See
+.B docs/AGENT.md
+for the full reference and threat model.
+.TP
+.B kettle exec \fR[\fIOPTIONS\fR] \fB\-\- \fICMD\fR...
+Run
+.I CMD
+under a real PTY, headlessly, and stream its output to stdout (the
+non-interactive counterpart to the GUI). Propagates the child's exit code;
+.B 124
+on a completed
+.BR \-\-timeout ,
+.B 125
+on an internal error or unverified teardown. Options:
+.B \-\-cols
+.IR N " / " \fB\-\-rows\fP " " N
+(terminal size; default: probe the console, else 80x24),
+.B \-\-cwd
+.IR DIR " (also " \fB\-d\fP " " DIR ;
+working directory, default inherit),
+.BI \-\-timeout " SECS"
+(bounded teardown + exit 124 after
+.IR SECS " when teardown is verified; otherwise 125),"
+.B \-\-strip\-ansi
+(emit plain text — good for assertions),
+.B \-\-json
+(one JSON object per line: start / output / title / exit), and
+.BI \-\-record " PATH"
+(also save an asciicast trace). The trace must be secured before the child is
+started; a recording error exits with status 125 instead of running unaudited.
+Capture is output-only and stops on a complete asciicast event boundary before
+512 MiB; a later write failure stops the trace without killing the child.
+Piped or redirected stdin bytes are forwarded to the child. An interactive
+terminal stdin is left attached to the caller. Unix signals a safely tracked
+canonical EOF without closing the bidirectional PTY master.
+.TP
+.B kettle ctl \fIMETHOD\fR \fR[\fB\-\-pane \fIN\fR] [\fB\-\-json \fIJSON\fR] [\fB\-\-text \fITEXT\fR] [\fB\-\-keys \fIKEYS\fR] [\fB\-\-regex \fIREGEX\fR] [\fB\-\-pid \fIPID\fR] [\fB\-\-raw\fR]
+Drive a running kettle's agent control server.
+.I METHOD
+is one of
+.BR get_state ", " list_tabs ", " list_panes ", " read_screen ", " read_cells ", " ui_geometry ", " screenshot ", " send_text ", " send_keys ", " dispatch_keybind ", " dispatch_ui_key ", " send_mouse ", " resize_window ", " perform_action ", " wait_for ", " run_command ,
+or
+.B events
+to stream the event feed. The target kettle must run with
+.B agent\-server
+enabled (see
+.BR \-\-agent\-server ).
+.B \-\-pane
+targets a specific pane (else the focused pane);
+.B \-\-json
+passes method parameters as a JSON object;
+.B \-\-text
+is the text for
+.B send_text
+or the command line for
+.BR run_command ,
+or the literal substring for
+.BR wait_for ;
+.B \-\-keys
+is a comma-separated token list for
+.B send_keys
+or
+.BR dispatch_ui_key ;
+.B \-\-regex
+is an alternative or additional regular expression for
+.BR wait_for ;
+.B \-\-pid
+selects a specific kettle (else the newest running server); and
+.B \-\-raw
+prints the raw JSON result instead of a pretty summary.
+Large list, screen, and cell reads return
+.BR snapshot ,
+.BR next_cursor ,
+and
+.BR truncated ;
+continue with JSON
+.BR cursor / snapshot
+parameters. Requests are capped at 1 MiB and responses at 768 KiB.
+.TP
+.B kettle mcp \fR[\fB\-\-self\-test\fR]
+Run a Model Context Protocol server over stdio, exposing kettle as native agent
+tools (run a command, drive a running kettle). Supports MCP 2025-11-25 and
+2025-06-18 with bounded concurrent tool execution and cancellation. Register
+with Claude Code:
+.B claude mcp add kettle \-\- kettle mcp\fR.
+.B \-\-self\-test
+runs an in-process handshake +
+.B tools/list
++ one
+.B kettle_run
+and exits, for CI.
+.TP
+.B kettle update \fR[\fB\-\-yes\fR]
+Download and install the latest authenticated stable release. Supported for
+official installer-owned Linux x86_64/aarch64 layouts; other installs are
+refused with package-manager guidance. Verifies an Ed25519-signed
+manifest, exact archive size, and SHA-256 before transactional replacement.
+Running windows are not restarted. Source and dev-record ownership markers are
+refused. Without
+.BR \-\-yes ,
+an interactive confirmation is required.
+.
+.SH KEY BINDINGS
+Defaults (every binding remappable via
+.IR ~/.config/kettle/config 's
+.B keybind
+entries). Cmd is the macOS modifier; Ctrl on Linux.
+.SS Tabs
+.TP
+.B Ctrl+Shift+T
+new tab
+.TP
+.B Ctrl+Shift+1 ... Ctrl+Shift+9
+new tab running the Nth entry of the new-tab dropdown (action
+.BR new_tab_shell_N ,
+1-based; also spelled
+.BR new\-tab\-shell\-N )
+.TP
+.B Ctrl+Shift+W
+close focused pane (or tab if last pane)
+.TP
+.B Ctrl+PgUp
+previous tab
+.TP
+.B Ctrl+PgDn
+next tab
+.TP
+.B Ctrl+Shift+PgUp
+move tab left
+.TP
+.B Ctrl+Shift+PgDn
+move tab right
+.TP
+.B Alt+1 ... Alt+9
+jump to tab N by number
+.TP
+.B Ctrl+Shift+I
+new window
+.TP
+.B Ctrl+Shift+Q
+close window
+.TP
+.B F11
+toggle fullscreen
+.PP
+The new-tab button's dropdown lists detected shells plus Settings, Command
+palette, and About rows; it is always visible.
+Menu rows show right-aligned shortcut hints taken from the live
+keybind map.
+.PP
+Dragging a tab past the tab bar tears it off instantly into a live
+window in the same process that rides the pointer in the OS's native
+move loop \(em the tab's running programs, PTYs and scrollback move
+untouched, and the window inherits the source window's size. Dropping
+a torn window onto another kettle window's tab bar merges the tab
+there at the marked insertion slot; dragging a lone-tab
+window's tab drags the whole window, which is how a torn-off window
+re-docks. Esc before the tear cancels. On Wayland, where clients
+cannot position windows, the tear happens at release instead. The
+.B move_tab_to_new_window
+action (alias
+.BR detach_tab )
+performs the same live move from the keyboard.
+.SS Splits / panes
+.TP
+.B Ctrl+Shift+O
+split top/bottom
+.TP
+.B Ctrl+Shift+E
+split left/right
+.TP
+.B Ctrl+Shift+A
+auto-split (longest axis)
+.TP
+.B Alt+arrow
+focus pane up / down / left / right when a split exists in that
+direction; at an outer edge, send the chord to the terminal program
+instead. A zoom that hides sibling panes keeps the chord as a no-op; a
+one-pane tab passes it through (Linux; macOS uses
+Ctrl+Cmd+arrow for pane focus)
+.TP
+.B Ctrl+Shift+N
+focus next pane (DFS order)
+.TP
+.B Ctrl+Shift+P
+focus previous pane
+.TP
+.B Ctrl+Shift+X
+toggle pane zoom (maximize / restore)
+.PP
+Additional actions available via the command palette
+.RB ( Ctrl+Shift+K ):
+.BR UndoCloseTab ,
+.BR DuplicateTab ,
+.BR DuplicatePane ,
+.BR Reset ,
+and
+.B about
+(open the About panel \(em version, update status, GitHub link;
+aliases
+.BR show_about " / " show\-about )
+\(em not default-bound (bind via the
+.B keybind
+config entry if you want a hotkey).
+.SS Overlays
+.TP
+.B Ctrl+Shift+K
+command palette (fuzzy actions)
+.TP
+.B Ctrl+Shift+F
+open the scrollback search bar. Patterns use strict Rust regex
+syntax and are capped at 4096 UTF-8 bytes. The bar provides Previous, Next,
+Wrap, Case (Smart / Match / Ignore), Invert, and Close. Enter / Shift+Enter
+search in the default / opposite direction; F3 / Shift+F3 always search next /
+previous. Invalid patterns are reported, not treated as literals. The status
+does not precompute a global match count. Valid patterns that exceed the
+512-KiB NFA ceiling report
+.BR Pattern " " too " " complex ;
+the engine also caps one-pass state and the hybrid cache at 256 KiB each and
+DFA state at 40 KiB, retaining only the implicit whole-match capture. It reports
+.B Results limited
+when a 256-row, 262,144-inspected-cell, or 64-KiB logical-line capacity, an
+output-interrupted explicit navigation, or the 65,536-span projection bound
+prevents an exact ordering claim. Each engine call and aggregate bounded call
+has a 64-KiB text ceiling; aggregate work also yields after 262,144 cells or 256
+complete logical haystacks. Those exact yields resume without a warning.
+Matches that consume no bytes are suppressed in the normal leftmost-first pass,
+so a winning nullable alternative can shadow a later consuming alternative at
+the same position. Only non-navigation drift gets an automatic 500-ms quiet
+verification; retry Previous/Next after interrupted navigation.
+.TP
+.B Ctrl+Shift+H
+URL / path quick-select hints
+.TP
+.B Ctrl+Shift+S
+SSH-host launcher
+.SS Scrollback / clipboard
+.TP
+.B Ctrl+Shift+C
+copy selection
+.TP
+.B Ctrl+Shift+V
+paste (bracketed if app enabled it)
+.TP
+.B Ctrl+Up
+jump to previous OSC 133 prompt
+.TP
+.B Ctrl+Down
+jump to next OSC 133 prompt
+.SS Scrollback movement
+.TP
+.B Ctrl+Shift+Up/Down
+scroll one line
+.SS Vi-mode
+Enter vi-mode for the focused pane's scrollback. A magenta hollow
+block marks the vi cursor; the terminal cursor stays in place so
+you can see both. Movement, visual selection, and yank all live
+on standard vi keys.
+.TP
+.B Ctrl+Shift+Space
+toggle vi-mode (enter / exit)
+.TP
+.B h j k l
+move vi cursor left / down / up / right
+.TP
+.B arrow keys
+same as h/j/k/l
+.TP
+.B 0 ^
+jump to line start
+.TP
+.B $
+jump to line end
+.TP
+.B g H
+jump to top of viewport
+.TP
+.B G L
+jump to bottom of viewport
+.TP
+.B M
+jump to middle of viewport
+.TP
+.B v
+toggle char-visual selection (anchor at cursor)
+.TP
+.B y
+yank visual selection to clipboard, exit vi-mode
+.TP
+.B Esc
+exit vi-mode
+.SS Dropdown mode
+.TP
+.B kettle \-\-toggle
+flip the running window's visibility, sent via the remote-control
+IPC. Bind your compositor, desktop, or OS global hotkey to this for
+quick dropdown access.
+.SS Group / broadcast
+.TP
+.B Super+G
+toggle broadcast (group-input) on this tab
+.TP
+.B Shift+Super+G
+turn broadcast off
+.SS Font size
+.TP
+.B Ctrl+Shift+Plus
+increase font size
+.TP
+.B Ctrl+Shift+Minus
+decrease font size
+.TP
+.B Ctrl+0
+reset font size to the configured default
+.SS Pane resize
+.TP
+.B Shift+Arrow
+resize the focused split (up / down / left / right). Composes
+with split-tree weights so adjacent panes grow proportionally.
+.SS Scroll
+.TP
+.B Shift+PgUp
+.TQ
+.B Shift+PgDn
+scroll one page up / down through scrollback
+.TP
+.B Shift+Home
+.TQ
+.B Shift+End
+jump to scrollback top / bottom
+.SS Right-click
+A right click anywhere in a pane opens a context menu with:
+Copy / Paste / Split Right / Split Down / Close Pane / New Tab.
+.
+.SH CONFIGURATION
+Configuration lives at
+.IR ~/.config/kettle/config
+(Linux and macOS \(em the resolver is
+.B XDG_CONFIG_HOME
+\(->
+.IR $HOME/.config ,
+so macOS uses the same
+.I ~/.config
+path, not
+.IR ~/Library ). The format uses
+.RI """ key " = " value """
+lines. A
+.B #
+starts a comment only at the beginning of a line; inside a value it is
+literal, which is what makes hex colours such as
+.B background = #1a1b26
+work. A trailing
+.B #
+on a value line is therefore part of the value, not a comment.
+.PP
+See
+.B kettle\ \-\-print\-default\-config
+for every option with its default + inline docstring, and the
+.B kettle
+docs at
+.UR https://github.com/Reddimus/kettle/blob/main/docs/CONFIG.md
+.UE
+for the full reference.
+.PP
+Search behavior is configured with
+.BR search\-wrap ,
+.BR search\-case\-sensitive
+(`smart`, `always`, or `never`; displayed as Smart, Match, Ignore), and
+.BR invert\-search .
+The same controls are available under Settings > Search and persist
+immediately. Search input is Kettle-owned UI chrome and is never forwarded to
+the active PTY.
+.
+.SH ENVIRONMENT
+.TP
+.B SHELL
+Program kettle launches when no
+.B \-e
+is given.
+.TP
+.B RUST_LOG
+Standard
+.B tracing-subscriber EnvFilter
+filter (e.g.
+.IR info ", " debug ", " "kettle=trace" ).
+Default
+.I warn
+surfaces session-restore failures, GPU init errors, and winit/Wayland protocol
+failures on stderr.
+.TP
+.B XDG_CONFIG_HOME
+Linux/Unix config root (default
+.IR ~/.config ).
+.TP
+.B KETTLE_VERSION " / " KETTLE_PREFIX
+Used by
+.B scripts/install-online.sh
+(the curl-pipe installer), not the
+.B kettle
+binary itself.
+.B KETTLE_VERSION
+pins which release to download;
+.B KETTLE_PREFIX
+overrides the install root.
+.
+.SH FILES
+.TP
+.I ~/.config/kettle/config
+User config file (Linux). See CONFIGURATION above.
+.TP
+.I ~/.local/share/kettle/sessions/
+Session JSON (atomic write-then-rename) capturing every window:
+tabs, splits, working directories + window geometry. Always saved on exit
+in restore mode; replayed on the next launch only when restore is opted
+in via
+.B restore-session = true
+or the
+.B \-\-restore
+flag (off by default \(em a new window opens fresh). Failures are logged
+via
+.BR log::warn! .
+.TP
+.I ~/.local/bin/kettle
+Default install location for the
+.B scripts/install.sh
++
+.B install-online.sh
+paths.
+.TP
+.I ~/.local/share/applications/kettle.desktop
+XDG launcher (GNOME Activities / KDE Krunner / rofi).
+.TP
+.I ~/.local/share/icons/hicolor/scalable/apps/kettle.svg
+Scalable launcher icon (plus PNG fallbacks at 16 / 24 / 32 / 48 / 64 / 128 / 256).
+.
+.SH EXAMPLES
+.PP
+Launch a windowed kettle running
+.BR htop :
+.PP
+.RS 4
+.EX
+kettle -e htop
+.EE
+.RE
+.PP
+Validate the resolved config and exit:
+.PP
+.RS 4
+.EX
+kettle --check-config
+.EE
+.RE
+.PP
+Generate a fresh config file with every option commented:
+.PP
+.RS 4
+.EX
+kettle --print-default-config > ~/.config/kettle/config
+.EE
+.RE
+.PP
+Diagnose a rendering bug (capture for issue report):
+.PP
+.RS 4
+.EX
+kettle --gpu-info > /tmp/gpu.txt
+kettle --screenshot /tmp/kettle.png
+.EE
+.RE
+.
+.SH SEE ALSO
+.BR ssh (1),
+.BR tmux (1)
+.PP
+Project home:
+.UR https://github.com/Reddimus/kettle
+.UE
+.
+.SH AUTHORS
+kettle contributors. See
+.UR https://github.com/Reddimus/kettle/graphs/contributors
+.UE
+for the full list. Bug reports + feature requests at
+.UR https://github.com/Reddimus/kettle/issues
+.UE .

@@ -1,0 +1,519 @@
+//! Ghostty-compatible `key = value` config tokenizer.
+//!
+//! Rules (matching Ghostty): one entry per line, first `=` splits key/value,
+//! surrounding whitespace trimmed, full-line `#` comments only (a `#` inside a
+//! value, e.g. a hex color, is part of the value), empty value resets the key.
+//! Keys may repeat (e.g. `font-family`, `keybind`, `palette`).
+
+#[derive(Debug, Clone)]
+pub struct Entry {
+    /// The key folded to kettle's canonical spelling: lowercased, with `_`
+    /// rewritten to `-`.
+    ///
+    /// Terminator writes every key with underscores (`scroll_on_keystroke`),
+    /// kettle's arms are hyphenated, and the parser matched the raw string. It
+    /// compensated by hand-listing ~60 underscore aliases — and missed several,
+    /// so `scroll_on_keystroke`, `scroll_on_output`, `scrollback_lines` and
+    /// friends were reported as unknown keys and silently did nothing. Folding
+    /// once here closes the whole class instead of one alias at a time.
+    ///
+    /// Safe because no config key exists in underscore form only: every
+    /// underscore spelling the parser matches has a hyphen sibling, which
+    /// `every_underscore_key_has_a_hyphen_sibling` pins.
+    pub key: String,
+    /// The key exactly as the user wrote it, for diagnostics. An
+    /// unknown-key warning must echo the spelling that is actually in their
+    /// file, or it sends them grepping for a line that is not there.
+    pub raw_key: String,
+    pub value: String,
+}
+
+/// Strip ONE matched pair of surrounding quotes from a value.
+///
+/// Terminator's own manual writes quoted values — `background_color =
+/// "#000000"`, `scrollback_lines = '500'` — and kettle's value parsers see the
+/// quote as part of the text. `Rgb::parse` rejects a leading `"` at its
+/// hex-digit gate and `usize::parse` rejects it too, so the key was recognised,
+/// the value discarded, and the default silently used. Handling it once here
+/// fixes every key at the same time rather than teaching each parser about
+/// quotes.
+///
+/// Deliberately conservative:
+///   * both ends must be the SAME quote character, so `"a'` is left alone;
+///   * only the outermost pair is removed, so `""` (an intentionally empty
+///     value) survives as `""` → `` and inner quotes are preserved verbatim
+///     for values that legitimately contain them, such as a shell command.
+fn unquote(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if (first == b'"' || first == b'\'') && bytes[bytes.len() - 1] == first {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+/// An INI-style section header: `[global_config]`, `[[default]]`,
+/// `[[[child1]]]`. Returns `(depth, name)`, where depth is the bracket nesting
+/// Terminator uses to express hierarchy.
+///
+/// kettle's own config format has no sections, so a file without any behaves
+/// exactly as it did before — every line applies.
+pub(crate) fn section_header(line: &str) -> Option<(usize, &str)> {
+    if !line.starts_with('[') || !line.ends_with(']') {
+        return None;
+    }
+    let depth = line.len() - line.trim_start_matches('[').len();
+    if depth == 0 || depth != line.len() - line.trim_end_matches(']').len() {
+        return None;
+    }
+    let name = line[depth..line.len() - depth].trim();
+    (!name.is_empty()).then_some((depth, name))
+}
+
+/// Which part of a sectioned Terminator config we are currently reading.
+///
+/// Terminator's file is INI with nesting expressed by bracket count:
+///
+/// ```text
+/// [global_config]
+///   focus = system
+/// [keybindings]
+///   new_tab = <Control><Shift>t
+/// [profiles]
+///   [[default]]
+///     background_color = "#1a1b26"
+///   [[work]]
+///     background_color = "#222222"
+/// [layouts]
+///   [[default]]
+///     [[[child1]]]
+/// ```
+///
+/// Reading every line regardless of section meant the LAST profile in the file
+/// won: a user's `[[default]]` colours were silently replaced by whichever
+/// other profile happened to be written last, and layout internals leaked in
+/// as config keys. kettle applies the global config, the keybindings, and the
+/// DEFAULT profile. Other profiles and `[layouts]` are Terminator structures
+/// with no kettle equivalent, and reading them would mean applying settings
+/// the user did not select.
+#[derive(Default)]
+struct Section {
+    /// `None` until the first header — a file with no sections at all is
+    /// kettle's own format and applies wholesale.
+    path: Option<Vec<String>>,
+    /// Set when a header could not be read or skipped a level. Nothing applies
+    /// until the next header that can be read, because we no longer know which
+    /// section the following lines belong to.
+    unknown: bool,
+}
+
+impl Section {
+    fn enter(&mut self, header: Option<(usize, &str)>) {
+        let path = self.path.get_or_insert_with(Vec::new);
+        let Some((depth, name)) = header else {
+            // Unreadable header: we have lost our place in the file.
+            self.unknown = true;
+            path.clear();
+            return;
+        };
+        // A depth must be one deeper than where we are, or shallower. Jumping
+        // levels means a level was skipped or mistyped, and collapsing it
+        // silently promoted the section: `[profiles]` then `[[[default]]]`
+        // resolved to the DEFAULT PROFILE and imported a malformed third-level
+        // section as the user's settings.
+        if depth > path.len() + 1 {
+            self.unknown = true;
+            path.clear();
+            return;
+        }
+        self.unknown = false;
+        path.truncate(depth - 1);
+        path.push(name.to_ascii_lowercase());
+    }
+
+    fn applies(&self) -> bool {
+        if self.unknown {
+            return false;
+        }
+        let Some(path) = self.path.as_deref() else {
+            // No section header seen yet: kettle's own flat format.
+            return true;
+        };
+        match path.first().map(String::as_str) {
+            Some("global_config" | "keybindings") => true,
+            // Only the default profile. Any other is one the user did not
+            // select, and kettle has `--profile` for choosing between configs.
+            Some("profiles") => path.get(1).is_none_or(|p| p == "default"),
+            // `[layouts]` describes Terminator's saved window trees; kettle
+            // has its own layout files, and none of these keys mean anything
+            // here.
+            _ => false,
+        }
+    }
+}
+
+/// A section whose settings kettle read past without applying.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredSection {
+    /// The header line as written, with surrounding whitespace trimmed.
+    pub header: String,
+    /// How many `key = value` lines it swallowed.
+    pub settings: usize,
+}
+
+/// The most sections worth naming in a diagnostic. A file with more than this
+/// has a structural problem the first few already demonstrate.
+const MAX_REPORTED_IGNORED_SECTIONS: usize = 16;
+
+/// Sections that swallowed settings, for `--check-config` to report.
+///
+/// [`parse`] answers "what applies", and everything else it walks past
+/// silently. That silence is right at load time and wrong in a diagnostic: a
+/// header with one character out of place makes every line beneath it do
+/// nothing, and `--check-config` used to answer "OK — no issues" because no
+/// individual key was unknown or malformed. The keys are fine. They are in a
+/// section nobody reads.
+///
+/// Only sections that actually swallowed an assignment are reported. An empty
+/// `[layouts]` is not a problem worth a line of output.
+pub fn ignored_sections(input: &str) -> Vec<IgnoredSection> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut section = Section::default();
+    let mut out: Vec<IgnoredSection> = Vec::new();
+    let mut current: Option<String> = None;
+    for raw in input.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            section.enter(section_header(line));
+            current = (!section.applies()).then(|| line.to_string());
+            continue;
+        }
+        if section.applies() {
+            continue;
+        }
+        // Count only what an applying section would have used. `parse` needs a
+        // `=` with a non-empty key before it builds an entry, so a stray
+        // `= value` is not a setting anywhere and must not inflate the number
+        // this reports as lost.
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        if line[..eq].trim().is_empty() {
+            continue;
+        }
+        let Some(header) = current.as_deref() else {
+            continue;
+        };
+        if let Some(existing) = out.iter_mut().find(|s| s.header == header) {
+            existing.settings += 1;
+        } else if out.len() < MAX_REPORTED_IGNORED_SECTIONS {
+            out.push(IgnoredSection {
+                header: header.to_string(),
+                settings: 1,
+            });
+        }
+    }
+    out
+}
+
+pub fn parse(input: &str) -> Vec<Entry> {
+    let mut out = Vec::new();
+    // Strip the UTF-8 byte-order mark if Notepad / certain Windows
+    // editors saved the file with one. Without this, the BOM bytes
+    // were prepended to the first key — so `\u{feff}theme` showed up
+    // as "unknown key: ﻿theme" in --check-config and the theme silently
+    // didn't apply.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+    let mut section = Section::default();
+    for raw in input.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            // A line that OPENS like a header is structure, well-formed or
+            // not. A malformed one used to fall through as an assignment and,
+            // worse, leave the previous section in force — so a typo'd
+            // `[[work]` meant the work profile's settings kept applying as the
+            // default profile's. An unreadable header means we no longer know
+            // where we are, and the safe answer to that is to apply nothing
+            // until the next header we can read.
+            section.enter(section_header(line));
+            continue;
+        }
+        if !section.applies() {
+            continue;
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let raw_key = line[..eq].trim().to_string();
+        let key = raw_key.to_ascii_lowercase().replace('_', "-");
+        let value = unquote(line[eq + 1..].trim()).to_string();
+        if key.is_empty() {
+            continue;
+        }
+        out.push(Entry {
+            key,
+            raw_key,
+            value,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    /// `section_header` slices by BYTE offset (`line[depth..len - depth]`), so
+    /// a multi-byte character in a header must not be able to land a boundary
+    /// mid-character. That would panic on a config file — untrusted input,
+    /// often someone else's file pasted from a forum.
+    ///
+    /// Symmetry is what makes it safe: the function refuses unless the leading
+    /// and trailing bracket counts are equal, and brackets are single-byte, so
+    /// both offsets always land on an ASCII bracket. Proven here, not argued.
+    #[test]
+    fn a_section_header_never_slices_a_character_in_half() {
+        for line in [
+            "[é]",
+            "[[é]]",
+            "[[[é]]]",
+            "[日本語]",
+            "[[プロファイル]]",
+            "[emoji 🦀 here]",
+            "[[🦀]]",
+            "[ﬁ]",
+            "[e\u{301}]",
+            "[👩\u{200d}💻]",
+        ] {
+            assert!(
+                section_header(line).is_some(),
+                "{line:?} is a well-formed header"
+            );
+            // And the whole tokenizer survives it.
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+    }
+
+    /// Adversarial and degenerate headers must be refused, not misread — and
+    /// above all must not panic.
+    #[test]
+    fn a_malformed_section_header_is_refused_without_panicking() {
+        for line in [
+            "[", "]", "[]", "[[]]", "[[[]]]", "]]", "[[", "[a]]", "[[a]", "[ ]", "[  ]", "a[b]",
+            "[b]c", "[[a]]]", "[]]", "[[]",
+        ] {
+            let got = section_header(line);
+            assert!(
+                got.is_none(),
+                "{line:?} must not be read as a header, got {got:?}"
+            );
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+    }
+
+    /// Deep nesting must not index past the string. Terminator itself only
+    /// goes three deep, but a hand-edited or generated file can say anything.
+    #[test]
+    fn absurd_nesting_depth_is_handled() {
+        for depth in [1usize, 2, 3, 8, 64, 512] {
+            let line = format!("{}name{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(section_header(&line), Some((depth, "name")));
+            let _ = parse(&format!("{line}\nfoo = bar\n"));
+        }
+        // Brackets with nothing between them is not a header at any depth.
+        for depth in [1usize, 4, 64] {
+            let line = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+            assert_eq!(section_header(&line), None);
+        }
+    }
+
+    /// A config with no section headers is kettle's own format, and the
+    /// section machinery must be completely inert for it.
+    #[test]
+    fn a_flat_config_is_untouched_by_section_filtering() {
+        let flat = "theme = TokyoNight Night\nfont-size = 14\n# comment\n\nscrollback = 5000\n";
+        let entries = parse(flat);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, "theme");
+        assert_eq!(entries[2].value, "5000");
+    }
+
+    /// A value that merely LOOKS like a header must still be a value.
+    #[test]
+    fn a_bracketed_value_is_not_a_header() {
+        let entries = parse("word-delimiters = []{}()\ntrigger = [error]\n");
+        assert_eq!(entries.len(), 2, "both lines are assignments");
+        assert_eq!(entries[0].value, "[]{}()");
+        assert_eq!(entries[1].value, "[error]");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_mistyped_section_header_is_reported_with_what_it_swallowed() {
+        // The footgun: one character wrong in a header and every line under it
+        // does nothing, while every key in it is individually valid, so
+        // --check-config had nothing to complain about and answered "OK".
+        let text = "[globl_config]\ntheme = TokyoNight Night\nfont-size = 14\n";
+        assert_eq!(
+            super::ignored_sections(text),
+            vec![super::IgnoredSection {
+                header: "[globl_config]".into(),
+                settings: 2,
+            }]
+        );
+        // The settings really are dropped, which is what makes it worth saying.
+        assert!(super::parse(text).is_empty());
+    }
+
+    #[test]
+    fn a_deliberate_skip_is_reported_only_when_it_holds_settings() {
+        // A non-default profile is a deliberate skip rather than a typo, but a
+        // user who put settings there still needs to hear nothing read them.
+        let with_settings = "[profiles]\n  [[work]]\n    background_color = \"#222222\"\n";
+        assert_eq!(
+            super::ignored_sections(with_settings),
+            vec![super::IgnoredSection {
+                header: "[[work]]".into(),
+                settings: 1,
+            }]
+        );
+        // An empty one is not worth a line of output.
+        assert!(super::ignored_sections("[layouts]\n").is_empty());
+
+        // Neither is a line that would not have been a setting anywhere:
+        // `parse` requires a non-empty key, so counting these would overstate
+        // what the user lost.
+        let malformed = "[globl_config]\n= orphan\nnot-an-assignment\ntheme = x\n";
+        assert_eq!(
+            super::ignored_sections(malformed),
+            vec![super::IgnoredSection {
+                header: "[globl_config]".into(),
+                settings: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_file_kettle_fully_understands_reports_nothing() {
+        assert!(super::ignored_sections("theme = TokyoNight Night\n").is_empty());
+        assert!(
+            super::ignored_sections(
+                "[global_config]\nfocus = system\n[keybindings]\nnew_tab = <Control><Shift>t\n"
+            )
+            .is_empty()
+        );
+        assert!(
+            super::ignored_sections(
+                "[profiles]\n  [[default]]\n    background_color = \"#1a1b26\"\n"
+            )
+            .is_empty()
+        );
+    }
+
+    use super::*;
+
+    #[test]
+    fn strips_leading_utf8_bom() {
+        // Notepad and a few Windows editors save UTF-8
+        // text with a leading byte-order mark (\u{feff}, 0xEF 0xBB
+        // 0xBF). Without this strip, the first key would parse as
+        // `\u{feff}theme` and surface as an unknown key. The BOM
+        // can only legitimately be at byte 0 of the input.
+        let e = parse("\u{feff}theme = TokyoNight Night\nfont-size = 14\n");
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0].key, "theme", "BOM must not be prepended to the key");
+        assert_eq!(e[0].value, "TokyoNight Night");
+        // A `\u{feff}` mid-file is NOT a BOM and stays in the value.
+        let e = parse("font-family = Hack\u{feff}\n");
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].value, "Hack\u{feff}");
+    }
+
+    #[test]
+    fn keeps_hash_in_value_and_repeats() {
+        let e = parse("# comment\nbackground = #1a1b26\nfont-family = A\nfont-family = B\n");
+        assert_eq!(e.len(), 3);
+        assert_eq!(e[0].key, "background");
+        assert_eq!(e[0].value, "#1a1b26");
+        assert_eq!(e[2].value, "B");
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    /// The parser folds `_` → `-` once, at tokenize time, instead of
+    /// hand-listing an underscore alias per key. That is only sound while every
+    /// underscore spelling the parser matches also has a hyphen sibling — if a
+    /// key ever existed in underscore form ONLY, folding would make it
+    /// permanently unreachable.
+    ///
+    /// This reads `lib.rs`'s own match arms rather than a maintained list, so a
+    /// future underscore-only key fails here instead of silently going dead.
+    #[test]
+    fn every_underscore_key_has_a_hyphen_sibling() {
+        let src = kettle_test_support::production_source(include_str!("lib.rs"));
+        let start = src.find("fn parse_collect").expect("parse_collect present");
+        let region = &src[start..];
+
+        // Match-arm string literals: `"key"` followed by `|` or `=>`.
+        let mut literals: Vec<String> = Vec::new();
+        let bytes: Vec<char> = region.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == '"' {
+                let mut j = i + 1;
+                let mut lit = String::new();
+                while j < bytes.len() && bytes[j] != '"' {
+                    lit.push(bytes[j]);
+                    j += 1;
+                }
+                let mut k = j + 1;
+                while k < bytes.len() && bytes[k].is_whitespace() {
+                    k += 1;
+                }
+                let is_arm = k < bytes.len()
+                    && (bytes[k] == '|' || (bytes[k] == '=' && bytes.get(k + 1) == Some(&'>')));
+                if is_arm
+                    && !lit.is_empty()
+                    && lit.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'
+                    })
+                {
+                    literals.push(lit);
+                }
+                i = j + 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        let hyphenated: std::collections::HashSet<&String> =
+            literals.iter().filter(|l| l.contains('-')).collect();
+        let orphans: Vec<&String> = literals
+            .iter()
+            .filter(|l| l.contains('_'))
+            .filter(|l| !hyphenated.contains(&l.replace('_', "-")))
+            .collect();
+
+        assert!(
+            orphans.is_empty(),
+            "these keys exist only in underscore form, so the tokenizer's \
+             `_`→`-` fold would make them unreachable: {orphans:?}"
+        );
+        assert!(
+            literals.len() > 100,
+            "sanity: expected to scrape many arms, got {}",
+            literals.len()
+        );
+    }
+}

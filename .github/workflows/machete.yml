@@ -1,0 +1,69 @@
+# cargo-machete — catch unused workspace dependencies before they land.
+# Pairs with the audit + deny workflows: every
+# `cargo add` PR now passes through three supply-chain checks:
+#
+#   audit.yml      — RustSec security advisories
+#   deny.yml       — licenses, sources, banned crates
+#   machete.yml    — actually-used (this one)
+#
+# Each one catches a class the others miss. cargo-machete in
+# particular finds dependencies declared in `Cargo.toml` but never
+# imported in source — a class an early run caught 11 of in one pass
+# (`log` in kettle-render + kettle-core, `serde` / `thiserror` /
+# `unicode-width` in kettle-core, `env_logger` / `kettle-vt` /
+# `raw-window-handle` / `toml` in kettle-ui). Adding the workflow
+# means the next contributor adding a dep "just in case" gets the
+# warning at PR time, not in a future grep.
+name: cargo-machete
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/machete.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/machete.yml"
+  # Weekly cron so the README cargo-machete badge always has a
+  # recent run to reflect. The push/PR triggers above are path-filtered to
+  # Cargo manifests, so a long run of non-manifest commits would otherwise
+  # leave the badge showing a stale state (or blank on a fresh branch) —
+  # unlike audit.yml (daily) and deny.yml (weekly), which already cron.
+  # Mirrors deny.yml's Sunday 06:00 UTC slot.
+  schedule:
+    - cron: "0 6 * * 0"
+
+permissions:
+  contents: read
+
+# Same concurrency block as ci.yml + actionlint.yml. A
+# weekly cron (see above) but no release artifacts, purely diagnostic — cancel-in-progress
+# is strictly a budget win when a Cargo.toml-touching PR gets
+# multiple pushes in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  machete:
+    name: unused deps
+    runs-on: ubuntu-latest
+    # Budget cap. cargo-machete runs in <1 min real time;
+    # 10 min handles a cold rust-cache restore.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: machete
+      # `bnjbvr/cargo-machete` is the upstream maintainer's official
+      # action. The immutable SHA is v0.9.2; the action vendors
+      # cargo-machete so no separate `cargo install` step is needed.
+      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08 # v0.9.2
