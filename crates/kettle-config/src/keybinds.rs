@@ -1436,11 +1436,30 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     }
     #[cfg(target_os = "macos")]
     {
+        // Two directional chords, both supported, `Cmd+Opt+Arrow` documented
+        // first. It is what iTerm2 ("Select Split Pane") and Ghostty
+        // (`super+alt+arrow_left=goto_split:left`) both ship, so a user
+        // arriving from either presses it before reading anything. It was
+        // unbound here, and an unbound chord fails silently: no movement, no
+        // error, no hint that a different one exists.
+        //
+        // `Ctrl+Cmd+Arrow` stays bound for everyone whose fingers already know
+        // it. Unbinding would not hand the chord to something better — a
+        // Cmd-bearing chord has no PTY encoding, so it would simply go dead.
+        //
+        // `Ctrl+Opt+Arrow` is deliberately NOT bound: Ctrl+Option is the
+        // default VoiceOver modifier and VO+Arrow moves the VoiceOver cursor.
+        // Bare Option+Arrow stays free too, for shell word motion —
+        // `macos_option_arrows_reach_the_pty_and_directional_focus_stays_bound`
+        // guards both of those.
+        let cmd_opt = Mods::ALT | Mods::SUPER;
         let ctrl_cmd = Mods::CTRL | Mods::SUPER;
-        bind(ctrl_cmd, Up, FocusUp);
-        bind(ctrl_cmd, Down, FocusDown);
-        bind(ctrl_cmd, Left, FocusLeft);
-        bind(ctrl_cmd, Right, FocusRight);
+        for mods in [cmd_opt, ctrl_cmd] {
+            bind(mods, Up, FocusUp);
+            bind(mods, Down, FocusDown);
+            bind(mods, Left, FocusLeft);
+            bind(mods, Right, FocusRight);
+        }
     }
     // Resize splits with Shift+Arrows only — `Ctrl+Shift+Up/Down` is
     // taken for `ScrollLineUp/Down`, so binding
@@ -1942,6 +1961,7 @@ mod tests {
             let su = Mods::SUPER;
             let sus = Mods::SUPER | Mods::SHIFT;
             let ctrl_cmd = Mods::CTRL | Mods::SUPER;
+            let cmd_opt = Mods::ALT | Mods::SUPER;
             let mac_pairs: &[(Mods, Key, Action)] = &[
                 (su, Key::Char('c'), Copy),
                 (su, Key::Char('v'), Paste),
@@ -1958,6 +1978,7 @@ mod tests {
                 (su, Key::Char('9'), GotoTab(8)),
                 (ctrl_cmd, Key::Char('b'), ToggleBroadcastAll),
                 (ctrl_cmd, Key::Left, FocusLeft),
+                (cmd_opt, Key::Left, FocusLeft),
             ];
             for (mods, k, want) in mac_pairs {
                 let trig = Trigger::new(*mods, *k);
@@ -1981,6 +2002,62 @@ mod tests {
             assert!(
                 !d.contains_key(&Trigger::new(su, Key::Char('g'))),
                 "Cmd+G is the system Find Next chord and must stay unbound"
+            );
+        }
+    }
+
+    #[test]
+    fn readme_still_documents_how_to_move_between_panes() {
+        // `readme_documented_chords_are_actually_bound` checks the other
+        // direction: that a chord the README names still does what the row
+        // claims. It cannot notice a row being *deleted*, and that is not
+        // hypothetical — a README rewrite dropped all three pane-focus rows
+        // and every test stayed green. Splits are the feature users ask about
+        // first, so the README has to keep saying how to move between them.
+        //
+        // Textual, like `man_page_documents_load_bearing_default_keybinds`: the
+        // README writes chords as prose, not as `Action` names. Scoped to the
+        // "Common keys" table rather than the whole file, so a chord that
+        // happens to appear in surrounding prose cannot hold this green while
+        // the table itself has lost the row.
+        const README: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md"));
+
+        let after = README
+            .split_once("## Common keys")
+            .expect("README lost its Common keys section")
+            .1;
+        let table = after
+            .split_once("\n## ")
+            .map_or(after, |(before, _)| before);
+        let rows: Vec<&str> = table
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with('|'))
+            .collect();
+        // A markdown table starts with a header row and a `|---|` separator.
+        // Requiring both means an emptied or reformatted-away table fails here
+        // rather than passing vacuously with zero rows to search.
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Action") && row.contains("Key")),
+            "README's Common keys table lost its header row"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.trim_matches('|').trim().starts_with("---")),
+            "README's Common keys table lost its separator row"
+        );
+
+        for chord in [
+            "Alt+Arrow",      // Linux and Windows directional focus
+            "Cmd+Opt+Arrow",  // macOS directional focus, iTerm2 and Ghostty
+            "Ctrl+Cmd+Arrow", // macOS directional focus, Kettle's original
+            "Ctrl+Shift+N",   // the cycle chord that works on every platform
+        ] {
+            assert!(
+                rows.iter().any(|row| row.contains(chord)),
+                "the README's Common keys table no longer has a row for {chord}, \
+                 so a reader cannot find out how to move between panes"
             );
         }
     }
@@ -2515,14 +2592,35 @@ mod tests {
                 trigger.label()
             );
         }
+        // Ctrl+Option is the VoiceOver modifier and VO+Arrow moves the
+        // VoiceOver cursor. Kettle must never claim it.
+        for key in [Key::Up, Key::Down, Key::Left, Key::Right] {
+            let trigger = Trigger::new(Mods::CTRL | Mods::ALT, key);
+            assert!(
+                !d.contains_key(&trigger),
+                "{} belongs to VoiceOver, not to Kettle",
+                trigger.label()
+            );
+        }
+        // Both directional chords are supported. `Cmd+Opt+Arrow` matches iTerm2
+        // and Ghostty; `Ctrl+Cmd+Arrow` is what Kettle shipped first.
+        let cmd_opt = Mods::ALT | Mods::SUPER;
         let ctrl_cmd = Mods::CTRL | Mods::SUPER;
-        for (key, action) in [
-            (Key::Up, Action::FocusUp),
-            (Key::Down, Action::FocusDown),
-            (Key::Left, Action::FocusLeft),
-            (Key::Right, Action::FocusRight),
-        ] {
-            assert_eq!(d.get(&Trigger::new(ctrl_cmd, key)), Some(&action));
+        for mods in [cmd_opt, ctrl_cmd] {
+            for (key, action) in [
+                (Key::Up, Action::FocusUp),
+                (Key::Down, Action::FocusDown),
+                (Key::Left, Action::FocusLeft),
+                (Key::Right, Action::FocusRight),
+            ] {
+                let trigger = Trigger::new(mods, key);
+                assert_eq!(
+                    d.get(&trigger),
+                    Some(&action),
+                    "{} must focus the pane in that direction",
+                    trigger.label()
+                );
+            }
         }
     }
 

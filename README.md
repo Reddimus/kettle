@@ -72,8 +72,8 @@ the active file and `kettle --check-config` to validate it.
 | Split left or right | `Ctrl+Shift+E` |
 | Split top or bottom | `Ctrl+Shift+O` |
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
-| Directional focus, Linux | `Alt+Arrow` |
-| Directional focus, macOS | `Ctrl+Cmd+Arrow` |
+| Directional pane focus, Linux | `Alt+Arrow` |
+| Directional pane focus, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
 | Search | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
@@ -87,7 +87,8 @@ keeps bare Option available for text entry unless `macos-option-as-alt` is on
 — but only for keys that produce text, so `Opt+Backspace` deletes a word and
 `Opt+Arrow` moves by one on every setting, and `Cmd+Backspace` deletes to the
 start of the line. macOS also provides `Cmd+T`, `Cmd+C/V`, `Cmd+F`, and
-`Cmd+,`.
+`Cmd+,`. `Cmd+Opt+Arrow` is the chord iTerm2 and Ghostty use, so either set of
+habits works; `Ctrl+Cmd+Arrow` stays bound for anyone who learned it here first.
 
 Use `kettle --list-keybinds` for the effective map and
 `kettle --list-actions` for every bindable action.

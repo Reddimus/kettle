@@ -53,7 +53,9 @@ Kettle starts with these pane and tab keys:
 | Split top/bottom | `Ctrl+Shift+O` |
 | New tab | `Ctrl+Shift+T` |
 | Close pane | `Ctrl+Shift+W` |
-| Move focus between panes | `Alt + Arrow` |
+| Move focus between panes, Linux | `Alt + Arrow` |
+| Move focus between panes, macOS | `Cmd+Opt+Arrow` |
+| Cycle panes | `Ctrl+Shift+N` / `Ctrl+Shift+P` |
 | Resize the split | `Shift + Arrow` |
 | Next / previous tab | `Ctrl+PageDown` / `Ctrl+PageUp` |
 | Search screen + scrollback | `Ctrl+Shift+F` |
@@ -67,9 +69,12 @@ On Linux, the focus chord is edge-aware: if no split exists in the
 arrow's direction, Kettle passes `Alt+Arrow` to the program instead. This keeps
 terminal-app shortcuts such as Codex's `Alt+Up` previous-message editor usable
 without giving up fast split navigation. A zoom that hides sibling panes keeps
-the chord with Kettle as a no-op; a one-pane tab passes it through. macOS uses
-`Ctrl+Cmd+Arrow` for split focus and already leaves `Option+Arrow` to terminal
-applications.
+the chord with Kettle as a no-op; a one-pane tab passes it through.
+
+macOS leaves `Option+Arrow` to the terminal, so split focus lives on
+`Cmd+Opt+Arrow`, the chord iTerm2 and Ghostty both use. `Ctrl+Cmd+Arrow` does
+the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
+every platform.
 
 ## 5. Search screen and scrollback
 

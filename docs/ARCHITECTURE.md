@@ -1369,8 +1369,8 @@ text, so its bitmap is already resident).
   persisted zoom bit remains set. A two-set press/release ledger ensures that
   once any repeated press reaches the PTY, terminal ownership stays sticky
   through its release; otherwise the UI-owned press suppresses that release.
-  Menu, automation, customized-action, and macOS `Ctrl+Cmd+Arrow` dispatch
-  remain explicit application actions.
+  Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /
+  `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
 - **Allocation hot-paths**: `App::drain_events`
   has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
   Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the
