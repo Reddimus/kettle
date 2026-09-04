@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.3.1] — 2026-09-04
+
 ### Fixed
 
 - **Linux self-update keeps future changelog archives installable.** The
