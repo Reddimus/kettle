@@ -198,20 +198,6 @@ pub(crate) fn private_dir_is_valid(dir: &std::path::Path) -> bool {
 }
 
 #[cfg(test)]
-mod private_directory_owner_tests {
-    #[test]
-    fn discovery_and_presence_share_the_crate_privacy_helpers() {
-        let discovery = include_str!("discovery.rs");
-        let presence = include_str!("presence.rs");
-        assert!(!discovery.contains("fn registry_dir_is_private"));
-        assert!(!presence.contains("fn ensure_private_dir"));
-        assert!(!presence.contains("fn private_dir_is_valid"));
-        assert!(discovery.contains("crate::private_dir_is_valid"));
-        assert!(presence.contains("crate::private_dir_is_valid"));
-    }
-}
-
-#[cfg(test)]
 pub(crate) fn test_scratch_root() -> std::path::PathBuf {
     #[cfg(windows)]
     {
@@ -223,6 +209,20 @@ pub(crate) fn test_scratch_root() -> std::path::PathBuf {
     #[cfg(not(windows))]
     {
         std::env::temp_dir()
+    }
+}
+
+#[cfg(test)]
+mod private_directory_owner_tests {
+    #[test]
+    fn discovery_and_presence_share_the_crate_privacy_helpers() {
+        let discovery = include_str!("discovery.rs");
+        let presence = include_str!("presence.rs");
+        assert!(!discovery.contains("fn registry_dir_is_private"));
+        assert!(!presence.contains("fn ensure_private_dir"));
+        assert!(!presence.contains("fn private_dir_is_valid"));
+        assert!(discovery.contains("crate::private_dir_is_valid"));
+        assert!(presence.contains("crate::private_dir_is_valid"));
     }
 }
 
