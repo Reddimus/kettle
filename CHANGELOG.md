@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.3.0] — 2026-09-04
+
 ### Added
 
 - **macOS directional pane focus now answers `Cmd+Opt+Arrow`.** The chord was
