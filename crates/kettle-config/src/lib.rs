@@ -6508,11 +6508,18 @@ cell-height = 1.2\n";
         }
 
         // XDG_CONFIG_HOME set normally → wins, joins `kettle/config`.
+        // The root has to be absolute *on the platform running the test*:
+        // `Path::is_absolute` is false for "/x" on Windows, which needs a
+        // drive or UNC prefix, and the probe now filters relative roots.
         // Build the expected value via PathBuf::join so the assertion
-        // uses the platform separator and works on Windows CI too.
+        // uses the platform separator too.
+        #[cfg(windows)]
+        let absolute_root = r"C:\x";
+        #[cfg(not(windows))]
+        let absolute_root = "/x";
         assert_eq!(
-            Config::default_path_from(from(&[("XDG_CONFIG_HOME", "/x")])),
-            Some(PathBuf::from("/x").join("kettle").join("config")),
+            Config::default_path_from(from(&[("XDG_CONFIG_HOME", absolute_root)])),
+            Some(PathBuf::from(absolute_root).join("kettle").join("config")),
         );
         // Config split-brain fix: the non-XDG fallback is now per-OS.
         // On Unix, XDG empty + HOME set → `$HOME/.config/kettle/config`.
