@@ -52,6 +52,7 @@ const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_COMPLETION_ID_MASK);
 const ACCESSIBILITY_MEDIA_RECEIPT_ID: NodeId = NodeId(1 << 59);
 const ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID: NodeId = NodeId((1 << 59) | 1);
+const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
 const ACCESSIBILITY_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn accessibility_completion_geometry_key(
@@ -102,6 +103,10 @@ fn clear_completions_on_focus_loss<T>(
             clear(pane);
         }
     }
+}
+
+fn warn_refused_terminal_url(_uri: &str, warn: impl FnOnce(&str)) {
+    warn("refused to open an unsafe URL from terminal output");
 }
 
 fn apply_pane_exit_action(
@@ -627,6 +632,275 @@ fn accessibility_search_control_from_id(id: NodeId) -> Option<kettle_render::Sea
         }
         _ => None,
     }
+}
+
+fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
+    NodeId(ACCESSIBILITY_MODAL_ID_MASK | (kind << 16) | index as u64)
+}
+
+fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
+    let first = accessibility_modal_id(1, 1).0;
+    let raw = id.0.checked_sub(first)?;
+    (raw < (1 << 16) - 1).then_some(raw as usize)
+}
+
+struct ModalAccessibilityProjection {
+    roots: Vec<NodeId>,
+    nodes: Vec<(NodeId, Node)>,
+    focus: Option<NodeId>,
+}
+
+fn push_picker_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    menu: Option<&ContextMenu>,
+    kind: u64,
+    label: &str,
+    query: &str,
+    full_bounds: accesskit::Rect,
+) {
+    let container_id = accessibility_modal_id(kind, 0);
+    let input_id = accessibility_modal_id(kind, 1);
+    let list_id = accessibility_modal_id(kind, 2);
+    let mut input = Node::new(Role::TextInput);
+    input.set_label(label);
+    input.set_value(query);
+    projection.nodes.push((input_id, input));
+
+    let mut list_children = Vec::new();
+    let mut selected = None;
+    if let Some(menu) = menu {
+        for (index, row) in menu.rows.iter().enumerate() {
+            if row.separator {
+                continue;
+            }
+            let id = accessibility_modal_id(kind, index + 3);
+            let mut option = Node::new(Role::ListBoxOption);
+            option.set_label(row.label.clone());
+            if !row.enabled {
+                option.set_disabled();
+            }
+            option.set_selected(index == menu.highlight);
+            if index == menu.highlight {
+                selected = Some(id);
+            }
+            list_children.push(id);
+            projection.nodes.push((id, option));
+        }
+    }
+    let mut list = Node::new(Role::ListBox);
+    list.set_label(format!("{label} results"));
+    list.set_children(list_children);
+    projection.nodes.push((list_id, list));
+
+    let mut dialog = Node::new(Role::Dialog);
+    dialog.set_label(label);
+    dialog.set_children([input_id, list_id]);
+    dialog.set_bounds(full_bounds);
+    projection.roots.push(container_id);
+    projection.nodes.push((container_id, dialog));
+    if projection.focus.is_none() {
+        projection.focus = selected.or(Some(input_id));
+    }
+}
+
+fn modal_accessibility_projection(
+    overlay: &Overlay,
+    surface: (f32, f32),
+) -> ModalAccessibilityProjection {
+    let full_bounds = accesskit::Rect::new(0.0, 0.0, f64::from(surface.0), f64::from(surface.1));
+    let mut projection = ModalAccessibilityProjection {
+        roots: Vec::new(),
+        nodes: Vec::new(),
+        focus: None,
+    };
+
+    if let Some(dialog) = overlay.confirm_dialog.as_ref() {
+        let container_id = accessibility_modal_id(1, 0);
+        let mut children = Vec::with_capacity(dialog.buttons.len());
+        for (index, button) in dialog.buttons.iter().enumerate() {
+            let id = accessibility_modal_id(1, index + 1);
+            let mut node = Node::new(Role::Button);
+            node.set_label(button.label.clone());
+            node.add_action(AccessibilityAction::Focus);
+            node.add_action(AccessibilityAction::Click);
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::AlertDialog);
+        node.set_label(dialog.prompt.clone());
+        node.set_children(children.clone());
+        node.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        projection.focus = children
+            .get(dialog.focus_idx.min(children.len().saturating_sub(1)))
+            .copied()
+            .or(Some(container_id));
+    }
+
+    let picker_open = overlay.palette_query.is_some()
+        || overlay.layout_picker_query.is_some()
+        || overlay.ssh_query.is_some();
+    if !picker_open && let Some(menu) = overlay.context_menu.as_ref() {
+        let container_id = accessibility_modal_id(2, 0);
+        let mut children = Vec::new();
+        let mut highlighted = None;
+        for (index, row) in menu.rows.iter().enumerate() {
+            if row.separator {
+                continue;
+            }
+            let id = accessibility_modal_id(2, index + 1);
+            let mut node = Node::new(Role::MenuItem);
+            node.set_label(row.label.clone());
+            if !row.hint.is_empty() {
+                node.set_description(row.hint.clone());
+            }
+            if !row.enabled {
+                node.set_disabled();
+            }
+            if index == menu.highlight {
+                highlighted = Some(id);
+            }
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::Menu);
+        node.set_label("Terminal menu");
+        node.set_children(children);
+        node.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        if projection.focus.is_none() {
+            projection.focus = highlighted.or(Some(container_id));
+        }
+    }
+
+    if !overlay.hint_labels.is_empty() {
+        let container_id = accessibility_modal_id(3, 0);
+        let mut children = Vec::with_capacity(overlay.hint_labels.len());
+        for (index, hint) in overlay.hint_labels.iter().enumerate() {
+            let id = accessibility_modal_id(3, index + 1);
+            let mut node = Node::new(Role::ListBoxOption);
+            node.set_label(hint.label.clone());
+            if hint.dim {
+                node.set_disabled();
+            }
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut node = Node::new(Role::ListBox);
+        node.set_label("Quick select hints");
+        node.set_children(children);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, node));
+        if projection.focus.is_none() {
+            projection.focus = Some(container_id);
+        }
+    }
+
+    if let Some(query) = overlay.palette_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            4,
+            "Command palette",
+            query,
+            full_bounds,
+        );
+    }
+
+    if let Some(settings) = overlay.settings.as_ref() {
+        let container_id = accessibility_modal_id(5, 0);
+        let list_id = accessibility_modal_id(5, 1);
+        let mut children = Vec::with_capacity(settings.rows.len());
+        for (index, row) in settings.rows.iter().enumerate() {
+            let id = accessibility_modal_id(5, index + 2);
+            let mut node = Node::new(Role::ListBoxOption);
+            node.set_label(row.label.clone());
+            node.set_value(row.value.clone());
+            if row.disabled {
+                node.set_disabled();
+            }
+            node.set_selected(index == settings.focused_row);
+            children.push(id);
+            projection.nodes.push((id, node));
+        }
+        let mut list = Node::new(Role::ListBox);
+        list.set_label("Settings fields");
+        list.set_children(children.clone());
+        projection.nodes.push((list_id, list));
+        let category = settings
+            .categories
+            .get(settings.active_category)
+            .map(String::as_str)
+            .unwrap_or("Settings");
+        let mut dialog = Node::new(Role::Dialog);
+        dialog.set_label(format!("Settings, {category}"));
+        dialog.set_children([list_id]);
+        dialog.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, dialog));
+        if projection.focus.is_none() {
+            projection.focus = children
+                .get(settings.focused_row.min(children.len().saturating_sub(1)))
+                .copied()
+                .or(Some(container_id));
+        }
+    }
+
+    if let Some(query) = overlay.layout_picker_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            6,
+            "Layout picker",
+            query,
+            full_bounds,
+        );
+    }
+    if let Some(query) = overlay.ssh_query.as_deref() {
+        push_picker_accessibility(
+            &mut projection,
+            overlay.context_menu.as_ref(),
+            7,
+            "SSH launcher",
+            query,
+            full_bounds,
+        );
+    }
+
+    if let Some(edit) = overlay.edit_title.as_ref() {
+        let container_id = accessibility_modal_id(8, 0);
+        let input_id = accessibility_modal_id(8, 1);
+        let mut input = Node::new(Role::TextInput);
+        input.set_label(edit.label.clone());
+        input.set_value(edit.input.clone());
+        projection.nodes.push((input_id, input));
+        let mut dialog = Node::new(Role::Dialog);
+        dialog.set_label(edit.label.clone());
+        dialog.set_children([input_id]);
+        dialog.set_bounds(full_bounds);
+        projection.roots.push(container_id);
+        projection.nodes.push((container_id, dialog));
+        if projection.focus.is_none() {
+            projection.focus = Some(input_id);
+        }
+    }
+
+    if let Some((tag, _)) = overlay.update_available.as_ref() {
+        let id = accessibility_modal_id(9, 0);
+        let mut node = Node::new(Role::Button);
+        node.set_label(format!("Update available: {tag}"));
+        node.set_description("Open the release page");
+        node.set_live(accesskit::Live::Polite);
+        projection.roots.push(id);
+        projection.nodes.push((id, node));
+        if projection.focus.is_none() {
+            projection.focus = Some(id);
+        }
+    }
+
+    projection
 }
 
 #[derive(Clone)]
@@ -2398,9 +2672,16 @@ fn local_paste_within_limit(text: &str) -> bool {
 fn group_scope_is_globally_stale(
     autoclean: bool,
     scope: &BroadcastScope,
-    populated_groups: &HashSet<String>,
+    populated_groups: &HashSet<&str>,
 ) -> bool {
-    autoclean && matches!(scope, BroadcastScope::Group(name) if !populated_groups.contains(name))
+    autoclean
+        && matches!(scope, BroadcastScope::Group(name) if !populated_groups.contains(name.as_str()))
+}
+
+fn any_group_scope_needs_hoover<'a>(windows: impl IntoIterator<Item = &'a WindowState>) -> bool {
+    windows.into_iter().any(|window| {
+        window.mux.autoclean_groups && matches!(window.mux.broadcast, BroadcastScope::Group(_))
+    })
 }
 
 fn stamp_accepted_input(
@@ -5384,18 +5665,16 @@ fn picker_context_menu(
     }
 
     let row_height = cell_h + kettle_render::menu::ROW_PAD;
-    let natural_width = (list
+    let max_columns = list
         .rows
         .iter()
         .map(kettle_render::menu_row_chars)
         .max()
-        .unwrap_or(0) as f32
-        * cell_w
-        + kettle_render::menu::H_PAD)
-        .max(kettle_render::menu::MIN_W);
+        .unwrap_or(0) as f32;
+    let natural_width = kettle_render::menu::panel_width(max_columns, cell_w);
     let natural_height = row_height * list.rows.len().min(PICKER_MAX_VISIBLE_ROWS) as f32;
     let panel = clamp_context_menu_panel((natural_width, natural_height), list_surface);
-    let max_columns = ((panel.0 - kettle_render::menu::H_PAD).max(0.0) / cell_w).floor() as usize;
+    let max_columns = kettle_render::menu::panel_columns(panel.0, cell_w);
     for row in &mut list.rows {
         fit_context_menu_row(row, max_columns);
     }
@@ -6227,6 +6506,13 @@ pub struct App {
 /// is skipped when the serialized text matches what is already on disk, so a
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn about_update_status_label(available_tag: Option<&str>) -> String {
+    available_tag.map_or_else(
+        || "Update status unknown".to_string(),
+        |tag| format!("Update available: {tag}"),
+    )
+}
 
 /// Which broadcast scope the group chord turns on, from `broadcast-default`.
 ///
@@ -9067,7 +9353,7 @@ impl App {
     /// Errors log::warn.
     fn open_url(&mut self, ws: &WindowState, uri: &str) {
         if !kettle_core::links::is_safe_url(uri) {
-            log::warn!("refused to open unsafe URL: {uri}");
+            warn_refused_terminal_url(uri, |message| log::warn!("{message}"));
             return;
         }
         // Terminator plugin parity: fire
@@ -9130,7 +9416,7 @@ impl App {
             }
         }
         if let Err(e) = open::that_detached(uri) {
-            log::warn!("failed to open {uri}: {e}");
+            log::warn!("failed to open a terminal-supplied URL: {e}");
         }
     }
 
@@ -11552,7 +11838,7 @@ impl App {
                 .unwrap_or(ws.search.editor.cursor()..ws.search.editor.cursor());
             projected.replace_range(replace.clone(), preedit);
             let cursor_byte = replace.start.saturating_add(preedit_focus);
-            let columns = (geometry.editor.2 / cw).floor().max(1.0) as usize;
+            let columns = kettle_render::search_bar_columns(geometry.editor.2, cw).max(1);
             let scroll = crate::search_input::SearchEditor::visible_scroll_for(
                 &projected,
                 cursor_byte,
@@ -11679,17 +11965,13 @@ impl App {
         // label drawn over a visible URL would open the active-screen URL at the
         // same index. `HintTarget.row` stays viewport-relative for label placement.
         let off = g.display_offset();
-        let lines: Vec<String> = (0..rows)
+        let lines: Vec<i32> = (0..rows)
             .map(|r| {
                 let base = viewport_point_to_grid(Point::new(Line(r as i32), Column(0)), off);
-                let s: String = (0..cols)
-                    .map(|c| g[Point::new(base.line, Column(c))].c)
-                    .collect();
-                s.trim_end().to_string()
+                base.line.0
             })
             .collect();
-        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        let spans = hints::detect(&refs);
+        let spans = hints::detect_rows(g, &lines, cols);
         let labels = hints::labels(spans.len(), hints::ALPHABET);
         spans
             .into_iter()
@@ -12049,14 +12331,15 @@ impl App {
         // layouts; run kettle --save-layout NAME)`.
         let (layout_picker_query, layout_picker_hint, layout_picker) = match &ws.layout_picker_input
         {
-            Some((query, selected)) => {
-                let layouts = crate::session::Session::list_layouts();
-                (
-                    Some(with_preedit(query)),
-                    "(Enter spawn · Tab/↑↓ select · Esc cancel)".to_string(),
-                    Some(layout_picker_list(query, *selected, &layouts)),
-                )
-            }
+            Some((query, selected)) => (
+                Some(with_preedit(query)),
+                "(Enter spawn · Tab/↑↓ select · Esc cancel)".to_string(),
+                Some(layout_picker_list(
+                    query,
+                    *selected,
+                    &ws.layout_picker_entries,
+                )),
+            ),
             None => (None, String::new(), None),
         };
         let hint_labels: Vec<HintLabel> = match &ws.hint_state {
@@ -12289,7 +12572,8 @@ impl App {
             .search_geometry(ws)
             .and_then(|geometry| {
                 let renderer = ws.renderer.as_ref()?;
-                let columns = (geometry.editor.2 / renderer.cell_w).floor().max(1.0) as usize;
+                let columns =
+                    kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
                 Some(crate::search_input::SearchEditor::visible_scroll_for(
                     &search_query,
                     search_cursor,
@@ -13793,8 +14077,7 @@ impl App {
             .map(|(item, hint)| context_menu_item_columns(item, hint))
             .max()
             .unwrap_or(0) as f32;
-        let panel_w =
-            (max_columns * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
+        let panel_w = kettle_render::menu::panel_width(max_columns, cw);
         let (sw, sh) = ws
             .renderer
             .as_ref()
@@ -14132,13 +14415,10 @@ impl App {
             ContextMenuItem::Info {
                 label: format!("kettle {v}"),
             },
-            match &self.update_available {
-                Some((tag, _)) => ContextMenuItem::Info {
-                    label: format!("Update available: {tag}"),
-                },
-                None => ContextMenuItem::Info {
-                    label: "Up to date".to_string(),
-                },
+            ContextMenuItem::Info {
+                label: about_update_status_label(
+                    self.update_available.as_ref().map(|(tag, _)| tag.as_str()),
+                ),
             },
             ContextMenuItem::Separator,
             ContextMenuItem::UrlItem {
@@ -14526,8 +14806,7 @@ impl App {
             .map(|(item, hint)| context_menu_item_columns(item, hint))
             .max()
             .unwrap_or(0) as f32;
-        let natural_w =
-            (max_columns * cw + kettle_render::menu::H_PAD).max(kettle_render::menu::MIN_W);
+        let natural_w = kettle_render::menu::panel_width(max_columns, cw);
         let (panel_w, panel_h) =
             clamp_context_menu_panel((natural_w, panel_h), (surface_w, surface_h));
         Some((menu.anchor, (panel_w, panel_h)))
@@ -14678,8 +14957,7 @@ impl App {
             .map(|(_, panel)| panel)
             .unwrap_or((0.0, 0.0));
         let (cell_w, _) = self.menu_cell(ws);
-        let max_row_columns =
-            ((panel_w_clamped - kettle_render::menu::H_PAD).max(0.0) / cell_w).floor() as usize;
+        let max_row_columns = kettle_render::menu::panel_columns(panel_w_clamped, cell_w);
         for row in &mut rows {
             fit_context_menu_row(row, max_row_columns);
         }
@@ -14750,22 +15028,42 @@ impl App {
         result
     }
 
-    fn populated_groups(&self, ws: Option<&WindowState>) -> HashSet<String> {
+    fn populated_groups<'a>(&'a self, ws: Option<&'a WindowState>) -> HashSet<&'a str> {
         ws.into_iter()
             .chain(self.windows.values())
             .flat_map(|window| window.mux.panes.values())
-            .filter_map(|pane| pane.group_name.clone())
+            .filter_map(|pane| pane.group_name.as_deref())
             .collect()
     }
 
     fn hoover_groups(&mut self, ws: &mut WindowState) {
+        if !any_group_scope_needs_hoover(std::iter::once(&*ws).chain(self.windows.values())) {
+            return;
+        }
         let populated = self.populated_groups(Some(ws));
-        for target in std::iter::once(ws).chain(self.windows.values_mut()) {
-            if group_scope_is_globally_stale(
-                target.mux.autoclean_groups,
-                &target.mux.broadcast,
-                &populated,
-            ) {
+        let reset_current =
+            group_scope_is_globally_stale(ws.mux.autoclean_groups, &ws.mux.broadcast, &populated);
+        let reset_windows: Vec<u64> = self
+            .windows
+            .iter()
+            .filter_map(|(&seq, target)| {
+                group_scope_is_globally_stale(
+                    target.mux.autoclean_groups,
+                    &target.mux.broadcast,
+                    &populated,
+                )
+                .then_some(seq)
+            })
+            .collect();
+        drop(populated);
+        if reset_current {
+            ws.mux.broadcast = BroadcastScope::Off;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        for seq in reset_windows {
+            if let Some(target) = self.windows.get_mut(&seq) {
                 target.mux.broadcast = BroadcastScope::Off;
                 if let Some(window) = &target.window {
                     window.request_redraw();
@@ -14775,13 +15073,25 @@ impl App {
     }
 
     fn hoover_mapped_groups(&mut self) {
+        if !any_group_scope_needs_hoover(self.windows.values()) {
+            return;
+        }
         let populated = self.populated_groups(None);
-        for target in self.windows.values_mut() {
-            if group_scope_is_globally_stale(
-                target.mux.autoclean_groups,
-                &target.mux.broadcast,
-                &populated,
-            ) {
+        let reset_windows: Vec<u64> = self
+            .windows
+            .iter()
+            .filter_map(|(&seq, target)| {
+                group_scope_is_globally_stale(
+                    target.mux.autoclean_groups,
+                    &target.mux.broadcast,
+                    &populated,
+                )
+                .then_some(seq)
+            })
+            .collect();
+        drop(populated);
+        for seq in reset_windows {
+            if let Some(target) = self.windows.get_mut(&seq) {
                 target.mux.broadcast = BroadcastScope::Off;
                 if let Some(window) = &target.window {
                     window.request_redraw();
@@ -15640,6 +15950,7 @@ impl App {
             // `kettle --save-layout NAME`" affordance.
             Action::OpenLayoutPicker => {
                 self.close_all_modals(ws);
+                ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((String::new(), 0));
             }
             Action::HintMode => {
@@ -18239,6 +18550,69 @@ impl App {
                 receipt.get("kind").and_then(serde_json::Value::as_str) == Some("image")
             })
             .cloned();
+        let diagnostic_overlay = self.overlay(target, false);
+        let settings = diagnostic_overlay.settings.as_ref().map(|settings| {
+            let geometry = kettle_render::settings_panel_geometry(
+                settings,
+                cell_w,
+                cell_h,
+                surface.0 as f32,
+                surface.1 as f32,
+            );
+            serde_json::json!({
+                "rect": rect_json(geometry.rect),
+                "focused_rect": rect_json(geometry.focused_rect),
+                "focused_row": settings.focused_row,
+                "row_count": settings.rows.len(),
+                "active_category": settings.active_category,
+                "first_line": geometry.first_line,
+                "visible_lines": geometry.visible_lines,
+            })
+        });
+        let modal_name = if diagnostic_overlay.confirm_dialog.is_some() {
+            Some("confirm_dialog")
+        } else if diagnostic_overlay.palette_query.is_some() {
+            Some("palette")
+        } else if diagnostic_overlay.settings.is_some() {
+            Some("settings")
+        } else if diagnostic_overlay.layout_picker_query.is_some() {
+            Some("layout_picker")
+        } else if diagnostic_overlay.ssh_query.is_some() {
+            Some("ssh_launcher")
+        } else if diagnostic_overlay.edit_title.is_some() {
+            Some("title_edit")
+        } else if !diagnostic_overlay.hint_labels.is_empty() {
+            Some("hint_mode")
+        } else if diagnostic_overlay.context_menu.is_some() {
+            Some("context_menu")
+        } else if diagnostic_overlay.update_available.is_some() {
+            Some("update_available")
+        } else {
+            None
+        };
+        let modal_projection = modal_accessibility_projection(
+            &diagnostic_overlay,
+            (surface.0 as f32, surface.1 as f32),
+        );
+        let accessibility = modal_name.map(|modal| {
+            let focused = modal_projection.focus.and_then(|focus| {
+                modal_projection
+                    .nodes
+                    .iter()
+                    .find(|(id, _)| *id == focus)
+                    .map(|(_, node)| {
+                        serde_json::json!({
+                            "role": format!("{:?}", node.role()).to_ascii_lowercase(),
+                            "label": node.label(),
+                        })
+                    })
+            });
+            serde_json::json!({
+                "modal": modal,
+                "root_count": modal_projection.roots.len(),
+                "focused": focused,
+            })
+        });
         Response::ok(
             req.id,
             serde_json::json!({
@@ -18285,6 +18659,8 @@ impl App {
                     "vi_mode": target.vi_mode.is_some(),
                 },
                 "context_menu": context_menu,
+                "settings": settings,
+                "accessibility": accessibility,
                 "search": search,
                 "image_paste_receipt": image_paste_receipt,
                 "media_paste_receipt": media_paste_receipt,
@@ -18559,8 +18935,10 @@ impl App {
                 _ => None,
             };
             match modal {
+                TextModal::Confirm => self.confirm_dialog_key(ws, key, event_loop),
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
+                TextModal::Settings => self.settings_key(ws, key, event_loop),
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
@@ -20413,8 +20791,10 @@ impl App {
 /// `the_control_plane_modal_order_matches_the_real_key_handler` is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextModal {
+    Confirm,
     Palette,
     SettingsText,
+    Settings,
     LayoutPicker,
     Ssh,
     TitleEdit,
@@ -20425,8 +20805,10 @@ impl TextModal {
     /// Stable wire spelling, reported by `dispatch_ui_key`.
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Confirm => "confirm",
             Self::Palette => "palette",
             Self::SettingsText => "settings_text",
+            Self::Settings => "settings",
             Self::LayoutPicker => "layout_picker",
             Self::Ssh => "ssh",
             Self::TitleEdit => "title_edit",
@@ -20435,18 +20817,20 @@ impl TextModal {
     }
 }
 
-/// Which text modal currently owns the keyboard, if any.
+/// Which control-plane-supported modal currently owns the keyboard, if any.
 ///
-/// The order mirrors the `KeyboardInput` arm exactly: palette, then the
-/// Settings path prompt, then the layout picker, then SSH, then the title
-/// editors, then search. If those two ever disagree, `dispatch_ui_key` would
-/// type into a different field than a real keystroke would, which is worse than
-/// having no automation at all.
+/// The order mirrors the supported branches of the `KeyboardInput` arm
+/// exactly. If those two ever disagree, `dispatch_ui_key` would drive a
+/// different surface than a real keystroke would.
 fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
-    if ws.palette_input.is_some() {
+    if ws.confirm_dialog.is_some() {
+        Some(TextModal::Confirm)
+    } else if ws.palette_input.is_some() {
         Some(TextModal::Palette)
     } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
         Some(TextModal::SettingsText)
+    } else if ws.settings_nav.is_some() {
+        Some(TextModal::Settings)
     } else if ws.layout_picker_input.is_some() {
         Some(TextModal::LayoutPicker)
     } else if ws.ssh_input.is_some() {
@@ -20461,6 +20845,67 @@ fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
 }
 
 impl App {
+    /// Route a key through the same confirmation state machine used by real
+    /// winit keyboard events. Unsupported keys are swallowed by the modal.
+    fn confirm_dialog_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let key = match key {
+            Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
+            Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
+            Key::Named(NamedKey::Tab) => {
+                if ws.mods.shift_key() {
+                    Some(ConfirmKey::ShiftTab)
+                } else {
+                    Some(ConfirmKey::Tab)
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
+            Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
+            Key::Character(s)
+                if self.cfg.vim_menu_nav
+                    && !ws.mods.control_key()
+                    && !ws.mods.alt_key()
+                    && !ws.mods.super_key() =>
+            {
+                match s.to_ascii_lowercase().as_str() {
+                    "y" => Some(ConfirmKey::Yes),
+                    "n" => Some(ConfirmKey::No),
+                    "h" => Some(ConfirmKey::Left),
+                    "l" => Some(ConfirmKey::Right),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(k) = key
+            && let Some(state) = ws.confirm_dialog.as_ref()
+        {
+            let n = state.buttons.len();
+            let focus = state.focus_idx;
+            let action = state.on_confirm.clone();
+            match confirm_dialog_keypress(focus, n, k) {
+                ConfirmKeyResult::Move(idx) => {
+                    if let Some(s) = ws.confirm_dialog.as_mut() {
+                        s.focus_idx = idx;
+                    }
+                }
+                ConfirmKeyResult::Confirm => {
+                    ws.confirm_dialog = None;
+                    self.dispatch_confirm_action(ws, action, event_loop);
+                }
+                ConfirmKeyResult::Cancel => self.cancel_confirm_dialog(ws),
+                ConfirmKeyResult::Ignore => {}
+            }
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     /// Key handling for the title-edit overlay (`Edit tab/window/pane title`
     /// and `Edit pane group`). Esc cancels, Enter applies via
     /// [`Self::apply_title_edit`], Backspace deletes one grapheme cluster, the
@@ -20914,7 +21359,7 @@ impl App {
             renderer.cell_w,
             renderer.cell_h,
         );
-        let columns = (geometry.editor.2 / renderer.cell_w).floor().max(1.0) as usize;
+        let columns = kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
         ws.search
             .editor
             .ensure_cursor_visible(columns.saturating_sub(2));
@@ -20954,6 +21399,8 @@ impl App {
         let query_column = crate::search_input::pointer_query_column(
             ws.search.editor.horizontal_scroll(),
             relative,
+            ws.search.editor.cursor_column(),
+            ws.search.focused_control == kettle_render::SearchControl::Editor,
         );
         let clicks = self.click_count(ws, usize::MAX, query_column);
         match clicks {
@@ -20988,6 +21435,8 @@ impl App {
         let query_column = crate::search_input::pointer_query_column(
             ws.search.editor.horizontal_scroll(),
             relative,
+            ws.search.editor.cursor_column(),
+            ws.search.focused_control == kettle_render::SearchControl::Editor,
         );
         ws.search.editor.set_cursor_column(query_column, true);
         self.sync_search_editor_scroll(ws);
@@ -21684,10 +22133,10 @@ impl App {
     /// Terminator parity, `layoutlauncher.py`:
     /// keyboard routing while the layout picker overlay is open.
     /// Same shape as `palette_key` but ranks against
-    /// `Session::list_layouts()` and dispatches by spawning
+    /// the names captured when it opened and dispatches by spawning
     /// `kettle --layout NAME` as a new window.
     fn layout_picker_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
-        let layouts = crate::session::Session::list_layouts();
+        let layouts = &ws.layout_picker_entries;
         let Some((q, sel)) = ws.layout_picker_input.as_mut() else {
             return;
         };
@@ -21701,13 +22150,13 @@ impl App {
                 *sel = 0;
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
-                let n = rank_layouts(q, &layouts).len();
+                let n = rank_layouts(q, layouts).len();
                 if n > 0 {
                     *sel = (*sel + 1) % n;
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                let n = rank_layouts(q, &layouts).len();
+                let n = rank_layouts(q, layouts).len();
                 if n > 0 {
                     *sel = (*sel + n - 1) % n;
                 }
@@ -21720,7 +22169,7 @@ impl App {
                     && !ws.mods.alt_key()
                     && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
             {
-                let n = rank_layouts(q, &layouts).len();
+                let n = rank_layouts(q, layouts).len();
                 if n > 0 {
                     *sel = match s.as_str() {
                         "j" | "n" => (*sel + 1) % n,
@@ -21729,7 +22178,7 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = rank_layouts(q, &layouts);
+                let ranked = rank_layouts(q, layouts);
                 let name = ranked.get(*sel).map(|&i| layouts[i].clone());
                 ws.layout_picker_input = None;
                 if let Some(name) = name {
@@ -22237,6 +22686,8 @@ fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
                 | NamedKey::Tab
                 | NamedKey::Backspace
                 | NamedKey::Delete
+                | NamedKey::ArrowUp
+                | NamedKey::ArrowDown
                 | NamedKey::ArrowLeft
                 | NamedKey::ArrowRight
                 | NamedKey::Home
@@ -23920,6 +24371,24 @@ impl App {
             children.push(ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID);
             nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID, dismiss));
         }
+        let surface = ws
+            .window
+            .as_ref()
+            .map(|window| {
+                let size = window.inner_size();
+                (size.width as f32, size.height as f32)
+            })
+            .or_else(|| {
+                ws.renderer.as_ref().map(|renderer| {
+                    let (width, height) = renderer.surface_size();
+                    (width as f32, height as f32)
+                })
+            })
+            .unwrap_or((800.0, 600.0));
+        let modal = modal_accessibility_projection(overlay, surface);
+        let modal_focus = modal.focus;
+        children.extend(modal.roots);
+        nodes.extend(modal.nodes);
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
         root.set_children(children);
@@ -23933,14 +24402,16 @@ impl App {
             ));
         }
         nodes.push((ACCESSIBILITY_ROOT_ID, root));
-        let focus = if ws.search.open {
-            accessibility_search_control_id(ws.search.focused_control)
-        } else {
-            focused
-                .map(accessibility_pane_id)
-                .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
-                .unwrap_or(ACCESSIBILITY_ROOT_ID)
-        };
+        let focus = modal_focus.unwrap_or_else(|| {
+            if ws.search.open {
+                accessibility_search_control_id(ws.search.focused_control)
+            } else {
+                focused
+                    .map(accessibility_pane_id)
+                    .filter(|id| nodes.iter().any(|(candidate, _)| candidate == id))
+                    .unwrap_or(ACCESSIBILITY_ROOT_ID)
+            }
+        });
         TreeUpdate {
             nodes,
             tree: None,
@@ -23974,6 +24445,62 @@ impl App {
                 .hash(&mut hasher);
             ws.search.focused_control.hash(&mut hasher);
         }
+        overlay.confirm_dialog.is_some().hash(&mut hasher);
+        if let Some(dialog) = overlay.confirm_dialog.as_ref() {
+            dialog.prompt.hash(&mut hasher);
+            dialog.focus_idx.hash(&mut hasher);
+            for button in &dialog.buttons {
+                button.label.hash(&mut hasher);
+                button.destructive.hash(&mut hasher);
+            }
+        }
+        overlay.settings.is_some().hash(&mut hasher);
+        if let Some(settings) = overlay.settings.as_ref() {
+            settings.categories.hash(&mut hasher);
+            settings.active_category.hash(&mut hasher);
+            settings.focused_row.hash(&mut hasher);
+            for row in &settings.rows {
+                row.label.hash(&mut hasher);
+                row.value.hash(&mut hasher);
+                row.disabled.hash(&mut hasher);
+            }
+        }
+        overlay.context_menu.is_some().hash(&mut hasher);
+        if let Some(menu) = overlay.context_menu.as_ref() {
+            menu.highlight.hash(&mut hasher);
+            menu.scroll_offset.hash(&mut hasher);
+            for component in [
+                menu.anchor.0,
+                menu.anchor.1,
+                menu.panel_w_clamped,
+                menu.panel_h_clamped,
+            ] {
+                component.to_bits().hash(&mut hasher);
+            }
+            for row in &menu.rows {
+                row.label.hash(&mut hasher);
+                row.hint.hash(&mut hasher);
+                row.separator.hash(&mut hasher);
+                row.enabled.hash(&mut hasher);
+            }
+        }
+        overlay.palette_query.hash(&mut hasher);
+        overlay.layout_picker_query.hash(&mut hasher);
+        overlay.ssh_query.hash(&mut hasher);
+        if let Some(edit) = overlay.edit_title.as_ref() {
+            edit.label.hash(&mut hasher);
+            edit.input.hash(&mut hasher);
+            for component in [edit.rect.0, edit.rect.1, edit.rect.2, edit.rect.3] {
+                component.to_bits().hash(&mut hasher);
+            }
+        }
+        for hint in &overlay.hint_labels {
+            hint.row.hash(&mut hasher);
+            hint.col.hash(&mut hasher);
+            hint.label.hash(&mut hasher);
+            hint.dim.hash(&mut hasher);
+        }
+        overlay.update_available.hash(&mut hasher);
         let projected_completion = overlay.completion.as_ref();
         projected_completion.is_some().hash(&mut hasher);
         if let Some(completion) = projected_completion {
@@ -25684,7 +26211,39 @@ impl App {
         kettle_core::term::prewarm_shell_detection();
     }
 
-    fn handle_accessibility_action(&mut self, ws: &mut WindowState, request: ActionRequest) {
+    fn handle_accessibility_action(
+        &mut self,
+        ws: &mut WindowState,
+        request: ActionRequest,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if let Some(index) = accessibility_confirm_button_index(request.target_node) {
+            let Some(dialog) = ws.confirm_dialog.as_mut() else {
+                return;
+            };
+            if index >= dialog.buttons.len() {
+                return;
+            }
+            match request.action {
+                AccessibilityAction::Focus => dialog.focus_idx = index,
+                AccessibilityAction::Click => {
+                    let confirm = matches!(dialog.buttons[index], ConfirmButton::Confirm { .. });
+                    if confirm {
+                        let action = dialog.on_confirm.clone();
+                        ws.confirm_dialog = None;
+                        self.dispatch_confirm_action(ws, action, event_loop);
+                    } else {
+                        self.cancel_confirm_dialog(ws);
+                    }
+                }
+                _ => return,
+            }
+            ws.accessibility_pending = true;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+            return;
+        }
         if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID {
             if request.action == AccessibilityAction::Click {
                 ws.media_paste_receipt = None;
@@ -25789,7 +26348,7 @@ impl App {
             // is checked out.
             UserEvent::Activation | UserEvent::RemoteScanReady => {}
             UserEvent::AccessibilityAction { request, .. } => {
-                self.handle_accessibility_action(ws, request);
+                self.handle_accessibility_action(ws, request, _el);
             }
             UserEvent::VideoPreviewReady {
                 window_seq,
@@ -27571,67 +28130,7 @@ impl App {
                 // closes the modal without dispatching. Modal is
                 // exclusive — non-nav keys are swallowed.
                 if ws.confirm_dialog.is_some() {
-                    let key = match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => Some(ConfirmKey::Escape),
-                        Key::Named(NamedKey::Enter) => Some(ConfirmKey::Enter),
-                        Key::Named(NamedKey::Tab) => {
-                            if ws.mods.shift_key() {
-                                Some(ConfirmKey::ShiftTab)
-                            } else {
-                                Some(ConfirmKey::Tab)
-                            }
-                        }
-                        Key::Named(NamedKey::ArrowLeft) => Some(ConfirmKey::Left),
-                        Key::Named(NamedKey::ArrowRight) => Some(ConfirmKey::Right),
-                        // v2.20.0 (`vim-menu-nav`): y/n answer directly;
-                        // h/l move button focus like ←/→. The modal swallows
-                        // all other keys either way, so disabling the setting
-                        // restores the old behavior exactly.
-                        Key::Character(s)
-                            if self.cfg.vim_menu_nav
-                                && !ws.mods.control_key()
-                                && !ws.mods.alt_key()
-                                && !ws.mods.super_key() =>
-                        {
-                            // Case-folded so CapsLock can't disable y/n/h/l.
-                            match s.to_ascii_lowercase().as_str() {
-                                "y" => Some(ConfirmKey::Yes),
-                                "n" => Some(ConfirmKey::No),
-                                "h" => Some(ConfirmKey::Left),
-                                "l" => Some(ConfirmKey::Right),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
-                    if let Some(k) = key
-                        && let Some(state) = ws.confirm_dialog.as_ref()
-                    {
-                        let n = state.buttons.len();
-                        let focus = state.focus_idx;
-                        let action = state.on_confirm.clone();
-                        let result = confirm_dialog_keypress(focus, n, k);
-                        match result {
-                            ConfirmKeyResult::Move(idx) => {
-                                if let Some(s) = ws.confirm_dialog.as_mut() {
-                                    s.focus_idx = idx;
-                                }
-                            }
-                            ConfirmKeyResult::Confirm => {
-                                // Inspect on_confirm BEFORE clearing
-                                // so the dispatch sees the right action.
-                                ws.confirm_dialog = None;
-                                self.dispatch_confirm_action(ws, action, event_loop);
-                            }
-                            ConfirmKeyResult::Cancel => {
-                                self.cancel_confirm_dialog(ws);
-                            }
-                            ConfirmKeyResult::Ignore => {}
-                        }
-                        if let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
-                    }
+                    self.confirm_dialog_key(ws, &event.logical_key, event_loop);
                     return;
                 }
                 if ws.context_menu.is_some() {
@@ -29253,7 +29752,7 @@ mod tests {
     #[test]
     fn global_group_autoclean_keeps_foreign_members_and_clears_empty_scopes() {
         let scope = BroadcastScope::Group("fleet".into());
-        let populated = HashSet::from(["fleet".to_string()]);
+        let populated = HashSet::from(["fleet"]);
         assert!(
             !group_scope_is_globally_stale(true, &scope, &populated),
             "a member in another window keeps the process-wide group alive"
@@ -30057,8 +30556,20 @@ mod tests {
         // (so it clears the base overlay quads), and the settings panel's dim
         // backdrop — pushed to the same list afterwards, therefore drawn over
         // it — stops above the bar rather than greying it out.
-        let render =
-            kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
+        let render = include_str!("../../kettle-render/src/lib.rs");
+        for guarded_arm in [
+            "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
+            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.search_query",
+            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.palette_query",
+            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.layout_picker_query",
+            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.ssh_query",
+            "overlay.confirm_dialog.is_none()\n            && let Some(edit) = &overlay.edit_title",
+        ] {
+            assert!(
+                render.contains(guarded_arm),
+                "the renderer must suppress {guarded_arm} while a confirm dialog owns the keyboard"
+            );
+        }
         assert!(
             render
                 .contains("menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));"),
@@ -30920,6 +31431,22 @@ mod tests {
     }
 
     #[test]
+    fn refused_terminal_url_warning_never_contains_the_payload() {
+        let hostile = "javascript:alert('private-token=sekret')\nforged-log-line";
+        let mut messages = Vec::new();
+
+        super::warn_refused_terminal_url(hostile, |message| messages.push(message.to_string()));
+
+        assert_eq!(messages.len(), 1);
+        assert!(!messages[0].contains(hostile));
+        assert!(!messages[0].contains("sekret"));
+        assert_eq!(
+            messages[0],
+            "refused to open an unsafe URL from terminal output"
+        );
+    }
+
+    #[test]
     fn output_generations_commit_only_after_presentation() {
         let mut committed = std::collections::HashMap::from([(1, 10), (2, 20)]);
         let mut candidate = std::collections::HashMap::from([(1, 11), (2, 21)]);
@@ -31693,6 +32220,123 @@ mod tests {
         assert_ne!(first, super::accessibility_pane_id(2));
         assert_ne!(first, text);
         assert_eq!(text, super::accessibility_text_id(1));
+    }
+
+    #[test]
+    fn confirm_dialog_accessibility_focuses_the_selected_button() {
+        let overlay = kettle_render::Overlay {
+            confirm_dialog: Some(kettle_render::ConfirmDialogOverlay {
+                prompt: "Close 3 running panes?".to_string(),
+                buttons: vec![
+                    kettle_render::ConfirmDialogButton {
+                        label: "Cancel".to_string(),
+                        destructive: false,
+                    },
+                    kettle_render::ConfirmDialogButton {
+                        label: "Close".to_string(),
+                        destructive: true,
+                    },
+                ],
+                focus_idx: 1,
+            }),
+            ..kettle_render::Overlay::default()
+        };
+
+        let projection = super::modal_accessibility_projection(&overlay, (800.0, 600.0));
+        let dialog = projection
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::AlertDialog)
+            .expect("confirm dialog node");
+        assert_eq!(dialog.1.label(), Some("Close 3 running panes?"));
+        let focused = projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == projection.focus.expect("modal focus"))
+            .expect("focused modal node");
+        assert_eq!(focused.1.role(), accesskit::Role::Button);
+        assert_eq!(focused.1.label(), Some("Close"));
+    }
+
+    #[test]
+    fn confirm_dialog_accessibility_button_ids_round_trip() {
+        for index in 0..3 {
+            let id = super::accessibility_modal_id(1, index + 1);
+            assert_eq!(super::accessibility_confirm_button_index(id), Some(index));
+        }
+        assert_eq!(
+            super::accessibility_confirm_button_index(super::accessibility_modal_id(1, 0)),
+            None
+        );
+        assert_eq!(
+            super::accessibility_confirm_button_index(super::accessibility_modal_id(5, 2)),
+            None
+        );
+    }
+
+    #[test]
+    fn group_hoover_skips_the_common_case_before_allocating_names() {
+        let src = production_source();
+        let body = src
+            .split("fn hoover_groups(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn hoover_mapped_groups(").next())
+            .expect("group hoover body");
+        let guard = body
+            .find("any_group_scope_needs_hoover")
+            .expect("cheap guard");
+        let scan = body.find("populated_groups").expect("group-name scan");
+        assert!(guard < scan);
+        assert!(src.contains("filter_map(|pane| pane.group_name.as_deref())"));
+    }
+
+    #[test]
+    fn layout_picker_reads_the_directory_only_when_it_opens() {
+        let src = production_source();
+        let overlay = src
+            .split("fn overlay(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn redraw(").next())
+            .expect("overlay body");
+        assert!(!overlay.contains("Session::list_layouts()"));
+        assert!(
+            src.contains("ws.layout_picker_entries = crate::session::Session::list_layouts();")
+        );
+    }
+
+    #[test]
+    fn ui_geometry_exposes_modal_accessibility_and_settings_scroll_without_values() {
+        let src = production_source();
+        let body = src
+            .split("fn ctl_ui_geometry(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn ctl_perform_action(").next())
+            .expect("ui_geometry body");
+        for needle in [
+            "kettle_render::settings_panel_geometry",
+            "\"first_line\":",
+            "\"visible_lines\":",
+            "\"focused_rect\":",
+            "\"accessibility\": accessibility",
+        ] {
+            assert!(body.contains(needle), "ui_geometry lost {needle:?}");
+        }
+        assert!(
+            !body.contains("\"value\":"),
+            "settings diagnostics must not expose config values"
+        );
+    }
+
+    #[test]
+    fn about_never_claims_current_without_a_verified_result() {
+        assert_eq!(
+            super::about_update_status_label(None),
+            "Update status unknown"
+        );
+        assert_eq!(
+            super::about_update_status_label(Some("v9.9.9")),
+            "Update available: v9.9.9"
+        );
     }
 
     #[test]
@@ -33204,7 +33848,7 @@ mod tests {
         }
     }
 
-    /// `open_text_modal` decides which field `dispatch_ui_key` types into. If it
+    /// `open_text_modal` decides which modal `dispatch_ui_key` drives. If it
     /// ever disagrees with the precedence the real `KeyboardInput` arm applies,
     /// an agent's keystroke lands somewhere a user's would not — and the tests
     /// built on it would be certifying the wrong field. Pin the two orders
@@ -33219,6 +33863,7 @@ mod tests {
             .and_then(|rest| rest.split("\n}").next())
             .expect("open_text_modal present");
         let resolver_order: Vec<&str> = [
+            ("ws.confirm_dialog.is_some()", "confirm"),
             ("ws.palette_input.is_some()", "palette"),
             // The compound condition, not just the text-edit half: dropping
             // the `settings_nav` guard would diverge from the real handler
@@ -33227,6 +33872,7 @@ mod tests {
                 "ws.settings_nav.is_some() && ws.settings_text_edit.is_some()",
                 "settings_text",
             ),
+            ("else if ws.settings_nav.is_some() {", "settings"),
             ("ws.layout_picker_input.is_some()", "layout_picker"),
             ("ws.ssh_input.is_some()", "ssh"),
             ("ws.editing_title.is_some()", "title_edit"),
@@ -33252,11 +33898,13 @@ mod tests {
             .and_then(|rest| rest.split("fn ").next())
             .expect("KeyboardInput arm present");
         let handler_order: Vec<&str> = [
+            ("if ws.confirm_dialog.is_some() {", "confirm"),
             ("if ws.palette_input.is_some() {", "palette"),
             (
                 "if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {",
                 "settings_text",
             ),
+            ("if ws.settings_nav.is_some() {", "settings"),
             ("if ws.layout_picker_input.is_some() {", "layout_picker"),
             ("if ws.ssh_input.is_some() {", "ssh"),
             ("if ws.editing_title.is_some() {", "title_edit"),
@@ -33287,8 +33935,10 @@ mod tests {
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("ctl_dispatch_ui_key present");
         for (variant, handler) in [
+            ("TextModal::Confirm", "self.confirm_dialog_key("),
             ("TextModal::Palette", "self.palette_key("),
             ("TextModal::SettingsText", "self.settings_text_key("),
+            ("TextModal::Settings", "self.settings_key("),
             ("TextModal::LayoutPicker", "self.layout_picker_key("),
             ("TextModal::Ssh", "self.ssh_key("),
             ("TextModal::TitleEdit", "self.title_edit_key("),
@@ -33533,7 +34183,14 @@ mod tests {
             parse_ui_key("shift+f3"),
             Some((ModifiersState::SHIFT, Key::Named(NamedKey::F3)))
         );
-        assert_eq!(parse_ui_key("up"), None);
+        assert_eq!(
+            parse_ui_key("up"),
+            Some((ModifiersState::empty(), Key::Named(NamedKey::ArrowUp)))
+        );
+        assert_eq!(
+            parse_ui_key("down"),
+            Some((ModifiersState::empty(), Key::Named(NamedKey::ArrowDown)))
+        );
         assert_eq!(parse_ui_key("page_down"), None);
         assert_eq!(parse_ui_key("insert"), None);
     }

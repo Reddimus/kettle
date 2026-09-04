@@ -812,10 +812,6 @@ fn prepare_linux_process_start_at(
     };
     confirm_committed_transaction(&install.prefix, running_version)?;
     recover_transaction(&install.prefix)?;
-    // Startup remains available for an installation whose ordinary provenance
-    // is invalid, but recovery must run before that content check can classify
-    // an interrupted update as unmanaged.
-    let _ = read_linux_install_provenance(&install.prefix);
     Ok(())
 }
 
@@ -2318,120 +2314,6 @@ pub(crate) fn verify_sha256_bytes(bytes: &[u8], expected: &str) -> Result<(), Up
     Ok(())
 }
 
-#[cfg(all(any(windows, target_os = "linux"), test))]
-fn verify_required_package_manifest(
-    root: &Path,
-    update: &AvailableUpdate,
-) -> Result<(), UpdateError> {
-    let manifest_path = root.join(PACKAGE_MANIFEST_FILE);
-    if manifest_path.is_file() {
-        return verify_package_manifest(root, update);
-    }
-    if update.version >= semver::Version::new(2, 36, 0) {
-        return Err(UpdateError::UnsafeArchive(format!(
-            "{PACKAGE_MANIFEST_FILE} is required for release archives from v2.36.0 onward"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(all(any(windows, target_os = "linux"), test))]
-fn verify_package_manifest(root: &Path, update: &AvailableUpdate) -> Result<(), UpdateError> {
-    let manifest_path = root.join(PACKAGE_MANIFEST_FILE);
-    let bytes = read_bounded_regular(&manifest_path, 256 * 1024).map_err(|error| {
-        UpdateError::UnsafeArchive(format!("invalid package manifest: {error}"))
-    })?;
-    if bytes.is_empty() {
-        return Err(UpdateError::UnsafeArchive(
-            "package manifest is empty".into(),
-        ));
-    }
-    let manifest: PackageManifest = serde_json::from_slice(&bytes)?;
-    if manifest.schema != 1
-        || manifest.product != "kettle"
-        || current_target() != Some(manifest.target.as_str())
-        || manifest.version != update.version.to_string()
-        || manifest.files.is_empty()
-        || manifest.files.len() >= MAX_ARCHIVE_ENTRIES
-    {
-        return Err(UpdateError::UnsafeArchive(
-            "package manifest identity failed validation".into(),
-        ));
-    }
-
-    let mut declared = std::collections::HashMap::new();
-    let mut declared_total = 0_u64;
-    for file in manifest.files {
-        let path = Path::new(&file.path);
-        validate_archive_path(path)?;
-        let declared_path = file.path.clone();
-        let folded = declared_path.to_lowercase();
-        if folded == PACKAGE_MANIFEST_FILE.to_lowercase()
-            || declared.insert(folded, (declared_path, file)).is_some()
-        {
-            return Err(UpdateError::UnsafeArchive(
-                "package manifest contains a duplicate or self-entry".into(),
-            ));
-        }
-    }
-
-    let mut actual_count = 0_usize;
-    for actual in collect_files(root)? {
-        let relative = actual
-            .strip_prefix(root)
-            .map_err(|_| UpdateError::UnsafeArchive(actual.display().to_string()))?;
-        if relative == Path::new(PACKAGE_MANIFEST_FILE) {
-            continue;
-        }
-        let relative_string = relative_to_string(relative)?;
-        let (declared_path, expected) = declared
-            .remove(&relative_string.to_lowercase())
-            .ok_or_else(|| {
-                UpdateError::UnsafeArchive(format!(
-                    "package contains undeclared file {relative_string}"
-                ))
-            })?;
-        let metadata = fs::symlink_metadata(&actual)?;
-        if declared_path != relative_string
-            || !metadata.file_type().is_file()
-            || metadata.len() != expected.size
-            || sha256_file(&actual)? != expected.sha256
-            || package_mode(&metadata) != expected.mode
-            || !is_sha256(&expected.sha256)
-        {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "package manifest mismatch for {relative_string}"
-            )));
-        }
-        declared_total = declared_total
-            .checked_add(expected.size)
-            .ok_or_else(|| UpdateError::UnsafeArchive("package size overflow".into()))?;
-        if declared_total > MAX_UNPACKED_BYTES {
-            return Err(UpdateError::UnsafeArchive(
-                "package contents exceed the safety limit".into(),
-            ));
-        }
-        actual_count += 1;
-    }
-    if !declared.is_empty() || actual_count == 0 {
-        return Err(UpdateError::UnsafeArchive(
-            "package is missing files declared by its manifest".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(all(any(windows, target_os = "linux"), unix, test))]
-fn package_mode(metadata: &fs::Metadata) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt as _;
-    Some(metadata.permissions().mode() & 0o777)
-}
-
-#[cfg(all(any(windows, target_os = "linux"), not(unix), test))]
-fn package_mode(_metadata: &fs::Metadata) -> Option<u32> {
-    None
-}
-
 #[cfg(windows)]
 fn load_windows_package(
     archive: &mut File,
@@ -2655,102 +2537,6 @@ pub(crate) fn zip_unix_mode_is_safe(mode: Option<u32>, is_dir: bool) -> bool {
         0o100000 => !is_dir,
         _ => false,
     }
-}
-
-/// Extracts from the same bounded in-memory bytes hashed by
-/// [`verify_sha256_bytes`]. No writable archive inode exists between
-/// verification and extraction.
-#[cfg(all(target_os = "linux", test))]
-fn extract_archive(archive: &[u8], destination: &Path) -> Result<(), UpdateError> {
-    let decoder = flate2::read::GzDecoder::new(std::io::Cursor::new(archive));
-    let mut tar = tar::Archive::new(decoder);
-    let mut count = 0_usize;
-    let mut total = 0_u64;
-    let mut seen = ArchivePaths::default();
-    for entry in tar.entries()? {
-        count += 1;
-        if count > MAX_ARCHIVE_ENTRIES {
-            return Err(UpdateError::UnsafeArchive("too many entries".into()));
-        }
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        validate_archive_path(&path)?;
-        if path.components().next() != Some(Component::Normal("kettle".as_ref())) {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "entry is outside the kettle root: {}",
-                path.display()
-            )));
-        }
-        let entry_type = entry.header().entry_type();
-        if !entry_type.is_file() && !entry_type.is_dir() {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "links and special files are forbidden: {}",
-                path.display()
-            )));
-        }
-        if let Some(extensions) = entry.pax_extensions()? {
-            for extension in extensions {
-                let extension = extension?;
-                let key = extension.key_bytes();
-                if key.starts_with(b"GNU.sparse.") || key == b"SCHILY.realsize" {
-                    return Err(UpdateError::UnsafeArchive(format!(
-                        "sparse files are forbidden: {}",
-                        path.display()
-                    )));
-                }
-            }
-        }
-        seen.insert(&path, entry_type.is_dir())?;
-        let mode = entry.header().mode()?;
-        if mode & !0o777 != 0 {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "special permission bits are forbidden: {}",
-                path.display()
-            )));
-        }
-        let declared_size = entry.size();
-        let next_total = total
-            .checked_add(declared_size)
-            .ok_or_else(|| UpdateError::UnsafeArchive("unpacked size overflow".into()))?;
-        if next_total > MAX_UNPACKED_BYTES {
-            return Err(UpdateError::UnsafeArchive(
-                "unpacked data exceeds the safety limit".into(),
-            ));
-        }
-        let output = destination.join(&path);
-        if entry_type.is_dir() {
-            if declared_size != 0 {
-                return Err(UpdateError::UnsafeArchive(format!(
-                    "directory has data: {}",
-                    path.display()
-                )));
-            }
-            fs::create_dir_all(output)?;
-            continue;
-        }
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(output)?;
-        let remaining = MAX_UNPACKED_BYTES - total;
-        let actual = std::io::copy(&mut entry.by_ref().take(remaining + 1), &mut file)?;
-        if actual != declared_size {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "entry size mismatch for {} (declared {declared_size}, extracted {actual})",
-                path.display()
-            )));
-        }
-        total = next_total;
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(fs::Permissions::from_mode(mode))?;
-        }
-        file.sync_all()?;
-    }
-    Ok(())
 }
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -6471,6 +6257,32 @@ fn system_tool_path_in(dirs: &[&str], name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn archive_hardening_tests_have_no_test_only_extractor() {
+        let source = include_str!("install.rs");
+        for obsolete_helper in [
+            ["fn extract", "_archive("].concat(),
+            ["fn verify", "_package_manifest("].concat(),
+            ["fn verify_required", "_package_manifest("].concat(),
+        ] {
+            assert!(
+                !source.contains(&obsolete_helper),
+                "test-only archive helper remains: {obsolete_helper}"
+            );
+        }
+    }
+
+    #[test]
+    fn steady_state_linux_startup_does_not_hash_the_install_tree() {
+        let source = kettle_test_support::production_source(include_str!("install.rs"));
+        let body = source
+            .split("fn prepare_linux_process_start_at(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn run_pending_update_helper(").next())
+            .expect("Linux startup recovery body");
+        assert!(!body.contains("read_linux_install_provenance"));
+    }
+
     #[cfg(windows)]
     use base64::Engine as _;
     #[cfg(windows)]
@@ -7029,84 +6841,79 @@ mod tests {
     }
 
     #[cfg(any(windows, target_os = "linux"))]
-    fn write_test_package_manifest(root: &Path, version: &str) {
-        let _ = fs::remove_file(root.join(PACKAGE_MANIFEST_FILE));
-        let files = collect_files(root)
-            .unwrap()
-            .into_iter()
-            .map(|path| {
-                let metadata = fs::metadata(&path).unwrap();
-                PackageFile {
-                    path: relative_to_string(path.strip_prefix(root).unwrap()).unwrap(),
-                    size: metadata.len(),
-                    sha256: sha256_file(&path).unwrap(),
-                    mode: package_mode(&metadata),
-                }
-            })
-            .collect();
-        let manifest = PackageManifest {
-            schema: 1,
-            product: "kettle".into(),
-            target: current_target().unwrap().into(),
-            version: version.into(),
-            files,
-        };
-        fs::write(
-            root.join(PACKAGE_MANIFEST_FILE),
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[cfg(any(windows, target_os = "linux"))]
     #[test]
-    fn package_manifest_is_mandatory_from_v2_36_onward() {
-        let root = test_tempdir();
-        let mut update = fake_update();
-
-        update.version = semver::Version::new(2, 35, 99);
-        verify_required_package_manifest(root.path(), &update)
-            .expect("legacy signed archives remain compatible without an inner manifest");
-
-        update.version = semver::Version::new(2, 36, 0);
-        let error = verify_required_package_manifest(root.path(), &update).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("required for release archives from v2.36.0 onward"),
-            "unexpected missing-manifest error: {error}"
-        );
-
-        fs::write(root.path().join("kettle.exe"), b"binary").unwrap();
-        write_test_package_manifest(root.path(), "2.36.0");
-        verify_required_package_manifest(root.path(), &update)
-            .expect("a valid v2.36 package manifest is accepted");
+    fn verified_package_requires_the_inner_manifest() {
+        let files = vec![VerifiedPackageFile {
+            relative: PathBuf::from("kettle"),
+            bytes: b"binary".to_vec(),
+            mode: cfg!(unix).then_some(0o755),
+        }];
+        let error = match VerifiedPackage::from_files(files, &fake_update(), None) {
+            Err(error) => error,
+            Ok(_) => panic!("package without an inner manifest was accepted"),
+        };
+        assert!(error.to_string().contains(PACKAGE_MANIFEST_FILE));
     }
 
     #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn package_manifest_requires_exact_hash_size_mode_and_file_set() {
-        let root = test_tempdir();
-        fs::create_dir(root.path().join("shell-integration")).unwrap();
-        fs::write(root.path().join("kettle.exe"), b"binary").unwrap();
-        fs::write(root.path().join("shell-integration/kettle.ps1"), b"prompt").unwrap();
-        write_test_package_manifest(root.path(), "99.0.0");
-        verify_package_manifest(root.path(), &fake_update()).unwrap();
+        fn package(
+            declared_path: &str,
+            actual_bytes: &[u8],
+            with_extra: bool,
+        ) -> Vec<VerifiedPackageFile> {
+            let expected = b"binary";
+            let mode = cfg!(unix).then_some(0o755);
+            let manifest = serde_json::to_vec(&PackageManifest {
+                schema: 1,
+                product: "kettle".into(),
+                target: current_target().unwrap().into(),
+                version: fake_update().version.to_string(),
+                files: vec![PackageFile {
+                    path: declared_path.into(),
+                    size: expected.len() as u64,
+                    sha256: hex::encode(Sha256::digest(expected)),
+                    mode,
+                }],
+            })
+            .unwrap();
+            let mut files = vec![
+                VerifiedPackageFile {
+                    relative: PathBuf::from("kettle"),
+                    bytes: actual_bytes.to_vec(),
+                    mode,
+                },
+                VerifiedPackageFile {
+                    relative: PathBuf::from(PACKAGE_MANIFEST_FILE),
+                    bytes: manifest,
+                    mode: cfg!(unix).then_some(0o644),
+                },
+            ];
+            if with_extra {
+                files.push(VerifiedPackageFile {
+                    relative: PathBuf::from("undeclared"),
+                    bytes: b"extra".to_vec(),
+                    mode,
+                });
+            }
+            files
+        }
 
-        fs::write(root.path().join("undeclared"), b"extra").unwrap();
-        assert!(verify_package_manifest(root.path(), &fake_update()).is_err());
-        fs::remove_file(root.path().join("undeclared")).unwrap();
-
-        let manifest_path = root.path().join(PACKAGE_MANIFEST_FILE);
-        let mut manifest: PackageManifest =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest.files[0].path.make_ascii_uppercase();
-        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        assert!(verify_package_manifest(root.path(), &fake_update()).is_err());
-        write_test_package_manifest(root.path(), "99.0.0");
-
-        fs::write(root.path().join("kettle.exe"), b"mutated").unwrap();
-        assert!(verify_package_manifest(root.path(), &fake_update()).is_err());
+        VerifiedPackage::from_files(package("kettle", b"binary", false), &fake_update(), None)
+            .unwrap();
+        assert!(
+            VerifiedPackage::from_files(package("kettle", b"binary", true), &fake_update(), None)
+                .is_err()
+        );
+        assert!(
+            VerifiedPackage::from_files(package("KETTLE", b"binary", false), &fake_update(), None)
+                .is_err()
+        );
+        assert!(
+            VerifiedPackage::from_files(package("kettle", b"mutated", false), &fake_update(), None)
+                .is_err()
+        );
     }
 
     #[cfg(any(windows, target_os = "linux"))]
@@ -8619,8 +8426,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_archive_extraction_preserves_modes_and_rejects_special_bits() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         fn write_archive(path: &Path, mode: u32) {
             let encoder = flate2::write::GzEncoder::new(
                 fs::File::create(path).unwrap(),
@@ -8636,34 +8441,57 @@ mod tests {
             archive
                 .append_data(&mut header, "kettle/install.sh", payload.as_slice())
                 .unwrap();
+            let manifest = serde_json::to_vec(&PackageManifest {
+                schema: 1,
+                product: "kettle".into(),
+                target: current_target().unwrap().into(),
+                version: fake_update().version.to_string(),
+                files: vec![PackageFile {
+                    path: "install.sh".into(),
+                    size: payload.len() as u64,
+                    sha256: hex::encode(Sha256::digest(payload)),
+                    mode: Some(mode),
+                }],
+            })
+            .unwrap();
+            let mut manifest_header = tar::Header::new_gnu();
+            manifest_header.set_entry_type(tar::EntryType::Regular);
+            manifest_header.set_mode(0o644);
+            manifest_header.set_size(manifest.len() as u64);
+            manifest_header.set_cksum();
+            archive
+                .append_data(
+                    &mut manifest_header,
+                    format!("kettle/{PACKAGE_MANIFEST_FILE}"),
+                    manifest.as_slice(),
+                )
+                .unwrap();
             let encoder = archive.into_inner().unwrap();
             encoder.finish().unwrap();
         }
 
         let root = test_tempdir();
         let archive = root.path().join("release.tar.gz");
-        let destination = root.path().join("stage");
-        fs::create_dir(&destination).unwrap();
         write_archive(&archive, 0o755);
         let archive_bytes = fs::read(&archive).unwrap();
-        extract_archive(&archive_bytes, &destination).unwrap();
+        let package = load_linux_package(&archive_bytes, &fake_update()).unwrap();
         assert_eq!(
-            fs::metadata(destination.join("kettle/install.sh"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o755
+            package
+                .files
+                .iter()
+                .find(|file| file.relative == Path::new("install.sh"))
+                .and_then(|file| file.mode),
+            Some(0o755)
         );
 
         let special_archive = root.path().join("special.tar.gz");
-        let special_destination = root.path().join("special-stage");
-        fs::create_dir(&special_destination).unwrap();
         write_archive(&special_archive, 0o4755);
         let special_archive_bytes = fs::read(&special_archive).unwrap();
-        let error = extract_archive(&special_archive_bytes, &special_destination).unwrap_err();
+        let error = match load_linux_package(&special_archive_bytes, &fake_update()) {
+            Err(error) => error,
+            Ok(_) => panic!("special permission bits were accepted"),
+        };
         assert!(error.to_string().contains("special permission bits"));
-        assert!(!special_destination.join("kettle/install.sh").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -8689,14 +8517,13 @@ mod tests {
             .append_data(&mut header, "kettle/sparse", payload.as_slice())
             .unwrap();
         archive.into_inner().unwrap().finish().unwrap();
-        let destination = root.path().join("stage");
-        fs::create_dir(&destination).unwrap();
-
         let archive_bytes = fs::read(&archive_path).unwrap();
-        let error = extract_archive(&archive_bytes, &destination).unwrap_err();
+        let error = match load_linux_package(&archive_bytes, &fake_update()) {
+            Err(error) => error,
+            Ok(_) => panic!("sparse archive metadata was accepted"),
+        };
 
         assert!(error.to_string().contains("sparse files are forbidden"));
-        assert!(!destination.join("kettle/sparse").exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -8713,6 +8540,31 @@ mod tests {
         header.set_cksum();
         archive
             .append_data(&mut header, "kettle/payload", payload)
+            .unwrap();
+        let manifest = serde_json::to_vec(&PackageManifest {
+            schema: 1,
+            product: "kettle".into(),
+            target: current_target().unwrap().into(),
+            version: fake_update().version.to_string(),
+            files: vec![PackageFile {
+                path: "payload".into(),
+                size: payload.len() as u64,
+                sha256: hex::encode(Sha256::digest(payload)),
+                mode: Some(0o644),
+            }],
+        })
+        .unwrap();
+        let mut manifest_header = tar::Header::new_gnu();
+        manifest_header.set_entry_type(tar::EntryType::Regular);
+        manifest_header.set_mode(0o644);
+        manifest_header.set_size(manifest.len() as u64);
+        manifest_header.set_cksum();
+        archive
+            .append_data(
+                &mut manifest_header,
+                format!("kettle/{PACKAGE_MANIFEST_FILE}"),
+                manifest.as_slice(),
+            )
             .unwrap();
         archive.into_inner().unwrap().finish().unwrap();
     }
@@ -8738,13 +8590,14 @@ mod tests {
         fs::rename(&malicious, &path).unwrap();
         assert_ne!(sha256_file(&path).unwrap(), expected_hash);
 
-        let destination = root.path().join("stage");
-        fs::create_dir(&destination).unwrap();
-        extract_archive(&archive, &destination).unwrap();
-
+        let package = load_linux_package(&archive, &fake_update()).unwrap();
         assert_eq!(
-            fs::read(destination.join("kettle/payload")).unwrap(),
-            b"original-bytes",
+            package
+                .files
+                .iter()
+                .find(|file| file.relative == Path::new("payload"))
+                .map(|file| file.bytes.as_slice()),
+            Some(b"original-bytes".as_slice()),
             "extraction must read the bytes verify_sha256_bytes hashed"
         );
     }

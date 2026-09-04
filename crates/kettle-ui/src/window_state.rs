@@ -833,6 +833,9 @@ pub(crate) struct WindowState {
     /// Terminator parity: `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
     pub(crate) layout_picker_input: Option<(String, usize)>,
+    /// Saved-layout names captured when the picker opens. The directory is
+    /// refreshed for each opening, never on every painted frame.
+    pub(crate) layout_picker_entries: Vec<String>,
     /// Active quick-select hint mode: detected targets + typed prefix.
     pub(crate) hint_state: Option<(Vec<HintTarget>, String)>,
     /// Right-click context menu state (`Some` while open). Lives next
@@ -1127,6 +1130,7 @@ impl WindowState {
             settings_restart_pending: false,
             last_bg_frame: None,
             layout_picker_input: None,
+            layout_picker_entries: Vec::new(),
             hint_state: None,
             context_menu: None,
             theme_preview: None,

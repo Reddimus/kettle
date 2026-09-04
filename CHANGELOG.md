@@ -13,6 +13,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `docs/changelog/CHANGELOG-<major>.x.md` file instead of stopping at the
   current `3.x` archive. It rejects other names and nested entries before they
   can add an install destination.
+- Unsafe terminal URLs no longer echo their untrusted payload into logs.
+- Modal overlays now appear in the accessibility tree and move accessibility
+  focus to the control that owns keyboard input. Confirmations also stay above
+  other bottom-bar overlays.
+- Settings scroll to keep the focused row visible in short windows and
+  ellipsize long rows in narrow windows.
+- Search selection and pointer mapping now account for the painted caret, and
+  quick-select preserves paths and URLs containing wide glyphs.
+- Large sixel images that fit the configured byte budget are accepted even
+  when geometric capacity growth would exceed it; Kitty root-frame edits now
+  replace the root instead of appending a duplicate frame.
+- Update extraction, activation, config-path, and control-directory edge cases
+  now fail safely without unbounded reads, busy loops, relative private paths,
+  or divergent ownership checks.
+
+### Changed
+
+- Minimum contrast is cached by transformed color pair for each frame. The
+  release diagnostic benchmark reduced a 100,000-cell, four-color workload
+  from a 76.93 ms median to 1.21 ms (about 63.7 times faster on the test Mac).
+- Glyph-atlas evictions coalesce freed regions in batches, layout-picker
+  entries are read once per open, and Kitty deletes skip grid and image-origin
+  snapshots when there are no relative placements.
 
 ## [4.3.0] — 2026-09-04
 

@@ -772,7 +772,8 @@ impl KittyState {
                     }
                     canvas
                 };
-                // `r` (>=2) edits an existing frame in place; else append.
+                // `r=1` edits the stored root; `r>=2` edits an appended frame;
+                // an omitted `r` appends a new frame.
                 let edit_index = edit.filter(|&r| r >= 2).map(|r| r as usize - 2);
                 let editing_existing = edit_index.and_then(|idx| {
                     self.frames
@@ -780,7 +781,14 @@ impl KittyState {
                         .and_then(|f| f.get(idx))
                         .map(|fr| (idx, fr.img.clone()))
                 });
-                if let Some((idx, old_img)) = editing_existing {
+                if edit == Some(1) {
+                    if let Some(root) = self.store.get_mut(&fid) {
+                        *root = frame_img;
+                        if gap != 0 {
+                            self.anim.entry(fid).or_default().root_gap = gap;
+                        }
+                    }
+                } else if let Some((idx, old_img)) = editing_existing {
                     if self.animation_replacement_fits(Some(&old_img), &frame_img)
                         && let Some(fr) = self.frames.get_mut(&fid).and_then(|f| f.get_mut(idx))
                     {
@@ -1945,6 +1953,24 @@ mod tests {
         assert_eq!(k.frames(1).len(), 1, "r=2 edits, does not append");
         assert_eq!(k.frames(1)[0].gap_ms, 99);
         assert_eq!(&k.frames(1)[0].img.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn editing_root_animation_frame_replaces_the_base() {
+        use base64::Engine;
+        let b = |v: &[u8]| base64::engine::general_purpose::STANDARD.encode(v);
+        let mut state = KittyState::default();
+        let base = b(&[0, 0, 0, 255, 255, 255, 255, 255]);
+        state.feed(&format!("a=T,i=8,f=32,s=2,v=1;{base}"));
+
+        let red = b(&[255, 0, 0, 255]);
+        state.feed(&format!("a=f,i=8,r=1,x=1,X=1,f=32,s=1,v=1,z=73;{red}"));
+
+        assert!(state.frames(8).is_empty(), "r=1 must not append a frame");
+        let root = state.image(8).expect("edited root image");
+        assert_eq!(&root.rgba[0..4], &[0, 0, 0, 255]);
+        assert_eq!(&root.rgba[4..8], &[255, 0, 0, 255]);
+        assert_eq!(state.animation(8).expect("animation state").root_gap, 73);
     }
 
     #[test]

@@ -197,28 +197,6 @@ fn registry_entry_is_valid(dir: &std::path::Path, file_pid: u32, entry: &Registr
         && entry.version.len() <= MAX_VERSION_BYTES
 }
 
-fn registry_dir_is_private(dir: &std::path::Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
-        return false;
-    };
-    if !metadata.file_type().is_dir() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
-    }
-    #[cfg(windows)]
-    {
-        // Verify actual ownership instead of trusting whatever ACL
-        // %LOCALAPPDATA% happened to inherit (a redirected/shared profile, a
-        // Terminal-Services-style multi-user box, or an injected env var
-        // could all point this at a non-private directory otherwise).
-        owned_by_current_user(dir)
-    }
-}
-
 fn read_registry_entry(path: &std::path::Path) -> Option<String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -280,33 +258,7 @@ pub fn register(dir: &std::path::Path, entry: &RegistryEntry) -> std::io::Result
             "invalid control registry entry",
         ));
     }
-    #[cfg(unix)]
-    {
-        // Create the leaf dir 0700 from the start (DirBuilder applies the mode
-        // at creation) so there is no create-then-chmod window where it is
-        // briefly world-readable, and give kettle's own directory above it the
-        // same treatment — leaving that one to the umask is what let a `002`
-        // umask make this whole subtree unusable. Then re-assert 0700 on the
-        // leaf in case it already existed with looser perms.
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt};
-        kettle_state::create_private_dirs(dir)?;
-        let metadata = std::fs::symlink_metadata(dir)?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "control registry directory is not a current-user directory",
-            ));
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
-    if !registry_dir_is_private(dir) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "control registry directory is not private",
-        ));
-    }
+    crate::ensure_private_dir(dir)?;
     let path = entry_path(dir, entry.pid);
     let json = crate::protocol::to_json_vec_bounded(entry, MAX_REGISTRY_ENTRY_BYTES)
         .map_err(std::io::Error::other)?;
@@ -322,7 +274,7 @@ pub fn unregister(dir: &std::path::Path, pid: u32) {
 /// List all registry entries, skipping unparseable / unreadable files.
 pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
     let mut out = Vec::new();
-    if !registry_dir_is_private(dir) {
+    if !crate::private_dir_is_valid(dir) {
         return out;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -463,11 +415,11 @@ impl Drop for OwnedSid {
 /// True if `path`'s Win32 security-descriptor owner SID matches the current
 /// process token's user SID. This is the Windows equivalent of the Unix
 /// `metadata.uid() == geteuid()` checks used throughout this file — without
-/// it, `registry_dir_is_private`/`read_registry_entry` on Windows previously
+/// it, `private_dir_is_valid`/`read_registry_entry` on Windows previously
 /// trusted whatever ACL the directory or file happened to have, rather than
 /// verifying ownership.
 #[cfg(windows)]
-fn owned_by_current_user(path: &std::path::Path) -> bool {
+pub(crate) fn owned_by_current_user(path: &std::path::Path) -> bool {
     let Some(owner) = path_owner_sid(path) else {
         return false;
     };

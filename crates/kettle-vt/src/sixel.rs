@@ -134,10 +134,19 @@ impl SixelCanvas {
             self.height = new_h;
             return true;
         }
-        let ncw = grow_cap(self.cap_w, new_w);
-        let nch = grow_cap(self.cap_h, new_h);
-        let bytes = ncw.checked_mul(nch).and_then(|v| v.checked_mul(4));
-        let Some(bytes) = bytes.filter(|&n| n <= self.budget.limits().image_bytes) else {
+        let mut ncw = grow_cap(self.cap_w, new_w);
+        let mut nch = grow_cap(self.cap_h, new_h);
+        let mut bytes = ncw.checked_mul(nch).and_then(|v| v.checked_mul(4));
+        if bytes.is_none_or(|bytes| bytes > self.budget.limits().image_bytes) {
+            let exact = new_w.checked_mul(new_h).and_then(|v| v.checked_mul(4));
+            let Some(exact) = exact.filter(|&n| n <= self.budget.limits().image_bytes) else {
+                return false;
+            };
+            ncw = new_w;
+            nch = new_h;
+            bytes = Some(exact);
+        }
+        let Some(bytes) = bytes else {
             return false;
         };
         // Hold the old canvas reservation until the new allocation has
@@ -391,6 +400,18 @@ mod tests {
         assert_eq!(grow_cap(0, 5000), 8192); // smallest pow2 ≥ 5000
         assert_eq!(grow_cap(8192, 8192), 8192);
         assert!(grow_cap(0, MAX_DIM) >= MAX_DIM);
+    }
+
+    #[test]
+    fn logical_image_that_fits_the_budget_uses_exact_capacity() {
+        let limits = crate::GraphicsLimits {
+            image_bytes: 300 * 200 * 4,
+            ..crate::GraphicsLimits::default()
+        };
+        let budget = crate::GraphicsBudget::isolated(limits).unwrap();
+        let image = super::decode_with_budget(b"\"1;1;300;200@", &budget)
+            .expect("the tight 300x200 image fits its configured byte budget");
+        assert_eq!((image.width, image.height), (300, 200));
     }
 
     /// `$` returns the cursor to column 0 without growing the canvas, so a

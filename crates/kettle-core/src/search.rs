@@ -14,7 +14,7 @@ use regex_automata::meta::Regex as MetaRegex;
 use regex_automata::nfa::thompson::WhichCaptures;
 use regex_automata::util::syntax::Config as RegexSyntaxConfig;
 
-use crate::event::EventProxy;
+use crate::{event::EventProxy, grid_text};
 
 /// Maximum UTF-8 byte length accepted by the interactive search compiler.
 pub const MAX_SEARCH_QUERY_BYTES: usize = 4096;
@@ -820,10 +820,6 @@ fn reverse_chunk_start<T>(term: &Term<T>, end: i32, minimum: i32) -> i32 {
     start
 }
 
-fn is_search_spacer(flags: Flags) -> bool {
-    flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-}
-
 fn take_cell_inspection(inspected_cells: &mut usize, max_cells: usize) -> bool {
     if *inspected_cells == max_cells {
         return false;
@@ -847,7 +843,7 @@ fn previous_context_char<T>(
             return None;
         }
         let cell = &term.grid()[Line(previous)][Column(column)];
-        if is_search_spacer(cell.flags) {
+        if grid_text::is_spacer(cell.flags) {
             continue;
         }
         return cell
@@ -873,7 +869,7 @@ fn next_context_char<T>(
             return None;
         }
         let cell = &term.grid()[Line(next)][Column(column)];
-        if !is_search_spacer(cell.flags) {
+        if !grid_text::is_spacer(cell.flags) {
             return Some(cell.c);
         }
     }
@@ -964,7 +960,7 @@ fn materialize_chunk<T>(
                 break 'rows;
             }
             let cell = &term.grid()[Line(line)][Column(column)];
-            if is_search_spacer(cell.flags) {
+            if grid_text::is_spacer(cell.flags) {
                 continue;
             }
             let remaining = max_bytes.saturating_sub(haystack.text.len());
@@ -1199,6 +1195,14 @@ mod tests {
 
     use crate::event::EventProxy;
     use crate::term::TermSize;
+
+    #[test]
+    fn search_uses_the_shared_wide_spacer_predicate() {
+        let source = include_str!("search.rs");
+        let obsolete = ["fn is_search", "_spacer("].concat();
+        assert!(!source.contains(&obsolete));
+        assert!(source.contains("grid_text::is_spacer(cell.flags)"));
+    }
 
     fn empty_term(columns: usize, screen_lines: usize) -> Term<EventProxy> {
         let (tx, _rx) = crossbeam_channel::unbounded();

@@ -1,7 +1,7 @@
 //! Lua scripting foundation (WezTerm parity).
 //!
 //! Exposes a `kettle` namespace inside a Lua VM so the user's
-//! `--lua-script PATH` (or future `<config-dir>/init.lua`) can read
+//! `--lua-script PATH` (or the auto-discovered `<config-dir>/init.lua`) can read
 //! kettle's runtime state. The foundation ships read-only
 //! introspection; side-effect APIs build on top of it:
 //!
@@ -2341,23 +2341,23 @@ mod tests {
 
     #[test]
     fn trusted_sandbox_leaves_stdlib_intact() {
-        // The opt-in `lua-sandbox =
-        // trusted` mode leaves the dangerous APIs callable. Users
-        // explicitly setting `trusted` accept the full Lua stdlib
-        // surface (per SECURITY.md's "Lua plugin sandbox escape" entry:
-        // opt-in trust is out-of-scope for sandbox-escape reports).
-        // A future refactor that nils
-        // these even in trusted mode silently breaks user scripts.
+        // The opt-in trusted mode restores command and file APIs. It still
+        // uses mlua's safe VM, which leaves package.loadlib as a refusal stub.
         let eng = LuaEngine::new_with_sandbox("Default", kettle_config::LuaSandbox::Trusted)
             .expect("init (trusted sandbox)");
         // os.execute exists in trusted mode (still a function).
         assert_eq!(eng.eval_str("return type(os.execute)").unwrap(), "function");
         // io.open exists in trusted mode.
         assert_eq!(eng.eval_str("return type(io.open)").unwrap(), "function");
-        // package.loadlib exists in trusted mode.
+        // The symbol exists for Lua compatibility, but native modules remain
+        // unavailable at every trust level.
         assert_eq!(
-            eng.eval_str("return type(package.loadlib)").unwrap(),
-            "function"
+            eng.eval_str(
+                "local ok = pcall(package.loadlib, 'not-a-real-module', 'luaopen_example'); \
+                 return tostring(ok)"
+            )
+            .unwrap(),
+            "false"
         );
     }
 

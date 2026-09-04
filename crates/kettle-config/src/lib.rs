@@ -3019,11 +3019,11 @@ impl Config {
     }
 
     /// Inner of `default_path` parameterized on the env-var lookup so
-    /// the probe order + empty-value filter are unit-testable without
+    /// the probe order + absolute-value filter are unit-testable without
     /// mutating the real process env (which would race against the
     /// rest of the parallel suite).
     ///
-    /// Empty env-var values are treated as unset and the probe
+    /// Empty or relative env-var values are treated as unset and the probe
     /// continues to the next variable. Previously,
     /// `XDG_CONFIG_HOME=""` (rare but possible in stripped CI
     /// containers or after a misconfigured `unset`/`export X=`)
@@ -3036,7 +3036,12 @@ impl Config {
     pub(crate) fn default_path_from(
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Option<PathBuf> {
-        let var = |k: &str| lookup(k).filter(|v| !v.is_empty());
+        let var = |k: &str| {
+            lookup(k)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+        };
         // `XDG_CONFIG_HOME` is the explicit cross-platform override on every OS.
         // Config split-brain: the per-OS fallback then differs.
         // On Windows the canonical per-user dir is `%APPDATA%\kettle` — a stray
@@ -3049,14 +3054,12 @@ impl Config {
         // `XDG_CONFIG_HOME` (honored above on all platforms).
         let os_fallback = || {
             if cfg!(windows) {
-                var("APPDATA").map(PathBuf::from)
+                var("APPDATA")
             } else {
-                var("HOME").map(|h| PathBuf::from(h).join(".config"))
+                var("HOME").map(|home| home.join(".config"))
             }
         };
-        let base = var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(os_fallback)?;
+        let base = var("XDG_CONFIG_HOME").or_else(os_fallback)?;
         Some(base.join("kettle").join("config"))
     }
 
@@ -6505,11 +6508,18 @@ cell-height = 1.2\n";
         }
 
         // XDG_CONFIG_HOME set normally → wins, joins `kettle/config`.
+        // The root has to be absolute *on the platform running the test*:
+        // `Path::is_absolute` is false for "/x" on Windows, which needs a
+        // drive or UNC prefix, and the probe now filters relative roots.
         // Build the expected value via PathBuf::join so the assertion
-        // uses the platform separator and works on Windows CI too.
+        // uses the platform separator too.
+        #[cfg(windows)]
+        let absolute_root = r"C:\x";
+        #[cfg(not(windows))]
+        let absolute_root = "/x";
         assert_eq!(
-            Config::default_path_from(from(&[("XDG_CONFIG_HOME", "/x")])),
-            Some(PathBuf::from("/x").join("kettle").join("config")),
+            Config::default_path_from(from(&[("XDG_CONFIG_HOME", absolute_root)])),
+            Some(PathBuf::from(absolute_root).join("kettle").join("config")),
         );
         // Config split-brain fix: the non-XDG fallback is now per-OS.
         // On Unix, XDG empty + HOME set → `$HOME/.config/kettle/config`.
@@ -6523,6 +6533,24 @@ cell-height = 1.2\n";
                     .join("config"),
             ),
         );
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                Config::default_path_from(from(
+                    &[("XDG_CONFIG_HOME", "relative"), ("HOME", "/h"),]
+                )),
+                Some(
+                    PathBuf::from("/h")
+                        .join(".config")
+                        .join("kettle")
+                        .join("config"),
+                ),
+            );
+            assert_eq!(
+                Config::default_path_from(from(&[("HOME", "relative")])),
+                None
+            );
+        }
         // On Windows, a stray HOME is IGNORED (it would split-brain the GUI vs a
         // shell launch); APPDATA is the canonical per-user dir. This is the exact
         // regression a git-bash/WSL `HOME` caused.
@@ -6564,14 +6592,17 @@ cell-height = 1.2\n";
             ),
         );
         // XDG set → wins on EVERY OS (the explicit cross-platform override),
-        // even with a Windows-style APPDATA also present.
+        // even with a Windows-style APPDATA also present. Reuse
+        // `absolute_root` so the override is absolute on this platform;
+        // a POSIX "/x" is relative on Windows, so the probe would reject
+        // it and APPDATA would win, which is not what this case checks.
         assert_eq!(
             Config::default_path_from(from(&[
-                ("XDG_CONFIG_HOME", "/x"),
+                ("XDG_CONFIG_HOME", absolute_root),
                 ("HOME", "/h"),
                 ("APPDATA", r"C:\u\AppData\Roaming"),
             ])),
-            Some(PathBuf::from("/x").join("kettle").join("config")),
+            Some(PathBuf::from(absolute_root).join("kettle").join("config")),
         );
         // All set-but-empty → None (rather than the previous relative
         // `"kettle/config"`).

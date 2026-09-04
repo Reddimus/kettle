@@ -678,6 +678,33 @@ fn ensure_path(root: &File, relative: &Path) -> Result<File, UpdateError> {
     Ok(current)
 }
 
+fn read_archive_entry_bounded(
+    entry: &mut impl std::io::Read,
+    declared_size: u64,
+    remaining: u64,
+    path: &Path,
+) -> Result<Vec<u8>, UpdateError> {
+    let capacity = usize::try_from(declared_size)
+        .map_err(|_| UpdateError::UnsafeArchive("entry is too large".into()))?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        UpdateError::Io(std::io::Error::other(format!(
+            "could not reserve {capacity} bytes for {}: {error}",
+            path.display()
+        )))
+    })?;
+    let actual = std::io::Read::by_ref(entry)
+        .take(remaining.saturating_add(1))
+        .read_to_end(&mut bytes)? as u64;
+    if actual != declared_size {
+        return Err(UpdateError::UnsafeArchive(format!(
+            "{} does not match its declared size ({declared_size} declared, {actual} extracted)",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
 /// Extract a verified archive into a staging directory.
 ///
 /// Every write is made relative to a descriptor rather than by pathname, with
@@ -739,20 +766,22 @@ fn extract_bundle_into(staging: &Staging, archive: &[u8]) -> Result<(), UpdateEr
             ensure_path(&staging.directory, &path)?;
             continue;
         }
-        unpacked = unpacked.saturating_add(entry.size());
-        if unpacked > MAX_UNPACKED_BYTES {
+        let declared_size = entry.size();
+        let next_unpacked = unpacked.checked_add(declared_size).ok_or_else(|| {
+            UpdateError::UnsafeArchive("archive unpacked size overflow".to_string())
+        })?;
+        if next_unpacked > MAX_UNPACKED_BYTES {
             return Err(UpdateError::UnsafeArchive(
                 "archive expands beyond the accepted size".to_string(),
             ));
         }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != entry.size() {
-            return Err(UpdateError::UnsafeArchive(format!(
-                "{} does not match its declared size",
-                inside.display()
-            )));
-        }
+        let bytes = read_archive_entry_bounded(
+            &mut entry,
+            declared_size,
+            MAX_UNPACKED_BYTES - unpacked,
+            &inside,
+        )?;
+        unpacked = next_unpacked;
 
         // Honour only the executable bit. Everything else is normalized, so an
         // archive cannot hand a file group- or world-writable permissions.
@@ -1026,6 +1055,16 @@ mod tests {
 
     fn official_zip() -> Vec<u8> {
         zip_from(&bundle_files())
+    }
+
+    #[test]
+    fn archive_entry_reader_stops_at_the_remaining_budget() {
+        let mut oversized = Cursor::new(vec![b'x'; 32]);
+        let error =
+            read_archive_entry_bounded(&mut oversized, 4, 4, Path::new("Contents/MacOS/kettle"))
+                .unwrap_err();
+        assert!(matches!(error, UpdateError::UnsafeArchive(_)));
+        assert_eq!(oversized.position(), 5, "read no more than remaining + 1");
     }
 
     fn mode_of(path: &Path) -> u32 {

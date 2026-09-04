@@ -336,7 +336,7 @@ pub fn claim(dir: &Path, entry: PresenceEntry) -> Option<PresenceGuard> {
     if !entry.is_valid() {
         return None;
     }
-    ensure_private_dir(dir).ok()?;
+    crate::ensure_private_dir(dir).ok()?;
     let path = entry_path(dir, entry.pid, entry.win);
     let json = crate::protocol::to_json_vec_bounded(&entry, MAX_PRESENCE_ENTRY_BYTES).ok()?;
     kettle_state::atomic_replace(&path, &json, kettle_state::AtomicWriteOptions::PRIVATE).ok()?;
@@ -347,7 +347,7 @@ pub fn claim(dir: &Path, entry: PresenceEntry) -> Option<PresenceGuard> {
 /// unparseable files are skipped (and removed — they can only be leftovers).
 pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
     let mut out = Vec::new();
-    if !private_dir_is_valid(dir) {
+    if !crate::private_dir_is_valid(dir) {
         return out;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -396,50 +396,6 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
 fn prune_stale(path: &Path, judged: &PresenceEntry) {
     if read_entry(path).is_some_and(|current| current == *judged) {
         let _ = std::fs::remove_file(path);
-    }
-}
-
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-        kettle_state::create_private_dirs(dir)?;
-        let metadata = std::fs::symlink_metadata(dir)?;
-        if !metadata.file_type().is_dir() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "presence directory is not owned by the current user",
-            ));
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    #[cfg(not(unix))]
-    std::fs::create_dir_all(dir)?;
-    if !private_dir_is_valid(dir) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "presence directory is not private",
-        ));
-    }
-    Ok(())
-}
-
-fn private_dir_is_valid(dir: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(dir) else {
-        return false;
-    };
-    if !metadata.file_type().is_dir() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o077 == 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
     }
 }
 
@@ -523,6 +479,7 @@ fn examine_entry(path: &Path) -> EntryRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ensure_private_dir;
 
     fn tmp(label: &str) -> PathBuf {
         let d = crate::test_scratch_root().join(format!(

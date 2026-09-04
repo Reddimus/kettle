@@ -222,37 +222,58 @@ impl AtlasAllocator {
         Some((x, y))
     }
 
+    #[cfg(test)]
     fn free(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        self.free_unmerged(x, y, w, h);
+        self.coalesce_free();
+    }
+
+    fn free_unmerged(&mut self, x: u32, y: u32, w: u32, h: u32) {
         let Some(width) = w.checked_add(GUTTER) else {
             return;
         };
         let Some(height) = h.checked_add(GUTTER) else {
             return;
         };
-        let mut reclaimed = FreeRect {
+        self.free.push(FreeRect {
             x,
             y,
             width,
             height,
-        };
-        // Repeatedly fold every full-edge neighbor into the reclaimed
-        // rectangle. Eviction commonly returns adjacent shelf slots one at a
-        // time; without this, their combined area could never satisfy a wider
-        // or taller glyph even after every cold glyph had been evicted.
-        let mut index = 0;
-        while index < self.free.len() {
-            if let Some(merged) = merge_free_rects(reclaimed, self.free[index]) {
-                reclaimed = merged;
-                self.free.swap_remove(index);
-                // A merge can expose a neighbor earlier in the vector (A+B
-                // may now touch C), so rescan to reach the transitive fixed
-                // point rather than depending on eviction order.
-                index = 0;
-            } else {
-                index += 1;
+        });
+    }
+
+    fn coalesce_free(&mut self) {
+        loop {
+            let before = self.free.len();
+            self.free
+                .sort_unstable_by_key(|rect| (rect.y, rect.height, rect.x, rect.width));
+            let mut horizontal: Vec<FreeRect> = Vec::with_capacity(self.free.len());
+            for rect in self.free.drain(..) {
+                if let Some(last) = horizontal.last_mut()
+                    && let Some(merged) = merge_free_rects(*last, rect)
+                {
+                    *last = merged;
+                    continue;
+                }
+                horizontal.push(rect);
+            }
+            horizontal.sort_unstable_by_key(|rect| (rect.x, rect.width, rect.y, rect.height));
+            let mut vertical: Vec<FreeRect> = Vec::with_capacity(horizontal.len());
+            for rect in horizontal {
+                if let Some(last) = vertical.last_mut()
+                    && let Some(merged) = merge_free_rects(*last, rect)
+                {
+                    *last = merged;
+                    continue;
+                }
+                vertical.push(rect);
+            }
+            self.free = vertical;
+            if self.free.len() == before {
+                break;
             }
         }
-        self.free.push(reclaimed);
     }
 
     fn grow_height(&mut self, height: u32) {
@@ -380,13 +401,17 @@ impl Atlas {
         self.allocator.alloc(w, h)
     }
 
-    fn free(&mut self, slot: GlyphSlot) {
-        self.allocator.free(
+    fn free_unmerged(&mut self, slot: GlyphSlot) {
+        self.allocator.free_unmerged(
             slot.atlas_x as u32,
             slot.atlas_y as u32,
             slot.w as u32,
             slot.h as u32,
         );
+    }
+
+    fn coalesce_free(&mut self) {
+        self.allocator.coalesce_free();
     }
 
     /// Double the height (clamped to `max_dim`), preserving existing pixels.
@@ -868,6 +893,7 @@ impl GlyphPipeline {
                 self.free_cached_slot(cached);
             }
         }
+        self.coalesce_freed_slots();
     }
 
     fn evict_cold_kind(&mut self, kind: u32, n: usize) -> usize {
@@ -886,17 +912,23 @@ impl GlyphPipeline {
                 self.free_cached_slot(cached);
             }
         }
+        self.coalesce_freed_slots();
         count
     }
 
     fn free_cached_slot(&mut self, cached: CachedSlot) {
         if let Some(slot) = cached.slot {
             if slot.kind == 0 {
-                self.color.free(slot);
+                self.color.free_unmerged(slot);
             } else {
-                self.mask.free(slot);
+                self.mask.free_unmerged(slot);
             }
         }
+    }
+
+    fn coalesce_freed_slots(&mut self) {
+        self.color.coalesce_free();
+        self.mask.coalesce_free();
     }
 
     fn rasterize_into_atlas<'r>(
@@ -1323,6 +1355,22 @@ mod tests {
             None,
             "partial-edge neighbors must remain distinct"
         );
+    }
+
+    #[test]
+    fn atlas_batch_free_coalesces_once_after_collecting_slots() {
+        let mut atlas = AtlasAllocator::new(12, 4);
+        let slots = [
+            atlas.alloc(3, 3).unwrap(),
+            atlas.alloc(3, 3).unwrap(),
+            atlas.alloc(3, 3).unwrap(),
+        ];
+        for (x, y) in slots {
+            atlas.free_unmerged(x, y, 3, 3);
+        }
+        assert_eq!(atlas.alloc(11, 3), None);
+        atlas.coalesce_free();
+        assert_eq!(atlas.alloc(11, 3), Some((0, 0)));
     }
 
     #[test]

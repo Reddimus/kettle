@@ -251,11 +251,21 @@ pub(crate) struct EditOutcome {
 ///
 /// Cell zero is the opening bracket and cell one is the first visible query column. Keeping the
 /// offset signed lets a drag beyond the left edge walk backward through a scrolled query.
-pub(crate) fn pointer_query_column(horizontal_scroll: usize, relative_cell: isize) -> usize {
-    if relative_cell >= 1 {
+pub(crate) fn pointer_query_column(
+    horizontal_scroll: usize,
+    relative_cell: isize,
+    cursor_column: usize,
+    caret_visible: bool,
+) -> usize {
+    let column = if relative_cell >= 1 {
         horizontal_scroll.saturating_add(relative_cell.saturating_sub(1) as usize)
     } else {
         horizontal_scroll.saturating_sub(1isize.saturating_sub(relative_cell) as usize)
+    };
+    if caret_visible && column > cursor_column {
+        column - 1
+    } else {
+        column
     }
 }
 
@@ -506,8 +516,7 @@ impl SearchEditor {
         current_scroll.clamp(minimum.min(maximum), maximum)
     }
 
-    #[cfg(test)]
-    fn cursor_column(&self) -> usize {
+    pub(crate) fn cursor_column(&self) -> usize {
         self.text[..self.cursor].width()
     }
 
@@ -749,11 +758,18 @@ mod tests {
 
     #[test]
     fn pointer_drag_can_walk_left_of_a_scrolled_editor() {
-        assert_eq!(super::pointer_query_column(7, 1), 7);
-        assert_eq!(super::pointer_query_column(7, 0), 6);
-        assert_eq!(super::pointer_query_column(7, -2), 4);
-        assert_eq!(super::pointer_query_column(0, -20), 0);
-        assert_eq!(super::pointer_query_column(7, 4), 10);
+        assert_eq!(super::pointer_query_column(7, 1, 9, false), 7);
+        assert_eq!(super::pointer_query_column(7, 0, 9, false), 6);
+        assert_eq!(super::pointer_query_column(7, -2, 9, false), 4);
+        assert_eq!(super::pointer_query_column(0, -20, 9, false), 0);
+        assert_eq!(super::pointer_query_column(7, 4, 9, false), 10);
+    }
+
+    #[test]
+    fn pointer_mapping_subtracts_the_caret_to_its_right() {
+        assert_eq!(super::pointer_query_column(0, 4, 3, true), 3);
+        assert_eq!(super::pointer_query_column(0, 5, 3, true), 3);
+        assert_eq!(super::pointer_query_column(0, 6, 3, true), 4);
     }
 
     #[test]

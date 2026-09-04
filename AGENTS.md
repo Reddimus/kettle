@@ -28,8 +28,8 @@ just gauntlet
 ```
 
 Before a release or supply-chain change, run `just gauntlet-strict`. It also
-requires locally installed `cargo-deny` and `cargo-machete`. Useful focused
-commands include `cargo test -p <crate>` and
+requires locally installed `cargo-deny`, `cargo-audit`, and `cargo-machete`.
+Useful focused commands include `cargo test -p <crate>` and
 `cargo clippy -p <crate> --all-targets -- -D warnings`.
 
 Do not claim a platform, GPU, installer, or live-UI check passed unless it was

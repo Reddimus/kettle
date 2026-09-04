@@ -7,6 +7,9 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
+use alacritty_terminal::grid::Grid;
+use alacritty_terminal::term::cell::Cell;
+
 /// What a detected hint points at (drives the copy-vs-open action later).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -67,8 +70,35 @@ use crate::url_trim::trim_trailing;
 /// Detect hint targets across `rows` (one string per visible line). Earlier
 /// kinds win on overlap (a URL is not also matched as a path), and matches
 /// are returned in reading order (row, then column).
+fn detect_line(row: usize, line: &str, col_of_byte: &[usize], out: &mut Vec<HintSpan>) {
+    let mut taken: Vec<(usize, usize)> = Vec::new();
+    for (kind, re) in res() {
+        for m in re.find_iter(line) {
+            let raw = m.as_str();
+            let trimmed = trim_trailing(raw);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let (bs, be) = (m.start(), m.start() + trimmed.len());
+            if taken.iter().any(|&(s, e)| bs < e && be > s) {
+                continue;
+            }
+            taken.push((bs, be));
+            let start = col_of_byte[bs];
+            let end = col_of_byte[be - 1];
+            out.push(HintSpan {
+                row,
+                start,
+                end,
+                kind: *kind,
+                text: trimmed.to_string(),
+            });
+        }
+    }
+}
+
 pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
-    let mut out: Vec<HintSpan> = Vec::new();
+    let mut out = Vec::new();
     for (row, line) in rows.iter().enumerate() {
         // Byte offset -> char column for this line. Push each char's
         // column exactly `len_utf8()` times (matching
@@ -86,30 +116,21 @@ pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
             v.push(line.chars().count()); // sentinel for the end-exclusive byte
             v
         };
-        let mut taken: Vec<(usize, usize)> = Vec::new(); // byte ranges claimed
-        for (kind, re) in res() {
-            for m in re.find_iter(line) {
-                let raw = m.as_str();
-                let trimmed = trim_trailing(raw);
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let (bs, be) = (m.start(), m.start() + trimmed.len());
-                if taken.iter().any(|&(s, e)| bs < e && be > s) {
-                    continue; // overlaps a higher-priority match
-                }
-                taken.push((bs, be));
-                let start = col_of_byte[bs];
-                let end = col_of_byte[be - 1];
-                out.push(HintSpan {
-                    row,
-                    start,
-                    end,
-                    kind: *kind,
-                    text: trimmed.to_string(),
-                });
-            }
-        }
+        detect_line(row, line, &col_of_byte, &mut out);
+    }
+    out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
+    out
+}
+
+/// Detect quick-select targets from terminal grid rows while preserving the
+/// original grid columns of wide glyphs and combining marks.
+pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpan> {
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut col_of_byte = Vec::new();
+    for (row, &line) in lines.iter().enumerate() {
+        crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
+        detect_line(row, &text, &col_of_byte, &mut out);
     }
     out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
     out
@@ -177,6 +198,40 @@ mod tests {
             h2.iter()
                 .any(|s| s.kind == Kind::Ip && s.text == "10.0.0.2")
         );
+    }
+
+    #[test]
+    fn grid_detection_skips_wide_character_spacers() {
+        use alacritty_terminal::grid::Grid;
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::term::cell::{Cell, Flags};
+
+        let mut grid: Grid<Cell> = Grid::new(1, 10, 0);
+        for (column, ch) in [
+            (0, '/'),
+            (1, '用'),
+            (3, '户'),
+            (5, '/'),
+            (6, 'f'),
+            (7, 'i'),
+            (8, 'l'),
+            (9, 'e'),
+        ] {
+            grid[Point::new(Line(0), Column(column))].c = ch;
+        }
+        for column in [1, 3] {
+            grid[Point::new(Line(0), Column(column))]
+                .flags
+                .insert(Flags::WIDE_CHAR);
+            grid[Point::new(Line(0), Column(column + 1))]
+                .flags
+                .insert(Flags::WIDE_CHAR_SPACER);
+        }
+
+        let hints = detect_rows(&grid, &[0], 10);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].text, "/用户/file");
+        assert_eq!((hints[0].start, hints[0].end), (0, 9));
     }
 
     #[test]

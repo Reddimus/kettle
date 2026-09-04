@@ -219,25 +219,7 @@ impl ImageData {
     /// A `w × h` canvas filled with one RGBA color (kitty animation `Y=`
     /// background). Returns `None` for zero dimensions.
     pub fn solid(w: u32, h: u32, color: [u8; 4]) -> Option<ImageData> {
-        if w == 0 || h == 0 {
-            return None;
-        }
-        // Bound dims BEFORE the fill allocation — `new`
-        // would reject oversized dims, but `solid` pre-allocates `w*h*4` first,
-        // so an attacker-influenced kitty animation background (`Y=` with huge
-        // base dims) could OOM here before the check. Reject up front.
-        if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
-            return None;
-        }
-        let bytes = rgba_bytes(w, h)?;
-        let budget = GraphicsBudget::default();
-        let reservation = budget.reserve_image_cpu(bytes)?;
-        let mut rgba = Vec::new();
-        rgba.try_reserve_exact(bytes).ok()?;
-        while rgba.len() < bytes {
-            rgba.extend_from_slice(&color);
-        }
-        ImageData::from_reserved(w, h, rgba, reservation)
+        Self::solid_with_budget(w, h, color, &GraphicsBudget::default())
     }
 
     pub(crate) fn solid_with_budget(
@@ -396,6 +378,16 @@ mod tests {
                 .all(|p| *p == [10, 20, 30, 255])
         );
         assert!(ImageData::solid(0, 4, [0; 4]).is_none());
+    }
+
+    #[test]
+    fn solid_delegates_to_the_budgeted_constructor() {
+        let body = include_str!("image.rs")
+            .split("pub fn solid(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub(crate) fn solid_with_budget(").next())
+            .expect("solid body");
+        assert!(body.contains("Self::solid_with_budget"));
     }
 
     /// `ImageData::new` must not panic or wrap on adversarial
