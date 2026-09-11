@@ -9,3 +9,18 @@
 //! `crate::dev_record::printable_token` call site resolves unchanged.
 
 pub use kettle_core::record::{RecordStatus, Recorder, printable_token};
+
+use kettle_config::Config;
+
+/// Publish retention budgets to the recorder engine, at startup and on reload.
+/// Unset keys resolve to the defaults here so a dropped key un-latches the
+/// previous override.
+pub fn apply_retention_config(cfg: &Config) {
+    use kettle_core::record::{MAX_RECORD_BYTES, MAX_RECORD_DIRECTORY_BYTES, MAX_RECORD_FILES};
+    kettle_core::record::configure_limits(
+        cfg.record_max_bytes.unwrap_or(MAX_RECORD_BYTES),
+        cfg.record_max_files.unwrap_or(MAX_RECORD_FILES),
+        cfg.record_max_directory_bytes
+            .unwrap_or(MAX_RECORD_DIRECTORY_BYTES),
+    );
+}
