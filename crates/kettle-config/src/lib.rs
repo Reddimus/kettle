@@ -47,6 +47,10 @@ pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
 /// live policy regardless, and its
 /// `min_record_bytes_clears_the_largest_possible_header` test pins the margin.
 pub const MIN_RECORD_BYTES: u64 = 1024;
+/// Mirrors `kettle_core::record::MIN_RECORD_DIRECTORY_BYTES`. Retention deletes
+/// oldest-first, so a bare `500` from someone who meant megabytes would wipe the
+/// namespace; reject it here instead of silently widening the blast radius.
+pub const MIN_RECORD_DIRECTORY_BYTES: u64 = 1024 * 1024;
 /// Largest accepted per-pane scrollback byte budget.
 pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
 const NEAR_OPAQUE_BACKGROUND_OPACITY: f32 = 0.99;
@@ -3794,7 +3798,9 @@ impl Config {
                 "record-max-bytes" => {
                     parse_byte_size(v).is_some_and(|n| n as u64 >= MIN_RECORD_BYTES)
                 }
-                "record-max-directory-bytes" => parse_byte_size(v).is_some_and(|n| n > 0),
+                "record-max-directory-bytes" => {
+                    parse_byte_size(v).is_some_and(|n| n as u64 >= MIN_RECORD_DIRECTORY_BYTES)
+                }
                 "record-max-files" => v.parse::<usize>().is_ok_and(|n| n > 0),
                 // Boolean keys: accept the same alias set `parse_bool`
                 // recognizes. Previously, any non-"false"
@@ -4486,7 +4492,9 @@ impl Config {
                     }
                 }
                 "record-max-directory-bytes" | "record_max_directory_bytes" => {
-                    if let Some(n) = parse_byte_size(&e.value).filter(|n| *n > 0) {
+                    if let Some(n) = parse_byte_size(&e.value)
+                        .filter(|n| *n as u64 >= MIN_RECORD_DIRECTORY_BYTES)
+                    {
                         cfg.record_max_directory_bytes = Some(n as u64);
                     }
                 }
@@ -9473,6 +9481,23 @@ split_horiz = <Control><Shift>j
         assert_eq!(c.record_max_bytes, None, "under MIN_RECORD_BYTES");
         let bad = Config::detect_malformed_values("record-max-bytes = 512\n");
         assert_eq!(bad.len(), 1, "and the diagnostic agrees: {bad:?}");
+
+        // A bare `500` from someone who meant 500 MB would otherwise delete
+        // every completed cast on the next recording start.
+        let c = Config::parse_text("record-max-directory-bytes = 500");
+        assert_eq!(c.record_max_directory_bytes, None, "unit slip rejected");
+        let bad = Config::detect_malformed_values("record-max-directory-bytes = 500\n");
+        assert_eq!(
+            bad.len(),
+            1,
+            "and it is flagged, not silently dropped: {bad:?}"
+        );
+        let c = Config::parse_text("record-max-directory-bytes = 500MB");
+        assert_eq!(
+            c.record_max_directory_bytes,
+            Some(500_000_000),
+            "the intended value still works"
+        );
 
         // Zero would disable recording rather than bound it.
         let c = Config::parse_text(

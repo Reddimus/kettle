@@ -65,6 +65,12 @@ pub const MAX_RECORD_DIRECTORY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 /// `min_record_bytes_clears_the_largest_possible_header` pins the margin.
 pub const MIN_RECORD_BYTES: u64 = 1024;
 
+/// Smallest accepted directory budget. Retention deletes oldest-first until the
+/// namespace fits, so a bare `record-max-directory-bytes = 500` from someone who
+/// meant megabytes would silently delete every completed cast on the next start.
+/// A floor well above any plausible unit slip turns that into a rejected config.
+pub const MIN_RECORD_DIRECTORY_BYTES: u64 = 1024 * 1024;
+
 // Live retention policy, overridable by config. Process-wide because
 // `kettle-config` is a sibling crate and recorders start from call sites with
 // no `Config` in hand.
@@ -73,9 +79,10 @@ static RECORD_MAX_FILES: AtomicUsize = AtomicUsize::new(MAX_RECORD_FILES);
 static RECORD_MAX_DIRECTORY_BYTES: AtomicU64 = AtomicU64::new(MAX_RECORD_DIRECTORY_BYTES);
 
 /// Publish the effective retention policy. Always writes, so a reload that
-/// drops a key restores the default. A per-cast budget under
-/// [`MIN_RECORD_BYTES`], or a zero count, falls back to the default rather than
-/// leaving a recorder that can never start.
+/// drops a key restores the default. A budget under [`MIN_RECORD_BYTES`] or
+/// [`MIN_RECORD_DIRECTORY_BYTES`], or a zero count, falls back to the default:
+/// the first would leave a recorder that can never start, and the second would
+/// make the next start delete every completed cast in the directory.
 pub fn configure_limits(max_bytes: u64, max_files: usize, max_directory_bytes: u64) {
     store_limit_u64(
         &RECORD_MAX_BYTES,
@@ -87,7 +94,7 @@ pub fn configure_limits(max_bytes: u64, max_files: usize, max_directory_bytes: u
     store_limit_u64(
         &RECORD_MAX_DIRECTORY_BYTES,
         max_directory_bytes,
-        1,
+        MIN_RECORD_DIRECTORY_BYTES,
         MAX_RECORD_DIRECTORY_BYTES,
     );
 }
@@ -1298,6 +1305,25 @@ mod tests {
         );
         super::store_limit_usize(&files, 20, 1, super::MAX_RECORD_FILES);
         assert_eq!(files.load(std::sync::atomic::Ordering::Relaxed), 20);
+    }
+
+    #[test]
+    fn a_unit_slip_directory_budget_cannot_wipe_the_namespace() {
+        // `record-max-directory-bytes = 500` from someone who meant 500 MB used
+        // to reach prune_recording_directory verbatim and delete every
+        // completed cast. It must fall back instead.
+        let slot = std::sync::atomic::AtomicU64::new(super::MAX_RECORD_DIRECTORY_BYTES);
+        super::store_limit_u64(
+            &slot,
+            500,
+            super::MIN_RECORD_DIRECTORY_BYTES,
+            super::MAX_RECORD_DIRECTORY_BYTES,
+        );
+        assert_eq!(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+            super::MAX_RECORD_DIRECTORY_BYTES,
+            "a sub-floor directory budget must not reach retention"
+        );
     }
 
     #[test]

@@ -75,4 +75,19 @@ mod tests {
         );
         apply_retention_config(&Config::default());
     }
+
+    #[test]
+    fn a_unit_slip_directory_budget_never_reaches_retention() {
+        let _policy = POLICY.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Meant 500 MB, wrote 500. Retention deletes oldest-first, so letting
+        // this through would wipe every completed cast on the next start.
+        let cfg = Config {
+            record_max_directory_bytes: Some(500),
+            ..Config::default()
+        };
+        apply_retention_config(&cfg);
+        assert_eq!(record_max_directory_bytes(), MAX_RECORD_DIRECTORY_BYTES);
+        apply_retention_config(&Config::default());
+    }
 }

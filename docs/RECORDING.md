@@ -30,8 +30,9 @@ record = on
 # where traces are written (default <config-dir>/recordings):
 record-dir = ~/.cache/kettle/records
 
-# Optional retention overrides; unset keeps the default. record-max-bytes needs
-# at least 1KiB -- a smaller cast cannot hold its own header.
+# Optional retention overrides; unset keeps the default. Always write a unit:
+# record-max-bytes needs at least 1KiB, and record-max-directory-bytes at least
+# 1MiB, so a bare number meant as megabytes is rejected rather than obeyed.
 record-max-bytes = 64MiB
 record-max-files = 20
 record-max-directory-bytes = 1GiB
