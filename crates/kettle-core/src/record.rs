@@ -30,7 +30,7 @@
 use std::fs::File;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::persistence::{
@@ -58,6 +58,55 @@ pub const MAX_RECORD_FILES: usize = 50;
 
 /// Automatic directory recording retains at most 5 GiB of Kettle-owned casts.
 pub const MAX_RECORD_DIRECTORY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+
+// Live retention policy, overridable by config. Process-wide because
+// `kettle-config` is a sibling crate and recorders start from call sites with
+// no `Config` in hand.
+static RECORD_MAX_BYTES: AtomicU64 = AtomicU64::new(MAX_RECORD_BYTES);
+static RECORD_MAX_FILES: AtomicUsize = AtomicUsize::new(MAX_RECORD_FILES);
+static RECORD_MAX_DIRECTORY_BYTES: AtomicU64 = AtomicU64::new(MAX_RECORD_DIRECTORY_BYTES);
+
+/// Publish the effective retention policy. Always writes, so a reload that
+/// drops a key restores the default. Zero falls back to the default: it cannot
+/// hold even the asciicast header, so applying it would disable recording.
+pub fn configure_limits(max_bytes: u64, max_files: usize, max_directory_bytes: u64) {
+    store_limit_u64(&RECORD_MAX_BYTES, max_bytes, MAX_RECORD_BYTES);
+    store_limit_usize(&RECORD_MAX_FILES, max_files, MAX_RECORD_FILES);
+    store_limit_u64(
+        &RECORD_MAX_DIRECTORY_BYTES,
+        max_directory_bytes,
+        MAX_RECORD_DIRECTORY_BYTES,
+    );
+}
+
+fn store_limit_u64(slot: &AtomicU64, requested: u64, fallback: u64) {
+    slot.store(
+        if requested > 0 { requested } else { fallback },
+        Ordering::Relaxed,
+    );
+}
+
+fn store_limit_usize(slot: &AtomicUsize, requested: usize, fallback: usize) {
+    slot.store(
+        if requested > 0 { requested } else { fallback },
+        Ordering::Relaxed,
+    );
+}
+
+/// Largest single cast, in bytes.
+pub fn record_max_bytes() -> u64 {
+    RECORD_MAX_BYTES.load(Ordering::Relaxed)
+}
+
+/// Most Kettle-owned casts retained in a recording directory.
+pub fn record_max_files() -> usize {
+    RECORD_MAX_FILES.load(Ordering::Relaxed)
+}
+
+/// Largest total size of Kettle-owned casts in a recording directory.
+pub fn record_max_directory_bytes() -> u64 {
+    RECORD_MAX_DIRECTORY_BYTES.load(Ordering::Relaxed)
+}
 
 const DIRECTORY_RECORD_PREFIX: &str = "kettle-session-";
 const DIRECTORY_RECORD_SUFFIX: &str = ".cast";
@@ -115,7 +164,7 @@ impl Recorder {
     /// lock), write the asciicast header, and start the monotonic clock.
     pub fn start(path: &Path, cols: u16, rows: u16, raw_input: bool) -> std::io::Result<Self> {
         let file = open_private(path)?;
-        Self::start_with_file(file, cols, rows, raw_input, MAX_RECORD_BYTES)
+        Self::start_with_file(file, cols, rows, raw_input, record_max_bytes())
     }
 
     /// Start from a typed target and return the actual output path. Directory
@@ -139,7 +188,7 @@ impl Recorder {
                     return Err(error);
                 }
                 let recorder =
-                    match Self::start_with_file(file, cols, rows, raw_input, MAX_RECORD_BYTES) {
+                    match Self::start_with_file(file, cols, rows, raw_input, record_max_bytes()) {
                         Ok(recorder) => recorder,
                         Err(error) => {
                             let _ = std::fs::remove_file(&path);
@@ -148,8 +197,8 @@ impl Recorder {
                     };
                 if let Err(error) = prune_recording_directory(
                     directory,
-                    MAX_RECORD_DIRECTORY_BYTES,
-                    MAX_RECORD_FILES,
+                    record_max_directory_bytes(),
+                    record_max_files(),
                 ) {
                     log::warn!(
                         "record: could not apply retention in {}: {error}",
@@ -172,7 +221,10 @@ impl Recorder {
     ) -> std::io::Result<Self> {
         let header = header_line(cols, rows);
         let header_bytes = u64::try_from(header.len() + 1).unwrap_or(u64::MAX);
-        if header_bytes > MAX_RECORD_BYTES {
+        // One load: a concurrent reload must not let the check and the stored
+        // budget disagree.
+        let max_bytes = record_max_bytes();
+        if header_bytes > max_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "recording limit is too small for the asciicast header",
@@ -197,7 +249,7 @@ impl Recorder {
             status: RecordStatus::Recording,
             observed_status: RecordStatus::Recording,
             bytes_written: header_bytes,
-            max_bytes: MAX_RECORD_BYTES,
+            max_bytes,
             raw_input,
             utf8_carry: Vec::new(),
             detach_on_drop: false,
@@ -614,8 +666,8 @@ impl LazyTargetCastWriter {
                     }
                     if let Err(error) = prune_recording_directory(
                         directory,
-                        MAX_RECORD_DIRECTORY_BYTES,
-                        MAX_RECORD_FILES,
+                        record_max_directory_bytes(),
+                        record_max_files(),
                     ) {
                         log::warn!(
                             "record: could not apply retention in {}: {error}",
@@ -1170,6 +1222,56 @@ mod tests {
     use std::io::Write as _;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_dropped_or_zero_limit_falls_back_to_the_shipped_default() {
+        // Local slots, not the statics: the directory tests read those.
+        let slot = std::sync::atomic::AtomicU64::new(64 * 1024 * 1024);
+        super::store_limit_u64(&slot, super::MAX_RECORD_BYTES, super::MAX_RECORD_BYTES);
+        assert_eq!(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+            super::MAX_RECORD_BYTES,
+            "dropping the key restores the default"
+        );
+        super::store_limit_u64(&slot, 0, super::MAX_RECORD_BYTES);
+        assert_eq!(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+            super::MAX_RECORD_BYTES,
+            "zero falls back, never applies"
+        );
+        super::store_limit_u64(&slot, 64 * 1024 * 1024, super::MAX_RECORD_BYTES);
+        assert_eq!(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+            64 * 1024 * 1024,
+            "a positive budget lowers the limit"
+        );
+
+        let files = std::sync::atomic::AtomicUsize::new(20);
+        super::store_limit_usize(&files, 0, super::MAX_RECORD_FILES);
+        assert_eq!(
+            files.load(std::sync::atomic::Ordering::Relaxed),
+            super::MAX_RECORD_FILES
+        );
+        super::store_limit_usize(&files, 20, super::MAX_RECORD_FILES);
+        assert_eq!(files.load(std::sync::atomic::Ordering::Relaxed), 20);
+    }
+
+    #[test]
+    fn the_live_policy_reports_the_shipped_defaults() {
+        // Also re-publishes them, proving `configure_limits` round-trips. Safe
+        // beside the directory tests: it writes what the statics already hold.
+        super::configure_limits(
+            super::MAX_RECORD_BYTES,
+            super::MAX_RECORD_FILES,
+            super::MAX_RECORD_DIRECTORY_BYTES,
+        );
+        assert_eq!(super::record_max_bytes(), super::MAX_RECORD_BYTES);
+        assert_eq!(super::record_max_files(), super::MAX_RECORD_FILES);
+        assert_eq!(
+            super::record_max_directory_bytes(),
+            super::MAX_RECORD_DIRECTORY_BYTES
+        );
+    }
 
     #[derive(Clone)]
     struct ControlledSink {
