@@ -7189,6 +7189,9 @@ impl App {
         // `resumed_inner`, so a missing config check here would leave the `o`
         // (terminal output) channel permanently empty while still showing `[REC]`.
         let recording_requested = startup.record.is_some() || initial_cfg.record.enabled();
+        // Retention budgets are process-wide in kettle-core, so publish them
+        // before any recorder can be constructed.
+        crate::dev_record::apply_retention_config(&initial_cfg);
         let lua_output_subscribed = lua_output_subscribed || recording_requested;
         // Broadcast always starts off. `broadcast_default` remains parseable
         // for compatibility but is inert until scope-on-enable is wired; the
@@ -17520,6 +17523,7 @@ impl App {
         }
         let font_size_changed = (new.font_size - previous_config_font_size).abs() > f32::EPSILON;
         self.cfg = new;
+        crate::dev_record::apply_retention_config(&self.cfg);
         self.sync_lua_active_theme();
         font_size_changed
     }

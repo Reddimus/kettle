@@ -42,6 +42,15 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+/// Mirrors `kettle_core::record::MIN_RECORD_BYTES`. kettle-config and
+/// kettle-core are siblings, so the value is duplicated; kettle-core floors the
+/// live policy regardless, and its
+/// `min_record_bytes_clears_the_largest_possible_header` test pins the margin.
+pub const MIN_RECORD_BYTES: u64 = 1024;
+/// Mirrors `kettle_core::record::MIN_RECORD_DIRECTORY_BYTES`. Retention deletes
+/// oldest-first, so a bare `500` from someone who meant megabytes would wipe the
+/// namespace; reject it here instead of silently widening the blast radius.
+pub const MIN_RECORD_DIRECTORY_BYTES: u64 = 1024 * 1024;
 /// Largest accepted per-pane scrollback byte budget.
 pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
 const NEAR_OPAQUE_BACKGROUND_OPACITY: f32 = 0.99;
@@ -1202,6 +1211,11 @@ pub struct Config {
     /// off by default. The window title shows `[REC RAW]` while active so
     /// literal-keystroke capture is never silent.
     pub record_raw_input: bool,
+    /// Recording retention overrides. `None` means kettle-core's default; the
+    /// values live there so the sibling crates cannot drift.
+    pub record_max_bytes: Option<u64>,
+    pub record_max_files: Option<usize>,
+    pub record_max_directory_bytes: Option<u64>,
     pub tab_bar: TabBarMode,
     pub tab_bar_pos: TabBarPos,
     /// Status-bar mode. See [`StatusBarMode`].
@@ -2656,6 +2670,9 @@ impl Default for Config {
             record: RecordMode::Off,
             record_dir: None,
             record_raw_input: false,
+            record_max_bytes: None,
+            record_max_files: None,
+            record_max_directory_bytes: None,
             tab_bar: TabBarMode::Always,
             tab_bar_pos: TabBarPos::Top,
             status_bar: StatusBarMode::Off,
@@ -3775,6 +3792,16 @@ impl Config {
                     "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
                         | "yes"
                 ),
+                // A per-cast budget below MIN_RECORD_BYTES is rejected rather
+                // than read as "unlimited": it cannot hold the asciicast
+                // header, so the recorder would refuse to start every session.
+                "record-max-bytes" => {
+                    parse_byte_size(v).is_some_and(|n| n as u64 >= MIN_RECORD_BYTES)
+                }
+                "record-max-directory-bytes" => {
+                    parse_byte_size(v).is_some_and(|n| n as u64 >= MIN_RECORD_DIRECTORY_BYTES)
+                }
+                "record-max-files" => v.parse::<usize>().is_ok_and(|n| n > 0),
                 // Boolean keys: accept the same alias set `parse_bool`
                 // recognizes. Previously, any non-"false"
                 // string silently meant "true", so typos like
@@ -4448,6 +4475,27 @@ impl Config {
                 "record-raw-input" | "record_raw_input" => {
                     if let Some(b) = parse_bool(&e.value) {
                         cfg.record_raw_input = b;
+                    }
+                }
+                "record-max-bytes" | "record_max_bytes" => {
+                    if let Some(n) =
+                        parse_byte_size(&e.value).filter(|n| *n as u64 >= MIN_RECORD_BYTES)
+                    {
+                        cfg.record_max_bytes = Some(n as u64);
+                    }
+                }
+                "record-max-files" | "record_max_files" => {
+                    if let Ok(n) = e.value.trim().parse::<usize>()
+                        && n > 0
+                    {
+                        cfg.record_max_files = Some(n);
+                    }
+                }
+                "record-max-directory-bytes" | "record_max_directory_bytes" => {
+                    if let Some(n) = parse_byte_size(&e.value)
+                        .filter(|n| *n as u64 >= MIN_RECORD_DIRECTORY_BYTES)
+                    {
+                        cfg.record_max_directory_bytes = Some(n as u64);
                     }
                 }
                 "tab-bar" => {
@@ -9409,6 +9457,71 @@ split_horiz = <Control><Shift>j
         assert!(!c.scroll_on_output);
         assert!(!c.mouse_hide_while_typing);
         assert!(!c.cursor_blink);
+    }
+
+    #[test]
+    fn record_retention_keys_parse_and_reject_zero() {
+        let c = Config::parse_text(
+            "record-max-bytes = 64MiB\n\
+             record-max-files = 20\n\
+             record-max-directory-bytes = 1GiB\n",
+        );
+        assert_eq!(c.record_max_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(c.record_max_files, Some(20));
+        assert_eq!(c.record_max_directory_bytes, Some(1024 * 1024 * 1024));
+
+        // Unset stays None so kettle-core's default applies.
+        let c = Config::parse_text("record = on");
+        assert_eq!(c.record_max_bytes, None);
+        assert_eq!(c.record_max_files, None);
+        assert_eq!(c.record_max_directory_bytes, None);
+
+        // A budget under the floor would stop every recording from starting.
+        let c = Config::parse_text("record-max-bytes = 512");
+        assert_eq!(c.record_max_bytes, None, "under MIN_RECORD_BYTES");
+        let bad = Config::detect_malformed_values("record-max-bytes = 512\n");
+        assert_eq!(bad.len(), 1, "and the diagnostic agrees: {bad:?}");
+
+        // A bare `500` from someone who meant 500 MB would otherwise delete
+        // every completed cast on the next recording start.
+        let c = Config::parse_text("record-max-directory-bytes = 500");
+        assert_eq!(c.record_max_directory_bytes, None, "unit slip rejected");
+        let bad = Config::detect_malformed_values("record-max-directory-bytes = 500\n");
+        assert_eq!(
+            bad.len(),
+            1,
+            "and it is flagged, not silently dropped: {bad:?}"
+        );
+        let c = Config::parse_text("record-max-directory-bytes = 500MB");
+        assert_eq!(
+            c.record_max_directory_bytes,
+            Some(500_000_000),
+            "the intended value still works"
+        );
+
+        // Zero would disable recording rather than bound it.
+        let c = Config::parse_text(
+            "record-max-bytes = 0\n\
+             record-max-files = 0\n\
+             record-max-directory-bytes = 0\n",
+        );
+        assert_eq!(c.record_max_bytes, None);
+        assert_eq!(c.record_max_files, None);
+        assert_eq!(c.record_max_directory_bytes, None);
+
+        let ok = Config::detect_malformed_values(
+            "record-max-bytes = 64MiB\n\
+             record-max-files = 20\n\
+             record-max-directory-bytes = 1GiB\n",
+        );
+        assert!(ok.is_empty(), "documented retention forms pass: {ok:?}");
+
+        let bad = Config::detect_malformed_values(
+            "record-max-bytes = 0\n\
+             record-max-files = lots\n\
+             record-max-directory-bytes = 0\n",
+        );
+        assert_eq!(bad.len(), 3, "zero and junk budgets should flag: {bad:?}");
     }
 
     #[test]

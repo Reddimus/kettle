@@ -29,6 +29,13 @@ Persistently, in your config file (`<config-dir>/kettle/config`):
 record = on
 # where traces are written (default <config-dir>/recordings):
 record-dir = ~/.cache/kettle/records
+
+# Optional retention overrides; unset keeps the default. Always write a unit:
+# record-max-bytes needs at least 1KiB, and record-max-directory-bytes at least
+# 1MiB, so a bare number meant as megabytes is rejected rather than obeyed.
+record-max-bytes = 64MiB
+record-max-files = 20
+record-max-directory-bytes = 1GiB
 ```
 
 Target precedence is fixed: `--record`, `--record-dir`, `KETTLE_RECORD`,
@@ -38,6 +45,9 @@ gets managed-directory behavior, while any other path is an explicit file.
 `--record-dir` / `KETTLE_RECORD_DIR` / `record-dir` always mean a directory,
 including when it does not exist yet. Empty environment variables are ignored.
 `record = on` with no explicit path records into `<config-dir>/recordings`.
+
+The `record-max-*` keys bound the app's recorder. `kettle exec --record` does
+not read the config file, so it always uses the defaults.
 
 On Linux, a **source install** can wire a recording directory into the Super-key
 launcher so desktop launches record automatically:
@@ -66,8 +76,9 @@ it before truncating it; a second active writer is refused. Unix symbolic links
 and Windows reparse-point files or parent directories are refused before an
 explicit or managed recording file is opened.
 
-Each session stops at a complete NDJSON event boundary before 512 MiB. When
-space permits, its last event is a `kettle:record_limit` marker. The native
+Each session stops at a complete NDJSON event boundary before
+`record-max-bytes` (512 MiB by default). When space permits, its last event is
+a `kettle:record_limit` marker. The native
 title changes from `[REC]` to `[REC LIMIT]`. Recording events cross a bounded
 128-message / 4 MiB persistence queue; if that queue fills, capture stops,
 already-admitted events drain, the title changes to `[REC INCOMPLETE]`, and a
@@ -88,9 +99,10 @@ flushes, and final close. It buffers complete NDJSON records and rolls a failed
 batch back to the preceding committed boundary, so an early stop retains a
 replayable valid-JSON prefix rather than a partial event.
 
-Starting a managed recording prunes the managed namespace toward budgets of 50
-files and 5 GiB. Kettle removes the oldest unlocked files first and never
-removes an active file. Pre-existing `session-*.cast` files, unrelated files,
+Starting a managed recording prunes the managed namespace toward
+`record-max-files` and `record-max-directory-bytes` (50 files and 5 GiB by
+default). Kettle removes the oldest unlocked files first and never removes an
+active file. Pre-existing `session-*.cast` files, unrelated files,
 symlinks, and unrecognized names are not managed or deleted. If
 active/unreadable files keep the managed namespace above its budget, recording
 continues and the condition is logged rather than deleting uncertain data.
@@ -121,18 +133,20 @@ instead of silently recording to the wrong destination or changing redaction.
 Use `kettle --new-process` when an intentionally isolated default session is
 needed.
 
-> **Shared recorder.** The trace writer lives in `kettle-core` (the `asciicast`
-> feature, compiled into every build), so it backs two front-ends: the GUI's
-> `--record` / `record = on` (full trace — output, input tokens, and `m`
-> markers) and the headless `kettle exec --record run.cast` (output-only — no
-> window, no keystroke or marker channel). Both use the same 512 MiB event
-> boundary, no-link checks, and private-file writer. `kettle exec` fails closed
-> with status 125 if the requested file cannot be secured before the child is
-> started; a later disk/write failure stops capture without killing an already
-> running child. Ordinary completion polls and joins the recording worker within
-> a fixed bound; timeout and cancellation perform only a zero-duration safe
-> completion probe, report an unfinished trace, and never wait in a join. See
-> [AGENT.md](AGENT.md) for `kettle exec`.
+> **Shared recorder.** The trace writer lives in `kettle-core` (the
+> `asciicast` feature, compiled into every build), so it backs two front-ends:
+> the GUI's `--record` / `record = on` (full trace — output, input tokens, and
+> `m` markers) and the headless `kettle exec --record run.cast` (output-only —
+> no window, no keystroke or marker channel). Both use the same no-link
+> checks, private-file writer, and 512 MiB default event boundary, but only
+> the GUI reads `record-max-bytes` — `kettle exec` loads no config file.
+> `kettle exec` fails closed with status 125 if the requested file cannot be
+> secured before the child is started; a later disk/write failure stops
+> capture without killing an already running child. Ordinary completion polls
+> and joins the recording worker within a fixed bound; timeout and
+> cancellation perform only a zero-duration safe completion probe, report an
+> unfinished trace, and never wait in a join. See [AGENT.md](AGENT.md) for
+> `kettle exec`.
 
 ## What it captures
 
