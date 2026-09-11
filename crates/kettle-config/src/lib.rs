@@ -42,6 +42,11 @@ pub const INFINITE_SCROLLBACK: usize = 10_000_000;
 /// Per-pane scrollback byte budget. `0` disables the byte cap and leaves the
 /// line-count `scrollback` key as the only history limit.
 pub const DEFAULT_SCROLLBACK_BYTES: usize = 10_000_000;
+/// Mirrors `kettle_core::record::MIN_RECORD_BYTES`. kettle-config and
+/// kettle-core are siblings, so the value is duplicated; kettle-core floors the
+/// live policy regardless, and its
+/// `min_record_bytes_clears_the_largest_possible_header` test pins the margin.
+pub const MIN_RECORD_BYTES: u64 = 1024;
 /// Largest accepted per-pane scrollback byte budget.
 pub const MAX_SCROLLBACK_BYTES: usize = 1 << 40;
 const NEAR_OPAQUE_BACKGROUND_OPACITY: f32 = 0.99;
@@ -3783,11 +3788,13 @@ impl Config {
                     "off" | "none" | "disabled" | "false" | "0" | "on" | "enabled" | "true" | "1"
                         | "yes"
                 ),
-                // Zero is rejected, not read as "unlimited": it cannot hold
-                // the asciicast header, so it would disable recording.
-                "record-max-bytes" | "record-max-directory-bytes" => {
-                    parse_byte_size(v).is_some_and(|n| n > 0)
+                // A per-cast budget below MIN_RECORD_BYTES is rejected rather
+                // than read as "unlimited": it cannot hold the asciicast
+                // header, so the recorder would refuse to start every session.
+                "record-max-bytes" => {
+                    parse_byte_size(v).is_some_and(|n| n as u64 >= MIN_RECORD_BYTES)
                 }
+                "record-max-directory-bytes" => parse_byte_size(v).is_some_and(|n| n > 0),
                 "record-max-files" => v.parse::<usize>().is_ok_and(|n| n > 0),
                 // Boolean keys: accept the same alias set `parse_bool`
                 // recognizes. Previously, any non-"false"
@@ -4465,7 +4472,9 @@ impl Config {
                     }
                 }
                 "record-max-bytes" | "record_max_bytes" => {
-                    if let Some(n) = parse_byte_size(&e.value).filter(|n| *n > 0) {
+                    if let Some(n) =
+                        parse_byte_size(&e.value).filter(|n| *n as u64 >= MIN_RECORD_BYTES)
+                    {
                         cfg.record_max_bytes = Some(n as u64);
                     }
                 }
@@ -9458,6 +9467,12 @@ split_horiz = <Control><Shift>j
         assert_eq!(c.record_max_bytes, None);
         assert_eq!(c.record_max_files, None);
         assert_eq!(c.record_max_directory_bytes, None);
+
+        // A budget under the floor would stop every recording from starting.
+        let c = Config::parse_text("record-max-bytes = 512");
+        assert_eq!(c.record_max_bytes, None, "under MIN_RECORD_BYTES");
+        let bad = Config::detect_malformed_values("record-max-bytes = 512\n");
+        assert_eq!(bad.len(), 1, "and the diagnostic agrees: {bad:?}");
 
         // Zero would disable recording rather than bound it.
         let c = Config::parse_text(
