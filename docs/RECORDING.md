@@ -30,7 +30,8 @@ record = on
 # where traces are written (default <config-dir>/recordings):
 record-dir = ~/.cache/kettle/records
 
-# Optional retention overrides; unset keeps the default. Zero is rejected.
+# Optional retention overrides; unset keeps the default. record-max-bytes needs
+# at least 1KiB -- a smaller cast cannot hold its own header.
 record-max-bytes = 64MiB
 record-max-files = 20
 record-max-directory-bytes = 1GiB
@@ -131,18 +132,20 @@ instead of silently recording to the wrong destination or changing redaction.
 Use `kettle --new-process` when an intentionally isolated default session is
 needed.
 
-> **Shared recorder.** The trace writer lives in `kettle-core` (the `asciicast`
-> feature, compiled into every build), so it backs two front-ends: the GUI's
-> `--record` / `record = on` (full trace — output, input tokens, and `m`
-> markers) and the headless `kettle exec --record run.cast` (output-only — no
-> window, no keystroke or marker channel). Both use the same 512 MiB event
-> boundary, no-link checks, and private-file writer. `kettle exec` fails closed
-> with status 125 if the requested file cannot be secured before the child is
-> started; a later disk/write failure stops capture without killing an already
-> running child. Ordinary completion polls and joins the recording worker within
-> a fixed bound; timeout and cancellation perform only a zero-duration safe
-> completion probe, report an unfinished trace, and never wait in a join. See
-> [AGENT.md](AGENT.md) for `kettle exec`.
+> **Shared recorder.** The trace writer lives in `kettle-core` (the
+> `asciicast` feature, compiled into every build), so it backs two front-ends:
+> the GUI's `--record` / `record = on` (full trace — output, input tokens, and
+> `m` markers) and the headless `kettle exec --record run.cast` (output-only —
+> no window, no keystroke or marker channel). Both use the same no-link
+> checks, private-file writer, and 512 MiB default event boundary, but only
+> the GUI reads `record-max-bytes` — `kettle exec` loads no config file.
+> `kettle exec` fails closed with status 125 if the requested file cannot be
+> secured before the child is started; a later disk/write failure stops
+> capture without killing an already running child. Ordinary completion polls
+> and joins the recording worker within a fixed bound; timeout and
+> cancellation perform only a zero-duration safe completion probe, report an
+> unfinished trace, and never wait in a join. See [AGENT.md](AGENT.md) for
+> `kettle exec`.
 
 ## What it captures
 

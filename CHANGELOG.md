@@ -10,8 +10,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - **Recording retention is configurable.** `record-max-bytes`,
   `record-max-files`, and `record-max-directory-bytes` override the 512 MiB /
-  50 file / 5 GiB defaults. Unset keeps the default; zero is rejected rather
-  than read as "unlimited".
+  50 file / 5 GiB defaults. Unset keeps the default. `record-max-bytes` has a
+  1 KiB floor and zero is rejected, rather than read as "unlimited": a cast that
+  cannot hold its own header would stop the recorder from ever starting.
 
 ## [4.3.1] — 2026-09-04
 

@@ -933,9 +933,12 @@ finite command timeout.
 GUI development recording subscribes to the same fan-out used by normal redraw
 and close drains, so consuming output for a recorder cannot steal it from Lua or
 skip a pane's final bytes. The shared asciicast writer stops at a complete event
-boundary before 512 MiB. Managed directories use private unique files, active
-file locks, and namespace-scoped 50-file / 5-GiB retention; explicit paths are
-locked before truncation.
+boundary before `record-max-bytes` (512 MiB by default). Managed directories use
+private unique files, active file locks, and namespace-scoped retention bounded
+by `record-max-files` / `record-max-directory-bytes` (50 files / 5 GiB by
+default); explicit paths are locked before truncation. The three budgets are
+process-wide and republished on config reload, because the writer is shared and
+its call sites hold no `Config`.
 
 Asciicast events and per-pane session-log chunks use the same bounded
 persistence transport: 128 messages, a 4 MiB aggregate reservation, and 128 KiB
