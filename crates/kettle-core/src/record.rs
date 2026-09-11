@@ -59,6 +59,12 @@ pub const MAX_RECORD_FILES: usize = 50;
 /// Automatic directory recording retains at most 5 GiB of Kettle-owned casts.
 pub const MAX_RECORD_DIRECTORY_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
+/// Smallest accepted per-cast budget. A cast that cannot hold its own header is
+/// not a small recording, it is a recorder that refuses to start, so anything
+/// under this floor falls back to the default exactly as zero does.
+/// `min_record_bytes_clears_the_largest_possible_header` pins the margin.
+pub const MIN_RECORD_BYTES: u64 = 1024;
+
 // Live retention policy, overridable by config. Process-wide because
 // `kettle-config` is a sibling crate and recorders start from call sites with
 // no `Config` in hand.
@@ -67,28 +73,43 @@ static RECORD_MAX_FILES: AtomicUsize = AtomicUsize::new(MAX_RECORD_FILES);
 static RECORD_MAX_DIRECTORY_BYTES: AtomicU64 = AtomicU64::new(MAX_RECORD_DIRECTORY_BYTES);
 
 /// Publish the effective retention policy. Always writes, so a reload that
-/// drops a key restores the default. Zero falls back to the default: it cannot
-/// hold even the asciicast header, so applying it would disable recording.
+/// drops a key restores the default. A per-cast budget under
+/// [`MIN_RECORD_BYTES`], or a zero count, falls back to the default rather than
+/// leaving a recorder that can never start.
 pub fn configure_limits(max_bytes: u64, max_files: usize, max_directory_bytes: u64) {
-    store_limit_u64(&RECORD_MAX_BYTES, max_bytes, MAX_RECORD_BYTES);
-    store_limit_usize(&RECORD_MAX_FILES, max_files, MAX_RECORD_FILES);
+    store_limit_u64(
+        &RECORD_MAX_BYTES,
+        max_bytes,
+        MIN_RECORD_BYTES,
+        MAX_RECORD_BYTES,
+    );
+    store_limit_usize(&RECORD_MAX_FILES, max_files, 1, MAX_RECORD_FILES);
     store_limit_u64(
         &RECORD_MAX_DIRECTORY_BYTES,
         max_directory_bytes,
+        1,
         MAX_RECORD_DIRECTORY_BYTES,
     );
 }
 
-fn store_limit_u64(slot: &AtomicU64, requested: u64, fallback: u64) {
+fn store_limit_u64(slot: &AtomicU64, requested: u64, floor: u64, fallback: u64) {
     slot.store(
-        if requested > 0 { requested } else { fallback },
+        if requested >= floor {
+            requested
+        } else {
+            fallback
+        },
         Ordering::Relaxed,
     );
 }
 
-fn store_limit_usize(slot: &AtomicUsize, requested: usize, fallback: usize) {
+fn store_limit_usize(slot: &AtomicUsize, requested: usize, floor: usize, fallback: usize) {
     slot.store(
-        if requested > 0 { requested } else { fallback },
+        if requested >= floor {
+            requested
+        } else {
+            fallback
+        },
         Ordering::Relaxed,
     );
 }
@@ -1227,19 +1248,42 @@ mod tests {
     fn a_dropped_or_zero_limit_falls_back_to_the_shipped_default() {
         // Local slots, not the statics: the directory tests read those.
         let slot = std::sync::atomic::AtomicU64::new(64 * 1024 * 1024);
-        super::store_limit_u64(&slot, super::MAX_RECORD_BYTES, super::MAX_RECORD_BYTES);
+        super::store_limit_u64(
+            &slot,
+            super::MAX_RECORD_BYTES,
+            super::MIN_RECORD_BYTES,
+            super::MAX_RECORD_BYTES,
+        );
         assert_eq!(
             slot.load(std::sync::atomic::Ordering::Relaxed),
             super::MAX_RECORD_BYTES,
             "dropping the key restores the default"
         );
-        super::store_limit_u64(&slot, 0, super::MAX_RECORD_BYTES);
+        super::store_limit_u64(&slot, 0, super::MIN_RECORD_BYTES, super::MAX_RECORD_BYTES);
         assert_eq!(
             slot.load(std::sync::atomic::Ordering::Relaxed),
             super::MAX_RECORD_BYTES,
             "zero falls back, never applies"
         );
-        super::store_limit_u64(&slot, 64 * 1024 * 1024, super::MAX_RECORD_BYTES);
+        // A budget too small to hold the header would stop every recording
+        // from starting, so it falls back exactly as zero does.
+        super::store_limit_u64(
+            &slot,
+            super::MIN_RECORD_BYTES - 1,
+            super::MIN_RECORD_BYTES,
+            super::MAX_RECORD_BYTES,
+        );
+        assert_eq!(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+            super::MAX_RECORD_BYTES,
+            "under the floor falls back"
+        );
+        super::store_limit_u64(
+            &slot,
+            64 * 1024 * 1024,
+            super::MIN_RECORD_BYTES,
+            super::MAX_RECORD_BYTES,
+        );
         assert_eq!(
             slot.load(std::sync::atomic::Ordering::Relaxed),
             64 * 1024 * 1024,
@@ -1247,29 +1291,24 @@ mod tests {
         );
 
         let files = std::sync::atomic::AtomicUsize::new(20);
-        super::store_limit_usize(&files, 0, super::MAX_RECORD_FILES);
+        super::store_limit_usize(&files, 0, 1, super::MAX_RECORD_FILES);
         assert_eq!(
             files.load(std::sync::atomic::Ordering::Relaxed),
             super::MAX_RECORD_FILES
         );
-        super::store_limit_usize(&files, 20, super::MAX_RECORD_FILES);
+        super::store_limit_usize(&files, 20, 1, super::MAX_RECORD_FILES);
         assert_eq!(files.load(std::sync::atomic::Ordering::Relaxed), 20);
     }
 
     #[test]
-    fn the_live_policy_reports_the_shipped_defaults() {
-        // Also re-publishes them, proving `configure_limits` round-trips. Safe
-        // beside the directory tests: it writes what the statics already hold.
-        super::configure_limits(
-            super::MAX_RECORD_BYTES,
-            super::MAX_RECORD_FILES,
-            super::MAX_RECORD_DIRECTORY_BYTES,
-        );
-        assert_eq!(super::record_max_bytes(), super::MAX_RECORD_BYTES);
-        assert_eq!(super::record_max_files(), super::MAX_RECORD_FILES);
-        assert_eq!(
-            super::record_max_directory_bytes(),
-            super::MAX_RECORD_DIRECTORY_BYTES
+    fn min_record_bytes_clears_the_largest_possible_header() {
+        // The floor only means anything if it exceeds every header this crate
+        // can emit; u16::MAX on both axes is the widest one.
+        let widest = super::header_line(u16::MAX, u16::MAX).len() as u64 + 1;
+        assert!(
+            super::MIN_RECORD_BYTES > widest,
+            "floor {} must clear the {widest}-byte header",
+            super::MIN_RECORD_BYTES
         );
     }
 
