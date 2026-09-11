@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.4.0] — 2026-09-10
+
 ### Added
 
 - **Recording retention is configurable.** `record-max-bytes`,
