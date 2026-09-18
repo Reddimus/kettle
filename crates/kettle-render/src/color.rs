@@ -189,6 +189,64 @@ pub fn relative_luminance(rgb: Rgb) -> f64 {
     0.2126 * srgb_to_linear(rgb.r) + 0.7152 * srgb_to_linear(rgb.g) + 0.0722 * srgb_to_linear(rgb.b)
 }
 
+/// CIE 1976 L* lightness (0.0 black ..= 100.0 white) of a relative luminance.
+/// Perceptually uniform: equal steps look equally different, unlike equal
+/// steps of luminance or of sRGB code value.
+pub fn lightness(luminance: f64) -> f64 {
+    const EPSILON: f64 = 216.0 / 24389.0;
+    const KAPPA: f64 = 24389.0 / 27.0;
+    let y = luminance.clamp(0.0, 1.0);
+    if y > EPSILON {
+        116.0 * y.cbrt() - 16.0
+    } else {
+        KAPPA * y
+    }
+}
+
+/// Inverse of [`lightness`]: the relative luminance with the given L*.
+pub fn luminance_from_lightness(lightness: f64) -> f64 {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    let l = lightness.clamp(0.0, 100.0);
+    if l > 8.0 {
+        ((l + 16.0) / 116.0).powi(3)
+    } else {
+        l / KAPPA
+    }
+}
+
+/// Alpha at which a wash of `fg` composited over `bg` in linear light moves
+/// the background's lightness by `step` of the L* scale toward `fg`: `0.03`
+/// is a +3 L* lift on a dark theme and a -3 L* dip on a light one.
+///
+/// The quad pipeline blends in linear light on an sRGB attachment, so a fixed
+/// alpha is not a fixed perceptual change: 0.10 of a light foreground over a
+/// dark background is a +21.7 L* jump (TokyoNight `#1a1b26` becomes
+/// `#464a5d`), while the same alpha over a light background barely moves it
+/// (-3 L*). Working in L* gives every theme the same visible cue, which is why
+/// `bell-flash-intensity` is defined in these units.
+///
+/// `0.0` is no wash and `1.0` is a solid foreground (the L* target saturates
+/// at black or white, so the alpha clamps to one). A foreground whose
+/// luminance equals the background's cannot move it in either direction; the
+/// fraction is used as a plain alpha there so the flash stays visible on such
+/// a theme instead of vanishing.
+pub fn perceptual_wash_alpha(bg: Rgb, fg: Rgb, step: f32) -> f32 {
+    let step = f64::from(step.clamp(0.0, 1.0));
+    if step <= 0.0 {
+        return 0.0;
+    }
+    let y_bg = relative_luminance(bg);
+    let y_fg = relative_luminance(fg);
+    let span = y_fg - y_bg;
+    if span.abs() < 1e-6 {
+        return step as f32;
+    }
+    let direction = if span > 0.0 { 1.0 } else { -1.0 };
+    let l_target = (lightness(y_bg) + direction * 100.0 * step).clamp(0.0, 100.0);
+    let y_target = luminance_from_lightness(l_target);
+    ((y_target - y_bg) / span).clamp(0.0, 1.0) as f32
+}
+
 /// WCAG 2.0 contrast ratio (1.0..=21.0). Symmetric in its arguments.
 pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     let (la, lb) = (relative_luminance(a), relative_luminance(b));
@@ -359,6 +417,134 @@ pub fn cursor_block_color(theme: &Theme, colors: &TermColors) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TOKYONIGHT_BG: Rgb = Rgb {
+        r: 0x1a,
+        g: 0x1b,
+        b: 0x26,
+    };
+    const TOKYONIGHT_FG: Rgb = Rgb {
+        r: 0xc0,
+        g: 0xca,
+        b: 0xf5,
+    };
+    const SOLARIZED_LIGHT_BG: Rgb = Rgb {
+        r: 0xfd,
+        g: 0xf6,
+        b: 0xe3,
+    };
+    const SOLARIZED_LIGHT_FG: Rgb = Rgb {
+        r: 0x65,
+        g: 0x7b,
+        b: 0x83,
+    };
+
+    /// Composite `fg` over `bg` in linear light at `alpha`, the way the quad
+    /// pipeline does, and return the result's L*.
+    fn washed_lightness(bg: Rgb, fg: Rgb, alpha: f32) -> f64 {
+        let a = f64::from(alpha);
+        lightness(relative_luminance(bg) * (1.0 - a) + relative_luminance(fg) * a)
+    }
+
+    #[test]
+    fn lightness_round_trips_and_pins_the_endpoints() {
+        assert_eq!(lightness(0.0), 0.0);
+        assert!((lightness(1.0) - 100.0).abs() < 1e-9);
+        // Mid grey by luminance is well above mid lightness: L* is nonlinear.
+        assert!((lightness(0.18) - 49.5).abs() < 0.2);
+        for y in [0.0, 0.0005, 0.005, 0.0114, 0.18, 0.5, 0.92, 1.0] {
+            let back = luminance_from_lightness(lightness(y));
+            assert!((back - y).abs() < 1e-9, "round trip at Y={y}: {back}");
+        }
+        assert!(lightness(-1.0) == 0.0 && lightness(2.0) == 100.0, "clamped");
+    }
+
+    /// The whole point: one number means one visible change on every theme,
+    /// even though the linear-light alpha behind it differs by an order of
+    /// magnitude between dark and light backgrounds.
+    #[test]
+    fn perceptual_wash_moves_dark_and_light_themes_by_the_same_lightness() {
+        for step in [0.03_f32, 0.04, 0.10] {
+            let dark = perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, step);
+            let light = perceptual_wash_alpha(SOLARIZED_LIGHT_BG, SOLARIZED_LIGHT_FG, step);
+            let want = f64::from(step) * 100.0;
+            let dark_delta = washed_lightness(TOKYONIGHT_BG, TOKYONIGHT_FG, dark)
+                - lightness(relative_luminance(TOKYONIGHT_BG));
+            let light_delta = washed_lightness(SOLARIZED_LIGHT_BG, SOLARIZED_LIGHT_FG, light)
+                - lightness(relative_luminance(SOLARIZED_LIGHT_BG));
+            assert!(
+                (dark_delta - want).abs() < 0.05,
+                "dark theme at {step}: alpha {dark} gives {dark_delta:+.2} L*, want {want:+.2}"
+            );
+            assert!(
+                (light_delta + want).abs() < 0.05,
+                "light theme at {step}: alpha {light} gives {light_delta:+.2} L*, want {:+.2}",
+                -want
+            );
+            assert!(
+                light > dark * 8.0,
+                "a light background needs far more alpha than a dark one ({light} vs {dark})"
+            );
+        }
+        // The shipped default on the user's theme: about 0.7% alpha, not 10%.
+        let default_alpha = perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, 0.03);
+        assert!(
+            (0.005..0.010).contains(&default_alpha),
+            "3 L* on TokyoNight is a sub-percent alpha, got {default_alpha}"
+        );
+        // And the old constant really was a +21 L* jump there.
+        let old = washed_lightness(TOKYONIGHT_BG, TOKYONIGHT_FG, 0.10)
+            - lightness(relative_luminance(TOKYONIGHT_BG));
+        assert!(old > 20.0, "alpha 0.10 on TokyoNight was {old:+.1} L*");
+    }
+
+    #[test]
+    fn perceptual_wash_endpoints_monotonicity_and_degenerate_themes() {
+        assert_eq!(
+            perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, 0.0),
+            0.0
+        );
+        assert_eq!(
+            perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, -1.0),
+            0.0
+        );
+        assert_eq!(
+            perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, 1.0),
+            1.0,
+            "a full step saturates at white and paints the foreground solid"
+        );
+        assert_eq!(
+            perceptual_wash_alpha(SOLARIZED_LIGHT_BG, SOLARIZED_LIGHT_FG, 1.0),
+            1.0,
+            "a full step saturates at black on a light theme too"
+        );
+        assert_eq!(
+            perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, 7.0),
+            1.0
+        );
+        let mut last = 0.0_f32;
+        for i in 1..=100 {
+            let step = i as f32 / 100.0;
+            let alpha = perceptual_wash_alpha(TOKYONIGHT_BG, TOKYONIGHT_FG, step);
+            assert!(
+                alpha >= last,
+                "alpha must not decrease with the step ({step})"
+            );
+            assert!((0.0..=1.0).contains(&alpha));
+            last = alpha;
+        }
+        // Black on white and white on black are the extreme cases.
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        let up = perceptual_wash_alpha(black, white, 0.03);
+        let down = perceptual_wash_alpha(white, black, 0.03);
+        assert!((lightness(f64::from(up)) - 3.0).abs() < 0.05);
+        assert!((100.0 - lightness(1.0 - f64::from(down)) - 3.0).abs() < 0.05);
+        // A foreground with the background's own luminance cannot move it;
+        // fall back to the raw fraction rather than to nothing.
+        let same = Rgb::new(0x1a, 0x1b, 0x26);
+        assert_eq!(perceptual_wash_alpha(same, same, 0.03), 0.03);
+    }
 
     /// The renderer must ask whether a runtime cursor colour EXISTS, and the
     /// answer must reach the glyph.

@@ -5925,6 +5925,25 @@ pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<Str
 /// `resize-overlay-duration` default).
 pub(crate) const RESIZE_OVERLAY_DURATION: std::time::Duration =
     std::time::Duration::from_millis(750);
+/// How long a pane's visual-bell flash lasts from the frame it rang. One
+/// constant for the redraw pacing and the ramp, so the two cannot drift.
+pub(crate) const BELL_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The visual-bell flash's remaining strength `elapsed` after the bell: 1.0
+/// the frame it rang, 0.0 once `BELL_FLASH_DURATION` has passed. Instant on,
+/// then an ease-out (quadratic) decay: the peak is what the eye notices, so
+/// the wash leaves it quickly and spends the rest of the window in a soft
+/// tail rather than lingering near the peak the way a linear ramp does. The
+/// renderer scales the configured lightness step by this value, so the fade
+/// is perceptually linear as well.
+pub(crate) fn bell_flash_ramp(elapsed: std::time::Duration) -> f32 {
+    let t = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+    if t >= 1.0 {
+        return 0.0;
+    }
+    let remaining = 1.0 - t.max(0.0);
+    remaining * remaining
+}
 const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const MAX_PENDING_LUA_COMMANDS: usize = 1024;
 const MAX_PENDING_LUA_SEND_BYTES: usize = 8 << 20;
@@ -10541,7 +10560,13 @@ impl App {
         }
         if bell {
             if self.cfg.bell.visual() {
-                ws.last_bell = Some(std::time::Instant::now());
+                // Only the pane that rang flashes; a sibling split's bell
+                // then tells you which one it was. Panes outside the current
+                // layout keep the tab dot and titlebar glyph as their cue.
+                let now = std::time::Instant::now();
+                for id in &bell_panes {
+                    ws.bell_flashes.insert(*id, now);
+                }
             }
             if self.cfg.bell.attention()
                 && !ws.window_focused
@@ -10554,8 +10579,8 @@ impl App {
         // Latch any per-pane bells onto their tab's
         // activity flag so the tab-bar dot survives even on tabs the
         // user isn't currently looking at. Active-tab bells were
-        // already handled visually (`last_bell` above triggers the
-        // visual-bell flash); the latching helper skips the active
+        // already handled visually (`bell_flashes` above drives the
+        // per-pane flash); the latching helper skips the active
         // tab so we don't double-signal.
         //
         // Terminator plugin parity:
@@ -12406,13 +12431,6 @@ impl App {
         } else {
             ws.blink_on
         };
-        let bell = ws
-            .last_bell
-            .map(|t| {
-                let e = t.elapsed().as_secs_f32();
-                if e >= 0.30 { 0.0 } else { 1.0 - e / 0.30 }
-            })
-            .unwrap_or(0.0);
         // v2.20.0: the transient resize chip (about_to_wait drives the
         // expiry repaint and clears the state).
         let resize_overlay = ws
@@ -12502,7 +12520,6 @@ impl App {
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
-                bell,
                 resize_overlay,
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
@@ -12617,7 +12634,6 @@ impl App {
             window_focused,
             scrollbar_active,
             cursor_visible,
-            bell,
             resize_overlay,
             context_menu,
             confirm_dialog,
@@ -13027,6 +13043,9 @@ impl App {
                         // `false`, so the titlebar bell indicator could never
                         // appear no matter how the setting was configured.
                         p.bell,
+                        ws.bell_flashes
+                            .get(id)
+                            .map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),
                         p.group_name.clone(),
                     ));
                 }
@@ -13043,7 +13062,10 @@ impl App {
             .iter()
             .zip(snaps.iter())
             .map(
-                |((id, r, f, imgs, prefix, title, path, cols, rows, bell, group_name), snap)| {
+                |(
+                    (id, r, f, imgs, prefix, title, path, cols, rows, bell, bell_flash, group_name),
+                    snap,
+                )| {
                     PaneView {
                         id: *id,
                         rect: *r,
@@ -13056,6 +13078,7 @@ impl App {
                         size_cols: *cols,
                         size_rows: *rows,
                         bell: *bell,
+                        bell_flash: *bell_flash,
                         group_name: group_name.as_deref(),
                     }
                 },
@@ -28559,12 +28582,21 @@ impl App {
             .map(|pane| pane.term.poll_completion_hide(now))
             .unwrap_or((false, None));
         // Drive cursor blink + visual-bell decay without busy-looping: only
-        // schedule wake-ups while something is actually animating.
-        let bell_active = !render_hidden
-            && ws
-                .last_bell
-                .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
-                .unwrap_or(false);
+        // schedule wake-ups while something is actually animating. A flash
+        // that has fully decayed is dropped here and gets one more repaint to
+        // erase its last frame, like the resize chip below.
+        let bells_expired = ws
+            .bell_flashes
+            .values()
+            .any(|rang| rang.elapsed() >= BELL_FLASH_DURATION);
+        if bells_expired {
+            ws.bell_flashes
+                .retain(|_, rang| rang.elapsed() < BELL_FLASH_DURATION);
+            if !render_hidden && let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+        let bell_active = !render_hidden && !ws.bell_flashes.is_empty();
         // v2.20.0: the resize chip needs repaints until it expires (then one
         // more to erase it); clear the state once it has.
         let resize_chip_live = ws
@@ -33294,6 +33326,78 @@ mod tests {
     /// Building a frame needs a live App (window + renderer + real PTYs), so
     /// the wiring is pinned here: the pane's own state reaches the renderer,
     /// and focusing the pane answers it.
+    /// The visual bell's time profile: instant on, quadratic ease-out, gone
+    /// at `BELL_FLASH_DURATION`. The renderer scales the configured lightness
+    /// step by this value, so its shape is the flash's perceived shape.
+    #[test]
+    fn bell_flash_ramp_is_instant_on_and_eases_out_within_the_duration() {
+        use super::{BELL_FLASH_DURATION, bell_flash_ramp};
+        use std::time::Duration;
+
+        assert_eq!(BELL_FLASH_DURATION, Duration::from_millis(300));
+        assert_eq!(
+            bell_flash_ramp(Duration::ZERO),
+            1.0,
+            "the frame it rang is the peak"
+        );
+        assert!((bell_flash_ramp(Duration::from_millis(150)) - 0.25).abs() < 1e-6);
+        assert!((bell_flash_ramp(Duration::from_millis(30)) - 0.81).abs() < 1e-6);
+        assert_eq!(bell_flash_ramp(BELL_FLASH_DURATION), 0.0);
+        assert_eq!(bell_flash_ramp(Duration::from_secs(5)), 0.0);
+        let mut last = 1.0_f32;
+        for ms in (0..=300).step_by(10) {
+            let value = bell_flash_ramp(Duration::from_millis(ms));
+            assert!(value <= last, "the ramp must never rise again ({ms} ms)");
+            assert!((0.0..=1.0).contains(&value));
+            last = value;
+        }
+        // Ease-out: the first half sheds most of the strength.
+        assert!(bell_flash_ramp(Duration::from_millis(150)) < 0.5);
+    }
+
+    /// The bell flash is per pane: the drain stamps every ringing pane, the
+    /// frame builder turns each stamp into the pane's ramp, the idle loop
+    /// keeps the animation wake alive while any stamp is live and drops
+    /// expired stamps with one erasing repaint, and nothing keeps a
+    /// window-level bell timestamp any more.
+    #[test]
+    fn the_bell_flash_is_stamped_per_pane_and_pruned_on_expiry() {
+        let src = production_source();
+        let drain = src
+            .split("if self.cfg.bell.visual() {")
+            .nth(1)
+            .and_then(|body| body.split("if self.cfg.bell.attention()").next())
+            .expect("visual bell branch in drain_events");
+        assert!(
+            drain.contains("for id in &bell_panes {")
+                && drain.contains("ws.bell_flashes.insert(*id, now);"),
+            "every ringing pane must get its own flash stamp"
+        );
+        assert!(
+            src.contains("bell_flash: *bell_flash,")
+                && src.contains(".map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),"),
+            "the frame builder must feed each pane its own ramp"
+        );
+        let idle = src
+            .split("let bells_expired = ws")
+            .nth(1)
+            .and_then(|body| body.split("let bell_active =").next())
+            .expect("bell expiry block in about_to_wait");
+        assert!(
+            idle.contains(".retain(|_, rang| rang.elapsed() < BELL_FLASH_DURATION);")
+                && idle.contains("w.request_redraw();"),
+            "expired stamps must be dropped and erased with one more repaint"
+        );
+        assert!(
+            src.contains("let bell_active = !render_hidden && !ws.bell_flashes.is_empty();"),
+            "the animation wake must key off live per-pane stamps"
+        );
+        assert!(
+            !src.contains("last_bell"),
+            "the window-level bell timestamp is gone; a flash belongs to the pane that rang"
+        );
+    }
+
     #[test]
     fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
         let src = production_source();

@@ -1208,7 +1208,16 @@ text, so its bitmap is already resident).
   redraw request, so a delayed Wayland frame callback cannot enqueue the same
   phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
-  actually changed.
+  actually changed. The visual bell is per pane: `drain_events` stamps each
+  ringing pane in `WindowState::bell_flashes`, the frame builder turns each
+  stamp into a `PaneView::bell_flash` ramp (`bell_flash_ramp`: instant on,
+  quadratic ease-out over `BELL_FLASH_DURATION`), the idle loop keeps the
+  ~30 fps wake alive while any stamp is younger than that and drops expired
+  stamps with one erasing repaint, and `kettle-render` washes only that
+  pane's rect under its text at `bell_flash_alpha`, which converts the
+  configured CIE L* step (`bell-flash-intensity`, scaled by the ramp) into a
+  linear-light alpha via `perceptual_wash_alpha` so every theme moves by the
+  same visible amount.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
   command-completion, and internal diagnostic toast enters a 64-message
   `try_send` queue. The worker preserves order while calling the OS backend.

@@ -6,6 +6,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **The visual bell is far dimmer, perceptually calibrated, and flashes only
+  the pane that rang.** `bell-flash-intensity` was documented as the wash's
+  peak alpha, but the renderer blends in linear light, so the `0.10` default
+  lifted a dark background by about 22 L\* of lightness (TokyoNight's
+  `#1a1b26` became `#464a5d`) while barely touching a light theme. The key now
+  means a step of CIE L\* lightness as a fraction of the 0–100 scale, converted
+  per theme into the linear alpha that produces exactly that step: every theme
+  moves by the same visible amount, and the fade is perceptually linear. The
+  default is `0.03` (3 L\*), the smallest step that still reads as a cue in a
+  lit room, chosen after a brightness review; `0` still disables the wash and
+  `1` still paints the foreground solid, but any custom value in between is
+  now much dimmer than before and may need raising (`0.06`–`0.10` is a strong
+  flash). The wash also covers only the pane that rang instead of the whole
+  window, so a bell in a split says which pane it came from, and the decay is
+  an ease-out over the same 300 ms rather than a linear ramp.
+
 ## [4.4.0] — 2026-09-10
 
 ### Added
