@@ -547,7 +547,18 @@ integration test renders both `DebugScene::Default` and
 asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
 pixels appear in the menu area — catches the v1.3.0/v1.3.1
 blank-menu render-pass-order regression class that bare logic
-tests can't see. Live-screenshot unit coverage verifies whole-frame
+tests can't see. `tests/bell_visual.rs` renders `DebugScene::Default` and
+`DebugScene::BellFlash` for the default dark theme and a bundled light theme,
+measures the mean CIE L\* of a background patch in each, and asserts the
+flash moves it by exactly the configured `bell-flash-intensity` step (+3 L\*
+on dark, −3 L\* on light, within 8-bit rounding) through the real linear-light
+quad pipeline; `color::tests` pins `perceptual_wash_alpha` itself (endpoints,
+monotonicity, the order-of-magnitude alpha gap between dark and light
+themes, and the same-luminance fallback), and `kettle-ui` pins the ease-out
+ramp, the per-pane stamping, and the expiry/erase pacing. The
+`just bell-flash-smoke` live check rings BEL in one pane of a split and
+proves only that pane's body lightens while the sibling pane and tab bar
+stay byte-identical, then fades back to the baseline. Live-screenshot unit coverage verifies whole-frame
 preservation, exact row/column cropping, out-of-surface rejection, and
 truncated-source rejection. Separate file-policy regressions prove an
 explicit output succeeds beneath a public existing parent while the default
@@ -1800,7 +1811,8 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+`just zoom-keybind-smoke`, `just bell-flash-smoke`, and
+`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
 `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`

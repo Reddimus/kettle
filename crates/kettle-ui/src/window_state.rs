@@ -942,7 +942,10 @@ pub(crate) struct WindowState {
     pub(crate) last_emitted_titles: std::collections::HashMap<u64, String>,
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
-    pub(crate) last_bell: Option<std::time::Instant>,
+    /// When each pane last rang the bell, for the per-pane visual flash.
+    /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
+    /// passed, so a pane that closes mid-flash cannot leak one.
+    pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
     /// Coalesce output-driven repaints (R2). `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
@@ -1157,7 +1160,7 @@ impl WindowState {
             last_emitted_titles: std::collections::HashMap::new(),
             blink_on: true,
             last_blink: std::time::Instant::now(),
-            last_bell: None,
+            bell_flashes: std::collections::HashMap::new(),
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),
             flood_paints: 0,

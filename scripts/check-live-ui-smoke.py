@@ -14722,6 +14722,178 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
+def region_mean_lightness(
+    png: Tuple[int, int, List[bytes]], rect: Dict[str, float], inset: float = 6.0
+) -> float:
+    """Mean CIE L* of the pixels inside `rect` (window px), inset by `inset`."""
+    width, height, rows = png
+    x0 = max(0, int(rect["x"] + inset))
+    y0 = max(0, int(rect["y"] + inset))
+    x1 = min(width, int(rect["x"] + rect["width"] - inset))
+    y1 = min(height, int(rect["y"] + rect["height"] - inset))
+    if x1 <= x0 or y1 <= y0:
+        raise SystemExit(f"bell-flash smoke: empty sample rect {rect}")
+
+    def linear(c: int) -> float:
+        v = c / 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    total = 0.0
+    count = 0
+    for y in range(y0, y1):
+        row = rows[y]
+        for x in range(x0, x1):
+            r, g, b = row[x * 4], row[x * 4 + 1], row[x * 4 + 2]
+            luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+            total += (
+                116.0 * luminance ** (1.0 / 3.0) - 16.0
+                if luminance > 216.0 / 24389.0
+                else (24389.0 / 27.0) * luminance
+            )
+            count += 1
+    return total / count
+
+
+def run_bell_flash(kettle: str, root: Path) -> Path:
+    """Prove the visual bell washes only the pane that rang, then fades.
+
+    A two-pane split rings BEL in the focused pane. The frame captured while
+    the flash is live must be lighter inside that pane's body and byte-for-byte
+    unchanged in the sibling pane and the tab bar; the frame captured after
+    `BELL_FLASH_DURATION` must match the baseline again. The magnitude of the
+    default step is pinned by the offscreen `bell_visual` render test; this
+    smoke uses a deliberately strong step so the live path is unmistakable.
+    """
+
+    out = root / f"bell-flash-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "theme = TokyoNight Night",
+                "minimum-contrast = 0",
+                "cursor-blink = false",
+                "bell = visual",
+                "bell-flash-intensity = 0.5",
+                "window-padding-x = 8",
+                "window-padding-y = 8",
+                "window-width = 110",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+
+    def pane_rects(live: LiveKettle) -> Dict[int, Dict[str, float]]:
+        geometry = live.json_ctl("ui_geometry")
+        rects: Dict[int, Dict[str, float]] = {}
+        for bar in geometry.get("pane_titlebars", []):  # type: ignore[union-attr]
+            pane_rect = dict(bar["pane_rect"])  # type: ignore[index]
+            titlebar = bar["rect"]  # type: ignore[index]
+            # Sample the body below the titlebar so the bell glyph the
+            # titlebar gains cannot count as wash.
+            if abs(float(titlebar["y"]) - float(pane_rect["y"])) < 0.5:  # type: ignore[index]
+                pane_rect["y"] = float(pane_rect["y"]) + float(titlebar["height"])  # type: ignore[index]
+                pane_rect["height"] = float(pane_rect["height"]) - float(titlebar["height"])  # type: ignore[index]
+            rects[int(bar["pane"])] = pane_rect  # type: ignore[index]
+        return rects
+
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            if len(live.json_ctl("ui_geometry").get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("bell-flash smoke: split did not produce two panes")
+        panes = live.json_ctl("list_panes").get("panes", [])
+        ringing = next(int(p["id"]) for p in panes if p.get("focused"))  # type: ignore[index]
+        quiet = next(int(p["id"]) for p in panes if not p.get("focused"))  # type: ignore[index]
+        # Let the shells settle so the baseline is a steady frame.
+        time.sleep(1.0)
+        geometry = live.json_ctl("ui_geometry")
+        (out / "geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+        rects = pane_rects(live)
+        surface = geometry["surface"]  # type: ignore[index]
+        tab_bar = {
+            "x": 0.0,
+            "y": float(geometry["tab_bar"]["y"]),  # type: ignore[index]
+            "width": float(surface["width"]),  # type: ignore[index]
+            "height": float(geometry["tab_bar"]["height"]),  # type: ignore[index]
+        }
+        live.screenshot(out / "baseline.png")
+        time.sleep(0.2)
+        live.screenshot(out / "baseline-2.png")
+        baseline = read_rgba_png(out / "baseline.png")
+        baseline_2 = read_rgba_png(out / "baseline-2.png")
+        if rgba_difference_count(baseline, baseline_2) != 0:
+            raise SystemExit("bell-flash smoke: the idle frame is not steady; cannot measure a flash")
+
+        bell_command = (
+            "[Console]::Write([char]7)" if platform.system() == "Windows" else "printf '\\a'"
+        )
+        live.ctl("send_text", params={"pane": ringing, "text": bell_command})
+        live.ctl("send_keys", params={"pane": ringing, "keys": ["enter"]})
+        # The screenshot is fulfilled by the next presented frame, which the
+        # bell's redraw pacing keeps coming at ~30 fps for 300 ms.
+        time.sleep(0.05)
+        live.screenshot(out / "flash.png")
+        flash = read_rgba_png(out / "flash.png")
+        time.sleep(0.8)
+        live.screenshot(out / "after.png")
+        after = read_rgba_png(out / "after.png")
+
+        before_ringing = region_mean_lightness(baseline, rects[ringing])
+        during_ringing = region_mean_lightness(flash, rects[ringing])
+        after_ringing = region_mean_lightness(after, rects[ringing])
+        before_quiet = region_mean_lightness(baseline, rects[quiet])
+        during_quiet = region_mean_lightness(flash, rects[quiet])
+        analysis = {
+            "ringing_pane": ringing,
+            "quiet_pane": quiet,
+            "ringing_lightness": [before_ringing, during_ringing, after_ringing],
+            "quiet_lightness": [before_quiet, during_quiet],
+            "quiet_changed_pixels": rgba_difference_count(baseline, flash, rect=rects[quiet]),
+            # The tab title follows the focused pane's title, which the bell
+            # command itself changes (`~` -> `printf`), so the bar is judged by
+            # mean lightness: a re-lettered title moves it by a hundredth of an
+            # L*, a whole-window wash by tens.
+            "tab_bar_lightness": [
+                region_mean_lightness(baseline, tab_bar, inset=0.0),
+                region_mean_lightness(flash, tab_bar, inset=0.0),
+            ],
+        }
+        (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+        lift = during_ringing - before_ringing
+        if lift < 3.0:
+            raise SystemExit(
+                f"bell-flash smoke: the ringing pane did not visibly flash (+{lift:.2f} L*): {analysis}"
+            )
+        if analysis["quiet_changed_pixels"] != 0:
+            raise SystemExit(
+                f"bell-flash smoke: the sibling pane changed during the flash: {analysis}"
+            )
+        tab_before, tab_during = analysis["tab_bar_lightness"]  # type: ignore[misc]
+        if abs(float(tab_during) - float(tab_before)) > 0.5:
+            raise SystemExit(f"bell-flash smoke: the tab bar washed during the flash: {analysis}")
+        # The prompt line in the ringing pane advanced by the command itself,
+        # so compare lightness rather than bytes for the settled frame.
+        if abs(after_ringing - before_ringing) > 0.5:
+            raise SystemExit(
+                f"bell-flash smoke: the flash did not fade back to the baseline: {analysis}"
+            )
+    return out
+
+
 def run_image_paste_receipt(kettle: str, root: Path) -> Path:
     """Drive bitmap clipboard paste through the live UI and capture its states."""
     out = root / f"image-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -18016,6 +18188,7 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "bell-flash",
             "dock-menu",
             "underline",
             "agent-tui",
@@ -18170,6 +18343,9 @@ def main() -> int:
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
+    if args.case in ("bell-flash", "all"):
+        out = run_bell_flash(args.kettle, root)
+        print(f"bell-flash smoke: OK artifacts={out}")
     if args.case == "image-paste-receipt":
         out = run_image_paste_receipt(args.kettle, root)
         print(f"image-paste-receipt smoke: OK artifacts={out}")

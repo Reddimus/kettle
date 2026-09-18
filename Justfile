@@ -863,6 +863,14 @@ split-repro *ARGS:
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
+# Prove the visual bell washes only the pane that rang and fades: a two-pane
+# split rings BEL, the live frame must lighten that pane's body while the
+# sibling pane and tab bar stay byte-identical, and the settled frame must
+# match the baseline. Captures PNG/analysis under target/diagnostics/bell-flash-*.
+[unix]
+bell-flash-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release bell-flash
+
 # Prove both backspace chords end to end: the text: action and, on macOS, the
 # Cmd+Backspace default; plus Option word-delete inside the search bar.
 # Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.
