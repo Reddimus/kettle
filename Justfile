@@ -713,7 +713,8 @@ live-render-smoke: release
 # Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
 # tmux, and clean/configured Neovim marker + split states. Captures
 # PNG/readback artifacts under target/diagnostics/agent-tui-*. Set
-# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
+# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts and a
+# live Claude Code `/diff` panel probe at 93 and 160 columns.
 # `--cargo-release` selects Cargo's reported executable, including custom target
 # directories/triples, instead of assuming `target/release`.
 [unix]

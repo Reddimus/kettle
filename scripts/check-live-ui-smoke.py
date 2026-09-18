@@ -8264,6 +8264,7 @@ def probe_claude_diff_panel(
             "status": "skipped",
             "reason": "the Claude Code REPL prompt did not appear (login or trust/first-run dialog?)",
         }
+    original = live.json_ctl("ui_geometry")["surface"]  # type: ignore[index]
     narrow_cols = resize_to_columns(93)
     time.sleep(0.5)
     live.ctl("send_text", params={"text": "/diff"}, timeout=8)
@@ -8279,6 +8280,12 @@ def probe_claude_diff_panel(
     wide_answer = wait_for([shown], 15.0)
     states.append(capture_live_state(live, out, f"{label}-wide"))
     finish(True)
+    # Hand the later probes the geometry they started with.
+    live.json_ctl(
+        "resize_window",
+        {"width": int(float(original["width"])), "height": int(float(original["height"]))},  # type: ignore[index]
+    )
+    time.sleep(0.5)
     probe: Dict[str, object] = {
         "name": label,
         "narrow_columns": narrow_cols,
