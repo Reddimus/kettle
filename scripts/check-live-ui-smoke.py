@@ -17027,6 +17027,146 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_alt_arrow_zoom(kettle: str, root: Path) -> Path:
+    """Prove the adaptive Alt+Arrow routing through the real keybind resolver.
+
+    `dispatch_keybind` shares the App's routing decision with the keyboard
+    path: a default `Alt+Arrow` focus chord is dispatched only when a visible
+    pane lies in that direction, and is reported as `terminal_fallthrough`
+    otherwise. The control route never writes PTY bytes, so this checks the
+    decision, not the encoded escape (see the manual `cat -v` check in
+    docs/TESTING.md for that half).
+    """
+
+    out = root / f"alt-arrow-zoom-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "font-size = 13",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 100",
+                "window-height = 28",
+            ]
+        )
+        + "\n"
+    )
+
+    def focused_pane(live: LiveKettle) -> int:
+        panes = live.json_ctl("list_panes").get("panes", [])
+        focused = [int(p["id"]) for p in panes if p.get("focused")]  # type: ignore[index]
+        if len(focused) != 1:
+            raise SystemExit(f"alt-arrow-zoom smoke: expected one focused pane: {panes}")
+        return focused[0]
+
+    def dispatch(live: LiveKettle, label: str, key: str) -> Dict[str, object]:
+        result = live.json_ctl("dispatch_keybind", {"logical": key, "mods": "alt"})
+        (out / f"{label}.dispatch.json").write_text(json.dumps(result, indent=2) + "\n")
+        return result
+
+    def expect_fallthrough(result: Dict[str, object], label: str) -> None:
+        if (
+            result.get("dispatched") is not False
+            or result.get("terminal_fallthrough") is not True
+            or result.get("modal_blocked") is not False
+        ):
+            raise SystemExit(
+                f"alt-arrow-zoom smoke: {label} must fall through to the terminal: {result}"
+            )
+
+    def expect_dispatched(result: Dict[str, object], label: str, action: str) -> None:
+        if (
+            result.get("dispatched") is not True
+            or result.get("terminal_fallthrough") is not False
+            or result.get("action") != action
+        ):
+            raise SystemExit(
+                f"alt-arrow-zoom smoke: {label} must dispatch {action}: {result}"
+            )
+
+    analysis: Dict[str, object] = {"steps": []}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        if platform.system() == "Darwin":
+            # macOS leaves Option+Arrow to the terminal outright; the adaptive
+            # rule is a Linux/Windows policy. Prove the resolver has nothing
+            # bound and stop.
+            result = dispatch(live, "macos-unbound", "left")
+            if result.get("dispatched") is not False or result.get("action"):
+                raise SystemExit(
+                    f"alt-arrow-zoom smoke: Option+Left must stay unbound on macOS: {result}"
+                )
+            analysis["steps"].append({"label": "macos-unbound", "dispatch": result})
+            (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+            return out
+
+        first = focused_pane(live)
+        for key in ("left", "right", "up", "down"):
+            result = dispatch(live, f"single-pane-{key}", key)
+            expect_fallthrough(result, f"single pane Alt+{key}")
+            analysis["steps"].append({"label": f"single-pane-{key}", "dispatch": result})
+
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            geometry = live.json_ctl("ui_geometry")
+            if len(geometry.get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("alt-arrow-zoom smoke: split did not produce two panes")
+        second = focused_pane(live)
+        if second == first:
+            raise SystemExit("alt-arrow-zoom smoke: split_right did not focus the new pane")
+
+        result = dispatch(live, "split-left", "left")
+        expect_dispatched(result, "unzoomed Alt+Left", "FocusLeft")
+        if focused_pane(live) != first:
+            raise SystemExit("alt-arrow-zoom smoke: Alt+Left did not focus the left pane")
+        analysis["steps"].append({"label": "split-left", "dispatch": result})
+
+        result = dispatch(live, "split-left-edge", "left")
+        expect_fallthrough(result, "outer-edge Alt+Left")
+        if focused_pane(live) != first:
+            raise SystemExit("alt-arrow-zoom smoke: an outer-edge chord moved focus")
+        analysis["steps"].append({"label": "split-left-edge", "dispatch": result})
+
+        for zoom_action in ("toggle_zoom", "scaled_zoom"):
+            live.json_ctl("perform_action", {"action": zoom_action})
+            time.sleep(0.15)
+            zoomed_focus = focused_pane(live)
+            for key in ("left", "right", "up", "down"):
+                result = dispatch(live, f"{zoom_action}-{key}", key)
+                expect_fallthrough(result, f"{zoom_action} Alt+{key}")
+                if focused_pane(live) != zoomed_focus:
+                    raise SystemExit(
+                        f"alt-arrow-zoom smoke: {zoom_action} Alt+{key} changed focus"
+                    )
+                analysis["steps"].append(
+                    {"label": f"{zoom_action}-{key}", "dispatch": result}
+                )
+            live.json_ctl("perform_action", {"action": zoom_action})
+            time.sleep(0.15)
+            result = dispatch(live, f"after-{zoom_action}-right", "right")
+            expect_dispatched(result, f"after {zoom_action} Alt+Right", "FocusRight")
+            if focused_pane(live) != second:
+                raise SystemExit(
+                    f"alt-arrow-zoom smoke: leaving {zoom_action} did not restore focus moves"
+                )
+            analysis["steps"].append({"label": f"after-{zoom_action}-right", "dispatch": result})
+            result = dispatch(live, f"after-{zoom_action}-left", "left")
+            expect_dispatched(result, f"after {zoom_action} Alt+Left", "FocusLeft")
+            analysis["steps"].append({"label": f"after-{zoom_action}-left", "dispatch": result})
+
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 DOCK_MENU_ROWS = ("New Window", "New Tab")
 
 
@@ -18016,6 +18156,7 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "alt-arrow-zoom",
             "dock-menu",
             "underline",
             "agent-tui",
@@ -18149,6 +18290,9 @@ def main() -> int:
     if args.case in ("line-edit-chords", "all"):
         out = run_line_edit_chords(args.kettle, root)
         print(f"line-edit-chords smoke: OK artifacts={out}")
+    if args.case in ("alt-arrow-zoom", "all"):
+        out = run_alt_arrow_zoom(args.kettle, root)
+        print(f"alt-arrow-zoom smoke: OK artifacts={out}")
     # macOS-only and driven through the real Dock via accessibility, so it is
     # deliberately out of "all".
     if args.case == "dock-menu":

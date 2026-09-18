@@ -6,6 +6,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Alt+Arrow` reaches the program while a pane is zoomed.** The Linux focus
+  chord is edge-aware, but a zoom (`Ctrl+Shift+X`, or the `scaled_zoom`
+  action) that hid sibling panes kept the chord with Kettle as a deliberate
+  no-op, so the press
+  and its release were swallowed and Codex's `Alt+Left`/`Alt+Right` word motion
+  went dead until the zoom was released. Directional focus now only counts
+  visible panes: a zoomed tab passes every `Alt+Arrow` through exactly like a
+  one-pane tab, and leaving the zoom restores the focus move. The
+  `dispatch_keybind` control route shares the same decision and reports
+  `terminal_fallthrough: true` instead of dispatching (it still never writes
+  PTY bytes).
+
 ## [4.4.0] — 2026-09-10
 
 ### Added

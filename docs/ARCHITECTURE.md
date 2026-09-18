@@ -1374,9 +1374,13 @@ text, so its bitmap is already resident).
   `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
   edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
   chord and receives focus, while an outside-edge press stays unconsumed and is
-  encoded for the PTY. A zoom that hides sibling panes keeps the chord
-  application-owned as a no-op; a one-leaf tab passes it through even if its
-  persisted zoom bit remains set. A two-set press/release ledger ensures that
+  encoded for the PTY. Only visible panes count: zoom collapses `Mux::layout`
+  to the focused pane, so `pane_in_direction` answers `None` in every
+  direction and a zoomed tab passes the chord through exactly like a one-leaf
+  tab (with or without a stale persisted zoom bit). The routing decision is one
+  App helper shared with the `dispatch_keybind` control route, which reports
+  `terminal_fallthrough` instead of dispatching and never writes PTY bytes. A
+  two-set press/release ledger ensures that
   once any repeated press reaches the PTY, terminal ownership stays sticky
   through its release; otherwise the UI-owned press suppresses that release.
   Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /

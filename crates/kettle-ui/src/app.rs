@@ -18770,10 +18770,37 @@ impl App {
         )
     }
 
+    /// The one routing decision shared by real keyboard input and the
+    /// `dispatch_keybind` control route: does this resolved chord belong to
+    /// the terminal instead of the matched action? Only the non-macOS default
+    /// `Alt+Arrow` focus chords are adaptive; they fall through when the mux
+    /// has no visible pane in that direction, which includes every zoomed
+    /// multi-pane tab because zoom collapses the layout to the focused pane.
+    fn adaptive_focus_chord_falls_through(
+        &self,
+        ws: &WindowState,
+        trigger: Trigger,
+        action: &Action,
+    ) -> bool {
+        adaptive_alt_focus_direction(trigger, action, !cfg!(target_os = "macos")).is_some_and(
+            |(dx, dy)| {
+                adaptive_alt_focus_falls_through(
+                    trigger,
+                    action,
+                    true,
+                    ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
+                )
+            },
+        )
+    }
+
     /// `dispatch_keybind`: diagnostic route for app-level keybind matching.
     /// Unlike `send_keys`, this does not write PTY bytes; it exercises the same
     /// resolver as the real window keyboard path and dispatches the matched app
-    /// action when no modal owns the keyboard.
+    /// action when no modal owns the keyboard. A chord the real keyboard path
+    /// would hand to the terminal (an adaptive `Alt+Arrow` with no visible
+    /// neighbour) is reported as `terminal_fallthrough` and not dispatched;
+    /// the PTY write itself stays exclusive to `send_keys`.
     fn ctl_dispatch_keybind(
         &mut self,
         ws: &mut WindowState,
@@ -18832,6 +18859,20 @@ impl App {
         };
         let trigger_label = trigger.label();
         let action_name = kettle_config::keybinds::action_label(&action);
+        if self.adaptive_focus_chord_falls_through(ws, trigger, &action) {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "window": ws.seq,
+                    "dispatched": false,
+                    "modal_blocked": false,
+                    "terminal_fallthrough": true,
+                    "trigger": trigger_label,
+                    "action": action_name,
+                    "candidates": candidate_labels,
+                }),
+            );
+        }
         let font_size_before = ws.renderer.as_ref().map(|r| r.font_size());
         self.handle_action(ws, action, event_loop);
         let font_size_after = ws.renderer.as_ref().map(|r| r.font_size());
@@ -18844,6 +18885,7 @@ impl App {
                 "window": ws.seq,
                 "dispatched": true,
                 "modal_blocked": false,
+                "terminal_fallthrough": false,
                 "trigger": trigger_label,
                 "action": action_name,
                 "font_size_before": font_size_before,
@@ -22880,10 +22922,17 @@ fn resolve_keybind_action(
 }
 
 /// The non-macOS default `Alt+Arrow` focus chords are adaptive at the edge of
-/// a split tree. When a neighbour exists, the keybind owns the chord and moves
-/// focus. When no pane exists in that direction, the original key event falls
-/// through to the PTY, preserving application bindings such as Codex's
-/// `Alt+Up` previous-message editor.
+/// the visible split tree. When a visible neighbour exists, the keybind owns
+/// the chord and moves focus. When no visible pane exists in that direction,
+/// the original key event falls through to the PTY, preserving application
+/// bindings such as Codex's `Alt+Left`/`Alt+Right` word motion and `Alt+Up`
+/// previous-message editor.
+///
+/// "Visible" is the operative word: a zoomed pane (`Ctrl+Shift+X`, or the
+/// `scaled_zoom` action) hides its siblings, so directional focus has nowhere to go
+/// and the chord belongs to the program until the zoom is released. Keeping the
+/// chord as a Kettle no-op there swallowed the press and its release for
+/// nothing.
 ///
 /// Match the trigger and action as a pair. A user who deliberately binds
 /// `Alt+Up` to some other action must get that action, not an implicit terminal
@@ -22908,16 +22957,17 @@ fn adaptive_alt_focus_direction(
     }
 }
 
+/// Whether an adaptive focus chord belongs to the terminal rather than to
+/// Kettle. `visible_neighbor_exists` is the mux's answer for the chord's
+/// direction; it is already `false` while zoom collapses the layout to the
+/// focused pane, so no separate zoom flag is consulted.
 fn adaptive_alt_focus_falls_through(
     trigger: Trigger,
     action: &Action,
     enabled: bool,
-    zoom_hides_siblings: bool,
-    neighbor_exists: bool,
+    visible_neighbor_exists: bool,
 ) -> bool {
-    !zoom_hides_siblings
-        && !neighbor_exists
-        && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
+    !visible_neighbor_exists && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
 }
 
 fn parse_ctl_mods(
@@ -28232,18 +28282,8 @@ impl App {
                     Some(&event.physical_key),
                     ws.mods,
                 ) {
-                    let adaptive_direction =
-                        adaptive_alt_focus_direction(trigger, &act, !cfg!(target_os = "macos"));
                     let adaptive_focus_falls_through =
-                        adaptive_direction.is_some_and(|(dx, dy)| {
-                            adaptive_alt_focus_falls_through(
-                                trigger,
-                                &act,
-                                true,
-                                ws.mux.zoom_hides_siblings(),
-                                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
-                            )
-                        });
+                        self.adaptive_focus_chord_falls_through(ws, trigger, &act);
                     if !adaptive_focus_falls_through {
                         track_consumed_key_release(
                             &mut ws.suppressed_key_releases,
@@ -34486,27 +34526,93 @@ mod tests {
         );
 
         let trigger = Trigger::new(Mods::ALT, KKey::Up);
-        assert!(adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            false,
-            false,
-        ));
-        assert!(!adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            true,
-            false,
-        ));
-        assert!(!adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            false,
-            true,
-        ));
+        assert!(
+            adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, true, false),
+            "no visible neighbour: the chord belongs to the program"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, true, true),
+            "a visible neighbour keeps the chord as a focus move"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusDown, true, false),
+            "a customised mismatched pair never falls through, neighbour or not"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, false, false),
+            "the adaptive rule is off on macOS even with nowhere to go"
+        );
+    }
+
+    /// A zoomed multi-pane tab hides its siblings, so the mux reports no
+    /// visible neighbour and the adaptive chord must fall through to the
+    /// program. This is the whole reason `adaptive_alt_focus_falls_through`
+    /// takes the mux's visible-neighbour answer instead of a zoom flag: the
+    /// earlier zoom guard kept the chord as a Kettle no-op, which swallowed
+    /// Codex's `Alt+Left`/`Alt+Right` word motion while `Ctrl+Shift+X` or the
+    /// `scaled_zoom` action was active.
+    #[test]
+    fn adaptive_alt_focus_falls_through_while_zoom_hides_siblings() {
+        use super::adaptive_alt_focus_falls_through;
+        use crate::mux::{Dir, Mux, Node, Tab};
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+
+        let area = (0.0, 0.0, 800.0, 600.0);
+        let mut mux = Mux::new();
+        mux.tabs.push(Tab {
+            root: Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            },
+            focus: 2,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        mux.active = 0;
+        let left = (
+            Trigger::new(Mods::ALT, KKey::Left),
+            Action::FocusLeft,
+            (-1, 0),
+        );
+        let right = (
+            Trigger::new(Mods::ALT, KKey::Right),
+            Action::FocusRight,
+            (1, 0),
+        );
+
+        let route = |mux: &Mux, (trigger, action, (dx, dy)): &(Trigger, Action, (i32, i32))| {
+            adaptive_alt_focus_falls_through(
+                *trigger,
+                action,
+                true,
+                mux.pane_in_direction(area, *dx, *dy).is_some(),
+            )
+        };
+
+        assert!(
+            !route(&mux, &left),
+            "unzoomed: the right pane has a left neighbour, so Alt+Left moves focus"
+        );
+        assert!(
+            route(&mux, &right),
+            "unzoomed: nothing lies right of the right pane, so Alt+Right falls through"
+        );
+
+        mux.toggle_zoom();
+        assert!(mux.is_zoomed());
+        assert!(
+            route(&mux, &left),
+            "zoomed: the hidden left sibling is not a visible neighbour"
+        );
+        assert!(route(&mux, &right));
+
+        mux.toggle_zoom();
+        assert!(!route(&mux, &left), "leaving zoom restores the focus move");
     }
 
     /// The adaptive edge case deliberately bypasses `handle_action` and falls
@@ -34518,7 +34624,7 @@ mod tests {
     fn adaptive_alt_focus_fallthrough_records_terminal_ownership_before_writing() {
         let src = production_source();
         let routing = src
-            .split("let adaptive_direction =")
+            .split("let adaptive_focus_falls_through =")
             .nth(1)
             .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
             .expect("adaptive keyboard routing block");

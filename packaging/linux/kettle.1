@@ -576,10 +576,10 @@ split left/right
 auto-split (longest axis)
 .TP
 .B Alt+arrow
-focus pane up / down / left / right when a split exists in that
+focus pane up / down / left / right when a visible split exists in that
 direction; at an outer edge, send the chord to the terminal program
-instead. A zoom that hides sibling panes keeps the chord as a no-op; a
-one-pane tab passes it through (Linux; macOS uses
+instead. A zoomed pane hides its siblings, so it passes every Alt+arrow
+through, as does a one-pane tab (Linux; macOS uses
 Ctrl+Cmd+arrow for pane focus)
 .TP
 .B Ctrl+Shift+N

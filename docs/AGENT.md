@@ -294,7 +294,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000; `poll_ms` default 100, clamped to 50–5000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
 | `send_keys` | full | v2.20: press 1–1,024 named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`), with 64-byte tokens and a 64 KiB encoded-byte budget. Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
-| `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, and whether a modal blocked dispatch |
+| `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, whether a modal blocked dispatch, and `terminal_fallthrough: true` when the real keyboard path would hand the chord to the program instead (a default `Alt+Arrow` focus chord with no visible pane in that direction, including every zoomed multi-pane tab) |
 | `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal — the command palette, the Settings path prompt, the layout picker, the SSH launcher, the title editors, or Search, resolved in that order. Each modal consumes them through its own real key handler. No token is ever encoded as terminal input or written to the PTY — but a modal's own Enter can dispatch its normal action, and some of those do reach a PTY or spawn a process (the palette runs the selected command, the SSH launcher opens a session, the layout picker spawns `kettle --layout`). Same privilege tier as `perform_action`, which is why both require full agent mode. The reply names the modal it typed into. All tokens validate before the first state change, the batch stops early if the modal closes mid-way, and no open modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). Synthetic motion can expand a pasted-media receipt but does not retarget the OS cursor or unrelated tab hover. A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
 | `resize_window` | full | request a live window client-area resize (`window`, `width`, `height`) and let the normal renderer/PTY resize path process it |
@@ -637,6 +637,17 @@ app-keybind resolver as real keyboard input for Ubuntu-style physical
 plus/minus/reset key events. It asserts `ui_geometry.cell.font_size`
 increments, decrements, and resets, and saves dispatch/geometry artifacts under
 `target/diagnostics/zoom-keybind-*`.
+
+```sh
+just alt-arrow-zoom-smoke
+```
+
+Starts a real Kettle window and drives the adaptive `Alt+Arrow` decision through
+`dispatch_keybind`: a single pane, the outer edge of a split, and a zoomed
+split (`toggle_zoom` and `scaled_zoom`) must all answer
+`terminal_fallthrough: true` without moving focus, while a visible neighbour
+dispatches `FocusLeft`/`FocusRight`. On macOS it only proves Option+Arrow stays
+unbound. Artifacts land under `target/diagnostics/alt-arrow-zoom-*`.
 
 ```sh
 just underline-scroll-smoke
