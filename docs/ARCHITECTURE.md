@@ -411,6 +411,23 @@ search bar's rectangles, focused control, modes, status, target pane, and
 truncation flag; its Search object deliberately omits the query and matched
 terminal text.
 
+The search bar owns the keyboard but not the pointer. It is a reserved lane
+below the grid, so `App::any_modal_open` (keyboard, file drops,
+focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
+arms and the cursor icon) does not; both derive from one
+`non_search_modal_open` list so they cannot drift on anything else. The pure
+`search_pointer_route` decides each pointer event by geometry: a press inside
+the lane goes to the bar's controls, a press above it is ordinary grid input,
+and motion or release follow whichever gesture is live (an editor drag keeps
+the bar). The native winit arms and the `send_mouse` control arms consult the
+same helper. Because the grid is clickable, an open bar follows pane focus:
+`note_focus_change` calls `retarget_search_to_focus`, which carries the query
+and toggles to the newly focused pane, returns the old pane its remembered
+query and, with no result focused, its pre-search viewport, and scans the new
+pane afresh without toggling the lane. The right-click menu is the one modal
+allowed to coexist with the bar; keys go to the menu while it is up because
+its arm precedes search in the key handler.
+
 Pane-bound bytes never block the App thread. Each pane owns two bounded input
 lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
 control requests) and higher-priority terminal protocol replies. Both lanes

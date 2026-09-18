@@ -8008,7 +8008,8 @@ impl App {
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
         let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
-        let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
+        let chrome =
+            chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));
         // v2.40.0 (tear-off UX): a live tab-drag owns the cursor, FIRST in
         // the chain — mid-drag the pointer can transiently cross another
         // tab's ✕ hit-zone or a split seam, and without the priority the
@@ -9976,6 +9977,11 @@ impl App {
     }
 
     fn begin_or_extend_mouse_selection(&mut self, ws: &mut WindowState, area: Rect) {
+        // The grid press is the newer gesture: drop any editor selection so
+        // the search bar's Copy shortcut reaches the grid selection instead.
+        if ws.search.open {
+            ws.search.editor.clear_selection();
+        }
         if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area, 0)
         {
             return;
@@ -13281,6 +13287,8 @@ impl App {
             // TermMode::VI while the UI routes keys to a different pane.
             self.exit_vi_mode(ws);
             self.reset_blink_phase(ws);
+            // An open search bar follows focus (see `retarget_search_to_focus`).
+            self.retarget_search_to_focus(ws);
             // Repaint immediately so the focused-pane
             // border and the cursor's solid/hollow state track the new pane.
             // Without this, a focus-follows-mouse (`focus = sloppy`) change
@@ -13408,7 +13416,23 @@ impl App {
         let Some(pane_id) = ws.mux.active_focus() else {
             return;
         };
-        let direction = if self.cfg.invert_search {
+        self.attach_search_to_pane(ws, pane_id, None);
+    }
+
+    /// Build the bar's state for `pane_id`. `carried` is the editor text and
+    /// toggles an already-open bar brings along when it follows focus to
+    /// another pane; a fresh open starts from the pane's remembered query and
+    /// the configured defaults.
+    fn attach_search_to_pane(
+        &mut self,
+        ws: &mut WindowState,
+        pane_id: u64,
+        carried: Option<SearchCarryOver>,
+    ) {
+        let invert = carried
+            .as_ref()
+            .map_or(self.cfg.invert_search, |c| c.invert);
+        let direction = if invert {
             kettle_core::SearchDirection::Reverse
         } else {
             kettle_core::SearchDirection::Forward
@@ -13426,24 +13450,19 @@ impl App {
             })
             .unwrap_or(0);
         let remembered = ws.search_queries.get(&pane_id).cloned().unwrap_or_default();
-        let mut search = crate::search_input::SearchState {
-            open: true,
-            target_pane: Some(pane_id),
-            editor: crate::search_input::SearchEditor::from_text(
-                remembered,
-                kettle_core::MAX_SEARCH_QUERY_BYTES,
-            ),
+        let defaults = SearchCarryOver {
+            query: remembered,
             wrap: self.cfg.search_wrap,
             case_mode: self.cfg.search_case_sensitive,
             invert: self.cfg.invert_search,
-            anchor: None,
-            pre_open_display_offset: Some(display_offset),
-            ..crate::search_input::SearchState::default()
+            focused_control: kettle_render::SearchControl::Editor,
         };
-        if !search.query().is_empty() {
-            search.note_edit(std::time::Instant::now());
-        }
-        ws.search = search;
+        ws.search = fresh_search_state(
+            pane_id,
+            carried.unwrap_or(defaults),
+            display_offset,
+            std::time::Instant::now(),
+        );
         self.resize_all(ws);
         // Reserving the responsive Search lane can shrink the terminal by several rows. In a
         // scrolled-back grid Alacritty increases display_offset to preserve the viewed content,
@@ -13460,22 +13479,73 @@ impl App {
         });
     }
 
-    fn close_search(&mut self, ws: &mut WindowState) {
-        use kettle_core::Dimensions as _;
+    /// Move the open bar to the focused pane. The bar is window-level, and
+    /// the grid stays clickable while it is open, so a click that focuses
+    /// another pane must also make typing search that pane: the query and
+    /// toggles come along, the old pane gets its remembered-query slot and
+    /// (with no focused result) its pre-search viewport back, exactly as
+    /// closing would have given it, and the new pane is scanned afresh.
+    fn retarget_search_to_focus(&mut self, ws: &mut WindowState) {
+        if !ws.search.open {
+            return;
+        }
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return;
+        };
+        if search_retarget(ws.search.target_pane, Some(pane_id)).is_none() {
+            return;
+        }
+        let carried = SearchCarryOver {
+            query: ws.search.query().to_string(),
+            wrap: ws.search.wrap,
+            case_mode: ws.search.case_mode,
+            invert: ws.search.invert,
+            focused_control: ws.search.focused_control,
+        };
+        self.remember_search_query(ws);
+        self.restore_search_viewport(ws);
+        self.attach_search_to_pane(ws, pane_id, Some(carried));
+    }
 
+    /// Park the bar's query in its target pane's remembered-query slot.
+    fn remember_search_query(&mut self, ws: &mut WindowState) {
+        if let Some(pane_id) = ws.search.target_pane
+            && ws.mux.panes.contains_key(&pane_id)
+        {
+            ws.search_queries
+                .insert(pane_id, ws.search.query().to_string());
+        }
+    }
+
+    /// With no focused result, put the target pane's viewport back where it
+    /// was before the bar opened. A focused result stays where it is: grid
+    /// growth already preserves the visible content, so no coordinate
+    /// arithmetic is needed and the pre-grow span is intentionally stale.
+    fn restore_search_viewport(&mut self, ws: &mut WindowState) {
+        if ws.search.focused.is_some() {
+            return;
+        }
+        let fallback_offset = ws.search.pre_open_display_offset;
+        if let Some(pane_id) = ws.search.target_pane
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            let current = term.grid().display_offset();
+            let wanted = fallback_offset
+                .unwrap_or(current)
+                .min(term.grid().history_size());
+            if wanted != current {
+                term.scroll_display(kettle_core::Scroll::Delta(wanted as i32 - current as i32));
+            }
+        }
+    }
+
+    fn close_search(&mut self, ws: &mut WindowState) {
         if !ws.search.open {
             return;
         }
         ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
-        let target = ws.search.target_pane;
-        let focused = ws.search.focused;
-        let fallback_offset = ws.search.pre_open_display_offset;
-        let query = ws.search.query().to_string();
-        if let Some(pane_id) = target
-            && ws.mux.panes.contains_key(&pane_id)
-        {
-            ws.search_queries.insert(pane_id, query);
-        }
+        self.remember_search_query(ws);
         if matches!(
             ws.ime_preedit_owner.map(|session| session.owner),
             Some(crate::window_state::ImePreeditOwner::Search)
@@ -13491,26 +13561,11 @@ impl App {
         ws.search.visible.clear();
         ws.search.visible_scan = None;
         ws.search.visible_turn_pending = false;
+        // Dropping the lane grows the grid, and Alacritty adjusts
+        // display_offset to keep the viewed content, so the viewport is
+        // restored only after that resize has settled.
         self.resize_all(ws);
-
-        if let Some(pane_id) = target
-            && let Some(pane) = ws.mux.panes.get(&pane_id)
-            && let Ok(mut term) = pane.term.term.lock()
-        {
-            // Grid growth already preserves the visible content. A focused result therefore
-            // needs no coordinate arithmetic here: its pre-grow SearchSpan is intentionally
-            // stale after history rows rotate back onto the screen. With no result, restore the
-            // viewport from before Search opened.
-            if focused.is_none() {
-                let current = term.grid().display_offset();
-                let wanted = fallback_offset
-                    .unwrap_or(current)
-                    .min(term.grid().history_size());
-                if wanted != current {
-                    term.scroll_display(kettle_core::Scroll::Delta(wanted as i32 - current as i32));
-                }
-            }
-        }
+        self.restore_search_viewport(ws);
         self.reset_blink_phase(ws);
         // The remembered query now has a single pane-scoped owner. Drop the
         // closed editor, compiled DFA, coordinates, and cache immediately so a
@@ -13560,9 +13615,33 @@ impl App {
     /// so the two stay in lock-step — extracted to drive the
     /// cursor-icon override (the OS arrow, not the I-beam, belongs over
     /// modal chrome) and later extended for the right-click menu.
+    /// `true` while a modal owns the whole pointer surface. This is
+    /// `any_modal_open` minus the search bar: the bar reserves its own lane
+    /// below the grid and leaves the grid mouse-interactive, so it must not
+    /// swallow pointer events the way the palette, settings, hints, SSH
+    /// launcher, title editor, vi mode, or a confirm dialog do. Keyboard
+    /// routing, focus-follows-mouse, and file drops keep using
+    /// `any_modal_open`, because search does own the keyboard.
+    fn pointer_modal_open(&self, ws: &WindowState) -> bool {
+        self.non_search_modal_open(ws)
+    }
+
+    /// Whether the pointer is inside the open search bar's reserved lane.
+    fn cursor_in_search_bar(&self, ws: &WindowState) -> bool {
+        self.search_geometry(ws).is_some_and(|geometry| {
+            rect_contains(geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
+        })
+    }
+
     fn any_modal_open(&self, ws: &WindowState) -> bool {
-        ws.search.open
-            || ws.palette_input.is_some()
+        ws.search.open || self.non_search_modal_open(ws)
+    }
+
+    /// Every modal except the search bar. The one list both
+    /// `any_modal_open` and `pointer_modal_open` derive from, so the two
+    /// cannot drift apart on anything but search.
+    fn non_search_modal_open(&self, ws: &WindowState) -> bool {
+        ws.palette_input.is_some()
             || ws.settings_nav.is_some()
             || ws.layout_picker_input.is_some()
             || ws.hint_state.is_some()
@@ -13948,7 +14027,7 @@ impl App {
     /// the surface (right-click near the bottom-right corner flips up-
     /// and-left rather than rendering off-screen).
     fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
-        self.close_all_modals(ws);
+        self.close_modals_for_context_menu(ws);
         // Terminator parity, terminal_popup_menu.py "Open link" /
         // "Copy address": when the right-click landed on a detected
         // hyperlink, lead with the URL rows. The URL is captured NOW — fresh
@@ -14015,6 +14094,23 @@ impl App {
     /// on-screen, and install the `ContextMenuState`. Used by both the
     /// right-click menu and the new-tab `▾` dropdown so they render
     /// pixel-identically.
+    /// The popup menu over the grid leaves an open search bar in place, as
+    /// Terminator leaves its bar under the menu: the user right-clicks to copy
+    /// what they just selected under the query, not to abandon the query.
+    /// Search is the only modal that can be open together with the menu:
+    /// every other opener runs `close_all_modals`, which closes search, and
+    /// search's own opener closes everything else. Keys go to the menu while
+    /// it is up (its arm precedes search in the key handler) and return to the
+    /// editor when it closes. `show_context_menu` ends the pointer gestures a
+    /// modal must not leave armed.
+    fn close_modals_for_context_menu(&mut self, ws: &mut WindowState) {
+        if ws.search.open {
+            ws.context_menu = None;
+        } else {
+            self.close_all_modals(ws);
+        }
+    }
+
     fn show_context_menu(
         &mut self,
         ws: &mut WindowState,
@@ -19229,7 +19325,10 @@ impl App {
         // sources keeps scrolling even though the latest pointer coordinate is
         // back over the pane.
         ws.selection_autoscroll_edge = 0;
-        if self.search_mouse_drag(ws) {
+        if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+            == SearchPointerRoute::Bar
+        {
+            self.search_mouse_drag(ws);
             return;
         }
         self.promote_tab_drag_if_needed(ws);
@@ -19276,7 +19375,12 @@ impl App {
             ws.context_menu = None;
             return true;
         }
-        if ws.search.open {
+        if search_pointer_route(
+            ws.search.open,
+            Some(self.cursor_in_search_bar(ws)),
+            ws.search.dragging_editor,
+        ) == SearchPointerRoute::Bar
+        {
             if bcode == 0 {
                 self.search_mouse_press(ws);
             }
@@ -19288,7 +19392,7 @@ impl App {
         {
             return true;
         }
-        if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+        if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -19394,10 +19498,11 @@ impl App {
     }
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
-        if ws.search.open {
-            if bcode == 0 {
-                ws.search.dragging_editor = false;
-            }
+        if bcode == 0
+            && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                == SearchPointerRoute::Bar
+        {
+            ws.search.dragging_editor = false;
             return true;
         }
         let mut handled = false;
@@ -20805,6 +20910,54 @@ enum TextModal {
     Search,
 }
 
+/// Editor text and toggles that an open search bar brings along when it
+/// follows focus to another pane (`App::retarget_search_to_focus`). A fresh
+/// open fills it from the pane's remembered query and the configured defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchCarryOver {
+    query: String,
+    wrap: bool,
+    case_mode: kettle_config::SearchCaseSensitivity,
+    invert: bool,
+    focused_control: kettle_render::SearchControl,
+}
+
+/// The pane an open bar must move to, if any: `None` while the bar already
+/// targets the focused pane or nothing is focused.
+fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> Option<u64> {
+    focus.filter(|pane| Some(*pane) != target_pane)
+}
+
+/// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
+/// query starts searching immediately; the anchor is derived by the caller
+/// once the lane's resize has settled.
+fn fresh_search_state(
+    pane_id: u64,
+    carried: SearchCarryOver,
+    display_offset: usize,
+    now: std::time::Instant,
+) -> crate::search_input::SearchState {
+    let mut search = crate::search_input::SearchState {
+        open: true,
+        target_pane: Some(pane_id),
+        editor: crate::search_input::SearchEditor::from_text(
+            carried.query,
+            kettle_core::MAX_SEARCH_QUERY_BYTES,
+        ),
+        wrap: carried.wrap,
+        case_mode: carried.case_mode,
+        invert: carried.invert,
+        focused_control: carried.focused_control,
+        anchor: None,
+        pre_open_display_offset: Some(display_offset),
+        ..crate::search_input::SearchState::default()
+    };
+    if !search.query().is_empty() {
+        search.note_edit(now);
+    }
+    search
+}
+
 impl TextModal {
     /// Stable wire spelling, reported by `dispatch_ui_key`.
     const fn as_str(self) -> &'static str {
@@ -21032,11 +21185,19 @@ impl App {
                 ws.search.editor.select_all();
             }
             Key::Character(s) if shortcut && s.eq_ignore_ascii_case("c") => {
-                if let Some(selected) = ws.search.editor.selected_text()
-                    && let Some(clipboard) = self.clipboard.as_mut()
-                    && let Err(error) = clipboard.set_text(selected.to_string())
-                {
-                    log::warn!("search copy: clipboard write failed: {error}");
+                // A selection inside the editor wins; otherwise copy the grid
+                // selection the user dragged out under the bar. A grid press
+                // clears the editor selection, so a stale editor range cannot
+                // shadow a fresh drag (Terminator copies the terminal
+                // selection here).
+                if let Some(selected) = ws.search.editor.selected_text() {
+                    if let Some(clipboard) = self.clipboard.as_mut()
+                        && let Err(error) = clipboard.set_text(selected.to_string())
+                    {
+                        log::warn!("search copy: clipboard write failed: {error}");
+                    }
+                } else {
+                    self.copy_selection(ws);
                 }
             }
             Key::Character(s) if shortcut && s.eq_ignore_ascii_case("x") => {
@@ -23303,6 +23464,42 @@ fn terminal_surface_available(ws: &WindowState) -> bool {
 /// right-click below, so gating it here would break that. Before this fix a
 /// click switched tabs / focused a pane and a wheel zoomed the font or scrolled
 /// the pane while a dialog the user thought was capturing input sat on top.
+/// Where a pointer event goes while the search bar is open.
+///
+/// The bar is a reserved lane below the grid, not an overlay: the grid above
+/// it is fully visible and stays mouse-interactive, exactly as Terminator
+/// keeps its VTE selectable under its search bar. A press inside the bar's
+/// rectangle belongs to the bar's controls; a press anywhere else is ordinary
+/// grid input (selection, links, scrollbar, mouse reporting). Motion and
+/// release follow whichever gesture is live: an editor drag started in the
+/// bar keeps the bar, anything else keeps the grid. Keyboard focus never
+/// leaves the search editor either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPointerRoute {
+    /// The bar is closed; nothing here applies.
+    Closed,
+    /// The bar's controls own the event.
+    Bar,
+    /// The grid owns the event as if the bar were closed.
+    Grid,
+}
+
+fn search_pointer_route(
+    search_open: bool,
+    press_in_bar: Option<bool>,
+    dragging_editor: bool,
+) -> SearchPointerRoute {
+    if !search_open {
+        return SearchPointerRoute::Closed;
+    }
+    match press_in_bar {
+        Some(true) => SearchPointerRoute::Bar,
+        Some(false) => SearchPointerRoute::Grid,
+        None if dragging_editor => SearchPointerRoute::Bar,
+        None => SearchPointerRoute::Grid,
+    }
+}
+
 fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool {
     any_modal_open && !context_menu_open
 }
@@ -26865,10 +27062,12 @@ impl App {
                     }
                     return;
                 }
-                // Search owns native pointer motion just as it owns synthetic ctl motion. Return
-                // even when no editor drag is armed so hover/motion cannot reach pane chrome or
-                // a mouse-tracking application behind the modal lane.
-                if ws.search.open {
+                // An editor drag that started inside the search bar keeps the
+                // motion; otherwise the grid above the bar stays live for
+                // hover, selection, and mouse reporting, matching the ctl path.
+                if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                    == SearchPointerRoute::Bar
+                {
                     self.show_mouse_cursor(ws);
                     self.sync_cursor_icon(ws);
                     self.search_mouse_drag(ws);
@@ -27154,7 +27353,10 @@ impl App {
                         }
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                    if !modal_swallows_pointer(
+                        self.pointer_modal_open(ws),
+                        ws.context_menu.is_some(),
+                    ) {
                         self.send_mouse(ws, sgr, true, false);
                     }
                     return;
@@ -27191,9 +27393,16 @@ impl App {
                     return;
                 }
                 // Search controls are real click targets inside the reserved
-                // lane. Handle them before the generic modal swallow; clicks
-                // elsewhere remain consumed and can never reach the PTY.
-                if ws.search.open {
+                // lane; every button inside the lane stays there. A press above
+                // the lane is ordinary grid input: the bar is not an overlay,
+                // so selecting, opening links, and mouse reporting keep working
+                // while a query is being typed (Terminator parity).
+                if search_pointer_route(
+                    ws.search.open,
+                    Some(self.cursor_in_search_bar(ws)),
+                    ws.search.dragging_editor,
+                ) == SearchPointerRoute::Bar
+                {
                     if bcode == 0 {
                         self.search_mouse_press(ws);
                         if let Some(window) = &ws.window {
@@ -27241,15 +27450,16 @@ impl App {
                     return;
                 }
                 // With any *other* modal open
-                // (search / palette / ssh / settings / layout-picker / hint /
-                // confirm dialog / inline title-edit / vi copy-mode) the click
-                // must be consumed — otherwise it fell straight through to the
+                // (palette / ssh / settings / layout-picker / hint / confirm
+                // dialog / inline title-edit / vi copy-mode) the click must be
+                // consumed — otherwise it fell straight through to the
                 // tab-bar / pane-focus / mouse-tracking logic below, switching
                 // tabs and injecting mouse events into the terminal *behind* a
                 // dialog that looked like it had focus. The context menu is
                 // excluded (handled + returned above; a right-click below
-                // relocates it).
-                if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                // relocates it), and so is the search bar, whose lane was
+                // routed above and whose grid stays live.
+                if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
@@ -27589,7 +27799,10 @@ impl App {
                     if ws.context_menu.is_some() {
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                    if !modal_swallows_pointer(
+                        self.pointer_modal_open(ws),
+                        ws.context_menu.is_some(),
+                    ) {
                         self.send_mouse(ws, sgr, false, false);
                     }
                     return;
@@ -27600,10 +27813,15 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                if ws.search.open {
-                    if bcode == 0 {
-                        ws.search.dragging_editor = false;
-                    }
+                // A release ends an editor drag inside the search bar; any
+                // other release while the bar is open belongs to the grid
+                // gesture it started (selection end, copy-on-select, mouse
+                // reporting), like the ctl path.
+                if bcode == 0
+                    && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                        == SearchPointerRoute::Bar
+                {
+                    ws.search.dragging_editor = false;
                     return;
                 }
                 // Terminator parity: the release is where a titlebar press
@@ -28921,10 +29139,18 @@ mod modal_discipline_guard {
             "close_all_modals must clear confirm_dialog so it can't stack under \
              another overlay"
         );
+        // `any_modal_open` and `pointer_modal_open` both derive from the one
+        // `non_search_modal_open` list, so the confirm dialog only needs to be
+        // counted there to gate keyboard and pointer input alike.
         assert!(
-            body("any_modal_open").contains("ws.confirm_dialog.is_some()"),
-            "any_modal_open must count the confirm dialog so input doesn't fall \
+            body("non_search_modal_open").contains("ws.confirm_dialog.is_some()"),
+            "non_search_modal_open must count the confirm dialog so input doesn't fall \
              through to the terminal behind it"
+        );
+        assert!(
+            body("any_modal_open").contains("self.non_search_modal_open(ws)")
+                && body("pointer_modal_open").contains("self.non_search_modal_open(ws)"),
+            "both modal predicates must derive from the shared non-search list"
         );
     }
 
@@ -33154,6 +33380,233 @@ mod tests {
         assert!(!modal_swallows_pointer(true, true));
     }
 
+    /// The search bar reserves a lane below the grid; the grid stays
+    /// mouse-interactive while it is open (Terminator parity). A press is
+    /// routed by where it lands, motion and release by whether an editor drag
+    /// is live, and a closed bar routes nothing.
+    #[test]
+    fn search_pointer_route_keeps_the_grid_live_under_the_bar() {
+        use super::{SearchPointerRoute, search_pointer_route};
+
+        for press in [None, Some(true), Some(false)] {
+            for dragging in [false, true] {
+                assert_eq!(
+                    search_pointer_route(false, press, dragging),
+                    SearchPointerRoute::Closed,
+                    "a closed bar routes nothing (press={press:?}, dragging={dragging})"
+                );
+            }
+        }
+        assert_eq!(
+            search_pointer_route(true, Some(true), false),
+            SearchPointerRoute::Bar,
+            "a press inside the lane belongs to the bar's controls"
+        );
+        assert_eq!(
+            search_pointer_route(true, Some(false), false),
+            SearchPointerRoute::Grid,
+            "a press above the lane is ordinary grid input"
+        );
+        assert_eq!(
+            search_pointer_route(true, Some(false), true),
+            SearchPointerRoute::Grid,
+            "a fresh press decides by position even if a stale editor drag flag survived"
+        );
+        assert_eq!(
+            search_pointer_route(true, None, true),
+            SearchPointerRoute::Bar,
+            "motion and release follow a live editor drag"
+        );
+        assert_eq!(
+            search_pointer_route(true, None, false),
+            SearchPointerRoute::Grid,
+            "motion and release without an editor drag belong to the grid gesture"
+        );
+    }
+
+    /// Source pins for the routing above: every pointer arm, native and
+    /// control-plane, must consult the same helper, the pointer gate must not
+    /// treat the bar as a pointer-owning modal, the cursor icon must follow
+    /// the pointer gate (I-beam over the grid while searching), and the
+    /// right-click menu must leave the bar in place.
+    #[test]
+    fn search_bar_pointer_routing_is_wired_on_both_input_paths() {
+        let src = production_source();
+        let native_press = src
+            .split("WindowEvent::MouseInput {\n                state: ElementState::Pressed,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::MouseInput {").next())
+            .expect("native Pressed arm");
+        let native_release = src
+            .split("WindowEvent::MouseInput {\n                state: ElementState::Released,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native Released arm");
+        let native_move = src
+            .split("WindowEvent::CursorMoved { position, .. } => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native CursorMoved arm");
+        let ctl_press = src
+            .split("fn ctl_mouse_press(")
+            .nth(1)
+            .and_then(|body| body.split("fn ctl_mouse_release").next())
+            .expect("ctl_mouse_press body");
+        let ctl_release = src
+            .split("fn ctl_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl_mouse_release body");
+        let ctl_move = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl_mouse_move body");
+
+        for (label, body) in [("native press", native_press), ("ctl press", ctl_press)] {
+            assert!(
+                body.contains("Some(self.cursor_in_search_bar(ws)),")
+                    && body.contains("== SearchPointerRoute::Bar"),
+                "{label} must route a search-time press by the bar's rectangle"
+            );
+            assert!(
+                !body.contains("if ws.search.open {"),
+                "{label} must not swallow every press while the bar is open"
+            );
+        }
+        for (label, body) in [
+            ("native move", native_move),
+            ("ctl move", ctl_move),
+            ("native release", native_release),
+            ("ctl release", ctl_release),
+        ] {
+            assert!(
+                body.contains(
+                    "search_pointer_route(ws.search.open, None, ws.search.dragging_editor)"
+                ),
+                "{label} must route search-time motion/release by the live editor drag"
+            );
+            assert!(
+                !body.contains("if ws.search.open {"),
+                "{label} must not swallow every event while the bar is open"
+            );
+        }
+        assert!(
+            native_press.contains(
+                "if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some())"
+            ),
+            "the native press gate must ignore the search bar"
+        );
+        let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains(
+                "let chrome = chrome_cursor_icon( self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws), );"
+            ) || normalized.contains(
+                "let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));"
+            ),
+            "the cursor icon over the grid must not turn into the arrow while searching"
+        );
+        let open_menu = src
+            .split("fn open_context_menu(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("open_context_menu body");
+        assert!(
+            open_menu.contains("self.close_modals_for_context_menu(ws);")
+                && !open_menu.contains("self.close_all_modals(ws);"),
+            "the right-click menu must leave an open search bar in place"
+        );
+        let note_focus = src
+            .split("fn note_focus_change(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("note_focus_change body");
+        assert!(
+            note_focus.contains("self.retarget_search_to_focus(ws);"),
+            "an open search bar must follow pane focus"
+        );
+        let begin_selection = src
+            .split("fn begin_or_extend_mouse_selection(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("begin_or_extend_mouse_selection body");
+        assert!(
+            begin_selection.contains("ws.search.editor.clear_selection();"),
+            "a grid press must drop the editor selection so Copy reaches the grid"
+        );
+        // Keyboard, file drops, and focus-follows-mouse keep the full gate:
+        // search does own the keyboard.
+        assert!(
+            src.contains(
+                "if self.any_modal_open(ws) {\n                    return;\n                }"
+            ),
+            "DroppedFile must still return while any modal, including search, is open"
+        );
+        assert!(
+            native_move.contains("&& !self.any_modal_open(ws)"),
+            "focus-follows-mouse must stay off while the bar is open, or the bar would retarget as the pointer drifts"
+        );
+    }
+
+    /// An open bar follows focus: the query and toggles come along, the pane
+    /// id changes, and a non-empty query starts searching the new pane at once.
+    #[test]
+    fn search_follows_focus_with_its_query_and_toggles() {
+        use super::{SearchCarryOver, fresh_search_state, search_retarget};
+
+        assert_eq!(
+            search_retarget(Some(1), Some(1)),
+            None,
+            "already on the focused pane"
+        );
+        assert_eq!(search_retarget(Some(1), None), None, "nothing focused");
+        assert_eq!(search_retarget(None, Some(2)), Some(2));
+        assert_eq!(search_retarget(Some(1), Some(2)), Some(2));
+
+        let now = std::time::Instant::now();
+        let carried = SearchCarryOver {
+            query: "needle".into(),
+            wrap: false,
+            case_mode: kettle_config::SearchCaseSensitivity::Always,
+            invert: true,
+            focused_control: kettle_render::SearchControl::Next,
+        };
+        let moved = fresh_search_state(2, carried.clone(), 7, now);
+        assert!(moved.open);
+        assert_eq!(moved.target_pane, Some(2));
+        assert_eq!(moved.query(), "needle");
+        assert!(!moved.wrap);
+        assert_eq!(
+            moved.case_mode,
+            kettle_config::SearchCaseSensitivity::Always
+        );
+        assert!(moved.invert);
+        assert_eq!(moved.focused_control, kettle_render::SearchControl::Next);
+        assert_eq!(moved.pre_open_display_offset, Some(7));
+        assert_eq!(
+            moved.status,
+            kettle_render::SearchStatus::Searching,
+            "a carried query scans the new pane immediately"
+        );
+        assert!(
+            moved.anchor.is_none(),
+            "the anchor is derived after the lane settles"
+        );
+        assert!(moved.focused.is_none() && moved.visible.is_empty());
+
+        let fresh = fresh_search_state(
+            3,
+            SearchCarryOver {
+                query: String::new(),
+                ..carried
+            },
+            0,
+            now,
+        );
+        assert_eq!(fresh.status, kettle_render::SearchStatus::Typing);
+        assert_eq!(fresh.target_pane, Some(3));
+    }
+
     /// Agent/control-plane mouse presses must stay in lock-step with the real
     /// winit mouse path for app chrome. The live interaction smoke drives these
     /// branches through `kettle ctl send_mouse`; this source guard prevents a
@@ -33173,9 +33626,13 @@ mod tests {
         );
         assert!(
             body.contains(
-                "if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some())"
+                "if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some())"
             ),
-            "ctl_mouse_press must swallow pane/tab clicks behind non-menu modals"
+            "ctl_mouse_press must swallow pane/tab clicks behind pointer-owning modals"
+        );
+        assert!(
+            !body.contains("modal_swallows_pointer(self.any_modal_open(ws)"),
+            "the search bar is not a pointer-owning modal; ctl_mouse_press must not gate on it"
         );
         assert!(
             body.contains("rect_contains(bar.new_tab_menu, px, py)")
@@ -35181,9 +35638,13 @@ mod tests {
         // `.gitattributes eol=lf` fixes checkout; this keeps the test robust
         // even on a CRLF working tree. (`\r` removal doesn't touch the escaped
         // `\n` in this literal, so the test's own source can't self-match.)
-        let src = production_source();
+        // Whitespace-normalized: rustfmt wraps the call across lines.
+        let src = production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let gated = src
-            .matches("if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {\n                        self.send_mouse(ws, sgr,")
+            .matches("if !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) { self.send_mouse(ws, sgr,")
             .count();
         assert!(
             gated >= 2,

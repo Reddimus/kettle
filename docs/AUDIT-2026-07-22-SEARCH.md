@@ -223,9 +223,13 @@ synchronous haystack are bounded independently.
 
 ### Security and privacy boundaries
 
-Search input is application chrome. Real keyboard, mouse, IME, and
+Search input is application chrome. Real keyboard, IME, and
 `dispatch_ui_key` events terminate in the editor/navigation state and never use
-terminal key encoding or PTY writes. `dispatch_ui_key` requires full agent mode,
+terminal key encoding or PTY writes. Pointer events are routed by geometry
+(amended 2026-09-18): a press inside the bar's reserved lane terminates in the
+bar's controls, while pointer events over the grid above the lane are ordinary
+grid input, exactly as with the bar closed, which includes mouse reports to a
+pane that negotiated mouse tracking. `dispatch_ui_key` requires full agent mode,
 accepts 1-64 tokens of 1-64 bytes, and validates the entire batch before the
 first state change. A closed/unsupported modal is an error.
 
