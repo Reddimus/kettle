@@ -83,7 +83,7 @@ for the in-app editor.
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
 | Directional pane focus, Linux | `Alt+Arrow` |
 | Directional pane focus, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
-| Search | `Ctrl+Shift+F` |
+| Search (the grid stays selectable while the bar is open) | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |

@@ -14722,6 +14722,319 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_search_selection(kettle: str, root: Path) -> Path:
+    """Prove the grid stays mouse-interactive under an open search bar.
+
+    Terminator parity: with Ctrl+Shift+F open, a drag on the grid selects
+    text, the bar's controls still take clicks inside the lane, the bar's
+    Copy shortcut copies the grid selection, a right-click opens the menu
+    without closing the bar, and clicking another split makes the bar follow
+    focus. Esc closes the bar and leaves the selection alone.
+    """
+
+    out = root / f"search-selection-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "background = #090909",
+                "foreground = #f5f5f5",
+                "minimum-contrast = 0",
+                "window-padding-x = 8",
+                "window-padding-y = 8",
+                "window-width = 110",
+                "window-height = 34",
+                "search-wrap = true",
+                "search-case-sensitive = always",
+                "copy-on-select = false",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+
+    row_marker = "KETTLE_SEARCH_SELECT_ROW"
+    done = "KETTLE_SEARCH_SELECT_DONE"
+
+    def search_geometry(live: LiveKettle, label: str) -> Dict[str, object]:
+        geometry = live.json_ctl("ui_geometry")
+        (out / f"{label}.geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+        return geometry
+
+    def require_search(geometry: Dict[str, object], label: str) -> Dict[str, object]:
+        search = geometry.get("search")
+        if not modal_open(geometry, "search") or not isinstance(search, dict):
+            raise SystemExit(f"search-selection smoke: search bar not open at {label}")
+        return search
+
+    def selection_text(live: LiveKettle, label: str, pane: Optional[int] = None) -> str:
+        params: Dict[str, object] = {"include_selection": True}
+        if pane is not None:
+            params["pane"] = pane
+        screen = live.json_ctl("read_screen", params)
+        (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
+        return str(screen.get("selection", "")).replace("\r\n", "\n").rstrip("\n")
+
+    def focused_pane(live: LiveKettle) -> int:
+        panes = live.json_ctl("list_panes").get("panes", [])
+        focused = [int(p["id"]) for p in panes if p.get("focused")]  # type: ignore[index]
+        if len(focused) != 1:
+            raise SystemExit(f"search-selection smoke: expected one focused pane: {panes}")
+        return focused[0]
+
+    def pane_text_point(
+        live: LiveKettle, pane: int, needle: str, *, at_end: bool = False
+    ) -> Tuple[float, float]:
+        """Window coordinates of `needle` inside one split pane's grid."""
+        deadline = time.monotonic() + 3.0
+        while True:
+            geometry = live.json_ctl("ui_geometry")
+            cells = live.json_ctl("read_cells", {"pane": pane, "limit": 1536})
+            titlebar = next(
+                (bar for bar in geometry.get("pane_titlebars", []) if int(bar.get("pane", -1)) == pane),  # type: ignore[union-attr]
+                None,
+            )
+            if titlebar is not None:
+                rows = max(1, int(cells.get("rows", 1)))
+                cols = max(1, int(cells.get("cols", 1)))
+                grid = [[" " for _ in range(cols)] for _ in range(rows)]
+                for cell in cells.get("cells", []):  # type: ignore[assignment]
+                    row = int(cell.get("row", -1))
+                    col = int(cell.get("col", -1))
+                    if 0 <= row < rows and 0 <= col < cols:
+                        ch = str(cell.get("ch", " "))
+                        grid[row][col] = ch[0] if ch else " "
+                for row, chars in enumerate(grid):
+                    start = "".join(chars).find(needle)
+                    if start < 0:
+                        continue
+                    col = start + (len(needle) - 1 if at_end else 0)
+                    pane_rect = titlebar["pane_rect"]  # type: ignore[index]
+                    bar_rect = titlebar["rect"]  # type: ignore[index]
+                    cell_w = float(geometry["cell"]["width"])  # type: ignore[index]
+                    cell_h = float(geometry["cell"]["height"])  # type: ignore[index]
+                    pad_x = float(geometry["padding"]["x"])  # type: ignore[index]
+                    pad_y = float(geometry["padding"]["y"])  # type: ignore[index]
+                    top = float(pane_rect["y"])  # type: ignore[index]
+                    if abs(float(bar_rect["y"]) - top) < 0.5:  # type: ignore[index]
+                        top += float(bar_rect["height"])  # type: ignore[index]
+                    return (
+                        float(pane_rect["x"]) + pad_x + (col + (0.75 if at_end else 0.25)) * cell_w,  # type: ignore[index]
+                        top + pad_y + (row + 0.5) * cell_h,
+                    )
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"search-selection smoke: could not locate {needle!r} in pane {pane}"
+                )
+            time.sleep(0.05)
+
+    def control_rect(search: Dict[str, object], name: str) -> Dict[str, float]:
+        for control in search.get("controls", []):  # type: ignore[union-attr]
+            if isinstance(control, dict) and control.get("name") == name:
+                return control["rect"]  # type: ignore[return-value]
+        raise SystemExit(f"search-selection smoke: search bar has no {name!r} control")
+
+    def focused_control(search: Dict[str, object]) -> Optional[str]:
+        for control in search.get("controls", []):  # type: ignore[union-attr]
+            if isinstance(control, dict) and control.get("focused"):
+                return str(control.get("name"))
+        return None
+
+    states: List[Dict[str, object]] = []
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        first_pane = focused_pane(live)
+        if platform.system() == "Windows":
+            fill = "; ".join(
+                f"Write-Output ('{row_marker[:12]}' + '{row_marker[12:]}{index}')"
+                for index in (1, 2, 3)
+            )
+        else:
+            fill = "; ".join(
+                f"printf '%s%s\\n' {row_marker[:12]} {row_marker[12:]}{index}"
+                for index in (1, 2, 3)
+            )
+        live_shell_command(live, command_with_marker(fill, done), done)
+        states.append(capture_live_state(live, out, "fixture"))
+
+        live.ctl("perform_action", params={"action": "start_search"})
+        time.sleep(0.3)
+        opened = search_geometry(live, "search-open")
+        search = require_search(opened, "open")
+        if search.get("target_pane") != first_pane:
+            raise SystemExit(
+                f"search-selection smoke: bar opened on pane {search.get('target_pane')}, "
+                f"expected the focused pane {first_pane}"
+            )
+        bar_rect = search["rect"]
+        states.append(capture_live_state(live, out, "search-open"))
+
+        # 1. A drag on the grid above the lane selects text.
+        target = f"{row_marker}1"
+        sx0, sy0 = wait_for_text_cell_point(live, target)
+        sx1, sy1 = wait_for_text_cell_point(live, target, at_end=True)
+        if sy0 >= float(bar_rect["y"]):  # type: ignore[index]
+            raise SystemExit("search-selection smoke: fixture row lies inside the search lane")
+        live.ctl("send_mouse", params={"event": "press", "x": sx0, "y": sy0, "button": "left"})
+        time.sleep(0.05)
+        live.ctl("send_mouse", params={"event": "move", "x": sx1, "y": sy1})
+        time.sleep(0.15)
+        live.ctl("send_mouse", params={"event": "release", "x": sx1, "y": sy1, "button": "left"})
+        time.sleep(0.15)
+        selected = selection_text(live, "selection-under-search")
+        if selected != target:
+            raise SystemExit(
+                "search-selection smoke: drag under the open search bar selected "
+                f"{selected!r}, expected {target!r}"
+            )
+        after_drag = search_geometry(live, "after-drag")
+        require_search(after_drag, "after the drag")
+        states.append(capture_live_state(live, out, "selection-under-search"))
+
+        # 2. Clicks inside the lane still drive the bar's controls.
+        wx, wy = rect_center(control_rect(search, "wrap"))
+        live.ctl("send_mouse", params={"event": "click", "x": wx, "y": wy, "button": "left"})
+        time.sleep(0.15)
+        toggled = require_search(search_geometry(live, "wrap-click"), "after the Wrap click")
+        if toggled.get("wrap") is not False or focused_control(toggled) != "wrap":
+            raise SystemExit(
+                f"search-selection smoke: Wrap click did not reach the bar: wrap={toggled.get('wrap')} "
+                f"focused={focused_control(toggled)}"
+            )
+        if selection_text(live, "selection-after-wrap-click") != target:
+            raise SystemExit("search-selection smoke: a click inside the lane disturbed the grid selection")
+
+        # 3. The bar's Copy shortcut copies the grid selection when the editor
+        #    has none; paste it back into the shell to read the clipboard.
+        copy_chord = "cmd+c" if platform.system() == "Darwin" else "ctrl+shift+c"
+        copied = live.json_ctl("dispatch_ui_key", {"keys": [copy_chord]})
+        (out / "copy.dispatch.json").write_text(json.dumps(copied, indent=2) + "\n")
+        if copied.get("open") is not True:
+            raise SystemExit(f"search-selection smoke: Copy chord closed the bar: {copied}")
+        before_paste = screen_text(live.json_ctl("read_screen")).count(target)
+        live.ctl("perform_action", params={"action": "paste"})
+        deadline = time.monotonic() + 5.0
+        while True:
+            pasted = live.json_ctl("read_screen")
+            if screen_text(pasted).count(target) > before_paste:
+                break
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    "search-selection smoke: the bar's Copy did not put the grid selection on the clipboard"
+                )
+            time.sleep(0.1)
+        (out / "pasted.screen.json").write_text(json.dumps(pasted, indent=2) + "\n")
+        live.ctl("send_keys", params={"keys": ["ctrl+u"]})
+        time.sleep(0.15)
+
+        # 4. Right-click opens the menu and leaves the bar in place; Copy from
+        #    the menu closes the menu only.
+        live.ctl("send_mouse", params={"event": "click", "x": sx0, "y": sy0, "button": "right"})
+        time.sleep(0.2)
+        menu_geo = search_geometry(live, "context-menu")
+        if not menu_geo.get("context_menu"):
+            raise SystemExit("search-selection smoke: right-click over the grid did not open the menu")
+        require_search(menu_geo, "with the context menu open")
+        states.append(capture_live_state(live, out, "context-menu-over-search"))
+        copy_row = visible_context_row(menu_geo, "Copy")
+        cx, cy = rect_center(copy_row["rect"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": cx, "y": cy, "button": "left"})
+        time.sleep(0.2)
+        after_menu = search_geometry(live, "after-menu-copy")
+        if after_menu.get("context_menu"):
+            raise SystemExit("search-selection smoke: the menu's Copy row did not close the menu")
+        require_search(after_menu, "after the menu's Copy")
+
+        # 5. The bar follows focus to another split.
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            if len(live.json_ctl("ui_geometry").get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("search-selection smoke: split did not produce two panes")
+        time.sleep(0.2)
+        panes = live.json_ctl("list_panes").get("panes", [])
+        second_pane = next(int(p["id"]) for p in panes if int(p["id"]) != first_pane)  # type: ignore[index]
+        after_split = require_search(search_geometry(live, "after-split"), "after the split")
+        if focused_pane(live) != second_pane or after_split.get("target_pane") != second_pane:
+            raise SystemExit(
+                "search-selection smoke: the bar did not follow focus to the new split: "
+                f"focused={focused_pane(live)} target={after_split.get('target_pane')}"
+            )
+        left_x, left_y = pane_text_point(live, first_pane, f"{row_marker}2")
+        live.ctl("send_mouse", params={"event": "click", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.2)
+        followed = require_search(search_geometry(live, "click-left-pane"), "after clicking the first pane")
+        if focused_pane(live) != first_pane or followed.get("target_pane") != first_pane:
+            raise SystemExit(
+                "search-selection smoke: clicking the first split did not move focus and the bar: "
+                f"focused={focused_pane(live)} target={followed.get('target_pane')}"
+            )
+        typed = live.json_ctl("dispatch_ui_key", {"keys": list(f"{row_marker}3")})
+        if typed.get("open") is not True:
+            raise SystemExit(f"search-selection smoke: query input closed the bar: {typed}")
+        deadline = time.monotonic() + 8.0
+        while True:
+            matched = live.json_ctl("ui_geometry")
+            search_now = matched.get("search")
+            if isinstance(search_now, dict) and search_now.get("has_match") is True:
+                break
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"search-selection smoke: the retargeted bar found no match in the first pane: {search_now}"
+                )
+            time.sleep(0.05)
+        (out / "retargeted-match.geometry.json").write_text(json.dumps(matched, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "retargeted-match"))
+        second_geo = live.json_ctl("ui_geometry")
+        second_titlebars = second_geo.get("pane_titlebars", [])
+        second_rect = next(
+            bar["pane_rect"] for bar in second_titlebars  # type: ignore[index]
+            if int(bar.get("pane", -1)) == second_pane  # type: ignore[union-attr]
+        )
+        rx, ry = rect_center(second_rect)  # type: ignore[arg-type]
+        live.ctl("send_mouse", params={"event": "click", "x": rx, "y": ry, "button": "left"})
+        time.sleep(0.2)
+        back = require_search(search_geometry(live, "click-right-pane"), "after clicking the second pane")
+        if focused_pane(live) != second_pane or back.get("target_pane") != second_pane:
+            raise SystemExit(
+                "search-selection smoke: clicking the second split did not move focus and the bar back: "
+                f"focused={focused_pane(live)} target={back.get('target_pane')}"
+            )
+
+        # 6. Esc closes the bar; the grid selection made under it survives.
+        live.ctl("send_mouse", params={"event": "click", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.15)
+        lx1, ly1 = pane_text_point(live, first_pane, f"{row_marker}2", at_end=True)
+        live.ctl("send_mouse", params={"event": "press", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.05)
+        live.ctl("send_mouse", params={"event": "move", "x": lx1, "y": ly1})
+        time.sleep(0.15)
+        live.ctl("send_mouse", params={"event": "release", "x": lx1, "y": ly1, "button": "left"})
+        time.sleep(0.15)
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        time.sleep(0.3)
+        closed = search_geometry(live, "search-closed")
+        if modal_open(closed, "search"):
+            raise SystemExit("search-selection smoke: Esc did not close the search bar")
+        survived = selection_text(live, "selection-after-close", pane=first_pane)
+        if survived != f"{row_marker}2":
+            raise SystemExit(
+                f"search-selection smoke: closing the bar disturbed the selection: {survived!r}"
+            )
+        states.append(capture_live_state(live, out, "search-closed"))
+    (out / "states.json").write_text(json.dumps(states, indent=2) + "\n")
+    return out
+
+
 def run_image_paste_receipt(kettle: str, root: Path) -> Path:
     """Drive bitmap clipboard paste through the live UI and capture its states."""
     out = root / f"image-paste-receipt-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -18016,6 +18329,7 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "search-selection",
             "dock-menu",
             "underline",
             "agent-tui",
@@ -18170,6 +18484,9 @@ def main() -> int:
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
+    if args.case in ("search-selection", "all"):
+        out = run_search_selection(args.kettle, root)
+        print(f"search-selection smoke: OK artifacts={out}")
     if args.case == "image-paste-receipt":
         out = run_image_paste_receipt(args.kettle, root)
         print(f"image-paste-receipt smoke: OK artifacts={out}")

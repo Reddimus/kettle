@@ -1105,7 +1105,15 @@ boundaries:
   non-navigation-only quiet retry, output-interrupted explicit-navigation
   Results-limited state, output/layout/query invalidation, direction shortcuts,
   result anchoring, and the invariant that UI-dispatched keys never reach the
-  PTY;
+  PTY. Pointer routing is pinned separately: `search_pointer_route` decides by
+  the bar's rectangle for a press and by the live editor drag for motion and
+  release, and a source guard proves every native and control-plane mouse arm
+  consults it, that the pointer gate (`pointer_modal_open`) excludes the bar
+  while the keyboard, file-drop, and focus-follows-mouse gates keep it, that a
+  grid press clears the editor selection so the bar's Copy reaches the grid,
+  that the right-click menu leaves the bar open, and that focus changes call
+  `retarget_search_to_focus`. `fresh_search_state` is tested for the carried
+  query and toggles and an immediate scan on the new pane;
 - `kettle-render`: one row on wide surfaces and as many additional rows as
   needed on narrow surfaces, all control hit targets, reserved content rows,
   signed multi-line projection, active/inactive colors, every bounded status
@@ -1129,6 +1137,16 @@ verify historical and soft-wrapped highlight pixels. Do not substitute
 `send_keys` in this test:
 `send_keys` intentionally targets the PTY; `dispatch_ui_key` is the bounded
 modal-only path and must fail when no supported modal is open.
+
+`just search-selection-smoke` drives the grid under an open bar with
+`send_mouse`: a drag selects a fixture row (read back through
+`read_screen.selection`), a click on the Wrap control toggles it without
+disturbing the selection, the bar's Copy chord puts the grid selection on the
+clipboard (proven by pasting it back into the shell), a right-click opens the
+menu with the bar still open and its Copy row closes only the menu, a click on
+another split moves focus and `ui_geometry.search.target_pane` together and a
+query then matches text that exists only in that pane, and Esc closes the bar
+with the last selection intact.
 
 Media-receipt visual smokes pass the receipt bounds back through the four
 `crop_*` screenshot fields. The renderer crops the GPU readback before it opens
@@ -1800,7 +1818,8 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+`just zoom-keybind-smoke`, `just search-selection-smoke`, and
+`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
 `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`

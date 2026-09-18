@@ -863,6 +863,14 @@ split-repro *ARGS:
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
+# Prove the grid stays mouse-interactive under an open search bar: drag
+# selection, bar-control clicks, the bar's Copy chord, a right-click menu that
+# leaves the bar open, focus-following across splits, and Esc.
+# Captures geometry/screen JSON under target/diagnostics/search-selection-*.
+[unix]
+search-selection-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release search-selection
+
 # Prove both backspace chords end to end: the text: action and, on macOS, the
 # Cmd+Backspace default; plus Option word-delete inside the search bar.
 # Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.

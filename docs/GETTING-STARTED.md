@@ -92,6 +92,15 @@ complex**.
 - **Invert** flips the default direction. `Escape` closes the bar while keeping
   the selected result anchored on screen.
 
+The bar is a lane below the grid, not a dialog over it: while it is open you
+can still drag-select text, double-click words, open links, scroll, and
+right-click for the menu, exactly as in Terminator. Keyboard focus stays in the
+query. `Ctrl+Shift+C` copies the query's own selection if it has one, otherwise
+the text you selected in the grid. Clicking another split moves the bar to that
+pane and searches it with the same query and toggles. A program that has turned
+on mouse reporting receives your clicks while the bar is open, just as it does
+without it.
+
 The query editor follows Unicode grapheme boundaries for caret movement and
 deletion, so combining marks and emoji sequences are not split. Kettle
 remembers the last query for each pane within its current window. The status

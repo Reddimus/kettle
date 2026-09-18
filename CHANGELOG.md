@@ -6,6 +6,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **The grid stays mouse-interactive while the search bar is open.** The bar
+  reserves a lane below the grid and never covers a cell, yet every mouse
+  event was swallowed while it was open, so you could not select the text you
+  were looking at. As in Terminator, drag selection, word and line selection,
+  links, the scrollbar, and mouse reporting now work under the bar, and
+  keyboard focus stays in the query. A press inside the lane still drives the
+  bar's controls. `Ctrl+Shift+C` copies the query's own selection if it has
+  one, otherwise the grid selection. Right-click opens the menu without closing
+  the bar. Clicking another split moves the bar to that pane and searches it
+  with the same query and toggles; the pane it left gets its remembered query
+  and, with no result focused, its pre-search viewport back, exactly as closing
+  would have given it.
+
 ## [4.4.0] — 2026-09-10
 
 ### Added
