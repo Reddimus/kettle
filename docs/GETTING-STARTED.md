@@ -65,11 +65,13 @@ Kettle starts with these pane and tab keys:
 See the full list any time with `kettle --list-keybinds`, or press
 `Ctrl+Shift+K` and type what you want.
 
-On Linux, the focus chord is edge-aware: if no split exists in the
+On Linux, the focus chord is edge-aware: if no visible split exists in the
 arrow's direction, Kettle passes `Alt+Arrow` to the program instead. This keeps
-terminal-app shortcuts such as Codex's `Alt+Up` previous-message editor usable
-without giving up fast split navigation. A zoom that hides sibling panes keeps
-the chord with Kettle as a no-op; a one-pane tab passes it through.
+terminal-app shortcuts such as Codex's `Alt+Left`/`Alt+Right` word motion and
+`Alt+Up` previous-message editor usable without giving up fast split
+navigation. A zoomed pane (`Ctrl+Shift+X`, or the `scaled_zoom` action) hides
+its siblings, so every `Alt+Arrow` reaches the program until you leave the zoom;
+a one-pane tab passes it through as well.
 
 macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 `Cmd+Opt+Arrow`, the chord iTerm2 and Ghostty both use. `Ctrl+Cmd+Arrow` does

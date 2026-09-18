@@ -1800,7 +1800,8 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+`just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, and
+`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
 `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
@@ -2027,9 +2028,14 @@ retained compile/regression checks on **windows**:
   actions, and keeps the macOS policy disabled. Mux geometry tests separately
   prove both real-neighbour selection and each outside-edge no-op; together
   they cover the two branches in the physical keyboard route without making a
-  synthetic window event the source of pane geometry. A zoom hiding sibling
-  panes is pinned to the consumed/no-op branch, while a one-leaf tab with the
-  zoom bit set still falls through. Key-release state tests reproduce
+  synthetic window event the source of pane geometry. Zoom is pinned from both
+  sides: the mux test proves `pane_in_direction` answers `None` in every
+  direction while a multi-leaf tab is zoomed (and for a one-leaf tab with the
+  zoom bit set), and the App-level test drives the real predicate through a
+  two-pane `Mux` across `toggle_zoom` to prove the chord falls through while
+  the siblings are hidden and returns to a focus move afterwards. The
+  `alt-arrow-zoom` live smoke exercises the same decision through the
+  `dispatch_keybind` control route. Key-release state tests reproduce
   auto-repeat in both directions across the consume/pass-through boundary; the
   eventual release must follow the terminal-owned repeat rather than a stale
   consumed press, and a later UI-owned repeat cannot reclaim it.

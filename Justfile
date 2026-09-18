@@ -863,6 +863,14 @@ split-repro *ARGS:
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
+# Prove the adaptive Alt+Arrow routing through the real keybind resolver: a
+# single pane, an outer edge, and a zoomed split (toggle_zoom and scaled_zoom)
+# all report terminal_fallthrough, while a visible neighbour dispatches Focus*.
+# Captures dispatch JSON under target/diagnostics/alt-arrow-zoom-*.
+[unix]
+alt-arrow-zoom-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release alt-arrow-zoom
+
 # Prove both backspace chords end to end: the text: action and, on macOS, the
 # Cmd+Backspace default; plus Option word-delete inside the search bar.
 # Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.
