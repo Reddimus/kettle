@@ -591,7 +591,15 @@ injection-guard.
 Session restore preflight accepts the exact 16-window/256-pane boundary,
 rejects either limit plus one before fan-out, clamps saved rectangles to the
 live monitor set, accepts 16 1080p surfaces, and rejects 16 4K surfaces over
-the 64-Mi-pixel aggregate budget. Input-queue regressions fill both the
+the 64-Mi-pixel aggregate budget. Startup sizing is pinned in logical
+pixels: `startup_geometry_cells_convert_to_inner_size` covers explicit and
+half-specified `window-width`/`window-height` (the missing axis comes from the
+160×45 default grid), `default_startup_size_targets_the_agent_grid_and_fits_the_monitor`
+pins the fresh-window rule on 1080p, 1366×768, ultrawide, a tiny monitor (no
+floor), a 2× HiDPI monitor (same grid as 1×), and that an explicit size is
+never monitor-fitted, and a source guard proves both window constructors use
+the shared rule as a `LogicalSize` and that the restore planner's fallback
+surface is the same rule in physical pixels. Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests
@@ -1494,6 +1502,14 @@ self-test runs in the normal CI matrix and pins this distinction, including
 a failed-command/stale-exit-code transcript. External auth failures are
 captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
 credentials should fail the run.
+After a successful Claude probe the same flag drives a `claude-diff-panel`
+probe: an interactive `CLAUDE_CODE_NO_FLICKER=1 claude` REPL in the pane is
+resized to ~93 columns, where `/diff` must answer "Resize your terminal to at
+least 110 columns", then to 160 columns, where `/diff` must answer "Diff panel
+shown"; both screens are captured. This proves the columns Kettle reports are
+what the client's fullscreen diff panel (Claude Code 2.1.260+) acts on. A REPL
+that never shows its prompt (login, first-run dialog) is recorded as
+`skipped` with the reason, fatal only under `strict`.
 The Windows/WSL live-agent recipe retired with the final
 Windows-supported 3.3.0 line. Its prior contract remains in the `v3.3.0`
 documentation and source history. The portable helper self-tests still protect
@@ -1800,7 +1816,8 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+`just zoom-keybind-smoke`, `just default-window-size-smoke`, and
+`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
 `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`

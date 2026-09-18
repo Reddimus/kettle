@@ -863,6 +863,15 @@ split-repro *ARGS:
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
 
+# Prove a fresh window is sized for agent TUIs: with no window-width/height a
+# pane must report at least 144x33 cells (needs a monitor >= 1366 px wide) and
+# the surface must not exceed the 1296 px target, while window-width = 100
+# still follows the 8 px startup baseline. Captures geometry/PNG under
+# target/diagnostics/default-window-size-*.
+[unix]
+default-window-size-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release default-window-size
+
 # Prove both backspace chords end to end: the text: action and, on macOS, the
 # Cmd+Backspace default; plus Option word-delete inside the search bar.
 # Captures dispatch/ui_geometry JSON under target/diagnostics/line-edit-chords-*.

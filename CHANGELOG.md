@@ -6,6 +6,31 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- **A fresh window opens wide enough for agent TUIs.** With no `window-width`
+  or `window-height` set, Kettle used the windowing library's ~800×600 px
+  default: 93 columns at the default font, below the 110 columns Claude Code's
+  fullscreen diff panel needs to toggle and the 144 it needs to auto-open, so
+  the panel never appeared unless the window was resized. A fresh window now
+  aims for a `160x45` cell baseline (1296×760 logical px with the default
+  chrome, about 152×41 cells at the 14 px font) fitted to 90 % × 85 % of the
+  monitor, which is about 144 columns on a 1366 px wide laptop and never
+  larger than the screen. The rule was chosen over a monitor fraction after a
+  review: a fraction undershoots small laptops and turns an ultrawide into a
+  285-column canvas. Explicit sizes, `window-state = maximise|fullscreen`, and
+  saved session geometry keep precedence; a half-specified size now fills its
+  other axis from the same `160x45` baseline instead of the old `100x36`. The
+  previous size is `window-width = 98` / `window-height = 35`, or set
+  `restore-session = true` to keep whatever you last had.
+
+### Fixed
+
+- **`window-width` / `window-height` mean the same columns on HiDPI.** The
+  cell-to-pixel conversion produced physical pixels, so a 2× display opened a
+  configured `window-width = 100` at about 47 real columns. Startup sizes are
+  logical pixels now.
+
 ## [4.4.0] — 2026-09-10
 
 ### Added
