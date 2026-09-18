@@ -3434,32 +3434,39 @@ const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
 const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
 const STARTUP_GEOMETRY_TAB_BAR_H: f64 = 24.0;
 const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
-const STARTUP_GEOMETRY_FALLBACK_COLS: u32 = 100;
-const STARTUP_GEOMETRY_FALLBACK_ROWS: u32 = 36;
+/// The grid a fresh window aims for when the config sets no size, and the
+/// value a half-specified `window-width`/`window-height` fills its other axis
+/// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
+/// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
+/// default font) left every fresh window too narrow for the tools Kettle
+/// targets. 160x45 baseline cells are 1296x760 logical px with the default
+/// chrome: about 152x41 real cells at the 14 px font on a 1080p monitor.
+pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
+pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
+/// The default window never covers more of the monitor than this: a fixed
+/// target rather than a monitor fraction keeps a 3440-wide ultrawide from
+/// opening a 285-column canvas, and the fit keeps a 1366x768 laptop honest
+/// (its 90 % is 1229 px, about 144 columns at the default font). There is no
+/// floor on purpose: a monitor smaller than the target wins.
+const STARTUP_MONITOR_WIDTH_FRACTION: f64 = 0.90;
+const STARTUP_MONITOR_HEIGHT_FRACTION: f64 = 0.85;
 
-/// Convert optional cell-based startup geometry into an initial inner-window
-/// size. This runs before renderer/font metrics exist, so it intentionally uses
-/// the same conservative 8x16 baseline as `geometry-hinting`; the first normal
-/// layout pass reconciles exact metrics after the renderer starts.
-fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
-    if cfg.window_width.is_none() && cfg.window_height.is_none() {
-        return None;
-    }
-
-    let cols = cfg
-        .window_width
-        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_COLS)
-        .clamp(
-            kettle_config::WINDOW_WIDTH_MIN,
-            kettle_config::WINDOW_WIDTH_MAX,
-        );
-    let rows = cfg
-        .window_height
-        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_ROWS)
-        .clamp(
-            kettle_config::WINDOW_HEIGHT_MIN,
-            kettle_config::WINDOW_HEIGHT_MAX,
-        );
+/// Convert a startup grid into an inner-window size in **logical** pixels.
+/// This runs before renderer/font metrics exist, so it intentionally uses the
+/// same conservative 8x16 baseline as `geometry-hinting`; the first normal
+/// layout pass reconciles exact metrics after the renderer starts. Logical
+/// rather than physical so a HiDPI display gets the same grid as a 1x one:
+/// the old physical conversion handed a 2x display half the requested columns.
+fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64) {
+    let cols = cols.clamp(
+        kettle_config::WINDOW_WIDTH_MIN,
+        kettle_config::WINDOW_WIDTH_MAX,
+    );
+    let rows = rows.clamp(
+        kettle_config::WINDOW_HEIGHT_MIN,
+        kettle_config::WINDOW_HEIGHT_MAX,
+    );
 
     let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
     let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
@@ -3477,7 +3484,95 @@ fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
         height += STARTUP_GEOMETRY_STATUS_BAR_H;
     }
 
-    Some((width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32))
+    (width.ceil().max(1.0), height.ceil().max(1.0))
+}
+
+/// The inner size an explicit `window-width` / `window-height` asks for, in
+/// logical pixels, or `None` when the config sets neither. A missing axis
+/// comes from the default grid so `window-width = 200` alone still opens
+/// tall enough for an agent TUI. Explicit values are honoured as typed: the
+/// monitor fit below applies to the default only.
+fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
+    if cfg.window_width.is_none() && cfg.window_height.is_none() {
+        return None;
+    }
+    let (width, height) = startup_cells_to_logical_px(
+        cfg,
+        cfg.window_width.unwrap_or(STARTUP_DEFAULT_COLS),
+        cfg.window_height.unwrap_or(STARTUP_DEFAULT_ROWS),
+    );
+    Some((width as u32, height as u32))
+}
+
+/// The fresh-window default when the config sets no size: the default grid
+/// with this config's chrome, fitted to the monitor it will most likely open
+/// on. `monitor_logical` is the monitor's logical size; `None` (no monitor
+/// enumerable yet) keeps the bare target.
+fn default_startup_inner_size(cfg: &Config, monitor_logical: Option<(f64, f64)>) -> (f64, f64) {
+    let (width, height) =
+        startup_cells_to_logical_px(cfg, STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS);
+    let Some((monitor_w, monitor_h)) = monitor_logical else {
+        return (width, height);
+    };
+    let max_w = (monitor_w * STARTUP_MONITOR_WIDTH_FRACTION)
+        .floor()
+        .max(1.0);
+    let max_h = (monitor_h * STARTUP_MONITOR_HEIGHT_FRACTION)
+        .floor()
+        .max(1.0);
+    (width.min(max_w), height.min(max_h))
+}
+
+/// The one startup size both window constructors use, in logical pixels:
+/// the configured grid when the user set one, else the monitor-fitted default.
+fn startup_inner_size(cfg: &Config, monitor: Option<StartupMonitor>) -> (f64, f64) {
+    match startup_inner_size_px(cfg) {
+        Some((w, h)) => (f64::from(w), f64::from(h)),
+        None => default_startup_inner_size(cfg, monitor.map(|m| m.logical)),
+    }
+}
+
+/// What the startup sizing needs to know about the monitor a fresh window
+/// will most likely land on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StartupMonitor {
+    /// Logical size (physical pixels divided by the scale factor).
+    logical: (f64, f64),
+    scale: f64,
+}
+
+impl StartupMonitor {
+    fn from_physical(width: u32, height: u32, scale: f64) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        Self {
+            logical: (f64::from(width) / scale, f64::from(height) / scale),
+            scale,
+        }
+    }
+}
+
+/// The monitor to fit a fresh window to: the primary monitor where the
+/// platform has one, else the largest by area (Wayland has no primary; a
+/// mixed multi-monitor setup then gets a deterministic answer instead of
+/// whichever output the compositor listed first).
+fn startup_monitor(event_loop: &ActiveEventLoop) -> Option<StartupMonitor> {
+    let describe = |m: winit::monitor::MonitorHandle| {
+        let size = m.size();
+        StartupMonitor::from_physical(size.width, size.height, m.scale_factor())
+    };
+    event_loop.primary_monitor().map(describe).or_else(|| {
+        event_loop
+            .available_monitors()
+            .map(describe)
+            .max_by(|a, b| {
+                let area = |m: &StartupMonitor| m.logical.0 * m.logical.1;
+                area(a).total_cmp(&area(b))
+            })
+    })
 }
 
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
@@ -23965,9 +24060,12 @@ impl App {
     /// always-on-top / hide-from-taskbar / geometry-hinting / WM_CLASS
     /// exactly like the first. Always returns `visible(false)` while renderer
     /// init runs; callers reveal visible states once the surface is configured.
+    /// `monitor` fits the default size (see `default_startup_inner_size`);
+    /// a restored geometry or explicit size supplied later still overrides it.
     fn window_attributes(
         &self,
         state: kettle_config::WindowState,
+        monitor: Option<StartupMonitor>,
     ) -> winit::window::WindowAttributes {
         let mut attrs = Window::default_attributes()
             .with_title("kettle")
@@ -24063,9 +24161,11 @@ impl App {
                 attrs = attrs.with_visible(false);
             }
         }
-        if let Some((w, h)) = startup_inner_size_px(&self.cfg) {
-            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
-        }
+        // Logical pixels on purpose: the grid is the contract, and winit
+        // scales a logical size per monitor, so a 2x display no longer opens
+        // with half the columns a 1x display gets for the same config.
+        let (w, h) = startup_inner_size(&self.cfg, monitor);
+        attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
         if self.cfg.window_position_x.is_some() || self.cfg.window_position_y.is_some() {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
                 self.cfg.window_position_x.unwrap_or(0),
@@ -24683,7 +24783,7 @@ impl App {
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
             (_, s) => s,
         };
-        let mut attrs = self.window_attributes(state);
+        let mut attrs = self.window_attributes(state, startup_monitor(event_loop));
         // C7: a restored window lands at its saved geometry, clamped to the
         // live monitor layout (its monitor may be unplugged).
         if let WindowOpen::Restore(sw) = &open
@@ -25771,7 +25871,18 @@ impl App {
             self.load_startup_session()
         };
         let live_monitors = monitor_rects(event_loop);
-        let default_surface = startup_inner_size_px(&self.cfg).unwrap_or((800, 600));
+        // The size a saved window without geometry gets, in physical pixels
+        // like the monitor rects it is validated against: the same startup
+        // rule a fresh window uses, so a restore and a first launch agree.
+        let monitor = startup_monitor(event_loop);
+        let default_surface = {
+            let (w, h) = startup_inner_size(&self.cfg, monitor);
+            let scale = monitor.map_or(1.0, |m| m.scale);
+            (
+                (w * scale).round().max(1.0) as u32,
+                (h * scale).round().max(1.0) as u32,
+            )
+        };
         let restore_plan = loaded_session.as_ref().and_then(|session| {
             if session.is_empty() {
                 return None;
@@ -25801,7 +25912,7 @@ impl App {
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
         ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
-        let mut attrs = self.window_attributes(self.cfg.window_state);
+        let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
         if let Some(geometry) = restore_plan
             .as_ref()
             .and_then(|(_, geometries)| geometries.first())
@@ -33076,8 +33187,133 @@ mod tests {
         cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
         assert_eq!(
             startup_inner_size_px(&cfg),
-            Some((1156, 614)),
-            "missing height falls back to the startup baseline; vertical tabs reserve width"
+            Some((1156, 758)),
+            "missing height comes from the 45-row default grid; vertical tabs reserve width"
+        );
+        cfg.window_width = None;
+        cfg.window_height = Some(30);
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            Some((1296, 542)),
+            "missing width comes from the 160-column default grid"
+        );
+        cfg.window_height = None;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            None,
+            "neither side set: the monitor-fitted default takes over"
+        );
+    }
+
+    /// A fresh window with no configured size opens at the 160x45 default
+    /// grid (1296x760 logical px with the default chrome), fitted to 90 % x
+    /// 85 % of the monitor. The numbers below are the ones the docs quote.
+    #[test]
+    fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
+        use super::{
+            STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, StartupMonitor, default_startup_inner_size,
+            startup_inner_size,
+        };
+        let cfg = kettle_config::Config::default();
+        assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
+        assert_eq!(
+            default_startup_inner_size(&cfg, None),
+            (1296.0, 760.0),
+            "160x45 cells + 8 px padding + the default top tab bar, no monitor known"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
+            (1296.0, 760.0),
+            "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((1366.0, 768.0))),
+            (1229.0, 652.0),
+            "a 1366x768 laptop clamps both axes: about 144 columns at the default font"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
+            (1296.0, 760.0),
+            "an ultrawide gets the same terminal-sized window, not a monitor fraction"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((640.0, 480.0))),
+            (576.0, 408.0),
+            "a monitor smaller than the target wins outright; there is no floor"
+        );
+
+        // The explicit path is honoured as typed and never monitor-fitted.
+        let explicit = kettle_config::Config {
+            window_width: Some(400),
+            window_height: Some(200),
+            ..Default::default()
+        };
+        let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
+        assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3240.0));
+        assert_eq!(
+            startup_inner_size(&cfg, tiny),
+            (576.0, 408.0),
+            "the default path is the one that fits the monitor"
+        );
+
+        // HiDPI: the size is logical, so a 2x display describes the same
+        // logical monitor and gets the same grid as a 1x one.
+        let hidpi = StartupMonitor::from_physical(3840, 2160, 2.0);
+        assert_eq!(hidpi.logical, (1920.0, 1080.0));
+        assert_eq!(hidpi.scale, 2.0);
+        assert_eq!(
+            startup_inner_size(&cfg, Some(hidpi)),
+            startup_inner_size(&cfg, Some(StartupMonitor::from_physical(1920, 1080, 1.0)))
+        );
+        assert_eq!(
+            startup_inner_size(&explicit, Some(hidpi)),
+            startup_inner_size(
+                &explicit,
+                Some(StartupMonitor::from_physical(1920, 1080, 1.0))
+            ),
+            "an explicit window-width means the same columns on every DPI"
+        );
+        let degenerate = StartupMonitor::from_physical(1920, 1080, 0.0);
+        assert_eq!(
+            degenerate.scale, 1.0,
+            "a bogus scale factor falls back to 1x"
+        );
+    }
+
+    /// Both window constructors must size through the shared startup rule in
+    /// logical pixels; a `PhysicalSize` at startup would bring back the
+    /// half-columns-on-HiDPI bug, and skipping the monitor would lose the fit.
+    #[test]
+    fn window_constructors_size_through_the_shared_startup_rule() {
+        let src = production_source();
+        let attrs = src
+            .split("fn window_attributes(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("window_attributes body");
+        assert!(
+            attrs.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);")
+                && attrs.contains("attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));"),
+            "window_attributes must apply the shared startup size as a LogicalSize"
+        );
+        assert!(
+            !attrs.contains("PhysicalSize"),
+            "startup sizing must not build a PhysicalSize"
+        );
+        assert_eq!(
+            src.matches("self.window_attributes(").count(),
+            2,
+            "exactly the two window constructors build attributes"
+        );
+        assert!(
+            src.contains("self.window_attributes(state, startup_monitor(event_loop))")
+                && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
+            "both constructors must pass the startup monitor"
+        );
+        assert!(
+            src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),
+            "the restore planner's fallback surface must be the same rule in physical pixels"
         );
     }
 

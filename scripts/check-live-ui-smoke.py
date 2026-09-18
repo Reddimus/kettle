@@ -8155,6 +8155,155 @@ def split_marker(marker: str) -> Tuple[str, str]:
     return marker[:midpoint], marker[midpoint:]
 
 
+def probe_claude_diff_panel(
+    live: "LiveKettle", out: Path, states: List[Dict[str, object]]
+) -> Dict[str, object]:
+    """Drive a live Claude Code REPL through both answers of its diff panel.
+
+    Claude Code 2.1.260+ draws the panel inside its fullscreen TUI and gates it
+    on the pane's column count: `/diff` is refused below 110 columns and shown
+    above. Kettle only transports the TUI, so this proves the columns Kettle
+    reports are what the client acts on, at a width below the threshold and at
+    one past the 144-column auto-open point. Interactive first-run dialogs or a
+    missing login are reported as a skip with the reason rather than a failure;
+    the caller decides whether that is fatal (`KETTLE_AGENT_AUTH_SMOKE=strict`).
+    """
+
+    label = "claude-diff-panel"
+    refused = "Resize your terminal to at least 110 columns"
+    shown = "Diff panel shown"
+    # The fullscreen REPL's status line always carries the permission-mode
+    # cycler, whatever mode the host user defaults to.
+    ready = "(shift+tab to cycle)"
+    # The panel needs a git repository, and Claude Code asks to trust a
+    # folder it has not seen before, so run in this checkout rather than the
+    # shell's home directory. The trust dialog on a machine that has not
+    # opened this repo in Claude Code is reported as a skip: answering it
+    # would change the host user's Claude configuration.
+    repo = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent),
+        check=False,
+    ).stdout.strip()
+
+    def wait_for(needles: Sequence[str], timeout_s: float) -> Optional[str]:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            text = screen_text(live.json_ctl("read_screen"))
+            for needle in needles:
+                if needle in text:
+                    return needle
+            time.sleep(0.25)
+        return None
+
+    def resize_to_columns(columns: int) -> int:
+        geometry = live.json_ctl("ui_geometry")
+        cell_w = float(geometry["cell"]["width"])  # type: ignore[index]
+        pad_x = float(geometry["padding"]["x"])  # type: ignore[index]
+        surface_h = float(geometry["surface"]["height"])  # type: ignore[index]
+        width = int(columns * cell_w + pad_x * 2.0 + 2.0)
+        live.json_ctl("resize_window", {"width": width, "height": int(surface_h)})
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            panes = live.json_ctl("list_panes").get("panes", [])
+            focused = [p for p in panes if p.get("focused")]
+            if focused and int(focused[0]["cols"]) != 0:  # type: ignore[index]
+                cols = int(focused[0]["cols"])  # type: ignore[index]
+                if (cols < 110) == (columns < 110):
+                    return cols
+            time.sleep(0.1)
+        raise SystemExit(f"agent-tui smoke: {label}: window did not resize toward {columns} columns")
+
+    def finish(repl_seen: bool) -> None:
+        # Leave the REPL (twice Ctrl+C: once to clear, once to quit) or
+        # cancel a dialog with Escape; never Ctrl+D, which would also close
+        # the shell, the pane, and with it the control server.
+        if repl_seen:
+            for _ in range(2):
+                live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
+                time.sleep(0.4)
+        else:
+            live.ctl("send_keys", params={"keys": ["escape"]}, timeout=8)
+            time.sleep(0.4)
+            live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
+        # The REPL restores the main screen on its way out; only then is the
+        # shell listening again, so wait for its status line to disappear
+        # before typing the marker command.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if ready not in screen_text(live.json_ctl("read_screen")):
+                break
+            time.sleep(0.25)
+        time.sleep(0.5)
+        back = "KETTLE_AGENT_TUI_CLAUDE_DIFF_BACK"
+        live_shell_command(live, command_with_marker("cd -", back, windows=False), back)
+
+    if not repo:
+        return {
+            "name": label,
+            "status": "skipped",
+            "reason": "this checkout is not inside a git repository",
+        }
+    # The fullscreen renderer is what draws the panel; the env var is the
+    # documented equivalent of `"tui": "fullscreen"` and keeps this probe
+    # independent of the host user's settings.
+    live.ctl(
+        "send_text",
+        params={"text": f"cd {shell_quote(repo, windows=False)} && CLAUDE_CODE_NO_FLICKER=1 claude"},
+        timeout=8,
+    )
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    if wait_for([ready], 45.0) is None:
+        state = capture_live_state(live, out, f"{label}-no-repl")
+        states.append(state)
+        finish(False)
+        return {
+            "name": label,
+            "status": "skipped",
+            "reason": "the Claude Code REPL prompt did not appear (login or trust/first-run dialog?)",
+        }
+    original = live.json_ctl("ui_geometry")["surface"]  # type: ignore[index]
+    narrow_cols = resize_to_columns(93)
+    time.sleep(0.5)
+    live.ctl("send_text", params={"text": "/diff"}, timeout=8)
+    time.sleep(1.0)
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    narrow_answer = wait_for([refused, shown], 15.0)
+    states.append(capture_live_state(live, out, f"{label}-narrow"))
+    wide_cols = resize_to_columns(160)
+    time.sleep(0.5)
+    live.ctl("send_text", params={"text": "/diff"}, timeout=8)
+    time.sleep(1.0)
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    wide_answer = wait_for([shown], 15.0)
+    states.append(capture_live_state(live, out, f"{label}-wide"))
+    finish(True)
+    # Hand the later probes the geometry they started with.
+    live.json_ctl(
+        "resize_window",
+        {"width": int(float(original["width"])), "height": int(float(original["height"]))},  # type: ignore[index]
+    )
+    time.sleep(0.5)
+    probe: Dict[str, object] = {
+        "name": label,
+        "narrow_columns": narrow_cols,
+        "narrow_answer": narrow_answer,
+        "wide_columns": wide_cols,
+        "wide_answer": wide_answer,
+    }
+    if narrow_answer == refused and wide_answer == shown:
+        probe["status"] = "ok"
+    else:
+        probe["status"] = "failed"
+        probe["reason"] = (
+            f"expected the refusal at {narrow_cols} columns and the panel at {wide_cols}; "
+            f"got {narrow_answer!r} and {wide_answer!r}"
+        )
+    return probe
+
+
 def agent_auth_command(
     tool: str,
     marker: str,
@@ -13817,6 +13966,14 @@ def run_agent_tui(
                 probes.append(probe)
                 if status != "ok" and require_auth_smoke:
                     raise SystemExit(f"agent-tui smoke: {auth_label} failed: {reason}")
+                if tool == "claude" and status == "ok" and not shell_target.powershell:
+                    diff_probe = probe_claude_diff_panel(live, out, states)
+                    probes.append(diff_probe)
+                    if diff_probe.get("status") != "ok" and require_auth_smoke:
+                        raise SystemExit(
+                            f"agent-tui smoke: {diff_probe['name']} {diff_probe['status']}: "
+                            f"{diff_probe.get('reason')}"
+                        )
 
         if shell_target.powershell or not shell_target.command_available("tmux"):
             reason = (
@@ -14717,6 +14874,78 @@ def run_search_history(kettle: str, root: Path) -> Path:
             },
             indent=2,
         )
+        + "\n"
+    )
+    return out
+
+
+def run_default_window_size(kettle: str, root: Path) -> Path:
+    """Prove a fresh window is sized for agent TUIs, and that an explicit size wins.
+
+    With no `window-width`/`window-height`, Kettle aims for a 160x45 baseline
+    fitted to 90 % x 85 % of the monitor, so on any monitor at least 1366
+    logical px wide the pane must report >= 144 columns (Claude Code's diff
+    panel auto-open threshold) and >= 33 rows, and the surface can never exceed
+    the 1296 px target. A second launch with `window-width = 100` must follow
+    the 8 px startup baseline instead: about `100 * 8 / cell_w` columns.
+    """
+
+    out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    base = [
+        "agent-server = full",
+        "tab-bar = always",
+        "status-bar = off",
+        "restore-session = false",
+        "update-check = false",
+        "record = off",
+        "font-size = 14",
+        "window-padding-x = 8",
+        "window-padding-y = 8",
+    ]
+
+    def launch(label: str, extra: List[str]) -> Dict[str, object]:
+        cfg = out / f"config-{label}"
+        cfg.write_text("\n".join(base + extra) + "\n")
+        with LiveKettle(kettle, cfg, out / f"kettle-{label}.log") as live:
+            panes = live.json_ctl("list_panes").get("panes", [])
+            focused = next(p for p in panes if p.get("focused"))
+            geometry = live.json_ctl("ui_geometry")
+            (out / f"{label}.geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+            live.screenshot(out / f"{label}.png")
+            return {
+                "cols": int(focused["cols"]),  # type: ignore[index]
+                "rows": int(focused["rows"]),  # type: ignore[index]
+                "surface": geometry["surface"],
+                "cell": geometry["cell"],
+                "padding": geometry["padding"],
+            }
+
+    default = launch("default", [])
+    if default["cols"] < 144 or default["rows"] < 33:
+        raise SystemExit(
+            "default-window-size smoke: a fresh window must open with at least 144x33 cells on a "
+            f"monitor >= 1366 px wide (got {default['cols']}x{default['rows']}); this smoke needs "
+            "such a monitor"
+        )
+    surface_w = float(default["surface"]["width"])  # type: ignore[index]
+    if surface_w > 1296.0 + 1.0:
+        raise SystemExit(
+            f"default-window-size smoke: the default surface exceeds the 1296 px target ({surface_w})"
+        )
+
+    explicit = launch("explicit", ["window-width = 100", "window-height = 30"])
+    cell_w = float(explicit["cell"]["width"])  # type: ignore[index]
+    expected_cols = int(100 * 8.0 / cell_w)
+    if abs(explicit["cols"] - expected_cols) > 1:  # type: ignore[operator]
+        raise SystemExit(
+            "default-window-size smoke: window-width = 100 must follow the 8 px startup baseline "
+            f"(expected about {expected_cols} columns at cell {cell_w:.2f}, got {explicit['cols']})"
+        )
+    if explicit["cols"] >= default["cols"]:  # type: ignore[operator]
+        raise SystemExit("default-window-size smoke: an explicit 100-column window must be narrower than the default")
+    (out / "analysis.json").write_text(
+        json.dumps({"default": default, "explicit": explicit, "expected_explicit_cols": expected_cols}, indent=2)
         + "\n"
     )
     return out
@@ -18016,6 +18245,7 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "default-window-size",
             "dock-menu",
             "underline",
             "agent-tui",
@@ -18170,6 +18400,9 @@ def main() -> int:
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
+    if args.case in ("default-window-size", "all"):
+        out = run_default_window_size(args.kettle, root)
+        print(f"default-window-size smoke: OK artifacts={out}")
     if args.case == "image-paste-receipt":
         out = run_image_paste_receipt(args.kettle, root)
         print(f"image-paste-receipt smoke: OK artifacts={out}")

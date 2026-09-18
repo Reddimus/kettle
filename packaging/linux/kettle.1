@@ -286,7 +286,11 @@ for in-window save/restore.
 Restore the previous session (windows, tabs, splits, working
 directories) for this launch \(em every saved window reopens at its
 (monitor-clamped) saved position. By default kettle opens a fresh window \(em a single
-pane in the default working directory, matching mainstream terminals.
+pane in the default working directory, sized at about 150 columns (a 160x45
+cell baseline fitted to the monitor) so agent TUIs such as Claude Code's diff
+panel work without configuration; see
+.B window-width
+in the configuration reference.
 Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
 in the config.

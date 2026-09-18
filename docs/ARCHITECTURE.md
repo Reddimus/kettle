@@ -474,6 +474,18 @@ winit window, its renderer, its `Mux` tab/split tree, input + overlay
 state) lives in `WindowState`, while `App` keeps the process globals
 (config, event-loop proxy, ctl server, Lua VM).
 
+Both window constructors size a new window through one rule
+(`startup_inner_size` in `app.rs`) before font metrics exist, using the 8×16 px
+startup baseline in **logical** pixels so HiDPI gets the same grid. An explicit
+`window-width`/`window-height` is honoured as typed (a missing axis comes from
+the 160×45 default grid); with neither set, the default grid is fitted to the
+primary monitor, or the largest one on Wayland, at 90 % × 85 %
+(`default_startup_inner_size`), so a fresh window clears the ~144 columns agent
+TUIs want without becoming a screen-wide canvas on an ultrawide. The restore
+planner's fallback surface for a saved window without geometry is the same rule
+in physical pixels. Restored geometry and explicit new-window geometry are
+applied after these attributes and still win.
+
 A no-argument GUI launch first uses the private activation endpoint under the
 per-user runtime/state directory. One advisory lock elects a primary; the
 endpoint accepts only a versioned `open_window` request capped at 8 KiB and
