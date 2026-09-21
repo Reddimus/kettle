@@ -55,6 +55,10 @@ future Xcode preview from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
+The macOS 26 job retains `macos-release-icon-<sha>` artifacts for seven days.
+Use only matching-commit assets for local bundle checks when Xcode 26 is absent;
+this does not count as a local icon-compilation pass.
+
 The macOS material policy has portable tests for opaque, plain-alpha, blurred,
 and Reduce Transparency states. A source guard pins the AppKit-only seam: the
 effect is initialized from the content frame, constrains all four edges to the

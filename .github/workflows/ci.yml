@@ -69,9 +69,14 @@ jobs:
           persist-credentials: false
       - name: Compile the release AppIcon with Xcode 26.x
         run: |
-          out=$(mktemp -d /tmp/kettle-release-app-icon.XXXXXX)
-          trap 'rm -rf "$out"' EXIT
+          out="$RUNNER_TEMP/kettle-release-app-icon"
           scripts/compile-macos-app-icon.sh "$out"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-release-icon-${{ github.sha }}
+          path: ${{ runner.temp }}/kettle-release-app-icon
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     name: build (${{ matrix.os }})
