@@ -2044,40 +2044,21 @@ impl LinuxSession {
         // as a new session or process-group id. Without this anchor a numeric
         // scan or kill could reach a newly created, unrelated session.
         let root_stopped = match root.signal(libc::SIGSTOP) {
-            Ok(signal_delivered) => {
-                let deadline = Instant::now() + Duration::from_millis(100);
-                loop {
-                    match LinuxProcessStat::read(root.identity.pid) {
-                        Ok(current)
-                            if linux_root_anchors_numeric_scope(self.root_identity, current) =>
-                        {
-                            break true;
-                        }
-                        Ok(Some(current)) if current.identity == root.identity => {
-                            // An unreaped exited child is already frozen and
-                            // still reserves its PID/session ids, but Linux
-                            // correctly reports ESRCH when asked to signal the
-                            // zombie through its pidfd. A live identity for
-                            // which no signal was delivered is not an anchor.
-                            if !signal_delivered {
-                                break false;
-                            }
-                        }
-                        Ok(_) => break false,
-                        Err(error) => {
-                            let _ = writeln!(
-                                std::io::stderr(),
-                                "kettle exec: cannot revalidate Linux session leader: {error}"
-                            );
-                            break false;
-                        }
-                    }
-                    if Instant::now() >= deadline {
-                        break false;
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
+            Ok(signal_delivered) => match linux_wait_for_root_anchor(
+                self.root_identity,
+                signal_delivered,
+                budget.deadline,
+                || LinuxProcessStat::read(root.identity.pid),
+            ) {
+                Ok(anchored) => anchored,
+                Err(error) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "kettle exec: cannot revalidate Linux session leader: {error}"
+                    );
+                    false
                 }
-            }
+            },
             Err(error) => {
                 let _ = writeln!(
                     std::io::stderr(),
@@ -2227,6 +2208,31 @@ fn linux_root_anchors_numeric_scope(
         (Some(expected), Some(current))
             if current.identity == expected && matches!(current.state, b'T' | b't' | b'Z' | b'X')
     )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_wait_for_root_anchor(
+    expected: Option<LinuxProcessIdentity>,
+    signal_delivered: bool,
+    deadline: Instant,
+    mut read: impl FnMut() -> std::io::Result<Option<LinuxProcessStat>>,
+) -> std::io::Result<bool> {
+    // SIGSTOP acknowledgement shares the session scan budget.
+    loop {
+        let current = read()?;
+        // An unreaped zombie reserves its ids even when signaling returns ESRCH.
+        if linux_root_anchors_numeric_scope(expected, current) {
+            return Ok(true);
+        }
+        if !signal_delivered
+            || current.is_none()
+            || current.map(|stat| stat.identity) != expected
+            || Instant::now() >= deadline
+        {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -5188,6 +5194,102 @@ wait
             !linux_root_anchors_numeric_scope(None, Some(stopped)),
             "attach failure cannot be upgraded into numeric ownership"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_root_stop_uses_the_remaining_cleanup_budget() {
+        let identity = LinuxProcessIdentity {
+            pid: 42,
+            session: 42,
+            start_time: 999,
+        };
+        let mut reads = 0;
+        let anchored = linux_wait_for_root_anchor(
+            Some(identity),
+            true,
+            Instant::now() + Duration::from_secs(2),
+            || {
+                reads += 1;
+                let state = if reads == 1 {
+                    std::thread::sleep(Duration::from_millis(150));
+                    b'R'
+                } else {
+                    b'T'
+                };
+                Ok(Some(LinuxProcessStat { identity, state }))
+            },
+        )
+        .unwrap();
+        assert!(
+            anchored,
+            "stop acknowledgement still had cleanup time available"
+        );
+        assert_eq!(reads, 2);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_root_stop_retains_fail_closed_checks() {
+        let identity = LinuxProcessIdentity {
+            pid: 42,
+            session: 42,
+            start_time: 999,
+        };
+        let running = LinuxProcessStat {
+            identity,
+            state: b'R',
+        };
+        let stopped = LinuxProcessStat {
+            state: b'T',
+            ..running
+        };
+        let recycled = LinuxProcessStat {
+            identity: LinuxProcessIdentity {
+                start_time: 1000,
+                ..identity
+            },
+            ..stopped
+        };
+        for (expected, delivered, current) in [
+            (Some(identity), true, None),
+            (Some(identity), true, Some(recycled)),
+            (Some(identity), false, Some(running)),
+            (None, true, Some(stopped)),
+            (None, true, None),
+        ] {
+            let mut reads = 0;
+            assert!(
+                !linux_wait_for_root_anchor(
+                    expected,
+                    delivered,
+                    Instant::now() + Duration::from_secs(2),
+                    || {
+                        reads += 1;
+                        assert_eq!(reads, 1, "unowned processes must fail immediately");
+                        Ok(current)
+                    }
+                )
+                .unwrap()
+            );
+        }
+        assert!(
+            !linux_wait_for_root_anchor(Some(identity), true, Instant::now(), || Ok(Some(running)))
+                .unwrap()
+        );
+        let zombie = LinuxProcessStat {
+            state: b'Z',
+            ..running
+        };
+        assert!(
+            linux_wait_for_root_anchor(Some(identity), false, Instant::now(), || Ok(Some(zombie)))
+                .unwrap()
+        );
+        let error = linux_wait_for_root_anchor(Some(identity), true, Instant::now(), || {
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[cfg(target_os = "linux")]
