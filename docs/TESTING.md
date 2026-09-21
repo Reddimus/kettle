@@ -1129,6 +1129,9 @@ kettle ctl ui_geometry --raw
 kettle ctl dispatch_ui_key --keys "enter,shift+enter,f3,shift+f3,escape"
 ```
 
+`ui_geometry.scale_factor` converts physical surface/cell dimensions to logical
+pixels. `monitor` reports logical dimensions, or null when unavailable.
+
 `ui_geometry.search` must report the bar/control rectangles, target pane,
 status, `has_match`, truncation, Wrap, Case, and Invert states. The Search
 object must not contain the raw query or matched terminal text. Use `kettle ctl screenshot --json

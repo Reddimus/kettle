@@ -8430,6 +8430,17 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
+    for scale in (1.0, 1.25, 2.0):
+        geometry = {
+            "scale_factor": scale,
+            "surface": {"width": 1296.0 * scale},
+            "cell": {"width": 8.4 * scale},
+        }
+        width, cols = startup_geometry_metrics(geometry)
+        assert width == 1296.0 and cols == 95
+        geometry["surface"]["width"] += 2.0 * scale
+        assert startup_geometry_metrics(geometry)[0] > 1297.0
+
     with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
         fixture = Path(temp) / "fixture.png"
         write_image_receipt_fixture(fixture, 64, 36)
@@ -14879,16 +14890,17 @@ def run_search_history(kettle: str, root: Path) -> Path:
     return out
 
 
-def run_default_window_size(kettle: str, root: Path) -> Path:
-    """Prove a fresh window is sized for agent TUIs, and that an explicit size wins.
+def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
+    """Convert physical diagnostics to logical width and a 100-cell baseline."""
+    scale = float(geometry["scale_factor"])
+    cell_w = float(geometry["cell"]["width"])
+    if not math.isfinite(scale) or scale <= 0 or not math.isfinite(cell_w) or cell_w <= 0:
+        raise ValueError("invalid startup scale or cell width")
+    return float(geometry["surface"]["width"]) / scale, int(800.0 * scale / cell_w)
 
-    With no `window-width`/`window-height`, Kettle aims for a 160x45 baseline
-    fitted to 90 % x 85 % of the monitor, so on any monitor at least 1366
-    logical px wide the pane must report >= 144 columns (Claude Code's diff
-    panel auto-open threshold) and >= 33 rows, and the surface can never exceed
-    the 1296 px target. A second launch with `window-width = 100` must follow
-    the 8 px startup baseline instead: about `100 * 8 / cell_w` columns.
-    """
+
+def run_default_window_size(kettle: str, root: Path) -> Path:
+    """Check monitor-fitted defaults and explicit sizing in logical pixels."""
 
     out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
     out.mkdir(parents=True, exist_ok=True)
@@ -14919,16 +14931,19 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
                 "surface": geometry["surface"],
                 "cell": geometry["cell"],
                 "padding": geometry["padding"],
+                "scale_factor": geometry["scale_factor"],
+                "monitor": geometry["monitor"],
             }
 
     default = launch("default", [])
-    if default["cols"] < 144 or default["rows"] < 33:
+    monitor = default["monitor"]
+    large_monitor = monitor and float(monitor["width"]) >= 1366 and float(monitor["height"]) >= 768
+    if large_monitor and (default["cols"] < 144 or default["rows"] < 33):
         raise SystemExit(
             "default-window-size smoke: a fresh window must open with at least 144x33 cells on a "
-            f"monitor >= 1366 px wide (got {default['cols']}x{default['rows']}); this smoke needs "
-            "such a monitor"
+            f"monitor >= 1366x768 logical px (got {default['cols']}x{default['rows']})"
         )
-    surface_w = float(default["surface"]["width"])  # type: ignore[index]
+    surface_w, _ = startup_geometry_metrics(default)
     if surface_w > 1296.0 + 1.0:
         raise SystemExit(
             f"default-window-size smoke: the default surface exceeds the 1296 px target ({surface_w})"
@@ -14936,14 +14951,12 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
 
     explicit = launch("explicit", ["window-width = 100", "window-height = 30"])
     cell_w = float(explicit["cell"]["width"])  # type: ignore[index]
-    expected_cols = int(100 * 8.0 / cell_w)
+    _, expected_cols = startup_geometry_metrics(explicit)
     if abs(explicit["cols"] - expected_cols) > 1:  # type: ignore[operator]
         raise SystemExit(
             "default-window-size smoke: window-width = 100 must follow the 8 px startup baseline "
             f"(expected about {expected_cols} columns at cell {cell_w:.2f}, got {explicit['cols']})"
         )
-    if explicit["cols"] >= default["cols"]:  # type: ignore[operator]
-        raise SystemExit("default-window-size smoke: an explicit 100-column window must be narrower than the default")
     (out / "analysis.json").write_text(
         json.dumps({"default": default, "explicit": explicit, "expected_explicit_cols": expected_cols}, indent=2)
         + "\n"

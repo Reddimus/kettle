@@ -18717,6 +18717,11 @@ impl App {
             serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
+                "scale_factor": target.window.as_ref().map_or(1.0, |w| w.scale_factor()),
+                "monitor": target.window.as_ref().and_then(|w| w.current_monitor()).map(|m| {
+                    let size = m.size().to_logical::<f64>(m.scale_factor());
+                    serde_json::json!({"width": size.width, "height": size.height})
+                }),
                 "surface": {"width": surface.0, "height": surface.1},
                 "cell": cell,
                 // Which face serves codepoints Unicode renders as text, or
