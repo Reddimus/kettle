@@ -1061,9 +1061,11 @@ proving the unreaped root anchor survives until lossless delivery completes. An
 active-fork fixture moves its worker into a different process group in the same
 session and keeps creating members as timeout begins; the PTY group fallback
 cannot satisfy it, so deleting the procfs scan makes the test fail. It also
-proves the freeze phase observes stopped states before its final scan. Separate Linux unit
-coverage pins `/proc/stat` parsing, pidfd-backed identities, rejection of a
-vanished or start-time-mismatched leader before numeric targeting, and reports a
+proves the freeze phase observes stopped states before its final scan. A delayed
+stop regression verifies that acknowledgement shares the 500 ms cleanup budget.
+Separate Linux unit coverage pins `/proc/stat` parsing, pidfd-backed identities,
+rejection of a vanished or start-time-mismatched leader before numeric targeting,
+and reports a
 local or shared procfs work bound instead of silently truncating cleanup. Native
 Windows vendor coverage opens a real ConPTY, services its startup DSR,
 re-executes the small native test helper whose first action creates a descendant,

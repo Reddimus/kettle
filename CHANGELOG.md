@@ -30,6 +30,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   directional focus between visible panes.
 - Explicit window sizes now use logical pixels, preserving columns on HiDPI.
 - Linux session scans tolerate processes exiting while `/proc` is read.
+- Linux timeout cleanup allows delayed stop acknowledgement within its existing
+  500 ms budget.
 - Update rustls to fix RUSTSEC-2026-0285.
 
 ## [4.4.0] — 2026-09-10
