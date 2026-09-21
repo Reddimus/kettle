@@ -25,6 +25,10 @@ updates:
       prefix: "deps"
       include: scope
     groups:
+      accessibility:
+        patterns:
+          - "accesskit"
+          - "accesskit_winit"
       # Bundle non-breaking bumps so a slow review week doesn't pile up
       # 15 PRs. Major bumps stay on their own so we can weigh each one.
       cargo-patch-and-minor:
@@ -52,6 +56,9 @@ updates:
       # until then. `cargo audit` remains the security backstop.
       - dependency-name: "objc2"
       - dependency-name: "objc2-app-kit"
+      # These types must match the pinned AppKit and objc2 APIs.
+      - dependency-name: "objc2-foundation"
+      - dependency-name: "block2"
 
   # GitHub Actions used across the workflow set. Same weekly cadence so the
   # review surface lands together; version comments keep SHA pins updateable.

@@ -984,6 +984,17 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     })
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn thumbnail_digest_hex(digest: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(32);
+    for byte in digest {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 #[cfg(target_os = "linux")]
 fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     use md5::{Digest as _, Md5};
@@ -993,7 +1004,7 @@ fn platform_thumbnail(path: &Path) -> Option<RawPreview> {
     // URI" and "Thumbnail Creation", define the MD5 file name, cache classes,
     // and `Thumb::URI` / `Thumb::MTime` validation used below.
     let uri = url::Url::from_file_path(path).ok()?.to_string();
-    let digest = format!("{:x}", Md5::digest(uri.as_bytes()));
+    let digest = thumbnail_digest_hex(Md5::digest(uri.as_bytes()).into());
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
@@ -1567,6 +1578,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn thumbnail_digest_keeps_leading_zeroes_and_lowercase_hex() {
+        assert_eq!(
+            thumbnail_digest_hex([
+                0x0c, 0xc1, 0x75, 0xb9, 0xc0, 0xf1, 0xb6, 0xa8, 0x31, 0xc3, 0x99, 0xe2, 0x69, 0x77,
+                0x26, 0x61,
+            ]),
+            "0cc175b9c0f1b6a831c399e269772661"
+        );
+        assert_eq!(
+            thumbnail_digest_hex([0; 16]),
+            "00000000000000000000000000000000"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn thumbnail_md5_matches_the_standard_test_vector() {
+        use md5::{Digest as _, Md5};
+        assert_eq!(
+            thumbnail_digest_hex(Md5::digest(b"a").into()),
+            "0cc175b9c0f1b6a831c399e269772661"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_platform_adapter_resolves_the_freedesktop_cache_entry() {
@@ -1581,7 +1617,7 @@ mod tests {
             write_test_video(&video, VIDEO_FIXTURE);
             let uri = url::Url::from_file_path(&video).unwrap().to_string();
             let mtime = std::fs::metadata(&video).unwrap().mtime().to_string();
-            let digest = format!("{:x}", Md5::digest(uri.as_bytes()));
+            let digest = thumbnail_digest_hex(Md5::digest(uri.as_bytes()).into());
             let cache = dir.path().join("thumbnails/normal");
             std::fs::DirBuilder::new()
                 .recursive(true)

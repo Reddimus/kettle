@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use accesskit::{
     Action as AccessibilityAction, ActionData, ActionHandler, ActionRequest, ActivationHandler,
-    DeactivationHandler, Node, NodeId, Role, TextPosition, TextSelection, Tree, TreeId, TreeUpdate,
+    DeactivationHandler, Node, NodeId, Role, TextPosition, TextSelection, TreeId, TreeInfo,
+    TreeUpdate,
 };
 use anyhow::Result;
 #[cfg(any(target_os = "macos", test))]
@@ -24509,7 +24510,7 @@ impl App {
     fn initial_accessibility_tree() -> TreeUpdate {
         let mut root = Node::new(Role::Window);
         root.set_label("Kettle terminal");
-        let mut tree = Tree::new(ACCESSIBILITY_ROOT_ID);
+        let mut tree = TreeInfo::new(ACCESSIBILITY_ROOT_ID);
         tree.toolkit_name = Some("Kettle".to_string());
         tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").to_string());
         TreeUpdate {
