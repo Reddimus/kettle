@@ -15,8 +15,8 @@ description = "kettle: windowing, tabs, splits, overlays, and session restore"
 workspace = true
 
 [dependencies]
-accesskit = "0.24.1"
-accesskit_winit = "0.33.2"
+accesskit = "0.25.0"
+accesskit_winit = "0.34.0"
 anyhow.workspace = true
 # `image-data` is enabled for clipboard-bitmap PASTE (a screenshot puts a raw
 # bitmap on the clipboard with no file and no text behind it — see
@@ -124,7 +124,7 @@ x11rb = "0.13"
 # protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
 # near-opaque fallback instead of silently showing sharp, washed-out alpha.
 [target.'cfg(target_os = "linux")'.dependencies]
-md-5 = "0.10"
+md-5 = "0.11"
 png = "0.18.1"
 url = "2.5"
 wayland-client = "0.31"
