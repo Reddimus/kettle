@@ -3633,6 +3633,10 @@ fn selection_leave_edge(selection_dragged: bool, x: f32, y: f32, width: f32, hei
 }
 
 fn arm_selection_gesture(ws: &mut WindowState, pane_id: u64, button: u8) {
+    // A fresh grid gesture owns Copy, including Shift+right-click extension.
+    if ws.search.open {
+        ws.search.editor.clear_selection();
+    }
     ws.selecting = true;
     ws.selecting_pane = Some(pane_id);
     ws.selection_autoscroll_edge = 0;
@@ -36671,6 +36675,23 @@ mod tests {
             origin,
             1.0,
         ));
+    }
+
+    #[test]
+    fn grid_selection_gestures_clear_the_search_editor_selection() {
+        use super::{Mux, WindowState, arm_selection_gesture};
+        use crate::search_input::SearchEditor;
+
+        let mut ws = WindowState::new(1, false, Mux::new());
+        ws.search.open = true;
+        ws.search.editor = SearchEditor::from_text("query".into(), 100);
+        for button in [0, 2] {
+            ws.search.editor.select_all();
+            assert_eq!(ws.search.editor.selected_text(), Some("query"));
+            arm_selection_gesture(&mut ws, 42, button);
+            assert_eq!(ws.search.editor.selected_text(), None);
+            assert_eq!(ws.search.query(), "query");
+        }
     }
 
     #[test]
