@@ -10,7 +10,7 @@ each run, including what did not run and why.
 macOS 26.6.2, M5 Max, 1920x1080 at 1x. Universal bundle built from clean
 `0aaaa34ac0a3`, with Xcode 26 icons from CI run `35570977894`. Its merge tree
 matches that cut. Both architectures load; the Intel check uses Rosetta.
-Later cut changes only synchronize an integration fixture and record this run.
+Later cut changes only synchronize test fixtures and record validation.
 
 Native window captures and geometry checks passed:
 

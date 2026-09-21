@@ -1883,6 +1883,8 @@ rather than a close action, and asserts the survivor's grid returns to its
 exact pre-split size before reading the same numbers back out of the tty with
 `stty size`. Both numbers matter. The grid commits local geometry even when the
 native resize fails, so the grid alone would not prove the child was told.
+Before closing, it waits for the source grid to shrink; pane creation precedes
+the redraw that applies that resize.
 
 `just pane-drag-smoke` does not currently pass anywhere. The gesture arms only
 in the native winit pointer path; `ctl_mouse_press` never sets `ws.pane_drag`,

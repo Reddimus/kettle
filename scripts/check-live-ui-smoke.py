@@ -18566,6 +18566,12 @@ def run_split_exit_resize(kettle: str, root: Path) -> Path:
         live.json_ctl("perform_action", {"action": "split_down"})
         split = wait_panes(live, 2, "after split_down")
         split_size = size_of(split, base_id)
+        # The pane list changes before redraw commits the source pane's size.
+        deadline = time.monotonic() + 10.0
+        while split_size[1] >= baseline[1] and time.monotonic() < deadline:
+            time.sleep(0.1)
+            split = panes_of(live)
+            split_size = size_of(split, base_id)
         if split_size[1] >= baseline[1]:
             raise SystemExit(
                 "split-exit-resize smoke: the split did not shrink the source "
