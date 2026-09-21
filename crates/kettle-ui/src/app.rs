@@ -12052,6 +12052,14 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> bool {
+        if search_bar_blocks_mouse_report(
+            self.cursor_in_search_bar(ws),
+            pressed,
+            motion,
+            ws.mouse_btn.is_some(),
+        ) {
+            return true;
+        }
         // Shift held = "bypass mouse tracking, let kettle handle this
         // locally" — the xterm convention every modern terminal honors.
         // Without it, running htop/vim/tmux with mouse-mode locks out
@@ -23488,6 +23496,11 @@ enum SearchPointerRoute {
     Grid,
 }
 
+// Captured grid drags keep their motion and release when crossing the bar.
+fn search_bar_blocks_mouse_report(in_bar: bool, pressed: bool, motion: bool, held: bool) -> bool {
+    in_bar && pressed && (!motion || !held)
+}
+
 fn search_pointer_route(
     search_open: bool,
     press_in_bar: Option<bool>,
@@ -33388,6 +33401,24 @@ mod tests {
     /// mouse-interactive while it is open (Terminator parity). A press is
     /// routed by where it lands, motion and release by whether an editor drag
     /// is live, and a closed bar routes nothing.
+    #[test]
+    fn search_bar_blocks_new_reports_but_preserves_captured_drags() {
+        use super::search_bar_blocks_mouse_report as blocks;
+        for pressed in [false, true] {
+            for motion in [false, true] {
+                for held in [false, true] {
+                    assert!(!blocks(false, pressed, motion, held));
+                }
+            }
+        }
+        assert!(blocks(true, true, true, false));
+        assert!(blocks(true, true, false, false));
+        assert!(blocks(true, true, false, true));
+        assert!(!blocks(true, true, true, true));
+        assert!(!blocks(true, false, false, true));
+        assert!(!blocks(true, false, false, false));
+    }
+
     #[test]
     fn search_pointer_route_keeps_the_grid_live_under_the_bar() {
         use super::{SearchPointerRoute, search_pointer_route};
