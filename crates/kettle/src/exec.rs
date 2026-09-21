@@ -1849,9 +1849,19 @@ struct LinuxProcessStat {
 #[cfg(target_os = "linux")]
 impl LinuxProcessStat {
     fn read(pid: u32) -> std::io::Result<Option<Self>> {
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Self::from_stat_read(pid, std::fs::read_to_string(format!("/proc/{pid}/stat")))
+    }
+
+    fn from_stat_read(pid: u32, result: std::io::Result<String>) -> std::io::Result<Option<Self>> {
+        let stat = match result {
             Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            // procfs may return ESRCH if the process exits after open.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(error),
         };
         let tail = stat
@@ -5069,6 +5079,45 @@ wait
         assert!(
             !process_path.exists(),
             "late output deadline lost the root anchor and left session member {pid} alive"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_stat_read_tolerates_exit_after_open() {
+        use std::io::Read as _;
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let opened = std::fs::File::open(format!("/proc/{pid}/stat"));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut stat = String::new();
+        let result = opened.unwrap().read_to_string(&mut stat).map(|_| stat);
+        assert_eq!(
+            result.as_ref().unwrap_err().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(LinuxProcessStat::from_stat_read(pid, result).unwrap(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_stat_read_preserves_non_exit_errors() {
+        for errno in [libc::EACCES, libc::EIO] {
+            let error =
+                LinuxProcessStat::from_stat_read(1, Err(std::io::Error::from_raw_os_error(errno)))
+                    .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(errno));
+        }
+        assert_eq!(
+            LinuxProcessStat::from_stat_read(1, Ok("malformed".into()))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData,
         );
     }
 

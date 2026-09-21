@@ -254,7 +254,11 @@ Case, Invert, and Close beside a Unicode/grapheme-aware editor. Case cycles
 **Smart** (lowercase pattern → insensitive, uppercase present → sensitive),
 **Match** (always sensitive, Terminator's default), and **Ignore** (always
 insensitive); `invert-search` flips the default Enter direction. The settings
-persist through both the bar and Settings → Search.
+persist through both the bar and Settings → Search. As in Terminator, the grid
+above the bar stays mouse-interactive while it is open: drag selection, links,
+the scrollbar, mouse reporting, and the right-click menu (which leaves the bar
+in place) all work, `Ctrl+Shift+C` copies the grid selection when the query has
+none, and clicking another split moves the bar to that pane.
 
 Kettle intentionally differs in bounded ways: patterns are strict Rust regexes
 compiled by `regex-automata`'s meta engine and capped at 4096 UTF-8 bytes; the

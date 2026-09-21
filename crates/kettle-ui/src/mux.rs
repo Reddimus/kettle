@@ -2595,18 +2595,6 @@ impl Mux {
             .unwrap_or(false)
     }
 
-    /// Whether zoom currently hides at least one sibling pane.
-    ///
-    /// The persisted zoom bit can remain set after a split collapses to one
-    /// leaf, and users can toggle zoom on a one-pane tab. Input routing must
-    /// distinguish that inert state from a real zoom whose hidden panes still
-    /// own directional-focus chords.
-    pub fn zoom_hides_siblings(&self) -> bool {
-        self.tabs
-            .get(self.active)
-            .is_some_and(|tab| tab.zoomed && !matches!(tab.root, Node::Leaf(_)))
-    }
-
     pub fn active_focus(&self) -> Option<u64> {
         self.tabs.get(self.active).map(|t| t.focus)
     }
@@ -2799,6 +2787,11 @@ impl Mux {
     /// would have gone. Two copies of this would eventually disagree about what
     /// counts as "the pane to the left", and the user would meet the difference
     /// as a pane that moves somewhere other than where they were looking.
+    ///
+    /// Only visible panes are candidates: while the tab is zoomed, `layout`
+    /// yields the focused pane alone, so every direction answers `None`. The
+    /// adaptive `Alt+Arrow` routing relies on that to hand the chord to the
+    /// program instead of swallowing it as a no-op.
     pub fn pane_in_direction(&self, area: Rect, dx: i32, dy: i32) -> Option<u64> {
         // `layout` rounds split seams with `.round()`, so a shared border between
         // adjacent panes can drift by up to ~1px; admit that slack on the side
@@ -5103,16 +5096,36 @@ mod node_tests {
         assert_eq!(m.tabs[0].focus, 1, "Down then Up returns to A");
     }
 
+    /// Zoom collapses the layout to the focused pane, so directional focus has
+    /// no visible target. Both halves matter to input routing: `focus_dir`
+    /// must not jump to a hidden sibling, and `pane_in_direction` must answer
+    /// `None` so the adaptive `Alt+Arrow` chord falls through to the program
+    /// (Codex word motion) instead of being swallowed as a Kettle no-op.
     #[test]
     fn focus_dir_noop_when_zoomed() {
         let mut m = Mux::new();
         push_tab(&mut m, screenshot_tree(), 6);
-        m.tabs[0].zoomed = true; // layout returns only the focused pane
-        assert!(m.zoom_hides_siblings());
         for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            m.tabs[0].zoomed = false;
+            let visible = m.pane_in_direction(AREA, dx, dy);
+            m.tabs[0].zoomed = true; // layout returns only the focused pane
+            assert_eq!(
+                m.pane_in_direction(AREA, dx, dy),
+                None,
+                "zoomed: no visible neighbour in direction ({dx}, {dy}), \
+                 unzoomed answer was {visible:?}"
+            );
             m.focus_dir(AREA, dx, dy);
             assert_eq!(m.tabs[0].focus, 6, "zoomed: focus_dir must be a no-op");
         }
+        m.tabs[0].zoomed = false;
+        assert!(
+            [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                .into_iter()
+                .any(|(dx, dy)| m.pane_in_direction(AREA, dx, dy).is_some()),
+            "the fixture must have a neighbour somewhere, or the zoomed \
+             assertions above prove nothing"
+        );
 
         let mut single = Mux::new();
         push_tab(&mut single, Node::Leaf(7), 7);
@@ -5121,10 +5134,13 @@ mod node_tests {
             single.is_zoomed(),
             "the persisted zoom bit remains truthful"
         );
-        assert!(
-            !single.zoom_hides_siblings(),
-            "one pane has no hidden focus target, even with zoom toggled"
-        );
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            assert_eq!(
+                single.pane_in_direction(AREA, dx, dy),
+                None,
+                "a one-pane tab has no neighbour with or without the zoom bit"
+            );
+        }
     }
 
     /// Drift guard. When a saved split-tree partially

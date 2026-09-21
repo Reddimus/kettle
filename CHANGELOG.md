@@ -6,6 +6,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- Select, copy, follow links, scroll, and use terminal mouse reporting while
+  search stays open. Clicking another split moves the search there. Copy uses
+  the query selection when present, otherwise the grid selection.
+
+### Changed
+
+- The visual bell flashes only the ringing pane and fades over 300 ms.
+  `bell-flash-intensity` now measures a CIE L\* lightness step instead of blend
+  alpha. The default is `0.03`; custom values may need raising. Use
+  `0.06`-`0.10` for a stronger flash, `0` to disable, or `1` for solid foreground.
+- Fresh windows target a `160x45` cell baseline, fitted within 90% of monitor
+  width and 85% of height. Explicit sizes and restored geometry take precedence.
+  Set `window-width = 98` and `window-height = 35` for the previous size.
+
+### Fixed
+
+- On Linux, zoomed panes pass `Alt+Arrow` to the terminal. Unzooming restores
+  directional focus between visible panes.
+- Explicit window sizes now use logical pixels, preserving columns on HiDPI.
+- Linux session scans tolerate processes exiting while `/proc` is read.
+- Update rustls to fix RUSTSEC-2026-0285.
+
 ## [4.4.0] — 2026-09-10
 
 ### Added

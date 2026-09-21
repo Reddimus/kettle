@@ -55,6 +55,10 @@ future Xcode preview from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
+The macOS 26 job retains `macos-release-icon-<sha>-<run>-<attempt>` artifacts for seven days.
+Use only matching-commit assets for local bundle checks when Xcode 26 is absent;
+this does not count as a local icon-compilation pass.
+
 The macOS material policy has portable tests for opaque, plain-alpha, blurred,
 and Reduce Transparency states. A source guard pins the AppKit-only seam: the
 effect is initialized from the content frame, constrains all four edges to the
@@ -547,7 +551,18 @@ integration test renders both `DebugScene::Default` and
 asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
 pixels appear in the menu area — catches the v1.3.0/v1.3.1
 blank-menu render-pass-order regression class that bare logic
-tests can't see. Live-screenshot unit coverage verifies whole-frame
+tests can't see. `tests/bell_visual.rs` renders `DebugScene::Default` and
+`DebugScene::BellFlash` for the default dark theme and a bundled light theme,
+measures the mean CIE L\* of a background patch in each, and asserts the
+flash moves it by exactly the configured `bell-flash-intensity` step (+3 L\*
+on dark, −3 L\* on light, within 8-bit rounding) through the real linear-light
+quad pipeline; `color::tests` pins `perceptual_wash_alpha` itself (endpoints,
+monotonicity, the order-of-magnitude alpha gap between dark and light
+themes, and the same-luminance fallback), and `kettle-ui` pins the ease-out
+ramp, the per-pane stamping, and the expiry/erase pacing. The
+`just bell-flash-smoke` live check rings BEL in one pane of a split and
+proves only that pane's body lightens while the sibling pane and tab bar
+stay byte-identical, then fades back to the baseline. Live-screenshot unit coverage verifies whole-frame
 preservation, exact row/column cropping, out-of-surface rejection, and
 truncated-source rejection. Separate file-policy regressions prove an
 explicit output succeeds beneath a public existing parent while the default
@@ -591,7 +606,15 @@ injection-guard.
 Session restore preflight accepts the exact 16-window/256-pane boundary,
 rejects either limit plus one before fan-out, clamps saved rectangles to the
 live monitor set, accepts 16 1080p surfaces, and rejects 16 4K surfaces over
-the 64-Mi-pixel aggregate budget. Input-queue regressions fill both the
+the 64-Mi-pixel aggregate budget. Startup sizing is pinned in logical
+pixels: `startup_geometry_cells_convert_to_inner_size` covers explicit and
+half-specified `window-width`/`window-height` (the missing axis comes from the
+160×45 default grid), `default_startup_size_targets_the_agent_grid_and_fits_the_monitor`
+pins the fresh-window rule on 1080p, 1366×768, ultrawide, a tiny monitor (no
+floor), a 2× HiDPI monitor (same grid as 1×), and that an explicit size is
+never monitor-fitted, and a source guard proves both window constructors use
+the shared rule as a `LogicalSize` and that the restore planner's fallback
+surface is the same rule in physical pixels. Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests
@@ -1105,7 +1128,15 @@ boundaries:
   non-navigation-only quiet retry, output-interrupted explicit-navigation
   Results-limited state, output/layout/query invalidation, direction shortcuts,
   result anchoring, and the invariant that UI-dispatched keys never reach the
-  PTY;
+  PTY. Pointer routing is pinned separately: `search_pointer_route` decides by
+  the bar's rectangle for a press and by the live editor drag for motion and
+  release, and a source guard proves every native and control-plane mouse arm
+  consults it, that the pointer gate (`pointer_modal_open`) excludes the bar
+  while the keyboard, file-drop, and focus-follows-mouse gates keep it, that a
+  grid press clears the editor selection so the bar's Copy reaches the grid,
+  that the right-click menu leaves the bar open, and that focus changes call
+  `retarget_search_to_focus`. `fresh_search_state` is tested for the carried
+  query and toggles and an immediate scan on the new pane;
 - `kettle-render`: one row on wide surfaces and as many additional rows as
   needed on narrow surfaces, all control hit targets, reserved content rows,
   signed multi-line projection, active/inactive colors, every bounded status
@@ -1121,6 +1152,9 @@ kettle ctl ui_geometry --raw
 kettle ctl dispatch_ui_key --keys "enter,shift+enter,f3,shift+f3,escape"
 ```
 
+`ui_geometry.scale_factor` converts physical surface/cell dimensions to logical
+pixels. `monitor` reports logical dimensions, or null when unavailable.
+
 `ui_geometry.search` must report the bar/control rectangles, target pane,
 status, `has_match`, truncation, Wrap, Case, and Invert states. The Search
 object must not contain the raw query or matched terminal text. Use `kettle ctl screenshot --json
@@ -1129,6 +1163,16 @@ verify historical and soft-wrapped highlight pixels. Do not substitute
 `send_keys` in this test:
 `send_keys` intentionally targets the PTY; `dispatch_ui_key` is the bounded
 modal-only path and must fail when no supported modal is open.
+
+`just search-selection-smoke` drives the grid under an open bar with
+`send_mouse`: a drag selects a fixture row (read back through
+`read_screen.selection`), a click on the Wrap control toggles it without
+disturbing the selection, the bar's Copy chord puts the grid selection on the
+clipboard (proven by pasting it back into the shell), a right-click opens the
+menu with the bar still open and its Copy row closes only the menu, a click on
+another split moves focus and `ui_geometry.search.target_pane` together and a
+query then matches text that exists only in that pane, and Esc closes the bar
+with the last selection intact.
 
 Media-receipt visual smokes pass the receipt bounds back through the four
 `crop_*` screenshot fields. The renderer crops the GPU readback before it opens
@@ -1494,6 +1538,14 @@ self-test runs in the normal CI matrix and pins this distinction, including
 a failed-command/stale-exit-code transcript. External auth failures are
 captured as `auth_failed`; set `KETTLE_AGENT_AUTH_SMOKE=strict` when missing
 credentials should fail the run.
+After a successful Claude probe the same flag drives a `claude-diff-panel`
+probe: an interactive `CLAUDE_CODE_NO_FLICKER=1 claude` REPL in the pane is
+resized to ~93 columns, where `/diff` must answer "Resize your terminal to at
+least 110 columns", then to 160 columns, where `/diff` must answer "Diff panel
+shown"; both screens are captured. This proves the columns Kettle reports are
+what the client's fullscreen diff panel (Claude Code 2.1.260+) acts on. A REPL
+that never shows its prompt (login, first-run dialog) is recorded as
+`skipped` with the reason, fatal only under `strict`.
 The Windows/WSL live-agent recipe retired with the final
 Windows-supported 3.3.0 line. Its prior contract remains in the `v3.3.0`
 documentation and source history. The portable helper self-tests still protect
@@ -1800,7 +1852,10 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, and `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
+`just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`,
+`just search-selection-smoke`, `just bell-flash-smoke`,
+`just default-window-size-smoke`, and
+`just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
 for frame-by-frame review. The tearoff recipe is two-tier: a portable
 ctl tier proves the mouseless `move_tab_to_new_window` tear +
 `tab_moved` broadcast (plus the `tear_lift`/`dock_highlighted`/`band`
@@ -2027,9 +2082,14 @@ retained compile/regression checks on **windows**:
   actions, and keeps the macOS policy disabled. Mux geometry tests separately
   prove both real-neighbour selection and each outside-edge no-op; together
   they cover the two branches in the physical keyboard route without making a
-  synthetic window event the source of pane geometry. A zoom hiding sibling
-  panes is pinned to the consumed/no-op branch, while a one-leaf tab with the
-  zoom bit set still falls through. Key-release state tests reproduce
+  synthetic window event the source of pane geometry. Zoom is pinned from both
+  sides: the mux test proves `pane_in_direction` answers `None` in every
+  direction while a multi-leaf tab is zoomed (and for a one-leaf tab with the
+  zoom bit set), and the App-level test drives the real predicate through a
+  two-pane `Mux` across `toggle_zoom` to prove the chord falls through while
+  the siblings are hidden and returns to a focus move afterwards. The
+  `alt-arrow-zoom` live smoke exercises the same decision through the
+  `dispatch_keybind` control route. Key-release state tests reproduce
   auto-repeat in both directions across the consume/pass-through boundary; the
   eventual release must follow the terminal-owned repeat rather than a stale
   consumed press, and a later UI-owned repeat cannot reclaim it.

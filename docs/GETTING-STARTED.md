@@ -65,11 +65,22 @@ Kettle starts with these pane and tab keys:
 See the full list any time with `kettle --list-keybinds`, or press
 `Ctrl+Shift+K` and type what you want.
 
-On Linux, the focus chord is edge-aware: if no split exists in the
+A fresh window opens at about 150 columns (a `160x45` baseline fitted to your
+monitor). That is on purpose: agent TUIs lay out side panels above ~110
+columns, and Claude Code's fullscreen diff panel auto-opens at 144. Set
+`window-width` / `window-height` for a different size, or `window-state =
+maximise`. A split pane is narrower than the window; zoom it (`Ctrl+Shift+X`)
+when a tool wants the full width. See
+[TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)
+for the panel's exact requirements.
+
+On Linux, the focus chord is edge-aware: if no visible split exists in the
 arrow's direction, Kettle passes `Alt+Arrow` to the program instead. This keeps
-terminal-app shortcuts such as Codex's `Alt+Up` previous-message editor usable
-without giving up fast split navigation. A zoom that hides sibling panes keeps
-the chord with Kettle as a no-op; a one-pane tab passes it through.
+terminal-app shortcuts such as Codex's `Alt+Left`/`Alt+Right` word motion and
+`Alt+Up` previous-message editor usable without giving up fast split
+navigation. A zoomed pane (`Ctrl+Shift+X`, or the `scaled_zoom` action) hides
+its siblings, so every `Alt+Arrow` reaches the program until you leave the zoom;
+a one-pane tab passes it through as well.
 
 macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 `Cmd+Opt+Arrow`, the chord iTerm2 and Ghostty both use. `Ctrl+Cmd+Arrow` does
@@ -91,6 +102,15 @@ complex**.
   **Match** always matches case; **Ignore** never matches case.
 - **Invert** flips the default direction. `Escape` closes the bar while keeping
   the selected result anchored on screen.
+
+The bar is a lane below the grid, not a dialog over it: while it is open you
+can still drag-select text, double-click words, open links, scroll, and
+right-click for the menu, exactly as in Terminator. Keyboard focus stays in the
+query. `Ctrl+Shift+C` copies the query's own selection if it has one, otherwise
+the text you selected in the grid. Clicking another split moves the bar to that
+pane and searches it with the same query and toggles. A program that has turned
+on mouse reporting receives your clicks while the bar is open, just as it does
+without it.
 
 The query editor follows Unicode grapheme boundaries for caret movement and
 deletion, so combining marks and emoji sequences are not split. Kettle

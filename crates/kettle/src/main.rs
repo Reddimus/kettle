@@ -2717,7 +2717,7 @@ mod tests {
     /// error predicate locally, so deleting the production code left it green.
     #[test]
     fn write_default_config_leaves_anything_already_there_untouched() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = kettle_test_support::private_tempdir("kettle-default-config-");
 
         // A regular file that is already there.
         let existing = dir.path().join("config");
@@ -2746,7 +2746,7 @@ mod tests {
 
         // A path that is genuinely free gets the shipped default, parent
         // directories and all.
-        let fresh = dir.path().join("missing").join("parents").join("config");
+        let fresh = dir.path().join("parents").join("config");
         assert_eq!(
             write_default_config(&fresh, kettle_config::ConfigTrust::VerifyDirectory)
                 .expect("a free path must be writable"),
@@ -2784,11 +2784,11 @@ mod tests {
             return;
         }
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config");
         // SAFETY: this branch runs in the isolated child process above before
         // it starts application threads.
         unsafe { libc::umask(0o002) };
+        let dir = kettle_test_support::private_tempdir("kettle-default-config-");
+        let path = dir.path().join("config");
         assert_eq!(
             write_default_config(&path, kettle_config::ConfigTrust::VerifyDirectory)
                 .expect("write default config"),

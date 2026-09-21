@@ -81,9 +81,9 @@ for the in-app editor.
 | Split left or right | `Ctrl+Shift+E` |
 | Split top or bottom | `Ctrl+Shift+O` |
 | Focus next or previous pane | `Ctrl+Shift+N` or `Ctrl+Shift+P` |
-| Directional pane focus, Linux | `Alt+Arrow` |
+| Directional pane focus, Linux (passes through to the program at an edge or while zoomed) | `Alt+Arrow` |
 | Directional pane focus, macOS | `Cmd+Opt+Arrow` or `Ctrl+Cmd+Arrow` |
-| Search | `Ctrl+Shift+F` |
+| Search (the grid stays selectable while the bar is open) | `Ctrl+Shift+F` |
 | Command palette | `Ctrl+Shift+K` |
 | Copy or paste | `Ctrl+Shift+C` or `Ctrl+Shift+V` |
 | Settings | `Ctrl+,` |

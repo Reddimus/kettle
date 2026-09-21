@@ -11,9 +11,10 @@ dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
 target, doctest, and warnings-denied clippy target with `just vendor-check`.
 CI exercises the parser patches on Linux and the PTY patch on both Linux and
-native Windows. Dependabot explicitly excludes `vendor/**`: vendored manifests
-and this lock may be refreshed only as part of an intentional, reviewed
-vendor-source update that revalidates the recorded provenance and local patch.
+native Windows. Dependabot excludes this validation workspace and reads patched
+crate manifests only as resolution support files. Updating vendored manifests
+or this lock requires a reviewed vendor-source update that revalidates provenance
+and local patches.
 
 ## `alacritty_terminal-0.26.0`
 

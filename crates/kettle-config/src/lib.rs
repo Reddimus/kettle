@@ -1681,14 +1681,20 @@ pub struct Config {
     pub lua_sandbox: LuaSandbox,
     /// Opacity of unfocused split panes (1.0 = no dim).
     pub unfocused_split_opacity: f32,
-    /// Peak alpha of the visual-bell flash (`0.0` = no flash at all).
+    /// Peak strength of the visual-bell flash as a step of CIE L* lightness,
+    /// expressed as a fraction of the 0..=100 scale: `0.03` lifts a dark
+    /// theme's background by 3 L* (and dips a light theme's by 3 L*) on the
+    /// frame the bell rings, then decays to nothing over 300 ms. `0.0` is no
+    /// flash at all; `1.0` paints the foreground solid.
     ///
-    /// The flash is a full-surface wash of the theme foreground that decays to
-    /// nothing over 300 ms, so this value is how bright its FIRST frame is.
-    /// Full-surface flashes are the part of a terminal most likely to bother a
-    /// photosensitive user, and the most common bell by far is an empty Tab
-    /// completion -- a non-event that does not deserve a bright wash. Hence a
-    /// low default and a knob rather than a hard-coded constant.
+    /// Defined perceptually rather than as an alpha because the renderer
+    /// blends in linear light, where one alpha means wildly different things
+    /// on different themes: "0.10 of the foreground" was a +21.7 L* jump on
+    /// TokyoNight and a -3 L* dip on Solarized Light. Only the pane that rang
+    /// flashes. Full-pane flashes are the part of a terminal most likely to
+    /// bother a photosensitive user, and the most common bell by far is an
+    /// empty Tab completion -- a non-event -- hence a barely-there default
+    /// and a knob rather than a hard-coded constant.
     pub bell_flash_intensity: f32,
     /// Mouse-wheel scroll speed multiplier (1.0 = ~3 lines per notch).
     pub scroll_multiplier: f32,
@@ -2773,7 +2779,7 @@ impl Default for Config {
             putty_paste_style_source_clipboard: false,
             lua_sandbox: LuaSandbox::Safe,
             unfocused_split_opacity: 0.7,
-            bell_flash_intensity: 0.10,
+            bell_flash_intensity: 0.03,
             scroll_multiplier: 1.0,
             minimum_contrast: 0.0,
             window_title_format: "{title} — kettle".to_string(),
@@ -8344,13 +8350,15 @@ cell-height = 1.2\n";
         assert!(bad.iter().any(|b| b.contains("tab-bar-position")));
     }
 
-    /// The visual bell is a full-surface wash, so its peak alpha is both a
-    /// taste setting and an accessibility one. Pin the default, both spellings,
-    /// the clamp, and that `0` is reachable — `0` means "no flash at all", so a
-    /// clamp floor above zero would make the opt-out unexpressible.
+    /// The visual bell is a full-pane wash, so its peak is both a taste
+    /// setting and an accessibility one. Pin the default (3 L*, the outcome
+    /// of the 2026-09 brightness review: the smallest step that still reads
+    /// as a cue in a lit room), both spellings, the clamp, and that `0` is
+    /// reachable — `0` means "no flash at all", so a clamp floor above zero
+    /// would make the opt-out unexpressible.
     #[test]
     fn bell_flash_intensity_parses_clamps_and_allows_opting_out() {
-        assert_eq!(Config::default().bell_flash_intensity, 0.10);
+        assert_eq!(Config::default().bell_flash_intensity, 0.03);
         assert_eq!(
             Config::parse_text("bell-flash-intensity = 0.25\n").bell_flash_intensity,
             0.25
@@ -8374,7 +8382,7 @@ cell-height = 1.2\n";
         );
         assert_eq!(
             Config::parse_text("bell-flash-intensity = nonsense\n").bell_flash_intensity,
-            0.10,
+            0.03,
             "an unparseable value must leave the default alone"
         );
     }

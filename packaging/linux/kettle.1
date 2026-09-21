@@ -286,7 +286,11 @@ for in-window save/restore.
 Restore the previous session (windows, tabs, splits, working
 directories) for this launch \(em every saved window reopens at its
 (monitor-clamped) saved position. By default kettle opens a fresh window \(em a single
-pane in the default working directory, matching mainstream terminals.
+pane in the default working directory, sized at about 150 columns (a 160x45
+cell baseline fitted to the monitor) so agent TUIs such as Claude Code's diff
+panel work without configuration; see
+.B window-width
+in the configuration reference.
 Use this flag for a one-shot "continue where I left off" without setting
 .B restore-session = true
 in the config.
@@ -576,10 +580,10 @@ split left/right
 auto-split (longest axis)
 .TP
 .B Alt+arrow
-focus pane up / down / left / right when a split exists in that
+focus pane up / down / left / right when a visible split exists in that
 direction; at an outer edge, send the chord to the terminal program
-instead. A zoom that hides sibling panes keeps the chord as a no-op; a
-one-pane tab passes it through (Linux; macOS uses
+instead. A zoomed pane hides its siblings, so it passes every Alt+arrow
+through, as does a one-pane tab (Linux; macOS uses
 Ctrl+Cmd+arrow for pane focus)
 .TP
 .B Ctrl+Shift+N

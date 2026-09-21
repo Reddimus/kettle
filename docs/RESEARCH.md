@@ -6,6 +6,23 @@ are within each upstream repo).
 
 ## Projects analyzed
 
+### September 2026 integration checks
+
+- [Neovim's TUI](https://neovim.io/doc/user/tui/) negotiates keyboard modes;
+  test entering and leaving the editor, both directly and through tmux.
+- [tmux modified keys](https://github.com/tmux/tmux/wiki/Modifier-Keys) must
+  survive Kettle's pane-focus routing when no visible neighbor owns the chord.
+- [Winit window sizes](https://docs.rs/winit/0.30.13/winit/window/struct.Window.html#method.inner_size)
+  are physical pixels. Compare startup geometry using the reported display scale.
+- [Dependabot's Cargo fetcher](https://github.com/dependabot/dependabot-core/blob/6634a4a4b6e203f3afcd302052839d290e6e61bf/cargo/lib/dependabot/cargo/file_fetcher.rb#L139-L162)
+  needs vendored patch manifests as support files. Exclude the separate vendor
+  validation workspace, not the patched crates needed to resolve the product.
+
+- [Linux procfs](https://docs.kernel.org/filesystems/proc.html) can return
+  `ESRCH` after a process exits, even when its stat file was already open.
+
+### Upstream projects
+
 | Project | Lang | Studied for |
 |---|---|---|
 | [Alacritty](https://github.com/alacritty/alacritty) | Rust | VT core, grid/scrollback, damage model |

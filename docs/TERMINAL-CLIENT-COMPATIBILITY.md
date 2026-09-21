@@ -256,6 +256,30 @@ by Kettle UI or a Kettle keybinding also suppresses its matching physical
 release, so a Kitty-aware child never receives a release for a press it did not
 see.
 
+## Claude Code diff panel
+
+Claude Code 2.1.260 and newer draws a diff panel beside the conversation
+inside its own fullscreen TUI (`"tui": "fullscreen"` in `~/.claude/settings.json`,
+or `CLAUDE_CODE_NO_FLICKER=1`), showing the session's or the repository's
+uncommitted changes as it edits. It is a client feature; Kettle transports it
+like any other alternate-screen application, and nothing terminal-specific is
+required (`TERM_PROGRAM=kettle` is fine). What the client does check is the
+column count of the pane it runs in:
+
+- `/diff` toggles the panel from **110 columns**; below that the client answers
+  "Resize your terminal to at least 110 columns to show the diff panel".
+- The panel **auto-opens at 144 columns** once the session has changes in a
+  git repository (`session`, `uncommitted`, and `branch` bases are cycled from
+  the panel).
+
+Kettle's default fresh window is sized for this (about 152 columns on a 1080p
+monitor at the default font; see `window-width` in [CONFIG.md](CONFIG.md)).
+A split pane is narrower than the window, so zoom the pane running Claude
+(`Ctrl+Shift+X`) when the panel matters; `Alt+Arrow` still reaches the client
+while zoomed. `just default-window-size-smoke` proves the fresh-window width,
+and the opt-in `KETTLE_AGENT_AUTH_SMOKE=1 just agent-tui-smoke` drives a live
+Claude Code session through both answers.
+
 ## tmux and full-screen clients
 
 - Kettle forwards application cursor/keypad modes, focus reports, SGR mouse

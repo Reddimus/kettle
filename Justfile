@@ -713,7 +713,8 @@ live-render-smoke: release
 # Drive a real grid-renderer window through shell, optional Codex/Claude CLI,
 # tmux, and clean/configured Neovim marker + split states. Captures
 # PNG/readback artifacts under target/diagnostics/agent-tui-*. Set
-# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts.
+# KETTLE_AGENT_AUTH_SMOKE=1 to include real Codex/Claude marker prompts and a
+# live Claude Code `/diff` panel probe at 93 and 160 columns.
 # `--cargo-release` selects Cargo's reported executable, including custom target
 # directories/triples, instead of assuming `target/release`.
 [unix]
@@ -862,6 +863,39 @@ split-repro *ARGS:
 [unix]
 zoom-keybind-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoom-keybind
+
+# Prove the adaptive Alt+Arrow routing through the real keybind resolver: a
+# single pane, an outer edge, and a zoomed split (toggle_zoom and scaled_zoom)
+# all report terminal_fallthrough, while a visible neighbour dispatches Focus*.
+# Captures dispatch JSON under target/diagnostics/alt-arrow-zoom-*.
+[unix]
+alt-arrow-zoom-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release alt-arrow-zoom
+
+# Prove the grid stays mouse-interactive under an open search bar: drag
+# selection, bar-control clicks, the bar's Copy chord, a right-click menu that
+# leaves the bar open, focus-following across splits, and Esc.
+# Captures geometry/screen JSON under target/diagnostics/search-selection-*.
+[unix]
+search-selection-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release search-selection
+
+# Prove the visual bell washes only the pane that rang and fades: a two-pane
+# split rings BEL, the live frame must lighten that pane's body while the
+# sibling pane and tab bar stay byte-identical, and the settled frame must
+# match the baseline. Captures PNG/analysis under target/diagnostics/bell-flash-*.
+[unix]
+bell-flash-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release bell-flash
+
+# Prove a fresh window is sized for agent TUIs: with no window-width/height a
+# pane must report at least 144x33 cells (needs a monitor >= 1366 px wide) and
+# the surface must not exceed the 1296 px target, while window-width = 100
+# still follows the 8 px startup baseline. Captures geometry/PNG under
+# target/diagnostics/default-window-size-*.
+[unix]
+default-window-size-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release default-window-size
 
 # Prove both backspace chords end to end: the text: action and, on macOS, the
 # Cmd+Backspace default; plus Option word-delete inside the search bar.
