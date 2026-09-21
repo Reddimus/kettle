@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.5.0] — 2026-09-20
+
 ### Added
 
 - Select, copy, follow links, scroll, and use terminal mouse reporting while
