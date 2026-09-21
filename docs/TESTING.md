@@ -55,7 +55,7 @@ future Xcode preview from silently changing release assets. Both CI and the
 release workflow use the same helper so a runner/toolchain mismatch cannot
 first appear after a tag.
 
-The macOS 26 job retains `macos-release-icon-<sha>` artifacts for seven days.
+The macOS 26 job retains `macos-release-icon-<sha>-<run>-<attempt>` artifacts for seven days.
 Use only matching-commit assets for local bundle checks when Xcode 26 is absent;
 this does not count as a local icon-compilation pass.
 
