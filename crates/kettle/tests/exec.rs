@@ -1608,6 +1608,9 @@ fn assert_post_eof_terminal_queries(context: &str) {
 fn exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies() {
     use std::io::BufRead;
 
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create raw EOF scratch directory");
+    let eof_observed = scratch.path().join("eof-observed");
     let helper = std::env::current_exe().expect("resolve integration-test helper");
     let helper = helper.to_str().expect("integration-test path is UTF-8");
     let mut cmd = kettle();
@@ -1623,7 +1626,7 @@ fn exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies() {
         "--nocapture",
         "--test-threads=1",
     ]);
-    cmd.env("KETTLE_EXEC_RAW_EOF_QUERY_HELPER", "1");
+    cmd.env("KETTLE_EXEC_RAW_EOF_QUERY_HELPER", &eof_observed);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1646,14 +1649,21 @@ fn exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies() {
         "raw-mode helper never became ready: {out:?}"
     );
     drop(stdin);
-    stdout.read_to_string(&mut out).unwrap();
+    let mut stderr = std::io::BufReader::new(child.stderr.take().expect("piped stderr"));
     let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
+    loop {
+        let mut line = String::new();
+        if stderr.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        err.push_str(&line);
+        if line.contains("stdin reached EOF but this PTY has no safe EOF signal") {
+            std::fs::write(&eof_observed, b"").expect("acknowledge raw EOF");
+            break;
+        }
+    }
+    stdout.read_to_string(&mut out).unwrap();
+    stderr.read_to_string(&mut err).unwrap();
     let status = child.wait().expect("wait");
     let code = status.code().unwrap_or(-1);
     if no_pty(code, &err) {
@@ -1671,14 +1681,18 @@ fn exec_raw_mode_eof_is_explicit_and_does_not_destroy_terminal_replies() {
 #[cfg(unix)]
 #[test]
 fn pty_raw_eof_then_query_helper() {
-    if std::env::var_os("KETTLE_EXEC_RAW_EOF_QUERY_HELPER").is_none() {
+    let Some(eof_observed) = std::env::var_os("KETTLE_EXEC_RAW_EOF_QUERY_HELPER") else {
         return;
-    }
+    };
 
     let original = make_stdin_raw();
     println!("RAW_MODE_READY");
     std::io::stdout().flush().unwrap();
-    std::thread::sleep(Duration::from_millis(250));
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !std::path::Path::new(&eof_observed).exists() {
+        assert!(Instant::now() < deadline, "raw EOF was not acknowledged");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let dsr = query_pty(b"\x1b[5n", b"\x1b[0n");
     let da = query_pty(b"\x1b[c", b"c");
     let kitty = query_pty(b"\x1b[?u", b"\x1b[?0u");
