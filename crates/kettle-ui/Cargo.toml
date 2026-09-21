@@ -124,7 +124,7 @@ x11rb = "0.13"
 # protocol. Probe the compositor registry once so GNOME/Mutter can use Kettle's
 # near-opaque fallback instead of silently showing sharp, washed-out alpha.
 [target.'cfg(target_os = "linux")'.dependencies]
-md-5 = "0.10"
+md-5 = "0.11"
 png = "0.18.1"
 url = "2.5"
 wayland-client = "0.31"
