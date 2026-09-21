@@ -18,6 +18,9 @@ are within each upstream repo).
   needs vendored patch manifests as support files. Exclude the separate vendor
   validation workspace, not the patched crates needed to resolve the product.
 
+- [Linux procfs](https://docs.kernel.org/filesystems/proc.html) can return
+  `ESRCH` after a process exits, even when its stat file was already open.
+
 ### Upstream projects
 
 | Project | Lang | Studied for |
