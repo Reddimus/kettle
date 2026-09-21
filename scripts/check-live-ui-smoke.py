@@ -14818,8 +14818,21 @@ def run_bell_flash(kettle: str, root: Path) -> Path:
         panes = live.json_ctl("list_panes").get("panes", [])
         ringing = next(int(p["id"]) for p in panes if p.get("focused"))  # type: ignore[index]
         quiet = next(int(p["id"]) for p in panes if not p.get("focused"))  # type: ignore[index]
-        # Let the shells settle so the baseline is a steady frame.
-        time.sleep(1.0)
+        ready = "KETTLE_BELL_READY"
+        ready_command = (
+            "Write-Output ('KETTLE_BELL_' + 'READY')"
+            if platform.system() == "Windows"
+            else "printf 'KETTLE_BELL_%s\\n' READY"
+        )
+        for pane in (quiet, ringing):
+            live.ctl("send_text", params={"pane": pane, "text": ready_command})
+            live.ctl("send_keys", params={"pane": pane, "keys": ["enter"]})
+            result = live.json_ctl(
+                "wait_for",
+                {"pane": pane, "text": ready, "timeout_ms": 15000, "quiet_ms": 500},
+            )
+            if not result.get("matched"):
+                raise SystemExit(f"bell-flash smoke: pane {pane} did not become ready: {result}")
         geometry = live.json_ctl("ui_geometry")
         (out / "geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
         rects = pane_rects(live)
