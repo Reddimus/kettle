@@ -5,6 +5,31 @@ before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
 
+## 4.5.0 cut - 2026-09-21
+
+macOS 26.6.2, M5 Max, 1920x1080 at 1x. Universal bundle built from clean
+`0aaaa34ac0a3`, with Xcode 26 icons from CI run `35570977894`. Its merge tree
+matches that cut. Both architectures load; the Intel check uses Rosetta.
+Later cut changes only synchronize an integration fixture and record this run.
+
+Native window captures and geometry checks passed:
+
+- Blur on/off at 86% and 100% opacity; no clear titlebar seam.
+- Decorated and borderless resize/fullscreen round trips; content restored exactly.
+- Light-theme startup under Dark, dark-theme startup under Light, and live palette
+  changes; titles stay beside the traffic lights.
+- Live Reduce Transparency off/on/off; background and titlebar return to their
+  original pixels. System appearance and accessibility settings were restored.
+- AccessKit exposes the live terminal text through the native accessibility tree.
+
+The real published 4.4.0 archive also passed `macos-update-smoke`, including
+Gatekeeper verification after extraction and replacement.
+
+Dock/menu and closed-but-pinned checks were skipped to preserve an existing
+Kettle session; Dock capture is unavailable. Finder, app-switcher and magnified
+icons were not checked. No native HiDPI or Intel hardware was available. This
+bundle is ad-hoc signed; release signing and notarization are checked separately.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
