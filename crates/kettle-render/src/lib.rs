@@ -43,7 +43,8 @@ use kettle_config::{Config, Rgb, ScrollbarMode, TextRenderer as TextRendererMode
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle};
 
 pub use color::{
-    dim as dim_color, reply_for_query, reply_for_text_area_size, resolve, resolve_query,
+    dim as dim_color, lightness, perceptual_wash_alpha, relative_luminance, reply_for_query,
+    reply_for_text_area_size, resolve, resolve_query,
 };
 use glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
 use outline::{OutlineInstance, OutlinePipeline};
@@ -1027,8 +1028,6 @@ pub struct Overlay {
     pub scrollbar_active: bool,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
-    /// Visual-bell intensity, 0.0 (none) .. 1.0 (just rang).
-    pub bell: f32,
     /// `Some` while the right-click context menu is open. Rendered on
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
@@ -2129,6 +2128,11 @@ pub struct PaneView<'a> {
     /// true and cfg.icon_bell is also true, a small dot renders in
     /// the titlebar.
     pub bell: bool,
+    /// Remaining visual-bell flash for this pane, 1.0 the frame it rang
+    /// down to 0.0 when the flash has decayed. Scales the configured
+    /// `bell-flash-intensity` lightness step; only the pane that rang
+    /// flashes, so a bell in a sibling split tells you which one it was.
+    pub bell_flash: f32,
     /// Terminator parity, titlebar: optional named broadcast group.
     /// When `Some(name)`, the titlebar prefixes `[name]` (group
     /// label in brackets) before the pane title. Borrowed from
@@ -6717,16 +6721,25 @@ impl Renderer {
             }
         }
 
-        // Visual bell: a brief full-surface flash (replaces an audible beep).
-        // `overlay.bell` is the 300 ms decay ramp; `bell-flash-intensity` is
-        // its peak alpha. The peak used to be a hard-coded 0.18, which is a
-        // lot of theme foreground across the whole surface for what is usually
-        // an empty Tab completion — the most frequent bell there is, and a
-        // non-event. `0.0` opts out of the flash while leaving the rest of the
-        // bell (window attention) alone.
-        let bell_alpha = overlay.bell * cfg.bell_flash_intensity;
-        if bell_alpha > 0.0 {
-            quads.push(rect(0.0, 0.0, sw, sh, theme.foreground, bell_alpha));
+        // Visual bell: a brief wash over the pane that rang (replaces an
+        // audible beep). It sits in the `quads` pass, under the text, so
+        // glyphs stay crisp and only cell backgrounds lift. The peak is
+        // `bell-flash-intensity`, a step of CIE L* rather than an alpha: the
+        // quad pipeline blends in linear light, where "alpha 0.10 of the
+        // foreground" was a +21.7 L* jump on a dark theme and a -3 L* dip on
+        // a light one. `pv.bell_flash` is the decay ramp; it scales the step
+        // before the alpha is derived so the fade is perceptually linear too.
+        // `0.0` opts out of the flash while leaving the rest of the bell
+        // (window attention, tab dot, titlebar glyph) alone.
+        for pv in panes {
+            if pv.bell_flash <= 0.0 {
+                continue;
+            }
+            let (rx, ry, rw, rh) = pv.rect;
+            let alpha = bell_flash_alpha(theme, cfg, pv.bell_flash);
+            if alpha > 0.0 {
+                quads.push(rect(rx, ry, rw, rh, theme.foreground, alpha));
+            }
         }
 
         // Search uses a responsive RESERVED lane. The app subtracts the public
@@ -12356,6 +12369,16 @@ pub fn fit_pane_titlebar_title(
     format!("  {title_prefix}{fitted_title}{bell_part}")
 }
 
+/// Wash alpha for a visual-bell flash `ramp` (1.0 at the peak, 0.0 when it
+/// has decayed) on this theme: the configured lightness step scaled by the
+/// ramp, converted for linear-light compositing of the foreground over the
+/// background. Shared by the live frame and the `DebugScene::BellFlash`
+/// fixture so the offscreen pixel check measures the shipped math.
+pub fn bell_flash_alpha(theme: &kettle_config::Theme, cfg: &Config, ramp: f32) -> f32 {
+    let step = cfg.bell_flash_intensity.clamp(0.0, 1.0) * ramp.clamp(0.0, 1.0);
+    color::perceptual_wash_alpha(theme.background, theme.foreground, step)
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32, c: Rgb, a: f32) -> QuadInstance {
     QuadInstance {
         pos: [x, y],
@@ -13604,6 +13627,10 @@ pub enum DebugScene {
     /// Render an active, partially-scrolled compact overlay scrollbar. Used by
     /// visual regression coverage; it is not exposed as a public CLI mode.
     Scrollbar,
+    /// Render the pane at the peak of a visual-bell flash through the same
+    /// `bell_flash_alpha` math and quad pipeline the live frame uses, so a
+    /// pixel test can measure the shipped lightness step. Not a CLI mode.
+    BellFlash,
 }
 
 /// Top edge (px from the surface top) of the passive "update available"
@@ -14332,6 +14359,14 @@ pub fn capture_png_with_annotation(
                     custom_glyphs: &[],
                 });
                 row_y += row_h;
+            }
+        }
+        if scene == DebugScene::BellFlash {
+            // The live frame washes the ringing pane's rect under the text;
+            // the fixture's pane is the whole body below the tab bar.
+            let alpha = bell_flash_alpha(theme, cfg, 1.0);
+            if alpha > 0.0 {
+                menu_q.push(rect(0.0, tab_h, wf, hf - tab_h, theme.foreground, alpha));
             }
         }
         if scene == DebugScene::Scrollbar {
@@ -19385,8 +19420,16 @@ mod title_fit_tests {
              computed against palette[1] itself"
         );
         assert!(
-            src.contains("overlay.bell * cfg.bell_flash_intensity"),
-            "the visual bell peak must come from the config key, not a literal"
+            src.contains("let alpha = bell_flash_alpha(theme, cfg, pv.bell_flash);")
+                && src.contains("quads.push(rect(rx, ry, rw, rh, theme.foreground, alpha));"),
+            "the visual bell must wash the ringing pane through the shared perceptual helper"
+        );
+        assert!(
+            src.contains("cfg.bell_flash_intensity.clamp(0.0, 1.0) * ramp.clamp(0.0, 1.0)")
+                && src.contains(
+                    "color::perceptual_wash_alpha(theme.background, theme.foreground, step)"
+                ),
+            "the visual bell peak must come from the config key as an L* step, not an alpha literal"
         );
     }
 
@@ -20956,6 +20999,7 @@ mod text_layout_damage_tests {
             size_cols: 80,
             size_rows: 24,
             bell: false,
+            bell_flash: 0.0,
             group_name: None,
         };
         let surface = (800.0, 600.0);

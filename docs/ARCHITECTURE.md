@@ -411,6 +411,23 @@ search bar's rectangles, focused control, modes, status, target pane, and
 truncation flag; its Search object deliberately omits the query and matched
 terminal text.
 
+The search bar owns the keyboard but not the pointer. It is a reserved lane
+below the grid, so `App::any_modal_open` (keyboard, file drops,
+focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
+arms and the cursor icon) does not; both derive from one
+`non_search_modal_open` list so they cannot drift on anything else. The pure
+`search_pointer_route` decides each pointer event by geometry: a press inside
+the lane goes to the bar's controls, a press above it is ordinary grid input,
+and motion or release follow whichever gesture is live (an editor drag keeps
+the bar). The native winit arms and the `send_mouse` control arms consult the
+same helper. Because the grid is clickable, an open bar follows pane focus:
+`note_focus_change` calls `retarget_search_to_focus`, which carries the query
+and toggles to the newly focused pane, returns the old pane its remembered
+query and, with no result focused, its pre-search viewport, and scans the new
+pane afresh without toggling the lane. The right-click menu is the one modal
+allowed to coexist with the bar; keys go to the menu while it is up because
+its arm precedes search in the key handler.
+
 Pane-bound bytes never block the App thread. Each pane owns two bounded input
 lanes: user input (keys, mouse, focus, paste, Lua, legacy remote commands, and
 control requests) and higher-priority terminal protocol replies. Both lanes
@@ -473,6 +490,18 @@ Since v2.18.0 every kettle window lives in one process. `App` holds
 winit window, its renderer, its `Mux` tab/split tree, input + overlay
 state) lives in `WindowState`, while `App` keeps the process globals
 (config, event-loop proxy, ctl server, Lua VM).
+
+Both window constructors size a new window through one rule
+(`startup_inner_size` in `app.rs`) before font metrics exist, using the 8×16 px
+startup baseline in **logical** pixels so HiDPI gets the same grid. An explicit
+`window-width`/`window-height` is honoured as typed (a missing axis comes from
+the 160×45 default grid); with neither set, the default grid is fitted to the
+primary monitor, or the largest one on Wayland, at 90 % × 85 %
+(`default_startup_inner_size`), so a fresh window clears the ~144 columns agent
+TUIs want without becoming a screen-wide canvas on an ultrawide. The restore
+planner's fallback surface for a saved window without geometry is the same rule
+in physical pixels. Restored geometry and explicit new-window geometry are
+applied after these attributes and still win.
 
 A no-argument GUI launch first uses the private activation endpoint under the
 per-user runtime/state directory. One advisory lock elects a primary; the
@@ -1208,7 +1237,16 @@ text, so its bitmap is already resident).
   redraw request, so a delayed Wayland frame callback cannot enqueue the same
   phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
-  actually changed.
+  actually changed. The visual bell is per pane: `drain_events` stamps each
+  ringing pane in `WindowState::bell_flashes`, the frame builder turns each
+  stamp into a `PaneView::bell_flash` ramp (`bell_flash_ramp`: instant on,
+  quadratic ease-out over `BELL_FLASH_DURATION`), the idle loop keeps the
+  ~30 fps wake alive while any stamp is younger than that and drops expired
+  stamps with one erasing repaint, and `kettle-render` washes only that
+  pane's rect under its text at `bell_flash_alpha`, which converts the
+  configured CIE L* step (`bell-flash-intensity`, scaled by the ramp) into a
+  linear-light alpha via `perceptual_wash_alpha` so every theme moves by the
+  same visible amount.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
   command-completion, and internal diagnostic toast enters a 64-message
   `try_send` queue. The worker preserves order while calling the OS backend.
@@ -1374,9 +1412,13 @@ text, so its bitmap is already resident).
   `Alt+Arrow` keybind. The App asks `Mux::pane_in_direction`, the same
   edge-overlap geometry used by `focus_dir`: a real neighbour consumes the
   chord and receives focus, while an outside-edge press stays unconsumed and is
-  encoded for the PTY. A zoom that hides sibling panes keeps the chord
-  application-owned as a no-op; a one-leaf tab passes it through even if its
-  persisted zoom bit remains set. A two-set press/release ledger ensures that
+  encoded for the PTY. Only visible panes count: zoom collapses `Mux::layout`
+  to the focused pane, so `pane_in_direction` answers `None` in every
+  direction and a zoomed tab passes the chord through exactly like a one-leaf
+  tab (with or without a stale persisted zoom bit). The routing decision is one
+  App helper shared with the `dispatch_keybind` control route, which reports
+  `terminal_fallthrough` instead of dispatching and never writes PTY bytes. A
+  two-set press/release ledger ensures that
   once any repeated press reaches the PTY, terminal ownership stays sticky
   through its release; otherwise the UI-owned press suppresses that release.
   Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /

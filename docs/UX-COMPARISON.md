@@ -63,7 +63,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
 | **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
-| **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar; regex with a literal fallback for unparseable patterns; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar that leaves the grid selectable and clickable; regex with a literal fallback for unparseable patterns; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **Kitty keyboard protocol** | ✅ progressive CSI-u negotiation + press/repeat/release encoder | ✅ | ✅ (origin) | ✅ | 🟡 (version/config dependent) | 🟡 |
 | **SSH launcher** | ✅ `Ctrl+Shift+S` fuzzy, configured + freeform | ⛔ | ⛔ | ⛔ | 🟡 (`ssh-host` plugin) | ⛔ |

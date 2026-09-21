@@ -8155,6 +8155,155 @@ def split_marker(marker: str) -> Tuple[str, str]:
     return marker[:midpoint], marker[midpoint:]
 
 
+def probe_claude_diff_panel(
+    live: "LiveKettle", out: Path, states: List[Dict[str, object]]
+) -> Dict[str, object]:
+    """Drive a live Claude Code REPL through both answers of its diff panel.
+
+    Claude Code 2.1.260+ draws the panel inside its fullscreen TUI and gates it
+    on the pane's column count: `/diff` is refused below 110 columns and shown
+    above. Kettle only transports the TUI, so this proves the columns Kettle
+    reports are what the client acts on, at a width below the threshold and at
+    one past the 144-column auto-open point. Interactive first-run dialogs or a
+    missing login are reported as a skip with the reason rather than a failure;
+    the caller decides whether that is fatal (`KETTLE_AGENT_AUTH_SMOKE=strict`).
+    """
+
+    label = "claude-diff-panel"
+    refused = "Resize your terminal to at least 110 columns"
+    shown = "Diff panel shown"
+    # The fullscreen REPL's status line always carries the permission-mode
+    # cycler, whatever mode the host user defaults to.
+    ready = "(shift+tab to cycle)"
+    # The panel needs a git repository, and Claude Code asks to trust a
+    # folder it has not seen before, so run in this checkout rather than the
+    # shell's home directory. The trust dialog on a machine that has not
+    # opened this repo in Claude Code is reported as a skip: answering it
+    # would change the host user's Claude configuration.
+    repo = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent),
+        check=False,
+    ).stdout.strip()
+
+    def wait_for(needles: Sequence[str], timeout_s: float) -> Optional[str]:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            text = screen_text(live.json_ctl("read_screen"))
+            for needle in needles:
+                if needle in text:
+                    return needle
+            time.sleep(0.25)
+        return None
+
+    def resize_to_columns(columns: int) -> int:
+        geometry = live.json_ctl("ui_geometry")
+        cell_w = float(geometry["cell"]["width"])  # type: ignore[index]
+        pad_x = float(geometry["padding"]["x"])  # type: ignore[index]
+        surface_h = float(geometry["surface"]["height"])  # type: ignore[index]
+        width = int(columns * cell_w + pad_x * 2.0 + 2.0)
+        live.json_ctl("resize_window", {"width": width, "height": int(surface_h)})
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            panes = live.json_ctl("list_panes").get("panes", [])
+            focused = [p for p in panes if p.get("focused")]
+            if focused and int(focused[0]["cols"]) != 0:  # type: ignore[index]
+                cols = int(focused[0]["cols"])  # type: ignore[index]
+                if (cols < 110) == (columns < 110):
+                    return cols
+            time.sleep(0.1)
+        raise SystemExit(f"agent-tui smoke: {label}: window did not resize toward {columns} columns")
+
+    def finish(repl_seen: bool) -> None:
+        # Leave the REPL (twice Ctrl+C: once to clear, once to quit) or
+        # cancel a dialog with Escape; never Ctrl+D, which would also close
+        # the shell, the pane, and with it the control server.
+        if repl_seen:
+            for _ in range(2):
+                live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
+                time.sleep(0.4)
+        else:
+            live.ctl("send_keys", params={"keys": ["escape"]}, timeout=8)
+            time.sleep(0.4)
+            live.ctl("send_keys", params={"keys": ["ctrl+c"]}, timeout=8)
+        # The REPL restores the main screen on its way out; only then is the
+        # shell listening again, so wait for its status line to disappear
+        # before typing the marker command.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if ready not in screen_text(live.json_ctl("read_screen")):
+                break
+            time.sleep(0.25)
+        time.sleep(0.5)
+        back = "KETTLE_AGENT_TUI_CLAUDE_DIFF_BACK"
+        live_shell_command(live, command_with_marker("cd -", back, windows=False), back)
+
+    if not repo:
+        return {
+            "name": label,
+            "status": "skipped",
+            "reason": "this checkout is not inside a git repository",
+        }
+    # The fullscreen renderer is what draws the panel; the env var is the
+    # documented equivalent of `"tui": "fullscreen"` and keeps this probe
+    # independent of the host user's settings.
+    live.ctl(
+        "send_text",
+        params={"text": f"cd {shell_quote(repo, windows=False)} && CLAUDE_CODE_NO_FLICKER=1 claude"},
+        timeout=8,
+    )
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    if wait_for([ready], 45.0) is None:
+        state = capture_live_state(live, out, f"{label}-no-repl")
+        states.append(state)
+        finish(False)
+        return {
+            "name": label,
+            "status": "skipped",
+            "reason": "the Claude Code REPL prompt did not appear (login or trust/first-run dialog?)",
+        }
+    original = live.json_ctl("ui_geometry")["surface"]  # type: ignore[index]
+    narrow_cols = resize_to_columns(93)
+    time.sleep(0.5)
+    live.ctl("send_text", params={"text": "/diff"}, timeout=8)
+    time.sleep(1.0)
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    narrow_answer = wait_for([refused, shown], 15.0)
+    states.append(capture_live_state(live, out, f"{label}-narrow"))
+    wide_cols = resize_to_columns(160)
+    time.sleep(0.5)
+    live.ctl("send_text", params={"text": "/diff"}, timeout=8)
+    time.sleep(1.0)
+    live.ctl("send_keys", params={"keys": ["enter"]}, timeout=8)
+    wide_answer = wait_for([shown], 15.0)
+    states.append(capture_live_state(live, out, f"{label}-wide"))
+    finish(True)
+    # Hand the later probes the geometry they started with.
+    live.json_ctl(
+        "resize_window",
+        {"width": int(float(original["width"])), "height": int(float(original["height"]))},  # type: ignore[index]
+    )
+    time.sleep(0.5)
+    probe: Dict[str, object] = {
+        "name": label,
+        "narrow_columns": narrow_cols,
+        "narrow_answer": narrow_answer,
+        "wide_columns": wide_cols,
+        "wide_answer": wide_answer,
+    }
+    if narrow_answer == refused and wide_answer == shown:
+        probe["status"] = "ok"
+    else:
+        probe["status"] = "failed"
+        probe["reason"] = (
+            f"expected the refusal at {narrow_cols} columns and the panel at {wide_cols}; "
+            f"got {narrow_answer!r} and {wide_answer!r}"
+        )
+    return probe
+
+
 def agent_auth_command(
     tool: str,
     marker: str,
@@ -8281,6 +8430,17 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
+    for scale in (1.0, 1.25, 2.0):
+        geometry = {
+            "scale_factor": scale,
+            "surface": {"width": 1296.0 * scale},
+            "cell": {"width": 8.4 * scale},
+        }
+        width, cols = startup_geometry_metrics(geometry)
+        assert width == 1296.0 and cols == 95
+        geometry["surface"]["width"] += 2.0 * scale
+        assert startup_geometry_metrics(geometry)[0] > 1297.0
+
     with tempfile.TemporaryDirectory(prefix="kettle-receipt-fixture-") as temp:
         fixture = Path(temp) / "fixture.png"
         write_image_receipt_fixture(fixture, 64, 36)
@@ -13817,6 +13977,14 @@ def run_agent_tui(
                 probes.append(probe)
                 if status != "ok" and require_auth_smoke:
                     raise SystemExit(f"agent-tui smoke: {auth_label} failed: {reason}")
+                if tool == "claude" and status == "ok" and not shell_target.powershell:
+                    diff_probe = probe_claude_diff_panel(live, out, states)
+                    probes.append(diff_probe)
+                    if diff_probe.get("status") != "ok" and require_auth_smoke:
+                        raise SystemExit(
+                            f"agent-tui smoke: {diff_probe['name']} {diff_probe['status']}: "
+                            f"{diff_probe.get('reason')}"
+                        )
 
         if shell_target.powershell or not shell_target.command_available("tmux"):
             reason = (
@@ -14717,6 +14885,578 @@ def run_search_history(kettle: str, root: Path) -> Path:
             },
             indent=2,
         )
+        + "\n"
+    )
+    return out
+
+
+def run_search_selection(kettle: str, root: Path) -> Path:
+    """Prove the grid stays mouse-interactive under an open search bar.
+
+    Terminator parity: with Ctrl+Shift+F open, a drag on the grid selects
+    text, the bar's controls still take clicks inside the lane, the bar's
+    Copy shortcut copies the grid selection, a right-click opens the menu
+    without closing the bar, and clicking another split makes the bar follow
+    focus. Esc closes the bar and leaves the selection alone.
+    """
+
+    out = root / f"search-selection-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "background = #090909",
+                "foreground = #f5f5f5",
+                "minimum-contrast = 0",
+                "window-padding-x = 8",
+                "window-padding-y = 8",
+                "window-width = 110",
+                "window-height = 34",
+                "search-wrap = true",
+                "search-case-sensitive = always",
+                "copy-on-select = false",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+
+    row_marker = "KETTLE_SEARCH_SELECT_ROW"
+    done = "KETTLE_SEARCH_SELECT_DONE"
+
+    def search_geometry(live: LiveKettle, label: str) -> Dict[str, object]:
+        geometry = live.json_ctl("ui_geometry")
+        (out / f"{label}.geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+        return geometry
+
+    def require_search(geometry: Dict[str, object], label: str) -> Dict[str, object]:
+        search = geometry.get("search")
+        if not modal_open(geometry, "search") or not isinstance(search, dict):
+            raise SystemExit(f"search-selection smoke: search bar not open at {label}")
+        return search
+
+    def selection_text(live: LiveKettle, label: str, pane: Optional[int] = None) -> str:
+        params: Dict[str, object] = {"include_selection": True}
+        if pane is not None:
+            params["pane"] = pane
+        screen = live.json_ctl("read_screen", params)
+        (out / f"{label}.screen.json").write_text(json.dumps(screen, indent=2) + "\n")
+        return str(screen.get("selection", "")).replace("\r\n", "\n").rstrip("\n")
+
+    def focused_pane(live: LiveKettle) -> int:
+        panes = live.json_ctl("list_panes").get("panes", [])
+        focused = [int(p["id"]) for p in panes if p.get("focused")]  # type: ignore[index]
+        if len(focused) != 1:
+            raise SystemExit(f"search-selection smoke: expected one focused pane: {panes}")
+        return focused[0]
+
+    def pane_text_point(
+        live: LiveKettle, pane: int, needle: str, *, at_end: bool = False
+    ) -> Tuple[float, float]:
+        """Window coordinates of `needle` inside one split pane's grid."""
+        deadline = time.monotonic() + 3.0
+        while True:
+            geometry = live.json_ctl("ui_geometry")
+            cells = live.json_ctl("read_cells", {"pane": pane, "limit": 1536})
+            titlebar = next(
+                (bar for bar in geometry.get("pane_titlebars", []) if int(bar.get("pane", -1)) == pane),  # type: ignore[union-attr]
+                None,
+            )
+            if titlebar is not None:
+                rows = max(1, int(cells.get("rows", 1)))
+                cols = max(1, int(cells.get("cols", 1)))
+                grid = [[" " for _ in range(cols)] for _ in range(rows)]
+                for cell in cells.get("cells", []):  # type: ignore[assignment]
+                    row = int(cell.get("row", -1))
+                    col = int(cell.get("col", -1))
+                    if 0 <= row < rows and 0 <= col < cols:
+                        ch = str(cell.get("ch", " "))
+                        grid[row][col] = ch[0] if ch else " "
+                for row, chars in enumerate(grid):
+                    start = "".join(chars).find(needle)
+                    if start < 0:
+                        continue
+                    col = start + (len(needle) - 1 if at_end else 0)
+                    pane_rect = titlebar["pane_rect"]  # type: ignore[index]
+                    bar_rect = titlebar["rect"]  # type: ignore[index]
+                    cell_w = float(geometry["cell"]["width"])  # type: ignore[index]
+                    cell_h = float(geometry["cell"]["height"])  # type: ignore[index]
+                    pad_x = float(geometry["padding"]["x"])  # type: ignore[index]
+                    pad_y = float(geometry["padding"]["y"])  # type: ignore[index]
+                    top = float(pane_rect["y"])  # type: ignore[index]
+                    if abs(float(bar_rect["y"]) - top) < 0.5:  # type: ignore[index]
+                        top += float(bar_rect["height"])  # type: ignore[index]
+                    return (
+                        float(pane_rect["x"]) + pad_x + (col + (0.75 if at_end else 0.25)) * cell_w,  # type: ignore[index]
+                        top + pad_y + (row + 0.5) * cell_h,
+                    )
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"search-selection smoke: could not locate {needle!r} in pane {pane}"
+                )
+            time.sleep(0.05)
+
+    def control_rect(search: Dict[str, object], name: str) -> Dict[str, float]:
+        for control in search.get("controls", []):  # type: ignore[union-attr]
+            if isinstance(control, dict) and control.get("name") == name:
+                return control["rect"]  # type: ignore[return-value]
+        raise SystemExit(f"search-selection smoke: search bar has no {name!r} control")
+
+    def focused_control(search: Dict[str, object]) -> Optional[str]:
+        for control in search.get("controls", []):  # type: ignore[union-attr]
+            if isinstance(control, dict) and control.get("focused"):
+                return str(control.get("name"))
+        return None
+
+    states: List[Dict[str, object]] = []
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        first_pane = focused_pane(live)
+        if platform.system() == "Windows":
+            fill = "; ".join(
+                f"Write-Output ('{row_marker[:12]}' + '{row_marker[12:]}{index}')"
+                for index in (1, 2, 3)
+            )
+        else:
+            fill = "; ".join(
+                f"printf '%s%s\\n' {row_marker[:12]} {row_marker[12:]}{index}"
+                for index in (1, 2, 3)
+            )
+        live_shell_command(live, command_with_marker(fill, done), done)
+        states.append(capture_live_state(live, out, "fixture"))
+
+        live.ctl("perform_action", params={"action": "start_search"})
+        time.sleep(0.3)
+        opened = search_geometry(live, "search-open")
+        search = require_search(opened, "open")
+        if search.get("target_pane") != first_pane:
+            raise SystemExit(
+                f"search-selection smoke: bar opened on pane {search.get('target_pane')}, "
+                f"expected the focused pane {first_pane}"
+            )
+        bar_rect = search["rect"]
+        states.append(capture_live_state(live, out, "search-open"))
+
+        # 1. A drag on the grid above the lane selects text.
+        target = f"{row_marker}1"
+        sx0, sy0 = wait_for_text_cell_point(live, target)
+        sx1, sy1 = wait_for_text_cell_point(live, target, at_end=True)
+        if sy0 >= float(bar_rect["y"]):  # type: ignore[index]
+            raise SystemExit("search-selection smoke: fixture row lies inside the search lane")
+        live.ctl("send_mouse", params={"event": "press", "x": sx0, "y": sy0, "button": "left"})
+        time.sleep(0.05)
+        live.ctl("send_mouse", params={"event": "move", "x": sx1, "y": sy1})
+        time.sleep(0.15)
+        live.ctl("send_mouse", params={"event": "release", "x": sx1, "y": sy1, "button": "left"})
+        time.sleep(0.15)
+        selected = selection_text(live, "selection-under-search")
+        if selected != target:
+            raise SystemExit(
+                "search-selection smoke: drag under the open search bar selected "
+                f"{selected!r}, expected {target!r}"
+            )
+        after_drag = search_geometry(live, "after-drag")
+        require_search(after_drag, "after the drag")
+        states.append(capture_live_state(live, out, "selection-under-search"))
+
+        # 2. Clicks inside the lane still drive the bar's controls.
+        wx, wy = rect_center(control_rect(search, "wrap"))
+        live.ctl("send_mouse", params={"event": "click", "x": wx, "y": wy, "button": "left"})
+        time.sleep(0.15)
+        toggled = require_search(search_geometry(live, "wrap-click"), "after the Wrap click")
+        if toggled.get("wrap") is not False or focused_control(toggled) != "wrap":
+            raise SystemExit(
+                f"search-selection smoke: Wrap click did not reach the bar: wrap={toggled.get('wrap')} "
+                f"focused={focused_control(toggled)}"
+            )
+        if selection_text(live, "selection-after-wrap-click") != target:
+            raise SystemExit("search-selection smoke: a click inside the lane disturbed the grid selection")
+
+        # 3. The bar's Copy shortcut copies the grid selection when the editor
+        #    has none; paste it back into the shell to read the clipboard.
+        copy_chord = "cmd+c" if platform.system() == "Darwin" else "ctrl+shift+c"
+        copied = live.json_ctl("dispatch_ui_key", {"keys": [copy_chord]})
+        (out / "copy.dispatch.json").write_text(json.dumps(copied, indent=2) + "\n")
+        if copied.get("open") is not True:
+            raise SystemExit(f"search-selection smoke: Copy chord closed the bar: {copied}")
+        before_paste = screen_text(live.json_ctl("read_screen")).count(target)
+        live.ctl("perform_action", params={"action": "paste"})
+        deadline = time.monotonic() + 5.0
+        while True:
+            pasted = live.json_ctl("read_screen")
+            if screen_text(pasted).count(target) > before_paste:
+                break
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    "search-selection smoke: the bar's Copy did not put the grid selection on the clipboard"
+                )
+            time.sleep(0.1)
+        (out / "pasted.screen.json").write_text(json.dumps(pasted, indent=2) + "\n")
+        live.ctl("send_keys", params={"keys": ["ctrl+u"]})
+        time.sleep(0.15)
+
+        # 4. Right-click opens the menu and leaves the bar in place; Copy from
+        #    the menu closes the menu only.
+        live.ctl("send_mouse", params={"event": "click", "x": sx0, "y": sy0, "button": "right"})
+        time.sleep(0.2)
+        menu_geo = search_geometry(live, "context-menu")
+        if not menu_geo.get("context_menu"):
+            raise SystemExit("search-selection smoke: right-click over the grid did not open the menu")
+        require_search(menu_geo, "with the context menu open")
+        states.append(capture_live_state(live, out, "context-menu-over-search"))
+        copy_row = visible_context_row(menu_geo, "Copy")
+        cx, cy = rect_center(copy_row["rect"])  # type: ignore[index]
+        live.ctl("send_mouse", params={"event": "click", "x": cx, "y": cy, "button": "left"})
+        time.sleep(0.2)
+        after_menu = search_geometry(live, "after-menu-copy")
+        if after_menu.get("context_menu"):
+            raise SystemExit("search-selection smoke: the menu's Copy row did not close the menu")
+        require_search(after_menu, "after the menu's Copy")
+
+        # 5. The bar follows focus to another split.
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            if len(live.json_ctl("ui_geometry").get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("search-selection smoke: split did not produce two panes")
+        time.sleep(0.2)
+        panes = live.json_ctl("list_panes").get("panes", [])
+        second_pane = next(int(p["id"]) for p in panes if int(p["id"]) != first_pane)  # type: ignore[index]
+        after_split = require_search(search_geometry(live, "after-split"), "after the split")
+        if focused_pane(live) != second_pane or after_split.get("target_pane") != second_pane:
+            raise SystemExit(
+                "search-selection smoke: the bar did not follow focus to the new split: "
+                f"focused={focused_pane(live)} target={after_split.get('target_pane')}"
+            )
+        left_x, left_y = pane_text_point(live, first_pane, f"{row_marker}2")
+        live.ctl("send_mouse", params={"event": "click", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.2)
+        followed = require_search(search_geometry(live, "click-left-pane"), "after clicking the first pane")
+        if focused_pane(live) != first_pane or followed.get("target_pane") != first_pane:
+            raise SystemExit(
+                "search-selection smoke: clicking the first split did not move focus and the bar: "
+                f"focused={focused_pane(live)} target={followed.get('target_pane')}"
+            )
+        typed = live.json_ctl("dispatch_ui_key", {"keys": list(f"{row_marker}3")})
+        if typed.get("open") is not True:
+            raise SystemExit(f"search-selection smoke: query input closed the bar: {typed}")
+        deadline = time.monotonic() + 8.0
+        while True:
+            matched = live.json_ctl("ui_geometry")
+            search_now = matched.get("search")
+            if isinstance(search_now, dict) and search_now.get("has_match") is True:
+                break
+            if time.monotonic() >= deadline:
+                raise SystemExit(
+                    f"search-selection smoke: the retargeted bar found no match in the first pane: {search_now}"
+                )
+            time.sleep(0.05)
+        (out / "retargeted-match.geometry.json").write_text(json.dumps(matched, indent=2) + "\n")
+        states.append(capture_live_state(live, out, "retargeted-match"))
+        second_geo = live.json_ctl("ui_geometry")
+        second_titlebars = second_geo.get("pane_titlebars", [])
+        second_rect = next(
+            bar["pane_rect"] for bar in second_titlebars  # type: ignore[index]
+            if int(bar.get("pane", -1)) == second_pane  # type: ignore[union-attr]
+        )
+        rx, ry = rect_center(second_rect)  # type: ignore[arg-type]
+        live.ctl("send_mouse", params={"event": "click", "x": rx, "y": ry, "button": "left"})
+        time.sleep(0.2)
+        back = require_search(search_geometry(live, "click-right-pane"), "after clicking the second pane")
+        if focused_pane(live) != second_pane or back.get("target_pane") != second_pane:
+            raise SystemExit(
+                "search-selection smoke: clicking the second split did not move focus and the bar back: "
+                f"focused={focused_pane(live)} target={back.get('target_pane')}"
+            )
+
+        # 6. Esc closes the bar; the grid selection made under it survives.
+        live.ctl("send_mouse", params={"event": "click", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.15)
+        lx1, ly1 = pane_text_point(live, first_pane, f"{row_marker}2", at_end=True)
+        live.ctl("send_mouse", params={"event": "press", "x": left_x, "y": left_y, "button": "left"})
+        time.sleep(0.05)
+        live.ctl("send_mouse", params={"event": "move", "x": lx1, "y": ly1})
+        time.sleep(0.15)
+        live.ctl("send_mouse", params={"event": "release", "x": lx1, "y": ly1, "button": "left"})
+        time.sleep(0.15)
+        live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+        time.sleep(0.3)
+        closed = search_geometry(live, "search-closed")
+        if modal_open(closed, "search"):
+            raise SystemExit("search-selection smoke: Esc did not close the search bar")
+        survived = selection_text(live, "selection-after-close", pane=first_pane)
+        if survived != f"{row_marker}2":
+            raise SystemExit(
+                f"search-selection smoke: closing the bar disturbed the selection: {survived!r}"
+            )
+        states.append(capture_live_state(live, out, "search-closed"))
+    (out / "states.json").write_text(json.dumps(states, indent=2) + "\n")
+    return out
+
+
+def region_mean_lightness(
+    png: Tuple[int, int, List[bytes]], rect: Dict[str, float], inset: float = 6.0
+) -> float:
+    """Mean CIE L* of the pixels inside `rect` (window px), inset by `inset`."""
+    width, height, rows = png
+    x0 = max(0, int(rect["x"] + inset))
+    y0 = max(0, int(rect["y"] + inset))
+    x1 = min(width, int(rect["x"] + rect["width"] - inset))
+    y1 = min(height, int(rect["y"] + rect["height"] - inset))
+    if x1 <= x0 or y1 <= y0:
+        raise SystemExit(f"bell-flash smoke: empty sample rect {rect}")
+
+    def linear(c: int) -> float:
+        v = c / 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    total = 0.0
+    count = 0
+    for y in range(y0, y1):
+        row = rows[y]
+        for x in range(x0, x1):
+            r, g, b = row[x * 4], row[x * 4 + 1], row[x * 4 + 2]
+            luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+            total += (
+                116.0 * luminance ** (1.0 / 3.0) - 16.0
+                if luminance > 216.0 / 24389.0
+                else (24389.0 / 27.0) * luminance
+            )
+            count += 1
+    return total / count
+
+
+def run_bell_flash(kettle: str, root: Path) -> Path:
+    """Prove the visual bell washes only the pane that rang, then fades.
+
+    A two-pane split rings BEL in the focused pane. The frame captured while
+    the flash is live must be lighter inside that pane's body and byte-for-byte
+    unchanged in the sibling pane and the tab bar; the frame captured after
+    `BELL_FLASH_DURATION` must match the baseline again. The magnitude of the
+    default step is pinned by the offscreen `bell_visual` render test; this
+    smoke uses a deliberately strong step so the live path is unmistakable.
+    """
+
+    out = root / f"bell-flash-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "text-renderer = grid",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "record = off",
+                "theme = TokyoNight Night",
+                "minimum-contrast = 0",
+                "cursor-blink = false",
+                "bell = visual",
+                "bell-flash-intensity = 0.5",
+                "window-padding-x = 8",
+                "window-padding-y = 8",
+                "window-width = 110",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    extra_args = ["-e", "powershell.exe", "-NoLogo", "-NoProfile"] if platform.system() == "Windows" else []
+
+    def pane_rects(live: LiveKettle) -> Dict[int, Dict[str, float]]:
+        geometry = live.json_ctl("ui_geometry")
+        rects: Dict[int, Dict[str, float]] = {}
+        for bar in geometry.get("pane_titlebars", []):  # type: ignore[union-attr]
+            pane_rect = dict(bar["pane_rect"])  # type: ignore[index]
+            titlebar = bar["rect"]  # type: ignore[index]
+            # Sample the body below the titlebar so the bell glyph the
+            # titlebar gains cannot count as wash.
+            if abs(float(titlebar["y"]) - float(pane_rect["y"])) < 0.5:  # type: ignore[index]
+                pane_rect["y"] = float(pane_rect["y"]) + float(titlebar["height"])  # type: ignore[index]
+                pane_rect["height"] = float(pane_rect["height"]) - float(titlebar["height"])  # type: ignore[index]
+            rects[int(bar["pane"])] = pane_rect  # type: ignore[index]
+        return rects
+
+    with LiveKettle(kettle, cfg, out / "kettle.log", extra_args=extra_args) as live:
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            if len(live.json_ctl("ui_geometry").get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("bell-flash smoke: split did not produce two panes")
+        panes = live.json_ctl("list_panes").get("panes", [])
+        ringing = next(int(p["id"]) for p in panes if p.get("focused"))  # type: ignore[index]
+        quiet = next(int(p["id"]) for p in panes if not p.get("focused"))  # type: ignore[index]
+        ready = "KETTLE_BELL_READY"
+        ready_command = (
+            "Write-Output ('KETTLE_BELL_' + 'READY')"
+            if platform.system() == "Windows"
+            else "printf 'KETTLE_BELL_%s\\n' READY"
+        )
+        for pane in (quiet, ringing):
+            live.ctl("send_text", params={"pane": pane, "text": ready_command})
+            live.ctl("send_keys", params={"pane": pane, "keys": ["enter"]})
+            result = live.json_ctl(
+                "wait_for",
+                {"pane": pane, "text": ready, "timeout_ms": 15000, "quiet_ms": 500},
+            )
+            if not result.get("matched"):
+                raise SystemExit(f"bell-flash smoke: pane {pane} did not become ready: {result}")
+        geometry = live.json_ctl("ui_geometry")
+        (out / "geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+        rects = pane_rects(live)
+        surface = geometry["surface"]  # type: ignore[index]
+        tab_bar = {
+            "x": 0.0,
+            "y": float(geometry["tab_bar"]["y"]),  # type: ignore[index]
+            "width": float(surface["width"]),  # type: ignore[index]
+            "height": float(geometry["tab_bar"]["height"]),  # type: ignore[index]
+        }
+        live.screenshot(out / "baseline.png")
+        time.sleep(0.2)
+        live.screenshot(out / "baseline-2.png")
+        baseline = read_rgba_png(out / "baseline.png")
+        baseline_2 = read_rgba_png(out / "baseline-2.png")
+        if rgba_difference_count(baseline, baseline_2) != 0:
+            raise SystemExit("bell-flash smoke: the idle frame is not steady; cannot measure a flash")
+
+        bell_command = (
+            "[Console]::Write([char]7)" if platform.system() == "Windows" else "printf '\\a'"
+        )
+        live.ctl("send_text", params={"pane": ringing, "text": bell_command})
+        live.ctl("send_keys", params={"pane": ringing, "keys": ["enter"]})
+        # The screenshot is fulfilled by the next presented frame, which the
+        # bell's redraw pacing keeps coming at ~30 fps for 300 ms.
+        time.sleep(0.05)
+        live.screenshot(out / "flash.png")
+        flash = read_rgba_png(out / "flash.png")
+        time.sleep(0.8)
+        live.screenshot(out / "after.png")
+        after = read_rgba_png(out / "after.png")
+
+        before_ringing = region_mean_lightness(baseline, rects[ringing])
+        during_ringing = region_mean_lightness(flash, rects[ringing])
+        after_ringing = region_mean_lightness(after, rects[ringing])
+        before_quiet = region_mean_lightness(baseline, rects[quiet])
+        during_quiet = region_mean_lightness(flash, rects[quiet])
+        analysis = {
+            "ringing_pane": ringing,
+            "quiet_pane": quiet,
+            "ringing_lightness": [before_ringing, during_ringing, after_ringing],
+            "quiet_lightness": [before_quiet, during_quiet],
+            "quiet_changed_pixels": rgba_difference_count(baseline, flash, rect=rects[quiet]),
+            # The tab title follows the focused pane's title, which the bell
+            # command itself changes (`~` -> `printf`), so the bar is judged by
+            # mean lightness: a re-lettered title moves it by a hundredth of an
+            # L*, a whole-window wash by tens.
+            "tab_bar_lightness": [
+                region_mean_lightness(baseline, tab_bar, inset=0.0),
+                region_mean_lightness(flash, tab_bar, inset=0.0),
+            ],
+        }
+        (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+        lift = during_ringing - before_ringing
+        if lift < 3.0:
+            raise SystemExit(
+                f"bell-flash smoke: the ringing pane did not visibly flash (+{lift:.2f} L*): {analysis}"
+            )
+        if analysis["quiet_changed_pixels"] != 0:
+            raise SystemExit(
+                f"bell-flash smoke: the sibling pane changed during the flash: {analysis}"
+            )
+        tab_before, tab_during = analysis["tab_bar_lightness"]  # type: ignore[misc]
+        if abs(float(tab_during) - float(tab_before)) > 0.5:
+            raise SystemExit(f"bell-flash smoke: the tab bar washed during the flash: {analysis}")
+        # The prompt line in the ringing pane advanced by the command itself,
+        # so compare lightness rather than bytes for the settled frame.
+        if abs(after_ringing - before_ringing) > 0.5:
+            raise SystemExit(
+                f"bell-flash smoke: the flash did not fade back to the baseline: {analysis}"
+            )
+    return out
+
+
+def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
+    """Convert physical diagnostics to logical width and a 100-cell baseline."""
+    scale = float(geometry["scale_factor"])
+    cell_w = float(geometry["cell"]["width"])
+    if not math.isfinite(scale) or scale <= 0 or not math.isfinite(cell_w) or cell_w <= 0:
+        raise ValueError("invalid startup scale or cell width")
+    return float(geometry["surface"]["width"]) / scale, int(800.0 * scale / cell_w)
+
+
+def run_default_window_size(kettle: str, root: Path) -> Path:
+    """Check monitor-fitted defaults and explicit sizing in logical pixels."""
+
+    out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    base = [
+        "agent-server = full",
+        "tab-bar = always",
+        "status-bar = off",
+        "restore-session = false",
+        "update-check = false",
+        "record = off",
+        "font-size = 14",
+        "window-padding-x = 8",
+        "window-padding-y = 8",
+    ]
+
+    def launch(label: str, extra: List[str]) -> Dict[str, object]:
+        cfg = out / f"config-{label}"
+        cfg.write_text("\n".join(base + extra) + "\n")
+        with LiveKettle(kettle, cfg, out / f"kettle-{label}.log") as live:
+            panes = live.json_ctl("list_panes").get("panes", [])
+            focused = next(p for p in panes if p.get("focused"))
+            geometry = live.json_ctl("ui_geometry")
+            (out / f"{label}.geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
+            live.screenshot(out / f"{label}.png")
+            return {
+                "cols": int(focused["cols"]),  # type: ignore[index]
+                "rows": int(focused["rows"]),  # type: ignore[index]
+                "surface": geometry["surface"],
+                "cell": geometry["cell"],
+                "padding": geometry["padding"],
+                "scale_factor": geometry["scale_factor"],
+                "monitor": geometry["monitor"],
+            }
+
+    default = launch("default", [])
+    monitor = default["monitor"]
+    large_monitor = monitor and float(monitor["width"]) >= 1366 and float(monitor["height"]) >= 768
+    if large_monitor and (default["cols"] < 144 or default["rows"] < 33):
+        raise SystemExit(
+            "default-window-size smoke: a fresh window must open with at least 144x33 cells on a "
+            f"monitor >= 1366x768 logical px (got {default['cols']}x{default['rows']})"
+        )
+    surface_w, _ = startup_geometry_metrics(default)
+    if surface_w > 1296.0 + 1.0:
+        raise SystemExit(
+            f"default-window-size smoke: the default surface exceeds the 1296 px target ({surface_w})"
+        )
+
+    explicit = launch("explicit", ["window-width = 100", "window-height = 30"])
+    cell_w = float(explicit["cell"]["width"])  # type: ignore[index]
+    _, expected_cols = startup_geometry_metrics(explicit)
+    if abs(explicit["cols"] - expected_cols) > 1:  # type: ignore[operator]
+        raise SystemExit(
+            "default-window-size smoke: window-width = 100 must follow the 8 px startup baseline "
+            f"(expected about {expected_cols} columns at cell {cell_w:.2f}, got {explicit['cols']})"
+        )
+    (out / "analysis.json").write_text(
+        json.dumps({"default": default, "explicit": explicit, "expected_explicit_cols": expected_cols}, indent=2)
         + "\n"
     )
     return out
@@ -17027,6 +17767,146 @@ def run_zoom_keybind(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_alt_arrow_zoom(kettle: str, root: Path) -> Path:
+    """Prove the adaptive Alt+Arrow routing through the real keybind resolver.
+
+    `dispatch_keybind` shares the App's routing decision with the keyboard
+    path: a default `Alt+Arrow` focus chord is dispatched only when a visible
+    pane lies in that direction, and is reported as `terminal_fallthrough`
+    otherwise. The control route never writes PTY bytes, so this checks the
+    decision, not the encoded escape (see the manual `cat -v` check in
+    docs/TESTING.md for that half).
+    """
+
+    out = root / f"alt-arrow-zoom-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "font-size = 13",
+                "background = #101010",
+                "foreground = #f4f4f4",
+                "window-width = 100",
+                "window-height = 28",
+            ]
+        )
+        + "\n"
+    )
+
+    def focused_pane(live: LiveKettle) -> int:
+        panes = live.json_ctl("list_panes").get("panes", [])
+        focused = [int(p["id"]) for p in panes if p.get("focused")]  # type: ignore[index]
+        if len(focused) != 1:
+            raise SystemExit(f"alt-arrow-zoom smoke: expected one focused pane: {panes}")
+        return focused[0]
+
+    def dispatch(live: LiveKettle, label: str, key: str) -> Dict[str, object]:
+        result = live.json_ctl("dispatch_keybind", {"logical": key, "mods": "alt"})
+        (out / f"{label}.dispatch.json").write_text(json.dumps(result, indent=2) + "\n")
+        return result
+
+    def expect_fallthrough(result: Dict[str, object], label: str) -> None:
+        if (
+            result.get("dispatched") is not False
+            or result.get("terminal_fallthrough") is not True
+            or result.get("modal_blocked") is not False
+        ):
+            raise SystemExit(
+                f"alt-arrow-zoom smoke: {label} must fall through to the terminal: {result}"
+            )
+
+    def expect_dispatched(result: Dict[str, object], label: str, action: str) -> None:
+        if (
+            result.get("dispatched") is not True
+            or result.get("terminal_fallthrough") is not False
+            or result.get("action") != action
+        ):
+            raise SystemExit(
+                f"alt-arrow-zoom smoke: {label} must dispatch {action}: {result}"
+            )
+
+    analysis: Dict[str, object] = {"steps": []}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        if platform.system() == "Darwin":
+            # macOS leaves Option+Arrow to the terminal outright; the adaptive
+            # rule is a Linux/Windows policy. Prove the resolver has nothing
+            # bound and stop.
+            result = dispatch(live, "macos-unbound", "left")
+            if result.get("dispatched") is not False or result.get("action"):
+                raise SystemExit(
+                    f"alt-arrow-zoom smoke: Option+Left must stay unbound on macOS: {result}"
+                )
+            analysis["steps"].append({"label": "macos-unbound", "dispatch": result})
+            (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+            return out
+
+        first = focused_pane(live)
+        for key in ("left", "right", "up", "down"):
+            result = dispatch(live, f"single-pane-{key}", key)
+            expect_fallthrough(result, f"single pane Alt+{key}")
+            analysis["steps"].append({"label": f"single-pane-{key}", "dispatch": result})
+
+        live.json_ctl("perform_action", {"action": "split_right"})
+        for _ in range(50):
+            geometry = live.json_ctl("ui_geometry")
+            if len(geometry.get("pane_titlebars", [])) == 2:  # type: ignore[arg-type]
+                break
+            time.sleep(0.1)
+        else:
+            raise SystemExit("alt-arrow-zoom smoke: split did not produce two panes")
+        second = focused_pane(live)
+        if second == first:
+            raise SystemExit("alt-arrow-zoom smoke: split_right did not focus the new pane")
+
+        result = dispatch(live, "split-left", "left")
+        expect_dispatched(result, "unzoomed Alt+Left", "FocusLeft")
+        if focused_pane(live) != first:
+            raise SystemExit("alt-arrow-zoom smoke: Alt+Left did not focus the left pane")
+        analysis["steps"].append({"label": "split-left", "dispatch": result})
+
+        result = dispatch(live, "split-left-edge", "left")
+        expect_fallthrough(result, "outer-edge Alt+Left")
+        if focused_pane(live) != first:
+            raise SystemExit("alt-arrow-zoom smoke: an outer-edge chord moved focus")
+        analysis["steps"].append({"label": "split-left-edge", "dispatch": result})
+
+        for zoom_action in ("toggle_zoom", "scaled_zoom"):
+            live.json_ctl("perform_action", {"action": zoom_action})
+            time.sleep(0.15)
+            zoomed_focus = focused_pane(live)
+            for key in ("left", "right", "up", "down"):
+                result = dispatch(live, f"{zoom_action}-{key}", key)
+                expect_fallthrough(result, f"{zoom_action} Alt+{key}")
+                if focused_pane(live) != zoomed_focus:
+                    raise SystemExit(
+                        f"alt-arrow-zoom smoke: {zoom_action} Alt+{key} changed focus"
+                    )
+                analysis["steps"].append(
+                    {"label": f"{zoom_action}-{key}", "dispatch": result}
+                )
+            live.json_ctl("perform_action", {"action": zoom_action})
+            time.sleep(0.15)
+            result = dispatch(live, f"after-{zoom_action}-right", "right")
+            expect_dispatched(result, f"after {zoom_action} Alt+Right", "FocusRight")
+            if focused_pane(live) != second:
+                raise SystemExit(
+                    f"alt-arrow-zoom smoke: leaving {zoom_action} did not restore focus moves"
+                )
+            analysis["steps"].append({"label": f"after-{zoom_action}-right", "dispatch": result})
+            result = dispatch(live, f"after-{zoom_action}-left", "left")
+            expect_dispatched(result, f"after {zoom_action} Alt+Left", "FocusLeft")
+            analysis["steps"].append({"label": f"after-{zoom_action}-left", "dispatch": result})
+
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 DOCK_MENU_ROWS = ("New Window", "New Tab")
 
 
@@ -18016,6 +18896,10 @@ def main() -> int:
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
+            "alt-arrow-zoom",
+            "search-selection",
+            "bell-flash",
+            "default-window-size",
             "dock-menu",
             "underline",
             "agent-tui",
@@ -18149,6 +19033,9 @@ def main() -> int:
     if args.case in ("line-edit-chords", "all"):
         out = run_line_edit_chords(args.kettle, root)
         print(f"line-edit-chords smoke: OK artifacts={out}")
+    if args.case in ("alt-arrow-zoom", "all"):
+        out = run_alt_arrow_zoom(args.kettle, root)
+        print(f"alt-arrow-zoom smoke: OK artifacts={out}")
     # macOS-only and driven through the real Dock via accessibility, so it is
     # deliberately out of "all".
     if args.case == "dock-menu":
@@ -18170,6 +19057,15 @@ def main() -> int:
     if args.case in ("search-history", "all"):
         out = run_search_history(args.kettle, root)
         print(f"search-history smoke: OK artifacts={out}")
+    if args.case in ("search-selection", "all"):
+        out = run_search_selection(args.kettle, root)
+        print(f"search-selection smoke: OK artifacts={out}")
+    if args.case in ("bell-flash", "all"):
+        out = run_bell_flash(args.kettle, root)
+        print(f"bell-flash smoke: OK artifacts={out}")
+    if args.case in ("default-window-size", "all"):
+        out = run_default_window_size(args.kettle, root)
+        print(f"default-window-size smoke: OK artifacts={out}")
     if args.case == "image-paste-receipt":
         out = run_image_paste_receipt(args.kettle, root)
         print(f"image-paste-receipt smoke: OK artifacts={out}")

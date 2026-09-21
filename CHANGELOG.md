@@ -6,6 +6,74 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- **The grid stays mouse-interactive while the search bar is open.** The bar
+  reserves a lane below the grid and never covers a cell, yet every mouse
+  event was swallowed while it was open, so you could not select the text you
+  were looking at. As in Terminator, drag selection, word and line selection,
+  links, the scrollbar, and mouse reporting now work under the bar, and
+  keyboard focus stays in the query. A press inside the lane still drives the
+  bar's controls. `Ctrl+Shift+C` copies the query's own selection if it has
+  one, otherwise the grid selection. Right-click opens the menu without closing
+  the bar. Clicking another split moves the bar to that pane and searches it
+  with the same query and toggles; the pane it left gets its remembered query
+  and, with no result focused, its pre-search viewport back, exactly as closing
+  would have given it.
+
+### Changed
+
+- **The visual bell is far dimmer, perceptually calibrated, and flashes only
+  the pane that rang.** `bell-flash-intensity` was documented as the wash's
+  peak alpha, but the renderer blends in linear light, so the `0.10` default
+  lifted a dark background by about 22 L\* of lightness (TokyoNight's
+  `#1a1b26` became `#464a5d`) while barely touching a light theme. The key now
+  means a step of CIE L\* lightness as a fraction of the 0–100 scale, converted
+  per theme into the linear alpha that produces exactly that step: every theme
+  moves by the same visible amount, and the fade is perceptually linear. The
+  default is `0.03` (3 L\*), the smallest step that still reads as a cue in a
+  lit room, chosen after a brightness review; `0` still disables the wash and
+  `1` still paints the foreground solid, but any custom value in between is
+  now much dimmer than before and may need raising (`0.06`–`0.10` is a strong
+  flash). The wash also covers only the pane that rang instead of the whole
+  window, so a bell in a split says which pane it came from, and the decay is
+  an ease-out over the same 300 ms rather than a linear ramp.
+
+- **A fresh window opens wide enough for agent TUIs.** With no `window-width`
+  or `window-height` set, Kettle used the windowing library's ~800×600 px
+  default: 93 columns at the default font, below the 110 columns Claude Code's
+  fullscreen diff panel needs to toggle and the 144 it needs to auto-open, so
+  the panel never appeared unless the window was resized. A fresh window now
+  aims for a `160x45` cell baseline (1296×760 logical px with the default
+  chrome, about 152×41 cells at the 14 px font) fitted to 90 % × 85 % of the
+  monitor, which is about 144 columns on a 1366 px wide laptop and never
+  larger than the screen. The rule was chosen over a monitor fraction after a
+  review: a fraction undershoots small laptops and turns an ultrawide into a
+  285-column canvas. Explicit sizes, `window-state = maximise|fullscreen`, and
+  saved session geometry keep precedence; a half-specified size now fills its
+  other axis from the same `160x45` baseline instead of the old `100x36`. The
+  previous size is `window-width = 98` / `window-height = 35`, or set
+  `restore-session = true` to keep whatever you last had.
+
+### Fixed
+
+- **`Alt+Arrow` reaches the program while a pane is zoomed.** The Linux focus
+  chord is edge-aware, but a zoom (`Ctrl+Shift+X`, or the `scaled_zoom`
+  action) that hid sibling panes kept the chord with Kettle as a deliberate
+  no-op, so the press
+  and its release were swallowed and Codex's `Alt+Left`/`Alt+Right` word motion
+  went dead until the zoom was released. Directional focus now only counts
+  visible panes: a zoomed tab passes every `Alt+Arrow` through exactly like a
+  one-pane tab, and leaving the zoom restores the focus move. The
+  `dispatch_keybind` control route shares the same decision and reports
+  `terminal_fallthrough: true` instead of dispatching (it still never writes
+  PTY bytes).
+
+- **`window-width` / `window-height` mean the same columns on HiDPI.** The
+  cell-to-pixel conversion produced physical pixels, so a 2× display opened a
+  configured `window-width = 100` at about 47 real columns. Startup sizes are
+  logical pixels now.
+
 ## [4.4.0] — 2026-09-10
 
 ### Added

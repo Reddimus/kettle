@@ -7753,7 +7753,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_update_rolls_back_unsafe_changelog_destinations_without_escape() {
-        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::{DirBuilderExt as _, symlink};
 
         let root = test_tempdir();
         let outside = test_tempdir();
@@ -7761,7 +7761,11 @@ mod tests {
         fs::create_dir_all(prefix.join("bin")).unwrap();
         fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
         seed_linux_install_provenance(&prefix);
-        fs::create_dir_all(prefix.join("share/doc/kettle/docs")).unwrap();
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(prefix.join("share/doc/kettle/docs"))
+            .unwrap();
         symlink(
             outside.path(),
             prefix.join("share/doc/kettle/docs/changelog"),

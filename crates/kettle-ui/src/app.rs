@@ -3434,32 +3434,39 @@ const STARTUP_GEOMETRY_CELL_W: f64 = 8.0;
 const STARTUP_GEOMETRY_CELL_H: f64 = 16.0;
 const STARTUP_GEOMETRY_TAB_BAR_H: f64 = 24.0;
 const STARTUP_GEOMETRY_STATUS_BAR_H: f64 = 22.0;
-const STARTUP_GEOMETRY_FALLBACK_COLS: u32 = 100;
-const STARTUP_GEOMETRY_FALLBACK_ROWS: u32 = 36;
+/// The grid a fresh window aims for when the config sets no size, and the
+/// value a half-specified `window-width`/`window-height` fills its other axis
+/// from. Sized for agent TUIs: Claude Code's fullscreen diff panel toggles at
+/// 110 columns and auto-opens at 144, and Codex CLI lays out two columns
+/// above ~120, so the classic 80x24 (or winit's ~800x600, 93 columns at the
+/// default font) left every fresh window too narrow for the tools Kettle
+/// targets. 160x45 baseline cells are 1296x760 logical px with the default
+/// chrome: about 152x41 real cells at the 14 px font on a 1080p monitor.
+pub(crate) const STARTUP_DEFAULT_COLS: u32 = 160;
+pub(crate) const STARTUP_DEFAULT_ROWS: u32 = 45;
+/// The default window never covers more of the monitor than this: a fixed
+/// target rather than a monitor fraction keeps a 3440-wide ultrawide from
+/// opening a 285-column canvas, and the fit keeps a 1366x768 laptop honest
+/// (its 90 % is 1229 px, about 144 columns at the default font). There is no
+/// floor on purpose: a monitor smaller than the target wins.
+const STARTUP_MONITOR_WIDTH_FRACTION: f64 = 0.90;
+const STARTUP_MONITOR_HEIGHT_FRACTION: f64 = 0.85;
 
-/// Convert optional cell-based startup geometry into an initial inner-window
-/// size. This runs before renderer/font metrics exist, so it intentionally uses
-/// the same conservative 8x16 baseline as `geometry-hinting`; the first normal
-/// layout pass reconciles exact metrics after the renderer starts.
-fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
-    if cfg.window_width.is_none() && cfg.window_height.is_none() {
-        return None;
-    }
-
-    let cols = cfg
-        .window_width
-        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_COLS)
-        .clamp(
-            kettle_config::WINDOW_WIDTH_MIN,
-            kettle_config::WINDOW_WIDTH_MAX,
-        );
-    let rows = cfg
-        .window_height
-        .unwrap_or(STARTUP_GEOMETRY_FALLBACK_ROWS)
-        .clamp(
-            kettle_config::WINDOW_HEIGHT_MIN,
-            kettle_config::WINDOW_HEIGHT_MAX,
-        );
+/// Convert a startup grid into an inner-window size in **logical** pixels.
+/// This runs before renderer/font metrics exist, so it intentionally uses the
+/// same conservative 8x16 baseline as `geometry-hinting`; the first normal
+/// layout pass reconciles exact metrics after the renderer starts. Logical
+/// rather than physical so a HiDPI display gets the same grid as a 1x one:
+/// the old physical conversion handed a 2x display half the requested columns.
+fn startup_cells_to_logical_px(cfg: &Config, cols: u32, rows: u32) -> (f64, f64) {
+    let cols = cols.clamp(
+        kettle_config::WINDOW_WIDTH_MIN,
+        kettle_config::WINDOW_WIDTH_MAX,
+    );
+    let rows = rows.clamp(
+        kettle_config::WINDOW_HEIGHT_MIN,
+        kettle_config::WINDOW_HEIGHT_MAX,
+    );
 
     let mut width = f64::from(cols) * STARTUP_GEOMETRY_CELL_W + f64::from(cfg.padding_x) * 2.0;
     let mut height = f64::from(rows) * STARTUP_GEOMETRY_CELL_H + f64::from(cfg.padding_y) * 2.0;
@@ -3477,7 +3484,95 @@ fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
         height += STARTUP_GEOMETRY_STATUS_BAR_H;
     }
 
-    Some((width.ceil().max(1.0) as u32, height.ceil().max(1.0) as u32))
+    (width.ceil().max(1.0), height.ceil().max(1.0))
+}
+
+/// The inner size an explicit `window-width` / `window-height` asks for, in
+/// logical pixels, or `None` when the config sets neither. A missing axis
+/// comes from the default grid so `window-width = 200` alone still opens
+/// tall enough for an agent TUI. Explicit values are honoured as typed: the
+/// monitor fit below applies to the default only.
+fn startup_inner_size_px(cfg: &Config) -> Option<(u32, u32)> {
+    if cfg.window_width.is_none() && cfg.window_height.is_none() {
+        return None;
+    }
+    let (width, height) = startup_cells_to_logical_px(
+        cfg,
+        cfg.window_width.unwrap_or(STARTUP_DEFAULT_COLS),
+        cfg.window_height.unwrap_or(STARTUP_DEFAULT_ROWS),
+    );
+    Some((width as u32, height as u32))
+}
+
+/// The fresh-window default when the config sets no size: the default grid
+/// with this config's chrome, fitted to the monitor it will most likely open
+/// on. `monitor_logical` is the monitor's logical size; `None` (no monitor
+/// enumerable yet) keeps the bare target.
+fn default_startup_inner_size(cfg: &Config, monitor_logical: Option<(f64, f64)>) -> (f64, f64) {
+    let (width, height) =
+        startup_cells_to_logical_px(cfg, STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS);
+    let Some((monitor_w, monitor_h)) = monitor_logical else {
+        return (width, height);
+    };
+    let max_w = (monitor_w * STARTUP_MONITOR_WIDTH_FRACTION)
+        .floor()
+        .max(1.0);
+    let max_h = (monitor_h * STARTUP_MONITOR_HEIGHT_FRACTION)
+        .floor()
+        .max(1.0);
+    (width.min(max_w), height.min(max_h))
+}
+
+/// The one startup size both window constructors use, in logical pixels:
+/// the configured grid when the user set one, else the monitor-fitted default.
+fn startup_inner_size(cfg: &Config, monitor: Option<StartupMonitor>) -> (f64, f64) {
+    match startup_inner_size_px(cfg) {
+        Some((w, h)) => (f64::from(w), f64::from(h)),
+        None => default_startup_inner_size(cfg, monitor.map(|m| m.logical)),
+    }
+}
+
+/// What the startup sizing needs to know about the monitor a fresh window
+/// will most likely land on.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StartupMonitor {
+    /// Logical size (physical pixels divided by the scale factor).
+    logical: (f64, f64),
+    scale: f64,
+}
+
+impl StartupMonitor {
+    fn from_physical(width: u32, height: u32, scale: f64) -> Self {
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+        Self {
+            logical: (f64::from(width) / scale, f64::from(height) / scale),
+            scale,
+        }
+    }
+}
+
+/// The monitor to fit a fresh window to: the primary monitor where the
+/// platform has one, else the largest by area (Wayland has no primary; a
+/// mixed multi-monitor setup then gets a deterministic answer instead of
+/// whichever output the compositor listed first).
+fn startup_monitor(event_loop: &ActiveEventLoop) -> Option<StartupMonitor> {
+    let describe = |m: winit::monitor::MonitorHandle| {
+        let size = m.size();
+        StartupMonitor::from_physical(size.width, size.height, m.scale_factor())
+    };
+    event_loop.primary_monitor().map(describe).or_else(|| {
+        event_loop
+            .available_monitors()
+            .map(describe)
+            .max_by(|a, b| {
+                let area = |m: &StartupMonitor| m.logical.0 * m.logical.1;
+                area(a).total_cmp(&area(b))
+            })
+    })
 }
 
 fn cursor_in_tab_bar_band(y: f32, bar_h: f32, surface_h: f32, pos: TabBarPos) -> bool {
@@ -3633,6 +3728,10 @@ fn selection_leave_edge(selection_dragged: bool, x: f32, y: f32, width: f32, hei
 }
 
 fn arm_selection_gesture(ws: &mut WindowState, pane_id: u64, button: u8) {
+    // A fresh grid gesture owns Copy, including Shift+right-click extension.
+    if ws.search.open {
+        ws.search.editor.clear_selection();
+    }
     ws.selecting = true;
     ws.selecting_pane = Some(pane_id);
     ws.selection_autoscroll_edge = 0;
@@ -5925,6 +6024,25 @@ pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<Str
 /// `resize-overlay-duration` default).
 pub(crate) const RESIZE_OVERLAY_DURATION: std::time::Duration =
     std::time::Duration::from_millis(750);
+/// How long a pane's visual-bell flash lasts from the frame it rang. One
+/// constant for the redraw pacing and the ramp, so the two cannot drift.
+pub(crate) const BELL_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The visual-bell flash's remaining strength `elapsed` after the bell: 1.0
+/// the frame it rang, 0.0 once `BELL_FLASH_DURATION` has passed. Instant on,
+/// then an ease-out (quadratic) decay: the peak is what the eye notices, so
+/// the wash leaves it quickly and spends the rest of the window in a soft
+/// tail rather than lingering near the peak the way a linear ramp does. The
+/// renderer scales the configured lightness step by this value, so the fade
+/// is perceptually linear as well.
+pub(crate) fn bell_flash_ramp(elapsed: std::time::Duration) -> f32 {
+    let t = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+    if t >= 1.0 {
+        return 0.0;
+    }
+    let remaining = 1.0 - t.max(0.0);
+    remaining * remaining
+}
 const INPUT_REJECTION_NOTICE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 const MAX_PENDING_LUA_COMMANDS: usize = 1024;
 const MAX_PENDING_LUA_SEND_BYTES: usize = 8 << 20;
@@ -8008,7 +8126,8 @@ impl App {
                 .or_else(|| rect_contains(geometry.rect, x, y).then_some(CursorIcon::Default))
         });
         let media_receipt_hover = media_receipt_action_hovered.then_some(CursorIcon::Pointer);
-        let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.any_modal_open(ws));
+        let chrome =
+            chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));
         // v2.40.0 (tear-off UX): a live tab-drag owns the cursor, FIRST in
         // the chain — mid-drag the pointer can transiently cross another
         // tab's ✕ hit-zone or a split seam, and without the priority the
@@ -9976,6 +10095,11 @@ impl App {
     }
 
     fn begin_or_extend_mouse_selection(&mut self, ws: &mut WindowState, area: Rect) {
+        // The grid press is the newer gesture: drop any editor selection so
+        // the search bar's Copy shortcut reaches the grid selection instead.
+        if ws.search.open {
+            ws.search.editor.clear_selection();
+        }
         if ws.mods.shift_key() && !ws.mods.alt_key() && self.extend_selection_to_cursor(ws, area, 0)
         {
             return;
@@ -10541,7 +10665,13 @@ impl App {
         }
         if bell {
             if self.cfg.bell.visual() {
-                ws.last_bell = Some(std::time::Instant::now());
+                // Only the pane that rang flashes; a sibling split's bell
+                // then tells you which one it was. Panes outside the current
+                // layout keep the tab dot and titlebar glyph as their cue.
+                let now = std::time::Instant::now();
+                for id in &bell_panes {
+                    ws.bell_flashes.insert(*id, now);
+                }
             }
             if self.cfg.bell.attention()
                 && !ws.window_focused
@@ -10554,8 +10684,8 @@ impl App {
         // Latch any per-pane bells onto their tab's
         // activity flag so the tab-bar dot survives even on tabs the
         // user isn't currently looking at. Active-tab bells were
-        // already handled visually (`last_bell` above triggers the
-        // visual-bell flash); the latching helper skips the active
+        // already handled visually (`bell_flashes` above drives the
+        // per-pane flash); the latching helper skips the active
         // tab so we don't double-signal.
         //
         // Terminator plugin parity:
@@ -12042,6 +12172,14 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> bool {
+        if search_bar_blocks_mouse_report(
+            self.cursor_in_search_bar(ws),
+            pressed,
+            motion,
+            ws.mouse_btn.is_some(),
+        ) {
+            return true;
+        }
         // Shift held = "bypass mouse tracking, let kettle handle this
         // locally" — the xterm convention every modern terminal honors.
         // Without it, running htop/vim/tmux with mouse-mode locks out
@@ -12406,13 +12544,6 @@ impl App {
         } else {
             ws.blink_on
         };
-        let bell = ws
-            .last_bell
-            .map(|t| {
-                let e = t.elapsed().as_secs_f32();
-                if e >= 0.30 { 0.0 } else { 1.0 - e / 0.30 }
-            })
-            .unwrap_or(0.0);
         // v2.20.0: the transient resize chip (about_to_wait drives the
         // expiry repaint and clears the state).
         let resize_overlay = ws
@@ -12502,7 +12633,6 @@ impl App {
                 window_focused,
                 scrollbar_active,
                 cursor_visible,
-                bell,
                 resize_overlay,
                 context_menu,
                 confirm_dialog: confirm_dialog_early,
@@ -12617,7 +12747,6 @@ impl App {
             window_focused,
             scrollbar_active,
             cursor_visible,
-            bell,
             resize_overlay,
             context_menu,
             confirm_dialog,
@@ -13027,6 +13156,9 @@ impl App {
                         // `false`, so the titlebar bell indicator could never
                         // appear no matter how the setting was configured.
                         p.bell,
+                        ws.bell_flashes
+                            .get(id)
+                            .map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),
                         p.group_name.clone(),
                     ));
                 }
@@ -13043,7 +13175,10 @@ impl App {
             .iter()
             .zip(snaps.iter())
             .map(
-                |((id, r, f, imgs, prefix, title, path, cols, rows, bell, group_name), snap)| {
+                |(
+                    (id, r, f, imgs, prefix, title, path, cols, rows, bell, bell_flash, group_name),
+                    snap,
+                )| {
                     PaneView {
                         id: *id,
                         rect: *r,
@@ -13056,6 +13191,7 @@ impl App {
                         size_cols: *cols,
                         size_rows: *rows,
                         bell: *bell,
+                        bell_flash: *bell_flash,
                         group_name: group_name.as_deref(),
                     }
                 },
@@ -13281,6 +13417,8 @@ impl App {
             // TermMode::VI while the UI routes keys to a different pane.
             self.exit_vi_mode(ws);
             self.reset_blink_phase(ws);
+            // An open search bar follows focus (see `retarget_search_to_focus`).
+            self.retarget_search_to_focus(ws);
             // Repaint immediately so the focused-pane
             // border and the cursor's solid/hollow state track the new pane.
             // Without this, a focus-follows-mouse (`focus = sloppy`) change
@@ -13408,7 +13546,23 @@ impl App {
         let Some(pane_id) = ws.mux.active_focus() else {
             return;
         };
-        let direction = if self.cfg.invert_search {
+        self.attach_search_to_pane(ws, pane_id, None);
+    }
+
+    /// Build the bar's state for `pane_id`. `carried` is the editor text and
+    /// toggles an already-open bar brings along when it follows focus to
+    /// another pane; a fresh open starts from the pane's remembered query and
+    /// the configured defaults.
+    fn attach_search_to_pane(
+        &mut self,
+        ws: &mut WindowState,
+        pane_id: u64,
+        carried: Option<SearchCarryOver>,
+    ) {
+        let invert = carried
+            .as_ref()
+            .map_or(self.cfg.invert_search, |c| c.invert);
+        let direction = if invert {
             kettle_core::SearchDirection::Reverse
         } else {
             kettle_core::SearchDirection::Forward
@@ -13426,24 +13580,19 @@ impl App {
             })
             .unwrap_or(0);
         let remembered = ws.search_queries.get(&pane_id).cloned().unwrap_or_default();
-        let mut search = crate::search_input::SearchState {
-            open: true,
-            target_pane: Some(pane_id),
-            editor: crate::search_input::SearchEditor::from_text(
-                remembered,
-                kettle_core::MAX_SEARCH_QUERY_BYTES,
-            ),
+        let defaults = SearchCarryOver {
+            query: remembered,
             wrap: self.cfg.search_wrap,
             case_mode: self.cfg.search_case_sensitive,
             invert: self.cfg.invert_search,
-            anchor: None,
-            pre_open_display_offset: Some(display_offset),
-            ..crate::search_input::SearchState::default()
+            focused_control: kettle_render::SearchControl::Editor,
         };
-        if !search.query().is_empty() {
-            search.note_edit(std::time::Instant::now());
-        }
-        ws.search = search;
+        ws.search = fresh_search_state(
+            pane_id,
+            carried.unwrap_or(defaults),
+            display_offset,
+            std::time::Instant::now(),
+        );
         self.resize_all(ws);
         // Reserving the responsive Search lane can shrink the terminal by several rows. In a
         // scrolled-back grid Alacritty increases display_offset to preserve the viewed content,
@@ -13460,22 +13609,73 @@ impl App {
         });
     }
 
-    fn close_search(&mut self, ws: &mut WindowState) {
-        use kettle_core::Dimensions as _;
+    /// Move the open bar to the focused pane. The bar is window-level, and
+    /// the grid stays clickable while it is open, so a click that focuses
+    /// another pane must also make typing search that pane: the query and
+    /// toggles come along, the old pane gets its remembered-query slot and
+    /// (with no focused result) its pre-search viewport back, exactly as
+    /// closing would have given it, and the new pane is scanned afresh.
+    fn retarget_search_to_focus(&mut self, ws: &mut WindowState) {
+        if !ws.search.open {
+            return;
+        }
+        let Some(pane_id) = ws.mux.active_focus() else {
+            return;
+        };
+        if search_retarget(ws.search.target_pane, Some(pane_id)).is_none() {
+            return;
+        }
+        let carried = SearchCarryOver {
+            query: ws.search.query().to_string(),
+            wrap: ws.search.wrap,
+            case_mode: ws.search.case_mode,
+            invert: ws.search.invert,
+            focused_control: ws.search.focused_control,
+        };
+        self.remember_search_query(ws);
+        self.restore_search_viewport(ws);
+        self.attach_search_to_pane(ws, pane_id, Some(carried));
+    }
 
+    /// Park the bar's query in its target pane's remembered-query slot.
+    fn remember_search_query(&mut self, ws: &mut WindowState) {
+        if let Some(pane_id) = ws.search.target_pane
+            && ws.mux.panes.contains_key(&pane_id)
+        {
+            ws.search_queries
+                .insert(pane_id, ws.search.query().to_string());
+        }
+    }
+
+    /// With no focused result, put the target pane's viewport back where it
+    /// was before the bar opened. A focused result stays where it is: grid
+    /// growth already preserves the visible content, so no coordinate
+    /// arithmetic is needed and the pre-grow span is intentionally stale.
+    fn restore_search_viewport(&mut self, ws: &mut WindowState) {
+        if ws.search.focused.is_some() {
+            return;
+        }
+        let fallback_offset = ws.search.pre_open_display_offset;
+        if let Some(pane_id) = ws.search.target_pane
+            && let Some(pane) = ws.mux.panes.get(&pane_id)
+            && let Ok(mut term) = pane.term.term.lock()
+        {
+            let current = term.grid().display_offset();
+            let wanted = fallback_offset
+                .unwrap_or(current)
+                .min(term.grid().history_size());
+            if wanted != current {
+                term.scroll_display(kettle_core::Scroll::Delta(wanted as i32 - current as i32));
+            }
+        }
+    }
+
+    fn close_search(&mut self, ws: &mut WindowState) {
         if !ws.search.open {
             return;
         }
         ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
-        let target = ws.search.target_pane;
-        let focused = ws.search.focused;
-        let fallback_offset = ws.search.pre_open_display_offset;
-        let query = ws.search.query().to_string();
-        if let Some(pane_id) = target
-            && ws.mux.panes.contains_key(&pane_id)
-        {
-            ws.search_queries.insert(pane_id, query);
-        }
+        self.remember_search_query(ws);
         if matches!(
             ws.ime_preedit_owner.map(|session| session.owner),
             Some(crate::window_state::ImePreeditOwner::Search)
@@ -13491,26 +13691,11 @@ impl App {
         ws.search.visible.clear();
         ws.search.visible_scan = None;
         ws.search.visible_turn_pending = false;
+        // Dropping the lane grows the grid, and Alacritty adjusts
+        // display_offset to keep the viewed content, so the viewport is
+        // restored only after that resize has settled.
         self.resize_all(ws);
-
-        if let Some(pane_id) = target
-            && let Some(pane) = ws.mux.panes.get(&pane_id)
-            && let Ok(mut term) = pane.term.term.lock()
-        {
-            // Grid growth already preserves the visible content. A focused result therefore
-            // needs no coordinate arithmetic here: its pre-grow SearchSpan is intentionally
-            // stale after history rows rotate back onto the screen. With no result, restore the
-            // viewport from before Search opened.
-            if focused.is_none() {
-                let current = term.grid().display_offset();
-                let wanted = fallback_offset
-                    .unwrap_or(current)
-                    .min(term.grid().history_size());
-                if wanted != current {
-                    term.scroll_display(kettle_core::Scroll::Delta(wanted as i32 - current as i32));
-                }
-            }
-        }
+        self.restore_search_viewport(ws);
         self.reset_blink_phase(ws);
         // The remembered query now has a single pane-scoped owner. Drop the
         // closed editor, compiled DFA, coordinates, and cache immediately so a
@@ -13560,9 +13745,33 @@ impl App {
     /// so the two stay in lock-step — extracted to drive the
     /// cursor-icon override (the OS arrow, not the I-beam, belongs over
     /// modal chrome) and later extended for the right-click menu.
+    /// `true` while a modal owns the whole pointer surface. This is
+    /// `any_modal_open` minus the search bar: the bar reserves its own lane
+    /// below the grid and leaves the grid mouse-interactive, so it must not
+    /// swallow pointer events the way the palette, settings, hints, SSH
+    /// launcher, title editor, vi mode, or a confirm dialog do. Keyboard
+    /// routing, focus-follows-mouse, and file drops keep using
+    /// `any_modal_open`, because search does own the keyboard.
+    fn pointer_modal_open(&self, ws: &WindowState) -> bool {
+        self.non_search_modal_open(ws)
+    }
+
+    /// Whether the pointer is inside the open search bar's reserved lane.
+    fn cursor_in_search_bar(&self, ws: &WindowState) -> bool {
+        self.search_geometry(ws).is_some_and(|geometry| {
+            rect_contains(geometry.rect, ws.cursor.x as f32, ws.cursor.y as f32)
+        })
+    }
+
     fn any_modal_open(&self, ws: &WindowState) -> bool {
-        ws.search.open
-            || ws.palette_input.is_some()
+        ws.search.open || self.non_search_modal_open(ws)
+    }
+
+    /// Every modal except the search bar. The one list both
+    /// `any_modal_open` and `pointer_modal_open` derive from, so the two
+    /// cannot drift apart on anything but search.
+    fn non_search_modal_open(&self, ws: &WindowState) -> bool {
+        ws.palette_input.is_some()
             || ws.settings_nav.is_some()
             || ws.layout_picker_input.is_some()
             || ws.hint_state.is_some()
@@ -13948,7 +14157,7 @@ impl App {
     /// the surface (right-click near the bottom-right corner flips up-
     /// and-left rather than rendering off-screen).
     fn open_context_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
-        self.close_all_modals(ws);
+        self.close_modals_for_context_menu(ws);
         // Terminator parity, terminal_popup_menu.py "Open link" /
         // "Copy address": when the right-click landed on a detected
         // hyperlink, lead with the URL rows. The URL is captured NOW — fresh
@@ -14015,6 +14224,23 @@ impl App {
     /// on-screen, and install the `ContextMenuState`. Used by both the
     /// right-click menu and the new-tab `▾` dropdown so they render
     /// pixel-identically.
+    /// The popup menu over the grid leaves an open search bar in place, as
+    /// Terminator leaves its bar under the menu: the user right-clicks to copy
+    /// what they just selected under the query, not to abandon the query.
+    /// Search is the only modal that can be open together with the menu:
+    /// every other opener runs `close_all_modals`, which closes search, and
+    /// search's own opener closes everything else. Keys go to the menu while
+    /// it is up (its arm precedes search in the key handler) and return to the
+    /// editor when it closes. `show_context_menu` ends the pointer gestures a
+    /// modal must not leave armed.
+    fn close_modals_for_context_menu(&mut self, ws: &mut WindowState) {
+        if ws.search.open {
+            ws.context_menu = None;
+        } else {
+            self.close_all_modals(ws);
+        }
+    }
+
     fn show_context_menu(
         &mut self,
         ws: &mut WindowState,
@@ -18622,6 +18848,11 @@ impl App {
             serde_json::json!({
                 "window": target.seq,
                 "window_focused": target.window_focused,
+                "scale_factor": target.window.as_ref().map_or(1.0, |w| w.scale_factor()),
+                "monitor": target.window.as_ref().and_then(|w| w.current_monitor()).map(|m| {
+                    let size = m.size().to_logical::<f64>(m.scale_factor());
+                    serde_json::json!({"width": size.width, "height": size.height})
+                }),
                 "surface": {"width": surface.0, "height": surface.1},
                 "cell": cell,
                 // Which face serves codepoints Unicode renders as text, or
@@ -18770,10 +19001,37 @@ impl App {
         )
     }
 
+    /// The one routing decision shared by real keyboard input and the
+    /// `dispatch_keybind` control route: does this resolved chord belong to
+    /// the terminal instead of the matched action? Only the non-macOS default
+    /// `Alt+Arrow` focus chords are adaptive; they fall through when the mux
+    /// has no visible pane in that direction, which includes every zoomed
+    /// multi-pane tab because zoom collapses the layout to the focused pane.
+    fn adaptive_focus_chord_falls_through(
+        &self,
+        ws: &WindowState,
+        trigger: Trigger,
+        action: &Action,
+    ) -> bool {
+        adaptive_alt_focus_direction(trigger, action, !cfg!(target_os = "macos")).is_some_and(
+            |(dx, dy)| {
+                adaptive_alt_focus_falls_through(
+                    trigger,
+                    action,
+                    true,
+                    ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
+                )
+            },
+        )
+    }
+
     /// `dispatch_keybind`: diagnostic route for app-level keybind matching.
     /// Unlike `send_keys`, this does not write PTY bytes; it exercises the same
     /// resolver as the real window keyboard path and dispatches the matched app
-    /// action when no modal owns the keyboard.
+    /// action when no modal owns the keyboard. A chord the real keyboard path
+    /// would hand to the terminal (an adaptive `Alt+Arrow` with no visible
+    /// neighbour) is reported as `terminal_fallthrough` and not dispatched;
+    /// the PTY write itself stays exclusive to `send_keys`.
     fn ctl_dispatch_keybind(
         &mut self,
         ws: &mut WindowState,
@@ -18832,6 +19090,20 @@ impl App {
         };
         let trigger_label = trigger.label();
         let action_name = kettle_config::keybinds::action_label(&action);
+        if self.adaptive_focus_chord_falls_through(ws, trigger, &action) {
+            return Response::ok(
+                req.id,
+                serde_json::json!({
+                    "window": ws.seq,
+                    "dispatched": false,
+                    "modal_blocked": false,
+                    "terminal_fallthrough": true,
+                    "trigger": trigger_label,
+                    "action": action_name,
+                    "candidates": candidate_labels,
+                }),
+            );
+        }
         let font_size_before = ws.renderer.as_ref().map(|r| r.font_size());
         self.handle_action(ws, action, event_loop);
         let font_size_after = ws.renderer.as_ref().map(|r| r.font_size());
@@ -18844,6 +19116,7 @@ impl App {
                 "window": ws.seq,
                 "dispatched": true,
                 "modal_blocked": false,
+                "terminal_fallthrough": false,
                 "trigger": trigger_label,
                 "action": action_name,
                 "font_size_before": font_size_before,
@@ -19229,7 +19502,10 @@ impl App {
         // sources keeps scrolling even though the latest pointer coordinate is
         // back over the pane.
         ws.selection_autoscroll_edge = 0;
-        if self.search_mouse_drag(ws) {
+        if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+            == SearchPointerRoute::Bar
+        {
+            self.search_mouse_drag(ws);
             return;
         }
         self.promote_tab_drag_if_needed(ws);
@@ -19276,7 +19552,12 @@ impl App {
             ws.context_menu = None;
             return true;
         }
-        if ws.search.open {
+        if search_pointer_route(
+            ws.search.open,
+            Some(self.cursor_in_search_bar(ws)),
+            ws.search.dragging_editor,
+        ) == SearchPointerRoute::Bar
+        {
             if bcode == 0 {
                 self.search_mouse_press(ws);
             }
@@ -19288,7 +19569,7 @@ impl App {
         {
             return true;
         }
-        if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+        if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
             return true;
         }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
@@ -19394,10 +19675,11 @@ impl App {
     }
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
-        if ws.search.open {
-            if bcode == 0 {
-                ws.search.dragging_editor = false;
-            }
+        if bcode == 0
+            && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                == SearchPointerRoute::Bar
+        {
+            ws.search.dragging_editor = false;
             return true;
         }
         let mut handled = false;
@@ -20805,6 +21087,54 @@ enum TextModal {
     Search,
 }
 
+/// Editor text and toggles that an open search bar brings along when it
+/// follows focus to another pane (`App::retarget_search_to_focus`). A fresh
+/// open fills it from the pane's remembered query and the configured defaults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchCarryOver {
+    query: String,
+    wrap: bool,
+    case_mode: kettle_config::SearchCaseSensitivity,
+    invert: bool,
+    focused_control: kettle_render::SearchControl,
+}
+
+/// The pane an open bar must move to, if any: `None` while the bar already
+/// targets the focused pane or nothing is focused.
+fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> Option<u64> {
+    focus.filter(|pane| Some(*pane) != target_pane)
+}
+
+/// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
+/// query starts searching immediately; the anchor is derived by the caller
+/// once the lane's resize has settled.
+fn fresh_search_state(
+    pane_id: u64,
+    carried: SearchCarryOver,
+    display_offset: usize,
+    now: std::time::Instant,
+) -> crate::search_input::SearchState {
+    let mut search = crate::search_input::SearchState {
+        open: true,
+        target_pane: Some(pane_id),
+        editor: crate::search_input::SearchEditor::from_text(
+            carried.query,
+            kettle_core::MAX_SEARCH_QUERY_BYTES,
+        ),
+        wrap: carried.wrap,
+        case_mode: carried.case_mode,
+        invert: carried.invert,
+        focused_control: carried.focused_control,
+        anchor: None,
+        pre_open_display_offset: Some(display_offset),
+        ..crate::search_input::SearchState::default()
+    };
+    if !search.query().is_empty() {
+        search.note_edit(now);
+    }
+    search
+}
+
 impl TextModal {
     /// Stable wire spelling, reported by `dispatch_ui_key`.
     const fn as_str(self) -> &'static str {
@@ -21032,11 +21362,19 @@ impl App {
                 ws.search.editor.select_all();
             }
             Key::Character(s) if shortcut && s.eq_ignore_ascii_case("c") => {
-                if let Some(selected) = ws.search.editor.selected_text()
-                    && let Some(clipboard) = self.clipboard.as_mut()
-                    && let Err(error) = clipboard.set_text(selected.to_string())
-                {
-                    log::warn!("search copy: clipboard write failed: {error}");
+                // A selection inside the editor wins; otherwise copy the grid
+                // selection the user dragged out under the bar. A grid press
+                // clears the editor selection, so a stale editor range cannot
+                // shadow a fresh drag (Terminator copies the terminal
+                // selection here).
+                if let Some(selected) = ws.search.editor.selected_text() {
+                    if let Some(clipboard) = self.clipboard.as_mut()
+                        && let Err(error) = clipboard.set_text(selected.to_string())
+                    {
+                        log::warn!("search copy: clipboard write failed: {error}");
+                    }
+                } else {
+                    self.copy_selection(ws);
                 }
             }
             Key::Character(s) if shortcut && s.eq_ignore_ascii_case("x") => {
@@ -22880,10 +23218,17 @@ fn resolve_keybind_action(
 }
 
 /// The non-macOS default `Alt+Arrow` focus chords are adaptive at the edge of
-/// a split tree. When a neighbour exists, the keybind owns the chord and moves
-/// focus. When no pane exists in that direction, the original key event falls
-/// through to the PTY, preserving application bindings such as Codex's
-/// `Alt+Up` previous-message editor.
+/// the visible split tree. When a visible neighbour exists, the keybind owns
+/// the chord and moves focus. When no visible pane exists in that direction,
+/// the original key event falls through to the PTY, preserving application
+/// bindings such as Codex's `Alt+Left`/`Alt+Right` word motion and `Alt+Up`
+/// previous-message editor.
+///
+/// "Visible" is the operative word: a zoomed pane (`Ctrl+Shift+X`, or the
+/// `scaled_zoom` action) hides its siblings, so directional focus has nowhere to go
+/// and the chord belongs to the program until the zoom is released. Keeping the
+/// chord as a Kettle no-op there swallowed the press and its release for
+/// nothing.
 ///
 /// Match the trigger and action as a pair. A user who deliberately binds
 /// `Alt+Up` to some other action must get that action, not an implicit terminal
@@ -22908,16 +23253,17 @@ fn adaptive_alt_focus_direction(
     }
 }
 
+/// Whether an adaptive focus chord belongs to the terminal rather than to
+/// Kettle. `visible_neighbor_exists` is the mux's answer for the chord's
+/// direction; it is already `false` while zoom collapses the layout to the
+/// focused pane, so no separate zoom flag is consulted.
 fn adaptive_alt_focus_falls_through(
     trigger: Trigger,
     action: &Action,
     enabled: bool,
-    zoom_hides_siblings: bool,
-    neighbor_exists: bool,
+    visible_neighbor_exists: bool,
 ) -> bool {
-    !zoom_hides_siblings
-        && !neighbor_exists
-        && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
+    !visible_neighbor_exists && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
 }
 
 fn parse_ctl_mods(
@@ -23303,6 +23649,47 @@ fn terminal_surface_available(ws: &WindowState) -> bool {
 /// right-click below, so gating it here would break that. Before this fix a
 /// click switched tabs / focused a pane and a wheel zoomed the font or scrolled
 /// the pane while a dialog the user thought was capturing input sat on top.
+/// Where a pointer event goes while the search bar is open.
+///
+/// The bar is a reserved lane below the grid, not an overlay: the grid above
+/// it is fully visible and stays mouse-interactive, exactly as Terminator
+/// keeps its VTE selectable under its search bar. A press inside the bar's
+/// rectangle belongs to the bar's controls; a press anywhere else is ordinary
+/// grid input (selection, links, scrollbar, mouse reporting). Motion and
+/// release follow whichever gesture is live: an editor drag started in the
+/// bar keeps the bar, anything else keeps the grid. Keyboard focus never
+/// leaves the search editor either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPointerRoute {
+    /// The bar is closed; nothing here applies.
+    Closed,
+    /// The bar's controls own the event.
+    Bar,
+    /// The grid owns the event as if the bar were closed.
+    Grid,
+}
+
+// Captured grid drags keep their motion and release when crossing the bar.
+fn search_bar_blocks_mouse_report(in_bar: bool, pressed: bool, motion: bool, held: bool) -> bool {
+    in_bar && pressed && (!motion || !held)
+}
+
+fn search_pointer_route(
+    search_open: bool,
+    press_in_bar: Option<bool>,
+    dragging_editor: bool,
+) -> SearchPointerRoute {
+    if !search_open {
+        return SearchPointerRoute::Closed;
+    }
+    match press_in_bar {
+        Some(true) => SearchPointerRoute::Bar,
+        Some(false) => SearchPointerRoute::Grid,
+        None if dragging_editor => SearchPointerRoute::Bar,
+        None => SearchPointerRoute::Grid,
+    }
+}
+
 fn modal_swallows_pointer(any_modal_open: bool, context_menu_open: bool) -> bool {
     any_modal_open && !context_menu_open
 }
@@ -23965,9 +24352,12 @@ impl App {
     /// always-on-top / hide-from-taskbar / geometry-hinting / WM_CLASS
     /// exactly like the first. Always returns `visible(false)` while renderer
     /// init runs; callers reveal visible states once the surface is configured.
+    /// `monitor` fits the default size (see `default_startup_inner_size`);
+    /// a restored geometry or explicit size supplied later still overrides it.
     fn window_attributes(
         &self,
         state: kettle_config::WindowState,
+        monitor: Option<StartupMonitor>,
     ) -> winit::window::WindowAttributes {
         let mut attrs = Window::default_attributes()
             .with_title("kettle")
@@ -24063,9 +24453,11 @@ impl App {
                 attrs = attrs.with_visible(false);
             }
         }
-        if let Some((w, h)) = startup_inner_size_px(&self.cfg) {
-            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
-        }
+        // Logical pixels on purpose: the grid is the contract, and winit
+        // scales a logical size per monitor, so a 2x display no longer opens
+        // with half the columns a 1x display gets for the same config.
+        let (w, h) = startup_inner_size(&self.cfg, monitor);
+        attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
         if self.cfg.window_position_x.is_some() || self.cfg.window_position_y.is_some() {
             attrs = attrs.with_position(winit::dpi::PhysicalPosition::new(
                 self.cfg.window_position_x.unwrap_or(0),
@@ -24683,7 +25075,7 @@ impl App {
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
             (_, s) => s,
         };
-        let mut attrs = self.window_attributes(state);
+        let mut attrs = self.window_attributes(state, startup_monitor(event_loop));
         // C7: a restored window lands at its saved geometry, clamped to the
         // live monitor layout (its monitor may be unplugged).
         if let WindowOpen::Restore(sw) = &open
@@ -25771,7 +26163,18 @@ impl App {
             self.load_startup_session()
         };
         let live_monitors = monitor_rects(event_loop);
-        let default_surface = startup_inner_size_px(&self.cfg).unwrap_or((800, 600));
+        // The size a saved window without geometry gets, in physical pixels
+        // like the monitor rects it is validated against: the same startup
+        // rule a fresh window uses, so a restore and a first launch agree.
+        let monitor = startup_monitor(event_loop);
+        let default_surface = {
+            let (w, h) = startup_inner_size(&self.cfg, monitor);
+            let scale = monitor.map_or(1.0, |m| m.scale);
+            (
+                (w * scale).round().max(1.0) as u32,
+                (h * scale).round().max(1.0) as u32,
+            )
+        };
         let restore_plan = loaded_session.as_ref().and_then(|session| {
             if session.is_empty() {
                 return None;
@@ -25801,7 +26204,7 @@ impl App {
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
         ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
-        let mut attrs = self.window_attributes(self.cfg.window_state);
+        let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
         if let Some(geometry) = restore_plan
             .as_ref()
             .and_then(|(_, geometries)| geometries.first())
@@ -26865,10 +27268,12 @@ impl App {
                     }
                     return;
                 }
-                // Search owns native pointer motion just as it owns synthetic ctl motion. Return
-                // even when no editor drag is armed so hover/motion cannot reach pane chrome or
-                // a mouse-tracking application behind the modal lane.
-                if ws.search.open {
+                // An editor drag that started inside the search bar keeps the
+                // motion; otherwise the grid above the bar stays live for
+                // hover, selection, and mouse reporting, matching the ctl path.
+                if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                    == SearchPointerRoute::Bar
+                {
                     self.show_mouse_cursor(ws);
                     self.sync_cursor_icon(ws);
                     self.search_mouse_drag(ws);
@@ -27154,7 +27559,10 @@ impl App {
                         }
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                    if !modal_swallows_pointer(
+                        self.pointer_modal_open(ws),
+                        ws.context_menu.is_some(),
+                    ) {
                         self.send_mouse(ws, sgr, true, false);
                     }
                     return;
@@ -27191,9 +27599,16 @@ impl App {
                     return;
                 }
                 // Search controls are real click targets inside the reserved
-                // lane. Handle them before the generic modal swallow; clicks
-                // elsewhere remain consumed and can never reach the PTY.
-                if ws.search.open {
+                // lane; every button inside the lane stays there. A press above
+                // the lane is ordinary grid input: the bar is not an overlay,
+                // so selecting, opening links, and mouse reporting keep working
+                // while a query is being typed (Terminator parity).
+                if search_pointer_route(
+                    ws.search.open,
+                    Some(self.cursor_in_search_bar(ws)),
+                    ws.search.dragging_editor,
+                ) == SearchPointerRoute::Bar
+                {
                     if bcode == 0 {
                         self.search_mouse_press(ws);
                         if let Some(window) = &ws.window {
@@ -27241,15 +27656,16 @@ impl App {
                     return;
                 }
                 // With any *other* modal open
-                // (search / palette / ssh / settings / layout-picker / hint /
-                // confirm dialog / inline title-edit / vi copy-mode) the click
-                // must be consumed — otherwise it fell straight through to the
+                // (palette / ssh / settings / layout-picker / hint / confirm
+                // dialog / inline title-edit / vi copy-mode) the click must be
+                // consumed — otherwise it fell straight through to the
                 // tab-bar / pane-focus / mouse-tracking logic below, switching
                 // tabs and injecting mouse events into the terminal *behind* a
                 // dialog that looked like it had focus. The context menu is
                 // excluded (handled + returned above; a right-click below
-                // relocates it).
-                if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                // relocates it), and so is the search bar, whose lane was
+                // routed above and whose grid stays live.
+                if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some()) {
                     return;
                 }
                 // Tab-bar interactions (left = switch / close-✕ / new-+;
@@ -27589,7 +28005,10 @@ impl App {
                     if ws.context_menu.is_some() {
                         return;
                     }
-                    if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {
+                    if !modal_swallows_pointer(
+                        self.pointer_modal_open(ws),
+                        ws.context_menu.is_some(),
+                    ) {
                         self.send_mouse(ws, sgr, false, false);
                     }
                     return;
@@ -27600,10 +28019,15 @@ impl App {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                if ws.search.open {
-                    if bcode == 0 {
-                        ws.search.dragging_editor = false;
-                    }
+                // A release ends an editor drag inside the search bar; any
+                // other release while the bar is open belongs to the grid
+                // gesture it started (selection end, copy-on-select, mouse
+                // reporting), like the ctl path.
+                if bcode == 0
+                    && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                        == SearchPointerRoute::Bar
+                {
+                    ws.search.dragging_editor = false;
                     return;
                 }
                 // Terminator parity: the release is where a titlebar press
@@ -28232,18 +28656,8 @@ impl App {
                     Some(&event.physical_key),
                     ws.mods,
                 ) {
-                    let adaptive_direction =
-                        adaptive_alt_focus_direction(trigger, &act, !cfg!(target_os = "macos"));
                     let adaptive_focus_falls_through =
-                        adaptive_direction.is_some_and(|(dx, dy)| {
-                            adaptive_alt_focus_falls_through(
-                                trigger,
-                                &act,
-                                true,
-                                ws.mux.zoom_hides_siblings(),
-                                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
-                            )
-                        });
+                        self.adaptive_focus_chord_falls_through(ws, trigger, &act);
                     if !adaptive_focus_falls_through {
                         track_consumed_key_release(
                             &mut ws.suppressed_key_releases,
@@ -28559,12 +28973,21 @@ impl App {
             .map(|pane| pane.term.poll_completion_hide(now))
             .unwrap_or((false, None));
         // Drive cursor blink + visual-bell decay without busy-looping: only
-        // schedule wake-ups while something is actually animating.
-        let bell_active = !render_hidden
-            && ws
-                .last_bell
-                .map(|t| t.elapsed() < std::time::Duration::from_millis(300))
-                .unwrap_or(false);
+        // schedule wake-ups while something is actually animating. A flash
+        // that has fully decayed is dropped here and gets one more repaint to
+        // erase its last frame, like the resize chip below.
+        let bells_expired = ws
+            .bell_flashes
+            .values()
+            .any(|rang| rang.elapsed() >= BELL_FLASH_DURATION);
+        if bells_expired {
+            ws.bell_flashes
+                .retain(|_, rang| rang.elapsed() < BELL_FLASH_DURATION);
+            if !render_hidden && let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+        let bell_active = !render_hidden && !ws.bell_flashes.is_empty();
         // v2.20.0: the resize chip needs repaints until it expires (then one
         // more to erase it); clear the state once it has.
         let resize_chip_live = ws
@@ -28921,10 +29344,18 @@ mod modal_discipline_guard {
             "close_all_modals must clear confirm_dialog so it can't stack under \
              another overlay"
         );
+        // `any_modal_open` and `pointer_modal_open` both derive from the one
+        // `non_search_modal_open` list, so the confirm dialog only needs to be
+        // counted there to gate keyboard and pointer input alike.
         assert!(
-            body("any_modal_open").contains("ws.confirm_dialog.is_some()"),
-            "any_modal_open must count the confirm dialog so input doesn't fall \
+            body("non_search_modal_open").contains("ws.confirm_dialog.is_some()"),
+            "non_search_modal_open must count the confirm dialog so input doesn't fall \
              through to the terminal behind it"
+        );
+        assert!(
+            body("any_modal_open").contains("self.non_search_modal_open(ws)")
+                && body("pointer_modal_open").contains("self.non_search_modal_open(ws)"),
+            "both modal predicates must derive from the shared non-search list"
         );
     }
 
@@ -33076,8 +33507,133 @@ mod tests {
         cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
         assert_eq!(
             startup_inner_size_px(&cfg),
-            Some((1156, 614)),
-            "missing height falls back to the startup baseline; vertical tabs reserve width"
+            Some((1156, 758)),
+            "missing height comes from the 45-row default grid; vertical tabs reserve width"
+        );
+        cfg.window_width = None;
+        cfg.window_height = Some(30);
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Top;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            Some((1296, 542)),
+            "missing width comes from the 160-column default grid"
+        );
+        cfg.window_height = None;
+        assert_eq!(
+            startup_inner_size_px(&cfg),
+            None,
+            "neither side set: the monitor-fitted default takes over"
+        );
+    }
+
+    /// A fresh window with no configured size opens at the 160x45 default
+    /// grid (1296x760 logical px with the default chrome), fitted to 90 % x
+    /// 85 % of the monitor. The numbers below are the ones the docs quote.
+    #[test]
+    fn default_startup_size_targets_the_agent_grid_and_fits_the_monitor() {
+        use super::{
+            STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS, StartupMonitor, default_startup_inner_size,
+            startup_inner_size,
+        };
+        let cfg = kettle_config::Config::default();
+        assert_eq!((STARTUP_DEFAULT_COLS, STARTUP_DEFAULT_ROWS), (160, 45));
+        assert_eq!(
+            default_startup_inner_size(&cfg, None),
+            (1296.0, 760.0),
+            "160x45 cells + 8 px padding + the default top tab bar, no monitor known"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((1920.0, 1080.0))),
+            (1296.0, 760.0),
+            "a 1080p monitor fits the whole target (about 152x41 cells at the 14 px font)"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((1366.0, 768.0))),
+            (1229.0, 652.0),
+            "a 1366x768 laptop clamps both axes: about 144 columns at the default font"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((3440.0, 1440.0))),
+            (1296.0, 760.0),
+            "an ultrawide gets the same terminal-sized window, not a monitor fraction"
+        );
+        assert_eq!(
+            default_startup_inner_size(&cfg, Some((640.0, 480.0))),
+            (576.0, 408.0),
+            "a monitor smaller than the target wins outright; there is no floor"
+        );
+
+        // The explicit path is honoured as typed and never monitor-fitted.
+        let explicit = kettle_config::Config {
+            window_width: Some(400),
+            window_height: Some(200),
+            ..Default::default()
+        };
+        let tiny = Some(StartupMonitor::from_physical(640, 480, 1.0));
+        assert_eq!(startup_inner_size(&explicit, tiny), (3216.0, 3240.0));
+        assert_eq!(
+            startup_inner_size(&cfg, tiny),
+            (576.0, 408.0),
+            "the default path is the one that fits the monitor"
+        );
+
+        // HiDPI: the size is logical, so a 2x display describes the same
+        // logical monitor and gets the same grid as a 1x one.
+        let hidpi = StartupMonitor::from_physical(3840, 2160, 2.0);
+        assert_eq!(hidpi.logical, (1920.0, 1080.0));
+        assert_eq!(hidpi.scale, 2.0);
+        assert_eq!(
+            startup_inner_size(&cfg, Some(hidpi)),
+            startup_inner_size(&cfg, Some(StartupMonitor::from_physical(1920, 1080, 1.0)))
+        );
+        assert_eq!(
+            startup_inner_size(&explicit, Some(hidpi)),
+            startup_inner_size(
+                &explicit,
+                Some(StartupMonitor::from_physical(1920, 1080, 1.0))
+            ),
+            "an explicit window-width means the same columns on every DPI"
+        );
+        let degenerate = StartupMonitor::from_physical(1920, 1080, 0.0);
+        assert_eq!(
+            degenerate.scale, 1.0,
+            "a bogus scale factor falls back to 1x"
+        );
+    }
+
+    /// Both window constructors must size through the shared startup rule in
+    /// logical pixels; a `PhysicalSize` at startup would bring back the
+    /// half-columns-on-HiDPI bug, and skipping the monitor would lose the fit.
+    #[test]
+    fn window_constructors_size_through_the_shared_startup_rule() {
+        let src = production_source();
+        let attrs = src
+            .split("fn window_attributes(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("window_attributes body");
+        assert!(
+            attrs.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);")
+                && attrs.contains("attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));"),
+            "window_attributes must apply the shared startup size as a LogicalSize"
+        );
+        assert!(
+            !attrs.contains("PhysicalSize"),
+            "startup sizing must not build a PhysicalSize"
+        );
+        assert_eq!(
+            src.matches("self.window_attributes(").count(),
+            2,
+            "exactly the two window constructors build attributes"
+        );
+        assert!(
+            src.contains("self.window_attributes(state, startup_monitor(event_loop))")
+                && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
+            "both constructors must pass the startup monitor"
+        );
+        assert!(
+            src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),
+            "the restore planner's fallback surface must be the same rule in physical pixels"
         );
     }
 
@@ -33154,6 +33710,251 @@ mod tests {
         assert!(!modal_swallows_pointer(true, true));
     }
 
+    /// The search bar reserves a lane below the grid; the grid stays
+    /// mouse-interactive while it is open (Terminator parity). A press is
+    /// routed by where it lands, motion and release by whether an editor drag
+    /// is live, and a closed bar routes nothing.
+    #[test]
+    fn search_bar_blocks_new_reports_but_preserves_captured_drags() {
+        use super::search_bar_blocks_mouse_report as blocks;
+        for pressed in [false, true] {
+            for motion in [false, true] {
+                for held in [false, true] {
+                    assert!(!blocks(false, pressed, motion, held));
+                }
+            }
+        }
+        assert!(blocks(true, true, true, false));
+        assert!(blocks(true, true, false, false));
+        assert!(blocks(true, true, false, true));
+        assert!(!blocks(true, true, true, true));
+        assert!(!blocks(true, false, false, true));
+        assert!(!blocks(true, false, false, false));
+    }
+
+    #[test]
+    fn search_pointer_route_keeps_the_grid_live_under_the_bar() {
+        use super::{SearchPointerRoute, search_pointer_route};
+
+        for press in [None, Some(true), Some(false)] {
+            for dragging in [false, true] {
+                assert_eq!(
+                    search_pointer_route(false, press, dragging),
+                    SearchPointerRoute::Closed,
+                    "a closed bar routes nothing (press={press:?}, dragging={dragging})"
+                );
+            }
+        }
+        assert_eq!(
+            search_pointer_route(true, Some(true), false),
+            SearchPointerRoute::Bar,
+            "a press inside the lane belongs to the bar's controls"
+        );
+        assert_eq!(
+            search_pointer_route(true, Some(false), false),
+            SearchPointerRoute::Grid,
+            "a press above the lane is ordinary grid input"
+        );
+        assert_eq!(
+            search_pointer_route(true, Some(false), true),
+            SearchPointerRoute::Grid,
+            "a fresh press decides by position even if a stale editor drag flag survived"
+        );
+        assert_eq!(
+            search_pointer_route(true, None, true),
+            SearchPointerRoute::Bar,
+            "motion and release follow a live editor drag"
+        );
+        assert_eq!(
+            search_pointer_route(true, None, false),
+            SearchPointerRoute::Grid,
+            "motion and release without an editor drag belong to the grid gesture"
+        );
+    }
+
+    /// Source pins for the routing above: every pointer arm, native and
+    /// control-plane, must consult the same helper, the pointer gate must not
+    /// treat the bar as a pointer-owning modal, the cursor icon must follow
+    /// the pointer gate (I-beam over the grid while searching), and the
+    /// right-click menu must leave the bar in place.
+    #[test]
+    fn search_bar_pointer_routing_is_wired_on_both_input_paths() {
+        let src = production_source();
+        let native_press = src
+            .split("WindowEvent::MouseInput {\n                state: ElementState::Pressed,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::MouseInput {").next())
+            .expect("native Pressed arm");
+        let native_release = src
+            .split("WindowEvent::MouseInput {\n                state: ElementState::Released,")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native Released arm");
+        let native_move = src
+            .split("WindowEvent::CursorMoved { position, .. } => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("native CursorMoved arm");
+        let ctl_press = src
+            .split("fn ctl_mouse_press(")
+            .nth(1)
+            .and_then(|body| body.split("fn ctl_mouse_release").next())
+            .expect("ctl_mouse_press body");
+        let ctl_release = src
+            .split("fn ctl_mouse_release(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl_mouse_release body");
+        let ctl_move = src
+            .split("fn ctl_mouse_move(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("ctl_mouse_move body");
+
+        for (label, body) in [("native press", native_press), ("ctl press", ctl_press)] {
+            assert!(
+                body.contains("Some(self.cursor_in_search_bar(ws)),")
+                    && body.contains("== SearchPointerRoute::Bar"),
+                "{label} must route a search-time press by the bar's rectangle"
+            );
+            assert!(
+                !body.contains("if ws.search.open {"),
+                "{label} must not swallow every press while the bar is open"
+            );
+        }
+        for (label, body) in [
+            ("native move", native_move),
+            ("ctl move", ctl_move),
+            ("native release", native_release),
+            ("ctl release", ctl_release),
+        ] {
+            assert!(
+                body.contains(
+                    "search_pointer_route(ws.search.open, None, ws.search.dragging_editor)"
+                ),
+                "{label} must route search-time motion/release by the live editor drag"
+            );
+            assert!(
+                !body.contains("if ws.search.open {"),
+                "{label} must not swallow every event while the bar is open"
+            );
+        }
+        assert!(
+            native_press.contains(
+                "if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some())"
+            ),
+            "the native press gate must ignore the search bar"
+        );
+        let normalized = src.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains(
+                "let chrome = chrome_cursor_icon( self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws), );"
+            ) || normalized.contains(
+                "let chrome = chrome_cursor_icon(self.cursor_in_chrome_band(ws), self.pointer_modal_open(ws));"
+            ),
+            "the cursor icon over the grid must not turn into the arrow while searching"
+        );
+        let open_menu = src
+            .split("fn open_context_menu(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("open_context_menu body");
+        assert!(
+            open_menu.contains("self.close_modals_for_context_menu(ws);")
+                && !open_menu.contains("self.close_all_modals(ws);"),
+            "the right-click menu must leave an open search bar in place"
+        );
+        let note_focus = src
+            .split("fn note_focus_change(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("note_focus_change body");
+        assert!(
+            note_focus.contains("self.retarget_search_to_focus(ws);"),
+            "an open search bar must follow pane focus"
+        );
+        let begin_selection = src
+            .split("fn begin_or_extend_mouse_selection(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("begin_or_extend_mouse_selection body");
+        assert!(
+            begin_selection.contains("ws.search.editor.clear_selection();"),
+            "a grid press must drop the editor selection so Copy reaches the grid"
+        );
+        // Keyboard, file drops, and focus-follows-mouse keep the full gate:
+        // search does own the keyboard.
+        assert!(
+            src.contains(
+                "if self.any_modal_open(ws) {\n                    return;\n                }"
+            ),
+            "DroppedFile must still return while any modal, including search, is open"
+        );
+        assert!(
+            native_move.contains("&& !self.any_modal_open(ws)"),
+            "focus-follows-mouse must stay off while the bar is open, or the bar would retarget as the pointer drifts"
+        );
+    }
+
+    /// An open bar follows focus: the query and toggles come along, the pane
+    /// id changes, and a non-empty query starts searching the new pane at once.
+    #[test]
+    fn search_follows_focus_with_its_query_and_toggles() {
+        use super::{SearchCarryOver, fresh_search_state, search_retarget};
+
+        assert_eq!(
+            search_retarget(Some(1), Some(1)),
+            None,
+            "already on the focused pane"
+        );
+        assert_eq!(search_retarget(Some(1), None), None, "nothing focused");
+        assert_eq!(search_retarget(None, Some(2)), Some(2));
+        assert_eq!(search_retarget(Some(1), Some(2)), Some(2));
+
+        let now = std::time::Instant::now();
+        let carried = SearchCarryOver {
+            query: "needle".into(),
+            wrap: false,
+            case_mode: kettle_config::SearchCaseSensitivity::Always,
+            invert: true,
+            focused_control: kettle_render::SearchControl::Next,
+        };
+        let moved = fresh_search_state(2, carried.clone(), 7, now);
+        assert!(moved.open);
+        assert_eq!(moved.target_pane, Some(2));
+        assert_eq!(moved.query(), "needle");
+        assert!(!moved.wrap);
+        assert_eq!(
+            moved.case_mode,
+            kettle_config::SearchCaseSensitivity::Always
+        );
+        assert!(moved.invert);
+        assert_eq!(moved.focused_control, kettle_render::SearchControl::Next);
+        assert_eq!(moved.pre_open_display_offset, Some(7));
+        assert_eq!(
+            moved.status,
+            kettle_render::SearchStatus::Searching,
+            "a carried query scans the new pane immediately"
+        );
+        assert!(
+            moved.anchor.is_none(),
+            "the anchor is derived after the lane settles"
+        );
+        assert!(moved.focused.is_none() && moved.visible.is_empty());
+
+        let fresh = fresh_search_state(
+            3,
+            SearchCarryOver {
+                query: String::new(),
+                ..carried
+            },
+            0,
+            now,
+        );
+        assert_eq!(fresh.status, kettle_render::SearchStatus::Typing);
+        assert_eq!(fresh.target_pane, Some(3));
+    }
+
     /// Agent/control-plane mouse presses must stay in lock-step with the real
     /// winit mouse path for app chrome. The live interaction smoke drives these
     /// branches through `kettle ctl send_mouse`; this source guard prevents a
@@ -33173,9 +33974,13 @@ mod tests {
         );
         assert!(
             body.contains(
-                "if modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some())"
+                "if modal_swallows_pointer(self.pointer_modal_open(ws), ws.context_menu.is_some())"
             ),
-            "ctl_mouse_press must swallow pane/tab clicks behind non-menu modals"
+            "ctl_mouse_press must swallow pane/tab clicks behind pointer-owning modals"
+        );
+        assert!(
+            !body.contains("modal_swallows_pointer(self.any_modal_open(ws)"),
+            "the search bar is not a pointer-owning modal; ctl_mouse_press must not gate on it"
         );
         assert!(
             body.contains("rect_contains(bar.new_tab_menu, px, py)")
@@ -33294,6 +34099,78 @@ mod tests {
     /// Building a frame needs a live App (window + renderer + real PTYs), so
     /// the wiring is pinned here: the pane's own state reaches the renderer,
     /// and focusing the pane answers it.
+    /// The visual bell's time profile: instant on, quadratic ease-out, gone
+    /// at `BELL_FLASH_DURATION`. The renderer scales the configured lightness
+    /// step by this value, so its shape is the flash's perceived shape.
+    #[test]
+    fn bell_flash_ramp_is_instant_on_and_eases_out_within_the_duration() {
+        use super::{BELL_FLASH_DURATION, bell_flash_ramp};
+        use std::time::Duration;
+
+        assert_eq!(BELL_FLASH_DURATION, Duration::from_millis(300));
+        assert_eq!(
+            bell_flash_ramp(Duration::ZERO),
+            1.0,
+            "the frame it rang is the peak"
+        );
+        assert!((bell_flash_ramp(Duration::from_millis(150)) - 0.25).abs() < 1e-6);
+        assert!((bell_flash_ramp(Duration::from_millis(30)) - 0.81).abs() < 1e-6);
+        assert_eq!(bell_flash_ramp(BELL_FLASH_DURATION), 0.0);
+        assert_eq!(bell_flash_ramp(Duration::from_secs(5)), 0.0);
+        let mut last = 1.0_f32;
+        for ms in (0..=300).step_by(10) {
+            let value = bell_flash_ramp(Duration::from_millis(ms));
+            assert!(value <= last, "the ramp must never rise again ({ms} ms)");
+            assert!((0.0..=1.0).contains(&value));
+            last = value;
+        }
+        // Ease-out: the first half sheds most of the strength.
+        assert!(bell_flash_ramp(Duration::from_millis(150)) < 0.5);
+    }
+
+    /// The bell flash is per pane: the drain stamps every ringing pane, the
+    /// frame builder turns each stamp into the pane's ramp, the idle loop
+    /// keeps the animation wake alive while any stamp is live and drops
+    /// expired stamps with one erasing repaint, and nothing keeps a
+    /// window-level bell timestamp any more.
+    #[test]
+    fn the_bell_flash_is_stamped_per_pane_and_pruned_on_expiry() {
+        let src = production_source();
+        let drain = src
+            .split("if self.cfg.bell.visual() {")
+            .nth(1)
+            .and_then(|body| body.split("if self.cfg.bell.attention()").next())
+            .expect("visual bell branch in drain_events");
+        assert!(
+            drain.contains("for id in &bell_panes {")
+                && drain.contains("ws.bell_flashes.insert(*id, now);"),
+            "every ringing pane must get its own flash stamp"
+        );
+        assert!(
+            src.contains("bell_flash: *bell_flash,")
+                && src.contains(".map_or(0.0, |rang| bell_flash_ramp(rang.elapsed())),"),
+            "the frame builder must feed each pane its own ramp"
+        );
+        let idle = src
+            .split("let bells_expired = ws")
+            .nth(1)
+            .and_then(|body| body.split("let bell_active =").next())
+            .expect("bell expiry block in about_to_wait");
+        assert!(
+            idle.contains(".retain(|_, rang| rang.elapsed() < BELL_FLASH_DURATION);")
+                && idle.contains("w.request_redraw();"),
+            "expired stamps must be dropped and erased with one more repaint"
+        );
+        assert!(
+            src.contains("let bell_active = !render_hidden && !ws.bell_flashes.is_empty();"),
+            "the animation wake must key off live per-pane stamps"
+        );
+        assert!(
+            !src.contains("last_bell"),
+            "the window-level bell timestamp is gone; a flash belongs to the pane that rang"
+        );
+    }
+
     #[test]
     fn the_pane_bell_indicator_is_wired_to_real_pane_state() {
         let src = production_source();
@@ -34486,27 +35363,93 @@ mod tests {
         );
 
         let trigger = Trigger::new(Mods::ALT, KKey::Up);
-        assert!(adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            false,
-            false,
-        ));
-        assert!(!adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            true,
-            false,
-        ));
-        assert!(!adaptive_alt_focus_falls_through(
-            trigger,
-            &Action::FocusUp,
-            true,
-            false,
-            true,
-        ));
+        assert!(
+            adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, true, false),
+            "no visible neighbour: the chord belongs to the program"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, true, true),
+            "a visible neighbour keeps the chord as a focus move"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusDown, true, false),
+            "a customised mismatched pair never falls through, neighbour or not"
+        );
+        assert!(
+            !adaptive_alt_focus_falls_through(trigger, &Action::FocusUp, false, false),
+            "the adaptive rule is off on macOS even with nowhere to go"
+        );
+    }
+
+    /// A zoomed multi-pane tab hides its siblings, so the mux reports no
+    /// visible neighbour and the adaptive chord must fall through to the
+    /// program. This is the whole reason `adaptive_alt_focus_falls_through`
+    /// takes the mux's visible-neighbour answer instead of a zoom flag: the
+    /// earlier zoom guard kept the chord as a Kettle no-op, which swallowed
+    /// Codex's `Alt+Left`/`Alt+Right` word motion while `Ctrl+Shift+X` or the
+    /// `scaled_zoom` action was active.
+    #[test]
+    fn adaptive_alt_focus_falls_through_while_zoom_hides_siblings() {
+        use super::adaptive_alt_focus_falls_through;
+        use crate::mux::{Dir, Mux, Node, Tab};
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+
+        let area = (0.0, 0.0, 800.0, 600.0);
+        let mut mux = Mux::new();
+        mux.tabs.push(Tab {
+            root: Node::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Node::Leaf(1)),
+                b: Box::new(Node::Leaf(2)),
+            },
+            focus: 2,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+        });
+        mux.active = 0;
+        let left = (
+            Trigger::new(Mods::ALT, KKey::Left),
+            Action::FocusLeft,
+            (-1, 0),
+        );
+        let right = (
+            Trigger::new(Mods::ALT, KKey::Right),
+            Action::FocusRight,
+            (1, 0),
+        );
+
+        let route = |mux: &Mux, (trigger, action, (dx, dy)): &(Trigger, Action, (i32, i32))| {
+            adaptive_alt_focus_falls_through(
+                *trigger,
+                action,
+                true,
+                mux.pane_in_direction(area, *dx, *dy).is_some(),
+            )
+        };
+
+        assert!(
+            !route(&mux, &left),
+            "unzoomed: the right pane has a left neighbour, so Alt+Left moves focus"
+        );
+        assert!(
+            route(&mux, &right),
+            "unzoomed: nothing lies right of the right pane, so Alt+Right falls through"
+        );
+
+        mux.toggle_zoom();
+        assert!(mux.is_zoomed());
+        assert!(
+            route(&mux, &left),
+            "zoomed: the hidden left sibling is not a visible neighbour"
+        );
+        assert!(route(&mux, &right));
+
+        mux.toggle_zoom();
+        assert!(!route(&mux, &left), "leaving zoom restores the focus move");
     }
 
     /// The adaptive edge case deliberately bypasses `handle_action` and falls
@@ -34518,7 +35461,7 @@ mod tests {
     fn adaptive_alt_focus_fallthrough_records_terminal_ownership_before_writing() {
         let src = production_source();
         let routing = src
-            .split("let adaptive_direction =")
+            .split("let adaptive_focus_falls_through =")
             .nth(1)
             .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
             .expect("adaptive keyboard routing block");
@@ -35181,9 +36124,13 @@ mod tests {
         // `.gitattributes eol=lf` fixes checkout; this keeps the test robust
         // even on a CRLF working tree. (`\r` removal doesn't touch the escaped
         // `\n` in this literal, so the test's own source can't self-match.)
-        let src = production_source();
+        // Whitespace-normalized: rustfmt wraps the call across lines.
+        let src = production_source()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let gated = src
-            .matches("if !modal_swallows_pointer(self.any_modal_open(ws), ws.context_menu.is_some()) {\n                        self.send_mouse(ws, sgr,")
+            .matches("if !modal_swallows_pointer( self.pointer_modal_open(ws), ws.context_menu.is_some(), ) { self.send_mouse(ws, sgr,")
             .count();
         assert!(
             gated >= 2,
@@ -36210,6 +37157,23 @@ mod tests {
             origin,
             1.0,
         ));
+    }
+
+    #[test]
+    fn grid_selection_gestures_clear_the_search_editor_selection() {
+        use super::{Mux, WindowState, arm_selection_gesture};
+        use crate::search_input::SearchEditor;
+
+        let mut ws = WindowState::new(1, false, Mux::new());
+        ws.search.open = true;
+        ws.search.editor = SearchEditor::from_text("query".into(), 100);
+        for button in [0, 2] {
+            ws.search.editor.select_all();
+            assert_eq!(ws.search.editor.selected_text(), Some("query"));
+            arm_selection_gesture(&mut ws, 42, button);
+            assert_eq!(ws.search.editor.selected_text(), None);
+            assert_eq!(ws.search.query(), "query");
+        }
     }
 
     #[test]
