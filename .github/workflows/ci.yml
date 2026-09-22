@@ -307,17 +307,35 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
-            --kettle ./target/release/kettle --background --cycles 3
+            --kettle ./target/release/kettle --background --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
           xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
-            --kettle ./target/release/kettle --alternate --background --cycles 3
+            --kettle ./target/release/kettle --alternate --background --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
+          xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
+            --kettle ./target/release/kettle --negative-controls \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
       - name: Unix job-control compatibility (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 3
         run: |
           python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
-            --kettle ./target/release/kettle --background --cycles 3
+            --kettle ./target/release/kettle --background --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
           python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
-            --kettle ./target/release/kettle --alternate --background --cycles 3
+            --kettle ./target/release/kettle --alternate --background --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+            --kettle ./target/release/kettle --negative-controls \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
+      - name: Preserve offline job-control failure diagnostics
+        if: failure() && runner.os != 'Windows'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: job-control-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/kettle-job-control
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Windows release-profile binary + CLI smoke
         # The core matrix builds all targets in the debug profile. This extra
         # build protects the retained GUI-subsystem + conditional console-attach

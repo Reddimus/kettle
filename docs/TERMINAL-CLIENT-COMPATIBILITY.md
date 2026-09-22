@@ -371,6 +371,7 @@ a process name or assume every foreground shell uses legacy keyboard input.
 See [Unix suspend/resume compatibility](TESTING.md#unix-suspendresume-compatibility)
 for the offline regression scenario and the explicit real-Codex probe. Until a
 fixed client is installed, exiting Codex normally avoids this suspension path.
+The fixed interactive TUI remains stopped after `bg`; use `fg` to resume it.
 
 At an empty shell prompt, `printf '\033c'; stty sane` restores terminal modes
 and shell editing. This clears the terminal display; the suspended job remains

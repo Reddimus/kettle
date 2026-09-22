@@ -24,11 +24,19 @@ import time
 from pathlib import Path
 
 
-def fixture(state: Path, alternate: bool, broken: bool) -> None:
+class KeyboardRegression(RuntimeError):
+    """A client left the shell with the wrong key encoding."""
+
+
+def fixture(
+    state: Path, alternate: bool, broken: bool, broken_background: bool
+) -> None:
     import termios
     import tty
 
     saved = termios.tcgetattr(0)
+    if broken_background:
+        signal.signal(signal.SIGTTOU, signal.SIG_IGN)
     signal.signal(signal.SIGTSTP, signal.SIG_DFL)
     generation = 0
     received = ""
@@ -86,7 +94,7 @@ def fixture(state: Path, alternate: bool, broken: bool) -> None:
                     if broken:
                         enter()
                     signal.raise_signal(signal.SIGTSTP)
-                    while os.tcgetpgrp(0) != os.getpgrp():
+                    while not broken_background and os.tcgetpgrp(0) != os.getpgrp():
                         signal.raise_signal(signal.SIGSTOP)
                     if not broken:
                         enter()
@@ -162,6 +170,7 @@ def run(args) -> Path:
     evidence = {
         "client": args.codex or "offline fixture",
         "codex_no_daemon": args.codex_no_daemon,
+        "codex_yolo": args.codex_yolo,
         "shell": shell_args,
         "os": platform.platform(),
         "cycles": args.cycles,
@@ -174,7 +183,14 @@ def run(args) -> Path:
         "external_editor": args.external_editor,
         "transcript": args.transcript,
         "startup_cells": [args.columns, args.rows],
+        "kettle_version": helpers.run([kettle, "--version"]).stdout.strip(),
     }
+    client = shutil.which(args.codex) if args.codex else None
+    if args.codex:
+        if client is None:
+            raise RuntimeError("requested Codex binary does not exist")
+        evidence["codex_version"] = helpers.run([client, "--version"]).stdout.strip()
+    (out / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     with (
         helpers.LiveKettle(kettle, cfg, out / "kettle.log", extra_args=launch) as live,
         failure_evidence(live, out),
@@ -223,9 +239,9 @@ def run(args) -> Path:
                         f"{label}: {chord}",
                         3,
                     )
-                except RuntimeError:
+                except RuntimeError as error:
                     (out / "failure-screen.txt").write_text(screen())
-                    raise
+                    raise KeyboardRegression(f"{label}: {chord}") from error
                 keys("ctrl+c")
                 wait_until(lambda: screen().endswith("JOB>"), "Ctrl+C at shell prompt")
             text("abc")
@@ -246,10 +262,9 @@ def run(args) -> Path:
             wait_until(lambda: screen().endswith("JOB>"), "original pane focus")
         state = out / "client-state.json"
         if args.codex:
-            client = shutil.which(args.codex)
-            if client is None:
-                raise RuntimeError("requested Codex binary does not exist")
-            argv = [client, "--dangerously-bypass-approvals-and-sandbox"]
+            argv = [client]
+            if args.codex_yolo:
+                argv.append("--dangerously-bypass-approvals-and-sandbox")
             if args.codex_no_daemon:
                 argv.append("--no-daemon")
             if not args.alternate:
@@ -275,6 +290,8 @@ def run(args) -> Path:
                 argv.append("--alternate")
             if args.broken_fixture:
                 argv.append("--broken-fixture")
+            if args.broken_background:
+                argv.append("--broken-background")
         command(shlex.join(argv))
 
         def ready(generation: int):
@@ -290,10 +307,15 @@ def run(args) -> Path:
                 )
                 probe = f"EDITPROBE{generation}"
                 text(probe + " word")
-                wait_until(lambda: probe + " word" in screen(), "live composer input")
+                # A shell can echo and edit the same text after a client crash.
+                # Require each unique probe on a Codex composer line.
+                wait_until(
+                    lambda: re.search(rf"(?m)^\u203a {probe} word[ \t]*$", screen()),
+                    "live Codex composer input",
+                )
                 keys("ctrl+backspace")
                 wait_until(
-                    lambda: probe in screen() and probe + " word" not in screen(),
+                    lambda: re.search(rf"(?m)^\u203a {probe}[ \t]*$", screen()),
                     "Codex word deletion",
                 )
                 keys("ctrl+u")
@@ -362,11 +384,6 @@ def run(args) -> Path:
         live.wait_for_text("JOB_CONTROL_OK")
         evidence["geometry"] = live.json_ctl("ui_geometry")
         evidence["panes"] = live.json_ctl("list_panes")
-        evidence["kettle_version"] = helpers.run([kettle, "--version"]).stdout.strip()
-        if args.codex:
-            evidence["codex_version"] = helpers.run(
-                [client, "--version"]
-            ).stdout.strip()
     (out / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     return out
 
@@ -375,6 +392,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kettle", default=os.environ.get("KETTLE_BIN", "kettle"))
     parser.add_argument("--codex", help="opt in to this real Codex executable")
+    parser.add_argument(
+        "--codex-yolo",
+        action="store_true",
+        help="explicitly disable Codex approvals and sandboxing to reproduce codex-yolo",
+    )
     parser.add_argument(
         "--codex-no-daemon",
         action="store_true",
@@ -392,6 +414,11 @@ def main() -> int:
     parser.add_argument("--alternate", action="store_true")
     parser.add_argument("--background", action="store_true")
     parser.add_argument(
+        "--negative-controls",
+        action="store_true",
+        help="require detection of deliberately broken suspend and background clients",
+    )
+    parser.add_argument(
         "--external-editor",
         action="store_true",
         help="exercise Codex's editor handoff with a disposable editor fixture",
@@ -404,6 +431,9 @@ def main() -> int:
     parser.add_argument("--fixture", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--state", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--broken-fixture", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--broken-background", action="store_true", help=argparse.SUPPRESS
+    )
     args = parser.parse_args()
     if os.name != "posix":
         parser.error("Unix job control requires Linux or macOS")
@@ -412,13 +442,33 @@ def main() -> int:
     if args.hidden and args.maximized:
         parser.error("--maximized requires a visible window")
     if (
-        args.external_editor or args.transcript or args.codex_no_daemon
+        args.external_editor
+        or args.transcript
+        or args.codex_no_daemon
+        or args.codex_yolo
     ) and not args.codex:
-        parser.error("editor, transcript, and no-daemon options require --codex")
+        parser.error("Codex-specific options require --codex")
     if args.fixture:
         if args.state is None:
             parser.error("--fixture requires --state")
-        fixture(args.state, args.alternate, args.broken_fixture)
+        fixture(args.state, args.alternate, args.broken_fixture, args.broken_background)
+        return 0
+    if args.negative_controls:
+        if args.codex:
+            parser.error("negative controls use only the offline fixture")
+        args.cycles = 1
+        args.background = True
+        for phase in ("suspend", "background"):
+            args.broken_fixture = phase == "suspend"
+            args.broken_background = phase == "background"
+            try:
+                run(args)
+            except KeyboardRegression as error:
+                if str(error) != f"{phase} 0: ctrl+backspace":
+                    raise
+                print(f"negative control: detected broken {phase} client")
+            else:
+                raise RuntimeError(f"broken {phase} client was accepted")
         return 0
     result = run(args)
     print(f"job-control smoke: OK artifacts={result}")

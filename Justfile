@@ -863,6 +863,7 @@ split-repro *ARGS:
 job-control-smoke: release
     python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --background
     python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --alternate --background
+    python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --negative-controls
 
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
