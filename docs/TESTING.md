@@ -77,6 +77,40 @@ the blurred window, repeats the style transition while borderless, and toggles
 Reduce Transparency live. It verifies the titlebar seam, rounded corners,
 traffic lights, drag region, and first content row by sight.
 
+### Unix suspend/resume compatibility
+
+`just job-control-smoke` builds Kettle and checks shell editing before a client
+starts, while it is suspended, after `bg` and `fg`, and after it exits. It covers
+Ctrl+Backspace, Alt+Backspace, ordinary Backspace, arrows, Ctrl+C, and Enter.
+The offline fixture negotiates Kitty keyboard reporting on both the main and
+alternate screen. Linux and macOS CI run it without accounts or network calls.
+The test uses the normal PTY and `send_keys` encoder; it does not inject physical
+desktop events. Windows has no Unix job control and retains its normal CI gates.
+
+For the real Codex TUI, explicitly choose the executable:
+
+```sh
+python3 scripts/check-job-control-smoke.py --kettle ./target/release/kettle \
+  --codex /absolute/path/to/codex --shell zsh --configured-shell --cycles 100
+```
+
+This opt-in check uses that client's local configuration and authentication,
+starts an idle session, and never submits a model prompt. A trust or login dialog
+fails readiness rather than receiving an automatic confirmation. Use a trusted
+working directory. Add `--background`, `--alternate`, or `--split` to exercise
+those paths. Standalone Codex development builds can use `--codex-no-daemon`
+when they lack a packaged daemon. `--external-editor` checks a temporary editor's
+draft handoff before
+suspending; `--transcript` suspends from the transcript overlay. `--columns` and
+`--rows` control the startup size; `--maximized` opens a maximized window.
+The harness owns
+its isolated window and cleans up its PTY sessions, including stopped jobs.
+It does not operate existing user windows.
+
+Artifacts contain exact binary versions, launch settings, final window geometry,
+and pane grids. Failed tests retain local screen text for diagnosis; review it
+before sharing. No screenshots or recordings are published by this test.
+
 ### Shell integration and completion
 
 Shell-integration changes also run `just shell-integration-check`. Unlike the

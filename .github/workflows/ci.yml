@@ -300,6 +300,24 @@ jobs:
         # helper handling and SHA-256 verification stay covered.
         if: runner.os == 'Linux'
         run: scripts/check-linux-installers.sh
+      - name: Unix job-control compatibility (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
+            --kettle ./target/release/kettle --background --cycles 3
+          xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
+            --kettle ./target/release/kettle --alternate --background --cycles 3
+      - name: Unix job-control compatibility (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+            --kettle ./target/release/kettle --background --cycles 3
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+            --kettle ./target/release/kettle --alternate --background --cycles 3
       - name: Windows release-profile binary + CLI smoke
         # The core matrix builds all targets in the debug profile. This extra
         # build protects the retained GUI-subsystem + conditional console-attach
