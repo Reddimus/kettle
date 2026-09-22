@@ -108,7 +108,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig1-dev libfreetype6-dev \
             libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish
+            libxcb1-dev mesa-vulkan-drivers libvulkan1 xvfb fish xclip x11-utils libxtst6
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo build --locked --workspace --all-targets
@@ -287,6 +287,67 @@ jobs:
         # binary to run. Windows stays out (its smokes are bash-only).
         if: runner.os != 'Windows'
         run: cargo build --release -p kettle
+      - name: Pinned Codex image-paste client (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "$(uname -s):$(uname -m)" in
+            Linux:x86_64)
+              target=x86_64-unknown-linux-musl
+              checksum=a0ef8b2debc3bf747e07b1a039354de31300ac0dcc2276498ba281470b5d9115 ;;
+            Darwin:arm64)
+              target=aarch64-apple-darwin
+              checksum=5e5a51470dce2423f9d96bd191d0bbc4cc0e2848a6833df5178eaf47a07a3768 ;;
+            Darwin:x86_64)
+              target=x86_64-apple-darwin
+              checksum=ff22ad0bf28b8568dbfb28ef0ea64451fe5170fa0f9118bf764ca6cb24c27791 ;;
+            *) echo "unsupported image-paste client architecture" >&2; exit 1 ;;
+          esac
+          client_dir="$RUNNER_TEMP/image-paste-client"
+          mkdir -p "$client_dir"
+          curl --fail --location --retry 3 --max-time 120 \
+            "https://github.com/openai/codex/releases/download/rust-v0.155.1/codex-$target.tar.gz" \
+            --output "$client_dir/client.tar.gz"
+          echo "$checksum  $client_dir/client.tar.gz" | shasum -a 256 --check
+          tar -xzf "$client_dir/client.tar.gz" -C "$client_dir"
+          mv "$client_dir/codex-$target" "$client_dir/codex"
+          echo "CODEX_PASTE_TEST_BIN=$client_dir/codex" >> "$GITHUB_ENV"
+      - name: Native image paste routes (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 3
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          env -u WAYLAND_DISPLAY xvfb-run -a python3 scripts/check-image-paste-parity.py \
+            --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/image-paste" \
+            --codex "$CODEX_PASTE_TEST_BIN"
+      - name: Native image paste routes (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 3
+        run: |
+          python3 scripts/check-image-paste-parity.py \
+            --kettle ./target/release/kettle --out-dir "$RUNNER_TEMP/image-paste" \
+            --codex "$CODEX_PASTE_TEST_BIN"
+      - name: Image paste environment
+        if: runner.os != 'Windows' && always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/image-paste/results.json" ]; then
+            cat "$RUNNER_TEMP/image-paste/results.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RUNNER_TEMP/image-paste/codex-results.json" ]; then
+            cat "$RUNNER_TEMP/image-paste/codex-results.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Image paste failure evidence
+        if: runner.os != 'Windows' && failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-paste-${{ runner.os }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/image-paste/*.json
+            ${{ runner.temp }}/image-paste/*.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Agent CLI non-interactive smoke (macOS)
         # The mandatory Kettle-owned PTY/JSON/MCP probes run on every attempt.
         # Third-party CLIs are machine-local and report explicit skips when the

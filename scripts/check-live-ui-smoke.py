@@ -6680,7 +6680,7 @@ MACOS_MOUSE_MOVED = 5
 MACOS_LEFT_MOUSE_DRAGGED = 6
 
 
-def macos_mouse_event(event_type: int, x: float, y: float) -> None:
+def macos_mouse_event(event_type: int, x: float, y: float, *, button: int = 0) -> None:
     import ctypes
 
     class CGPoint(ctypes.Structure):
@@ -6706,7 +6706,7 @@ def macos_mouse_event(event_type: int, x: float, y: float) -> None:
         raise SystemExit(
             "selection-autoscroll smoke: grant Accessibility access to the invoking terminal"
         )
-    event = core_graphics.CGEventCreateMouseEvent(None, event_type, CGPoint(x, y), 0)
+    event = core_graphics.CGEventCreateMouseEvent(None, event_type, CGPoint(x, y), button)
     if not event:
         raise SystemExit("selection-autoscroll smoke: CGEventCreateMouseEvent failed")
     core_graphics.CGEventPost(0, event)
@@ -7687,17 +7687,29 @@ def set_bitmap_clipboard(path: Path) -> Optional[subprocess.Popen]:
             )
         return owner
     elif os.environ.get("DISPLAY") and shutil.which("xclip"):
-        cp = run(
+        # Keep the selection owner in the foreground. A daemonized xclip
+        # inherits run()'s capture pipes and prevents communicate() reaching EOF.
+        owner = subprocess.Popen(
             [
                 "xclip",
+                "-quiet",
                 "-selection",
                 "clipboard",
                 "-target",
                 "image/png",
                 "-in",
                 str(path),
-            ]
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        time.sleep(0.1)
+        if owner.poll() is not None:
+            stderr = owner.stderr.read() if owner.stderr else b""
+            raise SystemExit(
+                f"image-paste-receipt smoke: X11 clipboard provider failed: {stderr!r}"
+            )
+        return owner
     else:
         raise SystemExit(
             "image-paste-receipt smoke: no bitmap clipboard writer; install "
@@ -7787,7 +7799,7 @@ def set_file_list_clipboard(paths: Sequence[Path]) -> Optional[subprocess.Popen]
         return owner
     elif os.environ.get("DISPLAY") and shutil.which("xclip"):
         owner = subprocess.Popen(
-            ["xclip", "-selection", "clipboard", "-target", "text/uri-list", "-in"],
+            ["xclip", "-quiet", "-selection", "clipboard", "-target", "text/uri-list", "-in"],
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
