@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
@@ -125,7 +126,7 @@ def failure_evidence(live, out: Path):
         try:
             result = live.ctl("read_screen", raw=True, timeout=2)
             (out / "failure-screen.json").write_text(result.stdout)
-        except (OSError, RuntimeError, SystemExit) as error:
+        except (OSError, RuntimeError, SystemExit, subprocess.TimeoutExpired) as error:
             print(f"could not save failure screen: {error}", file=sys.stderr)
         raise
 
@@ -280,8 +281,9 @@ def run(args) -> Path:
             if args.codex:
                 # Never confirm trust dialogs or submit model work automatically.
                 wait_until(
-                    lambda: re.search(
-                        r"Ask Codex|context left|/model to change", screen()
+                    lambda: (
+                        re.search(r"Ask Codex|context left|/model to change", screen())
+                        and not re.search(r"(?:model|directory):\s+loading", screen())
                     ),
                     "Codex composer",
                     45,

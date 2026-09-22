@@ -372,6 +372,11 @@ See [Unix suspend/resume compatibility](TESTING.md#unix-suspendresume-compatibil
 for the offline regression scenario and the explicit real-Codex probe. Until a
 fixed client is installed, exiting Codex normally avoids this suspension path.
 
+At an empty shell prompt, `printf '\033c'; stty sane` restores terminal modes
+and shell editing. This clears the terminal display; the suspended job remains
+stopped until `fg`. The recovery was checked against a client fixture that
+deliberately leaves enhanced keyboard reporting enabled while suspended.
+
 Run `scripts/check-agent-cli-smoke.sh` from a Kettle checkout to verify the
 installed Codex CLI, Claude Code CLI, tmux, clean Neovim, and configured
 Neovim/AstroNvim against the current Kettle binary. The smoke also performs a
