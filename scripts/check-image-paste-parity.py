@@ -60,6 +60,11 @@ def native_keys(live, names, *, middle=False):
         cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
         cg.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
         cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        cg.CGPreflightPostEventAccess.restype = ctypes.c_bool
+        if not cg.CGPreflightPostEventAccess():
+            raise RuntimeError(
+                "native image-paste keys require macOS Accessibility permission"
+            )
         cf.CFRelease.argtypes = [ctypes.c_void_p]
         codes = {
             "control": (59, 1 << 18),
@@ -454,6 +459,17 @@ def main():
                     owner.terminate()
                     owner.wait(timeout=3)
 
+        owner = helpers.set_bitmap_clipboard(image)
+        try:
+            live.ctl("perform_action", params={"action": "paste"})
+            wait_for(
+                lambda: live.json_ctl("ui_geometry").get("image_paste_receipt"),
+                "receipt before Ctrl+V dismissal",
+            )
+        finally:
+            if owner is not None and owner.poll() is None:
+                owner.terminate()
+                owner.wait(timeout=3)
         before = len(read_input())
         native_keys(live, ["control", "v"])
         wait_for(
