@@ -58,6 +58,16 @@ def is_leaked_key_report_tail(evidence: str) -> bool:
     )
 
 
+def background_job_stopped_evidence(screen_text: str) -> str | None:
+    lines = screen_text.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\[\d+\]\+\s+Stopped\b", line):
+            context = lines[index : index + 3]
+            if "--broken-background" in "".join(row.strip() for row in context):
+                return "\n".join(row.strip() for row in context).rstrip()
+    return None
+
+
 def expected_negative_control_failure(phase: str, error: RuntimeError) -> bool:
     return (
         isinstance(error, KeyboardRegression)
@@ -67,8 +77,12 @@ def expected_negative_control_failure(phase: str, error: RuntimeError) -> bool:
             error.step == "ctrl+backspace"
             or (
                 phase == "background"
-                and error.step == "shell input"
-                and is_leaked_key_report_tail(error.evidence)
+                and (
+                    error.step == "shell input"
+                    and is_leaked_key_report_tail(error.evidence)
+                    or error.step == "background process stopped"
+                    and background_job_stopped_evidence(error.evidence) == error.evidence
+                )
             )
         )
     )
@@ -93,6 +107,18 @@ def check_negative_control_failure_classification() -> None:
         raise AssertionError("failed to identify the leaked enhanced key report")
     if leaked_key_report_tail("JOB> EDIT3alpha beta", "EDIT3alpha") is not None:
         raise AssertionError("accepted shell input without a leaked key report")
+    stopped = background_job_stopped_evidence(
+        "JOB> bg\n[1]+  Stopped /tmp/client\n-smoke.py --broken-back\n"
+        "ground\nJOB>"
+    )
+    if stopped != (
+        "[1]+  Stopped /tmp/client\n-smoke.py --broken-back\nground"
+    ):
+        raise AssertionError("failed to identify a stopped background control")
+    if background_job_stopped_evidence(
+        "JOB> bg\n[1]+  Stopped /tmp/unrelated-command\nJOB>"
+    ) is not None:
+        raise AssertionError("accepted an unrelated stopped background process")
 
     accepted = {
         "suspend": KeyboardRegression("suspend 0", "ctrl+backspace"),
@@ -105,10 +131,19 @@ def check_negative_control_failure_classification() -> None:
     detections = run_negative_controls(exercise)
     if [phase for phase, _ in detections] != ["suspend", "background"]:
         raise AssertionError("negative controls did not classify both expected failures")
+    if not expected_negative_control_failure(
+        "background",
+        KeyboardRegression("background 0", "background process stopped", stopped),
+    ):
+        raise AssertionError("failed to classify a stopped background control")
     rejected = (
         ("background", KeyboardRegression("background 1", "ctrl+backspace")),
         ("suspend", KeyboardRegression("suspend 0", "shell input", "7;5u")),
         ("background", KeyboardRegression("background 0", "shell input", "oops")),
+        (
+            "background",
+            KeyboardRegression("background 0", "background process stopped", "stopped"),
+        ),
         ("background", RuntimeError("timed out waiting for background 0: shell input")),
     )
     if any(expected_negative_control_failure(phase, error) for phase, error in rejected):
@@ -341,6 +376,15 @@ def run(args) -> Path:
                         and tail is not None
                     ):
                         raise KeyboardRegression(label, "shell input", tail) from error
+                    stopped = background_job_stopped_evidence(screen_text)
+                    if (
+                        args.broken_background
+                        and label == "background 0"
+                        and stopped is not None
+                    ):
+                        raise KeyboardRegression(
+                            label, "background process stopped", stopped
+                        ) from error
                     raise
                 keys(chord)
                 try:
