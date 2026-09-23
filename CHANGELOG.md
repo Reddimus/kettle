@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.5.1] — 2026-09-22
+
+### Fixed
+
+- Clipboard pastes now fall back correctly for empty or non-text Linux selections and preserve images and files on macOS.
+
 ## [4.5.0] — 2026-09-20
 
 ### Added
