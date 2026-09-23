@@ -342,7 +342,7 @@ jobs:
         if: runner.os != 'Windows' && failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: image-paste-${{ runner.os }}-${{ github.run_id }}
+          name: image-paste-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/image-paste/*.json
             ${{ runner.temp }}/image-paste/*.log

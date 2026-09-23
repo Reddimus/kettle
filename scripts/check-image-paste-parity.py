@@ -297,7 +297,7 @@ def main():
     state = out / "input.hex"
     client = out / "client.py"
     client.write_text(
-        "import os,sys,tty\nfrom pathlib import Path\ntty.setraw(0)\nos.write(1,b'\\x1b[>7u\\x1b[?2004hIMAGE_PASTE_READY')\ndata=b''\nwhile True:\n data+=os.read(0,4096)\n Path(sys.argv[1]).write_text(data.hex())\n"
+        "import os,sys,tty\nfrom pathlib import Path\ntty.setraw(0)\nos.write(1,b'\\x1b[>7u\\x1b[?2004hIMAGE_PASTE_READY')\ndata=b''\nstate=Path(sys.argv[1])\nwhile True:\n data+=os.read(0,4096)\n temporary=state.with_suffix('.tmp')\n temporary.write_text(data.hex())\n temporary.replace(state)\n"
     )
     results = []
     with (
