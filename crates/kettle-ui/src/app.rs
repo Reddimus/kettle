@@ -9612,42 +9612,23 @@ impl App {
             .filter(|paths| !paths.is_empty())
     }
 
-    /// Paste the **X11 PRIMARY selection** (middle-click). On X11 the
-    /// PRIMARY selection holds whatever was last highlighted with the mouse —
-    /// distinct from the CLIPBOARD (Ctrl+C / Ctrl+Shift+C). The standard
-    /// terminal convention is middle-click = paste PRIMARY, which kettle
-    /// previously got wrong by aliasing `PastePrimary` straight to the regular
-    /// clipboard. arboard exposes PRIMARY on Linux via `GetExtLinux`; on
-    /// Wayland (no separate PRIMARY surfaced here), macOS, and Windows there is
-    /// no PRIMARY selection, so we fall back to the regular clipboard — the
-    /// historical behavior. Shares `paste_text` so the clamp + bracketed-paste
-    /// + broadcast scoping match `Action::Paste`.
+    /// Paste selected X11 text, falling back to the full clipboard pipeline
+    /// when PRIMARY is empty or unavailable. Other platforms have one clipboard.
     fn paste_primary(&mut self, ws: &mut WindowState) {
         #[cfg(target_os = "linux")]
-        let text = {
+        {
             use arboard::{GetExtLinux, LinuxClipboardKind};
             let primary = self
                 .clipboard
                 .as_mut()
                 .and_then(|c| c.get().clipboard(LinuxClipboardKind::Primary).text().ok())
-                .filter(|t| !t.is_empty());
-            match primary {
-                Some(t) => t,
-                // PRIMARY empty/unset (or under Wayland) → fall back to clipboard.
-                None => self
-                    .clipboard
-                    .as_mut()
-                    .and_then(|c| c.get_text().ok())
-                    .unwrap_or_default(),
+                .filter(|text| !text.is_empty());
+            if let Some(text) = primary {
+                self.paste_text(ws, text);
+                return;
             }
-        };
-        #[cfg(not(target_os = "linux"))]
-        let text = self
-            .clipboard
-            .as_mut()
-            .and_then(|c| c.get_text().ok())
-            .unwrap_or_default();
-        self.paste_text(ws, text);
+        }
+        self.paste_clipboard(ws);
     }
 
     /// Shared paste path — size validation, broadcast scoping, bracketed-paste

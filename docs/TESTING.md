@@ -2221,3 +2221,26 @@ Separate workflows:
   both published, the script also runs `install-online.sh` and verifies SHA-256
   and prefix-local uninstall behavior. A tag whose asset still returns 404 is
   treated as an in-progress release; other asset-probe failures remain fatal.
+
+### Native image paste routes
+
+`python3 scripts/check-image-paste-parity.py --kettle ./target/release/kettle`
+replaces the desktop clipboard with generated test pixels. Run it in an isolated
+Xvfb display on Linux (`env -u WAYLAND_DISPLAY xvfb-run -a python3
+scripts/check-image-paste-parity.py --kettle ./target/release/kettle`) or on a
+dedicated macOS runner. Linux needs `xclip`,
+`xwininfo`, `xprop`, and libXtst; macOS needs native event-posting permission.
+The required native CI steps run it after building the release binary.
+
+The test checks regular paste, native Ctrl+Shift+V, macOS Cmd+V, PRIMARY fallback,
+and middle-click. It verifies a delivered managed PNG path, thumbnail dimensions,
+and receipt survival after key release. Bare Ctrl+V must reach the client through
+Kitty keyboard encoding and dismiss the previous receipt. This offline client
+proves terminal routing. Optional `--codex /path/to/codex` also tests Codex
+0.155.1's real composer with an empty private profile, a trusted empty directory,
+and an offline provider. Each shortcut must add a new numbered attachment;
+Kettle thumbnails must follow the documented shortcut policy. No prompt is
+submitted and no credentials are needed. CI downloads the fixed official release
+and checks its pinned SHA-256 before execution. `results.json` records the actual
+OS, render surface, grid, and outcomes; `codex-results.json` records the client
+version and attachment outcomes.
