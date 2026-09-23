@@ -313,6 +313,9 @@ jobs:
             --kettle ./target/release/kettle --alternate --background --cycles 3 \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
           xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
+            --kettle ./target/release/kettle --split --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
+          xvfb-run -a python3 scripts/check-job-control-smoke.py --hidden \
             --kettle ./target/release/kettle --negative-controls \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
       - name: Unix job-control compatibility (macOS)
@@ -324,6 +327,9 @@ jobs:
             --out-dir "$RUNNER_TEMP/kettle-job-control"
           python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
             --kettle ./target/release/kettle --alternate --background --cycles 3 \
+            --out-dir "$RUNNER_TEMP/kettle-job-control"
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+            --kettle ./target/release/kettle --split --cycles 3 \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
           python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
             --kettle ./target/release/kettle --negative-controls \
