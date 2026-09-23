@@ -96,6 +96,10 @@ python3 scripts/check-job-control-smoke.py --kettle ./target/release/kettle \
   --codex /absolute/path/to/codex --shell zsh --configured-shell --cycles 100
 ```
 
+Codex 0.155.1 is expected to fail the post-resume editing probe until upstream
+issue [#26564](https://github.com/openai/codex/issues/26564) is fixed; CI uses
+the offline fixture.
+
 This opt-in check uses that client's local configuration and authentication,
 starts an idle session, and never submits a model prompt. A trust or login dialog
 fails readiness rather than receiving an automatic confirmation. Use a trusted
