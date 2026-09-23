@@ -64,6 +64,20 @@ control input dismisses it because the command line may have changed. Set
 `paste-image-preview = off` to avoid creating or retaining preview pixels
 without changing image paste.
 
+On macOS, `Cmd+V` uses the same Kettle clipboard paste action. The menu's
+Paste action and clipboard fallback for middle-click or `paste_primary` also
+use that pipeline. Linux PRIMARY text takes precedence over the clipboard.
+
+Codex CLI 0.155.1 handles bare `Ctrl+V` itself. A successful image attachment
+appears as `[Image #1]` in its composer, without Kettle's thumbnail receipt.
+Kettle cannot confirm a client-owned clipboard read. Both `Ctrl+Shift+V` and
+`Ctrl+V` were verified with a clipboard bitmap in the local Codex composer;
+this does not assert that a prompt was submitted or a model read the image.
+Copying an existing image file pastes its path and does not create Kettle's
+bitmap thumbnail. Preview settings, focus, and later input also affect receipt
+visibility. These distinctions prevent a missing thumbnail from being mistaken
+for a failed attachment.
+
 Current local `codex --help` also exposes `-i, --image <FILE>...` for images
 attached to an initial prompt. This is the durable Codex fallback when starting
 a session:
