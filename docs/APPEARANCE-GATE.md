@@ -30,6 +30,19 @@ Kettle session; Dock capture is unavailable. Finder, app-switcher and magnified
 icons were not checked. No native HiDPI or Intel hardware was available. This
 bundle is ad-hoc signed; release signing and notarization are checked separately.
 
+## 4.5.1 cut - 2026-09-22
+
+Clipboard routing only changed; renderer, window chrome, material and icon
+sources are unchanged. The visual results above remain applicable. The native
+macOS image-paste CI route passed, and `just macos-update-smoke` passed against
+published v4.5.0.
+
+The rebuilt appearance suite was skipped: this host has Xcode 27, while the
+release icon script requires Xcode 26.x. The macOS 26 CI icon job passed.
+`just dock-menu-smoke` was skipped because the existing Kettle instance is
+running; the recipe refuses to run alongside another instance. Dock icon
+capture remains unavailable.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
