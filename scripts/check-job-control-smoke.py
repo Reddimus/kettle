@@ -27,28 +27,103 @@ from pathlib import Path
 class KeyboardRegression(RuntimeError):
     """A client left the shell with the wrong key encoding."""
 
+    def __init__(self, label: str, step: str, evidence: str = ""):
+        self.label = label
+        self.step = step
+        self.evidence = evidence
+        match = re.fullmatch(r"(suspend|background) (\d+)", label)
+        self.phase = match.group(1) if match else None
+        self.cycle = int(match.group(2)) if match else None
+        detail = f"{label}: {step}"
+        if evidence:
+            detail += f" ({evidence})"
+        super().__init__(detail)
+
+
+def leaked_key_report_tail(screen_text: str, probe: str) -> str | None:
+    prefix = f"JOB> {probe} beta"
+    encoded_reports = ("\x1b[127;5u", "\x1b[127;3u")
+    for line in reversed(screen_text.splitlines()):
+        if not line.startswith(prefix):
+            continue
+        tail = line[len(prefix) :].rstrip()
+        if len(tail) >= 3 and any(report.endswith(tail) for report in encoded_reports):
+            return tail
+    return None
+
+
+def is_leaked_key_report_tail(evidence: str) -> bool:
+    return len(evidence) >= 3 and any(
+        report.endswith(evidence) for report in ("\x1b[127;5u", "\x1b[127;3u")
+    )
+
 
 def expected_negative_control_failure(phase: str, error: RuntimeError) -> bool:
-    if isinstance(error, KeyboardRegression):
-        return str(error) == f"{phase} 0: ctrl+backspace"
-    return phase == "background" and str(error) == (
-        "timed out waiting for background 0: shell input"
+    return (
+        isinstance(error, KeyboardRegression)
+        and error.phase == phase
+        and error.cycle == 0
+        and (
+            error.step == "ctrl+backspace"
+            or (
+                phase == "background"
+                and error.step == "shell input"
+                and is_leaked_key_report_tail(error.evidence)
+            )
+        )
     )
+
+
+def run_negative_controls(exercise):
+    detections = []
+    for phase in ("suspend", "background"):
+        try:
+            exercise(phase)
+        except RuntimeError as error:
+            if not expected_negative_control_failure(phase, error):
+                raise
+            detections.append((phase, error))
+        else:
+            raise RuntimeError(f"broken {phase} client was accepted")
+    return detections
 
 
 def check_negative_control_failure_classification() -> None:
-    assert expected_negative_control_failure(
-        "suspend", KeyboardRegression("suspend 0: ctrl+backspace")
+    if leaked_key_report_tail("JOB> EDIT3alpha beta7;5u", "EDIT3alpha") != "7;5u":
+        raise AssertionError("failed to identify the leaked enhanced key report")
+    if leaked_key_report_tail("JOB> EDIT3alpha beta", "EDIT3alpha") is not None:
+        raise AssertionError("accepted shell input without a leaked key report")
+
+    accepted = {
+        "suspend": KeyboardRegression("suspend 0", "ctrl+backspace"),
+        "background": KeyboardRegression("background 0", "shell input", "7;5u"),
+    }
+
+    def exercise(phase: str) -> None:
+        raise accepted[phase]
+
+    detections = run_negative_controls(exercise)
+    if [phase for phase, _ in detections] != ["suspend", "background"]:
+        raise AssertionError("negative controls did not classify both expected failures")
+    rejected = (
+        ("background", KeyboardRegression("background 1", "ctrl+backspace")),
+        ("suspend", KeyboardRegression("suspend 0", "shell input", "7;5u")),
+        ("background", KeyboardRegression("background 0", "shell input", "oops")),
+        ("background", RuntimeError("timed out waiting for background 0: shell input")),
     )
-    assert expected_negative_control_failure(
-        "background", KeyboardRegression("background 0: ctrl+backspace")
-    )
-    assert expected_negative_control_failure(
-        "background", RuntimeError("timed out waiting for background 0: shell input")
-    )
-    assert not expected_negative_control_failure(
-        "suspend", RuntimeError("timed out waiting for suspend 0: shell input")
-    )
+    if any(expected_negative_control_failure(phase, error) for phase, error in rejected):
+        raise AssertionError("negative control accepted an unrelated failure")
+
+    def unrelated_timeout(_phase: str) -> None:
+        raise RuntimeError("timed out waiting for background 0: shell input")
+
+    try:
+        run_negative_controls(unrelated_timeout)
+    except RuntimeError as error:
+        if str(error) != "timed out waiting for background 0: shell input":
+            raise
+    else:
+        raise AssertionError("negative control accepted an unrelated timeout")
 
 
 def fixture(
@@ -251,10 +326,22 @@ def run(args) -> Path:
                 edit_generation += 1
                 probe = f"EDIT{edit_generation}alpha"
                 text(probe + " beta")
-                wait_until(
-                    lambda probe=probe: screen().endswith(f"JOB> {probe} beta"),
-                    f"{label}: shell input",
-                )
+                try:
+                    wait_until(
+                        lambda probe=probe: screen().endswith(f"JOB> {probe} beta"),
+                        f"{label}: shell input",
+                    )
+                except RuntimeError as error:
+                    screen_text = screen()
+                    (out / "failure-screen.txt").write_text(screen_text)
+                    tail = leaked_key_report_tail(screen_text, probe)
+                    if (
+                        args.broken_background
+                        and label == "background 0"
+                        and tail is not None
+                    ):
+                        raise KeyboardRegression(label, "shell input", tail) from error
+                    raise
                 keys(chord)
                 try:
                     wait_until(
@@ -264,7 +351,7 @@ def run(args) -> Path:
                     )
                 except RuntimeError as error:
                     (out / "failure-screen.txt").write_text(screen())
-                    raise KeyboardRegression(f"{label}: {chord}") from error
+                    raise KeyboardRegression(label, chord) from error
                 keys("ctrl+c")
                 wait_until(lambda: screen().endswith("JOB>"), "Ctrl+C at shell prompt")
             text("abc")
