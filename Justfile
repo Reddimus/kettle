@@ -858,6 +858,13 @@ split-exit-resize-smoke:
 split-repro *ARGS:
     python3 scripts/check-split-repro.py --kettle ./target/release/kettle {{ARGS}}
 
+# Exercise shell editing across Unix job control without an authenticated client.
+[unix]
+job-control-smoke: release
+    python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --background
+    python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --alternate --background
+    python3 scripts/check-job-control-smoke.py --kettle "${CARGO_TARGET_DIR:-./target}/release/kettle" --negative-controls
+
 # Reproduce app-level zoom keybind matching without compositor key injection.
 # Captures dispatch_keybind/ui_geometry under target/diagnostics/zoom-keybind-*.
 [unix]
