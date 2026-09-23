@@ -28,6 +28,29 @@ class KeyboardRegression(RuntimeError):
     """A client left the shell with the wrong key encoding."""
 
 
+def expected_negative_control_failure(phase: str, error: RuntimeError) -> bool:
+    if isinstance(error, KeyboardRegression):
+        return str(error) == f"{phase} 0: ctrl+backspace"
+    return phase == "background" and str(error) == (
+        "timed out waiting for background 0: shell input"
+    )
+
+
+def check_negative_control_failure_classification() -> None:
+    assert expected_negative_control_failure(
+        "suspend", KeyboardRegression("suspend 0: ctrl+backspace")
+    )
+    assert expected_negative_control_failure(
+        "background", KeyboardRegression("background 0: ctrl+backspace")
+    )
+    assert expected_negative_control_failure(
+        "background", RuntimeError("timed out waiting for background 0: shell input")
+    )
+    assert not expected_negative_control_failure(
+        "suspend", RuntimeError("timed out waiting for suspend 0: shell input")
+    )
+
+
 def fixture(
     state: Path, alternate: bool, broken: bool, broken_background: bool
 ) -> None:
@@ -456,6 +479,7 @@ def main() -> int:
     if args.negative_controls:
         if args.codex:
             parser.error("negative controls use only the offline fixture")
+        check_negative_control_failure_classification()
         args.cycles = 1
         args.background = True
         for phase in ("suspend", "background"):
@@ -463,10 +487,10 @@ def main() -> int:
             args.broken_background = phase == "background"
             try:
                 run(args)
-            except KeyboardRegression as error:
-                if str(error) != f"{phase} 0: ctrl+backspace":
+            except RuntimeError as error:
+                if not expected_negative_control_failure(phase, error):
                     raise
-                print(f"negative control: detected broken {phase} client")
+                print(f"negative control: detected broken {phase} client ({error})")
             else:
                 raise RuntimeError(f"broken {phase} client was accepted")
         return 0
