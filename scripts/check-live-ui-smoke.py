@@ -7703,13 +7703,46 @@ def set_bitmap_clipboard(path: Path) -> Optional[subprocess.Popen]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-        time.sleep(0.1)
-        if owner.poll() is not None:
-            stderr = owner.stderr.read() if owner.stderr else b""
-            raise SystemExit(
-                f"image-paste-receipt smoke: X11 clipboard provider failed: {stderr!r}"
-            )
-        return owner
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if owner.poll() is not None:
+                break
+            try:
+                targets = subprocess.run(
+                    [
+                        "xclip",
+                        "-o",
+                        "-selection",
+                        "clipboard",
+                        "-target",
+                        "TARGETS",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=0.5,
+                )
+            except subprocess.TimeoutExpired:
+                targets = None
+            if (
+                targets is not None
+                and targets.returncode == 0
+                and b"image/png" in targets.stdout.split()
+            ):
+                return owner
+            time.sleep(0.05)
+        if owner.poll() is None:
+            owner.terminate()
+        try:
+            owner.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            owner.kill()
+            owner.wait(timeout=3)
+        stderr = owner.stderr.read() if owner.stderr else b""
+        if not stderr:
+            stderr = b"image/png clipboard target was not advertised"
+        raise SystemExit(
+            f"image-paste-receipt smoke: X11 clipboard provider failed: {stderr!r}"
+        )
     else:
         raise SystemExit(
             "image-paste-receipt smoke: no bitmap clipboard writer; install "
