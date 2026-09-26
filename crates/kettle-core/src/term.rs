@@ -4344,12 +4344,12 @@ pub struct Terminal {
     /// *authoritative* cwd — a shell that volunteers it (incl. an in-distro WSL
     /// shell) is always right.
     pub cwd: Arc<Mutex<Option<String>>>,
-    /// v2.29.0: a working directory read natively from the OS (the PTY child's
-    /// foreground process, via the platform process table) when the shell does
-    /// NOT emit OSC 7/9;9 — e.g. a stock Windows `pwsh`/`cmd`. Kept SEPARATE
-    /// from `cwd` so a stale/None native read can never clobber the authoritative
-    /// escape-sequence cwd; consulted only as a fallback by `current_dir_or_native`.
-    /// Never set for WSL/SSH panes (the relay's OS cwd is meaningless there).
+    /// v2.29.0: the shell's working directory, read from the OS process table,
+    /// for shells that do NOT emit OSC 7/9;9, such as a stock Windows `cmd`.
+    /// Kept SEPARATE from `cwd` so a stale/None native read can never clobber
+    /// the authoritative escape-sequence cwd; consulted only as a fallback by
+    /// `current_dir_or_native`. Never set for WSL/SSH panes (the relay's OS cwd
+    /// is meaningless there).
     pub native_cwd: Arc<Mutex<Option<String>>>,
     /// v2.29.1: set once the shell actually reported a cwd via OSC 7/9;9. Until
     /// then `cwd` holds only the pre-seeded launch directory, so

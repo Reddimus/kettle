@@ -420,18 +420,12 @@ impl RemoteScanner {
         )
     }
 
-    /// v2.29.0: the cwd of the pane's foreground process — the DEEPEST live
-    /// descendant of `child_pid` (e.g. `pwsh → git status`), or `child_pid`
-    /// itself when it has no children (a shell idling at a prompt; its own
-    /// process cwd tracks builtin `cd`). Backs the native cwd fallback used to
-    /// label a pane whose shell emits no OSC 7/9;9. Unlike
-    /// [`foreground_shell`](Self::foreground_shell) the descendant need NOT be a
-    /// known interactive shell — any foreground program inherits the shell's cwd,
-    /// so the deepest one is "where the user is". `None` if the cwd can't be read
-    /// (elevated / cross-arch / WSL-relay target — sysinfo returns None).
-    pub fn foreground_cwd(&self, child_pid: u32) -> Option<String> {
-        let pid = deepest_descendant_in_index(child_pid, &self.index).unwrap_or(child_pid);
-        self.tree().cwd_of(pid)
+    /// The directory of the shell the user is typing into, as `shell_in_chain`
+    /// picks it. Backs the native cwd for panes whose shell sends no OSC 7/9;9.
+    /// `None` if the OS won't say: elevated, cross-arch, or a WSL relay.
+    pub fn shell_cwd(&self, child_pid: u32) -> Option<String> {
+        let tree = self.tree();
+        tree.cwd_of(shell_in_chain(child_pid, tree, &self.index))
     }
 
     fn tree(&self) -> &dyn ProcessTree {
@@ -538,7 +532,7 @@ impl RemoteScanWorker {
                             });
                             let native_cwd =
                                 if target.allow_native_cwd && remote.is_none() && !nested_wsl {
-                                    scanner.foreground_cwd(target.pid)
+                                    scanner.shell_cwd(target.pid)
                                 } else {
                                     None
                                 };
@@ -1442,55 +1436,41 @@ fn find_foreground_composer_in_index_with_scratch(
     None
 }
 
-/// v2.29.0: the deepest live descendant pid of `root` — but ONLY along a LINEAR
-/// chain (each level has ≤1 child). `None` when `root` has no descendants OR the
-/// tree forks (some level has >1 child); the caller then reads `root`'s own cwd.
-/// Used by [`RemoteScanner::foreground_cwd`] to find the foreground process whose
-/// cwd is "where the user is". Unlike [`find_foreground_shell_in_index`] it does
-/// not filter to known shells — any descendant inherits the shell's cwd.
+/// The shell the user is typing into: the deepest interactive shell on the
+/// pane's single chain of processes, else `root`. A program that `chdir`s (an
+/// editor's `:cd`, `make -C`, a background job) is never picked. Terminator
+/// reads the shell process's own directory too, and so does OSC 7, which the
+/// shell sends at its prompt.
 ///
-/// v2.32.0 (audit, medium): the pre-fix walk took the deepest descendant across
-/// ALL branches, so when the pane shell had two children (e.g. a backgrounded
-/// `sleep 999 &` alongside an idle foreground prompt, or a long-running build in
-/// one branch while the user `cd`s in the shell) the cwd label tracked whichever
-/// branch happened to be deeper — a BACKGROUND job, not the foreground. "Deepest
-/// descendant" is only a valid foreground signal on a single (linear) chain like
-/// `pwsh → wsl → bash → git`; the moment the tree forks there is no unambiguous
-/// foreground from the process tree alone, so we bail to `None` and let
-/// `foreground_cwd` fall back to the root shell's own process cwd (which tracks
-/// the shell's builtin `cd` correctly regardless of background jobs).
-fn deepest_descendant_in_index(
+/// The walk stops at a fork, where the tree alone cannot tell foreground from
+/// background, and falls back to `root` on a malformed, cyclic index. Login
+/// shells (`-zsh`) count as shells.
+fn shell_in_chain<T: ProcessTree + ?Sized>(
     root: u32,
+    tree: &T,
     children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
-) -> Option<u32> {
-    // Walk straight down the chain. At each level the node must have exactly one
-    // child to continue; >1 child means a fork (ambiguous foreground → None), 0
-    // children means we've reached the deepest node of a linear chain.
+) -> u32 {
+    let is_interactive_shell = |pid: u32| {
+        tree.argv_of(pid).is_some_and(|argv| {
+            argv.first()
+                .is_some_and(|prog| is_known_shell(prog.trim_start_matches('-')))
+                && !is_noninteractive_shell(&argv)
+        })
+    };
+    let mut shell = root;
     let mut node = root;
-    let mut deepest: Option<u32> = None;
     for _ in 0..=children_by_parent.len() {
         match children_by_parent.get(&node).map(Vec::as_slice) {
-            // Linear step: descend to the sole child.
             Some([only]) => {
-                // Defensive against a cyclic fixture/index (a pid can normally
-                // have only one parent, so this should never fire): stop rather
-                // than loop forever.
-                deepest = Some(*only);
                 node = *only;
+                if is_interactive_shell(node) {
+                    shell = node;
+                }
             }
-            // Fork: >1 child at this level → ambiguous foreground, bail to None.
-            Some(_) => return None,
-            // Leaf: end of a linear chain (or `root` itself had no children).
-            None => break,
+            _ => return shell,
         }
     }
-    // If a malformed index cycles for more steps than it contains nodes, the
-    // foreground is not trustworthy.
-    if children_by_parent.get(&node).is_some() {
-        None
-    } else {
-        deepest
-    }
+    root
 }
 
 /// The production source of this file, excluding test-only items.
@@ -4816,34 +4796,48 @@ mod tests {
         );
     }
 
-    /// v2.29.0: the native-cwd foreground walk picks the DEEPEST descendant
-    /// (where the user is) regardless of whether it's a known shell — `pwsh →
-    /// git status` tracks git's pid (which inherits the shell's cwd); a bare
-    /// shell with no children returns None so the caller reads the shell's own
-    /// process cwd. (Contrast with `find_foreground_shell`, which filters to
-    /// interactive shells.)
+    /// The native cwd is the shell's, not a program's. From `/repo`, a running
+    /// program that `chdir`s to `/tmp` must not move where a split opens.
     #[test]
-    fn deepest_descendant_tracks_foreground_for_native_cwd() {
-        // pwsh → git (an external command, NOT a shell): deepest = git's pid.
+    fn shell_in_chain_ignores_a_program_that_changes_directory() {
         let mut tree = MockProcessTree::new();
-        tree.add_cwd(1, None, &["pwsh.exe"], "C:\\proj");
-        tree.add_cwd(2, Some(1), &["git", "status"], "C:\\proj");
+        tree.add_cwd(1, None, &["-zsh"], "/repo");
+        tree.add_cwd(2, Some(1), &["nvim"], "/tmp");
         let idx = build_children_index(&tree);
-        assert_eq!(deepest_descendant_in_index(1, &idx), Some(2));
+        assert_eq!(shell_in_chain(1, &tree, &idx), 1);
 
-        // Deeper chain wins: pwsh → wsl → bash.
+        // A shell with nothing running is its own answer.
+        let mut tree = MockProcessTree::new();
+        tree.add(20, None, &["bash"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(shell_in_chain(20, &tree, &idx), 20);
+    }
+
+    /// A shell the user typed inside the pane's shell is where they are. A
+    /// one-shot `sh -c` helper is not.
+    #[test]
+    fn shell_in_chain_follows_nested_interactive_shells() {
         let mut tree = MockProcessTree::new();
         tree.add(10, None, &["pwsh.exe"]);
         tree.add(11, Some(10), &["wsl.exe"]);
         tree.add(12, Some(11), &["bash"]);
+        tree.add(13, Some(12), &["git", "status"]);
         let idx = build_children_index(&tree);
-        assert_eq!(deepest_descendant_in_index(10, &idx), Some(12));
+        assert_eq!(shell_in_chain(10, &tree, &idx), 12);
 
-        // No descendants → None (caller reads the root's own cwd).
         let mut tree = MockProcessTree::new();
-        tree.add(20, None, &["pwsh.exe"]);
+        tree.add(30, None, &["-zsh"]);
+        tree.add(31, Some(30), &["claude"]);
+        tree.add(32, Some(31), &["/bin/zsh", "-c", "cd /elsewhere && make"]);
         let idx = build_children_index(&tree);
-        assert_eq!(deepest_descendant_in_index(20, &idx), None);
+        assert_eq!(shell_in_chain(30, &tree, &idx), 30);
+
+        // A pane with no shell at all answers with its own process.
+        let mut tree = MockProcessTree::new();
+        tree.add(40, None, &["htop"]);
+        tree.add(41, Some(40), &["helper"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(shell_in_chain(40, &tree, &idx), 40);
     }
 
     #[test]
@@ -4910,48 +4904,35 @@ mod tests {
         assert!(!accepts(&["python3"]));
     }
 
-    /// v2.32.0 (audit, medium): once the tree FORKS, "deepest descendant" is no
-    /// longer a valid foreground signal — a background job in another branch can
-    /// be deeper than the real foreground. So a root with >1 child returns None,
-    /// and `foreground_cwd` falls back to the root shell's own cwd (which tracks
-    /// the shell's builtin `cd`). Pre-fix this walked into the deeper background
-    /// branch and labelled the pane with the wrong dir.
+    /// v2.32.0 (audit, medium): a fork means the tree cannot tell foreground
+    /// from background, so the walk stops there. A background job in another
+    /// branch must never set the pane's directory.
     #[test]
-    fn deepest_descendant_forked_tree_returns_none() {
-        // pwsh → { idle foreground prompt (leaf), backgrounded `sleep 999 &`
-        // chain that happens to be deeper }. The fork at the root means we cannot
-        // tell the foreground apart, so bail to None (root-cwd fallback).
+    fn shell_in_chain_stops_at_a_fork() {
         let mut tree = MockProcessTree::new();
-        tree.add(1, None, &["pwsh.exe"]); // root shell (two children = fork)
-        tree.add(2, Some(1), &["nvim"]); // foreground at depth 1
-        tree.add(3, Some(1), &["sleep", "999"]); // background at depth 1
-        tree.add(4, Some(3), &["sleep-helper"]); // deeper background at depth 2
+        tree.add(1, None, &["pwsh.exe"]);
+        tree.add(2, Some(1), &["bash"]);
+        tree.add(3, Some(1), &["sleep", "999"]);
         let idx = build_children_index(&tree);
-        assert_eq!(
-            deepest_descendant_in_index(1, &idx),
-            None,
-            "a forked root is ambiguous → None so foreground_cwd uses the root's own cwd"
-        );
+        assert_eq!(shell_in_chain(1, &tree, &idx), 1);
 
-        // A fork DEEPER in an otherwise-linear chain also bails: pwsh → wsl →
-        // { bash, htop } — the linear prefix is fine but the fork at wsl is not.
+        // A fork deeper down keeps the last shell above it.
         let mut tree = MockProcessTree::new();
         tree.add(10, None, &["pwsh.exe"]);
-        tree.add(11, Some(10), &["wsl.exe"]);
-        tree.add(12, Some(11), &["bash"]);
+        tree.add(11, Some(10), &["bash"]);
+        tree.add(12, Some(11), &["zsh"]);
         tree.add(13, Some(11), &["htop"]);
         let idx = build_children_index(&tree);
-        assert_eq!(
-            deepest_descendant_in_index(10, &idx),
-            None,
-            "a fork at any level is ambiguous → None"
-        );
+        assert_eq!(shell_in_chain(10, &tree, &idx), 11);
     }
 
     #[test]
-    fn deepest_descendant_rejects_a_cyclic_index() {
+    fn shell_in_chain_falls_back_to_the_root_on_a_cyclic_index() {
+        let mut tree = MockProcessTree::new();
+        tree.add(10, None, &["bash"]);
+        tree.add(11, None, &["zsh"]);
         let index = std::collections::HashMap::from([(10, vec![11]), (11, vec![10])]);
-        assert_eq!(deepest_descendant_in_index(10, &index), None);
+        assert_eq!(shell_in_chain(10, &tree, &index), 10);
     }
 
     #[test]
