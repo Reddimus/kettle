@@ -1913,7 +1913,10 @@ impl Mux {
     fn snap(&self, n: &Node) -> SNode {
         match n {
             Node::Leaf(id) => SNode::Leaf {
-                cwd: self.panes.get(id).and_then(|p| p.term.current_dir()),
+                cwd: self
+                    .panes
+                    .get(id)
+                    .and_then(|p| p.term.current_dir_or_native()),
                 cmd: self
                     .panes
                     .get(id)
@@ -2347,7 +2350,7 @@ impl Mux {
     /// to the home dir (the bug the user hit: split a WSL pane → pwsh in ~).
     fn clone_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
         let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
+            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
             None => (Vec::new(), None),
         };
         if argv.is_empty() {
@@ -2367,7 +2370,7 @@ impl Mux {
     /// for shells, WSL, SSH, and ordinary explicit commands.
     fn split_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
         let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
-            Some(pane) => (pane.argv.clone(), pane.term.current_dir()),
+            Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
             None => (Vec::new(), None),
         };
         if split_falls_back_to_shell(&argv, cfg.always_split_with_profile) {
@@ -2599,13 +2602,16 @@ impl Mux {
         self.tabs.get(self.active).map(|t| t.focus)
     }
 
-    /// The focused pane's current directory (reported via OSC 7), used so a
-    /// new tab/split opens where you are — like WezTerm/iTerm/kitty. A
-    /// since-deleted directory falls back to the default (handled by
-    /// [`usable_cwd`]).
+    /// The focused pane's current directory, so a new tab opens where you are,
+    /// like Terminator's `get_cwd()`. [`usable_cwd`] sends a since-deleted
+    /// directory back to the default.
     fn focused_cwd(&self) -> Option<String> {
         let id = self.active_focus()?;
-        usable_cwd(self.panes.get(&id).and_then(|p| p.term.current_dir()))
+        usable_cwd(
+            self.panes
+                .get(&id)
+                .and_then(|p| p.term.current_dir_or_native()),
+        )
     }
 
     pub fn focused(&mut self) -> Option<&mut Pane> {
@@ -3217,7 +3223,7 @@ impl Mux {
                 let snap = ClosedTab {
                     original_index: idx,
                     argv: pane.argv.clone(),
-                    cwd: usable_cwd(pane.term.current_dir()),
+                    cwd: usable_cwd(pane.term.current_dir_or_native()),
                 };
                 if self.closed_tabs.len() >= CLOSED_TAB_RING_CAP {
                     self.closed_tabs.pop_front();
@@ -6700,6 +6706,74 @@ mod node_tests {
         // A since-deleted path or a file → fall back to the default.
         assert_eq!(usable_cwd(Some("/no/such/kettle/xyz".to_string())), None);
         assert_eq!(usable_cwd(None), None);
+    }
+
+    /// Terminator's split keys call `get_cwd()` on the pane being split. That
+    /// is the shell's OSC 7 report, else the shell process's live directory.
+    /// `sh` never reports, so only the live read can follow its `cd`.
+    #[cfg(unix)]
+    #[test]
+    fn new_panes_open_where_the_shell_is_now_not_where_it_started() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let dir = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).expect("create dir");
+            path.to_string_lossy().into_owned()
+        };
+        let cfg = Config {
+            shell: Some("/bin/sh".into()),
+            ..Config::default()
+        };
+        let waker: Waker = Arc::new(|| {});
+        let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+        let mut mux = Mux::new();
+        let started = dir("started");
+        if let Err(e) = mux.new_tab_with_geometry(
+            &cfg,
+            geometry,
+            waker.clone(),
+            &shell_argv(&cfg),
+            Some(&started),
+        ) {
+            eprintln!("skipping: no PTY ({e})");
+            return;
+        }
+
+        // Each step moves the focused shell somewhere new, then opens a pane.
+        // It must start there, not in the focused pane's launch dir.
+        type Open = fn(&mut Mux, &Config, PtyGeometry, Waker) -> Result<()>;
+        let steps: [(&str, Open); 4] = [
+            ("split", |m, c, g, w| {
+                m.split_geometry(Dir::Horizontal, c, g, w)
+            }),
+            ("new tab", |m, c, g, w| m.new_tab_geometry(c, g, w)),
+            ("duplicate tab", |m, c, g, w| {
+                m.duplicate_focused_tab_geometry(c, g, w)
+            }),
+            ("duplicate pane", |m, c, g, w| {
+                m.duplicate_focused_pane_geometry(Dir::Vertical, c, g, w)
+            }),
+        ];
+        for (action, open) in steps {
+            let moved_to = dir(action);
+            let focused = mux.active_focus().expect("a focused pane");
+            mux.panes[&focused]
+                .term
+                .set_native_cwd(Some(moved_to.clone()));
+
+            open(&mut mux, &cfg, geometry, waker.clone()).expect(action);
+
+            let opened = mux.active_focus().expect("the new pane is focused");
+            assert_ne!(opened, focused, "{action} opened no pane");
+            assert_eq!(
+                mux.panes[&opened].term.current_dir_or_native(),
+                Some(moved_to),
+                "{action} must open where the shell is now"
+            );
+        }
+        for pane in mux.panes.values() {
+            let _ = pane.term.kill();
+        }
     }
 
     #[test]

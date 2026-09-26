@@ -10770,7 +10770,7 @@ impl App {
                 .mux
                 .panes
                 .get(&pane_id)
-                .map(|pane| (pane.argv.clone(), pane.term.current_dir()));
+                .map(|pane| (pane.argv.clone(), pane.term.current_dir_or_native()));
             if let Some((argv, cwd)) = restart_info {
                 if let Err(error) = ws.mux.new_tab_with_geometry(
                     &self.cfg,
@@ -14681,7 +14681,10 @@ impl App {
         let (cols, rows) = self.grid_of(ws, area);
         let geometry = self.pty_geometry_for_grid(ws, cols, rows);
         let waker = self.waker();
-        let cwd = ws.mux.focused().and_then(|p| p.term.current_dir());
+        let cwd = ws
+            .mux
+            .focused()
+            .and_then(|p| p.term.current_dir_or_native());
         // Route through new_tab_with_launch so a WSL ▾-dropdown
         // entry's Linux cwd is carried via `wsl --cd` instead of being dropped
         // (a Windows spawn can't `cd` into a Linux path, so it fell back home).
@@ -16753,7 +16756,11 @@ impl App {
             // shape to clicking a `file://...` hyperlink in pane
             // output — re-uses the safety policy for free.
             Action::OpenCwdInFileManager => {
-                match ws.mux.focused().and_then(|p| p.term.current_dir()) {
+                match ws
+                    .mux
+                    .focused()
+                    .and_then(|p| p.term.current_dir_or_native())
+                {
                     // Refuse a non-local OSC 7 cwd before
                     // building/opening the URL (it's untrusted PTY input — a
                     // UNC path would trigger an SMB/NTLM leak on Windows).
@@ -16767,10 +16774,7 @@ impl App {
                         );
                     }
                     None => {
-                        log::info!(
-                            "Action::OpenCwdInFileManager: focused pane has no OSC 7 cwd \
-                             — set up shell integration with `kettle --shell-integration bash`"
-                        );
+                        log::info!("Action::OpenCwdInFileManager: focused pane has no known cwd");
                     }
                 }
             }
@@ -18122,7 +18126,7 @@ impl App {
                     "window": ws.seq,
                     "tab": ti,
                     "title": pane.title,
-                    "cwd": pane.term.current_dir(),
+                    "cwd": pane.term.current_dir_or_native(),
                     "cols": cols,
                     "rows": rows,
                     "focused": Some(id) == focused,

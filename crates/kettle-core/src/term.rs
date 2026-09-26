@@ -7852,22 +7852,21 @@ impl Terminal {
         }
     }
 
-    /// Last working directory reported via OSC 7 (or OSC 9;9), if any. This is
-    /// the authoritative shell-volunteered cwd; callers that must NOT trust an
-    /// OS-derived guess (e.g. WSL split-cloning) use this directly.
-    pub fn current_dir(&self) -> Option<String> {
+    /// The last OSC 7/9;9 report, or the launch directory before one. Private,
+    /// because it misses every `cd` in a shell that never reports. Use
+    /// [`current_dir_or_native`](Self::current_dir_or_native) instead.
+    fn reported_or_launch_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
     }
 
     /// Working directory explicitly reported by the child via OSC 7/9;9.
     ///
-    /// Unlike [`current_dir`](Self::current_dir), this never exposes the
-    /// launch-directory seed before the first cwd report. Use this when a
-    /// caller must distinguish shell-reported state from a startup fallback.
+    /// Never the launch-directory seed and never an OS read. Use this when a
+    /// caller must not trust an OS read, such as WSL split-cloning.
     pub fn reported_current_dir(&self) -> Option<String> {
         reported_current_dir(
             self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
-            self.current_dir(),
+            self.reported_or_launch_dir(),
         )
     }
 
@@ -7879,7 +7878,8 @@ impl Terminal {
         }
     }
 
-    /// v2.29.0: the cwd to display in tab/window/pane labels.
+    /// Where this pane's shell is now. Labels, new panes and tabs, session save
+    /// and ctl all read this, so a split opens where the label says.
     ///
     /// If the shell has actually REPORTED a cwd via OSC 7/9;9 (`osc_cwd_seen`),
     /// that is authoritative — return it, so a shell that volunteers its directory
@@ -7892,13 +7892,13 @@ impl Terminal {
     /// dir shadowed the native poll and a stock Windows shell's tab stayed frozen.)
     pub fn current_dir_or_native(&self) -> Option<String> {
         if self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed) {
-            return self.current_dir();
+            return self.reported_or_launch_dir();
         }
         self.native_cwd
             .lock()
             .ok()
             .and_then(|c| c.clone())
-            .or_else(|| self.current_dir())
+            .or_else(|| self.reported_or_launch_dir())
     }
 
     /// Latest OSC 9;4 taskbar-progress state reported by this pane
