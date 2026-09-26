@@ -43,6 +43,17 @@ release icon script requires Xcode 26.x. The macOS 26 CI icon job passed.
 running; the recipe refuses to run alongside another instance. Dock icon
 capture remains unavailable.
 
+## 4.5.2 cut - 2026-09-26
+
+Only working-directory and OSC 7 hostname logic changed. Renderer, window
+chrome, material and icon sources are unchanged, so the 4.5.0 visual results
+still apply. `just macos-update-smoke` passed against published v4.5.1, and
+`dock-menu-smoke` passed on the merged fix.
+
+The rebuilt appearance suite was skipped again: this host has Xcode 27, and the
+release icon script requires Xcode 26.x. The macOS 26 CI icon job passed. Dock
+icon capture remains unavailable.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
