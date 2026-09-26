@@ -9,7 +9,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 ### Fixed
 
 - New splits, tabs, and duplicates open where the shell is now, and labels keep
-  up, even when the shell never reports its directory.
+  up. A shell that never reports its directory is read from the OS, which can
+  lag a `cd` by about 200 ms.
 - Directory reports from local shells are no longer dropped after macOS renames
   the host on a network change.
 
