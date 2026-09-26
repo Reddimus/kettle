@@ -7571,6 +7571,8 @@ impl Terminal {
             .recv()
             .context("PTY reader stopped before reporting readiness")?
             .map_err(anyhow::Error::msg)?;
+        // The shell reads the hostname now and puts it in every OSC 7 report.
+        kettle_vt::remember_local_hostname();
         let child = pair.slave.spawn_command(cmd)?;
         // No fallible terminal setup remains after the child starts, but keep
         // the guard armed across the final value construction so an unwind

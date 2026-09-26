@@ -1782,8 +1782,19 @@ impl Extractor {
 }
 
 fn parse_osc7(s: &str) -> Option<String> {
-    let local = local_hostname();
-    parse_osc7_with_host(s, local.as_deref())
+    parse_osc7_with(s, |host| {
+        LOCAL_HOSTNAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_local(host, os_hostname)
+    })
+}
+
+#[cfg(test)]
+fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
+    parse_osc7_with(s, |host| {
+        local_host.is_none_or(|local| same_host(host, local))
+    })
 }
 
 /// v2.29.0: parse an OSC 9;9 working-directory payload (everything after the
@@ -1855,29 +1866,93 @@ fn safe_reported_cwd(path: String) -> Option<String> {
     drive_rooted.then_some(path)
 }
 
-/// The machine's hostname for OSC 7 validation. Asks the OS
-/// (gethostname(2) / GetComputerNameExW — review fix: the env vars alone
-/// fail OPEN on Linux/macOS, where interactive bash does not export
-/// `HOSTNAME`), falling back to `COMPUTERNAME`/`HOSTNAME`. Cached: one OS
-/// call per process, not one per OSC 7 report. `None` means "unknown" —
-/// validation then only rejects nothing (an unknown local name must not
-/// break every report that carries a host).
-fn local_hostname() -> Option<String> {
-    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            gethostname::gethostname()
-                .into_string()
+/// This machine's name from gethostname(2) or GetComputerNameExW, else
+/// `COMPUTERNAME` or `HOSTNAME`. Interactive bash does not export `HOSTNAME`,
+/// so the env vars alone would fail open.
+fn os_hostname() -> Option<String> {
+    gethostname::gethostname()
+        .into_string()
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
                 .ok()
                 .filter(|h| !h.trim().is_empty())
-                .or_else(|| {
-                    std::env::var("COMPUTERNAME")
-                        .or_else(|_| std::env::var("HOSTNAME"))
-                        .ok()
-                        .filter(|h| !h.trim().is_empty())
-                })
         })
-        .clone()
+}
+
+static LOCAL_HOSTNAMES: std::sync::Mutex<LocalHostnames> =
+    std::sync::Mutex::new(LocalHostnames::new());
+
+/// Record this machine's current name. Call it when starting a shell. The
+/// shell reads the name once and reports it in OSC 7 for the rest of its life.
+pub fn remember_local_hostname() {
+    if let Some(name) = os_hostname() {
+        LOCAL_HOSTNAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember(name);
+    }
+}
+
+/// Every name this machine has had while Kettle runs. macOS renames the host
+/// when the network changes, and each shell keeps reporting the name it
+/// started with, so a single cached name goes stale.
+struct LocalHostnames {
+    names: Vec<String>,
+}
+
+impl LocalHostnames {
+    /// Plenty, since a name is added only when the OS renames the host. The
+    /// oldest goes first.
+    const MAX: usize = 8;
+
+    const fn new() -> Self {
+        Self { names: Vec::new() }
+    }
+
+    fn remember(&mut self, name: String) {
+        if self
+            .names
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(&name))
+        {
+            return;
+        }
+        if self.names.len() == Self::MAX {
+            self.names.remove(0);
+        }
+        self.names.push(name);
+    }
+
+    /// Whether `host` is this machine. A miss asks the OS again, in case the
+    /// host was renamed since Kettle last looked.
+    fn is_local(&mut self, host: &str, current: impl FnOnce() -> Option<String>) -> bool {
+        if self.names.iter().any(|local| same_host(host, local)) {
+            return true;
+        }
+        match current() {
+            Some(name) => {
+                let hit = same_host(host, &name);
+                self.remember(name);
+                hit
+            }
+            // Nothing known and the OS won't say. Accept rather than drop
+            // every report that names a host.
+            None => self.names.is_empty(),
+        }
+    }
+}
+
+/// `host` names `local`, ignoring case. `host.lan` also matches `host`.
+fn same_host(host: &str, local: &str) -> bool {
+    let local = local.trim();
+    host.eq_ignore_ascii_case(local)
+        || host
+            .split('.')
+            .next()
+            .is_some_and(|label| label.eq_ignore_ascii_case(local))
 }
 
 /// v2.20.0 (Ghostty parity): parse an OSC 7 body, accepting BOTH schemes —
@@ -1888,9 +1963,8 @@ fn local_hostname() -> Option<String> {
 /// An ssh session's shell integration reports the REMOTE host's cwd; treating
 /// `/home/user` from another machine as a local directory breaks new-tab
 /// cwd inheritance and `OpenCwdInFileManager`. (Ghostty applies the same
-/// check in its stream handler.) `local_host = None` skips the rejection for
-/// named hosts only when the local name is unknowable.
-fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
+/// check in its stream handler.) `is_local` decides what "this machine" means.
+fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<String> {
     // Split scheme; kitty-shell-cwd paths are used VERBATIM (no decode).
     let (rest, percent_encoded) = if let Some(r) = s.strip_prefix("kitty-shell-cwd://") {
         (r, false)
@@ -1902,19 +1976,9 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     let path_start = rest.find('/')?;
     let (host, path) = (&rest[..path_start], &rest[path_start..]);
     let host = host.trim();
-    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
-        match local_host {
-            Some(local) if host.eq_ignore_ascii_case(local.trim()) => {}
-            // A FQDN report from this machine ("host.lan" vs "host"): accept
-            // when the first label matches.
-            Some(local)
-                if host
-                    .split('.')
-                    .next()
-                    .is_some_and(|l| l.eq_ignore_ascii_case(local.trim())) => {}
-            Some(_) => return None, // someone else's cwd (ssh) — reject
-            None => {}              // local name unknown — accept
-        }
+    // Someone else's cwd (ssh): reject.
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && !is_local(host) {
+        return None;
     }
     let path = path.trim();
     if path.is_empty() {
@@ -3097,6 +3161,61 @@ mod tests {
             parse_osc7_with_host("file:///c", Some("myhost")),
             Some("/c".to_string())
         );
+    }
+
+    /// macOS renamed a real Mac from `<name>-MacBook-Pro.local` to `Mac` when
+    /// its network changed. Shells started before and after the rename report
+    /// different names, and both are this machine.
+    #[test]
+    fn a_renamed_host_still_counts_as_this_machine() {
+        use super::LocalHostnames;
+        let mut names = LocalHostnames::new();
+        names.remember("Office-MacBook-Pro.local".into());
+        let renamed = || Some("Mac".to_string());
+
+        assert!(
+            names.is_local("Mac", renamed),
+            "a shell started after the rename"
+        );
+        assert!(
+            names.is_local("Office-MacBook-Pro.local", renamed),
+            "a shell started before it"
+        );
+        assert!(
+            !names.is_local("buildbox", renamed),
+            "an ssh session's host"
+        );
+    }
+
+    #[test]
+    fn remembered_hostnames_stay_bounded() {
+        use super::LocalHostnames;
+        let mut names = LocalHostnames::new();
+        names.remember("Mac".into());
+        names.remember("MAC".into());
+        assert_eq!(names.names.len(), 1, "names are compared ignoring case");
+
+        for n in 0..20 {
+            names.remember(format!("host-{n}"));
+        }
+        assert_eq!(names.names.len(), LocalHostnames::MAX);
+        assert!(
+            names.is_local("host-19", || None),
+            "the newest name is kept"
+        );
+        assert!(
+            !names.is_local("Mac", || None),
+            "the oldest name is dropped"
+        );
+    }
+
+    #[test]
+    fn an_unknowable_hostname_rejects_only_once_a_name_is_known() {
+        use super::LocalHostnames;
+        let mut names = LocalHostnames::new();
+        assert!(names.is_local("buildbox", || None));
+        names.remember("Mac".into());
+        assert!(!names.is_local("buildbox", || None));
     }
 
     #[test]
