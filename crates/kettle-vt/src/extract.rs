@@ -678,6 +678,8 @@ pub struct Extractor {
     /// ✢ ✳ ✶ ✻ ✽ — which Claude Code puts in OSC 0 titles).
     seq_tail: [u8; 3],
     seq_tail_len: u8,
+    /// The hostname when this pane's shell started. See [`is_local_host`].
+    shell_hostname: Option<String>,
 }
 
 impl Default for Extractor {
@@ -689,6 +691,15 @@ impl Default for Extractor {
 impl Extractor {
     pub fn new() -> Self {
         Self::with_budget(GraphicsBudget::default())
+    }
+
+    /// An extractor for a shell that is about to start. It keeps the current
+    /// hostname, because the shell puts that name in every OSC 7 report.
+    pub fn for_shell() -> Self {
+        Self {
+            shell_hostname: os_hostname(),
+            ..Self::new()
+        }
     }
 
     #[cfg(test)]
@@ -721,6 +732,7 @@ impl Extractor {
             private_completion: false,
             seq_tail: [0; 3],
             seq_tail_len: 0,
+            shell_hostname: None,
         }
     }
 
@@ -1372,8 +1384,11 @@ impl Extractor {
             self.emit_raw_control(mode, &seq, out);
             let body = &seq[2..];
             if body.len() <= MAX_CWD_REPORT_BYTES
-                && let Some(path) =
-                    parse_osc7(&String::from_utf8_lossy(body)).and_then(safe_reported_cwd)
+                && let Some(path) = parse_osc7(
+                    &String::from_utf8_lossy(body),
+                    self.shell_hostname.as_deref(),
+                )
+                .and_then(safe_reported_cwd)
             {
                 out.push(Chunk::Cwd(path));
             }
@@ -1781,13 +1796,8 @@ impl Extractor {
     }
 }
 
-fn parse_osc7(s: &str) -> Option<String> {
-    parse_osc7_with(s, |host| {
-        LOCAL_HOSTNAMES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_local(host, os_hostname)
-    })
+fn parse_osc7(s: &str, shell_hostname: Option<&str>) -> Option<String> {
+    parse_osc7_with(s, |host| is_local_host(host, shell_hostname, os_hostname))
 }
 
 #[cfg(test)]
@@ -1882,66 +1892,25 @@ fn os_hostname() -> Option<String> {
         })
 }
 
-static LOCAL_HOSTNAMES: std::sync::Mutex<LocalHostnames> =
-    std::sync::Mutex::new(LocalHostnames::new());
-
-/// Record this machine's current name. Call it when starting a shell. The
-/// shell reads the name once and reports it in OSC 7 for the rest of its life.
-pub fn remember_local_hostname() {
-    if let Some(name) = os_hostname() {
-        LOCAL_HOSTNAMES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remember(name);
+/// Whether an OSC 7 `host` is this machine. A shell reads the hostname once,
+/// at startup, and reports it for life, but macOS renames the host when the
+/// network changes. So accept the name this pane's shell started with, and
+/// the OS's current name for shells started since. Each pane keeps only its
+/// own startup name: pooling them would let a remote host that reuses a name
+/// this machine once had pass as local.
+fn is_local_host(
+    host: &str,
+    shell_hostname: Option<&str>,
+    current: impl FnOnce() -> Option<String>,
+) -> bool {
+    if shell_hostname.is_some_and(|name| same_host(host, name)) {
+        return true;
     }
-}
-
-/// Every name this machine has had while Kettle runs. macOS renames the host
-/// when the network changes, and each shell keeps reporting the name it
-/// started with, so a single cached name goes stale.
-struct LocalHostnames {
-    names: Vec<String>,
-}
-
-impl LocalHostnames {
-    /// Plenty, since a name is added only when the OS renames the host. The
-    /// oldest goes first.
-    const MAX: usize = 8;
-
-    const fn new() -> Self {
-        Self { names: Vec::new() }
-    }
-
-    fn remember(&mut self, name: String) {
-        if self
-            .names
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(&name))
-        {
-            return;
-        }
-        if self.names.len() == Self::MAX {
-            self.names.remove(0);
-        }
-        self.names.push(name);
-    }
-
-    /// Whether `host` is this machine. A miss asks the OS again, in case the
-    /// host was renamed since Kettle last looked.
-    fn is_local(&mut self, host: &str, current: impl FnOnce() -> Option<String>) -> bool {
-        if self.names.iter().any(|local| same_host(host, local)) {
-            return true;
-        }
-        match current() {
-            Some(name) => {
-                let hit = same_host(host, &name);
-                self.remember(name);
-                hit
-            }
-            // Nothing known and the OS won't say. Accept rather than drop
-            // every report that names a host.
-            None => self.names.is_empty(),
-        }
+    match current() {
+        Some(name) => same_host(host, &name),
+        // The OS won't say and never did. Accept rather than drop every
+        // report that names a host.
+        None => shell_hostname.is_none(),
     }
 }
 
@@ -3168,54 +3137,51 @@ mod tests {
     /// different names, and both are this machine.
     #[test]
     fn a_renamed_host_still_counts_as_this_machine() {
-        use super::LocalHostnames;
-        let mut names = LocalHostnames::new();
-        names.remember("Office-MacBook-Pro.local".into());
+        use super::is_local_host;
         let renamed = || Some("Mac".to_string());
+        let started_before = Some("Office-MacBook-Pro.local");
 
+        assert!(is_local_host(
+            "Office-MacBook-Pro.local",
+            started_before,
+            renamed
+        ));
         assert!(
-            names.is_local("Mac", renamed),
-            "a shell started after the rename"
+            is_local_host("Mac", started_before, renamed),
+            "a shell started since"
         );
         assert!(
-            names.is_local("Office-MacBook-Pro.local", renamed),
-            "a shell started before it"
-        );
-        assert!(
-            !names.is_local("buildbox", renamed),
+            !is_local_host("buildbox", started_before, renamed),
             "an ssh session's host"
         );
     }
 
+    /// If this machine was once `old-name` and a pane's shell started under
+    /// it, an ssh session to a real host called `old-name` in a newer pane must
+    /// still be refused. Only a pane's own startup name counts.
     #[test]
-    fn remembered_hostnames_stay_bounded() {
-        use super::LocalHostnames;
-        let mut names = LocalHostnames::new();
-        names.remember("Mac".into());
-        names.remember("MAC".into());
-        assert_eq!(names.names.len(), 1, "names are compared ignoring case");
+    fn another_panes_old_hostname_does_not_count() {
+        let osc7 = b"\x1b]7;file://old-name/srv/remote\x1b\\";
+        let mut started_as_old_name = Extractor::new();
+        started_as_old_name.shell_hostname = Some("old-name".into());
+        let mut started_since = Extractor::new();
+        started_since.shell_hostname = Some("laptop".into());
 
-        for n in 0..20 {
-            names.remember(format!("host-{n}"));
-        }
-        assert_eq!(names.names.len(), LocalHostnames::MAX);
-        assert!(
-            names.is_local("host-19", || None),
-            "the newest name is kept"
-        );
-        assert!(
-            !names.is_local("Mac", || None),
-            "the oldest name is dropped"
-        );
+        let cwd = |ex: &mut Extractor| {
+            ex.feed(osc7).into_iter().find_map(|chunk| match chunk {
+                Chunk::Cwd(path) => Some(path),
+                _ => None,
+            })
+        };
+        assert_eq!(cwd(&mut started_as_old_name), Some("/srv/remote".into()));
+        assert_eq!(cwd(&mut started_since), None);
     }
 
     #[test]
-    fn an_unknowable_hostname_rejects_only_once_a_name_is_known() {
-        use super::LocalHostnames;
-        let mut names = LocalHostnames::new();
-        assert!(names.is_local("buildbox", || None));
-        names.remember("Mac".into());
-        assert!(!names.is_local("buildbox", || None));
+    fn an_unknowable_hostname_is_accepted_only_when_none_was_ever_known() {
+        use super::is_local_host;
+        assert!(is_local_host("buildbox", None, || None));
+        assert!(!is_local_host("buildbox", Some("Mac"), || None));
     }
 
     #[test]

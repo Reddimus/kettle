@@ -6578,7 +6578,9 @@ impl Terminal {
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
-                    let mut extractor = Extractor::new();
+                    // Built before the child spawns, so it sees the hostname
+                    // the shell is about to read.
+                    let mut extractor = Extractor::for_shell();
                     let mut private_output_filter = PrivateOutputFilter::default();
                     let mut active_alternate = false;
                     let mut observed_reflow_generation = 0;
@@ -7571,8 +7573,6 @@ impl Terminal {
             .recv()
             .context("PTY reader stopped before reporting readiness")?
             .map_err(anyhow::Error::msg)?;
-        // The shell reads the hostname now and puts it in every OSC 7 report.
-        kettle_vt::remember_local_hostname();
         let child = pair.slave.spawn_command(cmd)?;
         // No fallible terminal setup remains after the child starts, but keep
         // the guard armed across the final value construction so an unwind
@@ -14282,6 +14282,27 @@ mod teardown_tests {
     /// short-child output race. Readiness alone is insufficient: a pump can be
     /// descheduled immediately after sending it, so the parent slave must stay
     /// alive until the pump owns it.
+    /// A shell reports the hostname it started with. Without it, every OSC 7
+    /// report after a macOS rename looks remote and is dropped.
+    #[test]
+    fn the_pty_reader_knows_the_hostname_the_shell_starts_with() {
+        let src = super::production_source();
+        let reader = src
+            .find("let mut extractor = Extractor::for_shell();")
+            .expect("the PTY reader builds its extractor with for_shell");
+        let spawn = src
+            .find("let child = pair.slave.spawn_command(cmd)?;")
+            .expect("child spawn present");
+        assert!(
+            reader < spawn,
+            "the hostname must be read before the child starts"
+        );
+        assert!(
+            !src.contains("Extractor::new()"),
+            "no production extractor may skip the shell's hostname"
+        );
+    }
+
     #[test]
     fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         let src = super::production_source();
