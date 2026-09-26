@@ -1451,10 +1451,12 @@ fn shell_in_chain<T: ProcessTree + ?Sized>(
     children_by_parent: &std::collections::HashMap<u32, Vec<u32>>,
 ) -> u32 {
     let is_interactive_shell = |pid: u32| {
-        tree.argv_of(pid).is_some_and(|argv| {
-            argv.first()
-                .is_some_and(|prog| is_known_shell(prog.trim_start_matches('-')))
-                && !is_noninteractive_shell(&argv)
+        tree.argv_of(pid).is_some_and(|mut argv| {
+            // Judge a login shell's `-bash` as `bash` in both checks.
+            if let Some(prog) = argv.first_mut() {
+                *prog = prog.trim_start_matches('-').to_owned();
+            }
+            argv.first().is_some_and(|prog| is_known_shell(prog)) && !is_noninteractive_shell(&argv)
         })
     };
     let mut shell = root;
@@ -4831,6 +4833,13 @@ mod tests {
         tree.add(32, Some(31), &["/bin/zsh", "-c", "cd /elsewhere && make"]);
         let idx = build_children_index(&tree);
         assert_eq!(shell_in_chain(30, &tree, &idx), 30);
+
+        // A one-shot is still a one-shot when its argv[0] has a login dash.
+        let mut tree = MockProcessTree::new();
+        tree.add(50, None, &["-zsh"]);
+        tree.add(51, Some(50), &["-bash", "-c", "cd /tmp; sleep 30"]);
+        let idx = build_children_index(&tree);
+        assert_eq!(shell_in_chain(50, &tree, &idx), 50);
 
         // A pane with no shell at all answers with its own process.
         let mut tree = MockProcessTree::new();
