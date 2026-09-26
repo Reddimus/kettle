@@ -6776,6 +6776,73 @@ mod node_tests {
         }
     }
 
+    /// The whole path a shell without OSC 7 relies on: a real `cd`, the
+    /// process-table read that sees it, and the split that follows it.
+    #[cfg(unix)]
+    #[test]
+    fn a_real_cd_in_a_shell_that_never_reports_reaches_the_next_split() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let started = root.path().join("started");
+        let moved = root.path().join("moved");
+        std::fs::create_dir(&started).expect("create dir");
+        std::fs::create_dir(&moved).expect("create dir");
+        let moved = moved.canonicalize().expect("canonical dir");
+        let cfg = Config {
+            shell: Some("/bin/sh".into()),
+            ..Config::default()
+        };
+        let waker: Waker = Arc::new(|| {});
+        let geometry = PtyGeometry::from_cell_size(80, 24, 8, 16);
+        let mut mux = Mux::new();
+        if let Err(e) = mux.new_tab_with_geometry(
+            &cfg,
+            geometry,
+            waker.clone(),
+            &shell_argv(&cfg),
+            started.to_str(),
+        ) {
+            eprintln!("skipping: no PTY ({e})");
+            return;
+        }
+        let pane = mux.active_focus().expect("a focused pane");
+        let pid = mux.panes[&pane].term.child_pid().expect("shell pid");
+        mux.panes[&pane]
+            .term
+            .write(format!("cd '{}'\n", moved.display()).as_bytes());
+
+        let mut scanner = kettle_remote::RemoteScanner::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = None;
+        while std::time::Instant::now() < deadline {
+            if scanner.refresh_roots(&[pid]) {
+                seen = scanner.shell_cwd(pid);
+                if seen.as_deref().map(std::path::Path::new) == Some(moved.as_path()) {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            seen.as_deref().map(std::path::Path::new),
+            Some(moved.as_path()),
+            "the process table never showed the shell's cd"
+        );
+        mux.panes[&pane].term.set_native_cwd(seen);
+
+        mux.split_geometry(Dir::Horizontal, &cfg, geometry, waker)
+            .expect("split");
+        let opened = mux.active_focus().expect("the new pane is focused");
+        assert_ne!(opened, pane, "the split opened no pane");
+        let opened_in = mux.panes[&opened].term.current_dir_or_native();
+        assert_eq!(
+            opened_in.as_deref().map(std::path::Path::new),
+            Some(moved.as_path())
+        );
+        for pane in mux.panes.values() {
+            let _ = pane.term.kill();
+        }
+    }
+
     #[test]
     fn split_layout_tiles_without_gaps_or_overlap() {
         let mut n = Node::Leaf(1);
