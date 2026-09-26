@@ -6545,6 +6545,8 @@ pub struct App {
     /// first poll immediately eligible, including during the first minute
     /// after Windows boots.
     last_remote_poll: Option<std::time::Instant>,
+    /// When a poll the throttle skipped must run. `about_to_wait` wakes for it.
+    remote_poll_due: Option<std::time::Instant>,
     /// The most-recent auto-theme "schedule decision" (true=dark)
     /// we've applied, so a boundary-crossing fires the swap exactly once.
     last_schedule_decision: Option<bool>,
@@ -7417,6 +7419,7 @@ impl App {
             remote_live_panes_scratch: std::collections::HashSet::new(),
             remote_targets_scratch: Vec::new(),
             last_remote_poll: None,
+            remote_poll_due: None,
             last_schedule_decision: None,
             config_path: startup.config.clone(),
             config_trust: startup.config_trust,
@@ -17574,7 +17577,8 @@ impl App {
     /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): periodic poll of
     /// every pane's process tree to detect SSH / Docker / Podman / kubectl
     /// sessions. Throttled to ~5 Hz; submissions overwrite an older queued
-    /// request and the bounded scan runs entirely on its worker.
+    /// request and the bounded scan runs entirely on its worker. A skipped
+    /// poll still runs when the window ends, so the last `cd` is always seen.
     ///
     /// On a detection change (was-None now-Some, or shape change),
     /// the pane's title is updated to `format_remote_title(...)`.
@@ -17586,14 +17590,12 @@ impl App {
             return;
         };
         let now = std::time::Instant::now();
-        if !throttle_elapsed(
-            self.last_remote_poll,
-            now,
-            std::time::Duration::from_millis(200),
-        ) {
+        if let Some(due) = remote_poll_deferred_until(self.last_remote_poll, now) {
+            self.remote_poll_due = Some(due);
             return;
         }
         self.last_remote_poll = Some(now);
+        self.remote_poll_due = None;
         stage_remote_targets(
             &mut self.remote_targets_scratch,
             ws.mux.panes.values().map(remote_probe_target),
@@ -23539,6 +23541,20 @@ fn gpu_recovery_backoff(attempt: u32) -> std::time::Duration {
 /// `None` represents "never run" and is immediately eligible. Saturating
 /// subtraction also keeps tests and unusual clock implementations safe if a
 /// caller supplies a timestamp ordered before `last`.
+/// How often the process scan may run. It feeds labels and new-pane
+/// directories for shells that never send OSC 7.
+const REMOTE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// `None` to poll now, or when the throttled poll must run instead. Dropping
+/// it would leave a `cd` that lands inside the window unseen until a redraw.
+fn remote_poll_deferred_until(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    let due = last? + REMOTE_POLL_INTERVAL;
+    (now < due).then_some(due)
+}
+
 fn throttle_elapsed(
     last: Option<std::time::Instant>,
     now: std::time::Instant,
@@ -23901,10 +23917,15 @@ impl ApplicationHandler<UserEvent> for App {
         // window's animation can't starve another's coalesced output flush.
         let seqs: Vec<u64> = self.windows.keys().copied().collect();
         let mut earliest_deadline: Option<std::time::Instant> = None;
+        // The poll covers every window, so one checkout is enough.
+        let mut remote_poll_due = self.remote_poll_due.is_some_and(|due| due <= now);
         for seq in seqs {
             let Some(mut ws) = self.windows.remove(&seq) else {
                 continue;
             };
+            if std::mem::take(&mut remote_poll_due) {
+                self.poll_remote_contexts(&mut ws);
+            }
             let wait = self.about_to_wait_inner(&mut ws, event_loop);
             self.finish_window_dispatch(event_loop, seq, ws);
             if let Some(deadline) = wait {
@@ -23915,6 +23936,11 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = self.config_reload_deadline {
             let deadline =
                 deadline.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
+            earliest_deadline =
+                Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+        }
+        if let Some(due) = self.remote_poll_due {
+            let deadline = due.max(std::time::Instant::now() + std::time::Duration::from_millis(1));
             earliest_deadline =
                 Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
         }
@@ -33252,6 +33278,41 @@ mod tests {
             origin + interval,
             interval
         ));
+    }
+
+    /// A `cd` whose prompt redraw lands inside the throttle window must still
+    /// be polled. Dropping that poll left new panes in the old directory until
+    /// something redrew, which on an unfocused window can be never.
+    #[test]
+    fn a_throttled_process_poll_is_deferred_not_dropped() {
+        use super::{REMOTE_POLL_INTERVAL, remote_poll_deferred_until};
+        use std::time::{Duration, Instant};
+
+        let last = Instant::now();
+        assert_eq!(remote_poll_deferred_until(None, last), None);
+        assert_eq!(
+            remote_poll_deferred_until(Some(last), last + Duration::from_millis(50)),
+            Some(last + REMOTE_POLL_INTERVAL)
+        );
+        assert_eq!(
+            remote_poll_deferred_until(Some(last), last + REMOTE_POLL_INTERVAL),
+            None
+        );
+
+        let src = super::production_source();
+        let wake = src
+            .split("fn about_to_wait(&mut self")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("about_to_wait body");
+        assert!(
+            wake.contains("self.poll_remote_contexts(&mut ws)"),
+            "about_to_wait must run the deferred poll"
+        );
+        assert!(
+            wake.contains("if let Some(due) = self.remote_poll_due"),
+            "about_to_wait must wake for the deferred poll"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-- New splits, tabs, and duplicates open where the shell is now, even when the
-  shell never reports its directory.
+- New splits, tabs, and duplicates open where the shell is now, and labels keep
+  up, even when the shell never reports its directory.
 - Directory reports from local shells are no longer dropped after macOS renames
   the host on a network change.
 
