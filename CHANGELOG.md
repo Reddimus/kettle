@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.5.2] — 2026-09-26
+
 ### Fixed
 
 - New splits, tabs, and duplicates open where the shell is now, and labels keep
