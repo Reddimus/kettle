@@ -1803,7 +1803,9 @@ for the historical multi-process design this replaced.
 ### Session restore
 
 Per-pane working directory + tab/split tree are captured live as the
-user works and atomically written to `session.json`. Since v2.18.0 the
+user works and atomically written to `session.json`. A pane's working
+directory is the shell's last OSC 7 report, else the OS's read of the shell
+process. Labels, splits, new tabs, and ctl all use that one value. Since v2.18.0 the
 session is **multi-window**: `Session` carries `windows: Vec<SWindow {
 tabs, active, geometry }>` and restore reopens *every* window at its
 (monitor-clamped) saved position. Replay on the next

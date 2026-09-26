@@ -356,7 +356,8 @@ PCRE2; same matches).
 ### `terminatorlib/util.py` — utilities
 
 dbg, err, spawn_new_terminator, get_cwd, enumerate_descendants, etc.
-kettle's `kettle_core::cwd` (OSC 7 cwd tracking) is the equivalent.
+kettle's `Terminal::current_dir_or_native` matches `get_cwd`: the OSC 7
+report, else the OS's read of the shell's directory.
 
 ### Plugins
 
