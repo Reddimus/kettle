@@ -230,8 +230,8 @@ busy and its close behaviour is unchanged.
 - `OSC 7` — current working directory, reported every prompt.
   Both `file://host/percent-encoded` and
   `kitty-shell-cwd://host/raw` schemes are accepted. The hostname must be
-  one this machine has had since Kettle started, so an **ssh session's
-  remote cwd is never adopted locally**. Windows paths travel URL-form
+  the one the pane's shell started with or the machine's current name, so
+  an **ssh session's remote cwd is never adopted locally**. Windows paths travel URL-form
   (`file://HOST/C:/Users/...`) and normalize back to drive-letter form.
 
 The OSC 133 marks also make close-confirmation prompt-aware: a pane idle at an
