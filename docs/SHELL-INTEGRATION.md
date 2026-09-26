@@ -173,6 +173,8 @@ their ordinary Tab behavior.
 
 The snippets also report the working directory at each prompt. This keeps tab
 titles current and lets new tabs and splits inherit the right directory.
+Without the report, Kettle reads the shell's directory from the OS instead,
+except in WSL and ssh panes.
 
 ### Windows installer through 3.3.0
 
@@ -227,9 +229,9 @@ busy and its close behaviour is unchanged.
 - `OSC 133;D;<code>` — command finished (exit code)
 - `OSC 7` — current working directory, reported every prompt.
   Both `file://host/percent-encoded` and
-  `kitty-shell-cwd://host/raw` schemes are accepted; the hostname is
-  validated against this machine, so an **ssh session's remote cwd is
-  never adopted locally**. Windows paths travel URL-form
+  `kitty-shell-cwd://host/raw` schemes are accepted. The hostname must be
+  the one the pane's shell started with or the machine's current name, so
+  an **ssh session's remote cwd is never adopted locally**. Windows paths travel URL-form
   (`file://HOST/C:/Users/...`) and normalize back to drive-letter form.
 
 The OSC 133 marks also make close-confirmation prompt-aware: a pane idle at an

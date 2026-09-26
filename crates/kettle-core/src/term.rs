@@ -4344,12 +4344,12 @@ pub struct Terminal {
     /// *authoritative* cwd — a shell that volunteers it (incl. an in-distro WSL
     /// shell) is always right.
     pub cwd: Arc<Mutex<Option<String>>>,
-    /// v2.29.0: a working directory read natively from the OS (the PTY child's
-    /// foreground process, via the platform process table) when the shell does
-    /// NOT emit OSC 7/9;9 — e.g. a stock Windows `pwsh`/`cmd`. Kept SEPARATE
-    /// from `cwd` so a stale/None native read can never clobber the authoritative
-    /// escape-sequence cwd; consulted only as a fallback by `current_dir_or_native`.
-    /// Never set for WSL/SSH panes (the relay's OS cwd is meaningless there).
+    /// v2.29.0: the shell's working directory, read from the OS process table,
+    /// for shells that do NOT emit OSC 7/9;9, such as a stock Windows `cmd`.
+    /// Kept SEPARATE from `cwd` so a stale/None native read can never clobber
+    /// the authoritative escape-sequence cwd; consulted only as a fallback by
+    /// `current_dir_or_native`. Never set for WSL/SSH panes (the relay's OS cwd
+    /// is meaningless there).
     pub native_cwd: Arc<Mutex<Option<String>>>,
     /// v2.29.1: set once the shell actually reported a cwd via OSC 7/9;9. Until
     /// then `cwd` holds only the pre-seeded launch directory, so
@@ -6578,7 +6578,9 @@ impl Terminal {
                 .name("kettle-pty-reader".into())
                 .spawn(move || {
                     let mut processor: Processor = Processor::new();
-                    let mut extractor = Extractor::new();
+                    // Built before the child spawns, so it sees the hostname
+                    // the shell is about to read.
+                    let mut extractor = Extractor::for_shell();
                     let mut private_output_filter = PrivateOutputFilter::default();
                     let mut active_alternate = false;
                     let mut observed_reflow_generation = 0;
@@ -7850,22 +7852,21 @@ impl Terminal {
         }
     }
 
-    /// Last working directory reported via OSC 7 (or OSC 9;9), if any. This is
-    /// the authoritative shell-volunteered cwd; callers that must NOT trust an
-    /// OS-derived guess (e.g. WSL split-cloning) use this directly.
-    pub fn current_dir(&self) -> Option<String> {
+    /// The last OSC 7/9;9 report, or the launch directory before one. Private,
+    /// because it misses every `cd` in a shell that never reports. Use
+    /// [`current_dir_or_native`](Self::current_dir_or_native) instead.
+    fn reported_or_launch_dir(&self) -> Option<String> {
         self.cwd.lock().ok().and_then(|c| c.clone())
     }
 
     /// Working directory explicitly reported by the child via OSC 7/9;9.
     ///
-    /// Unlike [`current_dir`](Self::current_dir), this never exposes the
-    /// launch-directory seed before the first cwd report. Use this when a
-    /// caller must distinguish shell-reported state from a startup fallback.
+    /// Never the launch-directory seed and never an OS read. Use this when a
+    /// caller must not trust an OS read, such as WSL split-cloning.
     pub fn reported_current_dir(&self) -> Option<String> {
         reported_current_dir(
             self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed),
-            self.current_dir(),
+            self.reported_or_launch_dir(),
         )
     }
 
@@ -7877,7 +7878,8 @@ impl Terminal {
         }
     }
 
-    /// v2.29.0: the cwd to display in tab/window/pane labels.
+    /// Where this pane's shell is now. Labels, new panes and tabs, session save
+    /// and ctl all read this, so a split opens where the label says.
     ///
     /// If the shell has actually REPORTED a cwd via OSC 7/9;9 (`osc_cwd_seen`),
     /// that is authoritative — return it, so a shell that volunteers its directory
@@ -7890,13 +7892,13 @@ impl Terminal {
     /// dir shadowed the native poll and a stock Windows shell's tab stayed frozen.)
     pub fn current_dir_or_native(&self) -> Option<String> {
         if self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed) {
-            return self.current_dir();
+            return self.reported_or_launch_dir();
         }
         self.native_cwd
             .lock()
             .ok()
             .and_then(|c| c.clone())
-            .or_else(|| self.current_dir())
+            .or_else(|| self.reported_or_launch_dir())
     }
 
     /// Latest OSC 9;4 taskbar-progress state reported by this pane
@@ -14280,6 +14282,27 @@ mod teardown_tests {
     /// short-child output race. Readiness alone is insufficient: a pump can be
     /// descheduled immediately after sending it, so the parent slave must stay
     /// alive until the pump owns it.
+    /// A shell reports the hostname it started with. Without it, every OSC 7
+    /// report after a macOS rename looks remote and is dropped.
+    #[test]
+    fn the_pty_reader_knows_the_hostname_the_shell_starts_with() {
+        let src = super::production_source();
+        let reader = src
+            .find("let mut extractor = Extractor::for_shell();")
+            .expect("the PTY reader builds its extractor with for_shell");
+        let spawn = src
+            .find("let child = pair.slave.spawn_command(cmd)?;")
+            .expect("child spawn present");
+        assert!(
+            reader < spawn,
+            "the hostname must be read before the child starts"
+        );
+        assert!(
+            !src.contains("Extractor::new()"),
+            "no production extractor may skip the shell's hostname"
+        );
+    }
+
     #[test]
     fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         let src = super::production_source();

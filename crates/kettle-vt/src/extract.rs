@@ -678,6 +678,8 @@ pub struct Extractor {
     /// ✢ ✳ ✶ ✻ ✽ — which Claude Code puts in OSC 0 titles).
     seq_tail: [u8; 3],
     seq_tail_len: u8,
+    /// The hostname when this pane's shell started. See [`is_local_host`].
+    shell_hostname: Option<String>,
 }
 
 impl Default for Extractor {
@@ -689,6 +691,15 @@ impl Default for Extractor {
 impl Extractor {
     pub fn new() -> Self {
         Self::with_budget(GraphicsBudget::default())
+    }
+
+    /// An extractor for a shell that is about to start. It keeps the current
+    /// hostname, because the shell puts that name in every OSC 7 report.
+    pub fn for_shell() -> Self {
+        Self {
+            shell_hostname: os_hostname(),
+            ..Self::new()
+        }
     }
 
     #[cfg(test)]
@@ -721,6 +732,7 @@ impl Extractor {
             private_completion: false,
             seq_tail: [0; 3],
             seq_tail_len: 0,
+            shell_hostname: None,
         }
     }
 
@@ -1372,8 +1384,11 @@ impl Extractor {
             self.emit_raw_control(mode, &seq, out);
             let body = &seq[2..];
             if body.len() <= MAX_CWD_REPORT_BYTES
-                && let Some(path) =
-                    parse_osc7(&String::from_utf8_lossy(body)).and_then(safe_reported_cwd)
+                && let Some(path) = parse_osc7(
+                    &String::from_utf8_lossy(body),
+                    self.shell_hostname.as_deref(),
+                )
+                .and_then(safe_reported_cwd)
             {
                 out.push(Chunk::Cwd(path));
             }
@@ -1781,9 +1796,15 @@ impl Extractor {
     }
 }
 
-fn parse_osc7(s: &str) -> Option<String> {
-    let local = local_hostname();
-    parse_osc7_with_host(s, local.as_deref())
+fn parse_osc7(s: &str, shell_hostname: Option<&str>) -> Option<String> {
+    parse_osc7_with(s, |host| is_local_host(host, shell_hostname, os_hostname))
+}
+
+#[cfg(test)]
+fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
+    parse_osc7_with(s, |host| {
+        local_host.is_none_or(|local| same_host(host, local))
+    })
 }
 
 /// v2.29.0: parse an OSC 9;9 working-directory payload (everything after the
@@ -1855,29 +1876,52 @@ fn safe_reported_cwd(path: String) -> Option<String> {
     drive_rooted.then_some(path)
 }
 
-/// The machine's hostname for OSC 7 validation. Asks the OS
-/// (gethostname(2) / GetComputerNameExW — review fix: the env vars alone
-/// fail OPEN on Linux/macOS, where interactive bash does not export
-/// `HOSTNAME`), falling back to `COMPUTERNAME`/`HOSTNAME`. Cached: one OS
-/// call per process, not one per OSC 7 report. `None` means "unknown" —
-/// validation then only rejects nothing (an unknown local name must not
-/// break every report that carries a host).
-fn local_hostname() -> Option<String> {
-    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            gethostname::gethostname()
-                .into_string()
+/// This machine's name from gethostname(2) or GetComputerNameExW, else
+/// `COMPUTERNAME` or `HOSTNAME`. Interactive bash does not export `HOSTNAME`,
+/// so the env vars alone would fail open.
+fn os_hostname() -> Option<String> {
+    gethostname::gethostname()
+        .into_string()
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
                 .ok()
                 .filter(|h| !h.trim().is_empty())
-                .or_else(|| {
-                    std::env::var("COMPUTERNAME")
-                        .or_else(|_| std::env::var("HOSTNAME"))
-                        .ok()
-                        .filter(|h| !h.trim().is_empty())
-                })
         })
-        .clone()
+}
+
+/// Whether an OSC 7 `host` is this machine. A shell reads the hostname once,
+/// at startup, and reports it for life, but macOS renames the host when the
+/// network changes. So accept the name this pane's shell started with, and
+/// the OS's current name for shells started since. Each pane keeps only its
+/// own startup name: pooling them would let a remote host that reuses a name
+/// this machine once had pass as local.
+fn is_local_host(
+    host: &str,
+    shell_hostname: Option<&str>,
+    current: impl FnOnce() -> Option<String>,
+) -> bool {
+    if shell_hostname.is_some_and(|name| same_host(host, name)) {
+        return true;
+    }
+    match current() {
+        Some(name) => same_host(host, &name),
+        // The OS won't say and never did. Accept rather than drop every
+        // report that names a host.
+        None => shell_hostname.is_none(),
+    }
+}
+
+/// `host` names `local`, ignoring case. `host.lan` also matches `host`.
+fn same_host(host: &str, local: &str) -> bool {
+    let local = local.trim();
+    host.eq_ignore_ascii_case(local)
+        || host
+            .split('.')
+            .next()
+            .is_some_and(|label| label.eq_ignore_ascii_case(local))
 }
 
 /// v2.20.0 (Ghostty parity): parse an OSC 7 body, accepting BOTH schemes —
@@ -1888,9 +1932,8 @@ fn local_hostname() -> Option<String> {
 /// An ssh session's shell integration reports the REMOTE host's cwd; treating
 /// `/home/user` from another machine as a local directory breaks new-tab
 /// cwd inheritance and `OpenCwdInFileManager`. (Ghostty applies the same
-/// check in its stream handler.) `local_host = None` skips the rejection for
-/// named hosts only when the local name is unknowable.
-fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
+/// check in its stream handler.) `is_local` decides what "this machine" means.
+fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<String> {
     // Split scheme; kitty-shell-cwd paths are used VERBATIM (no decode).
     let (rest, percent_encoded) = if let Some(r) = s.strip_prefix("kitty-shell-cwd://") {
         (r, false)
@@ -1902,19 +1945,9 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     let path_start = rest.find('/')?;
     let (host, path) = (&rest[..path_start], &rest[path_start..]);
     let host = host.trim();
-    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
-        match local_host {
-            Some(local) if host.eq_ignore_ascii_case(local.trim()) => {}
-            // A FQDN report from this machine ("host.lan" vs "host"): accept
-            // when the first label matches.
-            Some(local)
-                if host
-                    .split('.')
-                    .next()
-                    .is_some_and(|l| l.eq_ignore_ascii_case(local.trim())) => {}
-            Some(_) => return None, // someone else's cwd (ssh) — reject
-            None => {}              // local name unknown — accept
-        }
+    // Someone else's cwd (ssh): reject.
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") && !is_local(host) {
+        return None;
     }
     let path = path.trim();
     if path.is_empty() {
@@ -3097,6 +3130,58 @@ mod tests {
             parse_osc7_with_host("file:///c", Some("myhost")),
             Some("/c".to_string())
         );
+    }
+
+    /// macOS renamed a real Mac from `<name>-MacBook-Pro.local` to `Mac` when
+    /// its network changed. Shells started before and after the rename report
+    /// different names, and both are this machine.
+    #[test]
+    fn a_renamed_host_still_counts_as_this_machine() {
+        use super::is_local_host;
+        let renamed = || Some("Mac".to_string());
+        let started_before = Some("Office-MacBook-Pro.local");
+
+        assert!(is_local_host(
+            "Office-MacBook-Pro.local",
+            started_before,
+            renamed
+        ));
+        assert!(
+            is_local_host("Mac", started_before, renamed),
+            "a shell started since"
+        );
+        assert!(
+            !is_local_host("buildbox", started_before, renamed),
+            "an ssh session's host"
+        );
+    }
+
+    /// If this machine was once `old-name` and a pane's shell started under
+    /// it, an ssh session to a real host called `old-name` in a newer pane must
+    /// still be refused. Only a pane's own startup name counts.
+    #[test]
+    fn another_panes_old_hostname_does_not_count() {
+        let osc7 = b"\x1b]7;file://old-name/srv/remote\x1b\\";
+        let mut started_as_old_name = Extractor::new();
+        started_as_old_name.shell_hostname = Some("old-name".into());
+        let mut started_since = Extractor::new();
+        started_since.shell_hostname = Some("laptop".into());
+
+        let cwd = |ex: &mut Extractor| {
+            ex.feed(osc7).into_iter().find_map(|chunk| match chunk {
+                Chunk::Cwd(path) => Some(path),
+                _ => None,
+            })
+        };
+        assert_eq!(cwd(&mut started_as_old_name), Some("/srv/remote".into()));
+        assert_eq!(cwd(&mut started_since), None);
+    }
+
+    #[test]
+    fn an_unknowable_hostname_is_accepted_only_when_none_was_ever_known() {
+        use super::is_local_host;
+        assert!(is_local_host("buildbox", None, || None));
+        assert!(!is_local_host("buildbox", Some("Mac"), || None));
     }
 
     #[test]
