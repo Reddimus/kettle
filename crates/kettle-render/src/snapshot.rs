@@ -6,7 +6,8 @@
 //! to a vsync, submit, present). Under output flood, frames fire at the
 //! output coalescer's paint budget, so the lock would stay held nearly
 //! continuously and starve the PTY reader thread (`processor.advance` blocks
-//! on the same lock).
+//! on the same lock). Measured that way, throughput was 0.42-0.8 MB/s against
+//! 3-9 MB/s for Windows Terminal, Alacritty and WezTerm on the same harness.
 //!
 //! Instead, capture the pane's renderable state into a [`PaneSnapshot`]
 //! while the lock is held (a µs-scale flat copy), then drop the guard and
