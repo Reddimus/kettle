@@ -366,6 +366,26 @@ fn production_source() -> String {
 }
 
 #[cfg(test)]
+mod font_reload_tests {
+    use super::production_source;
+
+    /// A font-family reload must invalidate the quick-select hint cache too:
+    /// the same labels would otherwise keep glyphs shaped in the old family.
+    #[test]
+    fn a_font_reload_resets_the_hint_label_cache() {
+        let production = production_source();
+        let reload = production
+            .split_once("self.resize_overlay_text.clear();")
+            .expect("font reload invalidation")
+            .1
+            .split_once("// Ensure one text buffer per pane.")
+            .expect("end of font reload invalidation")
+            .0;
+        assert!(reload.contains("for label in &mut self.hint_texts"));
+    }
+}
+
+#[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
         ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
@@ -5643,15 +5663,15 @@ impl Renderer {
                 self.new_tab_arrow_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
-                // v2.38.2 P1b: the context-menu/settings/search-family caches
-                // added alongside the equality gates below have the exact
-                // same font-staleness hazard — unlike `hint_texts` (whose
-                // pool truncates to 0 whenever `hint_labels` empties, so it
-                // self-invalidates on next open), these overlays' buffer
-                // pools are only touched while the overlay is OPEN, so a
-                // font-family reload that lands while one is closed (or that
-                // doesn't change the label text) would otherwise leave a
-                // stale cache pointing at glyphs shaped in the old family.
+                // The overlay text caches are touched only while their overlay
+                // is open, so a font-family reload that lands while one is
+                // closed, or that keeps the same labels, would leave glyphs
+                // shaped in the old family.
+                // Quick-select hint buffers stay allocated; an empty label
+                // forces each one to reshape on its next fill.
+                for label in &mut self.hint_texts {
+                    label.clear();
+                }
                 self.context_menu_texts.clear();
                 self.context_menu_hint_texts.clear();
                 self.settings_texts.clear();
