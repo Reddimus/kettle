@@ -74,6 +74,9 @@ const OUTPUT_SLICE_BYTES: usize = 1024 * 1024;
 /// One additional command may remain on the lifecycle thread, keeping memory
 /// bounded while leaving timeout/cancellation checks runnable.
 const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
+/// The longest the lifecycle loop waits between turns while nothing arrives,
+/// which bounds how late it notices a timeout, cancellation, or child exit.
+const IDLE_TURN: Duration = Duration::from_millis(8);
 /// Apply the same lifecycle fairness to semantic events. The queue remains
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
@@ -714,6 +717,36 @@ pub fn run_exec_with(
     run_exec_engine(opts, _size_probe, &mut output, None, false)
 }
 
+/// Waits for the lifecycle loop's next input instead of sleeping a fixed turn.
+///
+/// The PTY reader hands the loop one read at a time through a four-slot
+/// channel, and a macOS read is only about 1.2 KiB. A fixed 8 ms sleep after
+/// each drain therefore capped `kettle exec` near 0.35 MiB/s while the CPU sat
+/// idle. `Select::ready_timeout` wakes as soon as output or an event arrives
+/// without taking it, so the bounded drains keep ownership of every message,
+/// and still returns after `limit` so lifecycle checks keep their cadence.
+///
+/// `ready_timeout` may wake spuriously, and a disconnected channel is always
+/// ready, so a wake that finds both channels empty sleeps out the rest of the
+/// turn rather than spinning. `output_closed` drops the output channel once
+/// the loop has seen it disconnect.
+fn wait_for_lifecycle_input(
+    output: &Receiver<Vec<u8>>,
+    output_closed: bool,
+    events: &Receiver<TermEvent>,
+    limit: Duration,
+) {
+    let started = Instant::now();
+    let mut select = crossbeam_channel::Select::new();
+    if !output_closed {
+        select.recv(output);
+    }
+    select.recv(events);
+    if select.ready_timeout(limit).is_ok() && output.is_empty() && events.is_empty() {
+        std::thread::sleep(limit.saturating_sub(started.elapsed()));
+    }
+}
+
 /// Drain one bounded output slice and report whether a backlog remains.
 ///
 /// A bounded channel alone does not make an unbounded `try_recv` loop fair:
@@ -1160,7 +1193,7 @@ fn run_exec_engine(
                 let _ = term.child_exit_code();
                 return code;
             }
-            std::thread::sleep(Duration::from_millis(8));
+            std::thread::sleep(IDLE_TURN);
             continue;
         }
 
@@ -1643,7 +1676,13 @@ fn run_exec_engine(
             std::thread::yield_now();
             continue;
         }
-        std::thread::sleep(Duration::from_millis(8));
+        if output_blocked {
+            // The stdout writer, not the PTY, is behind: wait for its queue to
+            // take the pending command.
+            output_or_stop!(output.wait_ready(IDLE_TURN));
+        } else {
+            wait_for_lifecycle_input(&orx, pty_channel_disconnected.get(), &rx, IDLE_TURN);
+        }
     }
 }
 
@@ -2465,6 +2504,13 @@ enum OutputFinish {
 trait ExecOutput {
     /// Try to publish the one lifecycle-owned pending command.
     fn ready(&mut self) -> OutputResult<bool>;
+    /// Wait up to `limit` for a blocked sink to accept its pending command,
+    /// instead of sleeping a fixed turn while it catches up. A sink with
+    /// nothing to wait on sleeps out the limit.
+    fn wait_ready(&mut self, limit: Duration) -> OutputResult<()> {
+        std::thread::sleep(limit);
+        Ok(())
+    }
     /// Whether every command admitted before this call has completed.
     fn drained(&mut self) -> OutputResult<bool> {
         self.ready()
@@ -2830,6 +2876,33 @@ impl WorkerOutput {
 }
 
 impl ExecOutput for WorkerOutput {
+    /// Hands the pending command to the writer as soon as its queue has room.
+    /// Any failure puts the command back, and the next `ready` reports it
+    /// through `dispatch` exactly as before.
+    fn wait_ready(&mut self, limit: Duration) -> OutputResult<()> {
+        let Some(command) = self.pending.take() else {
+            std::thread::sleep(limit);
+            return Ok(());
+        };
+        let Some(sender) = self.sender.as_ref() else {
+            self.pending = Some(command);
+            std::thread::sleep(limit);
+            return Ok(());
+        };
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        match sender.send_timeout(command, limit) {
+            Ok(()) => Ok(()),
+            Err(
+                crossbeam_channel::SendTimeoutError::Timeout(command)
+                | crossbeam_channel::SendTimeoutError::Disconnected(command),
+            ) => {
+                self.outstanding.fetch_sub(1, Ordering::AcqRel);
+                self.pending = Some(command);
+                Ok(())
+            }
+        }
+    }
+
     fn ready(&mut self) -> OutputResult<bool> {
         if self.poll_worker_outcome()? {
             return if self.completion_started {
@@ -3376,6 +3449,119 @@ fn windows_console_size() -> Option<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_blocked_writer_takes_the_pending_command_once_its_queue_has_room() {
+        struct GateWriter {
+            open: Arc<AtomicBool>,
+        }
+
+        impl Write for GateWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                while !self.open.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let open = Arc::new(AtomicBool::new(false));
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Raw,
+            GateWriter {
+                open: Arc::clone(&open),
+            },
+        )
+        .unwrap();
+        // One write in the OS-facing call, a full queue behind it, and one more
+        // held by the lifecycle as pending.
+        for _ in 0..=OUTPUT_WRITER_QUEUE_DEPTH + 1 {
+            output.output(vec![b'x']).unwrap();
+            if output.pending.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(output.pending.is_some(), "the writer queue never filled");
+        let admitted = output.outstanding.load(Ordering::Acquire);
+
+        let started = Instant::now();
+        output.wait_ready(Duration::from_millis(30)).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(25),
+            "a full queue must wait out the turn"
+        );
+        assert!(
+            output.pending.is_some(),
+            "a timed-out handoff keeps the command"
+        );
+        assert_eq!(output.outstanding.load(Ordering::Acquire), admitted);
+
+        open.store(true, Ordering::Release);
+        output.wait_ready(Duration::from_secs(5)).unwrap();
+        assert!(
+            output.pending.is_none(),
+            "the writer takes the command once it has room"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !output.drained().unwrap() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(output.drained().unwrap());
+    }
+
+    #[test]
+    fn lifecycle_wait_wakes_on_output_instead_of_sleeping_the_turn() {
+        let (output_tx, output) = crossbeam_channel::bounded::<Vec<u8>>(4);
+        let (_events_tx, events) = crossbeam_channel::bounded::<TermEvent>(4);
+        let sender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            output_tx.send(b"x".to_vec()).unwrap();
+            output_tx
+        });
+        let started = Instant::now();
+        wait_for_lifecycle_input(&output, false, &events, Duration::from_secs(5));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            output.try_recv().unwrap(),
+            b"x",
+            "the wait must not consume output"
+        );
+        drop(sender.join());
+    }
+
+    #[test]
+    fn lifecycle_wait_keeps_its_cadence_when_idle() {
+        let (_output_tx, output) = crossbeam_channel::bounded::<Vec<u8>>(4);
+        let (_events_tx, events) = crossbeam_channel::bounded::<TermEvent>(4);
+        let started = Instant::now();
+        wait_for_lifecycle_input(&output, false, &events, Duration::from_millis(40));
+        assert!(started.elapsed() >= Duration::from_millis(35));
+    }
+
+    #[test]
+    fn lifecycle_wait_does_not_spin_on_disconnected_channels() {
+        let (output_tx, output) = crossbeam_channel::bounded::<Vec<u8>>(4);
+        let (events_tx, events) = crossbeam_channel::bounded::<TermEvent>(4);
+        drop((output_tx, events_tx));
+        for output_closed in [false, true] {
+            let started = Instant::now();
+            wait_for_lifecycle_input(&output, output_closed, &events, Duration::from_millis(40));
+            assert!(
+                started.elapsed() >= Duration::from_millis(35),
+                "a disconnected channel returned after {:?}",
+                started.elapsed()
+            );
+        }
+    }
 
     fn opts_for(argv: Vec<String>, cwd: Option<PathBuf>) -> ExecOpts {
         ExecOpts {
