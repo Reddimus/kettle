@@ -16,6 +16,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - `kettle exec`, and the MCP tools built on it, stream large command output
   about 100 times faster on macOS. 8 MiB used to take 23 seconds.
+- `kettle exec --timeout` no longer warns that stdout was not fully delivered
+  when every byte was delivered, so the warning now means output was dropped.
+  A timed-out `--json` run now always ends with its exit event while stdout
+  is being read.
 - A command with an enormous argument list in one pane, such as
   `nvim $(git ls-files)`, no longer freezes SSH labels and shell directories
   in every other pane until it exits.

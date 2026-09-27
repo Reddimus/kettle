@@ -1813,7 +1813,11 @@ A separate Windows/Linux broken-pipe fixture reads one line and closes the
 only stdout reader while the child keeps producing output. It requires the
 dedicated exit 74 diagnostic and verifies the child no longer runs. This is
 intentionally separate from the unread-pipe deadline fixtures, which must
-retain the `stdout was not fully delivered` warning. Another native test
+retain the `stdout was not fully delivered` warning. The quiet
+`exec_timeout_returns_124` must not print it. Unit tests pin the final-write
+wait: a stopped JSON run hands a slow but reading consumer its exit event
+before returning, a write blocked in the OS is reported once the grace ends,
+and a command still held on the lifecycle thread is reported without waiting. Another native test
 supplies a nonexistent explicit `--cwd`, requires exit 125, and proves a
 child-side marker was never created.
 Backpressure regressions must cover both piped stdin and `/dev/null`: a

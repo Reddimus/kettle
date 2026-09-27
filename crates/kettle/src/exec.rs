@@ -77,6 +77,11 @@ const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
 /// The longest the lifecycle loop waits between turns while nothing arrives,
 /// which bounds how late it notices a timeout, cancellation, or child exit.
 const IDLE_TURN: Duration = Duration::from_millis(8);
+/// How long a stopped run waits for the stdout writer to confirm its final
+/// command. A consumer that is reading accepts it in microseconds, so the
+/// bound only costs time when the consumer has stalled, and then the run warns
+/// instead of waiting longer.
+const FINAL_WRITE_GRACE: Duration = Duration::from_millis(100);
 /// Apply the same lifecycle fairness to semantic events. The queue remains
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
@@ -2838,20 +2843,60 @@ impl WorkerOutput {
         self.enqueue(OutputCommand::Finish { code, duration })
     }
 
-    fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
+    /// Queue the final command if nothing is stuck ahead of it, then wait up to
+    /// `grace` for the worker to confirm it. Returns the dispatch result and
+    /// whether every command reached stdout.
+    ///
+    /// The worker reports success only after it writes and flushes Finish, and
+    /// every command queued earlier precedes Finish. Success therefore means
+    /// the consumer accepted all output, including the JSON exit event, before
+    /// `main` calls `process::exit`. Returning without it would let that event
+    /// race process teardown. The `outstanding` counter cannot answer this
+    /// either, because it includes Finish itself.
+    fn queue_final_write(
+        &mut self,
+        code: i32,
+        duration: Duration,
+        grace: Duration,
+    ) -> (OutputResult<()>, bool) {
         let dispatch_result = if !self.completion_started && self.pending.is_none() {
             self.enqueue(OutputCommand::Finish { code, duration })
         } else {
             self.poll_worker_outcome().map(|_| ())
         };
+        // Finish is in the worker's queue if ordinary completion queued it
+        // already or it just fit behind the admitted output. A command still
+        // pending on this thread never reached the worker, so waiting could
+        // not deliver it.
+        let finish_queued = dispatch_result.is_ok() && self.pending.is_none();
+        let delivered = finish_queued && self.worker_succeeded_within(grace);
+        (dispatch_result, delivered)
+    }
+
+    fn worker_succeeded_within(&mut self, limit: Duration) -> bool {
+        if self.outcome.is_none() {
+            match self.outcome_rx.recv_timeout(limit) {
+                Ok(outcome) => self.outcome = Some(outcome),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => return false,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    self.outcome = Some(Err(OutputDeliveryError::unexpected(
+                        "stdout writer stopped without reporting an outcome",
+                    )));
+                }
+            }
+        }
+        matches!(self.outcome, Some(Ok(())))
+    }
+
+    fn finish_abandoning_pending(&mut self, code: i32, duration: Duration) -> OutputResult<()> {
+        let (dispatch_result, delivered) =
+            self.queue_final_write(code, duration, FINAL_WRITE_GRACE);
 
         // Say so on stderr rather than only in a debug log. The exit code here
         // is the child's own when it was collected, so a caller that reads only
         // the status cannot otherwise tell a fully delivered run from one whose
         // tail was dropped because the caller's own reader stalled.
-        if dispatch_result.is_ok()
-            && (self.pending.is_some() || self.outstanding.load(Ordering::Acquire) != 0)
-        {
+        if dispatch_result.is_ok() && !delivered {
             let _ = writeln!(
                 std::io::stderr(),
                 "kettle exec: stdout was not fully delivered before the run stopped; \
@@ -2860,8 +2905,8 @@ impl WorkerOutput {
         }
 
         // Chosen timeout/cancellation contract: commands already accepted by
-        // the worker may complete if the consumer resumes immediately, but the
-        // lifecycle never waits. The lifecycle-owned pending command, any raw
+        // the worker get `FINAL_WRITE_GRACE` to finish, and the lifecycle
+        // waits no longer than that. The lifecycle-owned pending command, any raw
         // PTY tail not admitted to stdout, and a final JSON exit event that
         // cannot enter the full queue are abandoned explicitly. `main` then
         // calls `process::exit`, which terminates a writer still blocked in the
@@ -4090,6 +4135,204 @@ mod tests {
                 Ok(true) => panic!("a failed stdout write was reported as successfully drained"),
             }
         }
+    }
+
+    /// A consumer that accepts every event, slowly enough that a stop which
+    /// does not wait for the final write returns before it lands. The delay
+    /// sits in `flush`, which the writer calls once per event, so it does not
+    /// depend on how many `write` calls an event takes.
+    #[derive(Clone)]
+    struct SlowReader {
+        written: Arc<Mutex<Vec<u8>>>,
+        delay: Duration,
+    }
+
+    impl SlowReader {
+        fn new(delay: Duration) -> Self {
+            Self {
+                written: Arc::default(),
+                delay,
+            }
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.written.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for SlowReader {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            std::thread::sleep(self.delay);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_stopped_run_writes_its_exit_event_before_returning() {
+        // `main` calls `process::exit` as soon as the lifecycle returns, so an
+        // exit event still queued at that point can be lost. Three events at
+        // 10 ms each leave 70 ms of the grace to spare.
+        let reader = SlowReader::new(Duration::from_millis(10));
+        let mut output = WorkerOutput::spawn(OutputMode::Json, reader.clone()).unwrap();
+        output.start(80, 24).unwrap();
+        output.output(b"partial".to_vec()).unwrap();
+        output
+            .finish(
+                EXIT_TIMEOUT,
+                Duration::from_millis(5),
+                OutputFinish::AbandonPending,
+            )
+            .unwrap();
+
+        let text = reader.text();
+        let events: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("each event is one JSON line"))
+            .collect();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| event["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            ["start", "output", "exit"],
+            "a reading consumer lost part of a stopped run: {text}"
+        );
+        assert_eq!(events[1]["data"], "partial");
+        assert_eq!(events[2]["code"], EXIT_TIMEOUT);
+    }
+
+    #[test]
+    fn a_stop_counts_output_as_delivered_once_the_writer_confirms_it() {
+        let grace = Duration::from_secs(5);
+
+        // Nothing printed: the final write is the only command, and it lands.
+        let mut quiet =
+            WorkerOutput::spawn(OutputMode::Raw, SlowReader::new(Duration::ZERO)).unwrap();
+        let (result, delivered) = quiet.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, grace);
+        assert_eq!(result, Ok(()));
+        assert!(
+            delivered,
+            "a quiet run's stop must not report dropped output"
+        );
+
+        // Ordinary completion already queued Finish when the deadline hit.
+        let mut completing =
+            WorkerOutput::spawn(OutputMode::Raw, SlowReader::new(Duration::from_millis(20)))
+                .unwrap();
+        completing.output(b"tail".to_vec()).unwrap();
+        completing
+            .finish(0, Duration::ZERO, OutputFinish::Complete)
+            .unwrap();
+        let (result, delivered) = completing.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, grace);
+        assert_eq!(result, Ok(()));
+        assert!(
+            delivered,
+            "a completion in flight is delivered once it lands"
+        );
+    }
+
+    #[test]
+    fn a_stalled_consumer_is_reported_once_the_final_write_grace_ends() {
+        struct GateWriter {
+            entered: Sender<()>,
+            release: Receiver<()>,
+        }
+
+        impl Write for GateWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.try_send(());
+                let _ = self.release.recv_timeout(Duration::from_secs(5));
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let mut output = WorkerOutput::spawn(
+            OutputMode::Raw,
+            GateWriter {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        )
+        .unwrap();
+        output.output(vec![b'x']).unwrap();
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stdout worker entered the OS-facing write");
+
+        let grace = Duration::from_millis(50);
+        let started = Instant::now();
+        let (result, delivered) = output.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, grace);
+        let waited = started.elapsed();
+        release_tx.send(()).unwrap();
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            !delivered,
+            "a write still blocked in the OS was not delivered"
+        );
+        assert!(
+            waited >= grace,
+            "gave up after {waited:?}, before the grace"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "a stalled consumer held the stop for {waited:?}"
+        );
+    }
+
+    #[test]
+    fn a_command_still_pending_on_the_lifecycle_is_reported_without_waiting() {
+        struct BlockedWriter(Receiver<()>);
+
+        impl Write for BlockedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv_timeout(Duration::from_secs(5));
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (release_tx, release_rx) = crossbeam_channel::bounded::<()>(0);
+        let mut output = WorkerOutput::spawn(OutputMode::Raw, BlockedWriter(release_rx)).unwrap();
+        // Fill the writer until one command is held on the lifecycle thread:
+        // the worker holds at most one in the OS write and the queue the rest.
+        let mut sent = 0;
+        while output.pending.is_none() {
+            assert!(
+                sent <= OUTPUT_WRITER_QUEUE_DEPTH + 1,
+                "fixture never filled the queue"
+            );
+            output.output(vec![b'x']).unwrap();
+            sent += 1;
+        }
+
+        let started = Instant::now();
+        let (result, delivered) =
+            output.queue_final_write(EXIT_TIMEOUT, Duration::ZERO, Duration::from_secs(5));
+        let waited = started.elapsed();
+        drop(release_tx);
+
+        assert_eq!(result, Ok(()));
+        assert!(!delivered);
+        assert!(
+            waited < Duration::from_secs(1),
+            "waited {waited:?} for a command that never reached the writer"
+        );
     }
 
     #[test]
