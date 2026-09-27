@@ -761,7 +761,9 @@ mod tests {
     ///
     /// The log line for this case, which must not claim the file was kept, is
     /// not tested. Asserting on log output would need a capture layer this crate
-    /// does not have, and a test that cannot fail is worse than none.
+    /// does not have, and a test that cannot fail is worse than none. The claim
+    /// matters because it tells the reader their session was preserved while
+    /// the next save is about to overwrite it.
     #[cfg(unix)]
     #[test]
     fn a_stash_that_cannot_move_the_file_leaves_it_alone() {
