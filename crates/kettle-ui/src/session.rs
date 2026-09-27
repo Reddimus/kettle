@@ -21,13 +21,10 @@ pub enum SNode {
         /// argv the pane ran (empty = default shell); persists SSH panes.
         #[serde(default)]
         cmd: Vec<String>,
-        /// Named broadcast-group membership (mirrors `Pane::group_name`).
-        /// `Some(name)` = the pane belongs to that named broadcast group;
-        /// `None` = ungrouped (the Terminator default). `#[serde(default)]`
-        /// (additive wire field) so an OLD `session.json` written before this
-        /// field existed still deserializes — it just restores ungrouped, the
-        /// original default. Populated by `Mux::snap`, consumed by
-        /// `Mux::build_node`.
+        /// Named broadcast-group membership (mirrors `Pane::group_name`);
+        /// `None` = ungrouped, the Terminator default. `#[serde(default)]` lets
+        /// an older `session.json` without this field load ungrouped. Populated
+        /// by `Mux::snap`, consumed by `Mux::build_node`.
         #[serde(default)]
         group: Option<String>,
     },
@@ -41,11 +38,10 @@ pub enum SNode {
 }
 
 impl SNode {
-    /// Number of leaf panes in this tree — each leaf becomes one real PTY on
-    /// restore, so `Mux::restore` uses this to bound the spawn fan-out against a
-    /// crafted-but-small `session.json`. serde_json's default
-    /// 128-level recursion limit already bounds nesting depth, so this is a
-    /// simple (non-recursive-overflow) count.
+    /// Number of leaf panes in this tree. Only tests call it; restore uses
+    /// `bounded_leaf_count` to bound the PTY fan-out of a crafted-but-small
+    /// `session.json`. serde_json's default 128-level recursion limit already
+    /// bounds nesting depth.
     #[cfg(test)]
     pub fn leaf_count(&self) -> usize {
         self.bounded_leaf_count(usize::MAX).unwrap_or(usize::MAX)
@@ -121,24 +117,22 @@ pub struct STab {
     pub focus: usize,
     /// User-set tab-title override (mirrors `Tab::title_override`). `Some(s)`
     /// = the tab bar shows `s` instead of the focused pane's auto-title;
-    /// `None` = auto-title. `#[serde(default)]` (additive wire field) so an
-    /// OLD `session.json` lacking it still loads — it restores with no
-    /// override, the original default. Saved by `Mux::snapshot`, consumed
+    /// `None` = auto-title. `#[serde(default)]` lets an older `session.json`
+    /// without it load with no override. Saved by `Mux::snapshot`, consumed
     /// by `Mux::restore`.
     #[serde(default)]
     pub title_override: Option<String>,
     /// Whether this tab was zoomed (focused pane maximized; mirrors
-    /// `Tab::zoomed`). `#[serde(default)]` (additive wire field, defaults to
-    /// `false`) so an OLD `session.json` without it loads unzoomed, the
-    /// original default. Saved by `Mux::snapshot`, consumed by
+    /// `Tab::zoomed`). `#[serde(default)]` lets an older `session.json`
+    /// without it load unzoomed. Saved by `Mux::snapshot`, consumed by
     /// `Mux::restore`.
     #[serde(default)]
     pub zoomed: bool,
 }
 
-/// C7 (multi-window): a window's saved outer position + inner size,
-/// physical pixels. Restore clamps it to the visible monitors (the saved
-/// monitor may be unplugged) before applying.
+/// A window's saved outer position + inner size, in physical pixels. Restore
+/// clamps it to the visible monitors (the saved monitor may be unplugged)
+/// before applying.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SGeometry {
     pub x: i32,
@@ -147,9 +141,9 @@ pub struct SGeometry {
     pub h: u32,
 }
 
-/// C7 (multi-window): one window's tabs within a session. `geometry` is
-/// `None` when the platform can't report an outer position (Wayland) — the
-/// WM places the window on restore.
+/// One window's tabs within a session. `geometry` is `None` when the platform
+/// can't report an outer position (Wayland); the WM then places the window on
+/// restore.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SWindow {
     pub tabs: Vec<STab>,
@@ -161,21 +155,20 @@ pub struct SWindow {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Session {
-    /// LEGACY single-window fields. C7 dual-writes window 1 here so an older
-    /// kettle (or a hand-rolled tool) reading the file still restores
+    /// LEGACY single-window fields. `save_session` mirrors window 1 here so an
+    /// older kettle (or a hand-rolled tool) reading the file still restores
     /// something sensible; `windows` is the source of truth when present.
     pub tabs: Vec<STab>,
     pub active: usize,
-    /// LEGACY back-compat field. The theme is now
-    /// CONFIG-governed — every runtime theme change is persisted to the config
-    /// `theme =` line via `persist_pref`, and `save_session` writes this as
-    /// `None` while restore IGNORES it. Kept only so older `session.json` files
-    /// (which stored a theme here) still deserialize. `default` so absent is OK.
+    /// LEGACY back-compat field, kept only so older `session.json` files that
+    /// stored a theme here still deserialize. The config governs the theme
+    /// (`persist_pref` writes each runtime change to its `theme =` line), so
+    /// `save_session` writes `None` here and restore ignores it.
     #[serde(default)]
     pub theme: Option<String>,
-    /// C7 (multi-window): every window's tabs + geometry, ordered window 1
-    /// first. `#[serde(default)]` so pre-multi-window files still load —
-    /// `windows_normalized` falls back to the legacy top-level fields.
+    /// Every window's tabs + geometry, ordered window 1 first.
+    /// `#[serde(default)]` so pre-multi-window files still load;
+    /// `validated_restore_windows` falls back to the legacy top-level fields.
     #[serde(default)]
     pub windows: Vec<SWindow>,
 }
@@ -280,11 +273,8 @@ impl Session {
         load_from_path(&p)
     }
 
-    /// Terminator parity, detachable-tabs Bucket-D file-fallback: load a
-    /// one-shot tab-handoff JSON file written by another kettle process
-    /// (via `Action::MoveTabToNewWindow`). Reads the path + deletes it
-    /// after read (one-shot handoff — avoids accidental re-use
-    /// across launches).
+    /// Load a one-shot tab-handoff JSON file (`--tab-handoff`) written by an
+    /// older kettle's `Action::MoveTabToNewWindow`, deleting it after the read.
     pub fn load_tab_handoff(path: &std::path::Path) -> Option<Session> {
         let session = load_from_path(path)?;
         // One-shot: delete after read so a subsequent kettle
@@ -303,16 +293,14 @@ impl Session {
         }
     }
 
-    /// Terminator parity, `terminatorlib/layoutlauncher.py`:
-    /// list saved layouts by name (alphabetical). Walks
-    /// `<config-dir>/layouts/*.json`, strips the extension. Returns
-    /// an empty `Vec` when the layouts dir doesn't exist (a fresh
-    /// install has none) — that's not an error, just "nothing to
-    /// pick from yet". Closes the layout-launcher Bucket-D gap by
-    /// giving `Action::OpenLayoutPicker` a source of
-    /// names to filter against.
+    /// List saved layouts by name, alphabetically (Terminator parity,
+    /// `terminatorlib/layoutlauncher.py`). Walks `<config-dir>/layouts/*.json`
+    /// and strips the extension; `Action::OpenLayoutPicker` filters against
+    /// these names. A missing layouts dir (a fresh install has none) returns an
+    /// empty `Vec`, not an error.
+    ///
     /// Layouts always live at `<default config dir>/layouts/`, the same place
-    /// [`Session::path_for_layout`] loads and saves them — `--config FILE`
+    /// [`Session::path_for_layout`] loads and saves them. `--config FILE`
     /// does not relocate them, so listing must not pretend otherwise.
     pub fn list_layouts() -> Vec<String> {
         let Some(default) = kettle_config::Config::default_path() else {
@@ -421,10 +409,11 @@ impl Session {
         Ok(restore)
     }
 
-    /// C7: the session's windows in restore order, whatever vintage the file
-    /// is. A v2 file returns its (non-empty) `windows` entries; a legacy
+    /// The session's windows in restore order, whatever vintage the file is.
+    /// A v2 file returns its (non-empty) `windows` entries; a legacy
     /// single-window file becomes one geometry-less `SWindow` from the
-    /// top-level fields. Empty-tab windows are dropped — nothing to restore.
+    /// top-level fields. Empty-tab windows have nothing to restore and are
+    /// dropped.
     #[cfg(test)]
     pub fn windows_normalized(&self) -> Vec<SWindow> {
         match self.validated_restore_windows() {
@@ -444,12 +433,15 @@ impl Session {
     }
 }
 
-/// C7: clamp a saved window geometry so the window is actually reachable on
+/// Clamp a saved window geometry so the window is actually reachable on
 /// the CURRENT monitor layout (the saved monitor may be unplugged or the
-/// resolution changed). If the window's top strip — the part you grab to
-/// move it — intersects no monitor, snap the position into the first
-/// monitor; the size is left alone (the WM clips oversize windows fine).
-/// Pure for testability; monitors are `(x, y, w, h)` rects in physical px.
+/// resolution changed). Width, height, and area are capped at the largest any
+/// monitor offers and at the fixed surface caps, but never below the minimum
+/// window size. If the window's top strip (the part you grab to move it)
+/// intersects no monitor, snap the position into the first monitor. With no
+/// usable monitor, the position passes through and only the fixed caps bound
+/// the size. Pure for testability; monitors are `(x, y, w, h)` rects in
+/// physical px.
 pub(crate) fn clamp_geometry_to_monitors(
     g: SGeometry,
     monitors: &[(i32, i32, u32, u32)],
@@ -674,12 +666,11 @@ fn open_session_file(path: &std::path::Path) -> std::io::Result<(std::fs::File, 
 
 /// Move aside a session file kettle loaded but then refused to restore.
 ///
-/// The parse-error and oversize branches already do this, and the preflight
-/// rejections did not. That asymmetry cost the user everything: a rejected
-/// preflight only logged a warning, kettle opened one default tab, and the next
-/// save — either the action tail or the two-second sweep — rewrote the file from
-/// that single tab. Every window, split ratio and working directory was gone
-/// within seconds of a launch that looked ordinary.
+/// The parse-error and oversize branches do the same. A rejected restore still
+/// opens one default tab, so without the stash the next save (the action tail
+/// or the two-second sweep) rewrites the file from that single tab, losing
+/// every window, split ratio and working directory within seconds of a launch
+/// that looks ordinary.
 ///
 /// The rejections are reachable without a hostile file, because nothing on the
 /// save side enforces the limits the load side checks: seventeen open windows,
@@ -738,10 +729,9 @@ mod tests {
 
     /// A session kettle loads but refuses to restore must survive the launch.
     ///
-    /// The preflight rejections used to only log. Everything downstream then
-    /// behaved as if there were no session, including the next save, so the
-    /// file was replaced by a single fresh tab within seconds. The parse-error
-    /// and oversize branches already stashed; these did not.
+    /// A rejection that only logs leaves everything downstream behaving as if
+    /// there were no session, including the next save, which replaces the file
+    /// with a single fresh tab within seconds.
     #[test]
     fn a_session_that_cannot_be_restored_is_kept_rather_than_overwritten() {
         let temp = kettle_test_support::private_tempdir("kettle-session-stash-");
@@ -769,12 +759,9 @@ mod tests {
 
     /// A rename that fails must leave the original alone.
     ///
-    /// This pins the safe half. The other half of that fix, that the log stops
-    /// claiming the file was kept when the move failed, is not covered here:
-    /// asserting on log output would need a capture layer this crate does not
-    /// have, and a test that cannot fail is worse than none. The claim mattered
-    /// because it is worse than silence, telling the reader their session was
-    /// preserved while the next save is about to overwrite it.
+    /// The log line for this case, which must not claim the file was kept, is
+    /// not tested. Asserting on log output would need a capture layer this crate
+    /// does not have, and a test that cannot fail is worse than none.
     #[cfg(unix)]
     #[test]
     fn a_stash_that_cannot_move_the_file_leaves_it_alone() {
@@ -829,12 +816,11 @@ mod tests {
     /// `save_to_path` runs from `handle_action`'s unconditional tail, so it
     /// fires on every keybound action — including scrolling, which changes
     /// nothing in the session. Each write fsyncs the file and its parent
-    /// directory on the event-loop thread, so the repeats were a measurable
-    /// stall, not just wasted I/O.
+    /// directory on the event-loop thread, so a repeat is a measurable stall,
+    /// not just wasted I/O.
     ///
-    /// Detected by the file's modification time rather than its contents: the
-    /// bytes are identical either way, so only "was the file rewritten?"
-    /// distinguishes the two, and that is the thing being fixed.
+    /// Detected by the file's modification time rather than its contents,
+    /// because the bytes are identical either way.
     #[test]
     fn an_unchanged_session_skips_the_durable_write() {
         let dir = private_tempdir();
@@ -895,8 +881,8 @@ mod tests {
         assert_eq!(reloaded.active, 3);
     }
 
-    /// The memo must not stand in for the file. A session file deleted out
-    /// from under the process has to be recreated, not assumed present.
+    /// The skip must check the file itself. A session file deleted out from
+    /// under the process has to be recreated, not assumed present.
     #[test]
     fn a_session_file_changed_underneath_us_is_rewritten() {
         let dir = private_tempdir();
@@ -919,11 +905,10 @@ mod tests {
             "an identical session whose file is gone must still be written"
         );
 
-        // Replaced with different content of exactly the SAME LENGTH. This is
-        // the case the first version of the skip missed: it confirmed its memo
-        // against the file's size, which a same-length replacement satisfies.
-        // Two kettle windows share session.json and a hand-edited file is
-        // supported, so "different bytes, same count" is a real state to be in.
+        // Replaced with different content of exactly the SAME LENGTH, which a
+        // size check alone would miss. Two kettle windows share session.json
+        // and a hand-edited file is supported, so "different bytes, same count"
+        // is a real state to be in.
         let mut tampered: Vec<u8> = ours.clone().into_bytes();
         let last = tampered.len() - 1;
         tampered[last] = b' ';
@@ -979,8 +964,9 @@ mod tests {
         }
     }
 
-    /// `leaf_count` bounds the restore PTY fan-out, so it
-    /// must count every leaf across an arbitrarily nested split tree.
+    /// `leaf_count` wraps `bounded_leaf_count`, which bounds the restore PTY
+    /// fan-out, so it must count every leaf across an arbitrarily nested split
+    /// tree.
     #[test]
     fn snode_leaf_count_walks_the_tree() {
         let leaf = || SNode::Leaf {
@@ -1083,10 +1069,9 @@ mod tests {
 
     #[test]
     fn load_from_path_returns_none_silently_when_file_missing() {
-        // First-launch case — no file at the path. Must NOT panic, must
-        // NOT log (would be noisy on every fresh install). load_from_path
-        // returning None covers both — log::warn! is only called from the
-        // parse-error branch.
+        // First-launch case: no file at the path. Must NOT panic, must NOT log
+        // (would be noisy on every fresh install). A failed open returns None
+        // before any warning; only the parse-error and oversize branches warn.
         let dir = tmp_dir("missing");
         let path = dir.join("session.json");
         assert!(load_from_path(&path).is_none());
@@ -1137,10 +1122,9 @@ mod tests {
     fn load_from_path_rejects_oversize_file_without_reading_into_memory() {
         let dir = tmp_dir("oversize");
         let path = dir.join("session.json");
-        // Write a 17 MiB file (1 MiB over the 16 MiB cap). All
-        // zero bytes — `read_to_string` would still allocate the
-        // whole buffer if the cap weren't enforced, so just one
-        // extra byte past the cap exercises the size branch.
+        // Write a 17 MiB file (1 MiB over the 16 MiB cap). The content does not
+        // matter, because the size check rejects the file before reading it;
+        // even one byte past the cap would exercise that branch.
         let oversize = vec![b'A'; 17 * 1024 * 1024];
         std::fs::write(&path, &oversize).unwrap();
         assert!(
@@ -1167,10 +1151,9 @@ mod tests {
 
     #[test]
     fn load_from_path_backs_up_corrupted_file_and_returns_none() {
-        // A corrupted file (kettle killed mid-write,
-        // disk full, hand-edit) used to silently drop the user's tabs/
-        // splits state on the next launch. Now: return None *and* rename
-        // the file out of the way so the user can inspect / restore.
+        // A corrupted file (kettle killed mid-write, disk full, hand-edit) must
+        // return None *and* be renamed out of the way so the user can inspect
+        // or restore it, rather than silently losing their tabs and splits.
         let dir = tmp_dir("corrupted");
         let path = dir.join("session.json");
         std::fs::write(&path, "{ this is not valid json at all").unwrap();
@@ -1378,8 +1361,8 @@ mod tests {
 
     #[test]
     fn session_v2_windows_round_trip_with_geometry() {
-        // C7: the multi-window session shape — windows with geometry survive
-        // a JSON round-trip, and windows_normalized returns them in order.
+        // Windows with geometry survive a JSON round-trip, and
+        // windows_normalized returns them in order.
         let leaf = || STab {
             root: SNode::Leaf {
                 cwd: None,
@@ -1433,10 +1416,10 @@ mod tests {
 
     #[test]
     fn legacy_session_normalizes_to_one_window() {
-        // C7: a pre-multi-window file (no `windows` field) loads and
-        // normalizes to a single geometry-less window from the top-level
-        // fields — and an OLD kettle reading a NEW dual-written file sees
-        // window 1 via those same top-level fields.
+        // A pre-multi-window file (no `windows` field) loads and normalizes to
+        // a single geometry-less window from the top-level fields. An OLD
+        // kettle reading a NEW dual-written file sees window 1 via those same
+        // top-level fields.
         let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":null}}},{"root":{"Leaf":{"cwd":null}}}],"active":1}"#;
         let s: Session = serde_json::from_str(legacy).unwrap();
         let wins = s.windows_normalized();
@@ -1546,7 +1529,7 @@ mod tests {
 
     #[test]
     fn clamp_geometry_snaps_offscreen_windows_into_a_monitor() {
-        // C7: a window saved on a now-unplugged monitor must come back
+        // A window saved on a now-unplugged monitor must come back
         // reachable. One 1920x1080 monitor at the origin:
         let mons = [(0, 0, 1920u32, 1080u32)];
         // Fully on-screen geometry is untouched.
@@ -1682,13 +1665,10 @@ mod tests {
 
     #[test]
     fn session_round_trips_group_title_override_and_zoom() {
-        // Three pieces of per-pane / per-tab state were previously DROPPED on
-        // save/restore (the wire format had no slot for them, so restore
-        // hardcoded None/false): a pane's named broadcast-group membership
-        // (`SNode::Leaf::group`), a tab's user-set title override
-        // (`STab::title_override`), and a tab's zoom state (`STab::zoomed`).
-        // They're now additive `#[serde(default)]` wire fields. Confirm all
-        // three survive a JSON round-trip with their exact values.
+        // A pane's named broadcast-group membership (`SNode::Leaf::group`), a
+        // tab's user-set title override (`STab::title_override`), and a tab's
+        // zoom state (`STab::zoomed`) must all survive a JSON round-trip with
+        // their exact values.
         let s = Session {
             tabs: vec![STab {
                 root: SNode::Split {
@@ -1742,11 +1722,9 @@ mod tests {
 
     #[test]
     fn legacy_session_without_group_title_zoom_fields_loads_to_defaults() {
-        // The three new fields are all `#[serde(default)]`, so a session.json
-        // written by an OLDER kettle (no `group`/`title_override`/`zoomed`
-        // keys) must still deserialize cleanly — to the original defaults:
-        // ungrouped pane, no title override, not zoomed. This is the
-        // backward-compat guarantee that makes the wire-format extension safe.
+        // `group`, `title_override`, and `zoomed` are all `#[serde(default)]`,
+        // so a session.json written by an OLDER kettle without those keys must
+        // still load, as an ungrouped pane with no title override, not zoomed.
         let legacy = r#"{"tabs":[{"root":{"Leaf":{"cwd":"/tmp"}},"focus":0}],"active":0}"#;
         let s: Session = serde_json::from_str(legacy).expect("legacy json must still load");
         let tab = &s.tabs[0];

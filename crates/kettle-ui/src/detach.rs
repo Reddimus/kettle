@@ -38,9 +38,9 @@ pub enum DragState {
     /// (`DRAG_DISTANCE_THRESHOLD_PX`), matching GTK / OS drag thresholds.
     ArmedInside { tab_idx: usize },
     /// Mouse moved enough after ArmedInside to qualify as a drag. The
-    /// cursor is still inside this kettle window. v2.19.0: crossing the
-    /// band threshold from EITHER dragging state tears immediately
-    /// (`maybe_tear_off` consumes the FSM mid-drag).
+    /// cursor is still inside this kettle window. Except on Wayland,
+    /// crossing the band threshold from EITHER dragging state tears
+    /// immediately (`maybe_tear_off` consumes the FSM mid-drag).
     DraggingInside { tab_idx: usize },
     /// Cursor left this kettle window during a drag. On Wayland a
     /// mouse-up here is the tear-off (the at-release fallback); on every
@@ -85,11 +85,10 @@ impl DragState {
         DragState::Idle
     }
 
-    /// Terminator parity, detachable-tabs Bucket-D, phase 9 of
-    /// docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md: cancel path. Returns
-    /// Some(tab_idx) if a tab was being dragged when the cancel fired —
-    /// caller can restore that tab's visual state (clear ghost, reset
-    /// focus). None when the cancel comes from Idle (no-op).
+    /// Cancel path (phase 9 of docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md).
+    /// Returns Some(tab_idx) if a tab was being dragged when the cancel
+    /// fired, so the caller can restore that tab's visual state (clear
+    /// ghost, reset focus). None when the cancel comes from Idle (no-op).
     pub fn cancel(self) -> (Self, Option<usize>) {
         match self {
             DragState::Idle => (DragState::Idle, None),
@@ -192,12 +191,12 @@ mod tests {
 
     #[test]
     fn end_to_end_drag_walkthrough() {
-        // Pure-FSM e2e drift guard: the full C6 tear-off gesture flow.
+        // Pure-FSM e2e drift guard: the full tear-off gesture flow.
         // Idle → ArmedInside → DraggingInside → DraggingOutside, then a
-        // cancel restores. v2.19.0: the caller tears at the band
-        // THRESHOLD mid-drag (`maybe_tear_off` resets the FSM to Idle);
-        // a mouse-up while outside is the Wayland-only at-release tear
-        // (see the Released arm in app.rs).
+        // cancel restores. The caller tears at the band THRESHOLD mid-drag
+        // (`maybe_tear_off` resets the FSM to Idle); a mouse-up while
+        // outside is the Wayland-only at-release tear (see the Released arm
+        // in app.rs).
         let s = DragState::on_mouse_down_on_tab(2);
         assert!(matches!(s, DragState::ArmedInside { .. }));
         let s = s.on_mouse_move(1.0, 1.0);
