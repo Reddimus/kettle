@@ -5,7 +5,157 @@ Windows-supported release, and the PowerShell benchmark suite is available in
 the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
 Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
+## Unreleased — macOS standing for 4.6.0
+
+Measured with `scripts/perf/macos-standing.py` (`just macos-standing`), not the
+comparator in the next section. The standing tool:
+
+- times the window from the window server and the shell from inside it, on one
+  monotonic clock, instead of polling every 100 ms;
+- reports memory as `phys_footprint`, the figure Activity Monitor shows, which
+  includes the GPU driver memory that resident size leaves out;
+- samples idle 20 to 30 s after launch and records whether the window was
+  frontmost, because Kettle, Ghostty and kitty blink only when focused. Kettle
+  stops blinking after 10 s without activity and kitty after 15 s, so of the
+  three only Ghostty is still blinking when sampled;
+- runs vtebench at a pinned revision. Its `cursor_motion` and `light_cells`
+  benchmarks produced no samples in any terminal, so the tables and geometric
+  means cover the other 10.
+
+Host: **Apple M5 Max, 18 cores, 48 GB, macOS 26.6.2 (25G83)**. Kettle is a
+release build of `88894429`, which has every 4.6.0 change. Every terminal runs
+its default configuration from a 120x36 request, with Kettle's agent server,
+session restore and update check off and kitty and Ghostty set to quit with
+their last window. Every terminal inherits the file-descriptor limit of 256
+that the Dock gives GUI apps. 5 rounds per workload, 2 for vtebench, with the
+starting terminal rotated each round.
+
+| terminal | version |
+|---|---|
+| Alacritty | 0.17.0 |
+| Ghostty | 1.3.1 (15212) |
+| kitty | 0.49.1 |
+| WezTerm | 20240203-110809-5046fc22 |
+
+| metric | Kettle | rank | field |
+|---|---:|---|---|
+| time to window | 161.3 ms | tied 1st | WezTerm 159.9, Alacritty 160.9, **Kettle 161.3**, Ghostty 203.5, kitty 272.6 |
+| time to shell | 256.0 ms | 2 / 5 | WezTerm 226.2, **Kettle 256.0**, Ghostty 265.5, Alacritty 283.8, kitty 386.1 |
+| idle memory | **35.7 MiB** | **1 / 5** | **Kettle**, Alacritty 36.7, WezTerm 45.2, kitty 58.4, Ghostty 231.7 |
+| idle CPU | **0.003 %** | **1 / 5** | **Kettle**, WezTerm 0.01, kitty 0.02, Alacritty 0.04, Ghostty 0.55 |
+| idle wakeups | 1.3 /s | 3 / 5 | Alacritty 0.5, kitty 0.6, **Kettle 1.3**, WezTerm 1.6, Ghostty 88.7 |
+| vtebench geometric mean | **13.7 ms** | tied 1st | **Kettle 13.7**, Alacritty 13.9, Ghostty 16.1, kitty 26.0, WezTerm 43.2 |
+| memory 3 s after a 32 MiB flood | 365.6 MiB | 5 / 5 | Alacritty 77.5, WezTerm 78.2, Ghostty 242.5, kitty 278.8, **Kettle** |
+
+The three fastest windows appear within 1.4 ms of each other, less than any of
+the three moved between rounds. The two vtebench geometric means sit 1.3 %
+apart, about as far as Kettle's own two vtebench rounds moved (13.6 and
+13.8 ms). Both are ties rather than wins.
+
+vtebench, median milliseconds per sample (lower is better):
+
+| benchmark | Kettle | Alacritty | Ghostty | kitty | WezTerm |
+|---|---:|---:|---:|---:|---:|
+| dense_cells | 9.0 | **5.0** | 9.0 | 9.5 | 9.0 |
+| medium_cells | 8.5 | **7.0** | 12.0 | 8.0 | 36.5 |
+| scrolling | **15.5** | 37.0 | 20.0 | 67.5 | 63.5 |
+| scrolling_bottom_region | 15.0 | **12.0** | 21.0 | 31.0 | 56.5 |
+| scrolling_bottom_small_region | 15.0 | **12.0** | 21.5 | 39.5 | 55.5 |
+| scrolling_fullscreen | **23.0** | 56.0 | 28.0 | 156.5 | 78.5 |
+| scrolling_top_region | 34.5 | 31.0 | **21.5** | 34.0 | 73.5 |
+| scrolling_top_small_region | 15.0 | **11.5** | 21.0 | 40.0 | 56.5 |
+| sync_medium_cells | **9.0** | 10.0 | 13.5 | 15.0 | 49.5 |
+| unicode | 8.0 | **7.0** | **7.0** | **7.0** | 21.2 |
+
+### 4.5.2 against 4.6.0 on the same machine
+
+The installed, notarized 4.5.2 against the same `88894429` build, as a paired
+A/B (`--kettle-b`) at a soft limit of 1,048,576 descriptors, the limit a shell
+started from VS Code or another Node-based tool passes on. Ratios are the median
+paired B/A with a 10,000-resample bootstrap 95 % interval. Every idle sample was
+taken with the window frontmost.
+
+| metric | 4.5.2 | 4.6.0 | change (95 % CI) |
+|---|---:|---:|---|
+| time to window | 314.8 ms | 199.6 ms | −39 % (−36 to −40 %) |
+| time to shell | 391.4 ms | 273.1 ms | −31 % (−29 to −46 %) |
+| idle memory | 348.8 MiB | 35.7 MiB | −90 % (−90 %) |
+| idle CPU | 2.35 % | 0.003 % | −99.9 % (−99.9 %) |
+| idle wakeups | 4.1 /s | 1.3 /s | −68 % (−66 to −69 %) |
+
+Three changes produced this:
+
+- **Spawns no longer sweep the descriptor limit (#339).** Before `exec`, the
+  child marked every descriptor number up to the soft limit close-on-exec, one
+  `fcntl` each. At 1,048,576 that was about 100 ms per pane. On macOS the child
+  now asks the kernel which descriptors are open and marks only those, and the
+  limit no longer shows: alternating startup runs of the same build measured a
+  time to window of 192.5 and 191.9 ms at 256 against 197.4 and 189.8 ms at
+  1,048,576.
+- **The idle process scan reads only pane processes (#341).** SSH and
+  shell-directory detection refreshed argv and cwd for every process on the
+  machine, about 600 here, on each redraw; a blinking cursor redraws twice a
+  second. It now walks each pane's own process tree through libproc.
+- **The cursor stops blinking after 10 s without activity (#347).** While a
+  window presents frames, even just a blink, macOS keeps about 310 MiB of Metal
+  driver memory allocated to it, counted in `phys_footprint` but not in
+  resident size. A window that stops drawing releases it. The timeout is
+  configurable, and `0` restores the old endless blink.
+
+### Reading the losses
+
+- **Kettle leads 3 of the 10 vtebench benchmarks and trails the leader in the
+  other 7.** The widest gap by ratio is `dense_cells`: Alacritty reads one
+  sample, 26 full grids with new colors and attributes in every cell, in 5 ms
+  to Kettle's 9. The widest in milliseconds is `scrolling_top_region`, where
+  Kettle is 4th of 5 at 34.5 ms against Ghostty's 21.5. In the other five,
+  Kettle trails the leader by 1 to 3.5 ms.
+- **Time to shell trails WezTerm.** Kettle's shell starts in 256.0 ms to
+  WezTerm's 226.2, although the two windows appear within 1.4 ms of each other.
+- **Idle wakeups trail Alacritty and kitty.** A frontmost idle Kettle window
+  wakes 1.3 times a second, against Alacritty's 0.5 and kitty's 0.6.
+- **Memory right after a flood is the cost of counting output as activity.**
+  3 s after the flood Kettle is still blinking and still holds the Metal
+  memory. In a separate probe of the same flood, sampled past the timeout,
+  Kettle settled at 57 and 70 MiB 13 s after the output ended and at 53 and
+  64 MiB after 25 s, in two runs, below Alacritty's and WezTerm's figures at
+  3 s. Alacritty and WezTerm do not blink by default, so they had released it
+  by the 3 s sample.
+
+### What this measurement does NOT say
+
+- **Input latency was not measured.**
+- **Terminal.app and iTerm2 are not in the field.** The standing tool starts
+  each terminal's own binary with a command to run, and sets the grid through
+  flags or a config file it writes. It has no launch path for Terminal.app or
+  iTerm2.
+- **Kettle's grid is 123x35, not 120x36.** `window-width` and `window-height`
+  are converted to pixels with an 8×16 px baseline before font metrics exist,
+  so the request lands 0.35 % short in cell count. Every other terminal reports
+  exactly 120x36.
+- **WezTerm was not frontmost.** Its window was behind another app at the end
+  of all five idle rounds. Its default cursor does not blink, so focus should
+  not change its figure, but it was not measured frontmost. One Alacritty
+  round and one Ghostty round also ended behind another app; their medians
+  above use the frontmost rounds.
+- **One machine, not idle.** The load average was 3.2 at the start of the
+  standing and 5.1 at the start of the A/B. Absolute startup times also shift
+  between runs in ways load does not explain: the same build took 161.3 ms in
+  the standing and about 192 ms in the later descriptor-limit runs, which
+  launched only Kettle and started at a lower load (2.6 and 2.8 where
+  recorded). Compare terminals within one table, where every round interleaves
+  them under the same conditions.
+
 ## Unreleased — macOS comparator, first measured standing
+
+**Superseded by the 4.6.0 standing above.** This comparator polls for
+completion every 100 ms, so its timings move in steps of about 100 ms, and it
+reports maximum resident size, which leaves out GPU driver memory. In the A/B
+above, an idle 4.5.2 window was 101 MiB resident while its footprint, the
+figure Activity Monitor shows, was 349 MiB. Its figures stay here as the record
+of what was measured then, but its memory conclusion does not hold: resident
+size hid the Metal driver memory that Kettle's endless cursor blink kept
+allocated until #347.
 
 The first macOS comparison Kettle has ever had. Windows and Linux comparator
 legs existed; macOS did not, so no claim about Kettle's standing among macOS
