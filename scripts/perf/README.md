@@ -32,6 +32,38 @@ just macos-perf
 just macos-compare-score-self-test
 ```
 
+## macOS standing
+
+`macos-standing.py` measures what the comparator above cannot resolve. It
+times each launch on one monotonic clock instead of polling, so startup
+differences below 100 ms are visible, and it reports memory as
+`phys_footprint`, the Activity Monitor figure that includes GPU driver memory
+resident set size leaves out. Workloads:
+
+- `startup`: spawn to the first on-screen window, and to the child's first
+  instruction
+- `idle`: CPU share, wakeups per second, and memory of a window left alone
+- `flood-memory`: memory after printing a 32 MiB text file
+- `vtebench`: Alacritty's vtebench at a pinned revision
+
+Every terminal runs with its default configuration on a 120x36 grid. Helpers
+under `macos-standing/` are compiled into `target/perf-tools/` on first use,
+which needs the Xcode command line tools, and vtebench is cloned and built
+there too.
+
+```sh
+just macos-standing
+just macos-standing --workloads idle --rounds 8
+just macos-standing --kettle-b /path/to/other/kettle --workloads startup --fd-limit 1048576
+```
+
+`--kettle-b` compares two Kettle builds and reports each metric's median
+paired ratio with a bootstrap 95% interval. Idle figures depend on focus,
+because blinking cursors only run in a focused window, so each idle sample
+records whether its terminal was frontmost.
+`just macos-standing-self-test` checks the parsing and statistics without a
+desktop.
+
 ## Shared probe
 
 `kettle-live-probes.py` owns the bounded Kettle resize and scroll probes used by
