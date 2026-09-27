@@ -386,6 +386,34 @@ mod font_reload_tests {
 }
 
 #[cfg(test)]
+mod dim_blend_tests {
+    use super::dim_blend;
+    use crate::color::contrast_ratio;
+    use kettle_config::Rgb;
+
+    #[test]
+    fn dimmed_text_keeps_45_percent_of_the_foreground() {
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        assert_eq!(dim_blend(white, black), Rgb::new(115, 115, 115));
+    }
+
+    /// Disabled rows and shortcut hints must stay readable. On TokyoNight
+    /// Night the old blend kept a sixth of the foreground: about 1.6:1.
+    #[test]
+    fn dimmed_text_stays_readable_on_a_dark_theme() {
+        let fg = Rgb::parse("#c0caf5").unwrap();
+        let bg = Rgb::parse("#1a1b26").unwrap();
+        let ratio = contrast_ratio(dim_blend(fg, bg), bg);
+        assert!(ratio >= 3.0, "{ratio:.2}:1");
+        assert!(
+            ratio < contrast_ratio(fg, bg),
+            "still dimmer than normal text"
+        );
+    }
+}
+
+#[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
         ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
@@ -617,15 +645,11 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.update_available.is_some()
 }
 
-/// Disabled / secondary menu text: blend the foreground toward the panel
-/// background (~55% mute) without alpha-blending through to whatever lives
-/// under the panel.
+/// Disabled and secondary menu text: 45% foreground over the panel
+/// background, so it reads as about 55% transparent without alpha-blending
+/// through to whatever lives under the panel.
 fn dim_blend(fg: Rgb, bg: Rgb) -> Rgb {
-    Rgb::new(
-        ((fg.r as u16 + bg.r as u16 * 5) / 6) as u8,
-        ((fg.g as u16 + bg.g as u16 * 5) / 6) as u8,
-        ((fg.b as u16 + bg.b as u16 * 5) / 6) as u8,
-    )
+    solid_blend(fg, bg, 45)
 }
 
 /// Opaque color mixture used for UI surfaces that must remain legible over a
@@ -8468,9 +8492,8 @@ impl Renderer {
                     row_y += sep_h;
                     continue;
                 }
-                // Disabled rows blend toward the panel bg so a greyed
-                // Copy reads as ~55% transparent without alpha-blending
-                // through to whatever lives under the panel.
+                // Disabled rows blend toward the panel background (see
+                // `dim_blend`).
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
