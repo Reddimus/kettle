@@ -1255,7 +1255,10 @@ text, so its bitmap is already resident).
   above), input encoding, search/SSH overlays, session save/restore,
   cursor-blink and visual-bell timers (scheduled via
   `ControlFlow::WaitUntil` only while something animates, so an idle
-  terminal does no work). Blink phase advances at the timer edge before the
+  terminal does no work). The blink itself counts as animation, so it stops
+  `cursor-blink-timeout` after the last keystroke, focus change, or
+  focused-pane output, always on its visible phase; output after the stop
+  restarts it a full half-period from visible. Blink phase advances at the timer edge before the
   redraw request, so a delayed Wayland frame callback cannot enqueue the same
   phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state

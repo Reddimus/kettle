@@ -34,6 +34,8 @@ text-renderer = grid
 agent-server = full
 cursor-blink = true
 cursor-blink-interval = 250
+# Keep blinking for the whole capture; the default stops after 10 s idle.
+cursor-blink-timeout = 0
 background = #000000
 foreground = #ffffff
 cursor-color = #ffff00

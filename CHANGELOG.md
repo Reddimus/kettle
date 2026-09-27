@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- `cursor-blink-timeout` stops the cursor blink after 10 seconds without
+  typing or output, leaving the cursor visible. Set it to `0` to keep the old
+  behavior. An idle window then stops redrawing, which on macOS drops its
+  memory from about 350 MiB to about 35 MiB and its CPU use to nearly zero.
+
 ### Changed
 
 - `kettle exec --json` streams large output 3 to 5 times faster with about 70%

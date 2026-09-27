@@ -218,6 +218,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["block", "beam (bar)", "underline"],
                 ),
                 toggle("Cursor blink", "cursor-blink"),
+                // Seconds of no typing or output before the blink rests on a
+                // visible cursor; 0 blinks indefinitely.
+                number(
+                    "Stop blinking after",
+                    "cursor-blink-timeout",
+                    0,
+                    3600,
+                    5,
+                    "s",
+                ),
                 toggle("Show pane titlebars", "show-titlebar"),
             ],
         },
@@ -439,6 +449,8 @@ pub fn read(cfg: &Config, field: &Field) -> String {
             // what they were leaving.
             if field.key == "scrollback" && value == 0 {
                 "infinite".to_string()
+            } else if field.key == "cursor-blink-timeout" && value == 0 {
+                "never".to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes == 0 {
                 "no cap".to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes < 1_000_000 {
@@ -566,6 +578,7 @@ pub fn field_disabled(cfg: &Config, key: &str) -> bool {
     match key {
         "background-image" => !matches!(t, BT::Image),
         "background-animation" | "chrome-background" => !matches!(t, BT::Image | BT::Starfield),
+        "cursor-blink-timeout" => !cfg.cursor_blink,
         _ => false,
     }
 }
@@ -757,6 +770,7 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         "tab-min-width" => cfg.tab_min_width.round() as i64,
         "scrollbar-width" => cfg.scrollbar_width.round() as i64,
         "update-check-interval-hours" => cfg.update_check_interval_hours as i64,
+        "cursor-blink-timeout" => cfg.cursor_blink_timeout as i64,
         _ => 0,
     }
 }
@@ -983,6 +997,38 @@ mod tests {
         assert!(field_disabled(&cfg, "background-image")); // no file for a procedural bg
         assert!(!field_disabled(&cfg, "background-animation"));
         assert!(!field_disabled(&cfg, "chrome-background"));
+    }
+
+    #[test]
+    fn blink_timeout_row_reads_its_seconds_and_dims_without_blink() {
+        let appearance = categories(&[])
+            .into_iter()
+            .find(|c| c.name == "Appearance")
+            .expect("Appearance category");
+        assert!(
+            appearance
+                .fields
+                .iter()
+                .any(|f| f.key == "cursor-blink-timeout")
+        );
+        let mut cfg = Config::parse_text("cursor-blink-timeout = 45");
+        assert_eq!(read_number(&cfg, "cursor-blink-timeout"), 45);
+        assert!(!field_disabled(&cfg, "cursor-blink-timeout"));
+        cfg.cursor_blink = false;
+        assert!(field_disabled(&cfg, "cursor-blink-timeout"));
+        let row = appearance
+            .fields
+            .iter()
+            .find(|f| f.key == "cursor-blink-timeout")
+            .expect("timeout row");
+        assert_eq!(
+            read(&Config::parse_text("cursor-blink-timeout = 10"), row),
+            "10s"
+        );
+        assert_eq!(
+            read(&Config::parse_text("cursor-blink-timeout = 0"), row),
+            "never"
+        );
     }
 
     #[test]

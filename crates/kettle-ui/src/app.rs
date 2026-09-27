@@ -10367,6 +10367,7 @@ impl App {
         // ws.pending_pane_restarts after the iteration so the
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
+        let blink_focus = ws.mux.active_focus();
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
             if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
                 log::error!(
@@ -10519,9 +10520,16 @@ impl App {
                         // otherwise land in. (We're inside a
                         // `ws.mux.panes.values_mut()` loop here so
                         // we can't call `self.reset_blink_phase()`;
-                        // the two field writes are the same body.)
+                        // the field writes are the same body.) Only the
+                        // focused pane's cursor blinks, so only its mode
+                        // change counts as activity; a background prompt
+                        // redrawing its cursor shape must not re-arm the
+                        // idle timeout.
                         ws.blink_on = true;
                         ws.last_blink = std::time::Instant::now();
+                        if Some(pane_id) == blink_focus {
+                            ws.last_blink_activity = ws.last_blink;
+                        }
                     }
                     // Terminator parity (terminatorlib/
                     // config.py:103 `force_no_bell`): silence every
@@ -12929,8 +12937,21 @@ impl App {
                 }
                 pane.last_output_generation = Some(generation);
             }
+            let focused_output = ws
+                .mux
+                .active_focus()
+                .is_some_and(|focus| output_panes.contains(&focus));
             for id in output_panes {
                 ws.mux.touch_tab_output(id);
+            }
+            if focused_output {
+                note_blink_output_activity(
+                    &mut ws.last_blink,
+                    &mut ws.last_blink_activity,
+                    ws.blink_on,
+                    self.cfg.cursor_blink_timeout(),
+                    std::time::Instant::now(),
+                );
             }
             // Auto-scroll while a selection stays at or beyond the focused
             // pane's top or bottom edge.
@@ -15196,8 +15217,10 @@ impl App {
     ///   search/palette/hints/SSH overlay reveals the cursor immediately
     ///   instead of waiting up to one blink interval.
     fn reset_blink_phase(&mut self, ws: &mut WindowState) {
+        let now = std::time::Instant::now();
         ws.blink_on = true;
-        ws.last_blink = std::time::Instant::now();
+        ws.last_blink = now;
+        ws.last_blink_activity = now;
     }
 
     /// Send a broadcast from `ws`, and then to the panes in every OTHER window
@@ -15890,6 +15913,9 @@ impl App {
             }
             Action::ToggleCursorBlink => {
                 self.cfg.cursor_blink = !self.cfg.cursor_blink;
+                // Turning blink on from the menu after the idle timeout
+                // must show it blinking, not rest steady until a keystroke.
+                self.reset_blink_phase(ws);
                 self.persist_pref(
                     "cursor-blink",
                     if self.cfg.cursor_blink {
@@ -17743,6 +17769,9 @@ impl App {
     }
 
     fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {
+        // A config change, including a Settings edit or a menu toggle, is
+        // activity: a new blink or timeout value takes effect visibly now.
+        self.reset_blink_phase(ws);
         #[cfg(target_os = "macos")]
         {
             refresh_macos_modifiers(ws, self.cfg.macos_option_as_alt);
@@ -23567,6 +23596,38 @@ fn cursor_blink_active(configured: bool, pane_requests_blink: bool, window_focus
     configured && pane_requests_blink && window_focused
 }
 
+/// Whether an idle cursor has stopped blinking. It stops only in its visible
+/// phase, so the final toggle always leaves the cursor showing. Each blink
+/// repaints the window, and on macOS a window that keeps drawing keeps its GPU
+/// driver memory resident, so an idle window should settle.
+fn cursor_blink_timed_out(
+    idle: std::time::Duration,
+    timeout: Option<std::time::Duration>,
+    cursor_on: bool,
+) -> bool {
+    cursor_on && timeout.is_some_and(|timeout| idle >= timeout)
+}
+
+/// Record output in the focused pane as blink activity. A blink that had
+/// already stopped restarts a full half-period from its visible phase, so the
+/// cursor does not vanish in the same frame as the output that woke it.
+fn note_blink_output_activity(
+    last_blink: &mut std::time::Instant,
+    last_activity: &mut std::time::Instant,
+    cursor_on: bool,
+    timeout: Option<std::time::Duration>,
+    now: std::time::Instant,
+) {
+    if cursor_blink_timed_out(
+        now.saturating_duration_since(*last_activity),
+        timeout,
+        cursor_on,
+    ) {
+        *last_blink = now;
+    }
+    *last_activity = now;
+}
+
 fn next_cursor_blink_phase(
     active: bool,
     elapsed: std::time::Duration,
@@ -29077,7 +29138,13 @@ impl App {
             && self.torn_drag.is_none()
             && self.pane_snapshots_match_current_layout(ws);
         let pane_blink = self.pane_cursor_blinking(ws, cached_menu_snapshots);
+        let blink_timed_out = cursor_blink_timed_out(
+            now.saturating_duration_since(ws.last_blink_activity),
+            self.cfg.cursor_blink_timeout(),
+            ws.blink_on,
+        );
         let blink_active = !render_hidden
+            && !blink_timed_out
             && cursor_blink_active(self.cfg.cursor_blink, pane_blink, ws.window_focused);
         let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
         let blink_elapsed = now.saturating_duration_since(ws.last_blink);
@@ -33313,6 +33380,135 @@ mod tests {
             wake.contains("if let Some(due) = self.remote_poll_due"),
             "about_to_wait must wake for the deferred poll"
         );
+    }
+
+    #[test]
+    fn cursor_blink_stops_after_the_timeout_only_while_visible() {
+        use std::time::Duration;
+        let timeout = Some(Duration::from_secs(10));
+        assert!(!super::cursor_blink_timed_out(
+            Duration::from_secs(9),
+            timeout,
+            true
+        ));
+        assert!(super::cursor_blink_timed_out(
+            Duration::from_secs(10),
+            timeout,
+            true
+        ));
+        // A hidden phase keeps going until the next toggle shows the cursor.
+        assert!(!super::cursor_blink_timed_out(
+            Duration::from_secs(60),
+            timeout,
+            false
+        ));
+        // `cursor-blink-timeout = 0` blinks for as long as the window is focused.
+        assert!(!super::cursor_blink_timed_out(
+            Duration::from_secs(3600),
+            None,
+            true
+        ));
+    }
+
+    /// Drives the scheduler's two pure steps through 20 simulated seconds of
+    /// idle time: the blink must toggle until the timeout, stop within one
+    /// half-period after it, and rest with the cursor visible.
+    #[test]
+    fn an_idle_blink_stops_visible_within_one_half_period_of_the_timeout() {
+        use std::time::Duration;
+        let interval = Duration::from_millis(530);
+        let timeout = Some(Duration::from_secs(10));
+        let tick = Duration::from_millis(10);
+        let mut now = Duration::ZERO;
+        let (mut blink_on, mut last_blink) = (true, Duration::ZERO);
+        let mut last_toggle = Duration::ZERO;
+        while now < Duration::from_secs(20) {
+            let timed_out = super::cursor_blink_timed_out(now, timeout, blink_on);
+            let active = !timed_out && super::cursor_blink_active(true, true, true);
+            if let Some(next) =
+                super::next_cursor_blink_phase(active, now - last_blink, interval, blink_on)
+            {
+                blink_on = next;
+                last_blink = now;
+                last_toggle = now;
+            }
+            now += tick;
+        }
+        assert!(blink_on, "an idle blink must rest visible");
+        assert!(
+            last_toggle >= Duration::from_secs(10) - interval
+                && last_toggle <= Duration::from_secs(10) + interval,
+            "last toggle at {last_toggle:?}"
+        );
+    }
+
+    #[test]
+    fn output_restarts_a_stopped_blink_from_its_visible_phase() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let timeout = Some(Duration::from_secs(10));
+        let now = start + Duration::from_secs(30);
+
+        // Stopped: the phase restarts so the next toggle is a full half-period away.
+        let (mut last_blink, mut activity) = (start + Duration::from_secs(10), start);
+        super::note_blink_output_activity(&mut last_blink, &mut activity, true, timeout, now);
+        assert_eq!((last_blink, activity), (now, now));
+
+        // Still blinking, in either phase: output keeps it alive without
+        // shifting its rhythm.
+        for cursor_on in [true, false] {
+            let recent = now - Duration::from_secs(2);
+            let (mut last_blink, mut activity) = (now - Duration::from_millis(200), recent);
+            super::note_blink_output_activity(
+                &mut last_blink,
+                &mut activity,
+                cursor_on,
+                timeout,
+                now,
+            );
+            assert_eq!(last_blink, now - Duration::from_millis(200));
+            assert_eq!(activity, now);
+        }
+    }
+
+    #[test]
+    fn the_blink_scheduler_honors_the_idle_timeout_and_every_activity_source() {
+        let src = include_str!("app.rs");
+        let scheduler = src
+            .split_once("let pane_blink = self.pane_cursor_blinking(ws, cached_menu_snapshots);")
+            .expect("blink scheduler")
+            .1
+            .split_once("let blink_interval")
+            .expect("end of blink gate")
+            .0;
+        assert!(scheduler.contains("cursor_blink_timed_out("));
+        assert!(scheduler.contains("&& !blink_timed_out"));
+        let reset = src
+            .split_once("fn reset_blink_phase(&mut self, ws: &mut WindowState) {")
+            .expect("reset_blink_phase")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of reset_blink_phase")
+            .0;
+        assert!(reset.contains("ws.last_blink_activity = now;"));
+        assert!(src.contains(
+            "if Some(pane_id) == blink_focus {\n                            ws.last_blink_activity = ws.last_blink;"
+        ));
+        assert!(src.contains("if focused_output {\n                note_blink_output_activity("));
+        let toggle = src
+            .split_once("Action::ToggleCursorBlink => {")
+            .expect("blink toggle")
+            .1
+            .split_once("Action::ToggleCopyOnSelect")
+            .expect("end of blink toggle")
+            .0;
+        assert!(toggle.contains("self.reset_blink_phase(ws);"));
+        let reload = src
+            .split_once("fn apply_reloaded_config(&mut self, ws: &mut WindowState, font_size_changed: bool) {")
+            .expect("apply_reloaded_config")
+            .1;
+        assert!(reload.trim_start().starts_with("// A config change"));
+        assert!(reload.contains("self.reset_blink_phase(ws);"));
     }
 
     #[test]

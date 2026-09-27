@@ -1470,8 +1470,12 @@ fn main() -> anyhow::Result<()> {
         // are taking effect (rather than greping the source). Grouped by
         // theme of related settings; only one line per group for brevity.
         println!(
-            "cursor:  {:?} (blink={}, interval={}ms)",
-            cfg.cursor_style, cfg.cursor_blink, cfg.cursor_blink_interval
+            "cursor:  {:?} (blink={}, interval={}ms, timeout={})",
+            cfg.cursor_style,
+            cfg.cursor_blink,
+            cfg.cursor_blink_interval,
+            cfg.cursor_blink_timeout()
+                .map_or_else(|| "never".to_string(), |t| format!("{}s", t.as_secs()))
         );
         // When force_no_bell silences every bell flavor
         // regardless of mode, annotate the existing line so the user

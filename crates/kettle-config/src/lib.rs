@@ -1756,6 +1756,11 @@ pub struct Config {
     pub accent_seed: u64,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
+    /// Seconds without typing or focused-pane output after which the cursor
+    /// stops blinking and stays visible. `0` blinks for as long as the window
+    /// is focused. Each blink repaints the window, so a cursor that blinks
+    /// forever keeps an idle window drawing.
+    pub cursor_blink_timeout: u64,
     /// An inactive tab whose unseen output went quiet for
     /// at least this many milliseconds transitions from the
     /// `Output` indicator (cyan) to `Silent` (dim chrome). Default
@@ -2797,6 +2802,9 @@ impl Default for Config {
             accent_auto: true,
             accent_seed: 0,
             cursor_blink_interval: 530,
+            // GTK's `gtk-cursor-blink-timeout` default, which VTE and so
+            // Terminator follow.
+            cursor_blink_timeout: 10,
             tab_silence_threshold_ms: 10_000,
             command_notify_threshold_ms: 5_000,
             copy_on_select: true,
@@ -2910,6 +2918,13 @@ fn sort_profile_names(names: &mut [String]) {
 }
 
 impl Config {
+    /// How long the cursor keeps blinking after the last activity, or `None`
+    /// when `cursor-blink-timeout = 0` asks it to blink indefinitely.
+    pub fn cursor_blink_timeout(&self) -> Option<std::time::Duration> {
+        (self.cursor_blink_timeout > 0)
+            .then(|| std::time::Duration::from_secs(self.cursor_blink_timeout))
+    }
+
     /// The effective UI-chrome accent (focus border, active tab,
     /// titlebars, menu/settings highlights), resolved in precedence:
     ///   1. an explicit `accent-color = <hex>` / `--accent` (`accent_color`),
@@ -3486,6 +3501,8 @@ impl Config {
                 // 5000 — surface it now so the user's diagnostic
                 // matches their runtime.
                 "cursor-blink-interval" => v.parse::<u64>().is_ok_and(|n| (50..=5000).contains(&n)),
+                // parse_collect clamps to [0, 3600] seconds.
+                "cursor-blink-timeout" => v.parse::<u64>().is_ok_and(|n| n <= 3600),
                 // The notification thresholds are clamped at
                 // parse (`tab-silence` to [1000, 600000]; `command-notify` to
                 // [0, 86_400_000] with 0 = disable) but had no diagnostic, so an
@@ -5277,6 +5294,11 @@ impl Config {
                 "cursor-blink-interval" => {
                     if let Ok(v) = e.value.parse::<u64>() {
                         cfg.cursor_blink_interval = v.clamp(50, 5000);
+                    }
+                }
+                "cursor-blink-timeout" => {
+                    if let Ok(v) = e.value.parse::<u64>() {
+                        cfg.cursor_blink_timeout = v.min(3600);
                     }
                 }
                 "tab-silence-threshold-ms" | "tab-silence-threshold" => {
@@ -8388,6 +8410,31 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn cursor_blink_timeout_defaults_to_ten_seconds_and_clamps() {
+        let d = Config::default();
+        assert_eq!(d.cursor_blink_timeout, 10);
+        assert_eq!(
+            d.cursor_blink_timeout(),
+            Some(std::time::Duration::from_secs(10))
+        );
+        let never = Config::parse_text("cursor-blink-timeout = 0");
+        assert_eq!(never.cursor_blink_timeout(), None);
+        assert_eq!(
+            Config::parse_text("cursor-blink-timeout = 90").cursor_blink_timeout,
+            90
+        );
+        assert_eq!(
+            Config::parse_text("cursor-blink-timeout = 99999").cursor_blink_timeout,
+            3600
+        );
+        // A value that does not parse keeps the default.
+        assert_eq!(
+            Config::parse_text("cursor-blink-timeout = soon").cursor_blink_timeout,
+            10
+        );
+    }
+
+    #[test]
     fn ux_backlog_config() {
         let d = Config::default();
         assert_eq!(d.unfocused_split_opacity, 0.7);
@@ -8835,11 +8882,12 @@ split_horiz = <Control><Shift>j
              background-opacity = high\n\
              scroll-multiplier = fast\n\
              cursor-blink-interval = forever\n\
+             cursor-blink-timeout = -1\n\
              scrollback = lots\n\
              env = 1BAD=value\n\
              env = NO_SEPARATOR\n",
         );
-        assert_eq!(bad.len(), 8, "all eight should be flagged: {bad:?}");
+        assert_eq!(bad.len(), 9, "all nine should be flagged: {bad:?}");
         assert!(bad.iter().any(|b| b.contains("font-size")));
         assert!(bad.iter().any(|b| b.contains("scrollback")));
         assert!(bad.iter().any(|b| b.contains("1BAD")));
@@ -9602,6 +9650,7 @@ split_horiz = <Control><Shift>j
         //   scroll-multiplier         [0.1, 50.0]
         //   minimum-contrast          [0.0, 21.0]
         //   cursor-blink-interval     [50,  5000]
+        //   cursor-blink-timeout      [0,   3600]
         //
         // All clamp silently at parse or render time, so the
         // user's --check-config echo disagreed with the runtime
@@ -9615,9 +9664,10 @@ split_horiz = <Control><Shift>j
              minimum-contrast = 50\n\
              minimum-contrast = -1\n\
              cursor-blink-interval = 10\n\
-             cursor-blink-interval = 99999\n",
+             cursor-blink-interval = 99999\n\
+             cursor-blink-timeout = 3601\n",
         );
-        assert_eq!(bad.len(), 9, "all nine should flag: {bad:?}");
+        assert_eq!(bad.len(), 10, "all ten should flag: {bad:?}");
 
         // In-range / boundary values pass cleanly.
         let ok = Config::detect_malformed_values(
@@ -9634,7 +9684,9 @@ split_horiz = <Control><Shift>j
              minimum-contrast = 4.5\n\
              cursor-blink-interval = 50\n\
              cursor-blink-interval = 5000\n\
-             cursor-blink-interval = 530\n",
+             cursor-blink-interval = 530\n\
+             cursor-blink-timeout = 0\n\
+             cursor-blink-timeout = 3600\n",
         );
         assert!(ok.is_empty(), "all in-range pass: {ok:?}");
 
