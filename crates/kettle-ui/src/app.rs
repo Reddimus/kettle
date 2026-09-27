@@ -4317,7 +4317,12 @@ fn compile_triggers(
 ) -> Vec<(regex::Regex, kettle_config::TriggerAction)> {
     let mut out = Vec::with_capacity(triggers.len());
     for t in triggers {
-        match regex::Regex::new(&t.pattern) {
+        // Multi-line: the snapshot joins viewport rows with '\n', and `^` / `$`
+        // should anchor to each row.
+        match regex::RegexBuilder::new(&t.pattern)
+            .multi_line(true)
+            .build()
+        {
             Ok(re) => out.push((re, t.action.clone())),
             Err(e) => {
                 log::warn!("trigger pattern {:?} failed to compile: {e}", t.pattern);
@@ -39671,11 +39676,8 @@ mod tests {
 
     #[test]
     fn match_triggers_finds_pattern_anywhere_in_text() {
-        // Drift guard. The matching engine should fire on
-        // the first regex hit, return its action, and silently no-op
-        // when nothing matches. Anchors (`^` / `$`) work too because
-        // we scan multi-line viewport snapshots; the trigger uses
-        // `regex::Regex::is_match` which doesn't auto-anchor.
+        // The matching engine fires on the first regex hit, returns its
+        // action, and no-ops when nothing matches. Patterns are unanchored.
         use super::{compile_triggers, match_triggers};
         use kettle_config::{OutputTrigger, TriggerAction};
         let cfg = vec![
@@ -39722,6 +39724,21 @@ mod tests {
             "invalid regex should be dropped at compile time"
         );
         assert!(match_triggers("here is the valid_pattern token", &compiled_mixed).is_some());
+    }
+
+    /// Viewport snapshots join rows with '\n', so `^` and `$` must anchor to a
+    /// row, not to the whole snapshot.
+    #[test]
+    fn trigger_anchors_match_each_row() {
+        use super::{compile_triggers, match_triggers};
+        use kettle_config::{OutputTrigger, TriggerAction};
+        let compiled = compile_triggers(&[OutputTrigger {
+            pattern: r"^Build failed: (.+)$".into(),
+            action: TriggerAction::Urgency,
+        }]);
+        let snapshot = "$ make\nBuild failed: missing header\n$ \n";
+        assert!(match_triggers(snapshot, &compiled).is_some());
+        assert!(match_triggers("$ make\nok: Build failed: no\n", &compiled).is_none());
     }
 
     /// v2.20.0 (Terminator `run_cmd_on_match.py` parity completion): a
