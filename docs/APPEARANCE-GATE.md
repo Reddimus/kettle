@@ -54,6 +54,34 @@ The rebuilt appearance suite was skipped again: this host has Xcode 27, and the
 release icon script requires Xcode 26.x. The macOS 26 CI icon job passed. Dock
 icon capture remains unavailable.
 
+## 4.6.0 cut - 2026-09-27
+
+macOS 26.6.2 (25G83), M5 Max. Release build of the cut commit `a4c0a536`.
+
+Window chrome, material and icon sources are unchanged since 4.5.0, so the
+4.5.0 visual results still apply. The one visible change is the cursor-blink
+timeout (#347), which adds a "Stop blinking after" row to Settings →
+Appearance. Captured from the cut's release build with `kettle ctl
+screenshot`, the row sits under "Cursor blink" and reads `10s` by default.
+With `cursor-blink = false` and `cursor-blink-timeout = 0` it is dimmed and
+reads `never`. The blink itself was measured live: a focused idle window stops
+drawing after the timeout, as recorded in PERFORMANCE.md.
+
+`just gauntlet-strict` passed on the cut, and so did 15 of the 17 macOS native
+gates: `icons-check-required`, `package-templates`, `update-manifest-test`,
+`release-assets-test`, `package-manifest-test`, `online-installer-test`,
+`gpu-render-smoke`, `cli-smoke`, `touchpad-scroll-smoke`,
+`split-exit-resize-smoke`, `text-presentation-smoke`,
+`line-edit-chords-smoke`, `macos-compare-score-self-test`,
+`macos-standing-self-test` and `agent-cli-smoke`. `just macos-update-smoke`
+passed against published v4.5.2; `kettle-update` is unchanged since then.
+
+`icns-smoke` was skipped again: this host has Xcode 27, and the release icon
+script requires Xcode 26.x. The macOS 26 CI icon job covers it.
+`dock-menu-smoke` could not drive System Events, because macOS denied Apple
+Events to this session's host process (-1743); granting it Automation
+permission was out of scope. Dock icon capture remains unavailable.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
