@@ -1891,7 +1891,7 @@ dependencies = [
 
 [[package]]
 name = "kettle"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-config"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "bitflags 2.13.2",
  "kettle-state",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-core"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ctl"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "kettle-state",
  "kettle-test-support",
@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-remote"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "criterion",
  "kettle-test-support",
@@ -1975,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-render"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -1999,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-state"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "fs4",
  "getrandom 0.4.3",
@@ -2010,14 +2010,14 @@ dependencies = [
 
 [[package]]
 name = "kettle-test-support"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "kettle-ui"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-update"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-vt"
-version = "4.5.2"
+version = "4.6.0"
 dependencies = [
  "base64 0.23.1",
  "criterion",
