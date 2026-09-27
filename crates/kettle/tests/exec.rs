@@ -325,6 +325,32 @@ fn exec_rejects_an_explicit_missing_cwd_before_spawn() {
     assert!(!marker.exists(), "invalid --cwd still spawned the child");
 }
 
+/// `kettle exec` used to sleep a fixed 8 ms turn whenever its four-slot output
+/// queue was momentarily empty, so each turn moved at most four PTY reads:
+/// about 5 KiB on macOS and about 16 KiB on Linux. 32 MiB took about 90 s on
+/// macOS. The bound leaves slow debug CI hosts room, so it proves the fix on
+/// macOS; Linux's larger reads kept its old loop near 16 s. `--timeout` turns
+/// a hang into a failure rather than a stuck test.
+#[cfg(unix)]
+#[test]
+fn exec_streams_a_large_output_without_idle_polling() {
+    const SIZE: usize = 32 * 1024 * 1024;
+    let script = format!("head -c {SIZE} /dev/zero | tr '\\0' a");
+    let started = std::time::Instant::now();
+    let (code, out, err) = run_exec(&["--timeout", "60"], &["sh", "-c", &script], None);
+    let elapsed = started.elapsed();
+    if no_pty(code, &err) {
+        eprintln!("skipping exec_streams_a_large_output_without_idle_polling: no PTY");
+        return;
+    }
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(out.bytes().filter(|&byte| byte == b'a').count(), SIZE);
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "32 MiB through kettle exec took {elapsed:?}"
+    );
+}
+
 #[test]
 fn exec_streams_stdout_and_exits_zero() {
     let mut argv: Vec<&str> = ECHO.to_vec();
@@ -1925,6 +1951,12 @@ fn exec_query_reply_flood_fails_at_the_bounded_arbiter_queue() {
     );
 }
 
+/// Without stdin, nothing blocks the reply writer: the child never reads its
+/// input, and the tty discards input past its limit instead of blocking. So
+/// the replies drain, and whether the 64-reply bound trips depends only on how
+/// many queued queries one lifecycle wake services at once. Either way the run
+/// must fail closed by its deadline: through the bounded reply queue (125), or
+/// by answering every query and stopping at the timeout (124).
 #[cfg(unix)]
 #[test]
 fn exec_query_reply_flood_without_stdin_cannot_defeat_timeout() {
@@ -1932,15 +1964,18 @@ fn exec_query_reply_flood_without_stdin_cannot_defeat_timeout() {
         "i=0; while [ \"$i\" -lt 10000 ]; do printf '\\033[5n'; i=$((i+1)); done; sleep 30",
         "5.0",
     );
-    assert_eq!(
-        code, 125,
-        "no-stdin query flood did not fail closed; stderr: {err}; stdout: {out:?}"
-    );
-    assert!(
-        err.contains("PTY reply queue exceeded its 64-message bound")
-            || err.contains("PTY semantic event queue exceeded its 1024-message bound"),
-        "missing bounded-queue diagnostic: {err:?}"
-    );
+    match code {
+        125 => assert!(
+            err.contains("PTY reply queue exceeded its 64-message bound")
+                || err.contains("PTY semantic event queue exceeded its 1024-message bound"),
+            "missing bounded-queue diagnostic: {err:?}"
+        ),
+        124 => assert!(
+            out.contains("[0n"),
+            "the timeout path should have answered the queries; stdout: {out:?}"
+        ),
+        _ => panic!("no-stdin query flood did not fail closed; code {code}; stderr: {err}"),
+    }
     assert!(
         elapsed < Duration::from_secs(10),
         "no-stdin query flood stalled for {elapsed:?}"

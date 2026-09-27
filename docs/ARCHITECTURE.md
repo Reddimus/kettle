@@ -848,7 +848,11 @@ Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
 and cancellation therefore remain observable after child exit, while ordinary
-completion still drains losslessly.
+completion still drains losslessly. Between turns the lifecycle waits on the
+raw-output and event channels, or on the writer queue when that is full,
+rather than sleeping a fixed 8 ms: each macOS PTY read is about 1.2 KiB, so a
+fixed sleep per drain capped output near 0.35 MiB/s. The wait still returns
+within 8 ms to keep timeout and cancellation checks on schedule.
 Every stdout write and flush returns through a worker-outcome channel to the
 lifecycle thread. A genuine write/flush failure is not an abandonment: Kettle
 diagnoses it on stderr, terminates and reaps the owned process scope, finalizes
