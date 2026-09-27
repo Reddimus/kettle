@@ -871,7 +871,7 @@ contract and its `stdout was not fully delivered` warning, and returns 124 when
 teardown is verified even if the direct child already reported success: the
 deadline covers the complete lossless-delivery operation. On a stop the
 lifecycle queues the final Finish command when nothing is held back ahead of
-it and waits at most `FINAL_WRITE_GRACE` (100 ms) for the worker to confirm
+it and waits at most `FINAL_WRITE_GRACE` (250 ms) for the worker to confirm
 it. The worker confirms only after writing and flushing Finish, which follows
 every earlier command, so confirmation proves the consumer took all output,
 including the JSON exit event, before `process::exit`. The warning fires

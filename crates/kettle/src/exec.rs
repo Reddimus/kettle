@@ -78,10 +78,13 @@ const OUTPUT_WRITER_QUEUE_DEPTH: usize = 4;
 /// which bounds how late it notices a timeout, cancellation, or child exit.
 const IDLE_TURN: Duration = Duration::from_millis(8);
 /// How long a stopped run waits for the stdout writer to confirm its final
-/// command. A consumer that is reading accepts it in microseconds, so the
-/// bound only costs time when the consumer has stalled, and then the run warns
-/// instead of waiting longer.
-const FINAL_WRITE_GRACE: Duration = Duration::from_millis(100);
+/// command. A consumer that is reading accepts it in microseconds on an idle
+/// machine, but a loaded one can take tens of milliseconds just to schedule
+/// the writer thread: a macOS CI runner took over 70 ms to deliver three short
+/// events. Missing the bound drops the JSON exit event and prints a false
+/// warning, while the bound only costs time when the consumer has truly
+/// stalled, so it is set well above that.
+const FINAL_WRITE_GRACE: Duration = Duration::from_millis(250);
 /// Apply the same lifecycle fairness to semantic events. The queue remains
 /// substantially deeper so a short burst can be absorbed without loss.
 const EVENT_SLICE_MESSAGES: usize = 256;
@@ -4283,19 +4286,21 @@ mod tests {
     #[test]
     fn a_stopped_run_writes_its_exit_event_before_returning() {
         // `main` calls `process::exit` as soon as the lifecycle returns, so an
-        // exit event still queued at that point can be lost. Three events at
-        // 10 ms each leave 70 ms of the grace to spare.
+        // exit event still queued at that point can be lost. The stop must
+        // therefore wait for the writer. The grace here is generous because
+        // the test pins that ordering, not how fast a loaded machine
+        // schedules the writer; production uses `FINAL_WRITE_GRACE`.
         let reader = SlowReader::new(Duration::from_millis(10));
         let mut output = WorkerOutput::spawn(OutputMode::Json, reader.clone()).unwrap();
         output.start(80, 24).unwrap();
         output.output(b"partial".to_vec()).unwrap();
-        output
-            .finish(
-                EXIT_TIMEOUT,
-                Duration::from_millis(5),
-                OutputFinish::AbandonPending,
-            )
-            .unwrap();
+        let (result, delivered) = output.queue_final_write(
+            EXIT_TIMEOUT,
+            Duration::from_millis(5),
+            Duration::from_secs(30),
+        );
+        assert_eq!(result, Ok(()));
+        assert!(delivered, "the writer confirmed every event");
 
         let text = reader.text();
         let events: Vec<serde_json::Value> = text
