@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
 # scripts/release.sh — prepare a protected-main release pull request.
 #
-# Solves a race condition: tagging BEFORE the
-# CHANGELOG.md `[X.Y.Z] — YYYY-MM-DD` section was committed.
-# The tag/Cargo.toml/CHANGELOG consistency guard catches
-# that race at CI time, but by then the release workflow has
-# already been triggered and one platform job has failed at
-# pre-flight (the Linux job ran the guard; macOS + Windows
-# uploaded without it, leaving the GitHub release partial).
-#
-# This script does the four release ops atomically + with pre-
-# flight checks, so the race can't happen:
+# A tag pushed before the CHANGELOG.md `[X.Y.Z] — YYYY-MM-DD` section is
+# committed starts the release workflow, which then fails at the
+# tag/Cargo.toml/CHANGELOG consistency guard. This script closes that race by
+# running the release steps atomically, with pre-flight checks:
 #
 #   1. Asserts working tree is clean.
 #   2. Asserts CHANGELOG.md has the target [VERSION] section.
@@ -122,23 +116,15 @@ if git tag -l "v${VERSION}" | grep -q "^v${VERSION}\$"; then
     echo "  delete it first (git tag -d v${VERSION}) or pick a different version" >&2
     exit 1
 fi
-# Also check the REMOTE. Pre-fix, `git tag -l` only
-# listed local tags — if a previous run pushed v1.7.X but the
-# local clone hadn't fetched it, this script would silently
-# proceed and the eventual `git push origin v1.7.X` would fail
-# with a "remote tag already exists" error AFTER the local
-# commit + tag were already made. The user'd then have to delete
-# the local commit + tag manually to recover. Now: query the
-# remote up-front. If `git ls-remote` fails (no network / no
-# remote), warn but proceed (offline workflow is still valid).
+# Also check the remote, because `git tag -l` misses tags this clone has not
+# fetched. If `git ls-remote` fails (no network or no remote), skip the check
+# so offline preparation still works.
 if remote_tag=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null) \
     && [ -n "$remote_tag" ]; then
     echo "::error::remote tag v${VERSION} already exists on origin" >&2
-    # Backticks inside double-quoted echo run as command
-    # substitution. An earlier version of this line ran `git fetch && git
-    # tag -d` AT ERROR TIME, mutating state and printing garbled help.
-    # Use single quotes around the suggestion so the backticks are
-    # literal text the user can copy-paste.
+    # Single quotes keep the backticks literal so the user can copy the command.
+    # Inside double quotes they would run `git fetch && git tag -d` as command
+    # substitution at error time.
     echo '  pick a different version, or `git fetch && git tag -d v'"${VERSION}"'`' >&2
     echo "  if you need to overwrite (rarely the right move; cuts a fresh" >&2
     echo "  patch version is usually safer than retagging a published v)" >&2
@@ -149,22 +135,12 @@ fi
 # anchors are both errors: either means the owning file changed shape and a
 # release must not guess which text is current.
 #
-# This used to be `sed -i.bak "0,/re/s//replacement/"`. Both halves are GNU
-# extensions that BSD sed -- macOS's /usr/bin/sed -- does not implement:
-#
-#   * the `0,/re/` address range starts at line 0, which BSD sed accepts and
-#     then silently matches nothing, exiting 0;
-#   * `s//repl/` reuses the previous regular expression, which BSD sed rejects
-#     with "first RE may not be empty".
-#
-# The workspace version bump therefore no-opped on macOS while the inter-crate
-# pins below (a portable `-E s|...|`) bumped correctly, leaving Cargo.toml
-# internally inconsistent -- `kettle-update` requiring `kettle-state ^2.53.0`
-# against a still-2.52.0 crate -- so the Cargo.lock refresh failed and the
-# release aborted. Silently, until you read the cargo error closely.
-#
-# awk with an exact string comparison is portable, needs no regex escaping at
-# all, and can enforce the match count on both BSD and GNU userlands.
+# GNU sed's `0,/re/s//repl/` is not portable. BSD sed (macOS /usr/bin/sed)
+# accepts the `0,/re/` range but silently matches nothing and exits 0, and it
+# rejects `s//repl/` with "first RE may not be empty". A silent miss leaves
+# the workspace version behind the inter-crate pins and fails the Cargo.lock
+# refresh. awk with an exact string comparison is portable, needs no regex
+# escaping, and can enforce the match count on both BSD and GNU userlands.
 replace_exact_line() {
     local file="$1" want="$2" repl="$3"
     awk -v want="${want}" -v repl="${repl}" '
@@ -216,20 +192,13 @@ echo "bumping Cargo.toml: ${PREV} → ${VERSION}"
 MUTATIONS_STARTED=1
 replace_exact_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
 
-# Durable lockstep for the inter-crate path-dep version
-# requirements in `[workspace.dependencies]`. They were pinned at a fixed
-# 1.x floor (`version = "1.45.1"`), which `^`-excludes a 2.0.0 MAJOR bump
-# and broke `release.sh 2.0.0` at the Cargo.lock refresh ("failed to select
-# a version for `kettle-vt = ^1.45.1` … candidate 2.0.0 didn't match").
-# Keeping each pin equal to the release version means every future bump —
-# including majors — resolves cleanly. The crates are never published to
-# crates.io (no `publish`/badge), so the version is only a resolver hint.
+# Keep the inter-crate path-dep version requirements in
+# `[workspace.dependencies]` equal to the release version. A fixed floor such
+# as `1.45.1` `^`-excludes the next major version and fails the Cargo.lock
+# refresh. The crates are never published to crates.io, so the version is only
+# a resolver hint.
 echo "bumping inter-crate version pins → ${VERSION}"
-# The character class must admit `-`: `kettle-test-support` has two hyphens and
-# a `kettle-[a-z]+` class silently skipped it, leaving that one pin behind at
-# the previous version while every sibling advanced. That is precisely the
-# internally-inconsistent Cargo.toml described above, and it aborts the release
-# at the Cargo.lock refresh rather than at the edit that caused it.
+# The character class admits `-` because `kettle-test-support` has two hyphens.
 sed -i.bak -E "s|(path = \"crates/kettle-[a-z-]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
 rm -f Cargo.toml.bak
 
@@ -243,17 +212,9 @@ if grep -E 'path = "crates/kettle[^"]*", version = "' Cargo.toml \
     exit 1
 fi
 
-# Durable lockstep with flake.nix. The Nix-side
-# version had drifted 39 releases (v1.3.5 → v1.42.0)
-# because the file's "Keep in lockstep" comment was advisory-
-# only. Now the release script bumps it in the same atomic step
-# as Cargo.toml. The flake-nix-version-line shape:
-#
-#     version = "1.42.0";
-#
-# (10 leading spaces + version + ;).
-# `replace_exact_line` matches the whole line exactly, so only the package
-# version is touched -- not any cargo-vendor-deps version further down.
+# Bump flake.nix in the same step so the Nix package version cannot drift from
+# Cargo.toml. The package line is `version = "X.Y.Z";` with 10 leading spaces,
+# and `replace_exact_line` matches that whole line, so nothing else changes.
 if [ -f flake.nix ]; then
     echo "bumping flake.nix:  ${PREV} → ${VERSION}"
     replace_exact_line flake.nix \
@@ -310,9 +271,7 @@ replace_matching_line docs/VERSION-HISTORY.md \
 # rustup's default install puts cargo at ~/.cargo/bin/cargo;
 # Homebrew puts it at /opt/homebrew/bin/cargo or
 # /usr/local/bin/cargo. Search those in order; bail with a clear
-# error if none resolve. First catch: ran release.sh from a script
-# context where PATH was sanitized, and version got bumped without
-# Cargo.lock being refreshed as a result.
+# error if none resolve.
 CARGO=cargo
 if ! command -v "$CARGO" >/dev/null 2>&1; then
     for candidate in "$HOME/.cargo/bin/cargo" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do
@@ -329,28 +288,17 @@ if ! command -v "$CARGO" >/dev/null 2>&1 && [ ! -x "$CARGO" ]; then
     exit 1
 fi
 echo "refreshing Cargo.lock"
-# Roll back the version bumps if the build fails. The bump touched
-# Cargo.toml (+ inter-crate pins), flake.nix, and possibly Cargo.lock BEFORE
-# this build; under `set -e` a build failure would otherwise exit with those
-# files dirty and no commit, leaving the maintainer to clean up by hand.
-# Restore them so a failed release attempt leaves the tree exactly as it was.
+# If the build fails, the EXIT trap restores every file in RESTORE_FILES, so a
+# failed release attempt leaves the tree exactly as it was.
 if ! "$CARGO" build --workspace --quiet; then
     echo "::error::cargo build failed" >&2
     echo "  fix the build error and re-run" >&2
     exit 1
 fi
 
-# Commit.
-# Include flake.nix in the release commit since the
-# Nix-side version is now auto-bumped in lockstep above.
-# Gate the `git add flake.nix` on the file's existence
-# to match the sed-bump guard above. An earlier version of this
-# comment claimed the add was a no-op when the file was absent,
-# but `git add <missing>` exits with code 128 — under `set -e`
-# the whole release would abort *after* the Cargo.toml + lock
-# bump had already been applied to the working tree, leaving
-# the user with a dirty state to clean up. Conditional add
-# matches the conditional bump.
+# Commit. Add flake.nix only when it exists, matching the conditional bump
+# above. `git add` of a missing path exits 128, which aborts the release under
+# `set -e`.
 ADD_FILES=(Cargo.toml Cargo.lock CHANGELOG.md)
 if [ -f flake.nix ]; then
     ADD_FILES+=(flake.nix)

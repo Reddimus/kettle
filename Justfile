@@ -32,8 +32,8 @@
 # machine) as the recipe shell on Windows. Just's default is `sh` which
 # requires Git Bash on PATH — not a thing on a fresh Win11 install.
 # `-NoLogo -Command` suppresses the PS startup banner and accepts a
-# script body. All recipe bodies in this file are cargo / @echo /
-# explicit cmdlets — all of which work in PowerShell 5.1+.
+# script body. Recipes available on Windows run cargo, python, just, or
+# @echo, all of which work in PowerShell 5.1+.
 #
 # Native-command exit codes: just halts the recipe if any single line
 # returns non-zero (just's default --shell-arg flag is `-c` which
@@ -41,12 +41,9 @@
 # = 'Stop'` injection inside every recipe.
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
-# Surface rustdoc-lint denials to every recipe (doc,
-# gauntlet) without a bash-only env-var prefix. Just exports this
-# at recipe-entry as a real env var, working under bash, zsh,
-# PowerShell, and cmd. Previously the `doc` + `gauntlet` recipes ran
-# `RUSTDOCFLAGS="-D warnings" cargo doc …` which broke under
-# PowerShell (the inline `FOO=bar cmd` prefix is bash-only).
+# Surface rustdoc-lint denials to every recipe (doc, gauntlet) without a
+# bash-only `FOO=bar cmd` prefix. Just exports this at recipe entry as a
+# real env var, which works under bash, zsh, PowerShell, and cmd.
 export RUSTDOCFLAGS := "-D warnings"
 
 # OS-appropriate temp dir for default screenshot output.
@@ -55,8 +52,7 @@ export RUSTDOCFLAGS := "-D warnings"
 # The `if os_family()` ternary picks `%TEMP%` on Windows (always
 # set) and `/tmp` on Linux/macOS (always present), so the
 # `screenshot` / `menu` recipes can default to a writable location
-# everywhere. They used to default to `/tmp/...` which doesn't
-# exist on Windows.
+# everywhere.
 TMPDIR := if os_family() == "windows" { env_var("TEMP") } else { "/tmp" }
 
 # Default recipe: show the list when `just` is invoked with no args.
@@ -80,10 +76,9 @@ clippy:
 #
 # A workspace build cannot see this: kettle-ui and the bin crate both enable
 # `asciicast`, so any accidental dependence on an optional dependency compiles
-# there and fails only for someone building the crate alone. That is exactly
-# how session logging came to use `kettle-state` while it was still optional.
-# Feature unification makes `--workspace` structurally unable to catch it, so
-# the check has to name the crate.
+# there and fails only for someone building the crate alone. Feature
+# unification makes `--workspace` structurally unable to catch it, so the
+# check has to name the crate.
 core-default-features-check:
     cargo clippy -p kettle-core --all-targets -- -D warnings
 
@@ -120,9 +115,10 @@ audit:
     cargo audit --db target/advisory-db --url https://github.com/RustSec/advisory-db.git --file vendor/Cargo.lock
 
 # `cargo machete` — finds unused workspace dependencies. CI runs
-# this on every PR via `.github/workflows/machete.yml`. Local
-# pre-flight before adding a `Cargo.toml` dep, since a forgotten
-# leftover trips CI later. Requires `cargo install cargo-machete`.
+# this via `.github/workflows/machete.yml` on every PR that touches a
+# Cargo.toml or Cargo.lock. Local pre-flight before adding a `Cargo.toml`
+# dep, since a forgotten leftover trips CI later. Requires
+# `cargo install cargo-machete`.
 machete:
     cargo machete
 
@@ -211,10 +207,8 @@ lru-scope:
     ./scripts/check-lru-scope.sh
 
 # === Packaging & release metadata ==================================
-# These four wrap CI checks that used to have NO `just` entry point at
-# all — a contributor could only discover them by reading ci.yml, run
-# `just gauntlet` clean, and still get an unrelated CI failure on a
-# packaging-only change. Folded into `gauntlet-full` above.
+# Local entry points for CI's packaging and release-metadata checks.
+# `just gauntlet` skips them; `gauntlet-full` below runs them.
 
 # Validate the Homebrew/AUR package templates and their renderer
 # (scripts/render-package-templates.py). At an exact clean release tag,
@@ -330,11 +324,10 @@ macos-compare-score-self-test:
     python3 scripts/perf/macos-compare-score-self-test.py
 
 # The CI matrix job's core Rust gate (fmt/clippy/build/test/doc) plus
-# the live-UI-helper and native shell-integration fixtures. This is the fast
-# pre-commit loop; run
-# it before every commit. It does NOT cover the packaging/installer/
-# update-manifest/GPU-render checks ci.yml also runs — see
-# `gauntlet-full` below for those.
+# the live-UI-helper, native shell-integration, and VM-launcher fixtures.
+# This is the fast pre-commit loop; run it before every commit. It does NOT
+# cover the packaging/installer/update-manifest/GPU-render checks ci.yml
+# also runs; see `gauntlet-full` below for those.
 gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -348,17 +341,15 @@ gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."
 
 # Strict gate: gauntlet + direct patched-crate validation + supply-chain
-# hygiene (adds the cargo-deny stale-ignore catch and cargo-machete
-# unused-deps catch as separate CI workflows triggered on Cargo.lock
-# changes), plus the documentation gates. `mermaid-check` belongs here because
-# it previously had no caller in any gauntlet tier: it ran only in ci.yml, so a
-# clean `just gauntlet-full` could still be hiding a diagram that renders as a
-# red error panel on GitHub. It fails open without Node or Chrome, which is why
-# it is safe in a tier people run locally, and CI sets
-# KETTLE_MERMAID_REQUIRED=1 so it cannot quietly stop running there. Run `just gauntlet-strict` before a release cut so all CI gates
-# pass locally first. Requires cargo-audit, cargo-deny, and cargo-machete
-# (one-time). The current-OS vendor check is supplemented by Linux + Windows
-# native vendor legs in CI.
+# hygiene (the cargo-deny, cargo-audit, and cargo-machete checks CI runs as
+# separate workflows on Cargo.lock changes, and the RUSTSEC scope guards),
+# plus the documentation gates. `mermaid-check` fails open without Node or
+# Chrome, so it is safe in a tier people run locally; CI sets
+# KETTLE_MERMAID_REQUIRED=1 so it cannot quietly stop running there. Run
+# `just gauntlet-strict` before a release cut so all CI gates pass locally
+# first. Requires cargo-audit, cargo-deny, and cargo-machete (one-time). CI
+# supplements the current-OS vendor check with Linux + Windows native vendor
+# legs.
 [unix]
 gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope machete tracked-audit mermaid-check release-script-test
     @echo ""
@@ -366,18 +357,15 @@ gauntlet-strict: gauntlet vendor-check deny audit ttf-parser-scope lru-scope mac
 
 # The FULL CI-equivalent gate: gauntlet-strict plus every packaging,
 # installer, update-manifest, and GPU-render check ci.yml runs that
-# `gauntlet`/`gauntlet-strict` don't touch. Every dependency below is
-# platform-gated (see each recipe's own comment for exactly
-# what it covers and on which OS it's a real check vs. an informational
-# stub), so this either exercises the full ci.yml surface reachable on
-# the current OS, or tells you plainly what it couldn't run here. Needs
-# a release build (several dependencies exercise target/release/kettle);
-# `release` runs once and is shared across every recipe that needs it.
-# Run this before a release cut, or before any change to packaging/*,
-# scripts/install*, scripts/*manifest*.{py,ps1}, or the renderer —
-# `gauntlet`/`gauntlet-strict` alone won't catch a regression there. The
-# platform-specific dependency set contains no successful stubs: every listed
-# dependency performs a real check, and missing required tooling fails.
+# `gauntlet`/`gauntlet-strict` don't touch. `full-native-gates` runs the set
+# reachable on the current OS and prints what it cannot run here. Every
+# listed dependency performs a real check, and missing required tooling
+# fails. Needs a release build (several dependencies exercise
+# target/release/kettle); `release` runs once and is shared across every
+# recipe that needs it. Run this before a release cut, or before any change
+# to packaging/*, scripts/install*, scripts/*manifest*.{py,ps1}, or the
+# renderer; `gauntlet`/`gauntlet-strict` alone won't catch a regression
+# there.
 [unix]
 gauntlet-full: gauntlet-strict full-native-gates
     @echo ""
@@ -408,13 +396,9 @@ live-ui-helper-selftest:
 # Render the canonical "kettle in a terminal" screenshot — exercises
 # the full GPU pipeline (wgpu adapter + offscreen Vulkan device +
 # glyphon text + quad + image pipelines + image::save PNG encode).
-# Default OUT lands in the platform's temp dir (`/tmp` on Linux,
-# `$env:TEMP` on Windows). Pass `OUT=path` to override.
-#
-# Uses `cargo run` (cargo handles the `.exe`
-# suffix automatically on Windows) and `TMPDIR` (OS-aware temp
-# dir, set at the top of this Justfile) instead of hardcoded
-# `/tmp/kettle.png`.
+# Default OUT lands in the OS temp dir (`TMPDIR`, set at the top of this
+# Justfile to `/tmp` on Linux/macOS and `$env:TEMP` on Windows). Pass
+# `OUT=path` to override. `cargo run` handles the `.exe` suffix on Windows.
 screenshot OUT=(TMPDIR / "kettle.png"):
     cargo run --release -p kettle -- --screenshot {{OUT}}
     @echo "wrote {{OUT}}"
@@ -456,7 +440,7 @@ headless-gpu-smoke:
 
 # Bundle of ci.yml's Linux/macOS-only offscreen render smokes:
 # `--gpu-info` (adapter resolution + key:value output shape),
-# `--screenshot-menu` (the v1.3.0/v1.3.1 blank-menu regression class),
+# `--screenshot-menu` (the blank-menu regression class),
 # and `--screenshot` (the full text+quad+image render + PNG encode
 # path). Needs a release binary; LIBGL_ALWAYS_SOFTWARE is a harmless
 # no-op outside Linux's software-Vulkan path. Mirrors CI's
@@ -792,11 +776,11 @@ window-close-isolation-smoke:
 
 # Reproduce a Windows Precision Touchpad gesture: a stream of sub-detent wheel
 # deltas (the units winit actually reports) instead of pre-quantized whole
-# lines. Guards the v2.41.0 fix where every such event rounded to zero on its
-# own and touchpad scrolling was completely dead. Drives `wheel_delta`, the
-# only synthetic path that runs the real accumulator — the older integer
-# `wheel_lines` form enters downstream of the conversion and cannot reproduce
-# it. Artifacts under target/diagnostics/touchpad-scroll-*.
+# lines. Guards against each such event rounding to zero on its own, which
+# leaves touchpad scrolling dead. Drives `wheel_delta`, the only synthetic
+# path that runs the real accumulator; the integer `wheel_lines` form enters
+# downstream of the conversion and cannot reproduce it. Artifacts under
+# target/diagnostics/touchpad-scroll-*.
 [unix]
 touchpad-scroll-smoke: release
     python3 scripts/check-live-ui-smoke.py --cargo-release touchpad-scroll
@@ -819,7 +803,7 @@ tabbar-click-smoke: release
 pane-drag-smoke: release
     KETTLE_BIN=./target/release/kettle ./scripts/check-pane-drag-smoke.sh
 
-# v2.40.0 (tear-off UX): tear-off regression guards, two tiers. The ctl tier
+# Tear-off regression guards, two tiers. The ctl tier
 # proves the mouseless move_tab_to_new_window tear + tab_moved broadcast; the
 # live tier drives xdotool REAL pointer input through the full gesture
 # (tear -> follow -> re-dock merge -> Esc cancel), because `maybe_tear_off`

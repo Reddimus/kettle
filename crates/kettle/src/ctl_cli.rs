@@ -61,9 +61,8 @@ fn stream_events(client: &mut Client, pane: Option<u64>) -> i32 {
     loop {
         match client.next_event() {
             Ok(Some(ev)) => {
-                // E3 (audit v2.32.0): ping keepalives are now consumed inside
-                // `Client::next_event` (the single forward-compat seam), so no
-                // per-consumer skip is needed here.
+                // `Client::next_event` consumes ping keepalives (the single
+                // forward-compat seam), so no per-consumer skip is needed here.
                 // Filter by pane when requested.
                 if let Some(want) = pane
                     && ev.pane.is_some()
@@ -85,7 +84,8 @@ fn stream_events(client: &mut Client, pane: Option<u64>) -> i32 {
     }
 }
 
-/// Merge `--pane` / `--text` / `--json` into the request params object.
+/// Merge `--pane` / `--text` / `--json` / `--regex` / `--keys` into the
+/// request params object.
 fn build_params(args: &CtlArgs) -> Result<Value, String> {
     let mut map = if let Some(json) = &args.json {
         match serde_json::from_str::<Value>(json) {
@@ -108,7 +108,7 @@ fn build_params(args: &CtlArgs) -> Result<Value, String> {
         };
         map.insert(key.into(), Value::String(text.clone()));
     }
-    // v2.20.0: `--regex` → `wait_for`'s regex param.
+    // `--regex` → `wait_for`'s regex param.
     if let Some(re) = &args.regex {
         map.insert("regex".into(), Value::String(re.clone()));
     }
@@ -212,7 +212,6 @@ fn pretty(method: &str, request_params: &Value, result: &Value) -> String {
                 )
             }
         }
-        // v2.20.0 (agent plane).
         "send_keys" => format!(
             "sent {} keys ({} bytes) to pane {}\n",
             result["keys"], result["bytes"], result["pane"]

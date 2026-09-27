@@ -176,11 +176,11 @@ impl QuadPipeline {
                     // This pipeline's fragment shader returns PREMULTIPLIED
                     // color (`rgb * a`), so the blend must not apply alpha a
                     // second time. `ALPHA_BLENDING` uses `SrcAlpha` for the
-                    // source factor, which computed `rgb * a * a` — a
-                    // 50%-opaque surface contributed 25%, darkening every
-                    // translucent image, panel, highlight, and separator.
-                    // (`glyphpipe` deliberately returns STRAIGHT alpha and
-                    // correctly keeps `ALPHA_BLENDING`.)
+                    // source factor and would compute `rgb * a * a`, so a
+                    // 50%-opaque surface would contribute 25% and every
+                    // translucent image, panel, highlight, and separator would
+                    // render too dark. (`glyphpipe` returns STRAIGHT alpha and
+                    // keeps `ALPHA_BLENDING`.)
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -227,14 +227,11 @@ impl QuadPipeline {
             }),
         );
         if data.len() > self.capacity {
-            // Checked growth: `next_power_of_two()` panics (and this
-            // workspace runs with `panic = "abort"`, so that would be a hard
-            // process abort) if the grown capacity overflows `usize`, and a
-            // naive `* size_of::<QuadInstance>()` could overflow separately
-            // even when the capacity itself fits. Mirror the checked-growth
-            // contract used by `ImagePipeline::upload` (imgpipe.rs) and
-            // `GlyphPipeline::upload` (glyphpipe.rs): degrade by skipping
-            // this frame's quad upload instead of panicking.
+            // `grow_capacity` is checked because release builds use
+            // `panic = "abort"`, so an overflow panic would abort the process.
+            // Like `ImagePipeline::upload` (imgpipe.rs) and
+            // `GlyphPipeline::upload` (glyphpipe.rs), skip this frame's quad
+            // upload instead.
             let Some((capacity, bytes)) = grow_capacity(data.len()) else {
                 log::warn!(
                     "quad instance buffer growth for {} instances overflows usize; skipping quad upload",

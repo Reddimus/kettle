@@ -5,14 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref so a burst of
-# pushes (rebase, quick fix-up, force-push to a PR branch) only
-# consumes CI minutes for the latest commit. PRs and pushes to main
-# get a stable concurrency group keyed by branch ref. Saves real
-# budget on every PR with >1 push — important given the GitHub
-# Actions budget-exhaustion incident. `cancel-in-progress: true`
-# is safe here because CI is purely diagnostic (no deploys, no
-# state-mutating side effects).
+# Cancel superseded runs on the same ref so a burst of pushes (rebase,
+# quick fix-up, force-push to a PR branch) only spends CI minutes on the
+# latest commit. `cancel-in-progress: true` is safe because CI is purely
+# diagnostic (no deploys, no state-mutating side effects).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -81,14 +77,10 @@ jobs:
   build:
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Per-job timeout. GitHub Actions defaults each job
-    # to 360 min (6 hours); a hung test or runaway loop would burn
-    # the full default before failing. Real ci.yml job time is
-    # ~15-25 min (cold-cache Rust build × 3 OSes); 45 min is ~2×
-    # headroom for a slow runner without giving a hang the full
-    # 6-hour budget. Pairs with the cancel-in-progress
-    # concurrency block above — both budget-protection measures per the
-    # maintainer's GitHub Actions budget exhaustion directive.
+    # Per-job timeout. GitHub Actions defaults each job to 360 min, so a
+    # hung test or runaway loop would burn six hours before failing. This
+    # job takes ~15-25 min (cold-cache Rust build on 3 OSes); 45 min is ~2x
+    # headroom for a slow runner.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -146,10 +138,7 @@ jobs:
       # platform-gating typos (e.g. `[wndows]` instead of `[windows]`)
       # or `tempdir()`-builtin removal at CI time instead of a
       # confused contributor's "why doesn't `just gauntlet` work on
-      # Windows?" bug report. The Justfile was originally bash-only
-      # (RUSTDOCFLAGS prefix, /tmp paths, ./scripts/install.sh
-      # invocations) and never exercised by CI; the cross-platform
-      # rewrite makes a parse-smoke worthwhile.
+      # Windows?" bug report.
       #
       # `taiki-e/install-action` is cached so the install is
       # ~1s after first run. `just --summary` prints every recipe
@@ -162,8 +151,7 @@ jobs:
         with:
           tool: just
       # Kept as two steps on purpose. Chaining them in one `run:` block reports
-      # only the last command's exit code, which is the same masking defect that
-      # hid a failing `cargo test -p portable-pty` behind a trailing clippy.
+      # only the last command's exit code, which can mask a failing first one.
       - name: Justfile parse validation
         run: just --summary
       - name: Justfile platform recipe validation
@@ -225,10 +213,9 @@ jobs:
             || { echo ".ico has only ${count:-0} resolutions (expected ≥4)"; exit 1; }
           echo "kettle.ico OK (${count} resolutions)"
       - name: Icon rasters match the Pillow generator
-        # The generated vectors and rasters once had no gate: the generator was
-        # run by hand and dispatched by nothing, so drift shipped silently.
-        # Exercise the documented wrapper as well as its tests; --require-tooling
-        # makes an absent Pillow fatal here.
+        # Without this gate, generated vectors and rasters can drift from their
+        # generator unnoticed. Exercise the documented wrapper as well as its
+        # tests; --require-tooling makes an absent Pillow fatal here.
         if: runner.os == 'Linux'
         run: |
           python3 -m pip install --quiet --disable-pip-version-check Pillow
@@ -268,25 +255,20 @@ jobs:
         if: runner.os == 'Linux'
         run: python3 scripts/test-install-online.py
       - name: Rustdoc (Linux, warnings denied)
-        # rustdoc has its own warning class (broken
-        # intra-doc-links, missing docs on public items, malformed
-        # code blocks) that `clippy -D warnings` doesn't catch. The
-        # per-crate doc landings (`mod@search`, `mod@links`
-        # disambiguations, etc.) will silently
-        # break if a referenced item is renamed — CI didn't catch that
-        # before. One platform is enough; rustdoc is platform-agnostic.
+        # rustdoc has its own warning class (broken intra-doc links, missing
+        # docs on public items, malformed code blocks) that
+        # `clippy -D warnings` doesn't catch. The per-crate doc landings
+        # (`mod@search`, `mod@links` disambiguations, etc.) silently break if
+        # a referenced item is renamed. One platform is enough; rustdoc is
+        # platform-agnostic.
         if: runner.os == 'Linux'
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
       - name: Build release binary (Linux/macOS)
-        # The GPU/render smokes below invoke
-        # ./target/release/kettle. Build it once here for both Linux and
-        # macOS — previously this `cargo build --release` lived inside the
-        # Linux-only headless smoke, so the macOS --gpu-info /
-        # --screenshot / --screenshot-menu smokes (added for
-        # real-Metal-hardware render verification) would have had no
-        # binary to run. Windows stays out (its smokes are bash-only).
+        # The Linux and macOS smokes below invoke ./target/release/kettle, so
+        # build it once here. Windows builds its own release binary in its
+        # pwsh smoke below.
         if: runner.os != 'Windows'
         run: cargo build --release -p kettle
       - name: Pinned Codex image-paste client (Linux/macOS)
@@ -410,11 +392,10 @@ jobs:
         # build protects the retained GUI-subsystem + conditional console-attach
         # path, the winresource .ico embed, and panic=abort codegen without
         # packaging or publishing a Windows artifact. Smoke `--version` through
-        # a pwsh pipe: capturing the output
-        # redirects stdout, the exact inherited-handle case the GUI-subsystem
-        # binary must still write to, so this verifies
-        # that behavior on real Windows under PowerShell 7 (the v2.0.0 default
-        # shell) — not just that it compiles.
+        # a pwsh pipe. Capturing the output redirects stdout, the exact
+        # inherited-handle case the GUI-subsystem binary must still write to,
+        # so this verifies that behavior on real Windows under PowerShell 7
+        # (Kettle's default Windows shell), not just that it compiles.
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -443,10 +424,9 @@ jobs:
             echo "headless run OK (exit $rc)"'
       - name: Live UI ctl + search-history smoke (Linux, quarantined)
         if: runner.os == 'Linux'
-        # This is the first real scenario promoted from the manual live-UI
-        # driver. It launches a window under Xvfb, drives the control server,
-        # searches retained history, validates pixels in the reported search
-        # and match rectangles, and captures screen/cell/PNG evidence.
+        # Launch a window under Xvfb, drive the control server, search
+        # retained history, validate pixels in the reported search and match
+        # rectangles, and capture screen/cell/PNG evidence.
         # Keep it non-blocking for one week while its hosted-runner flake rate
         # is measured; the result remains visible and its artifacts are always
         # uploaded. Promote it to required only from observed CI evidence.
@@ -472,8 +452,9 @@ jobs:
         # Nothing below kettle consults `Emoji_Presentation`, so the answer is
         # decided by which fonts the host has, which makes it worth checking on
         # a runner rather than only on a developer machine.
-        # Quarantined like the legs below it: creating a real window under Xvfb
-        # on a hosted runner is the flake source, not what the scenario asserts.
+        # Quarantined like the other live-UI legs. Creating a real window under
+        # Xvfb on a hosted runner is the flake source, not what the scenario
+        # asserts.
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -518,16 +499,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: --gpu-info diagnostic smoke (Linux/macOS)
-        # Pin that the `--gpu-info` flag resolves
-        # an adapter + prints the expected key:value layout under the
-        # software-Vulkan adapter the CI runner has. Same env as the
-        # other GPU-touching smokes. Floor on the "Backend:" prefix
-        # so a regression that flips the output format (e.g. JSON-
-        # ification later) catches here, not in a user bug report.
-        # Also run on macOS — the runner has a real Metal GPU,
-        # giving genuine macOS-hardware verification of adapter resolution
-        # (LIBGL_ALWAYS_SOFTWARE is a harmless no-op there). Bash-only step,
-        # so Windows (pwsh default) stays excluded.
+        # Pin that `--gpu-info` resolves an adapter and prints the expected
+        # key:value layout, so an output-format change (e.g. to JSON) fails
+        # here, not in a user bug report. Linux uses the runner's software
+        # Vulkan adapter; macOS uses its real Metal GPU (LIBGL_ALWAYS_SOFTWARE
+        # is a harmless no-op there). Bash-only step, so Windows (pwsh
+        # default) stays excluded.
         if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -537,17 +514,12 @@ jobs:
           grep -qE '^Adapter:[[:space:]]+' /tmp/gpu-info.txt
           grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' /tmp/gpu-info.txt
       - name: --screenshot-menu visual regression (Linux/macOS)
-        # The v1.3.0/v1.3.1 blank-menu bug shipped because
-        # nothing in CI exercised the context menu's render path —
-        # `--screenshot` renders a no-overlay frame and the unit
-        # tests in `kettle-ui::app` only pinned the menu's behavior
-        # (highlight stepping, anchor clamping), not its appearance.
-        # The `--screenshot-menu` CLI flag + offscreen Vulkan adapter
-        # closes that gap.
-        # Also run on macOS (real Metal GPU) so the menu
-        # render path is verified on macOS hardware, not just Linux's
-        # software-Vulkan. `wc -c <` instead of GNU `stat -c%s` keeps
-        # the size check portable to BSD/macOS stat.
+        # Exercise the context menu's render path through the CLI.
+        # `--screenshot` renders a no-overlay frame, and the `kettle-ui::app`
+        # unit tests pin only the menu's behavior (highlight stepping, anchor
+        # clamping), not its appearance. Also run on macOS (real Metal GPU),
+        # not just Linux's software Vulkan. `wc -c <` instead of GNU
+        # `stat -c%s` keeps the size check portable to BSD/macOS stat.
         if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -565,22 +537,13 @@ jobs:
             || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
           echo "screenshot-menu OK ($size bytes)"
       - name: --screenshot end-to-end (Linux/macOS)
-        # capture_png drives the real GPU text + quad +
-        # image pipeline (bundled Nerd Font, glyphon shaping, wgpu
-        # offscreen device + texture, image::save PNG encode) — none
-        # of that is covered by the offscreen_selftest unit test
-        # (which only compiles the WGSL shaders). Run it against
-        # the software-Vulkan adapter on the Linux job to catch a
-        # regression in any of those layers before users hit it.
-        # No DISPLAY needed — capture_png builds its own offscreen
-        # device with compatible_surface=None.
-        # Also run on macOS — the runner's real Metal GPU
-        # exercises the full text+quad+image render and PNG encode on
-        # macOS hardware (the offscreen_selftest unit test only compiles
-        # the shaders; this is the only macOS-hardware coverage of the
-        # actual draw + readback + image::save path). This is the
-        # achievable automated macOS render-behavior verification absent
-        # a windowed/interactive Mac. `wc -c <` is BSD/macOS-portable.
+        # capture_png drives the real GPU text + quad + image pipeline
+        # (bundled Nerd Font, glyphon shaping, wgpu offscreen device +
+        # texture, image::save PNG encode). The offscreen_selftest unit test
+        # only compiles the WGSL shaders and covers none of that. No DISPLAY
+        # is needed; capture_png builds its own offscreen device with
+        # compatible_surface=None. Linux runs it on software Vulkan and macOS
+        # on the runner's real Metal GPU. `wc -c <` is BSD/macOS-portable.
         if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -631,14 +594,11 @@ jobs:
           # un-noticed.
           "$KETTLE_CI_BIN" --version | tee /tmp/kettle-version.txt
           grep -E '^kettle [0-9]+\.[0-9]+\.[0-9]+ \([0-9a-f]+(\+dirty)?\)' /tmp/kettle-version.txt
-          # `--help` itself wasn't smoked previously. Pin
-          # the help output's shape: clap's "Usage: kettle ..." prelude,
-          # the verbatim-doc-comment flags (--shell-
-          # integration, --print-completions, --print-default-config),
-          # and three load-bearing flags (--config, --screenshot,
-          # --gpu-info) all surface. A clap-derive regression that
-          # silently drops or renames a flag would fail this step
-          # instead of slipping past CI to a confused user.
+          # Pin the `--help` output's shape: clap's "Usage: kettle ..." prelude,
+          # the verbatim-doc-comment flags (--shell-integration,
+          # --print-completions, --print-default-config), and three
+          # load-bearing flags (--config, --screenshot, --gpu-info). A
+          # clap-derive regression that drops or renames a flag fails here.
           "$KETTLE_CI_BIN" --help > /tmp/kettle-help.txt
           grep -qE '^Usage: kettle' /tmp/kettle-help.txt
           grep -q -- '--config' /tmp/kettle-help.txt
@@ -681,20 +641,15 @@ jobs:
           # while still catching "I accidentally cleared `defaults()`".
           "$KETTLE_CI_BIN" --list-keybinds > keybinds.txt
           test "$(wc -l < keybinds.txt)" -gt 40
-          # `--list-ssh-hosts` on a fresh CI runner has no
-          # configured hosts. The `format_ssh_hosts` empty
-          # fallback emits an explicit "(no ssh-host entries configured)"
-          # line so the user sees *something* (not silence) when their
-          # config has no `ssh-host = name=target` entries. Pin the
-          # contract here so a regression that drops the fallback
-          # — silently producing no output — fails CI instead of
-          # surprising the user.
+          # A fresh CI runner has no `ssh-host = name=target` entries, so
+          # `--list-ssh-hosts` must print the explicit `format_ssh_hosts`
+          # fallback line rather than nothing.
           "$KETTLE_CI_BIN" --list-ssh-hosts \
             | grep -E '^\(no ssh-host entries configured\)$'
           # `--print-default-config` is the one-command first-launch
           # bootstrap (`kettle --print-default-config > ~/.config/
           # kettle/config`). It emits the embedded
-          # `docs/kettle.example.config` (~140 lines). Floor at 50
+          # `docs/kettle.example.config` (~570 lines). Floor at 50
           # catches an accidental empty include_str! or a near-empty
           # rewrite of the example file. Round-trip through
           # `--check-config` confirms the parser accepts the output —
@@ -704,24 +659,18 @@ jobs:
           test "$(wc -l < /tmp/k.cfg)" -gt 50
           "$KETTLE_CI_BIN" --config /tmp/k.cfg --check-config \
             | grep -E '^status: +OK'
-          # --profile NAME interaction smoke. `resolve_config_path` was
-          # extracted so every introspection
-          # flag honors --profile uniformly. Before that fix, --check-config
-          # silently checked the default path even when --profile
-          # was set — bug class is the silent-fallback at the CLI
-          # surface. Write a tiny profile file with a deliberately
-          # malformed value, then assert the EXIT CODE goes non-zero
-          # when --profile is set (--check-config exits non-zero
-          # whenever it finds issues).
-          # This assertion was pivoted from grep-on-output (flaky on Windows
-          # bash where the if-condition's pipe semantics differed)
-          # to a direct exit-code check.
-          # Pin the config dir via XDG_CONFIG_HOME (the cross-platform
-          # override, honored on every OS). kettle uses %APPDATA% on Windows
-          # and deliberately ignores a stray HOME (the config split-brain fix), so
-          # a profile written under ~/.config would NOT be found by the Windows
-          # binary. Using XDG_CONFIG_HOME — set to the same $HOME/.config the test
-          # already wrote to — keeps this smoke platform-independent.
+          # --profile NAME interaction smoke. Every introspection flag resolves
+          # its path through `resolve_config_path`, so --check-config must
+          # check the profile, not silently fall back to the default path.
+          # Write a tiny profile with a deliberately malformed value, then
+          # assert the EXIT CODE goes non-zero (--check-config exits non-zero
+          # whenever it finds issues). Check kettle's exit code directly, not
+          # through a pipe in an if-condition, whose semantics differ under
+          # Windows bash.
+          # Pin the config dir via XDG_CONFIG_HOME, the cross-platform override
+          # honored on every OS. kettle otherwise uses %APPDATA% on Windows and
+          # deliberately ignores a stray HOME, so a profile written under
+          # ~/.config would NOT be found by the Windows binary.
           export XDG_CONFIG_HOME="$HOME/.config"
           mkdir -p "$XDG_CONFIG_HOME/kettle/profiles"
           echo 'font-size = not_a_number' > "$XDG_CONFIG_HOME/kettle/profiles/cibad.config"
@@ -730,11 +679,8 @@ jobs:
               { echo "::error::--profile cibad --check-config exited 0 (should be non-zero on malformed font-size)"; \
                 echo "$out"; \
                 exit 1; }
-          # Proper if/then/else (was `A && B || C`, which
-          # SC2015 flags because the error branch C also fires if the
-          # success echo B ever fails). actionlint had been red on every
-          # push since 2026-05-25 over this single finding; fixing it
-          # turns the workflow-lint gate green.
+          # Use if/then/else, not `A && B || C`, which SC2015 flags because the
+          # error branch C also fires if the success echo B fails.
           if echo "$out" | grep -q 'font-size'; then
               echo "✓ --profile cibad --check-config surfaces malformed font-size"
           else
@@ -778,17 +724,12 @@ jobs:
           if "$KETTLE_CI_BIN" --print-completions tcsh 2>/dev/null; then
             echo "expected --print-completions tcsh to error"; exit 1
           fi
-          # Pin the hard-fail surface
-          # on a real CI run (the unit tests in main.rs cover the parse
-          # but never reach the exit-code path the CLI smoke does). A
-          # regression that returns Ok + falls back to defaults here is
-          # exactly the silent-failure class this guards
-          # against. Use a path we just removed so the test is
-          # self-contained, and use --config-path (a no-GUI, no-PTY
-          # introspection command) so the assertion is the exit code,
-          # not whatever windowed-run side effects might happen on each
-          # OS. Same trick for --working-directory (paired with
-          # --config-path because -d needs a windowed run otherwise).
+          # A missing --config or --working-directory path must exit non-zero,
+          # not fall back to defaults. The unit tests in main.rs cover the parse
+          # but never reach this exit-code path. Use a path just removed so the
+          # test is self-contained, and pair each flag with --config-path (a
+          # no-GUI, no-PTY introspection command) so the assertion is the exit
+          # code, not windowed-run side effects.
           typo=/tmp/kettle-ci-definitely-no-such-path-$RANDOM
           rm -rf "$typo"
           if "$KETTLE_CI_BIN" --config "$typo" --config-path 2>/dev/null; then
@@ -822,10 +763,9 @@ jobs:
   msrv:
     name: msrv (rust 1.89)
     runs-on: ubuntu-latest
-    # Same timeout rationale as the matrix `build` job above. MSRV job runs the
-    # same gauntlet as the matrix `build` job on a pinned toolchain.
-    # 30 min is ~2× the observed time; tighter than `build` because
-    # this job is Linux-only (no Windows runner overhead).
+    # Same timeout rationale as the matrix `build` job above. 30 min is ~2x
+    # the observed build + test time; tighter than `build` because this job
+    # is Linux-only (no Windows runner overhead).
     timeout-minutes: 30
     # The `menu_visual.rs` integration test
     # initializes wgpu (it renders a PNG via the same `capture_png_with`
@@ -854,12 +794,10 @@ jobs:
       - run: cargo build --locked --workspace --all-targets
       - run: cargo test --locked --workspace
 
-  # Nightly early-warning job. Catches
-  # upcoming rustc breaking changes weeks before they hit stable so
-  # we have lead time to fix transitively (e.g. an MSRV-floor bump
-  # from a dep, a new lint that flips to deny-by-default). Linux-only
-  # to conserve runner minutes (matches the GitHub Actions
-  # budget-exhaustion incident rule); `continue-on-error: true` means
+  # Nightly early-warning job. Catches upcoming rustc breaking changes
+  # weeks before they hit stable, leaving time to fix them (e.g. an
+  # MSRV-floor bump from a dep, a new lint that flips to deny-by-default).
+  # Linux-only to conserve runner minutes; `continue-on-error: true` means
   # a nightly regression warns but doesn't block PR merges.
   nightly:
     name: nightly (early warning)
@@ -893,10 +831,10 @@ jobs:
   # builds for ARM64 Linux (Raspberry Pi 4/5, ARM VPS/servers, ARM laptops
   # running Linux) without needing ARM hardware. Non-blocking
   # (`continue-on-error`) — a cross-build regression warns on PRs but doesn't
-  # gate merges; a verified aarch64 *release artifact* is a tracked follow-up
-  # (ROADMAP) once this job is reliably green. kettle's Linux windowing deps
-  # (x11/wayland/xkbcommon/vulkan) are loaded via `dlopen` at runtime, so the
-  # cross-build needs only the Rust std for the target + the GNU linker.
+  # gate merges. release.yml cross-builds the shipped aarch64 artifact the
+  # same way. kettle's Linux windowing deps (x11/wayland/xkbcommon/vulkan)
+  # are loaded via `dlopen` at runtime, so the cross-build needs only the
+  # Rust std for the target + the GNU linker.
   aarch64-linux:
     name: aarch64-linux (early warning)
     runs-on: ubuntu-latest

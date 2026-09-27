@@ -24,22 +24,16 @@ exclude = [
 
 [workspace.package]
 version = "4.6.0"
-# The edition was "2021" but every crate's Cargo.toml declared
-# "2024" individually. Bumped here to match reality and let crates
-# inherit via `edition.workspace = true`.
 edition = "2024"
-# MSRV declaration. The workspace uses let-chains (`if X && let
-# Y = ... && Z`) in kettle-vt / kettle-config / kettle-render /
-# kettle, which stabilized in Rust 1.88 (the original floor). The
-# *effective* MSRV is now 1.89 because two transitive deps
-# (`cosmic-text 0.19.0`, `smol_str 0.3.6`) bumped their floors to
-# 1.89; declaring 1.88 here misled `cargo install` users into a
-# confusing transitive-dep failure instead of the clean cargo
-# "package requires rustc 1.89" message. The `msrv` CI job builds +
-# tests on exactly the declared rustc so a future dep bump that
-# raises the effective floor again fails CI instead of silently
-# breaking `cargo install`. This is a floor, not a ceiling; we
-# still develop and CI on stable.
+# MSRV. The workspace uses let-chains (`if X && let Y = ... && Z`) in
+# kettle-vt / kettle-config / kettle-render / kettle, stable since Rust
+# 1.88, but two transitive deps (`cosmic-text 0.19.0`, `smol_str 0.3.6`)
+# require 1.89. Declaring 1.89 gives `cargo install` users cargo's clean
+# "package requires rustc 1.89" message instead of a confusing
+# transitive-dep failure. The `msrv` CI job builds + tests on exactly the
+# declared rustc, so a future dep bump that raises the floor again fails
+# CI instead of silently breaking `cargo install`. This is a floor, not a
+# ceiling; we still develop and CI on stable.
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Reddimus/kettle"
@@ -59,10 +53,7 @@ categories = ["command-line-utilities"]
 #                                     crates, wildcard `*` denied.
 #   - `cargo machete` (machete.yml) — every dep listed here + in
 #                                     per-crate manifests is actually
-#                                     imported in source. An earlier
-#                                     pass removed 11 unused workspace
-#                                     deps in one go; this guard
-#                                     prevents another accumulation.
+#                                     imported in source.
 #   - MSRV verify     (ci.yml)      — workspace builds + tests on
 #                                     exactly the declared
 #                                     rust-version.
@@ -74,11 +65,7 @@ categories = ["command-line-utilities"]
 [workspace.dependencies]
 # Declare every internal kettle-* crate as a workspace dep so
 # version + path stay in lockstep across every consumer manifest.
-# Previously each `crates/*/Cargo.toml` hardcoded `version = "1.2.0"`
-# on its internal path deps while the workspace was at 1.45.1; the
-# literal version diverged every release because nobody updated the
-# path-dep pins. Workspace-deps make the next `release.sh` version
-# bump update one line instead of ten.
+# `release.sh` bumps these pins with the workspace version.
 kettle-config = { path = "crates/kettle-config", version = "4.6.0" }
 kettle-state = { path = "crates/kettle-state", version = "4.6.0" }
 kettle-test-support = { path = "crates/kettle-test-support", version = "4.6.0" }
@@ -110,30 +97,25 @@ unicode-segmentation = "1.13.2"
 mlua = { version = "0.12", features = ["lua54", "vendored", "send", "error-send"] }
 # Cross-platform desktop notifications for kettle.notify
 # (Lua plugin API). Backends: libnotify on Linux (D-Bus), NSUserNotification
-# on macOS, Toast on Windows. Pure-Rust + small. Fallback to log::info
-# on platforms where notifications aren't available.
+# on macOS, Toast on Windows. Pure-Rust + small. Falls back to log::warn
+# when a notification cannot be shown.
 notify-rust = "4"
 
 [workspace.lints.clippy]
-# Forward-guard against three patterns we never want
-# committed to main. `clippy -- -D warnings` already denies the
-# default clippy levels; this block opts each lint up to deny so
-# it survives a future `--warnings=allow` invocation and is
+# Deny three patterns that must never reach main. `clippy -- -D warnings`
+# already denies the default clippy levels; this block opts each lint up
+# to deny so it survives a future `--warnings=allow` invocation and is
 # visible policy in the manifest rather than a CI flag.
 #
-# - `dbg_macro` — `dbg!(x)` is fine while debugging but leaks
-#   debug prints into release builds + tests if forgotten.
-# - `todo` / `unimplemented` — `todo!()` and `unimplemented!()`
-#   panic at runtime; they belong in scratchpads, not in committed
-#   main. A real not-yet-implemented surface should return a
-#   typed error so callers can decide.
+# - `dbg_macro`: `dbg!(x)` leaks debug prints into release builds and
+#   tests if forgotten.
+# - `todo` / `unimplemented`: `todo!()` and `unimplemented!()` panic at
+#   runtime. A real not-yet-implemented surface should return a typed
+#   error so callers can decide.
 #
-# The codebase has zero occurrences of all three today, so this
-# is purely "lock the door before someone walks through it." If a
-# legitimate case ever arises (`todo!()` inside a freshly stubbed-
-# out branch during an in-progress feature), the contributor adds
-# `#[allow(clippy::todo)]` with a one-line justification, the same
-# pattern used everywhere else.
+# For a legitimate case (`todo!()` in a freshly stubbed branch during an
+# in-progress feature), add `#[allow(clippy::todo)]` with a one-line
+# justification, as elsewhere.
 dbg_macro = "deny"
 todo = "deny"
 unimplemented = "deny"
@@ -168,7 +150,7 @@ codegen-units = 1
 panic = "abort"
 # Strip symbols from the shipped binary. Cross-platform and
 # toolchain-native — ELF/Mach-O have their symbol tables removed in place
-# (~several MB smaller; the release artifacts were unstripped), and on MSVC
+# (~several MB smaller), and on MSVC
 # debuginfo already lives in a separate (unshipped) `.pdb`, so this is a no-op
 # there. panic=abort means no backtraces are expected in release anyway. If
 # post-mortem symbolication is ever wanted, switch to `strip = "debuginfo"` +

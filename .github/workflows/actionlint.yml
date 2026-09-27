@@ -3,10 +3,9 @@
 # Why this is its own workflow (instead of folding into ci.yml):
 #   - Triggers only on changes that touch the workflow files, so it
 #     doesn't add ~30 s to every code-only PR.
-#   - Runs the bundled `shellcheck` check on every `run: |` block
-#     across all workflows in one pass — catches a dash-vs-bash
-#     bug like the one in the bundled install.sh (`set -o pipefail`
-#     was a Bash-only construct invoked via sh) before the PR ships.
+#   - Runs shellcheck on every `run: |` block across all workflows in
+#     one pass, so a Bash-only construct run by sh (such as
+#     `set -o pipefail`) is flagged before the PR ships.
 #   - Rejects mutable action references and catches malformed workflow
 #     syntax before a workflow actually runs.
 #
@@ -31,12 +30,10 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref. Same shape as ci.yml's
-# concurrency block (added for the GitHub Actions budget-exhaustion
-# incident) — no cron trigger here, no release artifacts, purely
-# diagnostic, so cancel-in-progress is strictly a budget win.
-# Workflow-files churn is rare but a rebase of a workflow-touching
-# PR used to queue duplicate runs.
+# Cancel superseded runs on the same ref, like ci.yml. This workflow is
+# purely diagnostic, with no cron trigger and no release artifacts, so
+# cancel-in-progress only saves budget, e.g. when a workflow-touching PR
+# is rebased.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
