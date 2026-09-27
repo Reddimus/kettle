@@ -718,8 +718,11 @@ per-session children.
 Runtime-diagnostic tests verify control-character stripping, message bounds,
 private Unix directory/file modes, and ten-record rotation without needing a
 live event loop. Idle-loop regressions pin the cursor-blink truth table,
-require the phase timestamp to advance before a redraw request, and normalize
-repeated empty IME preedit notifications to the same absent state.
+require the phase timestamp to advance before a redraw request, simulate an
+idle blink to prove it stops on its visible phase within one half-period of
+`cursor-blink-timeout`, and normalize repeated empty IME preedit notifications
+to the same absent state. `check-live-render-smoke.sh` sets
+`cursor-blink-timeout = 0` so the blink keeps running for its whole capture.
 
 ### kettle-remote (50+ tests)
 

@@ -45,6 +45,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Window padding | `window-padding-x` | 0–40 px |
 | Cursor shape | `cursor-style` | block · beam · underline |
 | Cursor blink | `cursor-blink` | on / off |
+| Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
 | Show pane titlebars | `show-titlebar` | on / off |
 
 **Background** (v2.24.0) — options that don't apply to the chosen type are dimmed
