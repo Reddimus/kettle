@@ -14,8 +14,9 @@ argument path. Workloads:
                 left alone, sampled over --idle-window seconds after
                 --idle-settle seconds
   flood-memory  phys_footprint after printing 32 MiB of seeded text
-  vtebench      Alacritty's vtebench at a pinned revision, per-benchmark
-                medians and their geometric mean
+  vtebench      Alacritty's vtebench at a pinned revision, with its scripts'
+                window-size lookup fixed for macOS, per-benchmark medians and
+                their geometric mean
 
 Rounds rotate the terminal order so no terminal always runs first. With
 --kettle-b the run compares two Kettle builds only and reports the median
@@ -166,6 +167,51 @@ def build_vtebench(tools: Path) -> Path:
     return binary
 
 
+# vtebench's scripts read the window size with
+#     tty="/dev/$(ps -o tty= -p $$)"; columns=$(tput cols < $tty)
+# On macOS that fails twice. `ps` pads the name ("ttys001 "), so the path names
+# no file. `tput` reads the size from stdout, which is vtebench's capture pipe,
+# so it would fall back to 80x24 anyway. With no size, `cursor_motion` and
+# `light_cells` print nothing and vtebench drops them, `dense_cells` shrinks to
+# 26 cursor-home escapes, and the region setups set no region. These are the
+# replacements from upstream's unmerged fix,
+# https://github.com/alacritty/vtebench/pull/46, applied to a copy.
+VTEBENCH_SIZE_FIX = (
+    ('tty="/dev/$(ps -o tty= -p $$)"', 'tty="/dev/$(ps -o tty= -p $$ | tr -d "[:space:]")"'),
+    ("columns=$(tput cols < $tty)", 'columns=$(stty size < $tty | cut -d" " -f2)'),
+    ("lines=$(tput lines < $tty)", 'lines=$(stty size < $tty | cut -d" " -f1)'),
+    (
+        'printf "\\e[?1049h\\e[2;$(tput lines)r"',
+        'tty="/dev/$(ps -o tty= -p $$ | tr -d "[:space:]")"\n'
+        'lines=$(stty size < $tty | cut -d" " -f1)\n\n'
+        'printf "\\e[?1049h\\e[2;${lines}r"',
+    ),
+)
+
+
+def prepare_benchmarks(source: Path, dest: Path) -> Path:
+    """Copy vtebench's benchmarks into `dest` with the macOS size fix applied.
+
+    Symlinked scripts are copied as files so each can be patched on its own.
+    Fails if a script still reads the size another way, so a new pin cannot
+    bring the bug back unnoticed.
+    """
+    shutil.copytree(source, dest, symlinks=False)
+    for script in sorted([*dest.glob("*/setup"), *dest.glob("*/benchmark")]):
+        text = script.read_text()
+        for old, new in VTEBENCH_SIZE_FIX:
+            text = text.replace(old, new)
+        if "tput" in text or "ps -o tty= -p $$)" in text:
+            raise SystemExit(f"{script}: reads the window size in a way the macOS fix does not cover")
+        script.write_text(text)
+    return dest
+
+
+def missing_benchmarks(benchmarks: Path, dat: Dict[str, float]) -> List[str]:
+    """Benchmarks with no samples. vtebench drops a script that prints nothing."""
+    return sorted(d.name for d in benchmarks.iterdir() if (d / "benchmark").exists() and d.name not in dat)
+
+
 def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -> List[str]:
     """How each terminal runs `script` at the pinned grid with default settings."""
     if name in kettle:
@@ -313,13 +359,20 @@ class Runner:
                 "max_footprint_mib": sample["max_footprint"] / 2**20,
                 "rss_mib": sample["rss"] / 2**20}
 
-    def vtebench(self, name: str, vtebench: Path, dat: Path, seconds: int) -> dict:
-        benchmarks = vtebench.parents[2] / "benchmarks"
+    def vtebench(self, name: str, vtebench: Path, benchmarks: Path, dat: Path, seconds: int) -> dict:
         process = self.launch(
             name, f'exec "{vtebench}" -s -b "{benchmarks}" --dat "{dat}" --max-secs {seconds}', 900
         )
         self.finish(process, 900)
-        return parse_dat(dat.read_text()) if dat.exists() else {"error": "no vtebench output"}
+        if not dat.exists():
+            return {"error": "no vtebench output"}
+        medians = parse_dat(dat.read_text())
+        missing = missing_benchmarks(benchmarks, medians)
+        if missing:
+            # A table without them would compare the rest as if nothing had
+            # been dropped.
+            raise SystemExit(f"vtebench in {name} produced no samples for {', '.join(missing)}")
+        return medians
 
 
 def parse_dat(text: str) -> Dict[str, float]:
@@ -475,6 +528,8 @@ def main() -> int:
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
             write_flood(flood)
+        if vtebench:
+            benchmarks = prepare_benchmarks(vtebench.parents[2] / "benchmarks", work / "benchmarks")
         for workload in workloads:
             rows: Dict[str, List[dict]] = {name: [] for name in names}
             rounds = args.vtebench_rounds if workload == "vtebench" else args.rounds
@@ -487,8 +542,8 @@ def main() -> int:
                     elif workload == "flood-memory":
                         row = runner.flood_memory(name, flood)
                     else:
-                        row = runner.vtebench(name, vtebench, out_dir / f"{name}-r{round_index}.dat",
-                                              args.vtebench_seconds)
+                        row = runner.vtebench(name, vtebench, benchmarks,
+                                              out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
                     rows[name].append(row)
                     print(f"{workload} round {round_index} {name}: {json.dumps(row)}", flush=True)
                     time.sleep(1.0)

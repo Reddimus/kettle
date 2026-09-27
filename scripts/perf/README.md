@@ -45,7 +45,11 @@ resident set size leaves out. Workloads:
 - `idle`: CPU share, wakeups per second, and memory of a window left alone
 - `flood-memory`: memory after printing 32 MiB of seeded text that is the same
   on every run, in lines narrower than the grid
-- `vtebench`: Alacritty's vtebench at a pinned revision
+- `vtebench`: Alacritty's vtebench at a pinned revision. On macOS its
+  scripts cannot read the window size, so they run from a copy with
+  upstream's unmerged fix
+  ([alacritty/vtebench#46](https://github.com/alacritty/vtebench/pull/46)).
+  A run stops if any benchmark comes back without samples.
 
 Every terminal runs with its default configuration on a 120x36 grid. Helpers
 under `macos-standing/` are compiled into `target/perf-tools/` on first use,
@@ -62,8 +66,8 @@ just macos-standing --kettle-b /path/to/other/kettle --workloads startup --fd-li
 paired ratio with a bootstrap 95% interval. Idle figures depend on focus,
 because blinking cursors only run in a focused window, so each idle sample
 records whether its terminal was frontmost.
-`just macos-standing-self-test` checks the parsing and statistics without a
-desktop.
+`just macos-standing-self-test` checks the parsing, the statistics and the
+vtebench fix without a desktop.
 
 ## Shared probe
 
