@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.6.0] — 2026-09-27
+
 ### Added
 
 - `cursor-blink-timeout` stops the cursor blink after 10 seconds without
