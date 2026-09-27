@@ -90,7 +90,7 @@ The timeout also bounds trailing output after the child exits. If stdout is
 still stalled at the deadline, Kettle abandons output the downstream consumer
 cannot accept and returns 124 once owned-process teardown is verified. It then
 warns on stderr that stdout was not fully delivered. When the consumer is still
-reading, Kettle waits up to 100 ms for its last write, so `--json` output ends
+reading, Kettle waits up to 250 ms for its last write, so `--json` output ends
 with the exit event and no warning. A collected child status cannot turn
 incomplete lossless PTY delivery into success. MCP cancellation takes precedence at every lifecycle stage and returns
 130 when teardown is verified; either path returns 125 when it is not.
