@@ -203,10 +203,11 @@ just vendor-check
 ```
 
 CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
-`portable-pty` on Linux and Windows because only the Windows runner compiles
-and executes the `PIPE_NOWAIT` ConPTY regression. A local non-Windows
-`just vendor-check` is therefore not evidence that the native Windows patch
-passed.
+`portable-pty` on Linux, macOS, and Windows because each compiles its own
+descriptor or pipe code: Linux uses `close_range`, macOS lists open
+descriptors through `proc_pidinfo`, and only the Windows runner executes the
+`PIPE_NOWAIT` ConPTY regression. A local `just vendor-check` is therefore
+evidence only for the platform it ran on.
 
 The vendored trees intentionally preserve their upstream release formatting so
 the retained patch remains reviewable against the published source. Do not run

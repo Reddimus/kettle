@@ -151,12 +151,80 @@ fn descriptor_sweep_limit() -> libc::c_int {
     soft_limit.min(MAX_FD_SWEEP) as libc::c_int
 }
 
+/// Room for the child's descriptor list on macOS. A shell normally inherits a
+/// few dozen descriptors; a list that fills this falls back to the sweep.
+#[cfg(target_os = "macos")]
+const FD_LIST_CAPACITY: usize = 4096;
+
+/// Whether this kernel's descriptor list is complete for any buffer that it
+/// does not fill. Darwin 20 (macOS 11) walks open descriptors in order and
+/// stops only at the buffer's end; older kernels scanned descriptor numbers
+/// below the buffer's entry count, so a higher open descriptor was silently
+/// left out. See `proc_fdlist_internal` in XNU's `bsd/kern/proc_info.c`.
+#[cfg(target_os = "macos")]
+fn kernel_lists_every_open_fd() -> bool {
+    static LISTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LISTS.get_or_init(|| {
+        let mut release = [0_u8; 64];
+        let mut len = release.len();
+        let name = b"kern.osrelease\0";
+        // SAFETY: `name` is NUL-terminated, `release` has `len` writable
+        // bytes, and no new value is set. This runs in the parent.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr().cast(),
+                release.as_mut_ptr().cast(),
+                &mut len,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        rc == 0 && darwin_major(&release[..len.min(release.len())]) >= 20
+    })
+}
+
+/// Major version from a `kern.osrelease` string such as `25.6.0`.
+#[cfg(any(target_os = "macos", test))]
+fn darwin_major(release: &[u8]) -> u32 {
+    release
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .fold(0_u32, |major, &digit| {
+            major
+                .saturating_mul(10)
+                .saturating_add(u32::from(digit - b'0'))
+        })
+}
+
+/// Parent-owned space the forked child fills with its open descriptors.
+///
+/// The pre_exec hook must not allocate, so the parent sizes the buffer before
+/// `fork` and the child writes into its own copy-on-write view of it.
+#[derive(Clone, Copy)]
+struct FdListScratch {
+    #[cfg(target_os = "macos")]
+    addr: usize,
+    #[cfg(target_os = "macos")]
+    capacity: usize,
+}
+
 /// Prevent leaked descriptors from surviving into the executed program.
 ///
 /// Cocoa can leak descriptors on macOS, and gnome/mutter shell extensions can
 /// do the same on Linux. Marking them close-on-exec preserves Rust's private
 /// exec-error channel until it has reported a failed exec to the parent.
-fn mark_random_fds_cloexec(max_fd: libc::c_int) {
+fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) {
+    #[cfg(target_os = "macos")]
+    {
+        if mark_listed_fds_cloexec(scratch) {
+            return;
+        }
+        // An unreadable or possibly truncated list still needs the sweep
+        // below or inherited descriptors would escape.
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = scratch;
+
     #[cfg(target_os = "linux")]
     {
         // A raw syscall avoids imposing a newer glibc symbol requirement on
@@ -185,6 +253,64 @@ fn mark_random_fds_cloexec(max_fd: libc::c_int) {
         }
         fd += 1;
     }
+}
+
+/// Number of descriptor entries the kernel wrote into `scratch` for the
+/// calling process, or `None` when the list is unreadable or may be truncated.
+///
+/// macOS has no `close_range`. The sweep costs one `fcntl` per descriptor
+/// number up to the soft limit, and a shell started under Node-based tools
+/// inherits a 1,048,576 limit, so every pane spawn waited about 100 ms for the
+/// child to reach `exec`. The kernel's own list makes the cost proportional to
+/// the descriptors actually open. See `proc_pidinfo` and `PROC_PIDLISTFDS` in
+/// XNU's `bsd/kern/proc_info.c`.
+#[cfg(target_os = "macos")]
+fn list_open_fds(scratch: FdListScratch) -> Option<usize> {
+    use std::convert::TryFrom;
+
+    let entry = mem::size_of::<libc::proc_fdinfo>();
+    let bytes = libc::c_int::try_from(scratch.capacity * entry).ok()?;
+    // SAFETY: `scratch.addr` points at `scratch.capacity` initialized
+    // `proc_fdinfo` entries that outlive this call; the kernel writes at most
+    // `bytes` into them. `proc_pidinfo` is a direct system-call wrapper, so it
+    // is safe between `fork` and `exec`.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            0,
+            scratch.addr as *mut libc::c_void,
+            bytes,
+        )
+    };
+    // A completely full buffer cannot be told apart from a truncated list.
+    if filled <= 0 || filled >= bytes {
+        return None;
+    }
+    Some(filled as usize / entry)
+}
+
+/// Marks each listed descriptor from `FIRST_INHERITED_FD` up close-on-exec.
+/// Returns false when the list could not be read in full.
+#[cfg(target_os = "macos")]
+fn mark_listed_fds_cloexec(scratch: FdListScratch) -> bool {
+    let Some(count) = list_open_fds(scratch) else {
+        return false;
+    };
+    // SAFETY: `list_open_fds` confirmed the kernel initialized `count` whole
+    // entries at `scratch.addr`.
+    let listed =
+        unsafe { std::slice::from_raw_parts(scratch.addr as *const libc::proc_fdinfo, count) };
+    for info in listed {
+        if info.proc_fd >= FIRST_INHERITED_FD {
+            // SAFETY: fcntl on a descriptor number has no memory effects; a
+            // descriptor closed since the list was taken just returns EBADF.
+            unsafe {
+                libc::fcntl(info.proc_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+        }
+    }
+    true
 }
 
 impl PtyFd {
@@ -244,6 +370,27 @@ impl PtyFd {
         // Resolve the bound in the parent because POSIX does not require
         // getrlimit to be async-signal-safe on every supported Unix.
         let max_fd = descriptor_sweep_limit();
+        #[cfg(target_os = "macos")]
+        let mut fd_list = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            FD_LIST_CAPACITY
+        ];
+        // `fd_list` outlives `cmd.spawn()` below, which returns only after the
+        // child has reached `exec` or failed. A zero capacity keeps kernels
+        // whose list can skip descriptors on the sweep.
+        let scratch = FdListScratch {
+            #[cfg(target_os = "macos")]
+            addr: fd_list.as_mut_ptr() as usize,
+            #[cfg(target_os = "macos")]
+            capacity: if kernel_lists_every_open_fd() {
+                fd_list.len()
+            } else {
+                0
+            },
+        };
 
         unsafe {
             cmd.stdin(self.as_stdio()?)
@@ -287,7 +434,7 @@ impl PtyFd {
                         }
                     }
 
-                    mark_random_fds_cloexec(max_fd);
+                    mark_random_fds_cloexec(max_fd, scratch);
 
                     if let Some(mask) = configured_umask {
                         libc::umask(mask);
@@ -440,12 +587,73 @@ mod tests {
 
     #[test]
     fn inherited_descriptor_is_closed_on_exec() -> anyhow::Result<()> {
-        let source = File::open("/dev/null")?;
         // A moderately high number avoids a false failure if process startup
         // reuses a recently closed descriptor before the probe can inspect it.
-        let leaked_fd = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, 64) };
+        assert_leaked_descriptor_is_closed_on_exec(64)
+    }
+
+    #[test]
+    fn descriptor_near_the_usable_limit_is_closed_on_exec() -> anyhow::Result<()> {
+        // The macOS path lists open descriptors instead of sweeping numbers,
+        // so the highest usable number must still be found and marked.
+        let target = usable_descriptor_limit().min(65_536) - 1;
+        if target < 64 {
+            eprintln!("skipped: descriptor limit {} is too low", target + 1);
+            return Ok(());
+        }
+        assert_leaked_descriptor_is_closed_on_exec(target)
+    }
+
+    /// The soft limit, and on macOS also `kern.maxfilesperproc`, which XNU
+    /// enforces on `F_DUPFD` whatever the soft limit says and which scales
+    /// with installed memory.
+    fn usable_descriptor_limit() -> libc::c_int {
+        let mut limits = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) },
+            0,
+            "getrlimit: {}",
+            io::Error::last_os_error()
+        );
+        let soft = limits.rlim_cur.min(libc::c_int::MAX as libc::rlim_t) as libc::c_int;
+        #[cfg(target_os = "macos")]
+        {
+            let mut per_process: libc::c_int = 0;
+            let mut len = mem::size_of::<libc::c_int>();
+            let name = b"kern.maxfilesperproc\0";
+            let rc = unsafe {
+                libc::sysctlbyname(
+                    name.as_ptr().cast(),
+                    (&mut per_process as *mut libc::c_int).cast(),
+                    &mut len,
+                    ptr::null_mut(),
+                    0,
+                )
+            };
+            if rc == 0 && per_process > 0 {
+                return soft.min(per_process);
+            }
+        }
+        soft
+    }
+
+    #[test]
+    fn darwin_major_reads_the_leading_number() {
+        assert_eq!(darwin_major(b"25.6.0"), 25);
+        assert_eq!(darwin_major(b"20.1.0\0"), 20);
+        assert_eq!(darwin_major(b"19.6.0"), 19);
+        assert_eq!(darwin_major(b""), 0);
+        assert_eq!(darwin_major(b"x"), 0);
+    }
+
+    fn assert_leaked_descriptor_is_closed_on_exec(min_fd: libc::c_int) -> anyhow::Result<()> {
+        let source = File::open("/dev/null")?;
+        let leaked_fd = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, min_fd) };
         assert!(
-            leaked_fd >= 64,
+            leaked_fd >= min_fd,
             "duplicate test descriptor: {}",
             io::Error::last_os_error()
         );
@@ -469,6 +677,72 @@ mod tests {
         drop(leaked);
         assert!(status.success(), "descriptor probe failed: {}", status);
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kernel_descriptor_list_tracks_an_open_descriptor() -> anyhow::Result<()> {
+        assert!(
+            kernel_lists_every_open_fd(),
+            "macOS 11 or later is required"
+        );
+        // Other test threads open and close descriptors concurrently, so this
+        // checks only a probe far above the busy low numbers, where a close
+        // is not immediately reused. Half the limit stays clear of the
+        // near-limit test running beside it.
+        let far = (usable_descriptor_limit() / 2).min(1_000);
+        if far < 64 {
+            eprintln!("skipped: descriptor limit {} is too low", far * 2);
+            return Ok(());
+        }
+        let source = File::open("/dev/null")?;
+        let probe = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_DUPFD, far) };
+        assert!(
+            probe >= far,
+            "duplicate test descriptor: {}",
+            io::Error::last_os_error()
+        );
+        let mut list = vec![
+            libc::proc_fdinfo {
+                proc_fd: 0,
+                proc_fdtype: 0,
+            };
+            FD_LIST_CAPACITY
+        ];
+        let scratch = FdListScratch {
+            addr: list.as_mut_ptr() as usize,
+            capacity: list.len(),
+        };
+        // The kernel writes through `scratch.addr`, so each check reads a
+        // fresh slice from that pointer instead of borrowing `list`.
+        let lists_probe = || {
+            let count = list_open_fds(scratch).expect("descriptor list");
+            unsafe { std::slice::from_raw_parts(scratch.addr as *const libc::proc_fdinfo, count) }
+                .iter()
+                .any(|info| info.proc_fd == probe)
+        };
+
+        assert!(lists_probe(), "open descriptor {} missing", probe);
+        assert_eq!(unsafe { libc::close(probe) }, 0);
+        assert!(!lists_probe(), "closed descriptor {} still listed", probe);
+        drop(list);
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_full_descriptor_list_falls_back_to_the_sweep() {
+        // Standard input, output, and error alone fill a one-entry buffer, so
+        // the list reports possible truncation instead of a partial answer.
+        let mut list = [libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        }];
+        let scratch = FdListScratch {
+            addr: list.as_mut_ptr() as usize,
+            capacity: list.len(),
+        };
+        assert_eq!(list_open_fds(scratch), None);
     }
 
     #[test]
@@ -543,6 +817,11 @@ mod tests {
             .split_once("\n}\n\nimpl PtyFd")
             .expect("end of descriptor sweep helper")
             .0;
+        // The macOS descriptor list runs in the same child, so it must stay
+        // inside the guarded span.
+        for helper in ["fn list_open_fds", "fn mark_listed_fds_cloexec"] {
+            assert!(sweep.contains(helper), "{} left the guarded span", helper);
+        }
 
         // Holding the allocator across fork is not a deterministic test setup,
         // so guard the hook and its fd sweep against known allocating APIs.

@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- On macOS, new tabs, splits, and windows no longer pause about 100 ms each
+  when Kettle starts from a shell with a high open-file limit, as VS Code and
+  other Node-based tools set.
+
 ## [4.5.2] — 2026-09-26
 
 ### Fixed
