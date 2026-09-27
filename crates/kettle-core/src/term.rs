@@ -1755,8 +1755,9 @@ fn recompute_kitty_placements(placements: &mut Vec<Placement>, geometry: PtyGeom
 
 /// A `Write` sink that discards everything. On `Terminal` teardown the PTY
 /// writer (the child's stdin / conin) is swapped for this, so the real writer
-/// drops at once and the field never holds a dangling handle. That drop closes
-/// the handle without synthesizing terminal input. Zero-sized; never errors.
+/// drops at once and the field never holds a dangling handle. Closing the
+/// input is an EOF nudge for shells that exit when stdin closes, and it
+/// synthesizes no terminal input. Zero-sized; never errors.
 struct NullWrite;
 
 impl std::io::Write for NullWrite {
