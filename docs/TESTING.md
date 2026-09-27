@@ -246,10 +246,9 @@ blocks to the sparse qcow2 because the launcher enables discard.
 
 The 2026-08-23 migration kept the guest OS, user, tools, credentials, and
 repository state, and grew the root disk to 256 GiB. A full workspace run then
-completed
-2,131 tests across 45 binaries with zero failures and the release binary linked
-successfully. The native aarch64 `search-history` live-window smoke passed once
-under Xvfb and once in the real GNOME Wayland session. Both runs selected
+completed 2,131 tests across 45 binaries with zero failures, and the release
+binary linked. The native aarch64 `search-history` live-window smoke passed
+once under Xvfb and once in the real GNOME Wayland session. Both runs selected
 Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
 software-rendered Vulkan and Wayland paths. It does not prove accelerated
 virtio GPU rendering.
