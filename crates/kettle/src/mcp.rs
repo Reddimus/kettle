@@ -121,7 +121,9 @@ type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 /// spending the real budget in wall clock. The production value itself is
 /// asserted by `the_production_stall_limit_is_the_documented_one`.
 #[cfg(not(test))]
-const STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
+const STDOUT_STALL_LIMIT: Duration = PRODUCTION_STDOUT_STALL_LIMIT;
+/// The stall limit release builds use.
+const PRODUCTION_STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const STDOUT_STALL_LIMIT: Duration = Duration::from_millis(400);
 
@@ -1095,13 +1097,8 @@ mod tests {
     #[test]
     fn the_production_stall_limit_is_the_documented_one() {
         // `STDOUT_STALL_LIMIT` is 400 ms under cfg(test) so the fixtures below
-        // run in a second rather than a minute. The value that ships is this.
-        let shipped = if cfg!(test) {
-            Duration::from_secs(30)
-        } else {
-            STDOUT_STALL_LIMIT
-        };
-        assert_eq!(shipped, Duration::from_secs(30));
+        // run in a second rather than a minute; release builds use this value.
+        assert_eq!(PRODUCTION_STDOUT_STALL_LIMIT, Duration::from_secs(30));
     }
 
     /// A worker that is simply BUSY must not be mistaken for a stalled peer.

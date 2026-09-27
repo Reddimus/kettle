@@ -10691,8 +10691,8 @@ split_horiz = <Control><Shift>j
     /// map to anything kettle ships (no audio surface yet), so the
     /// parser accepts the key without setting anything. The drift
     /// guard locks in two outcomes:
-    ///   - the key is recognized (no unknown-key warning would
-    ///     appear in the `detect_malformed_values` diagnostic surface), and
+    ///   - the key is recognized (the parser does not report it as unknown),
+    ///     and
     ///   - the rest of the config is unaffected (no spillover
     ///     into the unified `bell` mode).
     #[test]
@@ -10707,14 +10707,11 @@ split_horiz = <Control><Shift>j
         // wins (audible-bell is a documented no-op).
         let cfg = Config::parse_text("bell = visual\naudible-bell = true\n");
         assert_eq!(cfg.bell, BellMode::Visual);
-        // The `detect_malformed_values` unknown-key surface should NOT flag this
-        // key. (We test by asking detect_malformed_values for the
-        // diagnostic list — `audible-bell` should not appear.)
-        let bad = Config::detect_malformed_values("audible-bell = true\n");
-        assert!(
-            !bad.iter().any(|m| m.contains("audible-bell")),
-            "audible-bell shouldn't trip --check-config (got: {bad:?})"
-        );
+        // Recognized: the parser does not list it as an unknown key.
+        for text in ["audible-bell = true\n", "audible_bell = false\n"] {
+            let (_, unknown) = Config::parse_collect(text);
+            assert!(unknown.is_empty(), "{text:?} reported unknown: {unknown:?}");
+        }
     }
 
     /// Drift guard. Terminator-spelling aliases for kettle's

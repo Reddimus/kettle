@@ -50,23 +50,42 @@ fn run_exec_with_env(
         child.stdin.take().unwrap().write_all(data).unwrap();
         // stdin dropped here → EOF to the pump.
     }
-    let mut out = String::new();
-    let mut err = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
-    let status = child.wait().expect("wait");
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        out
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).unwrap();
+        err
+    });
+    // Most callers pass no --timeout, and exec has no default one, so a hung
+    // run would otherwise hang the whole test binary.
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll kettle exec") {
+            break status;
+        }
+        if started.elapsed() >= RUN_EXEC_WATCHDOG {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "kettle exec {extra:?} -- {argv:?} exceeded the {RUN_EXEC_WATCHDOG:?} test watchdog"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let out = stdout_reader.join().expect("join stdout reader");
+    let err = stderr_reader.join().expect("join stderr reader");
     (status.code().unwrap_or(-1), out, err)
 }
+
+/// Long enough for the slowest caller on a loaded CI runner, short enough that
+/// a hang fails the test instead of the job's time limit.
+const RUN_EXEC_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// True if the run looks like a PTY-less sandbox failure we should soft-skip.
 fn no_pty(code: i32, err: &str) -> bool {

@@ -76,6 +76,18 @@ pub struct ImageData {
     _cpu: Arc<GraphicsReservation>,
 }
 
+/// Limits the image decoder enforces while decoding untrusted bytes: no side
+/// above `MAX_IMAGE_DIM` and no allocation above `decode_cap`. Checks after
+/// decoding cannot stop a decompression bomb; these stop it before the buffer
+/// exists.
+fn decode_limits(decode_cap: usize) -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIM);
+    limits.max_image_height = Some(MAX_IMAGE_DIM);
+    limits.max_alloc = Some(decode_cap as u64);
+    limits
+}
+
 impl ImageData {
     pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Option<ImageData> {
         Self::new_with_budget(width, height, rgba, &GraphicsBudget::default())
@@ -179,11 +191,7 @@ impl ImageData {
         let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?;
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(MAX_IMAGE_DIM);
-        limits.max_image_height = Some(MAX_IMAGE_DIM);
-        limits.max_alloc = Some(decode_cap as u64);
-        reader.limits(limits);
+        reader.limits(decode_limits(decode_cap));
         let img = reader.decode().ok()?.to_rgba8();
         let expected = rgba_bytes(img.width(), img.height())?;
         if expected > decode_cap || !output.shrink_to(expected) {
@@ -468,14 +476,27 @@ mod tests {
         assert_eq!(pinned.rgba.as_slice(), &[0; 16]);
     }
 
-    /// Drift guard for the decompression-bomb defense in
-    /// `from_encoded`. Encodes a small PNG (positive case) and a PNG
-    /// whose width exceeds `MAX_IMAGE_DIM` (negative case) via the
-    /// `image` crate's encoder, then re-decodes through `from_encoded`
-    /// and asserts the oversized one is rejected by the `Limits` we
-    /// install. If a future refactor of `from_encoded` drops the
-    /// `ImageReader::limits` wire-up, this test fails immediately
-    /// rather than the regression slipping into a release.
+    /// The decoder refuses to allocate past the dimension and byte caps while
+    /// decoding. A post-decode check would still reject an oversized image, so
+    /// only these guards prove the decode-time defense is installed.
+    #[test]
+    fn untrusted_images_decode_under_dimension_and_allocation_limits() {
+        let limits = super::decode_limits(1234);
+        assert_eq!(limits.max_image_width, Some(MAX_IMAGE_DIM));
+        assert_eq!(limits.max_image_height, Some(MAX_IMAGE_DIM));
+        assert_eq!(limits.max_alloc, Some(1234));
+        let source = include_str!("image.rs");
+        let from_encoded = source
+            .split_once("fn from_encoded_with_budget(")
+            .expect("from_encoded_with_budget")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of from_encoded_with_budget")
+            .0;
+        assert!(from_encoded.contains("reader.limits(decode_limits(decode_cap));"));
+    }
+
+    /// An oversized PNG is rejected and a small one round-trips.
     #[test]
     fn from_encoded_rejects_oversized_images() {
         use image::ImageEncoder;

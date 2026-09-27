@@ -37,6 +37,44 @@ use crate::persistence::{
     AsyncFileWriter, AsyncWriterStatus, MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits,
 };
 
+/// Decode as much of `bytes` as possible: valid UTF-8 as is and each invalid
+/// run as one U+FFFD, leaving only an incomplete trailing sequence for the next
+/// read. Returns the text and the number of bytes it consumed.
+///
+/// One cursor pass. Draining from the front per invalid run shifts the whole
+/// tail each time, which made a read of `0xff` bytes quadratic.
+fn decode_lossy_prefix(bytes: &[u8]) -> (String, usize) {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let incomplete = loop {
+        let rest = &bytes[cursor..];
+        if rest.is_empty() {
+            break 0;
+        }
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                break 0;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // SAFETY: `valid_up_to` guarantees this prefix is valid UTF-8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
+                match e.error_len() {
+                    // An incomplete trailing sequence waits for the next read.
+                    None => break rest.len() - valid,
+                    // An invalid run becomes one replacement character.
+                    Some(n) => {
+                        out.push('\u{FFFD}');
+                        cursor += valid + n;
+                    }
+                }
+            }
+        }
+    };
+    (out, bytes.len() - incomplete)
+}
+
 /// Decode large PTY reads in bounded pieces before JSON expansion. Invalid or
 /// control-heavy bytes can expand several-fold, so admitting the raw read as
 /// one queue item would defeat the writer's per-item memory bound.
@@ -474,47 +512,7 @@ impl Recorder {
             return;
         }
         self.utf8_carry.extend_from_slice(bytes);
-        let mut out = String::new();
-        // Decode as much valid UTF-8 as possible so a chunk containing
-        // [valid][invalid][valid] emits all of it, retaining only a genuinely-
-        // incomplete trailing sequence for the next call.
-        //
-        // Advance a cursor rather than draining per invalid run. Draining from
-        // the front shifts the entire remaining tail every time, so a hostile
-        // 64 KiB chunk of `0xff` — one invalid run per byte — cost about 65,536
-        // iterations and gigabytes of cumulative movement before a single event
-        // was written, stalling whichever thread called this: the UI, or
-        // `kettle exec`'s lifecycle. One pass now, then one move of the
-        // at-most-three-byte incomplete suffix.
-        let mut cursor = 0usize;
-        let incomplete = loop {
-            let rest = &self.utf8_carry[cursor..];
-            if rest.is_empty() {
-                break 0;
-            }
-            match std::str::from_utf8(rest) {
-                Ok(s) => {
-                    out.push_str(s);
-                    break 0;
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    // SAFETY: `valid_up_to` guarantees this prefix is valid UTF-8.
-                    out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
-                    match e.error_len() {
-                        // Incomplete trailing sequence — keep it for the next chunk.
-                        None => break rest.len() - valid,
-                        // A genuinely-invalid run — emit one replacement and
-                        // step past it.
-                        Some(n) => {
-                            out.push('\u{FFFD}');
-                            cursor += valid + n;
-                        }
-                    }
-                }
-            }
-        };
-        let consumed = self.utf8_carry.len() - incomplete;
+        let (out, consumed) = decode_lossy_prefix(&self.utf8_carry);
         self.utf8_carry.drain(..consumed);
         if !out.is_empty() {
             self.emit("o", &out);
@@ -1771,41 +1769,46 @@ mod tests {
         );
     }
 
-    /// A child can emit a whole PTY read of bytes that are never valid UTF-8.
-    /// Draining per invalid run made that quadratic — 64 KiB of `0xff` meant
-    /// about 65,536 tail shifts and gigabytes of movement before one event was
-    /// written, on whichever thread called this. The bound below is far looser
-    /// than the linear implementation needs and far tighter than the quadratic
-    /// one achieves, so it discriminates without being timing-fragile. The
-    /// separation was measured, not assumed — an earlier bound of this shape
-    /// passed against the quadratic code and would have been false assurance.
+    /// Decoding bytes that are never valid UTF-8 must stay linear. Draining per
+    /// invalid run made it quadratic: 1 MiB of `0xff` took 13.3 s against
+    /// 26 ms linear. The 2 s bound separates the two by two orders of
+    /// magnitude either way. This times the decoder directly, because
+    /// `record_output` splits input into 16 KiB pieces, which would hide a
+    /// quadratic decoder under the bound.
     #[test]
-    fn hostile_invalid_utf8_chunk_stays_linear_and_lossless() {
-        use std::io::Read;
-        use std::time::Instant;
+    fn decoding_an_invalid_utf8_read_is_linear() {
+        const LEN: usize = 1024 * 1024;
+        let payload = vec![0xff_u8; LEN];
+        let started = std::time::Instant::now();
+        let (text, consumed) = super::decode_lossy_prefix(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(consumed, LEN);
+        assert_eq!(
+            text.chars().count(),
+            LEN,
+            "one replacement per invalid byte"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "invalid-UTF-8 decoding is not linear: {elapsed:?} for {LEN} bytes"
+        );
+    }
 
-        // Deliberately larger than a real 64 KiB PTY read. At 64 KiB the
-        // quadratic path moves ~2 GiB and takes a couple hundred milliseconds:
-        // real jank when a child sustains it, but not separable from a linear
-        // run by any bound that stays stable on a busy machine. Measured on
-        // this workspace at 1 MiB: 26 ms linear against 13.3 s quadratic, so
-        // the bound below discriminates by two orders of magnitude in both
-        // directions instead of passing whatever it is handed.
+    /// A read of bytes that are never valid UTF-8 is recorded losslessly: one
+    /// replacement per invalid run.
+    #[test]
+    fn hostile_invalid_utf8_chunk_is_recorded_losslessly() {
+        use std::io::Read;
+
         const CHUNK: usize = 1024 * 1024;
         let temp = test_tempdir();
         let path = temp.path().join("invalid.cast");
-        // Allocate the payload and open the recorder OUTSIDE the timed region:
-        // a 1 MiB allocation and a file create are noise against the thing
-        // under measurement, and they make a failure harder to read.
         let payload = vec![0xff_u8; CHUNK];
-        let elapsed = {
+        {
             let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
-            let started = Instant::now();
             rec.record_output(&payload);
-            let elapsed = started.elapsed();
             rec.finish();
-            elapsed
-        };
+        }
 
         let mut s = String::new();
         std::fs::File::open(&path)
@@ -1833,10 +1836,6 @@ mod tests {
         assert!(
             joined.chars().all(|c| c == '\u{FFFD}'),
             "an all-invalid chunk must decode to replacements only"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "invalid-UTF-8 recording is not linear: {elapsed:?} for {CHUNK} bytes"
         );
     }
 

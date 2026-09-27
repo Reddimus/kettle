@@ -3934,7 +3934,13 @@ mod tests {
         cfg.background_image = "/tmp/wp.jpg".into();
         cfg.borderless = true;
         cfg.status_bar = kettle_config::StatusBarMode::Bottom;
-        for line in extra_check_config_lines(&cfg) {
+        cfg.inert_keys = vec!["example-inert-key".into()];
+        let lines = extra_check_config_lines(&cfg);
+        assert!(
+            lines.iter().any(|line| line.starts_with("inert:")),
+            "the inert-key echo must be exercised too: {lines:?}"
+        );
+        for line in lines {
             let lower = line.to_ascii_lowercase();
             for needle in ["cycle ", "cycle-"] {
                 if let Some(pos) = lower.find(needle)
