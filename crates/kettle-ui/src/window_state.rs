@@ -1,4 +1,4 @@
-//! Per-window state (C1 of the in-process multi-window refactor).
+//! Per-window state.
 //!
 //! Everything that belongs to ONE OS window — the winit window handle, its
 //! GPU renderer, its tab/pane multiplexer, and all input/overlay/animation
@@ -223,9 +223,9 @@ enum OutputPaintPhase {
 
 /// Behavioral output-paint state machine.
 ///
-/// This replaces two independently mutable booleans whose invalid combinations
-/// could erase the sustained-flood signal or schedule a 1 ns wake loop while a
-/// redraw was already queued.
+/// A single phase, rather than independent booleans, cannot form a combination
+/// that erases the sustained-flood signal or schedules a 1 ns wake loop while a
+/// redraw is already queued.
 #[derive(Debug, Default)]
 pub(crate) struct OutputPaintPacer {
     phase: OutputPaintPhase,
@@ -438,7 +438,7 @@ fn capped_exponential_delay(
     base.saturating_mul(1_u32 << shift).min(cap)
 }
 
-/// Multi-window effort (Peacock): the accent this window resolved + claimed.
+/// The Peacock accent this window resolved and claimed.
 pub(crate) struct WindowAccent {
     /// The live color (recomputed from `slot` when the theme changes).
     pub(crate) color: kettle_config::Rgb,
@@ -686,7 +686,7 @@ impl MediaPasteReceiptState {
 
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
-    /// Exposed to agents via the ctl API (C8) and used as the map key — never
+    /// Exposed to agents via the ctl API and used as the map key. Never
     /// reused, so an agent holding a seq can't be aliased onto a new window.
     pub(crate) seq: u64,
     /// Declared BEFORE `window`: the renderer owns the wgpu `Surface` created
@@ -704,8 +704,9 @@ pub(crate) struct WindowState {
     pub(crate) accessibility_key: Option<u64>,
     pub(crate) accessibility_updated_at: Option<std::time::Instant>,
     pub(crate) accessibility_pending: bool,
-    /// Short-lived thumbnail for a Kettle-created clipboard bitmap. It is
-    /// projected only while its owning pane remains focused and visible.
+    /// Short-lived thumbnail for a Kettle-created clipboard bitmap or an
+    /// accepted video path. It is projected only while its owning pane remains
+    /// focused and visible.
     pub(crate) media_paste_receipt: Option<MediaPasteReceiptState>,
     /// Accepted video path awaiting trust validation and poster extraction on
     /// the bounded background pipeline. It has no visible projection.
@@ -719,7 +720,7 @@ pub(crate) struct WindowState {
     /// and clear them directly via `Taskbar::clear_attention` on focus-gain.
     pub(crate) attention_active: bool,
     /// This window's tab/pane multiplexer. Panes are self-contained (PTY +
-    /// reader thread + channels), so a tab can move between windows (C5) by
+    /// reader thread + channels), so a tab can move between windows by
     /// moving its panes between Muxes — the PTYs never notice.
     pub(crate) mux: Mux,
     /// Scrollback search is OS-window chrome, not terminal/mux state. Keeping
@@ -787,7 +788,7 @@ pub(crate) struct WindowState {
     /// Distance from the pointer to the dragged thumb's top edge. Keeping the
     /// grab offset prevents the thumb from jumping when a drag starts.
     pub(crate) scrollbar_drag_offset: Option<f32>,
-    /// v2.26.0: the pointer is hovering the focused pane's scrollbar gutter.
+    /// The pointer is hovering the focused pane's scrollbar gutter.
     /// Drives the overlay scrollbar's bright (vs dim-at-rest) opacity with no
     /// fade timer, so it costs zero idle wakeups — just a single repaint on the
     /// hover-enter / hover-leave transition.
@@ -816,19 +817,20 @@ pub(crate) struct WindowState {
     /// `Action::OpenSettings` overlay navigation. `Some` while the
     /// in-app settings panel is open.
     pub(crate) settings_nav: Option<crate::settings::SettingsNav>,
-    /// v2.24.0: when `Some`, an inline text prompt (the image-path entry) is open
+    /// When `Some`, an inline text prompt (the image-path entry) is open
     /// over the settings panel; keystrokes route to it until Enter (persist) or
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
-    /// v2.23.0: set when a Settings change (a GPU pin / power-preference /
-    /// backend / force-software) was persisted but can only take effect on the
-    /// next launch. The settings overlay shows a "⚠ restart to apply" footer
-    /// while this is true; cleared when the overlay closes.
+    /// Set when a persisted Settings change needs a restart or a new window to
+    /// take effect. GPU pin, power preference, backend, and force-software
+    /// changes need the next launch; background opacity, background type, and
+    /// window blur need a new window. The settings overlay shows a restart
+    /// footer while this is true; opening the overlay clears it.
     pub(crate) settings_restart_pending: bool,
-    /// v2.23.1: the animated-background frame index last requested for paint.
+    /// The animated-background frame index last requested for paint.
     /// The event loop requests a bg redraw only when the live frame index
     /// differs from this (an edge-trigger), so an animated wallpaper repaints at
-    /// the GIF's fps instead of continuously (the animated-idle-CPU fix).
+    /// the GIF's fps instead of continuously.
     pub(crate) last_bg_frame: Option<usize>,
     /// Terminator parity: `Action::OpenLayoutPicker` modal state —
     /// (typed query, selected index) against `Session::list_layouts`.
@@ -842,12 +844,12 @@ pub(crate) struct WindowState {
     /// to the other modal overlays — same close-all-modals discipline,
     /// same Esc-to-dismiss key route.
     pub(crate) context_menu: Option<ContextMenuState>,
-    /// v2.24.0 live theme preview: while the cursor (or keyboard) is on a
+    /// Live theme preview. While the cursor (or keyboard) is on a
     /// `ThemeChoice` row in the right-click → Theme submenu, the theme is applied
     /// ephemerally to `cfg`; this holds the `(theme_name, theme)` to restore on
-    /// dismiss-without-select. Cleared (kept) on commit (`SetTheme`). Reverted by
-    /// the single post-event chokepoint in `window_event` when the highlight
-    /// leaves a theme row or the menu closes.
+    /// dismiss-without-select. A commit (`SetTheme`) clears it and keeps the
+    /// theme. Reverted by the single post-event chokepoint in `window_event`
+    /// when the highlight leaves a theme row or the menu closes.
     pub(crate) theme_preview: Option<(String, kettle_config::Theme)>,
     /// When `Some`, the user is editing a window/tab/pane title via
     /// an inline overlay.
@@ -856,17 +858,14 @@ pub(crate) struct WindowState {
     /// they need re-sizing before the next frame.
     ///
     /// Deliberately NOT named for chrome: `handle_action`'s tail marks it after
-    /// every action, not only after a chrome-strip transition. It began life as
-    /// `chrome_geometry_dirty` and was renamed once that stopped being true —
-    /// a flag whose name claims narrower semantics than its use invites exactly
-    /// the wrong assumption at the next call site.
+    /// every action, not only after a chrome-strip transition.
     ///
     /// Deferred rather than resized on the spot because `close_all_modals`
     /// runs immediately BEFORE most modal openers. Resizing there and again in
-    /// the opener sent the child two `SIGWINCH`s — grow then shrink — for a net
-    /// change of zero on a title-edit -> title-edit replacement. Kettle paints
-    /// no intermediate frame, but vim, tmux and htop observe both and redraw.
-    /// Coalescing to one flush per frame makes the intermediate state
+    /// the opener would send the child two `SIGWINCH`s (grow, then shrink) for
+    /// a net change of zero on a title-edit -> title-edit replacement. Kettle
+    /// paints no intermediate frame, but vim, tmux and htop observe both and
+    /// redraw. Coalescing to one flush per frame makes the intermediate state
     /// unobservable no matter what a caller does next, without threading a
     /// "will install another modal" flag through seventeen call sites.
     pub(crate) pending_resize: bool,
@@ -874,7 +873,7 @@ pub(crate) struct WindowState {
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
     pub(crate) window_focused: bool,
-    /// v2.24.0: `true` while the window is fully hidden behind other windows
+    /// `true` while the window is fully hidden behind other windows
     /// (winit `WindowEvent::Occluded(true)`). Gates the animated-background
     /// wake so a covered window costs zero idle (alongside an `is_minimized`
     /// probe). Set back to `false` on un-occlude, which also forces a repaint.
@@ -885,8 +884,8 @@ pub(crate) struct WindowState {
     /// Last `CursorIcon` we pushed to the window — used to dedupe so we
     /// don't issue a `set_cursor` syscall on every CursorMoved event.
     pub(crate) last_cursor_icon: Option<CursorIcon>,
-    /// Drag-to-reorder tab state. `Some(_)` while a left-
-    /// mouse-button press in the tab bar is being held; cleared on release.
+    /// Drag-to-reorder tab state. `true` while a left-mouse-button press in
+    /// the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
     /// Surface position where the in-window tab reorder gesture was armed.
     /// A click stays visually a click until movement crosses the drag-distance
@@ -898,12 +897,13 @@ pub(crate) struct WindowState {
     /// rects and `tab_drag_*` fields.
     pub(crate) tab_pressed_idx: Option<usize>,
     /// Tab tear-off drag FSM state. Distinct from the in-window
-    /// `tab_drag_active` reorder; both fire from the same
-    /// mouse-down on the tab bar. Wired live in C6 of the multi-window
-    /// effort: a release while DraggingOutside tears the tab off into a new
-    /// in-process window at the drop point.
+    /// `tab_drag_active` reorder; both fire from the same mouse-down on the tab
+    /// bar. Once the cursor crosses the band threshold, `maybe_tear_off` tears
+    /// the tab into a new in-process window (a lone tab drags its window
+    /// instead). On Wayland the tear waits for a release while DraggingOutside,
+    /// and the compositor places the new window.
     pub(crate) detach_drag: crate::detach::DragState,
-    /// C6: surface position of the tab-bar mouse-down that armed
+    /// Surface position of the tab-bar mouse-down that armed
     /// `detach_drag` — the origin the FSM's click-vs-drag distance is
     /// measured from. `None` while no tear-off gesture is armed.
     pub(crate) drag_press: Option<(f32, f32)>,
@@ -913,7 +913,7 @@ pub(crate) struct WindowState {
     /// clears the slop radius, so a plain click on the titlebar still means
     /// "focus, then edit the title".
     pub(crate) pane_drag: Option<PaneDrag>,
-    /// v2.19.0 (tear-off UX, re-dock): `Some(insertion index)` while a
+    /// `Some(insertion index)` while a
     /// torn-off window is hovering this window's tab band. Draws the
     /// accent insertion marker, and — key affordance — MATERIALIZES the
     /// tab bar on a single-tab `tab-bar = auto` window (`tab_bar_h`
@@ -949,12 +949,12 @@ pub(crate) struct WindowState {
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
     pub(crate) bell_flashes: std::collections::HashMap<u64, std::time::Instant>,
-    /// Coalesce output-driven repaints (R2). `last_paint` is when the last
+    /// Coalesce output-driven repaints. `last_paint` is when the last
     /// frame painted; `output_pacer` owns the deferred -> queued -> presenting
     /// transaction. Input/cursor paints bypass this state machine.
     pub(crate) last_paint: Option<std::time::Instant>,
     pub(crate) output_pacer: OutputPaintPacer,
-    /// v2.21.1 (throughput): consecutive output-coalesced frames — i.e. how
+    /// Consecutive output-coalesced frames — i.e. how
     /// sustained the current PTY-output flood is. `effective_output_budget`
     /// stretches the monitor-derived paint budget as this climbs, so fewer
     /// per-frame snapshots are taken under the `Term` lock the PTY reader
@@ -976,13 +976,12 @@ pub(crate) struct WindowState {
     pub(crate) last_title: String,
     /// A user-set window title that must survive redraws.
     ///
-    /// `apply_title_edit` used to call `set_title` and stop there, but
     /// `sync_window_title` recomputes the title from `window-title-format` on
-    /// every redraw and overwrites it — so "Edit window title" appeared to
-    /// work and reverted within one frame. Terminator keeps an equivalent
-    /// `forced` flag on its window so later `set_title` calls are ignored
-    /// (window.py:1162-1198). `None` means "follow the format", which is how
-    /// clearing the field restores automatic titles.
+    /// every redraw, so a plain `set_title` would revert within one frame.
+    /// Terminator keeps an equivalent `forced` flag on its window so later
+    /// `set_title` calls are ignored (window.py:1162-1198). `None` means
+    /// "follow the format", which is how clearing the field restores automatic
+    /// titles.
     pub(crate) window_title_override: Option<String>,
     /// Pane ids whose shell exited + cfg.exit_action requested
     /// restart. Drained AFTER drain_events; dedup'd on push.
@@ -992,7 +991,7 @@ pub(crate) struct WindowState {
     /// once the surface is configured; `window_state = hidden` keeps this true
     /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
-    /// v2.34.0: the last native window-theme hint this window was given via
+    /// The last native window-theme hint this window was given via
     /// `Window::set_theme` (`None` = never synced). The hint keeps the OS
     /// titlebar — Windows DWM caption, Wayland Adwaita CSD, macOS appearance —
     /// matching the active palette. Cached so the redraw-time check is a
@@ -1004,7 +1003,7 @@ pub(crate) struct WindowState {
     /// hint once AppKit has built that window's caption, and windows reach
     /// that point at different times. See `app::native_theme_sync_is_due`.
     pub(crate) native_theme_synced: Option<Option<winit::window::Theme>>,
-    /// C4: per-pane `Terminal::output_generation` values consumed by this
+    /// Per-pane `Terminal::output_generation` values consumed by this
     /// window's last successfully presented frame. During genuine device loss,
     /// the redraw guard intentionally snapshots these without presentation so
     /// streaming output quiesces until process-wide recovery forces a redraw.
@@ -1035,37 +1034,36 @@ pub(crate) struct WindowState {
     /// expose a nonzero restore rect through `inner_size`; DPI fallback must
     /// not treat that stale rect as a usable surface.
     pub(crate) dpi_resize_surface_suspended: bool,
-    /// Multi-window effort (Peacock): this window's resolved accent claim.
+    /// This window's resolved Peacock accent claim.
     /// `None` while unresolved (first frame) or when the user opted out
     /// (`accent-color = theme`/`off`/`none` or a pinned hex). Kept in sync
     /// each frame by `App::sync_window_accent`.
     pub(crate) accent: Option<WindowAccent>,
-    /// PERF (key-repeat stutter fix): when the user last typed bytes into a
-    /// PTY in this window. Output arriving within `TYPING_ECHO_WINDOW` of a
-    /// keystroke paints IMMEDIATELY (request_redraw is vsync-coalesced, so
-    /// this can't outpace the display) instead of through the
-    /// output coalescer (`output_pacer`) — whose WaitUntil deadline has ~16ms timer
-    /// granularity on Windows, which made held-key echo visibly stutter
-    /// while Terminator (steady GTK frame clock) stayed smooth.
+    /// When the user last typed bytes into a PTY in this window. Output
+    /// arriving within `TYPING_ECHO_WINDOW` of a keystroke paints IMMEDIATELY
+    /// (request_redraw is vsync-coalesced, so this can't outpace the display)
+    /// instead of through the output coalescer (`output_pacer`), whose
+    /// WaitUntil deadline has ~16ms timer granularity on Windows and would make
+    /// held-key echo visibly stutter.
     pub(crate) last_typed: Option<std::time::Instant>,
-    /// v2.20.0 (Ghostty `resize-overlay` parity): `Some((cols, rows, armed_at))`
+    /// Ghostty `resize-overlay` parity: `Some((cols, rows, armed_at))`
     /// while the transient size chip is visible; expires
     /// `RESIZE_OVERLAY_DURATION` after the last resize event.
     pub(crate) resize_overlay: Option<(u16, u16, std::time::Instant)>,
-    /// v2.20.0: the first `Resized` after window creation is the initial
+    /// The first `Resized` after window creation is the initial
     /// placement, not a user resize — `resize-overlay = after-first`
     /// (the default) skips it.
     pub(crate) seen_first_resize: bool,
-    /// v2.20.0 (review fix): when this WindowState was created. Session
+    /// When this WindowState was created. Session
     /// restore / `window-state = maximised` / tear-off creation deliver a
     /// short STORM of placement `Resized` events, not just one —
     /// `after-first` also swallows everything in the first moments after
     /// birth so a restored window doesn't flash a spurious size chip.
     pub(crate) spawned_at: std::time::Instant,
-    /// v2.20.0 P2 (perf): pooled per-pane render snapshots. `redraw` captures
+    /// Pooled per-pane render snapshots. `redraw` captures
     /// each visible pane's viewport into these UNDER the Term lock (a
     /// µs-scale flat copy) and drops the guard before the GPU frame, so the
-    /// PTY reader threads no longer stall behind shaping / surface-acquire /
+    /// PTY reader threads don't stall behind shaping / surface-acquire /
     /// present. High-water pooled: each snapshot's `cells` Vec keeps its
     /// capacity across frames; truncated to the visible pane count.
     pub(crate) pane_snapshots: Vec<kettle_render::PaneSnapshot>,

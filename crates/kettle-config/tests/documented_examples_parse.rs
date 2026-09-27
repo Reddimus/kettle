@@ -4,18 +4,15 @@
 //! and silently no-ops is worse than a line that is obviously wrong — nothing
 //! tells the user, and the setting simply never takes effect.
 //!
-//! This existed as a real defect, not a hypothetical: the man page stated
-//! "everything after `#` is a comment", which is the OPPOSITE of the parser's
-//! rule (`#` opens a comment only at the start of a line, so a `#` inside a
-//! value is literal — that is what makes `background = #1a1b26` work). Ten
-//! documented examples inherited the wrong rule and carried trailing
-//! `value  # explanation` comments. Pasting any of them fed the comment text
-//! into the value: `font-size = 20  # bigger` produced 13pt, the default,
-//! because "20  # bigger" is not a number.
+//! `#` opens a comment only at the start of a line, so a `#` inside a value is
+//! literal (that is what makes `background = #1a1b26` work). So a trailing
+//! `value  # explanation` comment becomes part of the value, and
+//! `font-size = 20  # bigger` yields 13pt, the default, because "20  # bigger"
+//! is not a number.
 //!
-//! The guard is deliberately mechanical — extract every line that looks like a
-//! config assignment and feed it to the real parser — so it catches the next
-//! wrong example without anyone remembering this one.
+//! The guard is deliberately mechanical. It extracts every line that looks
+//! like a config assignment and feeds it to the real parser, so it catches the
+//! next wrong example without anyone having to remember the rule.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +23,8 @@ fn docs_dir() -> PathBuf {
         .join("docs")
 }
 
-/// Lines that are prose or deliberate non-examples rather than config to copy.
+/// Whether `line` is config to copy, rather than prose or a deliberate
+/// non-example (a `#` comment or `>` quote).
 fn is_config_assignment(line: &str) -> bool {
     let trimmed = line.trim_start();
     if trimmed.starts_with('#') || trimmed.starts_with('>') {

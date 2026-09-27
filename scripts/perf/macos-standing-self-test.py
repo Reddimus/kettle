@@ -174,8 +174,8 @@ class VtebenchCheckout(unittest.TestCase):
         self.assertFalse(standing.checkout_vtebench(self.checkout, str(self.upstream), self.first))
 
     def test_a_pin_that_names_no_commit_fails_with_its_value(self) -> None:
-        # The first pin shipped with a correct 7-character prefix and a wrong
-        # remainder, which only failed when a full run reached vtebench.
+        # A correct 7-character prefix with a wrong remainder must fail here,
+        # not when a full run reaches vtebench.
         bogus = self.first[:7] + "0" * 33
         with self.assertRaises(SystemExit) as raised:
             standing.checkout_vtebench(self.checkout, str(self.upstream), bogus)
@@ -195,7 +195,7 @@ class VtebenchCheckout(unittest.TestCase):
 
     def test_the_workspace_excludes_the_checkout(self) -> None:
         # Cargo refuses to build a package inside a workspace root that does
-        # not list it, so a run from a Kettle checkout failed at the build.
+        # not list it.
         import tomllib
 
         manifest = tomllib.loads((standing.REPO / "Cargo.toml").read_text())

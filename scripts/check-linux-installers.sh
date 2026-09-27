@@ -8,13 +8,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 #
 # `install-unix.py` refuses to install into a path whose components are group-
 # or other-writable, because a group member could then replace the installed
-# binary. That check is correct and must not be relaxed. But Ubuntu's DEFAULT
-# umask is 002, so a plain `mkdir` here yields 0775 and the installer rightly
-# rejects the smoke's own scratch prefix — meaning `just linux-installer-smoke`
-# could not pass on a stock Ubuntu desktop, only on a umask-022 machine such as
-# a CI runner. Pinning the umask makes the scratch prefix look like the
-# correctly-permissioned target the installer expects, so the smoke tests the
-# installer rather than the caller's shell configuration.
+# binary. That check is correct and must not be relaxed. Ubuntu's default
+# umask is 002, so a plain `mkdir` yields 0775 and the installer rejects the
+# smoke's own scratch prefix. `just linux-installer-smoke` would then pass only
+# on a umask-022 machine such as a CI runner. Pinning the umask means the smoke
+# tests the installer, not the caller's shell configuration.
 umask 022
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -203,9 +201,9 @@ rm -- "${managed_hardlink_alias}"
 assert_uninstalled_prefix "$hardlink_prefix"
 echo "linux-installer check: hardlinked managed destination refused"
 
-# Reproduce the audited traversal: replace the recorded share/kettle directory
-# with a symlink to an unrelated tree. The hardened uninstaller must refuse
-# before removing any recorded path, and the victim must remain byte-for-byte.
+# Replace the recorded share/kettle directory with a symlink to an unrelated
+# tree. The hardened uninstaller must refuse this traversal before removing any
+# recorded path, and the victim must remain byte-for-byte.
 attack_prefix="${tmp_root}/symlink-attack"
 victim="${tmp_root}/victim"
 mkdir -p "${victim}/shell-integration"
@@ -234,8 +232,8 @@ if ./scripts/install.sh --skip-build "--prefix=${tmp_root}/must-refuse-symlink" 
   fail "installer accepted a symlink as the recording directory"
 fi
 
-# A source-checkout install with --record-dir now needs no special build
-# (recording ships in every binary); it stays `local-dev` (self-update refused,
+# A source-checkout install with --record-dir needs no special build, since
+# recording ships in every binary. It stays `local-dev` (self-update refused,
 # rebuild to update) and wires KETTLE_RECORD_DIR into the launcher.
 dev_prefix="${tmp_root}/dev back\\slash % dollar\$ quote\" tick\`"
 record_dir="${tmp_root}/record back\\slash % dollar\$ quote\" tick\`"

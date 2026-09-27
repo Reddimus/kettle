@@ -154,17 +154,13 @@ mod tests {
 
     #[test]
     fn palette_includes_every_user_facing_action() {
-        // Drift guard. When ScrollLineUp/Down were added, the palette
-        // quietly missed them — users couldn't reach the new actions via
-        // Ctrl+Shift+K. The class of "new Action variant landed but only
-        // the keymap and `--list-actions` know about it" is the same
-        // shape as the drift between `from_name` and `action_names` that
-        // `action_names_round_trip_through_from_name` (keybinds.rs)
-        // guards against. Pin it: every action *intended* for palette
-        // dispatch must appear, identifiable by ⩾1 entry whose Action
-        // matches the variant. Variants intentionally excluded from
-        // the palette (geometric / parametric / palette-itself) are
-        // listed explicitly below so a future excluded action is a
+        // Drift guard: a new Action variant must not reach only the keymap
+        // and `--list-actions` while the palette (Ctrl+Shift+K) misses it.
+        // `action_names_round_trip_through_from_name` (keybinds.rs) guards
+        // the same kind of drift between `from_name` and `action_names`.
+        // Every action *intended* for the palette must have at least one
+        // entry. Variants excluded on purpose (geometric / parametric /
+        // palette-itself) are listed below, so a future exclusion is a
         // conscious choice, not an oversight.
         use Action::*;
         let cmds = commands();

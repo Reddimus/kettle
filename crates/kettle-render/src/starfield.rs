@@ -8,9 +8,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Star count. The starfield is a FIXED built-in example (not config-driven,
-/// v2.24.1), so this lives here, not in `Config`. It is also the uniform
-/// array's compile-time bound, substituted into the WGSL for the broadest
+/// Star count. The starfield is a FIXED built-in example (not config-driven),
+/// so this lives here, not in `Config`. It is also the uniform array's
+/// compile-time bound, substituted into the WGSL for the broadest
 /// naga-backend support (no override-constant required).
 const NSTARS: usize = 55;
 
@@ -87,12 +87,11 @@ impl StarSeed {
 
 /// Deterministic index hash, `0..1`.
 ///
-/// This is the WGSL `fract(sin(n * 12.9898) * 43758.5453)` moved to the CPU
-/// verbatim. It is evaluated once per star at startup instead of once per star
-/// per pixel per frame. The multiply amplifies any ULP difference in `sin`
-/// enormously, so the field this produces is not bit-identical to the one the
-/// GPU's `sin` produced — it is the same kind of field from the same
-/// generator, which is all the model ever asked for.
+/// The classic WGSL hash `fract(sin(n * 12.9898) * 43758.5453)`, evaluated on
+/// the CPU once per star at startup instead of once per star per pixel per
+/// frame. The multiply amplifies any ULP difference in `sin` enormously, so the
+/// field is not bit-identical to what a GPU `sin` would give. It is the same
+/// kind of field from the same generator, which is all the model needs.
 fn rnd(n: f32) -> f32 {
     // The classic `43758.5453` multiplier, written as the `f32` it actually
     // becomes: the decimal literal carries more digits than the type does, and
@@ -150,9 +149,8 @@ fn star_brightness(prog: f32) -> f32 {
 /// Resolve every star for one frame, writing the visible ones into `out` and
 /// returning how many there are.
 ///
-/// This is the whole of the model that used to run per pixel. It runs once per
-/// frame, and the field repaints at a low fps cap, so its cost is not on any
-/// hot path.
+/// This is the whole of the model. It runs once per frame, and the field
+/// repaints at a low fps cap, so its cost is not on any hot path.
 fn build_frame_stars(
     seeds: &[StarSeed; NSTARS],
     resolution: [f32; 2],
@@ -333,10 +331,9 @@ impl StarfieldPipeline {
     }
 
     /// Resolve and upload one frame's stars. `time_secs` is the continuous
-    /// drift clock; the look (speed / star count / glow) is baked in
-    /// (v2.24.1).
+    /// drift clock; the look (speed / star count / glow) is baked in.
     ///
-    /// This is where the model is evaluated — once per frame for 55 stars,
+    /// This is where the model is evaluated, once per frame for 55 stars
     /// rather than once per star per pixel.
     pub fn upload(&self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
         let mut u = Uniforms {
@@ -376,11 +373,8 @@ impl StarfieldPipeline {
 mod tests {
     use super::*;
 
-    // These once tested a hand-copied Rust transcription of the brightness
-    // curve, so the shader they were protecting could drift away underneath
-    // them without a single one going red. The curve is production code now
-    // (`star_brightness`) and the shader reads its result, so these drive the
-    // thing that actually runs.
+    // These drive `star_brightness`, the production curve whose result the
+    // shader reads, so they test the thing that actually runs.
 
     #[test]
     fn brightness_is_zero_at_both_ends_for_a_seamless_loop() {
@@ -474,13 +468,11 @@ mod tests {
         );
     }
 
-    /// The point of the rewrite: the fragment loop must not carry the model
-    /// any more.
+    /// The fragment loop must not carry the model.
     ///
-    /// The hash, the angle, the radial ease and the sRGB decode were all
-    /// evaluated per pixel. This asserts on the fragment entry point only —
-    /// asserting on the whole source would pass merely because the vertex
-    /// shader is cheap.
+    /// The hash, the angle, the radial ease and the sRGB decode belong on the
+    /// CPU. This asserts on the fragment entry point only; asserting on the
+    /// whole source would pass merely because the vertex shader is cheap.
     #[test]
     fn the_fragment_loop_carries_no_per_pixel_transcendentals_but_the_falloff() {
         let src = SHADER.replace("%NSTARS%", &NSTARS.to_string());

@@ -400,9 +400,9 @@ mod tests {
         );
     }
 
-    /// The other half of the same invariant, on this file: both `imp` modules
-    /// must exist, so a non-macOS build gets a real no-op rather than a
-    /// missing symbol.
+    /// The other half of `install_is_called_unconditionally_from_run_with`,
+    /// checked on this file: both `imp` modules must exist, so a non-macOS
+    /// build gets a real no-op rather than a missing symbol.
     #[test]
     fn dock_module_keeps_both_platform_arms() {
         let source = kettle_test_support::production_source(include_str!("macos_dock.rs"));
