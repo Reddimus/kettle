@@ -2062,8 +2062,12 @@ fn ignores_profile(cli: &Cli) -> bool {
     // invocation skip validation for a mode that needed it:
     // `--profile typo --list-profiles --list-ssh-hosts` ran `list-ssh-hosts`
     // first and silently printed defaults.
-    let reads_profile =
-        cli.list_keybinds || cli.list_layouts || cli.list_ssh_hosts || cli.check_config;
+    let reads_profile = cli.list_keybinds
+        || cli.list_layouts
+        || cli.list_ssh_hosts
+        || cli.check_config
+        || cli.gpu_info
+        || cli.config_path;
     let ignores_profile = cli.print_default_config
         || cli.write_default_config
         || cli.list_themes
@@ -2936,6 +2940,22 @@ mod tests {
                 "typo",
                 "--list-themes",
                 "--list-keybinds",
+            ],
+            // --gpu-info and --config-path run before --check-update and both
+            // resolve the profile.
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--check-update",
+                "--gpu-info",
+            ],
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--check-update",
+                "--config-path",
             ],
         ] {
             let cli = Cli::parse_from(&args);
