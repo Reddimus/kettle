@@ -1,17 +1,15 @@
 //! Visual regression test for the right-click context menu.
 //!
-//! v1.3.0 and v1.3.1 shipped a *blank* context menu — the panel bg
-//! quad was drawn AFTER the menu text in the same render pass, so the
-//! opaque bg painted right on top of the just-rendered text. The bug
-//! survived two releases because nothing in CI exercised the menu's
-//! render path: `--screenshot` rendered a no-overlay representative
-//! frame, and the unit tests in `kettle-ui::app` only pinned the
-//! menu's *behavior* (highlight stepping, anchor clamping, hit-test
-//! geometry), not its appearance.
+//! It catches a *blank* context menu, where the opaque panel bg quad
+//! is drawn after the menu text in the same render pass and paints
+//! over it. The default `--screenshot` frame has no overlays, and the
+//! unit tests in `kettle-ui::app` only pin the menu's *behavior*
+//! (highlight stepping, anchor clamping, hit-test geometry), not its
+//! appearance.
 //!
-//! This test renders the menu via the new
-//! `capture_png_with(.., DebugScene::ContextMenu)` headless path
-//! and asserts two invariants:
+//! This test renders the menu via the headless
+//! `capture_png_with(.., DebugScene::ContextMenu)` path and asserts
+//! two invariants:
 //!
 //! 1. The menu PNG differs from the no-menu PNG by enough pixels that
 //!    it's clearly drawing *something* (a blank-menu regression
@@ -20,10 +18,10 @@
 //! 2. Inside the menu area, enough pixels approximately match
 //!    `theme.foreground` to be real label glyphs — not just chrome.
 //!
-//! Two invariants in one test (rather than two separate tests) so we
-//! only spin up one pair of wgpu adapters per `cargo test` run; with
-//! the offscreen software-Vulkan adapter, four-devices-concurrent
-//! has segfaulted in the past on shared CI runners.
+//! Both invariants share one test so each `cargo test` run spins up
+//! only one pair of wgpu adapters. Four concurrent devices on the
+//! offscreen software-Vulkan adapter can segfault on shared CI
+//! runners.
 
 use kettle_config::Config;
 use kettle_render::{DebugScene, capture_png_with};
@@ -68,11 +66,10 @@ fn context_menu_renders_visibly_with_text() {
     // --- Invariant 1: the menu render visibly differs from the no-
     // menu baseline.
     //
-    // v1.3.0/v1.3.1 regression: the menu rendered a fully-opaque
-    // panel bg over its own text in a post-text quad pass. The
-    // resulting PNG was byte-identical to the no-menu baseline
-    // inside the panel area (because the panel bg color equals the
-    // pane bg color — `theme.background` opaque on both).
+    // A blank-menu regression paints the fully-opaque panel bg over
+    // its own text in a post-text quad pass. The PNG is then
+    // byte-identical to the no-menu baseline inside the panel area,
+    // because the panel and pane bg are both opaque `theme.background`.
     let mut diff_count = 0u64;
     for (a, b) in default_px.pixels().zip(menu_px.pixels()) {
         if a != b {
@@ -92,10 +89,10 @@ fn context_menu_renders_visibly_with_text() {
 
     // --- Invariant 2: the menu text glyphs are actually visible.
     //
-    // Scan the lower-left quadrant (where the synthetic menu lives)
-    // and count pixels approximately matching the theme foreground
-    // that did NOT match before — i.e. they're newly drawn by the
-    // menu and roughly the right color to be label text.
+    // Scan the left half between h/4 and 3h/4, which overlaps the
+    // synthetic menu, and count changed pixels that approximately
+    // match the theme foreground. The menu drew them, and they are
+    // roughly the right color to be label text.
     let theme = cfg.theme;
     let fg = (theme.foreground.r, theme.foreground.g, theme.foreground.b);
     let (w, h) = (menu_px.width(), menu_px.height());

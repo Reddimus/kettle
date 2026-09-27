@@ -119,19 +119,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// A cached GPU texture for one decoded image, plus a clone of the `Arc`
-/// whose pointer is the cache key.
+/// A cached GPU texture for one decoded image, plus a clone of the
+/// `ImageData` whose `rgba` pointer is the cache key.
 ///
-/// ABA fix: the cache key is `Arc::as_ptr(&img.rgba)` —
-/// the heap address of the pixel buffer. Holding an `Arc` clone here **pins
-/// that address** for exactly as long as the entry lives in the cache, so a
-/// dropped-then-reallocated image can't land on a still-cached key and bind
-/// the wrong texture. Without this, image A could cache at address `P`, A
-/// gets dropped freeing `P`, and a *different* image B's buffer reallocates
-/// at `P` before [`ImagePipeline::gc`] evicts A — making `ensure_texture(B)`
-/// hit A's stale entry and draw A's pixels for B. The clone is just an
-/// `Arc` refcount bump (the buffer is already shared with the VT layer), and
-/// `gc` releases it the first frame the image isn't drawn.
+/// The cache key is `Arc::as_ptr(&img.rgba)`, the heap address of the pixel
+/// buffer. Holding the clone pins that address while the entry is cached,
+/// which prevents an ABA collision. Without it, image A could cache at
+/// address `P` and be dropped, and a different image B could reallocate at
+/// `P` before [`ImagePipeline::gc`] evicts A. `ensure_texture(B)` would then
+/// hit A's stale entry and draw A's pixels. The clone only bumps refcounts
+/// (the VT layer already shares the buffer), and `gc` releases it the first
+/// frame the image isn't drawn.
 struct CachedTexture {
     /// Keeps both the keyed pixels and their CPU reservation alive.
     _image: ImageData,
@@ -453,14 +451,12 @@ impl ImagePipeline {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    // This pipeline's fragment shader returns PREMULTIPLIED
-                    // color (`rgb * a`), so the blend must not apply alpha a
-                    // second time. `ALPHA_BLENDING` uses `SrcAlpha` for the
-                    // source factor, which computed `rgb * a * a` — a
-                    // 50%-opaque surface contributed 25%, darkening every
-                    // translucent image, panel, highlight, and separator.
-                    // (`glyphpipe` deliberately returns STRAIGHT alpha and
-                    // correctly keeps `ALPHA_BLENDING`.)
+                    // The fragment shader returns PREMULTIPLIED color
+                    // (`rgb * a`), so the blend must not apply alpha again.
+                    // `ALPHA_BLENDING` uses `SrcAlpha` as the source factor,
+                    // which would yield `rgb * a * a` and draw a 50%-opaque
+                    // image at 25%. (`glyphpipe` deliberately returns STRAIGHT
+                    // alpha and correctly keeps `ALPHA_BLENDING`.)
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -540,14 +536,13 @@ impl ImagePipeline {
         queue: &wgpu::Queue,
         img: &ImageData,
     ) -> Option<usize> {
-        // Defense-in-depth: never hand wgpu a texture larger
-        // than the device supports — that's a validation error wgpu's default
-        // (no error-scope) handler turns into a panic, and panic=abort makes it
-        // a whole-process abort. `ImageData::new` already caps dims at
-        // MAX_IMAGE_DIM (8192) for every decode path, but a struct-literal
-        // construction (e.g. the background-image decode in lib.rs) bypasses
-        // `new`, so this is the last guard before `create_texture`. Skipping the
-        // draw is strictly better than aborting the renderer.
+        // Defense-in-depth: never hand wgpu a texture larger than the device
+        // supports. wgpu's default (no error-scope) handler turns that
+        // validation error into a panic, and panic=abort makes it a
+        // whole-process abort. Every `ImageData` constructor caps dims at
+        // MAX_IMAGE_DIM (8192), but the device limit comes from the adapter
+        // and can be lower, so this is the last guard before `create_texture`.
+        // Skipping the draw is strictly better than aborting the renderer.
         let max = device.limits().max_texture_dimension_2d;
         if img.width == 0 || img.height == 0 || img.width > max || img.height > max {
             log::warn!(
@@ -825,14 +820,14 @@ mod aba_guard_tests {
         production
     }
 
-    /// Drift guard (ABA fix). The image cache keys textures
-    /// by the rgba `Arc`'s raw pointer; it MUST hold an `Arc` clone
-    /// (`CachedTexture._rgba`) to pin that address while the entry is cached,
-    /// or a dropped-then-reallocated image can collide on a stale key and draw
-    /// the wrong texture. The field is `_`-prefixed (never read), so a future
-    /// "remove the unused field" cleanup would silently reintroduce the
-    /// hazard — exercising the cache needs a real GPU device, so pin the
-    /// invariant at the source level (same approach as the pane-buffer
+    /// Drift guard for the ABA hazard. The image cache keys textures by the
+    /// rgba `Arc`'s raw pointer, so it MUST hold an `ImageData` clone
+    /// (`CachedTexture._image`) to pin that address while the entry is cached.
+    /// Otherwise a dropped-then-reallocated image can collide on a stale key
+    /// and draw the wrong texture. The field is `_`-prefixed (never read), so
+    /// a future "remove the unused field" cleanup would silently reintroduce
+    /// the hazard. Exercising the cache needs a real GPU device, so this pins
+    /// the invariant at the source level (same approach as the pane-buffer
     /// lifecycle guards in `lib.rs`).
     #[test]
     fn cache_pins_arc_to_prevent_address_reuse() {
@@ -856,7 +851,7 @@ mod aba_guard_tests {
         use std::sync::Arc;
         let rgba: Arc<Vec<u8>> = Arc::new(vec![1, 2, 3, 4]);
         let key = Arc::as_ptr(&rgba) as usize;
-        let pinned = rgba.clone(); // stands in for CachedTexture._rgba
+        let pinned = rgba.clone(); // stands in for CachedTexture._image
         assert_eq!(Arc::as_ptr(&pinned) as usize, key);
         assert_eq!(Arc::strong_count(&rgba), 2);
         // VT layer drops its reference; the pin keeps the buffer (and its

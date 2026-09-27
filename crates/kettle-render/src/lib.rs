@@ -54,7 +54,7 @@ use quad::{QuadInstance, QuadPipeline};
 ///
 /// A colour-emoji face is deliberately absent: it is what these steer away
 /// from. Only a family the system actually has is used, so an unusual install
-/// simply keeps today's behaviour rather than tofu-boxing anything.
+/// keeps its existing fallback cascade rather than tofu-boxing anything.
 #[cfg(target_os = "macos")]
 const TEXT_SYMBOL_FAMILIES: &[&str] = &["STIX Two Math", "Apple Symbols"];
 #[cfg(target_os = "windows")]
@@ -123,8 +123,8 @@ fn resolve_text_symbol_family(font_system: &mut FontSystem) -> Option<&'static s
 /// with or without U+FE0F, U+3030 and U+1F202 among them, and width cannot tell
 /// those apart from `Emoji_Presentation=Yes`. They are out of scope here: a
 /// colour glyph in a two-column cell occupies the space it was given, so it
-/// neither overflows nor misaligns anything. The defect this closes is a
-/// two-cell colour bitmap painted into a one-cell slot.
+/// neither overflows nor misaligns anything. This guards against a two-cell
+/// colour bitmap painted into a one-cell slot.
 ///
 /// Nothing here decides how a cell is drawn on its own. It only says which
 /// cells must not be handed to a colour-emoji face, which is a font-selection
@@ -223,18 +223,13 @@ pub struct LinkRect {
     pub hover: bool,
 }
 
-// Named constants for the right-click context-menu chrome. These
-// magic numbers (12.0 row-pad, 8.0 sep-h, 40.0 horiz-pad, 180.0
-// min-w, 80.0 surface-breathing) used to be duplicated across 16
-// sites in `kettle-render/src/lib.rs` + `kettle-ui/src/app.rs`; the
-// duplication turned earlier layout-math changes into a 16-line
-// search-and-replace instead of a 1-line edit. Re-exported so
-// `kettle-ui` can pull them in via `use kettle_render::menu;`
-// instead of redeclaring.
+// Named constants for the right-click context-menu chrome. Public so
+// `kettle-ui` reads the same values through `kettle_render::menu` instead
+// of redeclaring them.
 pub mod menu {
-    /// Vertical padding inside each context-menu row. Cell-height +
-    /// MENU_ROW_PAD = total row height (~28-32 px on default cell
-    /// metrics — a comfortable click target).
+    /// Vertical padding inside each context-menu row. Cell height +
+    /// `ROW_PAD` = total row height (~28-32 px on default cell
+    /// metrics, a comfortable click target).
     pub const ROW_PAD: f32 = 12.0;
     /// Separator row height. Smaller than a regular row so the menu
     /// reads as grouped without wasting vertical space.
@@ -264,12 +259,9 @@ pub mod menu {
     pub const PANEL_BREATHING: f32 = 80.0;
 }
 
-// v2.40.0 (tear-off UX): tab-drag rendering constants, single home — same
-// rationale as `menu` above (the ghost/marker/highlight numbers were inline
-// literals scattered across two crates before this). Gesture *thresholds*
-// (arm distance, tear hysteresis) stay in kettle-ui with the drag FSM; only
-// paint geometry/opacity lives here. Re-exported for kettle-ui via
-// `kettle_render::tab_drag`.
+// Tab-drag rendering constants, public for kettle-ui like `menu` above.
+// Only paint geometry/opacity lives here. Gesture *thresholds* (arm
+// distance, tear hysteresis) stay in kettle-ui with the drag FSM.
 pub mod tab_drag {
     /// Drag-ghost drop-shadow offset at rest (no tear pending).
     pub const GHOST_SHADOW_OFFSET_PX: f32 = 3.0;
@@ -291,8 +283,8 @@ pub mod tab_drag {
     /// leaves the strip, signalling "this is coming out".
     pub const GHOST_BG_ALPHA_LIFT: f32 = 0.30;
 
-    /// Re-dock insertion-marker line thickness (was a 2.0 inline literal;
-    /// 3px survives dark-on-dark themes at a glance).
+    /// Re-dock insertion-marker line thickness. 3px survives dark-on-dark
+    /// themes at a glance.
     pub const INSERT_MARKER_PX: f32 = 3.0;
     /// Square end-caps on the insertion marker — the "bullet" idiom the
     /// per-tab activity dot already uses (this renderer has no curves).
@@ -646,7 +638,7 @@ pub struct ContextMenu {
     /// menu UX parity). Rows `0..scroll_offset` are scrolled
     /// off-panel; the renderer also stops drawing when the
     /// accumulated row height exceeds `panel_h_clamped`. Zero means
-    /// "show from the top" (the default before scrollable submenus).
+    /// "show from the top".
     pub scroll_offset: usize,
     /// Panel width after the surface clamp. Zero means use natural width.
     pub panel_w_clamped: f32,
@@ -974,11 +966,12 @@ impl SearchBarGeometry {
     }
 }
 
-/// Search-bar + hyperlink overlay state.
+/// Overlay state projected by the UI, covering search, links, hints, pickers,
+/// menus, dialogs, and banners.
 #[derive(Default)]
 pub struct Overlay {
-    /// Rich v2.38 search-lane projection. When present it takes precedence over
-    /// the legacy `search_query` fields below.
+    /// Rich search-lane projection. When present it takes precedence over the
+    /// legacy `search_query` fields below.
     pub search: Option<SearchOverlay>,
     /// Compatibility shim for callers predating [`SearchOverlay`]. New callers
     /// should leave these three fields at their defaults.
@@ -994,9 +987,9 @@ pub struct Overlay {
     pub hint_labels: Vec<HintLabel>,
     /// Input-method preedit text drawn at the focused terminal cursor.
     pub ime_preedit: Option<ImePreedit>,
-    /// Shell completion card shown near the top of the focused pane.
+    /// Shell completion card shown above or below the focused pane's command.
     pub completion: Option<CompletionOverlay>,
-    /// Visual receipt for the focused pane's most recent clipboard bitmap.
+    /// Visual receipt for the focused pane's most recent image or video paste.
     pub media_paste_receipt: Option<MediaPasteReceiptOverlay>,
     /// `Some(typed)` while the SSH launcher is open.
     pub ssh_query: Option<String>,
@@ -1020,11 +1013,11 @@ pub struct Overlay {
     /// Window has keyboard focus. Terminal cursors are suppressed entirely
     /// while false and resume from the unchanged DEC state when focus returns.
     pub window_focused: bool,
-    /// v2.26.0: the focused pane's scrollbar should paint in its bright
-    /// (interacting) state — the pointer is hovering the scrollbar gutter or the
-    /// thumb is being dragged. At rest the bar is drawn dim; being scrolled back
-    /// (`display_offset > 0`) also brightens it, decided per-pane in the renderer
-    /// from the snapshot, so this only needs to carry the hover/drag signal.
+    /// The focused pane's scrollbar should paint in its bright (interacting)
+    /// state because the pointer is over the scrollbar gutter or the thumb is
+    /// being dragged. At rest the bar is dim. The renderer brightens a
+    /// scrolled-back pane (`display_offset > 0`) itself from the snapshot, so
+    /// this carries only the hover/drag signal.
     pub scrollbar_active: bool,
     /// Cursor is in its "on" blink phase.
     pub cursor_visible: bool,
@@ -1032,17 +1025,17 @@ pub struct Overlay {
     /// top of everything else so an overlapping pane border doesn't
     /// occlude the menu.
     pub context_menu: Option<ContextMenu>,
-    /// Phase 3 of [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
-    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md): when
-    /// `Some`, render a centered modal dialog over a dimming
-    /// backdrop. The renderer paints the prompt + button row;
-    /// the button at `focus_idx` gets the accent-border treatment.
+    /// `Some` while a confirmation is pending (see
+    /// [`TERMINATOR-CONFIRM-DIALOG-DESIGN.md`](
+    /// ../../../docs/TERMINATOR-CONFIRM-DIALOG-DESIGN.md)). The renderer
+    /// paints it as a bottom bar holding the prompt and the button row, and
+    /// marks the button at `focus_idx`.
     pub confirm_dialog: Option<ConfirmDialogOverlay>,
     /// `Some` while the in-app settings overlay is open. Painted
     /// centered, above panes but below the confirm dialog.
     pub settings: Option<SettingsOverlay>,
-    /// v2.20.0 (Ghostty `resize-overlay` parity): `Some((cols, rows))` while
-    /// the transient size chip should paint (the app owns the timing; the
+    /// Ghostty `resize-overlay` parity: `Some((cols, rows))` while the
+    /// transient size chip should paint (the app owns the timing; the
     /// renderer just draws a centered `cols×rows` chip above everything).
     pub resize_overlay: Option<(u16, u16)>,
     /// `Some((tag, url))` while the "a newer kettle release is
@@ -1064,7 +1057,7 @@ fn cursor_focus_gate(window_focused: bool, terminal_requests_cursor: bool) -> bo
     window_focused && terminal_requests_cursor
 }
 
-/// Renderer-side projection of `App::confirm_dialog`.
+/// Renderer-side projection of `WindowState::confirm_dialog`.
 /// Stripped of dispatch state — just the bits needed to paint.
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogOverlay {
@@ -1084,14 +1077,14 @@ pub struct ConfirmDialogButton {
     pub destructive: bool,
 }
 
-/// Renderer-side projection of `App::settings_nav` + the resolved
+/// Renderer-side projection of `WindowState::settings_nav` + the resolved
 /// field values. The UI computes labels/values (reading `Config`); the renderer
 /// just paints a centered panel — a row of category tabs, then label/value
 /// rows for the active category, with the focused row highlighted.
-// `PartialEq` (audit P1b fix): lets the renderer memoize
-// `settings_display_lines`'s output against the last `SettingsOverlay` it was
-// computed from, instead of re-running a `format!()` per display line on
-// every painted frame the Settings overlay stays open.
+// `PartialEq` lets the renderer memoize `settings_display_lines`'s output
+// against the last `SettingsOverlay` it was computed from, instead of
+// re-running a `format!()` per display line on every painted frame the
+// Settings overlay stays open.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsOverlay {
     /// Category tab names, in order.
@@ -1102,11 +1095,11 @@ pub struct SettingsOverlay {
     pub rows: Vec<SettingsRow>,
     /// Index into `rows` of the focused field (gets the accent highlight).
     pub focused_row: usize,
-    /// v2.20.0: `cfg.vim_menu_nav` — the footer hint advertises the vim keys
+    /// Mirrors `cfg.vim_menu_nav`; the footer hint advertises the vim keys
     /// when the setting is on.
     pub vim_nav: bool,
-    /// v2.23.0: an optional contextual note shown below the keybind footer —
-    /// e.g. the Graphics category's "Active GPU: … • ⚠ restart to apply". `None`
+    /// An optional contextual note shown below the keybind footer, e.g. the
+    /// Graphics category's "Active GPU: … • ⚠ restart kettle to apply". `None`
     /// on categories that don't need it.
     pub footer_note: Option<String>,
 }
@@ -1116,8 +1109,8 @@ pub struct SettingsOverlay {
 pub struct SettingsRow {
     pub label: String,
     pub value: String,
-    /// v2.24.0: `true` when this row doesn't apply to the current state (e.g. the
-    /// image path while `background-type != image`) — drawn dimmed and skipped by
+    /// `true` when this row doesn't apply to the current state (e.g. the image
+    /// path while `background-type != image`). Drawn dimmed and skipped by
     /// keyboard/mouse nav.
     pub disabled: bool,
 }
@@ -1942,10 +1935,10 @@ pub struct TabSeg {
     /// Close-button (✕) hit rect within the segment.
     pub close: Rect4,
     pub title: String,
-    /// v2.26.0: home-abbreviated full cwd path when the label is directory-
-    /// derived, enabling width-aware tiering (full path → leaf dir name → tail).
-    /// `None` for explicit/override and shell-set (OSC 2) titles, which are
-    /// fitted with the older `fit_tab_title` middle-ellipsis path.
+    /// Home-abbreviated full cwd path when the label is directory-derived,
+    /// enabling width-aware tiering (full path → leaf dir name → tail). `None`
+    /// for explicit/override and shell-set (OSC 2) titles, which use the
+    /// `fit_tab_title` middle-ellipsis path.
     pub path: Option<String>,
     pub active: bool,
     /// Inactive-tab activity. Always `Normal` on the
@@ -1954,21 +1947,19 @@ pub struct TabSeg {
     pub activity: TabActivity,
 }
 
-/// The tab bar geometry — computed once in the UI, used for both drawing
-/// (here) and click hit-testing (app), so there is a single source of truth.
 /// Thin status-bar strip at the top or bottom of the
 /// surface. Disabled by default; when on, the App sets `height` > 0
 /// and supplies a pre-formatted single-line string.
 ///
 /// Content is a free-form `String` so the App can compose whatever
-/// it wants (the default: "HH:MM:SS · theme · pane title").
+/// it wants (the default: "HH:MM:SS UTC · theme · pane title").
 /// Renderer just draws background + text; layout / refresh / content
 /// composition all live in the App.
 pub struct StatusBar {
     /// Height in px (0 = hidden).
     pub height: f32,
-    /// Top-left y of the strip. 0 for top position, `surface_h - h`
-    /// for bottom.
+    /// Top-left y of the strip. At the top it is 0, or just below a top tab
+    /// bar. At the bottom the App places it above the search lane.
     pub y: f32,
     /// Pre-formatted content (single line).
     pub text: String,
@@ -1987,7 +1978,8 @@ impl StatusBar {
 pub struct TabBar {
     /// Bar height in px (0 = hidden).
     pub height: f32,
-    /// Top-left Y of the bar (0 for top position, `surface_h - h` for bottom).
+    /// Top-left Y of the bar. 0 at the top; at the bottom the App places it
+    /// above the search lane and any bottom status bar.
     pub y: f32,
     pub segments: Vec<TabSeg>,
     /// The trailing "new tab" (+) button rect.
@@ -2031,7 +2023,7 @@ pub struct TabBar {
     /// "main-axis" field would have been tidier, but this one is reported over
     /// the control plane under its own name, and agents already read it.
     pub drag_cursor_y: Option<f32>,
-    /// v2.40.0 (tear-off UX): 0.0..=1.0 — how far the drag has moved from
+    /// 0.0..=1.0 tear-off lift, measuring how far the drag has moved from
     /// the tab band toward the tear threshold. 0.0 at/inside the band,
     /// 1.0 at (or past) the distance `tear_threshold_crossed` fires at.
     /// Escalates the ghost's shadow/opacity (`tab_drag::*_LIFT*`) so a
@@ -2040,25 +2032,25 @@ pub struct TabBar {
     /// on non-Wayland the tear consumes the gesture at 1.0, so the full
     /// range is mostly visible on Wayland's at-release path.
     pub tear_lift: f32,
-    /// v2.19.0 (tear-off UX, re-dock): `Some(rect)` while a torn-off
+    /// `Some(rect)` while a torn-off
     /// window hovers this window's tab band — the accent-colored
     /// insertion marker showing where the dropped tab will land. The
     /// UI computes the rect (a `tab_drag::INSERT_MARKER_PX` line between
     /// segments, oriented per `tab-bar-pos`) so the renderer stays
     /// geometry-free, same contract as `hovered_close_idx`.
     pub insert_marker: Option<Rect4>,
-    /// v2.40.0 (tear-off UX): the strip's full band rect in surface
+    /// The strip's full band rect in surface
     /// coords, both orientations — the canvas for the dock-target
     /// highlight (`tab_drag::DOCK_HIGHLIGHT_*`) drawn while
     /// `insert_marker` is latched. UI-computed, same geometry-free
     /// contract as `insert_marker`.
     pub band: Rect4,
-    /// v2.26.0: `‹` scroll-left button rect, present (non-zero) only when the
+    /// `‹` scroll-left button rect, present (non-zero) only when the
     /// horizontal tab bar overflows (more tabs than fit at `tab_min_width`).
     /// Clicking it reveals tabs scrolled off the left. `(0,0,0,0)` when the bar
     /// fits or for vertical bars.
     pub scroll_left: Rect4,
-    /// v2.26.0: `›` scroll-right button rect (see `scroll_left`).
+    /// `›` scroll-right button rect (see `scroll_left`).
     pub scroll_right: Rect4,
 }
 
@@ -2092,11 +2084,10 @@ pub struct PaneView<'a> {
     pub id: u64,
     /// Pixel rect `(x, y, w, h)` within the surface.
     pub rect: (f32, f32, f32, f32),
-    /// v2.20.0 P2 (perf): RAW terminal state captured under the Term lock by
-    /// `redraw` (µs-scale flat copy, pooled per window), borrowed here so the
-    /// whole GPU frame runs with the lock RELEASED — the PTY reader no longer
-    /// stalls behind shaping/acquire/present. Replaces the former
-    /// `&'a Term<EventProxy>` borrowed from a frame-held `MutexGuard`.
+    /// Raw terminal state captured under the Term lock by `redraw` (µs-scale
+    /// flat copy, pooled per window), borrowed here so the whole GPU frame
+    /// runs with the lock released and the PTY reader never stalls behind
+    /// shaping/acquire/present.
     pub snap: &'a PaneSnapshot,
     pub focused: bool,
     /// Decoded images placed in this pane (Sixel / kitty / iTerm2).
@@ -2140,7 +2131,7 @@ pub struct PaneView<'a> {
     pub group_name: Option<&'a str>,
 }
 
-/// C3 (multi-window): the process-wide GPU objects shared by every window's
+/// The process-wide GPU objects shared by every window's
 /// Renderer. wgpu's Instance/Adapter/Device/Queue handles are internally
 /// ref-counted — `Clone` is a refcount bump, and one device happily serves N
 /// surfaces. Window 1 creates this inside `Renderer::new`; windows 2..N reuse
@@ -2152,16 +2143,16 @@ pub struct GpuContext {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    /// v2.31.0: set `true` when wgpu reports a fatal uncaptured error or a
-    /// device-loss (a GPU driver TDR/reset, VRAM exhaustion, or internal
-    /// backend fault). Validation errors are logged but deliberately excluded.
-    /// The handlers installed in `install_gpu_error_handlers` set this flag
-    /// instead of letting wgpu's default handler panic — which, with the
-    /// release profile's `panic = "abort"`, hard-killed kettle on a GPU reset
-    /// with no crash log. The App checks this (a refcount-shared `Arc`, so every
-    /// window's clone sees it) to stop rendering on a dead device and surface a
-    /// "GPU device lost" state rather than spin or crash. Reset by rebuilding
-    /// the renderer on a fresh context.
+    /// Set `true` when wgpu reports a fatal uncaptured error or a device loss
+    /// (a GPU driver TDR/reset, VRAM exhaustion, or internal backend fault).
+    /// Validation errors are logged but deliberately excluded. The handlers
+    /// installed in `install_gpu_error_handlers` set this flag instead of
+    /// letting wgpu's default handler panic, which under the release profile's
+    /// `panic = "abort"` would kill kettle on a GPU reset with no crash log.
+    /// The App checks this (a refcount-shared `Arc`, so every window's clone
+    /// sees it) to stop rendering on a dead device and surface a "GPU device
+    /// lost" state rather than spin or crash. Reset by rebuilding the renderer
+    /// on a fresh context.
     pub gpu_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// First fatal wgpu error for this device. Error callbacks only latch this
     /// bounded in-memory value; the UI thread owns durable diagnostics so a
@@ -2203,9 +2194,9 @@ pub enum FrameOutcome {
 }
 
 impl GpuContext {
-    /// v2.31.0: has the GPU device been lost (driver reset / TDR) or hit an
-    /// uncaptured error (e.g. VRAM exhaustion)? Once `true`, no rendering will
-    /// succeed against this context.
+    /// Whether the GPU device was lost (driver reset / TDR) or hit a fatal error
+    /// (e.g. VRAM exhaustion). Once `true`, no rendering will succeed against
+    /// this context.
     pub fn is_lost(&self) -> bool {
         self.gpu_lost.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -2244,11 +2235,11 @@ impl GpuContext {
     }
 }
 
-/// v2.31.0: install wgpu's uncaptured-error + device-lost handlers so a GPU
-/// fault becomes a LOGGED, observable event instead of wgpu's default panic —
-/// which, under the release `panic = "abort"`, hard-aborted kettle (no unwind,
-/// no log) on a driver TDR/reset or a VRAM allocation failure. After this, the
-/// shared `gpu_lost` flag flips and the App degrades gracefully.
+/// Installs wgpu's uncaptured-error and device-lost handlers so a GPU fault is
+/// logged instead of hitting wgpu's default panic. Under the release
+/// `panic = "abort"`, that panic kills kettle with no unwind and no log on a
+/// driver TDR/reset or a VRAM allocation failure. A fatal fault sets the shared
+/// `gpu_lost` flag, and the App degrades gracefully.
 fn install_gpu_error_handlers(
     device: &wgpu::Device,
     gpu_lost: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2259,15 +2250,13 @@ fn install_gpu_error_handlers(
     let fault = gpu_fault.clone();
     let wake = recovery_wake.clone();
     // The uncaptured-error path catches errors NOT routed to an error scope.
-    // NOTE (adversarial review): in wgpu 29 a genuine DEVICE-LOSS is delivered
-    // via `set_device_lost_callback` below, NOT here — this handler only ever
-    // sees `Validation` / `OutOfMemory` / `Internal`. So gate the latch by kind:
-    // a `Validation` error is a kettle code/data bug (bad descriptor, over-limit
-    // dim, stale bind group) on a HEALTHY device — log it loudly but do NOT set
-    // `gpu_lost` (that would falsely brick the window with "GPU device lost").
-    // Only `OutOfMemory` (VRAM exhaustion) / `Internal` are device-fatal. Without
-    // ANY handler, wgpu's default panics → `panic=abort` hard-crash, so installing
-    // this (even just to log) is what prevents the crash. `Fn`; must not panic.
+    // wgpu delivers a real device loss through `set_device_lost_callback`
+    // below, not here; this handler only sees `Validation`, `OutOfMemory`, and
+    // `Internal`. A `Validation` error is a kettle code/data bug (bad
+    // descriptor, over-limit dim, stale bind group) on a healthy device, so it
+    // is logged loudly but does not set `gpu_lost`, which would falsely brick
+    // the window with "GPU device lost". Only `OutOfMemory` (VRAM exhaustion)
+    // and `Internal` are device-fatal. `Fn`; must not panic.
     device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| match e {
         wgpu::Error::Validation { .. } => {
             log::error!("wgpu validation error (a kettle bug, NOT device loss): {e}");
@@ -2287,8 +2276,9 @@ fn install_gpu_error_handlers(
     let fault2 = gpu_fault.clone();
     let wake2 = recovery_wake.clone();
     device.set_device_lost_callback(move |reason, msg| {
-        // `Destroyed` fires on our own clean shutdown (`device.destroy()` at drop)
-        // — that is not a crash. Only an `Unknown` loss (driver TDR/reset) flags.
+        // `Destroyed` fires only after our own `device.destroy()` (the wedged
+        // screenshot reset, which latches its own fault first), so it needs no
+        // flag here. Only an `Unknown` loss (driver TDR/reset) flags.
         if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
             log::error!("wgpu device lost ({reason:?}): {msg}");
             latch_gpu_fault(&flag2, &fault2, "device_lost", msg);
@@ -2338,10 +2328,10 @@ fn bounded_gpu_message(message: &str) -> String {
 }
 
 impl GpuContext {
-    /// v2.23.0: the live adapter's identity, in kettle's vocabulary — feeds the
-    /// settings `Active now: <gpu> (<kind>, <backend>)` line so the user sees
-    /// which GPU is actually in use (vs. the pinned/preferred one, which only
-    /// takes effect on restart).
+    /// The live adapter's identity, in kettle's vocabulary. It feeds the
+    /// settings `Active GPU: <gpu> (<kind>, <backend>)` line, so the user sees
+    /// which GPU is actually in use rather than the pinned/preferred one, which
+    /// only takes effect on restart.
     pub fn adapter_info(&self) -> GpuAdapterInfo {
         let i = self.adapter.get_info();
         GpuAdapterInfo {
@@ -2354,12 +2344,12 @@ impl GpuContext {
     }
 }
 
-/// v2.21.0 (idle perf): the foreground glyph drawn on top of a focused solid
-/// block cursor this frame. The glyph is rendered in its OWN tiny renderer +
-/// 1-line buffer rather than recolored INTO the pane text buffer, so a cursor
-/// blink no longer mutates the pane buffer (which would force the expensive
-/// whole-viewport `prepare`). The glyph bitmap is already in the atlas (it is
-/// part of the visible pane text), so the 1-glyph prepare never grows it.
+/// The foreground glyph drawn on top of a focused solid block cursor this
+/// frame. It is rendered in its own tiny renderer and 1-line buffer rather than
+/// recolored into the pane text buffer, so a cursor blink does not mutate the
+/// pane buffer and force the expensive whole-viewport `prepare`. The glyph
+/// bitmap is already in the atlas (it is part of the visible pane text), so the
+/// 1-glyph prepare never grows it.
 struct PendingCursorGlyph {
     /// Surface-pixel top-left of the cursor cell.
     x: f32,
@@ -2404,9 +2394,9 @@ fn cursor_glyph_damage_key(
     Some(hash.finish())
 }
 
-/// v2.21.x: the decoded background-image, animated. A still image is one frame;
-/// an animated GIF / APNG / animated WebP is many. `frames.is_empty()` encodes a
-/// FAILED decode (drives the retry throttle, like the old inner `Option::None`).
+/// The decoded background-image, animated. A still image is one frame; an
+/// animated GIF / APNG / animated WebP is many. `frames.is_empty()` encodes a
+/// failed decode, which drives the retry throttle.
 struct BgImageAnim {
     /// The configured path this was decoded from (cache key part 1).
     path: String,
@@ -2437,13 +2427,13 @@ pub struct Renderer {
     font_system: FontSystem,
     /// The face to request for a codepoint Unicode renders as text by default,
     /// when this system has one. `None` leaves such cells on the platform
-    /// fallback cascade, which is what they had before.
+    /// fallback cascade.
     text_symbol_family: Option<&'static str>,
     swash: SwashCache,
     atlas: TextAtlas,
     viewport: Viewport,
     text_renderer: TextRenderer,
-    /// v2.25.0: cell-locked pane-text renderer (the default `text-renderer=grid`
+    /// Cell-locked pane-text renderer (the default `text-renderer=grid`
     /// path). Pins every glyph to its grid cell so fallback/ligature/CJK glyphs
     /// can't drift off the `col*cell_w` grid that selection / cursor / hit-testing
     /// use. glyphon's `text_renderer` above still draws chrome / titlebars /
@@ -2465,7 +2455,7 @@ pub struct Renderer {
     /// Without this, a font/scale/cache invalidation can drop the live draw
     /// count to zero and cursor-only frames keep presenting blank pane text.
     grid_glyphs_dirty: bool,
-    /// v2.25.1: text-area / grid-glyph layout damage key. Cursor blink must not
+    /// Text-area / grid-glyph layout damage key. Cursor blink must not
     /// be part of this key: a blink changes cursor quads / cursor glyph only,
     /// never pane text glyph instances. Geometry, cell metrics, renderer mode,
     /// font shaping inputs, and pane viewport dimensions do belong here because
@@ -2492,29 +2482,28 @@ pub struct Renderer {
     /// palette across thousands of cells, while the lift itself performs a
     /// bisection with many nonlinear color conversions.
     minimum_contrast_cache: MinimumContrastCache,
-    /// v2.20.0 P1 (perf): per-pane, per-row content keys for the line-level
-    /// shaping cache. `build_pane` hashes each grid row's style runs (text,
-    /// fg, bold, italic); a row whose key matches last frame is SKIPPED
-    /// entirely — its `BufferLine` keeps its shaped+laid-out caches. The old
-    /// whole-buffer `set_rich_text` reset every line's shaping every frame,
-    /// so an idle blink repaint re-shaped 100% of all visible text. Grown /
-    /// truncated in lockstep with `pane_buffers` (the keys describe what is
-    /// IN the buffer at that index, so they must live and die with it).
+    /// Per-pane, per-row content keys for the line-level shaping cache.
+    /// `build_pane` hashes each grid row's style runs (text, fg, bold, italic).
+    /// A row whose key matches last frame is skipped entirely, so its
+    /// `BufferLine` keeps its shaped and laid-out caches and an idle blink
+    /// repaint does not re-shape visible text. Grown and truncated in lockstep
+    /// with `pane_buffers`, because the keys describe what is in the buffer at
+    /// that index.
     pane_line_keys: Vec<Vec<u64>>,
-    /// v2.20.0 P1: per-pane key over the inputs that change how a row SHAPES
+    /// Per-pane key over the inputs that change how a row SHAPES
     /// without changing its run tuples — font-family variants, ligature
     /// toggle, font-features, shaping mode. On mismatch the pane's row keys
     /// are wiped so every row re-sets via `reset_new` (the only path that
     /// updates a `BufferLine`'s internal shaping mode).
     pane_style_keys: Vec<u64>,
-    /// v2.20.0 P1: pooled scratch for assembling one row's text.
+    /// Pooled scratch for assembling one row's text.
     line_text_scratch: String,
-    /// v2.20.0 P1b: chrome-label caches (titlebar / tab / status / glyph
+    /// Chrome-label caches (titlebar / tab / status / glyph
     /// buttons) gate their `Buffer::set_text` (which re-shapes
     /// unconditionally) on text equality. Text-only keys are sound while the
     /// font family is stable; this key invalidates them all when it changes.
     chrome_style_key: u64,
-    /// v2.21.0 (idle perf): hash of the chrome label text shaped last frame
+    /// Hash of the chrome label text shaped last frame
     /// (titlebars, tab labels, status, resize chip). When it is unchanged AND
     /// no pane row reshaped AND no overlay is open, the whole-viewport glyphon
     /// `prepare` (which re-encodes EVERY visible glyph's vertices) is skipped
@@ -2525,15 +2514,14 @@ pub struct Renderer {
     /// the frame is assembled, so this latch forces a retry after an error
     /// instead of accepting partially retained vertices as current.
     text_prepare_dirty: bool,
-    /// v2.23.0 fix: whether ANY text overlay (settings, palette, search, menu,
-    /// …) was open the previous frame. The `need_prepare` damage gate forces a
-    /// glyphon prepare while an overlay is open, but the frame an overlay
-    /// *closes* would otherwise see "no overlay + nothing changed" and SKIP the
-    /// prepare — re-rendering the just-closed overlay's cached text vertices, so
-    /// the panel lingered on screen until the next keystroke. Tracking the
-    /// previous open-state lets the close transition force one clearing prepare.
+    /// Whether any text overlay (settings, palette, search, menu, ...) was open
+    /// the previous frame. The `need_prepare` damage gate forces a glyphon
+    /// prepare while an overlay is open. On the frame an overlay closes, the
+    /// gate would otherwise see no overlay and no change, skip the prepare, and
+    /// keep drawing the closed panel's cached text until the next keystroke.
+    /// This flag lets the close transition force one clearing prepare.
     last_overlay_open: bool,
-    /// v2.21.0 (idle perf): dedicated renderer + 1-line buffer for the focused
+    /// Dedicated renderer + 1-line buffer for the focused
     /// solid-block cursor's foreground glyph, drawn in its own pass on top of
     /// the cursor block quad. Decoupling it from the pane text buffer is what
     /// lets a blinking BLOCK cursor (the default) skip the whole-viewport
@@ -2555,37 +2543,38 @@ pub struct Renderer {
     /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
     /// the atlas and invalidate the cached pane vertices).
     last_cursor_char: Option<char>,
-    /// v2.20.0 P1b: last text shaped into each `pane_titlebar_buffers` slot.
+    /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
-    /// v2.20.0 P1b: last text shaped into each `tab_buffers` slot.
+    /// Last text shaped into each `tab_buffers` slot.
     tab_texts: Vec<String>,
-    /// v2.38.2: last text shaped into each `hint_buffers` slot. Quick-select
-    /// labels are byte-stable while the overlay is open, but the loop
-    /// re-shaped all of them (up to ~100) on every blink/keystroke redraw —
-    /// free-ish under no-fallback shaping, real work under Advanced.
+    /// Last text shaped into each `hint_buffers` slot. Quick-select labels are
+    /// byte-stable while the overlay is open, so this gate skips re-shaping up
+    /// to ~100 of them on every blink/keystroke redraw (cheap under no-fallback
+    /// shaping, real work under Advanced).
     hint_texts: Vec<String>,
-    /// v2.20.0 P1b: last text shaped into `tab_close_buffer` / `tabbar_buffer`
+    /// Last text shaped into `tab_close_buffer` / `tabbar_buffer`
     /// / `new_tab_arrow_buffer` / `status_bar_buffer`. The first three are
     /// constant glyphs, so after frame 1 these gates always hold.
     tab_close_text: String,
     tabbar_text: String,
     new_tab_arrow_text: String,
-    /// v2.26.0: last text shaped into the `‹` / `›` overflow scroll-arrow
+    /// Last text shaped into the `‹` / `›` overflow scroll-arrow
     /// buffers (constant glyphs → the gate holds after frame 1).
     scroll_left_text: String,
     scroll_right_text: String,
     status_bar_text: String,
-    /// v2.20.0 (Ghostty parity): the transient resize chip's text buffer +
-    /// its P1b equality gate (re-shaped only when the grid size changes).
+    /// Ghostty parity: the transient resize chip's text buffer and its
+    /// equality gate (re-shaped only when the grid size changes).
     resize_overlay_buffer: TextBuffer,
     resize_overlay_text: String,
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
     ime_text: String,
-    /// Pooled scratch for the per-frame cell/UI quad list
-    /// (`render_frame_with_status` filled a fresh `Vec` of `panes*16+256`
-    /// `QuadInstance`s every frame). Taken + cleared at the top of the frame,
-    /// returned after the GPU upload — same high-water pooling as `span_scratch`.
+    /// Pooled scratch for the per-frame cell/UI quad list, so
+    /// `render_frame_with_status` does not allocate a fresh `Vec` of
+    /// `panes*16+256` `QuadInstance`s every frame. Taken and cleared at the
+    /// top of the frame, returned after the GPU upload; same high-water pooling
+    /// as `span_scratch`.
     quad_scratch: Vec<QuadInstance>,
     /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
     /// for the title text drawn in the titlebar quad (see
@@ -2605,17 +2594,17 @@ pub struct Renderer {
     /// Dropdown-parity: one buffer per row's right-aligned shortcut
     /// hint (empty-hint rows shape nothing). Pooled like its sibling.
     context_menu_hint_buffers: Vec<TextBuffer>,
-    /// v2.38.2 P1b: last text shaped into each `context_menu_hint_buffers` slot.
+    /// Last text shaped into each `context_menu_hint_buffers` slot.
     context_menu_hint_texts: Vec<String>,
     /// One text buffer per display line of the settings overlay
     /// (title, category tabs, field rows, footer). Grown + truncated like the
     /// context-menu pool.
     settings_buffers: Vec<TextBuffer>,
-    /// v2.38.2 P1b: last text shaped into each `settings_buffers` slot. Moving
-    /// the focused row only changes 2 of N lines (the old/new `▸` mark), so
-    /// this catches what the whole-overlay `settings_lines_cache` gate below
-    /// can't: it still recomputes `lines` on ANY overlay change, but the
-    /// per-row reshape is skipped for every row whose text is unaffected.
+    /// Last text shaped into each `settings_buffers` slot. Moving the focused
+    /// row changes only 2 of N lines (the old/new `▸` mark). The whole-overlay
+    /// `settings_lines_cache` gate below still recomputes `lines` on any
+    /// overlay change, but this gate skips the reshape for every row whose text
+    /// is unaffected.
     settings_texts: Vec<String>,
     /// v2.38.2 P1b: memoizes `settings_display_lines(set)` — a `format!()`
     /// per display line — keyed on the last `SettingsOverlay` it was computed
@@ -2657,7 +2646,7 @@ pub struct Renderer {
     /// (drawn left of `+`) so it lands precisely in `new_tab_menu` and the `+`
     /// stays put in `new_tab`. Unused when the dropdown is disabled.
     new_tab_arrow_buffer: TextBuffer,
-    /// v2.26.0: `‹` / `›` tab-bar overflow scroll-arrow glyphs, each in its own
+    /// `‹` / `›` tab-bar overflow scroll-arrow glyphs, each in its own
     /// buffer (constant glyph, shaped once). Drawn only when the horizontal tab
     /// bar overflows (more tabs than fit at `tab_min_width`).
     scroll_left_buffer: TextBuffer,
@@ -2671,14 +2660,12 @@ pub struct Renderer {
     /// One buffer, N positions via per-tab `TextArea` instances.
     tab_close_buffer: TextBuffer,
     search_buffer: TextBuffer,
-    /// v2.38.2 P1b: last text shaped into `search_buffer`. Shared across the
-    /// search / command-palette / layout-picker / ssh-launcher / edit-title /
-    /// confirm-dialog / update-banner bars — only one of those `else if`
-    /// branches paints per frame, so a single cache is enough (unlike the
-    /// per-row pools above, there's no risk of comparing one overlay's label
-    /// against a different overlay's stale cache: whichever branch runs next
-    /// simply re-shapes once, the same one-time cost a fresh buffer already
-    /// pays on the first frame it opens).
+    /// Last text shaped into `search_buffer`. Shared across the search /
+    /// command-palette / layout-picker / ssh-launcher / edit-title /
+    /// confirm-dialog / update-banner bars. Only one of those `else if`
+    /// branches paints per frame, so a single cache is enough. When a
+    /// different bar takes over, it re-shapes once, the same cost a fresh
+    /// buffer pays on its first frame.
     search_buffer_text: String,
     /// Status-bar text. Single line, reused every frame
     /// via `set_text` — same one-buffer pattern `tabbar_buffer` uses
@@ -2699,38 +2686,31 @@ pub struct Renderer {
     pane_outlines: OutlinePipeline,
     /// Second quad pass drawn *after* text (pane dimming, scrollbar).
     overlay_quads: QuadPipeline,
-    /// Third quad pass drawn after the overlay quads — reserved for
-    /// the right-click context menu's shadow / panel / border /
-    /// highlight quads. Lives in its own pass so the menu's text
-    /// (rendered by `menu_text_renderer` below) lands *on top of* the
-    /// panel bg rather than underneath it. This was split out
-    /// after v1.3.0+v1.3.1 shipped a blank menu — opaque panel-bg
-    /// quad in `overlay_quads` was painted on top of the menu text
-    /// (which was bundled with all other text in the single
-    /// `text_renderer.render` call between `quads.draw` and
-    /// `overlay_quads.draw`).
+    /// Third quad pass drawn after the overlay quads, for overlay chrome
+    /// (context menu, settings panel, confirm bar, resize chip, and similar).
+    /// It draws between `overlay_quads` and `menu_text_renderer`, so the panels
+    /// sit above pane dimming and the main text while their own labels land
+    /// *on top of* the panel bg.
     menu_quads: QuadPipeline,
-    /// Dedicated TextRenderer for the context-menu rows. Shares
-    /// `atlas` + `viewport` with `text_renderer` (glyphon allows
-    /// multiple renderers against one atlas); rendered as the final
-    /// pass so menu labels sit above the panel bg.
+    /// Dedicated TextRenderer for the text drawn over `menu_quads`
+    /// (context-menu rows, settings lines, the resize chip, ...). Shares
+    /// `atlas` + `viewport` with `text_renderer` (glyphon allows multiple
+    /// renderers against one atlas); rendered after `menu_quads` so menu labels
+    /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
     imgs: imgpipe::ImagePipeline,
     /// Single-instance overlay pipeline drawn between menu chrome and menu
     /// text, so the receipt thumbnail cannot cover its own status labels.
     media_receipt_img: imgpipe::ImagePipeline,
-    /// v2.23.0: dedicated pipeline for the **background image (wallpaper)**,
-    /// drawn at the very back — between the surface clear and the cell/chrome
-    /// `quads` pass — so cell backgrounds (selection, syntax, TUI panels),
-    /// chrome (tab bar / status bar / per-pane titlebars), and pane borders all
-    /// composite OPAQUELY on top of the wallpaper (the standard kitty / wezterm
-    /// / alacritty layering). Inline kitty / sixel images stay in `imgs`, drawn
-    /// *after* the quads so they sit over cell backgrounds. Pre-2.23.0 the
-    /// wallpaper shared `imgs` and drew *after* every quad, so an opaque
-    /// wallpaper hid all cell backgrounds AND let the animation bleed through
-    /// the tab bar.
+    /// Dedicated pipeline for the **background image (wallpaper)**, drawn at
+    /// the very back, between the surface clear and the cell/chrome `quads`
+    /// pass. Cell backgrounds (selection, syntax, TUI panels), chrome (tab bar /
+    /// status bar / per-pane titlebars), and pane borders therefore composite
+    /// OPAQUELY on top of the wallpaper (the standard kitty / wezterm /
+    /// alacritty layering). Inline kitty / sixel images stay in `imgs`, drawn
+    /// *after* the quads so they sit over cell backgrounds.
     bg_imgs: imgpipe::ImagePipeline,
-    /// v2.24.0 procedural starfield wallpaper (`background-type = starfield`),
+    /// Procedural starfield wallpaper (`background-type = starfield`),
     /// drawn in the same back-most slot as `bg_imgs`. Stateless on the GPU side
     /// (just a per-frame uniform); the only state is `starfield_started`.
     starfield: starfield::StarfieldPipeline,
@@ -2739,23 +2719,19 @@ pub struct Renderer {
     /// continuous `time` so motion is smooth-valued even though we repaint at a
     /// low fps cap.
     starfield_started: std::time::Instant,
-    /// Terminator parity, bg-image: decoded background-image cache.
-    /// Tuple of (cfg.background_image path, decoded ImageData).
-    /// Invalidated + re-decoded when the config path changes.
-    // Key is `(path, blur_radius)` — keying on the path
-    // alone meant toggling `background-blur` was ignored on reload unless
-    // the image path *also* changed. The value is bounded to 64 MiB per frame
-    // and 128 MiB per animation; it is freed (`= None`) when config moves away from
-    // `background-type = image` so a large wallpaper doesn't sit resident
-    // for the rest of the session after the user turns it off.
+    /// Terminator parity, bg-image: decoded background-image cache, keyed on
+    /// `(path, blur_radius)` so a `background-blur` toggle re-decodes even when
+    /// the image path is unchanged.
+    // The value is bounded to 64 MiB per frame and 128 MiB per animation. It
+    // is freed (`= None`) when config moves away from `background-type = image`
+    // so a large wallpaper doesn't stay resident after the user turns it off.
     //
-    // A FAILED decode is cached as `frames.is_empty()` (was the
-    // inner `Option::None`). Caching the failed key (a) stops rendering the
-    // previous wallpaper after the path changes to a broken one, and (b) stops
-    // re-attempting the failing decode every frame.
-    // v2.21.x: holds ALL frames of an animated background (GIF/APNG/WebP) — one
-    // for a still image — plus per-frame gaps + the playback clock origin, so
-    // the render loop swaps the already-decoded frame per `bg_current_frame`.
+    // A failed decode is cached as `frames.is_empty()`. Caching the failed key
+    // (a) stops rendering the previous wallpaper after the path changes to a
+    // broken one, and (b) stops re-attempting the failing decode every frame.
+    // Holds all frames of an animated background (GIF/APNG/WebP), one for a
+    // still image, plus per-frame gaps and the playback clock origin, so the
+    // render loop swaps in the already-decoded frame per `bg_current_frame`.
     bg_image_cache: Option<BgImageAnim>,
     /// When the current bg-image (path, blur) FAILED to
     /// decode, the earliest `Instant` to retry — throttling self-heal to ≥3s so
@@ -3280,9 +3256,8 @@ struct BgImageResult {
     path: String,
     blur_radius: u32,
     /// Empty when the decode failed (bad path, unsupported format, decode
-    /// error) — mirrors the synchronous path's `None => Vec::new()` handling
-    /// so `apply_bg_image_worker_result` can reuse the same
-    /// failed-decode-caches-the-key self-heal behavior.
+    /// error), so `apply_bg_image_worker_result` caches the failed key and
+    /// throttles the next retry.
     frames: Vec<bg_image::BgFrame>,
 }
 
@@ -3318,8 +3293,6 @@ impl BgImageWorker {
             .name("kettle-bg-image".to_string())
             .spawn(move || {
                 while let Ok(job) = job_rx.recv() {
-                    // Same decode+blur helper the old synchronous path called
-                    // inline in `render_frame` — only WHERE it runs changed.
                     let frames =
                         bg_image::decode_bg_image_frames_with_blur(&job.path, job.blur_radius)
                             .unwrap_or_default();
@@ -3793,7 +3766,7 @@ fn screenshot_publication_error_message(
 /// Private-state outputs also reject untrusted ancestors; an explicit
 /// user-selected output pins and verifies its already-existing parent.
 /// Screenshot PNGs may capture private on-screen content; see the call site in
-/// `finish_live_screenshot`.
+/// `finish_live_screenshot_persistence`.
 fn create_screenshot_file(
     path: &std::path::Path,
     policy: ScreenshotOutputPolicy,
@@ -4278,10 +4251,10 @@ mod live_screenshot_tests {
         assert_eq!(error, "screenshot source buffer is shorter than expected");
     }
 
-    // Privacy hardening (audit): a screenshot can capture the same class of
-    // transient secrets a `.cast` recording can (kettle-core/src/record.rs
-    // chmods those to 0o600) — the PNG file must land with the same
-    // owner-only permissions regardless of the process umask.
+    // A screenshot can capture the same class of transient secrets a `.cast`
+    // recording can (kettle-core/src/record.rs chmods those to 0o600), so the
+    // PNG file must land with the same owner-only permissions regardless of
+    // the process umask.
     #[cfg(unix)]
     #[test]
     fn private_screenshot_file_is_created_owner_only() {
@@ -4294,12 +4267,12 @@ mod live_screenshot_tests {
         assert_eq!(mode, 0o600, "screenshot file must be owner-read/write only");
     }
 
-    /// The write is `create_new` (O_EXCL): anything already at the path — a
-    /// leftover file or, in the threat model, a symlink planted into the
-    /// check-then-use window to redirect the write at a sensitive file — must
-    /// make the open fail with `AlreadyExists` rather than being followed or
-    /// truncated. This is the atomic half of the screenshot path-traversal fix
-    /// (the ctl-side `validate_screenshot_path` pre-check is only a fast-fail).
+    /// Anything already at the path (a leftover file or, in the threat model, a
+    /// symlink planted into the check-then-use window to redirect the write at
+    /// a sensitive file) must make creation fail with `AlreadyExists` rather
+    /// than being followed or truncated. The no-replace publication is the
+    /// atomic guard; the ctl-side `validate_screenshot_path` pre-check is only a
+    /// fast-fail.
     #[test]
     fn private_screenshot_file_refuses_a_pre_existing_path() {
         let dir = test_tempdir();
@@ -4390,7 +4363,7 @@ mod live_screenshot_tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
     }
 
-    /// The same O_EXCL guarantee, exercised against a symlink: a planted
+    /// The same no-replace guarantee, exercised against a symlink: a planted
     /// symlink at the output path must not be followed to overwrite its target.
     #[cfg(unix)]
     #[test]
@@ -4432,21 +4405,19 @@ mod live_screenshot_tests {
     }
 }
 
-/// The async background-image decode worker (audit fix: `render_frame` must
-/// never block the render thread on `decode_bg_image_frames_with_blur` — see
+/// The async background-image decode worker. `render_frame` must never block
+/// the render thread on `decode_bg_image_frames_with_blur` (see
 /// `Renderer::request_bg_image_reload` / `Renderer::apply_bg_image_worker_result`).
-/// Pure CPU + `std::sync::mpsc`, so — unlike `ScreenshotWorker`, which needs a
-/// real `wgpu::Device` — this is fully unit-testable without a GPU.
+/// Pure CPU + `std::sync::mpsc`, so unlike `ScreenshotWorker`, which needs a
+/// real `wgpu::Device`, this is fully unit-testable without a GPU.
 #[cfg(test)]
 mod bg_image_worker_tests {
     use super::{BgImageJob, BgImageWorker};
 
-    /// A nonexistent path decodes to an empty frame list (mirrors the old
-    /// synchronous path's `None => Vec::new()` handling) rather than blocking
-    /// or panicking — and the result must arrive on `try_recv` carrying back
-    /// the same `(path, blur_radius)` key the job was submitted with, which is
-    /// exactly what `apply_bg_image_worker_result` keys its stale-result check
-    /// on.
+    /// A nonexistent path decodes to an empty frame list rather than blocking
+    /// or panicking, and the result must arrive on `try_recv` carrying back the
+    /// same `(path, blur_radius)` key the job was submitted with, which is what
+    /// `apply_bg_image_worker_result` keys its stale-result check on.
     #[test]
     fn worker_delivers_a_keyed_result_for_a_failed_decode() {
         let worker = BgImageWorker::start().expect("worker thread should start");
@@ -4706,9 +4677,9 @@ impl Renderer {
             })
             .await
             .map_err(|e| anyhow!("failed to create device: {e:?}"))?;
-        // v2.31.0: turn a GPU driver reset (TDR) / VRAM exhaustion into a logged,
-        // observable event instead of wgpu's default panic (which `panic=abort`
-        // turned into a hard crash). Installed once on the shared device.
+        // Turn a GPU driver reset (TDR) / VRAM exhaustion into a logged,
+        // observable event instead of wgpu's default panic, which `panic=abort`
+        // makes a hard crash. Installed once on the shared device.
         let gpu_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let gpu_fault = std::sync::Arc::new(std::sync::Mutex::new(None));
         let recovery_wake = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -4725,10 +4696,8 @@ impl Renderer {
         let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
         let t_rest = std::time::Instant::now();
         let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg);
-        // Named for what it actually spans: everything after device creation.
-        // That INCLUDES the font-system time logged separately just below, so
-        // the two must not be added together -- the earlier `pipelines+atlas`
-        // label invited exactly that double-count.
+        // This span covers everything after device creation, INCLUDING the
+        // font-system time logged separately, so do not add the two together.
         log::info!(
             "renderer init: adapter {adapter_ms:.1}ms, device {device_ms:.1}ms,              surface+fonts+pipelines {:.1}ms (font init logged separately is              part of it), total {:.1}ms",
             t_rest.elapsed().as_secs_f64() * 1000.0,
@@ -4737,13 +4706,12 @@ impl Renderer {
         built
     }
 
-    /// C3 (multi-window): synchronous constructor for windows 2..N — reuses
-    /// the shared [`GpuContext`] instead of requesting an adapter/device, so
-    /// it never blocks the event loop (the ~1.5s async init and its hung-
-    /// driver watchdog are a window-1-only cost). Fails cleanly if the shared
-    /// adapter can't present to the new window's surface (e.g. a window on a
-    /// display driven by a different GPU) — the caller falls back to keeping
-    /// the tab where it was.
+    /// Synchronous constructor for windows 2..N. Reuses the shared
+    /// [`GpuContext`] instead of requesting an adapter/device, so it never
+    /// blocks the event loop (the ~1.5s async init and its hung-driver
+    /// watchdog are a window-1-only cost). Fails cleanly if the shared adapter
+    /// can't present to the new window's surface (e.g. a window on a display
+    /// driven by a different GPU); the caller then keeps the tab where it was.
     pub fn new_with_gpu<W>(
         gpu: &GpuContext,
         window: Arc<W>,
@@ -4831,16 +4799,11 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        // Clamp `cfg.font_size` here (same range as `set_font_size`'s
-        // runtime path: [5.0, 72.0]). Without this, a user config of
-        // `font-size = 200` boots the renderer with 200pt cells and
-        // hits the wgpu 8192px-per-side texture limit (or floods the
-        // window with one giant glyph). 5.0 is below "tiny but
-        // legible"; 72.0 is "billboard". The runtime setter already
-        // had this clamp; `Renderer::new` silently didn't,
-        // so the bound was only enforced after a Ctrl+0 ResetFontSize
-        // round-trip — same "downstream cache stale at startup" shape
-        // as the `set_font_family` fix.
+        // Clamp `cfg.font_size` to the same [5.0, 72.0] range as the runtime
+        // `set_font_size` path. Without this, a user config of
+        // `font-size = 200` boots the renderer with 200pt cells and hits the
+        // wgpu 8192px-per-side texture limit (or floods the window with one
+        // giant glyph). 5.0 is below "tiny but legible"; 72.0 is "billboard".
         let font_size = clamp_font_size(cfg.font_size);
         // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
@@ -4918,8 +4881,8 @@ impl Renderer {
         .ok_or_else(|| {
             anyhow!("GPU graphics budget exhausted while creating image-receipt pipeline")
         })?;
-        // v2.23.0: separate pipeline so the wallpaper draws behind cell/chrome
-        // quads (see the `bg_imgs` field docs).
+        // Separate pipeline so the wallpaper draws behind cell/chrome quads
+        // (see the `bg_imgs` field docs).
         let bg_imgs = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
             &device,
             format,
@@ -4929,10 +4892,10 @@ impl Renderer {
         .ok_or_else(|| {
             anyhow!("GPU graphics budget exhausted while creating background image pipeline")
         })?;
-        // v2.24.0: procedural starfield wallpaper, same back-most slot.
+        // Procedural starfield wallpaper, same back-most slot.
         let starfield = starfield::StarfieldPipeline::new(&device, format);
-        // v2.25.0: cell-locked pane-text pipeline (the `text-renderer=grid`
-        // default). Always constructed; only emitted/drawn in grid mode.
+        // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
+        // Always constructed; only emitted/drawn in grid mode.
         let glyph_pipeline =
             GlyphPipeline::new_with_budget(&device, format, graphics_budget.clone()).ok_or_else(
                 || anyhow!("GPU graphics budget exhausted while creating glyph pipeline"),
@@ -5057,9 +5020,9 @@ impl Renderer {
         })
     }
 
-    /// C3 (multi-window): the shared GPU handles, for spawning another
-    /// window's Renderer via [`Renderer::new_with_gpu`]. Cloning the returned
-    /// context is a refcount bump.
+    /// The shared GPU handles, for spawning another window's Renderer via
+    /// [`Renderer::new_with_gpu`]. Cloning the returned context is a refcount
+    /// bump.
     pub fn gpu(&self) -> &GpuContext {
         &self.gpu
     }
@@ -5125,29 +5088,23 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        // Terminator parity, bg-image: explicit resize handler for
-        // the background-image render path. The `bg_image_cache`
-        // stores the DECODED image (not a window-sized texture); the
-        // background-image-mode dispatch recomputes the image rect
-        // from the current surface dims every frame via build_frame.
-        // So a resize implicitly takes effect on the next frame — no
-        // manual texture re-upload needed.
-        //
-        // This comment closes phase 8 of
-        // docs/TERMINATOR-BG-IMAGE-DESIGN.md with the "implicit
-        // per-frame recompute" contract documented so a future
-        // contributor sees that the per-frame recompute IS the impl.
+        // Terminator parity, bg-image (phase 8 of
+        // docs/TERMINATOR-BG-IMAGE-DESIGN.md): no texture work is needed here.
+        // `bg_image_cache` stores the DECODED image, not a window-sized
+        // texture, and every frame recomputes the image rect from the current
+        // surface dims (see `background_image_rect`), so a resize takes effect
+        // on the next frame.
         //
         // Floor at 1 (`surface.configure(0, ...)` panics) and ceiling at the
-        // device's max-texture-dimension-2d. The device is now created with the
-        // ADAPTER's full 2D limit rather than wgpu's default 8192, so a window
-        // stretched across multiple 4K monitors keeps its real physical size on
-        // hardware that can present it -- but the ceiling stays, because on an
-        // adapter whose genuine limit is smaller than the window, configuring
-        // past it fails validation and leaves a stale surface that paints
-        // nothing at all. Clipping to the visible top-left region is the better
-        // failure. Sibling to `cap_axis_cells` (same bug class on the
-        // `--screenshot` path).
+        // device's max-texture-dimension-2d. The device requests the ADAPTER's
+        // full 2D limit rather than wgpu's default 8192, so a window stretched
+        // across multiple 4K monitors keeps its real physical size on hardware
+        // that can present it. The ceiling stays because, on an adapter whose
+        // genuine limit is smaller than the window, configuring past it fails
+        // validation and leaves a stale surface that paints nothing at all.
+        // Clipping to the visible top-left region is the better failure.
+        // Sibling to `cap_axis_cells` (same bug class on the `--screenshot`
+        // path).
         let (width, height) = live_surface_dimensions(
             width,
             height,
@@ -5213,13 +5170,12 @@ impl Renderer {
     }
 
     /// Update the device-pixel scale factor (DPI). Wired to winit's
-    /// `ScaleFactorChanged` — fired at startup and whenever the window moves to
+    /// `ScaleFactorChanged`, fired at startup and whenever the window moves to
     /// a monitor with a different scale. Recomputes physical metrics from the
     /// unchanged *logical* `font_size` and re-measures the cell, so glyphs keep
-    /// the same visual size across DPI changes (and fixes tiny text that was
-    /// the result of `scale` being stored but never applied). No-op when the
-    /// scale is unchanged. The caller must re-grid afterward (cell_w/cell_h
-    /// change), e.g. via `App::resize_all`.
+    /// the same visual size across DPI changes. No-op when the scale is
+    /// unchanged. The caller must re-grid afterward (cell_w/cell_h change),
+    /// e.g. via `App::resize_all`.
     pub fn set_scale(&mut self, scale: f32) {
         let s = if scale.is_finite() && scale > 0.0 {
             scale
@@ -5236,10 +5192,7 @@ impl Renderer {
 
     /// Update the primary font family and re-measure the cell. Called by
     /// `reload_config` so a `font-family = …` change in the user's config
-    /// actually takes effect at runtime — without this, the renderer kept
-    /// the family it was constructed with forever and only the `font-size`
-    /// part of a reload was visible (silent partial-apply, the same
-    /// "reload doesn't re-flow downstream caches" gap class).
+    /// takes effect at runtime, not only the `font-size` part of a reload.
     pub fn set_font_family(&mut self, family: String) {
         if self.font_family.as_ref() == family.as_str() {
             return;
@@ -5362,10 +5315,10 @@ impl Renderer {
     /// keep redrawing it (feeds the app's anim tick). True for a procedural
     /// starfield, OR a decoded MULTI-frame image (animated GIF / APNG / WebP) with
     /// `background-animation != off`. For `background-animation = when-focused` it
-    /// is true only while the window is focused; the DEFAULT is `Always` (v2.24.0)
-    /// — it animates even unfocused, but the event loop still FREEZES the wake when
-    /// the window is minimized or occluded, so a hidden window costs zero idle (the
-    /// battery behavior Ghostty's always-on custom shaders lack). The frame shown is
+    /// is true only while the window is focused. The DEFAULT, `Always`, animates
+    /// even unfocused, but the event loop still FREEZES the wake when the window is
+    /// minimized or occluded, so a hidden window costs zero idle (the battery
+    /// behavior Ghostty's always-on custom shaders lack). The frame shown is
     /// time-correct on any other repaint (see the bg frame-select in
     /// `render_frame_with_status`); this only governs proactive waking.
     pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
@@ -5396,14 +5349,13 @@ impl Renderer {
         (1000 / Self::STARFIELD_FPS) as u128
     }
 
-    /// v2.23.1: milliseconds until the animated background's displayed frame
-    /// next changes — the wake interval the event loop should use for the
-    /// bg-animation tick. Animating at a fixed 30 fps repaints the SAME frame
-    /// ~22×/s for a typical 8 fps GIF (wasted full-surface `present()`s — the
-    /// cause of the ~55% animated-idle CPU); waking at the actual frame boundary
-    /// caps the repaint rate at the GIF's own fps. `None` when the background
-    /// isn't animating. Floored at 16 ms so a degenerate fast GIF can't drive
-    /// the loop past ~60 fps.
+    /// Milliseconds until the animated background's displayed frame next
+    /// changes. The event loop uses this as the bg-animation wake interval.
+    /// Waking at the actual frame boundary caps repaints at the GIF's own fps,
+    /// where a fixed 30 fps tick would repaint the SAME frame ~22×/s for a
+    /// typical 8 fps GIF (wasted full-surface `present()`s). `None` when the
+    /// background isn't animating. Floored at 16 ms so a degenerate fast GIF
+    /// can't drive the loop past ~60 fps.
     pub fn bg_anim_interval_ms(&self, cfg: &Config, window_focused: bool) -> Option<u64> {
         if !self.background_is_animating(cfg, window_focused) {
             return None;
@@ -5421,13 +5373,13 @@ impl Renderer {
         bg_image::bg_next_frame_ms(&c.gaps, c.started.elapsed().as_millis())
     }
 
-    /// v2.23.1: the animated background's currently-displayed frame index, or
-    /// `None` when it isn't animating. The event loop compares this against the
+    /// The animated background's currently-displayed frame index, or `None`
+    /// when it isn't animating. The event loop compares this against the
     /// last-painted index and requests a redraw ONLY when it changes (an
-    /// edge-trigger, like the cursor blink) — without that, `request_redraw` is
-    /// called every `about_to_wait` while the bg animates, so winit redraws
-    /// continuously (vsync-bound) instead of at the GIF's fps. That continuous
-    /// repaint was the real cause of the high animated-idle CPU.
+    /// edge-trigger, like the cursor blink). Calling `request_redraw` on every
+    /// `about_to_wait` while the bg animates would make winit redraw
+    /// continuously (vsync-bound) instead of at the GIF's fps, which keeps
+    /// animated-idle CPU high.
     pub fn bg_current_frame_index(&self, cfg: &Config, window_focused: bool) -> Option<usize> {
         if !self.background_is_animating(cfg, window_focused) {
             return None;
@@ -5461,10 +5413,8 @@ impl Renderer {
         self.render_frame_with_status(panes, tabbar, cfg, overlay, &StatusBar::hidden())
     }
 
-    /// Extended `render_frame` variant that also draws the
-    /// status-bar strip. The bare `render_frame` shim passes a hidden
-    /// status bar, so existing call sites that don't yet know about
-    /// the new feature still compile.
+    /// Extended `render_frame` variant that also draws the status-bar strip.
+    /// The bare `render_frame` shim passes a hidden status bar.
     pub fn render_frame_with_status(
         &mut self,
         panes: &[PaneView<'_>],
@@ -5522,14 +5472,13 @@ impl Renderer {
         }
     }
 
-    /// Drain any finished background-image decode(s) and, for one that
-    /// matches the currently-pending `(path, blur_radius)` key, install it
-    /// into `bg_image_cache` — the same failure-throttle / success-clears-
-    /// throttle bookkeeping the old synchronous path did inline. A result
-    /// whose key no longer matches `bg_image_pending` (the config moved on
-    /// to a different image/blur — or off background images entirely —
-    /// before this decode finished) is silently discarded: a fresh request
-    /// for the current key has already been queued.
+    /// Drain any finished background-image decodes and install the one that
+    /// matches the pending `(path, blur_radius)` key into `bg_image_cache`,
+    /// arming the retry throttle on failure and clearing it on success. A
+    /// result whose key no longer matches `bg_image_pending` (the config moved
+    /// on to a different image/blur, or off background images entirely, before
+    /// this decode finished) is silently discarded: a fresh request for the
+    /// current key has already been queued.
     fn apply_bg_image_worker_result(&mut self) {
         let Some(worker) = self.bg_image_worker.as_ref() else {
             return;
@@ -5632,9 +5581,9 @@ impl Renderer {
         } else {
             0.0
         };
-        // v2.20.0 P1b: the chrome-label caches below compare TEXT only, which
-        // is sound while the font family is stable — invalidate them all once
-        // when it changes (config reload with a new `font-family`).
+        // The chrome-label caches below compare TEXT only, which is sound while
+        // the font family is stable, so invalidate them all once when it
+        // changes (config reload with a new `font-family`).
         {
             use std::hash::{Hash, Hasher};
             let mut h = std::hash::DefaultHasher::new();
@@ -5679,9 +5628,9 @@ impl Renderer {
             let b = TextBuffer::new(&mut self.font_system, metrics);
             self.pane_buffers.push(b);
         }
-        // v2.20.0 P1: the line-key / style-key pools live and die with
-        // `pane_buffers` — a key must always describe the content actually
-        // shaped into the buffer at the same index.
+        // The line-key / style-key pools live and die with `pane_buffers`,
+        // because a key must always describe the content actually shaped into
+        // the buffer at the same index.
         while self.pane_line_keys.len() < panes.len() {
             self.pane_line_keys.push(Vec::new());
         }
@@ -5720,12 +5669,12 @@ impl Renderer {
                 self.pane_titlebar_texts[i].clear();
             }
         }
-        // Release buffers for panes that have closed. The grow
-        // loops above only ever extend, so without this the two vecs sat at
-        // the session's high-water pane count — a 6-way split that you close
-        // back to one pane left 5 idle TextBuffers (with their shaped glyph
-        // runs) allocated for the rest of the session. Truncation is safe:
-        // every later loop indexes by enumerate position `< panes.len()`.
+        // Release buffers for panes that have closed. The grow loops above
+        // only extend, so without this the pools stay at the session's
+        // high-water pane count: a 6-way split closed back to one pane keeps
+        // 5 idle TextBuffers (with their shaped glyph runs) for the rest of
+        // the session. Truncation is safe: every later loop indexes by
+        // enumerate position `< panes.len()`.
         self.pane_buffers.truncate(panes.len());
         self.pane_buffer_ids.truncate(panes.len());
         self.pane_line_keys.truncate(panes.len());
@@ -5744,21 +5693,13 @@ impl Renderer {
                 } else {
                     pv.title
                 };
-                // Titlebar text = "  TITLE [WxH] [●]"
-                // where:
-                //   - [WxH] is shown unless cfg.title_hide_sizetext
-                //   - [●] is shown when cfg.icon_bell && pv.bell
-                // Named groups: when
-                //   `pane.group_name = Some("fleet")`, prepend
-                //   the group pill: "  [fleet] TITLE …".
-                //   The render-side bracket gives it a visual
-                //   weight without needing a separate quad
-                //   shape (a future pass could promote it to a real
-                //   colored chip).
-                // v2.24.0: fit the label to the pane width, shedding the size
-                // text then the group tag then middle-ellipsizing the title
-                // (keeping the program/leaf name) — was a hard glyphon clip with
-                // no ellipsis, so a narrow split cut "C:\Program…" to "C:\Program".
+                // Label layout: "  [group]  TITLE  WxH  <bell>". The group pill
+                // appears for a named group (the brackets give it visual weight
+                // without a separate quad), WxH unless cfg.title_hide_sizetext,
+                // and the bell when cfg.icon_bell && pv.bell. To fit the pane
+                // width, `fit_pane_titlebar_title` sheds the size text, then the
+                // group tag, then middle-ellipsizes the title (keeping the
+                // program/leaf name).
                 let group = pv.group_name.filter(|g| !g.is_empty());
                 let size_text = (!cfg.title_hide_sizetext)
                     .then(|| format!("{}x{}", pv.size_cols, pv.size_rows));
@@ -5776,16 +5717,15 @@ impl Renderer {
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(rw), Some(pane_titlebar_h));
-                // v2.20.0 P1b: `Buffer::set_text` re-shapes unconditionally —
-                // gate it on text change so a steady title costs nothing.
+                // `Buffer::set_text` re-shapes unconditionally, so gate it on
+                // text change and a steady title costs nothing.
                 if self.pane_titlebar_texts[i] != label {
-                    // Advanced shaping, like every other chrome buffer: the
+                    // Use Advanced shaping, like every other chrome buffer. The
                     // title is shell-controlled OSC 0/2 text (agents such as
                     // Claude Code lead with a status glyph) and the label can
-                    // carry the 🔔 bell — Basic skips cosmic-text's platform
+                    // carry the 🔔 bell. Basic skips cosmic-text's platform
                     // font fallback (Segoe UI Emoji/Symbol, Noto), so any
-                    // glyph outside the bundled Nerd Font tofu-boxed here
-                    // while the tab bar rendered the same string fine.
+                    // glyph outside the bundled Nerd Font would render as tofu.
                     buf.set_text(
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
@@ -5798,14 +5738,12 @@ impl Renderer {
             }
         }
 
-        // Pre-size the per-frame quad/image vectors so the render
-        // hot path doesn't repeatedly reallocate as they grow (borders +
-        // per-pane chrome + cell-background quads dominate `quads`). Capacities
-        // are rough upper-of-typical estimates; growth still happens for
-        // outliers but the common 60fps path avoids the realloc churn.
-        // Reuse the pooled quad scratch (cleared, capacity
-        // retained from the prior frame) instead of allocating a fresh Vec every
-        // frame. Returned to `self.quad_scratch` after the GPU upload below.
+        // Pre-size the per-frame quad/image vectors so the 60fps hot path
+        // avoids realloc churn (borders + per-pane chrome + cell-background
+        // quads dominate `quads`). Capacities are rough upper-of-typical
+        // estimates; outliers still grow. `quads` reuses the pooled
+        // `quad_scratch` (cleared, capacity kept from the prior frame) and
+        // returns to it after the GPU upload below.
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
@@ -5821,19 +5759,17 @@ impl Renderer {
                 composed_bg_alpha(cfg) as f32,
             ));
         }
-        // Third quad pass — drawn after `over` so the right-click
-        // context menu's bg/shadow/border/highlight sit on top of
-        // every other UI element. The menu's text is rendered by
-        // `menu_text_renderer` after this pass so the labels land on
-        // top of the panel bg.
+        // Third quad pass, drawn after `over` so the right-click context
+        // menu's bg/shadow/border/highlight sit on top of every other UI
+        // element. `menu_text_renderer` draws the menu labels after this pass,
+        // on top of the panel bg.
         //
-        // The four per-frame buffers below (menu_q / over /
-        // img_items / image-live sets) are intentionally allocated fresh each frame, unlike
+        // The per-frame buffers below (menu_q / over / image items /
+        // image-live sets) are deliberately allocated fresh each frame, unlike
         // the pooled `quad_scratch` / `span_scratch`. They are small and usually
         // near-empty (no open context menu, a handful of panes, no cell images),
         // so the allocation is trivial; high-water pooling is reserved for the
-        // large per-cell `quads` / `spans` buffers where it actually pays off.
-        // The asymmetry is deliberate, not an oversight.
+        // large per-cell `quads` / `spans` buffers, where it pays off.
         use kettle_config::BackgroundType;
         let mut menu_q: Vec<QuadInstance> = Vec::with_capacity(64);
         // Drawn *after* text: unfocused-pane dimming + scrollbar thumbs.
@@ -5844,7 +5780,7 @@ impl Renderer {
         // tile mode repeats UVs in the sampler instead of rebuilding a quad per
         // tile on every frame.
         let mut bg_img_items: Vec<imgpipe::ImageItem> = Vec::with_capacity(1);
-        // v2.23.0: when `chrome-background = auto`, the average color of the
+        // When `chrome-background = auto`, the average color of the
         // currently-displayed wallpaper frame, used to tint the chrome strips.
         // Computed once from the displayed frame below (only when auto is set).
         let mut bg_frame_avg: Option<Rgb> = None;
@@ -5859,32 +5795,28 @@ impl Renderer {
             std::collections::HashSet::new();
 
         // Terminator parity, bg-image: when cfg.background_type = Image +
-        // cfg.background_image is set, decode-once + cache + prepend a
-        // fullscreen image item BEFORE any cell-images so the wallpaper
-        // renders at the back. The `decode_bg_image_frames_with_blur`
-        // helper handles the file-not-found / decode-error paths
-        // gracefully.
+        // cfg.background_image is set, decode once, cache, and push the
+        // wallpaper into `bg_img_items`, its own back-most pass. The
+        // `decode_bg_image_frames_with_blur` helper handles the
+        // file-not-found / decode-error paths gracefully.
         if matches!(cfg.background_type, BackgroundType::Image) && !cfg.background_image.is_empty()
         {
             let want = cfg.background_image.clone();
-            // Route through decode_bg_image_with_blur
-            // so cfg.background_blur takes effect at load time.
-            // Radius 8 is a reasonable default for the on/off
-            // toggle Terminator's bool config exposes; a follow-up
-            // could expose a `background_blur_radius`
+            // The worker decodes through `decode_bg_image_frames_with_blur`,
+            // so cfg.background_blur takes effect at load time. Radius 8 is a
+            // reasonable default for the on/off toggle Terminator's bool config
+            // exposes; a follow-up could expose a `background_blur_radius`
             // numeric for finer control.
             let blur_radius: u32 = if cfg.background_blur { 8 } else { 0 };
-            // Reload when the path OR the blur radius
-            // changes. Before, blur lived outside the cache key, so toggling
-            // `background-blur` on a still-loaded image was silently ignored.
+            // Reload when the path OR the blur radius changes, so toggling
+            // `background-blur` on a still-loaded image takes effect.
             let need_reload = match self.bg_image_cache.as_ref() {
                 None => true,
-                // Reload when the (path, blur) key changed, OR when
-                // the cached entry is a FAILED decode (`frames` empty)
-                // and the throttle has elapsed: a transient read error / an
-                // in-place file fix self-heals, but THROTTLED (≥3s between
-                // attempts) so a broken or corrupt path is NOT re-decoded every
-                // frame (avoiding the per-frame thrash this replaced). A successful
+                // Reload when the (path, blur) key changed, OR when the cached
+                // entry is a FAILED decode (`frames` empty) and the throttle has
+                // elapsed. A transient read error or an in-place file fix
+                // self-heals, but THROTTLED (≥3s between attempts) so a broken
+                // or corrupt path is NOT re-decoded every frame. A successful
                 // decode clears the throttle, so the happy path never re-decodes.
                 Some(c) => {
                     c.path != want
@@ -5897,26 +5829,22 @@ impl Renderer {
             };
             if need_reload {
                 // (Re)decode ALL frames (one for a still image; many for an
-                // animated GIF/APNG/WebP) — but off the render thread: an
-                // animated + blurred wallpaper's decode+blur can run tens of
-                // ms PER FRAME (up to 128 frames), which used to run inline
-                // here and stall the winit event loop + every window's render
-                // pass for the whole duration. `request_bg_image_reload`
-                // just (re)submits the job to `bg_image_worker`; the result
-                // lands on a LATER frame via `apply_bg_image_worker_result`
-                // below, same key-caching / failure-throttle semantics as
-                // the old synchronous path.
+                // animated GIF/APNG/WebP) off the render thread. An animated,
+                // blurred wallpaper's decode+blur can take tens of ms PER FRAME
+                // (up to 128 frames), which would stall the winit event loop and
+                // every window's render pass. `request_bg_image_reload` just
+                // (re)submits the job to `bg_image_worker`; the result lands on
+                // a LATER frame via `apply_bg_image_worker_result` below.
                 self.request_bg_image_reload(&want, blur_radius);
             }
             // Pick up a finished decode (if any) before selecting the frame
-            // to display. A no-op (cheap `try_recv`) on every frame where no
-            // background image is configured or nothing has finished yet.
+            // to display. A cheap `try_recv` no-op when nothing has finished.
             self.apply_bg_image_worker_result();
-            // v2.21.x: select the frame to display now. A still image (1 frame)
-            // or `background-animation = off` shows frame 0; otherwise the
+            // Select the frame to display now. A still image (1 frame) or
+            // `background-animation = off` shows frame 0; otherwise the
             // playback clock loops through frames at their own gaps. Focus does
             // NOT gate the index (so an output-driven repaint while unfocused
-            // still shows the time-correct frame, no jump) — focus only gates
+            // still shows the time-correct frame, no jump); focus only gates
             // whether the render loop PROACTIVELY wakes to animate, via
             // `background_is_animating` feeding the anim tick.
             let bg_frame: Option<(&kettle_core::ImageData, bool)> = self
@@ -5938,7 +5866,7 @@ impl Renderer {
                     )
                 });
             if let Some((data, frame_is_opaque)) = bg_frame {
-                // v2.23.0: sample the displayed frame's average color for
+                // Sample the displayed frame's average color for
                 // `chrome-background = auto`. Sampled + alpha-aware, so it's a
                 // few microseconds even on a 4K frame; only when auto is set.
                 if cfg.chrome_background == kettle_config::ChromeBackground::Auto {
@@ -5993,16 +5921,15 @@ impl Renderer {
             self.bg_image_pending = None;
         }
 
-        // v2.23.0: the opaque fill color for the window chrome strips (tab bar,
-        // status bar, new-tab button). Only differs from the theme when a
-        // wallpaper is in use AND `chrome-background` asks for it; otherwise
-        // it's `palette[8]` exactly as before. See `resolve_chrome_bg`.
+        // The opaque fill color for the window chrome strips (tab bar, status
+        // bar, new-tab button). It differs from the theme's `palette[8]` only
+        // when a wallpaper is in use AND `chrome-background` asks for it. See
+        // `resolve_chrome_bg`.
         let chrome_strip_bg = resolve_chrome_bg(cfg, theme, bg_frame_avg);
 
-        // Status-bar background. The text is uploaded
-        // alongside `tabbar_buffer.set_text` further down so the same
-        // text-renderer pass handles both. Just a chrome-dim panel
-        // here (1 quad).
+        // Status-bar background. The text is uploaded alongside
+        // `tabbar_buffer.set_text` further down so the same text-renderer
+        // pass handles both.
         if status.height > 0.0 {
             quads.push(rect(0.0, status.y, sw, status.height, chrome_strip_bg, 1.0));
             // One-px line on the side facing the pane grid so the
@@ -6097,11 +6024,11 @@ impl Renderer {
                     let r = (seg_h * 0.18).clamp(3.0, 6.0);
                     let dx = x + 6.0;
                     let dy = seg_y + seg_h - r * 2.0 - 4.0;
-                    // Render the dot as a small square — wgpu doesn't
-                    // have a circle primitive here and a 4×4 / 6×6
-                    // square at high opacity reads as a "bullet" at
-                    // typical tab-bar sizes (kitty / iTerm2 do the
-                    // same in their text-only inactive-tab indicators).
+                    // Render the dot as a small square. wgpu has no circle
+                    // primitive here, and a 6x6 to 12x12 square at high
+                    // opacity reads as a "bullet" at typical tab-bar sizes
+                    // (kitty / iTerm2 do the same in their text-only
+                    // inactive-tab indicators).
                     quads.push(rect(dx, dy, r * 2.0, r * 2.0, c, 1.0));
                 }
                 // Close-button chip — drawn at *all* times so the user
@@ -6216,11 +6143,11 @@ impl Renderer {
                 }
             {
                 let (_, _, seg_w, seg_h) = active_seg.rect;
-                // v2.40.0 (tear-off UX): pre-tear escalation — the ghost
-                // "lifts off" as the cursor approaches the tear threshold
-                // (bigger/darker shadow, fading body), so a release reads
-                // as "this will tear" instead of surprising the user with
-                // a new window. `tear_lift` is 0 for a plain reorder.
+                // Pre-tear escalation: the ghost "lifts off" as the cursor
+                // approaches the tear threshold (bigger/darker shadow, fading
+                // body), so a release reads as "this will tear" instead of
+                // surprising the user with a new window. `tear_lift` is 0 for a
+                // plain reorder.
                 let lift = tabbar.tear_lift.clamp(0.0, 1.0);
                 let shadow_off =
                     tab_drag::GHOST_SHADOW_OFFSET_PX + tab_drag::GHOST_SHADOW_OFFSET_LIFT_PX * lift;
@@ -6248,11 +6175,10 @@ impl Renderer {
                     theme.background,
                     bg_alpha,
                 ));
-                // Accent strip on the left edge, same color the live
-                // active segment uses (palette[3] yellow under
-                // broadcast, accent-color → palette[4]
-                // otherwise — keeps the ghost visually identical to
-                // the source segment).
+                // Accent strip on the left edge, in the same color the live
+                // active segment uses (palette[3] yellow under broadcast,
+                // otherwise `ui_accent`), so the ghost matches its source
+                // segment.
                 let accent = if tabbar.broadcast {
                     theme.palette[3]
                 } else {
@@ -6267,22 +6193,20 @@ impl Renderer {
                     1.0,
                 ));
             }
-            // v2.19.0 (tear-off UX, re-dock): the insertion marker — an
-            // accent line between segments showing where a torn-off
-            // window's tab will dock. Pushed to `over` so it sits above
-            // segment backgrounds AND text (a thin line under text would
-            // vanish behind a long title). Rect comes oriented from the
-            // UI (vertical line for horizontal bars, horizontal line for
-            // vertical bars).
+            // Re-dock insertion marker: an accent line between segments
+            // showing where a torn-off window's tab will dock. Pushed to
+            // `over` so it sits above segment backgrounds AND text (a thin
+            // line under text would vanish behind a long title). Rect comes
+            // oriented from the UI (vertical line for horizontal bars,
+            // horizontal line for vertical bars).
             if let Some((ix, iy, iw, ih)) = tabbar.insert_marker {
                 let accent = self.ui_accent(cfg, theme);
-                // v2.40.0 (tear-off UX): dock-target highlight — wash the
-                // whole latched band in translucent accent plus a border on
-                // the pane-facing edge. Before this, the marker line was the
-                // ONLY latch signal off-Windows (the torn-window alpha trick
-                // is Windows-only) and a session recording showed it reads
-                // as "nothing happened" on Linux. Presence is derived from
-                // `insert_marker` so the two signals cannot drift apart.
+                // Dock-target highlight: wash the whole latched band in
+                // translucent accent plus a border on the pane-facing edge.
+                // Without it the marker line is the ONLY latch signal off
+                // Windows (the torn-window alpha trick is Windows-only), and on
+                // Linux that reads as "nothing happened". Presence is derived
+                // from `insert_marker` so the two signals cannot drift apart.
                 let (bx0, by0, bw0, bh0) = tabbar.band;
                 if bw0 > 0.0 && bh0 > 0.0 {
                     over.push(rect(
@@ -6332,7 +6256,7 @@ impl Renderer {
         }
 
         // Per-pane grid + dividers/border.
-        // v2.21.0 (idle perf): true if ANY pane reshaped a row this frame.
+        // Idle perf: true if ANY pane reshaped a row this frame.
         let mut any_pane_text_changed = false;
         // Reset the focused-cursor glyph; the focused pane's `build_pane` re-sets
         // it this frame if a solid block cursor is visible.
@@ -6357,20 +6281,17 @@ impl Renderer {
             // Pane separators / focus border. Both colors are config-
             // overridable: `split-divider-color` for inactive panes
             // (defaults to theme `palette[8]`, the dim color) and
-            // `focused-split-color` for the focused pane (defaults to
-            // theme `palette[4]`, the accent blue).
+            // `focused-split-color` for the focused pane (defaults to the
+            // resolved accent below).
             //
-            // When broadcast / group-input mode is on, the
-            // focused-pane border flips to theme palette[3] (yellow,
-            // the same warning slot the tab-bar accent uses). The tab-bar indicator alone wasn't enough: with
-            // `tab-bar = auto` and only one tab open (the default
-            // single-window case), the tab bar is hidden and the
-            // user has no visual cue that broadcast is active.
-            // Per-pane border-color shift works regardless of tab-bar
-            // state. Inactive panes keep their normal divider color
-            // — broadcast is scoped to the active tab (a
-            // broadcast-scope invariant) and the focused-pane border is the single
-            // most-visible chrome element on every layout.
+            // When broadcast / group-input mode is on, the focused-pane border
+            // flips to theme palette[3] (yellow, the same warning slot the
+            // tab-bar accent uses). The tab-bar indicator alone is not enough,
+            // because with `tab-bar = auto` and one tab open (the default
+            // single-window case) the tab bar is hidden. Inactive panes keep
+            // their normal divider color, since broadcast is scoped to the
+            // active tab and the focused-pane border is the single most-visible
+            // chrome element on every layout.
             let border = if pv.focused {
                 if tabbar.broadcast {
                     theme.palette[3]
@@ -6389,9 +6310,9 @@ impl Renderer {
             };
             // Terminator parity (terminatorlib/config.py:74
             // `handle_size`): split-divider width in px. -1 means
-            // "use theme default" (1.0 here); positive values 0-20 are
-            // honored directly. Clamping was already done at parse
-            // time.
+            // "use theme default" (1.0 here), 0 draws no border (see
+            // below), and 1-50 are used as-is. Clamping was already done
+            // at parse time.
             let bw = if cfg.handle_size < 0 {
                 1.0
             } else {
@@ -6423,7 +6344,6 @@ impl Renderer {
             // Color picks from the cfg.title_*_bg_color variants
             // based on focus + broadcast group state.
             if pane_titlebar_h > 0.0 {
-                // See `pick_titlebar_bg`.
                 let bar_bg = pick_titlebar_bg(
                     cfg,
                     theme,
@@ -6535,7 +6455,7 @@ impl Renderer {
                 }
             }
 
-            // Hyperlink underlines (all panes show them; brighter on hover).
+            // Hyperlink underlines, focused pane only (brighter on hover).
             for ln in &overlay.links {
                 if !pv.focused {
                     break;
@@ -6565,10 +6485,10 @@ impl Renderer {
                         hl.width as f32 * cw,
                         ch,
                         if hl.active {
-                            // The active match follows the theme's
-                            // yellow (Mocha #f9e2af) unless overridden, so it
-                            // matches the inactive highlight's theme.selection_bg
-                            // instead of a hardcoded TokyoNight amber.
+                            // The active match uses the theme's yellow
+                            // (Mocha #f9e2af) unless `search-background`
+                            // overrides it, so it follows the theme like the
+                            // inactive highlight's theme.selection_bg.
                             cfg.search_background.unwrap_or(theme.palette[3])
                         } else {
                             theme.selection_background
@@ -6623,20 +6543,15 @@ impl Renderer {
             // `inactive_color_offset` + `inactive_bg_color_offset`: when EITHER
             // offset is < 1.0, layer a dim over the unfocused pane.
             //
-            // The FG offset used to be READ NOWHERE — only the BG offset and
-            // the split opacity composed the alpha. That made Terminator's own
-            // default pair (`inactive_color_offset = 0.8`,
-            // `inactive_bg_color_offset = 1.0`) produce no visible change at
-            // all: the BG term was 1.0, so the dim was zero and the setting
-            // the user actually reached for did nothing.
-            //
-            // Both offsets now contribute. This is not Terminator's exact
-            // model — it scales the foreground palette per glyph
-            // (terminal.py:809-823) rather than compositing — but an overlay
-            // reproduces the visible intent ("unfocused panes recede") without
-            // re-running the shaper for every unfocused pane. Taking the max
-            // rather than summing keeps a config that sets both from dimming
-            // twice as hard as either alone.
+            // The FG offset, the BG offset, and the split opacity all
+            // contribute, so Terminator's own default pair
+            // (`inactive_color_offset = 0.8`, `inactive_bg_color_offset = 1.0`)
+            // still dims the pane. Terminator scales the foreground palette per
+            // glyph (terminal.py:809-823) rather than compositing, but an
+            // overlay reproduces the visible intent ("unfocused panes recede")
+            // without re-running the shaper for every unfocused pane. Taking
+            // the max rather than summing keeps a config that sets both from
+            // dimming twice as hard as either alone.
             let inactive_fg_dim = (1.0 - cfg.inactive_color_offset).clamp(0.0, 0.95);
             let inactive_bg_dim = (1.0 - cfg.inactive_bg_color_offset).clamp(0.0, 0.95);
             let split_opacity_dim = (1.0 - cfg.unfocused_split_opacity).clamp(0.0, 0.95);
@@ -6861,9 +6776,9 @@ impl Renderer {
             ));
             self.search_buffer
                 .set_size(Some(sw), Some(geometry.reserved_height));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -6882,11 +6797,11 @@ impl Renderer {
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
-            // v2.20.0: advertise the Ctrl+j/k match stepping when
-            // `vim-menu-nav` is on (the keys themselves live app-side).
-            // Review fix: ^j/^k are LITERAL directions while `invert-search`
-            // flips Enter's default — the hint pairs them accordingly so it
-            // never claims an equivalence the keys don't have.
+            // Advertise the Ctrl+j/k match stepping when `vim-menu-nav` is on
+            // (the keys themselves live app-side). ^j/^k are LITERAL directions
+            // while `invert-search` flips Enter's default, so the hint pairs
+            // them accordingly and never claims an equivalence the keys don't
+            // have.
             let nav_hint = match (cfg.vim_menu_nav, cfg.invert_search) {
                 (true, false) => "(Enter/^j next · Shift+Enter/^k prev · Esc close)",
                 (true, true) => "(Shift+Enter/^j next · Enter/^k prev · Esc close)",
@@ -6902,9 +6817,9 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -6927,9 +6842,9 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -6955,9 +6870,9 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -6980,9 +6895,9 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -7020,9 +6935,9 @@ impl Renderer {
             self.search_buffer.set_metrics(metrics);
             self.search_buffer
                 .set_size(Some(edit.rect.2), Some(edit.rect.3));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -7035,12 +6950,11 @@ impl Renderer {
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
         } else if let Some(dlg) = &overlay.confirm_dialog {
-            // Phase 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md:
-            // a bottom-bar projection of the modal. v1 of the
-            // renderer skips the fancy centered-panel + backdrop
-            // The bottom bar gives immediate modal feedback with prompt,
-            // visible button labels, and a focus indicator. The UI hit-test
-            // path mirrors this text layout so keyboard and mouse activation
+            // Phase 3 of TERMINATOR-CONFIRM-DIALOG-DESIGN.md: a bottom-bar
+            // projection of the modal, without a centered panel or backdrop.
+            // The bar gives immediate modal feedback with prompt, visible
+            // button labels, and a focus indicator. The UI hit-test path
+            // mirrors this text layout so keyboard and mouse activation
             // dispatch through the same confirmation state machine.
             have_search = true;
             search_text_on_menu = true;
@@ -7051,19 +6965,16 @@ impl Renderer {
             // edit-title yellows/blues/cyans.
             //
             // Queued with the menu chrome rather than the base overlay quads:
-            // the settings panel washes the whole surface in a dim backdrop
-            // from `menu_q`, which is drawn last, so a bar pushed to `quads`
-            // came out greyed under it. A modal question has to be the most
-            // legible thing on screen, and the one raised by rebinding onto an
-            // already-bound chord is raised from inside that very panel.
-            // Opaque, and that is load-bearing rather than cosmetic:
-            // `confirm_bar_text_color` guarantees AA against `palette[1]`
-            // itself. At the previous 0.96 the painted background was
-            // `palette[1]` composited over whatever terminal content happened
-            // to sit underneath, so the real ratio drifted with the scrollback
-            // and a valid custom theme could land under the floor the helper
-            // advertises. A destructive question is the one overlay that has
-            // no business being translucent.
+            // the settings panel washes the surface in a dim backdrop from
+            // `menu_q`, which is drawn last, so a bar in `quads` would come out
+            // greyed under it. A modal question has to be the most legible
+            // thing on screen, and rebinding onto an already-bound chord raises
+            // one from inside that very panel.
+            // Opaque, and that is load-bearing: `confirm_bar_text_color`
+            // guarantees AA against `palette[1]` itself. A translucent bar
+            // composites `palette[1]` over the terminal content underneath, so
+            // the real ratio drifts with the scrollback and a valid custom theme
+            // could land under the floor the helper advertises.
             menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
             let mut buttons_label = String::new();
             for (i, btn) in dlg.buttons.iter().enumerate() {
@@ -7078,13 +6989,12 @@ impl Renderer {
                 buttons_label.push(']');
             }
             // The bar is `palette[1]`, not the chrome background, so the theme
-            // foreground is not guaranteed to be readable on it — on the
-            // shipped TokyoNight Night default it is light lavender (#c0caf5)
-            // on light red (#f7768e), about 1.6:1, which is how a close
-            // confirmation ended up unanswerable. Lift it to WCAG AA the same
-            // way the completion panel does (`confirm_bar_text_color`). The
-            // 0.96 alpha leaves the effective background within a few percent
-            // of `palette[1]`, so measuring against the flat color is right.
+            // foreground is not guaranteed to be readable on it. On the shipped
+            // TokyoNight Night default it is light lavender (#c0caf5) on light
+            // red (#f7768e), about 1.6:1, too low to read a close confirmation.
+            // Lift it to WCAG AA the same way the completion panel does
+            // (`confirm_bar_text_color`). The bar is opaque, so measuring
+            // against the flat color is right.
             let bar_fg = confirm_bar_text_color(theme);
             search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));
             let prompt = format!("  ⚠ {}", dlg.prompt);
@@ -7108,9 +7018,9 @@ impl Renderer {
             );
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -7167,9 +7077,9 @@ impl Renderer {
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // v2.38.2 P1b: same equality gate as the other chrome buffers —
-            // only one of this `if`/`else if` chain's arms runs per frame, so
-            // a single cache is enough (see `search_buffer_text`'s doc comment).
+            // Same equality gate as the other chrome buffers. Only one arm of
+            // this `if`/`else if` chain runs per frame, so a single cache is
+            // enough (see `search_buffer_text`'s doc comment).
             if self.search_buffer_text != label {
                 self.search_buffer.set_text(
                     &label,
@@ -7190,15 +7100,15 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.tab_buffers.push(b);
             }
-            // v2.20.0 P1b: label cache lives and dies with `tab_buffers`.
+            // The label cache lives and dies with `tab_buffers`.
             while self.tab_texts.len() < tabbar.segments.len() {
                 self.tab_texts.push(String::new());
             }
             self.tab_texts.truncate(tabbar.segments.len());
             // Shrink the pool when tabs close, matching
-            // `pane_buffers`/`settings_buffers` — otherwise it stuck at the
-            // peak tab count for the whole session (open 50, close to 5 → 50
-            // shaped-text buffers retained).
+            // `pane_buffers`/`settings_buffers`. Otherwise it stays at the
+            // session's peak tab count (open 50, close to 5 → 50 shaped-text
+            // buffers retained).
             self.tab_buffers.truncate(tabbar.segments.len());
             for (bi, s) in tabbar.segments.iter().enumerate() {
                 let (_, _, title_w, title_h) = s.title_rect;
@@ -7206,13 +7116,11 @@ impl Renderer {
                 // excludes fixed tab chrome such as the close button, so
                 // fitting and visual centering share the same coordinate space.
                 //
-                // The budget tracks the *actual* segment width
-                // instead of a hard 24-char cap, so a wide tab shows its full
-                // title (and only ellipsizes when the title genuinely doesn't
-                // fit). We reserve `fixed_w` for the non-title part of the
-                // format (the leading space + e.g. "{n}: ") so the title
-                // ellipsizes to keep the WHOLE label inside the segment rather
-                // than letting the prefix push it past the right edge.
+                // The budget tracks the *actual* segment width, so a wide tab
+                // shows its full title and ellipsizes only when it doesn't fit.
+                // `fixed_w` reserves room for the non-title part of the format
+                // (e.g. "{n}: "), so the title ellipsizes to keep the WHOLE
+                // label inside the segment.
                 let title = fit_tab_segment_title(
                     &s.title,
                     s.path.as_deref(),
@@ -7231,7 +7139,7 @@ impl Renderer {
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(title_w), Some(title_h));
-                // v2.20.0 P1b: re-shape only when the label actually changed.
+                // Re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
                     buf.set_text(
                         &label,
@@ -7248,7 +7156,7 @@ impl Renderer {
             self.tab_close_buffer.set_metrics(metrics);
             self.tab_close_buffer
                 .set_size(Some(tabbar.height), Some(tabbar.height));
-            // v2.20.0 P1b: constant glyph — shaped once per font family.
+            // Constant glyph, shaped once per font family.
             if self.tab_close_text != "✕" {
                 self.tab_close_buffer.set_text(
                     "✕",
@@ -7264,7 +7172,7 @@ impl Renderer {
             self.tabbar_buffer.set_metrics(metrics);
             self.tabbar_buffer
                 .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
-            // v2.20.0 P1b: constant glyph — shaped once per font family.
+            // Constant glyph, shaped once per font family.
             if self.tabbar_text != NEW_TAB_PLUS_GLYPH {
                 self.tabbar_buffer.set_text(
                     NEW_TAB_PLUS_GLYPH,
@@ -7282,7 +7190,7 @@ impl Renderer {
                 self.new_tab_arrow_buffer.set_metrics(metrics);
                 self.new_tab_arrow_buffer
                     .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
-                // v2.20.0 P1b: constant glyph — shaped once per font family.
+                // Constant glyph, shaped once per font family.
                 if self.new_tab_arrow_text != NEW_TAB_MENU_GLYPH {
                     self.new_tab_arrow_buffer.set_text(
                         NEW_TAB_MENU_GLYPH,
@@ -7295,8 +7203,8 @@ impl Renderer {
                 self.new_tab_arrow_buffer
                     .shape_until_scroll(&mut self.font_system, false);
             }
-            // v2.26.0: overflow scroll-arrow glyphs `‹` / `›`, each shaped in its
-            // own buffer and sized to its button rect. Present only when the
+            // Overflow scroll-arrow glyphs `‹` / `›`, each shaped in its own
+            // buffer and sized to its button rect. Present only when the
             // horizontal tab bar overflows.
             if tabbar.scroll_left.2 > 0.0 {
                 self.scroll_left_buffer.set_metrics(metrics);
@@ -7339,8 +7247,8 @@ impl Renderer {
             self.status_bar_buffer.set_metrics(metrics);
             self.status_bar_buffer
                 .set_size(Some(sw - 16.0), Some(status.height));
-            // v2.20.0 P1b: the status line changes at most once a second (the
-            // HH:MM:SS clock) — don't re-shape it on every painted frame.
+            // The status line changes at most once a second (the HH:MM:SS
+            // clock), so don't re-shape it on every painted frame.
             if self.status_bar_text != status.text {
                 self.status_bar_buffer.set_text(
                     &status.text,
@@ -7355,17 +7263,16 @@ impl Renderer {
                 .shape_until_scroll(&mut self.font_system, false);
         }
 
-        // v2.20.0 (Ghostty `resize-overlay` parity): shape the transient
-        // size chip's text ("120×40"). Drawn later in the menu pass so it
-        // sits above pane content; the P1b equality gate means a live
-        // resize only re-shapes when the GRID size actually changed.
+        // Ghostty `resize-overlay` parity: shape the transient size chip's
+        // text ("120×40"). Drawn later in the menu pass so it sits above pane
+        // content; the equality gate means a live resize only re-shapes when
+        // the GRID size actually changed.
         if let Some((rcols, rrows)) = overlay.resize_overlay {
             let label = format!("{rcols}×{rrows}");
-            // Metrics/size stay OUTSIDE the text gate (review fix): a DPI
-            // change can re-show the chip with an UNCHANGED label, and the
-            // gated form left the glyphs shaped at the old monitor's scale.
-            // Both calls early-out when unchanged, like the other chrome
-            // buffers.
+            // Metrics/size stay OUTSIDE the text gate: a DPI change can re-show
+            // the chip with an UNCHANGED label, and gating them would leave the
+            // glyphs shaped at the old monitor's scale. Both calls early-out
+            // when unchanged, like the other chrome buffers.
             self.resize_overlay_buffer.set_metrics(metrics);
             self.resize_overlay_buffer
                 .set_size(Some(sw), Some(ch * 2.0));
@@ -7389,11 +7296,11 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.context_menu_buffers.push(b);
             }
-            // v2.38.2 P1b: label cache lives and dies with `context_menu_buffers`
-            // but grows off ITS OWN length (like `tab_texts`/`tab_buffers`), not
-            // the buffer pool's — so the font-family invalidation above (which
-            // clears only the `_texts` caches, not the heavier buffer pools) can't
-            // desync the two into different lengths and panic on indexing below.
+            // The label cache lives and dies with `context_menu_buffers` but
+            // grows off ITS OWN length (like `tab_texts`/`tab_buffers`), not the
+            // buffer pool's. The font-family invalidation above clears only the
+            // `_texts` caches, not the heavier buffer pools, so the two could
+            // otherwise reach different lengths and panic on indexing below.
             while self.context_menu_texts.len() < menu.rows.len() {
                 // Empty sentinel — same trick `hint_buffers`/`hint_texts` use —
                 // so a fresh slot's first fill isn't skipped by the equality
@@ -7407,10 +7314,9 @@ impl Renderer {
             while self.context_menu_hint_texts.len() < menu.rows.len() {
                 self.context_menu_hint_texts.push(String::new());
             }
-            // Shrink to the current row count so a small
-            // menu after a large one (common with dynamic Lua menus) doesn't
-            // keep the peak's worth of shaped-glyph buffers. The field doc
-            // promised this trim; the code never did it until now.
+            // Shrink to the current row count so a small menu after a large
+            // one (common with dynamic Lua menus) doesn't keep the peak's worth
+            // of shaped-glyph buffers.
             self.context_menu_buffers.truncate(menu.rows.len());
             self.context_menu_texts.truncate(menu.rows.len());
             self.context_menu_hint_buffers.truncate(menu.rows.len());
@@ -7420,8 +7326,7 @@ impl Renderer {
             // cannot drift by a fractional cell after ellipsis.
             let panel_w = context_menu_panel_width(menu, cw);
             // Row height matches a comfortable click target (~28-32 px
-            // on default cell metrics) — was 6 px of pad which gave a
-            // cramped 18-19 px row.
+            // on default cell metrics).
             let row_h = ch + 12.0;
             for (i, row) in menu.rows.iter().enumerate() {
                 if row.separator {
@@ -7430,10 +7335,9 @@ impl Renderer {
                 let buf = &mut self.context_menu_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(panel_w), Some(row_h));
-                // v2.38.2 P1b: re-shape only when the row's label actually
-                // changed — an open menu previously re-shaped every row on
-                // every blink/hover-driven redraw even though its rows are
-                // byte-stable while it stays open.
+                // Re-shape only when the row's label actually changed. An open
+                // menu's rows are byte-stable, so blink/hover-driven redraws
+                // need no reshape.
                 if self.context_menu_texts[i] != row.label {
                     buf.set_text(
                         &row.label,
@@ -7464,12 +7368,10 @@ impl Renderer {
 
         // Settings-overlay row buffers (one per display line).
         if let Some(set) = &overlay.settings {
-            // v2.38.2 P1b: `settings_display_lines` runs a `format!()` per
-            // display line — memoize its output against the last
-            // `SettingsOverlay` it was computed from instead of rebuilding
-            // every painted frame (the settings panel, like the context
-            // menu, sits open across blink/hover-driven redraws with nothing
-            // actually changing).
+            // `settings_display_lines` runs a `format!()` per display line, so
+            // memoize its output against the last `SettingsOverlay` it was
+            // computed from. The panel, like the context menu, sits open across
+            // blink/hover-driven redraws with nothing actually changing.
             if self.settings_lines_source.as_ref() != Some(set) {
                 self.settings_lines_cache = settings_display_lines(set);
                 self.settings_lines_source = Some(set.clone());
@@ -7479,10 +7381,10 @@ impl Renderer {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
                 self.settings_buffers.push(b);
             }
-            // v2.38.2 P1b: grows off ITS OWN length, not `settings_buffers`' —
-            // same reasoning as `context_menu_texts` above (the font-family
-            // invalidation clears only the `_texts` cache, so the two pools
-            // must each regrow independently or indexing below could panic).
+            // Grows off ITS OWN length, not `settings_buffers`', for the same
+            // reason as `context_menu_texts` above. The font-family invalidation
+            // clears only the `_texts` cache, so the two pools must each regrow
+            // independently or indexing below could panic.
             while self.settings_texts.len() < lines.len() {
                 self.settings_texts.push(String::new());
             }
@@ -7500,10 +7402,10 @@ impl Renderer {
                 let fitted = settings_fit_line(line, panel_w, cw);
                 buf.set_size(Some(text_w), Some(row_h));
                 buf.set_wrap(Wrap::None);
-                // v2.38.2 P1b: moving the focused row only changes 2 of N
-                // lines (the old/new `▸` mark) — this per-row gate spares the
-                // other N-2 rows a reshape even on a frame where the overlay
-                // memoization above DID recompute `lines`.
+                // Moving the focused row only changes 2 of N lines (the old/new
+                // `▸` mark). This per-row gate spares the other N-2 rows a
+                // reshape even on a frame where the memoization above DID
+                // recompute `lines`.
                 if self.settings_texts[i] != fitted {
                     buf.set_text(
                         &fitted,
@@ -7750,8 +7652,8 @@ impl Renderer {
                 let buf = &mut self.hint_buffers[i];
                 // Metrics/size stay outside the text gate (same DPI-change
                 // hazard as the resize chip above); both early-out when
-                // unchanged. The gate spares the ~100-label reshape the
-                // blink-driven redraw paid while the overlay sat open.
+                // unchanged. The gate spares a ~100-label reshape on every
+                // blink-driven redraw while the overlay is open.
                 buf.set_metrics(metrics);
                 buf.set_size(Some(n * cw + 2.0), Some(ch));
                 if self.hint_texts[i] != hint.label {
@@ -7799,18 +7701,16 @@ impl Renderer {
         // (where there's no specific pane to take an OSC 10 override from).
         let fg = theme.foreground;
         let mut areas: Vec<TextArea> = Vec::with_capacity(panes.len() + 2);
-        // Menu text lives in its own areas vec so we can hand it to a
-        // dedicated `menu_text_renderer.prepare(...)` call after the
-        // main `text_renderer.prepare(...)` — drawing the
-        // menu's bg / shadow / border / highlight before the menu's
-        // text in the same pass painted text right under bg; this
-        // split fixes that by giving the menu its own
-        // bg→border→highlight→text pipeline at the end of the render
-        // pass.
+        // Menu text lives in its own areas vec, prepared by a dedicated
+        // `menu_text_renderer.prepare(...)` after the main
+        // `text_renderer.prepare(...)`. In one shared pass the menu's bg /
+        // shadow / border / highlight would cover its text; the split gives
+        // the menu its own bg→border→highlight→text pipeline at the end of the
+        // render pass.
         // Pre-size for the menu / settings-overlay rows it collects.
         let mut menu_areas: Vec<TextArea> = Vec::with_capacity(48);
-        // v2.20.0 (Ghostty parity): the transient resize chip — centered,
-        // drawn in the menu pass (last) so it reads over any pane content.
+        // Ghostty parity: the transient resize chip, centered and drawn in the
+        // menu pass (last) so it reads over any pane content.
         if let Some((rcols, rrows)) = overlay.resize_overlay {
             let label_cells = format!("{rcols}×{rrows}").chars().count() as f32;
             let pad = 14.0_f32;
@@ -8162,9 +8062,9 @@ impl Renderer {
             let pane_fg = pv.snap.colors[256]
                 .map(|c| Rgb::new(c.r, c.g, c.b))
                 .unwrap_or(theme.foreground);
-            // v2.25.0: in the default grid mode, pane cell text is drawn by the
-            // cell-locked `glyph_pipeline` (emitted below), NOT glyphon — so don't
-            // push a pane TextArea here. Legacy mode keeps the old glyphon path.
+            // In the default grid mode, pane cell text is drawn by the
+            // cell-locked `glyph_pipeline` (emitted below), NOT glyphon, so don't
+            // push a pane TextArea here. Legacy mode keeps the glyphon path.
             if cfg.text_renderer == TextRendererMode::Legacy {
                 areas.push(TextArea {
                     buffer: &self.pane_buffers[i],
@@ -8184,18 +8084,16 @@ impl Renderer {
                 });
             }
         }
-        // Terminator parity, per-pane-titlebar Bucket-D,
-        // phase 3 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: per-pane title text. Push the TextAreas
-        // referencing the `pane_titlebar_buffers` (already populated
-        // earlier in this pass — see
-        // build_pane_titlebar_text).
+        // Terminator parity, phase 3 of TERMINATOR-PANE-TITLEBAR-DESIGN.md:
+        // per-pane title text. Push TextAreas for the `pane_titlebar_buffers`
+        // shaped earlier in this pass.
         if pane_titlebar_h > 0.0 {
             for (i, pv) in panes.iter().enumerate() {
                 let (rx, ry, rw, rh) = pv.rect;
-                // Matching fg variant for the three states,
-                // derived from the theme so the title text stays
-                // readable + on-theme. The focused + broadcast bars are the
-                // theme's (light) blue `palette[4]`, so their text is the dark
+                // Matching fg variant for the three states, derived from the
+                // theme so the title text stays readable + on-theme. The
+                // focused and broadcast bars default to the window accent (see
+                // `pick_titlebar_bg`), so their text is the dark
                 // `theme.cursor_text`; the inactive bar is the dark `palette[8]`
                 // surface, so its text is the light `theme.foreground`. Explicit
                 // `title-*-fg-color` config still overrides.
@@ -8345,7 +8243,7 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            // v2.26.0: overflow scroll-arrow glyphs `‹` / `›` at the strip edges.
+            // Overflow scroll-arrow glyphs `‹` / `›` at the strip edges.
             if tabbar.scroll_left.2 > 0.0 {
                 let (ax, _, aw, _) = tabbar.scroll_left;
                 areas.push(TextArea {
@@ -8466,14 +8364,11 @@ impl Renderer {
             }
         }
 
-        // Right-click context menu — drawn in its own final pass.
-        // v1.3.0/v1.3.1 put the menu's panel-bg quad in
-        // `over` (drawn AFTER text), with the opaque bg covering the
-        // menu text underneath. Now: chrome quads go to `menu_q`
-        // (drawn after `over` via `self.menu_quads.draw`); row labels
-        // go to `menu_areas` (drawn via a dedicated
-        // `self.menu_text_renderer.render` call after the menu
-        // quads). The bg-under-text order finally matches reality.
+        // Right-click context menu, drawn in its own final pass. Chrome quads
+        // go to `menu_q` (drawn after `over` via `self.menu_quads.draw`); row
+        // labels go to `menu_areas` (drawn by a dedicated
+        // `self.menu_text_renderer.render` call after the menu quads), so the
+        // opaque panel bg stays under the menu text.
         if let Some(menu) = &overlay.context_menu {
             let chrome = menu_chrome_quads(menu, theme, self.ui_accent(cfg, theme), cw, ch);
             menu_q.extend(chrome);
@@ -8554,13 +8449,11 @@ impl Renderer {
         // the menu pipeline (dim backdrop + panel + accent border + focused-row
         // highlight as quads; one TextArea per display line).
         if let Some(set) = &overlay.settings {
-            // v2.38.2 P1b: reuse the buffer-prep pass's memoized lines rather
-            // than running `settings_display_lines` (one `format!()` per
-            // display line) a SECOND time per frame — the two passes already
-            // shared a comment promising they "call this off the same
-            // `settings_display_lines` output, keeping them in lockstep";
-            // `self.settings_lines_cache` was just (re)computed for this
-            // exact `set` above, in the same `render_frame` call.
+            // Reuse the buffer-prep pass's memoized lines rather than running
+            // `settings_display_lines` (one `format!()` per display line) a
+            // SECOND time per frame. `self.settings_lines_cache` was just
+            // (re)computed for this exact `set` above, in the same
+            // `render_frame` call, so both passes stay in lockstep.
             let lines = &self.settings_lines_cache;
             let layout = settings_panel_layout(set, lines, cw, ch, sw, sh);
             let (row_h, panel_w, panel_h, px, py) = (
@@ -8575,9 +8468,9 @@ impl Renderer {
             // active tab rather than always-blue.
             let acc = self.ui_accent(cfg, theme);
             // Dim backdrop over the whole window so the panel reads as modal.
-            // v2.24.0: on the Background page, dim LESS so the live wallpaper
-            // (the real animated starfield / image) shows around the panel as a
-            // genuine preview while you change `background-type`.
+            // On the Background page, dim LESS so the live wallpaper (the real
+            // animated starfield / image) shows around the panel as a genuine
+            // preview while you change `background-type`.
             let on_bg_page = set
                 .categories
                 .get(set.active_category)
@@ -8606,8 +8499,8 @@ impl Renderer {
             let hi_y = py + 12.0 + (hi_line - layout.first_line) as f32 * row_h;
             menu_q.push(rect(px + 6.0, hi_y, panel_w - 12.0, row_h, acc, 0.22));
             let sfg = theme.foreground;
-            // v2.24.0: a disabled field row (inapplicable to the current state)
-            // renders dimmed — blended halfway toward the panel background.
+            // A disabled field row (inapplicable to the current state) renders
+            // dimmed, blended halfway toward the panel background.
             let dim = color::dim(sfg, theme.background);
             for (visible_index, (i, _line)) in lines
                 .iter()
@@ -8654,18 +8547,18 @@ impl Renderer {
             }
         }
 
-        // v2.21.0 (idle perf): skip the whole-viewport glyphon `prepare` when
-        // nothing that feeds the text renderers changed this frame. `prepare`
-        // re-encodes EVERY visible glyph's vertices + does atlas housekeeping;
-        // on an idle repaint (a cursor blink, a bell-flash decay, a focus-dim
-        // toggle) the text is byte-identical, so we re-render the cached vertex
-        // buffers as-is and only rebuild/upload the cheap quad list. Skipping
-        // is conservative — ANY pane row reshape, ANY chrome label change, or
-        // ANY open text overlay forces the prepare, so a stale frame is
-        // impossible. `atlas.trim()` (below) is likewise gated: trimming
-        // without a following prepare would clear the in-use set and let a
-        // later prepare evict still-displayed glyphs out from under the cached
-        // vertices.
+        // Skip the whole-viewport glyphon `prepare` when nothing that feeds the
+        // text renderers changed this frame. `prepare` re-encodes EVERY visible
+        // glyph's vertices + does atlas housekeeping; on an idle repaint (a
+        // cursor blink, a bell-flash decay, a focus-dim toggle) the text is
+        // byte-identical, so we re-render the cached vertex buffers as-is and
+        // only rebuild/upload the cheap quad list. Skipping is conservative.
+        // ANY pane row reshape, ANY chrome label or damage-key change, or an
+        // open text overlay without its own damage key forces the prepare, so
+        // a stale frame is impossible. `atlas.trim()` (below) is gated the same
+        // way, because trimming without a following prepare would clear the
+        // in-use set and let a later prepare evict still-displayed glyphs out
+        // from under the cached vertices.
         let non_context_text_overlay_open = text_overlay_requires_continuous_prepare(overlay);
         let overlay_open = non_context_text_overlay_open || overlay.context_menu.is_some();
         let chrome_hash = {
@@ -8722,10 +8615,10 @@ impl Renderer {
         let cursor_char = self.pending_cursor_glyph.as_ref().map(|c| c.ch);
         let cursor_char_changed = cursor_char != self.last_cursor_char;
         self.last_cursor_char = cursor_char;
-        // v2.23.0 fix: the frame an overlay CLOSES (`overlay_open` flips
-        // true→false) must still prepare once, or the closed panel's cached text
-        // vertices keep rendering until the next keystroke. `overlay_open` alone
-        // covers the open state; this covers the close edge.
+        // The frame an overlay CLOSES (`overlay_open` flips true→false) must
+        // still prepare once, or the closed panel's cached text vertices keep
+        // rendering until the next keystroke. Open overlays are covered above;
+        // this covers the close edge.
         let overlay_changed = overlay_open != self.last_overlay_open;
         self.last_overlay_open = overlay_open;
         let need_prepare = self.text_prepare_dirty
@@ -8763,7 +8656,8 @@ impl Renderer {
                 areas,
                 &mut self.swash,
             )?;
-            // Second TextRenderer prepare — context-menu rows. Empty
+            // Second TextRenderer prepare, for the menu pass (context menu,
+            // settings, completion, and other top-layer text). Empty
             // `menu_areas` is fine; glyphon's prepare handles a zero-area
             // batch as a no-op.
             self.menu_text_renderer.prepare(
@@ -8776,7 +8670,7 @@ impl Renderer {
                 &mut self.swash,
             )?;
         }
-        // v2.25.1: cell-locked pane text has its OWN damage gate. A cursor blink
+        // Cell-locked pane text has its OWN damage gate. A cursor blink
         // can force `need_prepare` via `cursor_char_changed` for the separate
         // cursor glyph pass, but it must not clear/re-upload pane glyph
         // instances. Only pane text changes and layout/style damage refresh the
@@ -8861,11 +8755,11 @@ impl Renderer {
         self.pane_bases
             .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
         // `pane_bases` deliberately uses replace blending so overlapping pane
-        // interiors do not compound their configured transparency. That same
-        // replace pass used to erase the unsupported-blur underlay floor,
-        // leaving Linux at the user's raw opacity despite the advertised 99%
-        // fallback. Upload a live-only copy with its final alpha clamped;
-        // offscreen screenshots continue to draw the unmodified buffer above.
+        // interiors do not compound their configured transparency. That pass
+        // would also erase the unsupported-blur underlay floor, leaving Linux
+        // at the user's raw opacity instead of the advertised 99% fallback.
+        // Upload a live-only copy with its final alpha clamped; offscreen
+        // screenshots continue to draw the unmodified buffer above.
         if let Some(floor) = self.live_background_opacity_floor {
             apply_quad_alpha_floor(&mut pane_bases, floor);
             self.live_pane_bases
@@ -8878,7 +8772,7 @@ impl Renderer {
         // Return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
-        // v2.23.0: wallpaper into its own back pipeline; inline images into
+        // Wallpaper goes into its own back pipeline; inline images into
         // `imgs`. Each cache gets its own exact live set so an image used in one
         // role cannot accidentally pin a stale texture in the other pipeline.
         // Release textures not referenced by this frame before admitting new
@@ -8894,9 +8788,9 @@ impl Renderer {
             &bg_img_items,
         );
         opaque_wallpaper_covers_surface &= wallpaper_upload_complete;
-        // v2.24.0: refresh the procedural starfield's per-frame uniform (just
+        // Refresh the procedural starfield's per-frame uniform (just
         // resolution + the continuous `time` clock; the look is baked into the
-        // shader as of v2.24.1) when it's the active wallpaper.
+        // shader) when it's the active wallpaper.
         if matches!(
             cfg.background_type,
             kettle_config::BackgroundType::Starfield
@@ -8987,15 +8881,14 @@ impl Renderer {
             // surface. Present it once, then refresh the swapchain before the
             // next acquire as required by wgpu 30's explicit outcome model.
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => (t, true),
-            // v2.31.0 (adversarial review): Occluded and Timeout are BENIGN
-            // transient states, NOT device loss. CRITICAL: on macOS the Metal
-            // backend returns `Occluded` on EVERY acquire while the window is
-            // minimized/occluded (gfx-rs/wgpu#8309 — occluded `nextDrawable`
-            // hangs ~1s, so the HAL short-circuits before it), so a minimized
-            // window with any active output would otherwise rack up the streak
-            // and FALSELY latch `gpu_lost` on a perfectly healthy device. Pure
-            // skip-frame: do NOT reconfigure (reconfiguring an occluded surface
-            // can itself hang).
+            // Occluded and Timeout are benign transient states, not device
+            // loss. On macOS the Metal backend returns `Occluded` on every
+            // acquire while the window is minimized/occluded (gfx-rs/wgpu#8309;
+            // an occluded `nextDrawable` hangs ~1s, so the HAL short-circuits
+            // before it). Treating that as a failure would falsely latch
+            // `gpu_lost` for a minimized window with active output. Skip the
+            // frame without reconfiguring; reconfiguring an occluded surface
+            // can itself hang.
             wgpu::CurrentSurfaceTexture::Occluded => {
                 self.submit_offscreen_screenshot(encoder, prepared_screenshot);
                 if need_prepare {
@@ -9175,11 +9068,11 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        // v2.23.0 layering: wallpaper at the very back → cell + chrome +
-        // border quads opaquely on top → inline kitty/sixel images over the
-        // cell backgrounds → text. Pre-2.23.0 the wallpaper drew *after*
-        // `quads`, hiding all cell backgrounds and bleeding the animation
-        // through the chrome.
+        // Layering, back to front: wallpaper, then cell + chrome + border
+        // quads opaquely on top, then inline kitty/sixel images over the cell
+        // backgrounds, then text. Drawing the wallpaper after `quads` would
+        // hide every cell background and bleed the animation through the
+        // chrome.
         if matches!(
             cfg.background_type,
             kettle_config::BackgroundType::Starfield
@@ -9198,7 +9091,7 @@ impl Renderer {
         self.quads.draw(&mut pass);
         self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
-        // v2.25.0: cell-locked pane text sits above cell backgrounds + inline
+        // Cell-locked pane text sits above cell backgrounds + inline
         // images and below chrome text (titlebars / menus) and the cursor
         // glyph. A no-op (count 0) in legacy mode, where pane text rides the
         // glyphon `text_renderer` below.
@@ -9215,8 +9108,8 @@ impl Renderer {
         self.media_receipt_img.draw(&mut pass);
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
-        // v2.21.0 (idle perf): the focused solid-block cursor's inverted glyph,
-        // drawn last so it sits on top of the block quad and normal glyph.
+        // The focused solid-block cursor's inverted glyph, drawn last so it
+        // sits on top of the block quad and normal glyph.
         if self.pending_cursor_glyph.is_some() {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
@@ -9406,19 +9299,18 @@ impl Renderer {
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
-        // Terminator parity, per-pane-titlebar Bucket-D,
-        // phase 2 of TERMINATOR-PANE-TITLEBAR-DESIGN.md: extra top offset for cell content
-        // so it doesn't overlap the per-pane titlebar bar. When
-        // titlebar is off this is 0.0 (zero overhead).
+        // Terminator parity (TERMINATOR-PANE-TITLEBAR-DESIGN.md): the per-pane
+        // titlebar height reserved so cell content doesn't overlap the bar.
+        // 0.0 when the titlebar is off.
         pane_titlebar_h: f32,
     ) -> bool {
-        // v2.21.0 (idle perf): becomes true iff this pane mutated its text
-        // buffer this frame (a row reshaped, or the line count changed). When
-        // NO pane changed — and chrome text is identical, no overlay is open —
-        // `render_frame_with_status` skips the whole-viewport glyphon
-        // `prepare`, re-rendering the cached glyph vertices instead. A cursor
-        // blink that doesn't touch text (bar/underline/hollow, or any steady
-        // cursor) therefore costs no reshape AND no glyph re-encode.
+        // True iff this pane mutated its text buffer this frame (a row
+        // reshaped, or the line count changed). When no pane changed, chrome
+        // text is identical, and no overlay is open, `render_frame_with_status`
+        // skips the whole-viewport glyphon `prepare` and re-renders the cached
+        // glyph vertices. A cursor blink that doesn't touch text
+        // (bar/underline/hollow, or any steady cursor) therefore costs no
+        // reshape and no glyph re-encode.
         let mut text_changed = false;
         let theme = &cfg.theme;
         let (_, _, rw, rh) = pv.rect;
@@ -9430,17 +9322,14 @@ impl Renderer {
         );
         let cw = self.cell_w;
         let ch = self.cell_h;
-        // v2.20.0 P2: everything below reads the lock-free snapshot captured
-        // by `redraw` — same data `renderable_content()` used to yield, the
-        // Term mutex is just no longer held while we process it.
+        // Everything below reads the lock-free snapshot captured by `redraw`,
+        // so the Term mutex is not held while we process it.
         let snap = pv.snap;
         let term_colors = &snap.colors;
         let cols = snap.columns;
         // Cells inside the selection range get their fg swapped to
         // `theme.selection_foreground` so dark-on-dark themes stay readable
-        // under the highlight. Without this, the configured
-        // `selection-foreground` color was parsed and stored but the
-        // renderer ignored it.
+        // under the highlight.
         let selection_range = snap.selection;
         // Snapshot cells + selection carry
         // GRID-ABSOLUTE lines (negative when scrolled into history); the per-cell
@@ -9549,12 +9438,12 @@ impl Renderer {
         // cell walk (the display iterator is single-pass); `None` = narrow
         // cell, draw as before.
         let mut cursor_wide_quad: Option<(usize, f32)> = None;
-        // v2.21.0 (idle perf): instead of recoloring the glyph UNDER a focused
-        // solid block cursor INTO the pane text buffer (which dirtied the
-        // cursor row's shaping cache every blink and forced a whole-viewport
-        // re-prepare), capture (glyph, color) here and draw it in the dedicated
-        // cursor-glyph pass on top of the block. The pane buffer then stays
-        // byte-identical across a blink, so the prepare is skipped.
+        // Capture the glyph under a focused solid block cursor (with its
+        // color) and draw it in the dedicated cursor-glyph pass on top of the
+        // block. Recoloring it in the pane text buffer would dirty the cursor
+        // row's shaping cache every blink and force a whole-viewport
+        // re-prepare. This way the buffer stays byte-identical across a blink,
+        // so the prepare is skipped.
         let mut cursor_glyph_capture: Option<(char, Rgb, bool)> = None;
 
         for sc in &snap.cells {
@@ -9634,26 +9523,22 @@ impl Renderer {
                     1.0,
                 ));
             }
-            // SGR 4 underline family / SGR 9 strikeout — both engine-
-            // tracked (see the `sgr_underline_dim_strike` test); render
-            // support followed later.
+            // SGR 4 underline family / SGR 9 strikeout, both engine-tracked
+            // (see the `sgr_underline_dim_strike` test).
             //
             // Underline color: SGR 58 (`\e[58;2;r;g;bm` / `[58;5;Nm`) sets
             // a per-cell `underline_color`, used by neovim spell-check to
             // draw red squiggles on otherwise-normal text. Resolve it via
-            // the same path as fg/bg; fall back to `fg` when unset so
-            // every existing usage keeps working.
+            // the same path as fg/bg; fall back to `fg` when unset.
             //
-            // Underline style: alacritty exposes five style bits —
-            // UNDERLINE, DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE,
-            // DASHED_UNDERLINE — all reached via `Flags::ALL_UNDERLINES`, and
-            // mutually exclusive (alacritty_terminal clears the others
-            // whenever SGR 4 sets a new sub-style; see `term/mod.rs`'s
-            // `Attr::Underline*` arms). `push_underline_quads` now gives
-            // each style a visually distinct shape (audit fix — see its doc
-            // comment for the undercurl approximation's limits) instead of
-            // collapsing all five to the same 1px line; DOUBLE_UNDERLINE's
-            // extra stacked line is still added separately below.
+            // Underline style: alacritty exposes five style bits (UNDERLINE,
+            // DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE, DASHED_UNDERLINE),
+            // all reached via `Flags::ALL_UNDERLINES` and mutually exclusive
+            // (alacritty_terminal clears the others whenever SGR 4 sets a new
+            // sub-style; see `term/mod.rs`'s `Attr::Underline*` arms).
+            // `push_underline_quads` draws each style as a distinct shape,
+            // including DOUBLE_UNDERLINE's second line; see its doc comment
+            // for the undercurl approximation's limits.
             if flags.intersects(Flags::ALL_UNDERLINES) {
                 let line_color = sc
                     .underline_color
@@ -9678,7 +9563,7 @@ impl Renderer {
             // accent (`e`+U+0301), an emoji ZWJ sequence, a variation selector.
             // Append them right after the base char so the shaper composes the
             // full grapheme; skip on a HIDDEN cell (the base became a space, so
-            // the marks have nothing to attach to). audit v2.32.0.
+            // the marks have nothing to attach to).
             let marks: &[char] = if hidden { &[] } else { sc.zerowidth() };
             match cur {
                 Some((f, cb, ci)) if f == fg && cb == bold && ci == italic => {
@@ -9719,9 +9604,6 @@ impl Renderer {
             let (s, e) = (sel.start, sel.end);
             for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
                 // Selection lines are grid-absolute; map to the viewport row.
-                // The old `r < 0` guard DROPPED any selection scrolled up into
-                // history, and a positive `r` was drawn at the wrong
-                // (un-offset) viewport y.
                 let vrow = r + display_off;
                 debug_assert!((0..screen_rows).contains(&vrow));
                 let (c0, c1) = selection_row_span(
@@ -9749,16 +9631,9 @@ impl Renderer {
         // use this to flip between block/underline/beam for normal/insert/
         // replace modes. The engine is seeded from `cfg.cursor_style` at pane
         // creation so the default still matches the user's config.
-        // Also require cursor_visible. The old check fell
-        // through to draw the hollow-outline branch on an unfocused
-        // window even when DEC ?25l had hidden the cursor. So a
-        // program that called `printf '\e[?25l'` (vim, less, fzf…)
-        // and the user clicked away — the unfocused-pane outline
-        // still showed. cursor_visible now gates everything; the
-        // hollow-outline-for-HollowBlock-shape case stays inside the
-        // visible branch since DECSCUSR shapes and DEC ?25 hide are
-        // independent (a program can use HollowBlock to mean "I'm
-        // not in this pane" while still wanting the cursor visible).
+        // DEC ?25l (vim, less, fzf) reaches us as `EShape::Hidden`, which
+        // `draw_cursor` excludes, so outside vi mode it hides every shape,
+        // including the HollowBlock outline.
         // The cursor point is grid-absolute, including alacritty's native vi
         // cursor. When scrolled back (`display_offset > 0`) it must convert to
         // a viewport row like the cells and selection already do above — else
@@ -9773,11 +9648,8 @@ impl Renderer {
             let bx = ox + bcol as f32 * cw;
             let by = oy + cvrow as f32 * ch;
             // OSC 12 cursor color override (stored in `term_colors[258]`)
-            // takes precedence over the theme — same precedence rule the
-            // OSC 4/10/11/12 *query* path returns. Without this, programs
-            // could set the cursor color but the renderer kept drawing the
-            // theme cursor (a silent drop, mirror of the OSC color-query
-            // bug that was fixed two weeks ago for the *read* direction).
+            // takes precedence over the theme, the same precedence rule the
+            // OSC 4/10/11/12 *query* path returns.
             let cursor_color = if snap.vi_mode {
                 // Keep vi navigation distinct from both the application
                 // cursor and broadcast-mode yellow.
@@ -9797,18 +9669,17 @@ impl Renderer {
                 let (cwidth, alpha, cheight, yoff) = match shape {
                     EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
                     EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                    // A focused block cursor is SOLID (was a 0.55
-                    // translucent tint). v2.21.0: the inverted glyph under it is
-                    // drawn in the dedicated cursor-glyph pass (see below), not
-                    // recolored into the pane buffer, so a blink no longer
-                    // reshapes the row. `bcells` widens it over a
-                    // wide (CJK/emoji) glyph so the right half isn't uncovered.
+                    // A focused block cursor is solid. The inverted glyph under
+                    // it is drawn in the dedicated cursor-glyph pass (see below),
+                    // not recolored into the pane buffer, so a blink does not
+                    // reshape the row. `bcells` widens it over a wide
+                    // (CJK/emoji) glyph so the right half stays covered.
                     EShape::Block | EShape::HollowBlock | EShape::Hidden => {
                         (cw * bcells, 1.0, ch, 0.0)
                     }
                 };
                 quads.push(rect(bx, by + yoff, cwidth, cheight, cursor_color, alpha));
-                // v2.21.0 (idle perf): queue the inverted foreground glyph to be
+                // Queue the inverted foreground glyph to be
                 // drawn ON TOP of the solid block in its own pass. Only the
                 // full Block shape covers the glyph; beam/underline leave it
                 // visible in its normal color, so they need no overdraw.
@@ -9854,13 +9725,12 @@ impl Renderer {
             .family(Family::Name(family))
             .font_features(ff.clone());
         // Always Advanced: it is the only shaping mode that walks
-        // cosmic-text's platform font-fallback cascade (CJK, emoji, symbols).
-        // The ligature toggle is fully expressed as OpenType features
-        // (`font_features()` emits liga/clig/calt/dlig=0 when off), so the
-        // old ligatures-off drop to Basic shaping bought nothing but a
-        // narrower fast path — and silently tofu-boxed every fallback glyph
-        // for those users. Cost is bounded by the per-line shaping cache
-        // below: only rows whose content changed re-shape.
+        // cosmic-text's platform font-fallback cascade (CJK, emoji, symbols),
+        // so Basic would tofu-box every fallback glyph. The ligature toggle is
+        // fully expressed as OpenType features (`font_features()` emits
+        // liga/clig/calt/dlig=0 when off), so it needs no shaping-mode switch.
+        // Cost is bounded by the per-line shaping cache below: only rows whose
+        // content changed re-shape.
         let shaping = Shaping::Advanced;
 
         // Keep buffer lines row-aligned and reshape only when a row key changes.
@@ -9904,10 +9774,9 @@ impl Renderer {
         let keys = &mut self.pane_line_keys[idx];
         keys.truncate(rows);
         let mut row_text = std::mem::take(&mut self.line_text_scratch);
-        // Row r's runs are `spans[breaks[r-1]..breaks[r]]` — `span_line_breaks`
+        // Row r's runs are `spans[breaks[r-1]..breaks[r]]`. `span_line_breaks`
         // records the live run count at each row transition (one entry per
-        // crossed row, `rows - 1` total), exactly the structure the old
-        // `build_rich_spans` consumed to interleave its `"\n"` markers.
+        // crossed row, `rows - 1` total).
         let mut start = 0usize;
         for row in 0..rows {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
@@ -9994,15 +9863,15 @@ impl Renderer {
         text_changed
     }
 
-    /// v2.25.0 (cell-locked rendering): walk every visible pane's freshly-shaped
-    /// `Buffer` and emit ONE pinned glyph instance per laid-out glyph, positioned
-    /// at its grid cell (`pane_origin + col*cell_w`) instead of cosmic-text's
-    /// continuous advance. Rasterization + the cache key + the vertical / bearing
-    /// math are byte-identical to glyphon (see `glyphpipe.rs`); only the X is
-    /// substituted, and only that differs from the legacy path — a primary-face
-    /// monospace glyph already has advance == cell_w, so its position is
-    /// unchanged. The drift cases (fallback punctuation, Nerd icons, color emoji,
-    /// CJK, ligatures, mismatched-width bold/italic) are what get pinned.
+    /// Cell-locked rendering: walk every visible pane's freshly-shaped `Buffer`
+    /// and emit ONE pinned glyph instance per laid-out glyph, positioned at its
+    /// grid cell (`pane_origin + col*cell_w`) instead of cosmic-text's
+    /// continuous advance. Rasterization, the cache key, and the vertical /
+    /// bearing math are byte-identical to glyphon (see `glyphpipe.rs`); only
+    /// the X differs from the legacy path. A primary-face monospace glyph
+    /// already has advance == cell_w, so its position is unchanged. The drift
+    /// cases (fallback punctuation, Nerd icons, color emoji, CJK, ligatures,
+    /// mismatched-width bold/italic) are what get pinned.
     fn emit_pane_glyphs(
         &mut self,
         panes: &[PaneView<'_>],
@@ -10075,14 +9944,6 @@ impl Renderer {
     }
 }
 
-/// OpenType features to shape pane text with: the coarse ligature toggle
-/// expressed as `liga/clig/calt/dlig = 0` when off, then the user's explicit
-/// `font-feature` overrides applied on top (so they can re-enable or tune
-/// individual features). Cited: Ghostty `font-feature`, kitty `font_features`.
-/// Upper bound on tiles a `tile` background may emit per frame before falling
-/// back to a single stretched quad. ~60-px tiles on a 4K surface (3840×2160 →
-/// 64×34 ≈ 2176) stay under it; only pathologically small source images
-/// (≤ ~30 px) trip the cap.
 /// Divide a bounded frame resource across independent panes in deterministic
 /// round-robin order. Saturated or empty panes donate their unused share, so
 /// the result consumes `min(sum(counts), limit)` slots without allowing the
@@ -10221,6 +10082,10 @@ fn rect_covers_surface(rect: [f32; 4], surface: [f32; 2]) -> bool {
         && y + height >= surface_height
 }
 
+/// OpenType features to shape pane text with: the coarse ligature toggle
+/// expressed as `liga/clig/calt/dlig = 0` when off, then the user's explicit
+/// `font-feature` overrides applied on top (so they can re-enable or tune
+/// individual features). Cited: Ghostty `font-feature`, kitty `font_features`.
 fn font_features(cfg: &Config) -> FontFeatures {
     let mut ff = FontFeatures::new();
     if !cfg.font_ligatures {
@@ -10292,10 +10157,8 @@ fn selection_row_span(
 
 /// Attrs for one style run: the family picks the bold/italic variant
 /// (`cfg.family_for`), the color is the run's resolved fg, weight/style
-/// mirror the SGR bold/italic bits. Split out of the retired whole-buffer
-/// `build_rich_spans` so the v2.20.0 P1 per-line shaping cache
-/// can build a single row's `AttrsList` at a time — runs that didn't change
-/// never construct an `Attrs` at all.
+/// mirror the SGR bold/italic bits. The per-line shaping cache builds one
+/// row's `AttrsList` at a time, so unchanged rows never construct an `Attrs`.
 fn run_attrs<'a>(
     cfg: &'a Config,
     ff: &FontFeatures,
@@ -10316,28 +10179,13 @@ fn run_attrs<'a>(
     a
 }
 
-/// Truncate `s` to at most `n` **display columns** (not chars), adding `…`
-/// when something was cut. CJK characters and emoji are wide (2 cells
-/// each), so a char-count truncation overflows the tab segment / title
-/// when these are present; this honors the cell width that the renderer
-/// Pick the per-pane titlebar background
-/// color from the focus / broadcast state.
+/// Pick the per-pane titlebar background color from the focus / broadcast state.
 ///
-/// The focused branch used to fall back to a hardcoded
-/// Terminator-bright `Rgb::new(0xc8, 0x00, 0x03)` which screamed
-/// against dark themes like Tokyo Night Storm. The pane border (lib.rs
-/// ~1209) and screenshot accent (lib.rs ~3136) already cascade through
-/// `focused_split_color → accent_color → palette[4]` for theme-aware
-/// focus signaling, so this mirrors that cascade. An explicit
-/// `title_transmit_bg_color = #hex` still wins — anyone who pinned the
-/// Terminator look keeps it.
-///
-/// Receive (broadcast) and inactive now ALSO derive from the theme
-/// (they were hardcoded Terminator/legacy literals — `#0076c9` blue and
-/// `#c0bebf` grey — that clashed with a dark theme like the Catppuccin Mocha
-/// default). Broadcast mirrors the focused cascade (accent → `palette[4]`);
-/// inactive falls back to the theme's surface `palette[8]`. Explicit
-/// `title-*-bg-color` config still wins.
+/// Explicit `title-*-bg-color` config wins; otherwise every state derives from
+/// the theme. Focused falls back to `focused_split_color`, then the resolved
+/// accent, the same cascade as the pane border and screenshot accent. Broadcast
+/// falls back to the accent. Inactive falls back to the theme's surface
+/// `palette[8]`.
 ///
 /// Pure so the cascade is drift-guarded without standing up wgpu.
 pub(crate) fn pick_titlebar_bg(
@@ -10361,11 +10209,11 @@ pub(crate) fn pick_titlebar_bg(
     }
 }
 
-/// v2.23.0: resolve the opaque fill color for the window chrome strips (tab
-/// bar, status bar, new-tab button). Without a wallpaper, or with
-/// `chrome-background = theme`, this is the theme's chrome color (`palette[8]`)
-/// — identical to the pre-2.23.0 look. With a wallpaper, the other modes let
-/// the chrome read deliberately against the moving background:
+/// Resolve the opaque fill color for the window chrome strips (tab bar,
+/// status bar, new-tab button). Without a wallpaper, or with
+/// `chrome-background = theme`, this is the theme's chrome color (`palette[8]`).
+/// With a wallpaper, the other modes let the chrome read deliberately against
+/// the moving background:
 ///   - `black` / `white`: a fixed neutral panel.
 ///   - `auto`: the wallpaper's average color, nudged toward black/white only as
 ///     far as needed to keep the (theme-colored) tab text readable on it
@@ -10430,9 +10278,8 @@ pub fn cap_axis_cells(requested: u32, cell_px: f32, chrome_px: f32) -> u32 {
 /// drift on which sizes they accept. Pure so the bounds are unit-tested
 /// without standing up wgpu.
 pub fn clamp_font_size(size: f32) -> f32 {
-    // `clamp` on f32 panics on NaN; treat that as "use default" by
-    // routing it to the floor rather than letting it propagate to
-    // cosmic-text where it would silently produce zero-sized cells.
+    // `f32::clamp` passes NaN through, and cosmic-text would silently turn it
+    // into zero-sized cells. Route NaN to the floor instead.
     if size.is_nan() {
         return 5.0;
     }
@@ -10442,11 +10289,9 @@ pub fn clamp_font_size(size: f32) -> f32 {
 /// Build glyphon [`Metrics`] for a *logical* `font_size` at a given
 /// device-pixel `scale` (the window's `scale_factor`). glyphon shapes and
 /// rasterizes in the same coordinate space as the wgpu surface, which winit
-/// sizes in **physical** pixels — so a logical `font_size` must be multiplied
+/// sizes in **physical** pixels, so a logical `font_size` must be multiplied
 /// by the scale factor or text renders at `1/scale` of its intended size on
-/// HiDPI displays. That was the "tiny font at 200% Windows scaling" bug:
-/// `scale` was stored but never applied, so a 13pt font drew at ~6.5px on a 2×
-/// monitor. The line height keeps the historical 1.25 ratio. `scale` is
+/// HiDPI displays. The line height is 1.25 times the size. `scale` is
 /// sanitized (NaN / ≤0 → 1.0) so a bogus value can't produce zero-sized cells.
 pub fn metrics_for(font_size: f32, scale: f32) -> Metrics {
     let s = if scale.is_finite() && scale > 0.0 {
@@ -10577,7 +10422,7 @@ pub fn escalation_for_attempt(attempt: u32) -> AdapterEscalation {
     }
 }
 
-/// v2.23.0: a detected GPU adapter, described in kettle's own vocabulary so
+/// A detected GPU adapter, described in kettle's own vocabulary so
 /// kettle-ui (the settings GPU picker) never has to name a `wgpu` type. Carries
 /// the PCI `(vendor, device)` pair the config pins on, the human display name,
 /// and string-ized `kind` / `backend` for the settings list.
@@ -11247,7 +11092,7 @@ async fn resolve_adapter(
 
     // Resolve a visible settings/config pin before separating hardware from
     // software. CPU adapters such as llvmpipe/lavapipe are valid explicit
-    // choices and were historically selectable in the GPU device picker.
+    // choices, and the GPU device picker offers them.
     if escalation == AdapterEscalation::Preferred && !force_software && has_gpu_pin(cfg) {
         if let Some(chosen) = take_pinned(&candidates, cfg, requested, preferred, context) {
             let info = chosen.get_info();
@@ -11444,14 +11289,14 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
         lines.push(format!("{mark}{:<26}{}", row.label, row.value));
     }
     lines.push(String::new());
-    // v2.20.0: advertise the vim keys when `vim-menu-nav` is on.
+    // Advertise the vim keys when `vim-menu-nav` is on.
     lines.push(if set.vim_nav {
         "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close".to_string()
     } else {
         "↑↓ field    ←→ change    Tab category    Esc close".to_string()
     });
-    // v2.23.0: contextual note (e.g. the Graphics "Active GPU … • restart to
-    // apply" line). Appended last so it never shifts the focused-row highlight.
+    // Contextual note (e.g. the Graphics "Active GPU … • restart to apply"
+    // line). Appended last so it never shifts the focused-row highlight.
     if let Some(note) = &set.footer_note {
         lines.push(note.clone());
     }
@@ -11461,11 +11306,10 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
 /// The settings panel's width in character cells — the widest
 /// display line, so the panel grows to fit its content. Both render passes
 /// (buffer-text + quad/highlight) call this off the same `settings_display_lines`
-/// output, keeping them in lockstep. The old hardcoded 44 cols clipped the
-/// ~50-cell footer hint ("Esc close" rendered as "Esc clo") and overflowed the
-/// in-capture "‹press a chord — Esc to cancel›" prompt (~59 cells with its
-/// 26-col label) onto the next row. A 44-col floor keeps a sparse category from
-/// rendering as a cramped panel.
+/// output, keeping them in lockstep. Fitting the widest line keeps the ~50-cell
+/// footer hint and the in-capture "‹press a chord — Esc to cancel›" prompt (~59
+/// cells with its 26-col label) from clipping or wrapping. A 44-col floor keeps
+/// a sparse category from rendering as a cramped panel.
 fn settings_panel_cols(lines: &[String]) -> f32 {
     use unicode_width::UnicodeWidthStr;
     lines.iter().map(|l| l.width()).max().unwrap_or(44).max(44) as f32
@@ -11556,10 +11400,9 @@ pub fn settings_panel_geometry(
     }
 }
 
-/// What a click on the settings overlay landed on (v2.24.0 mouse control). The
-/// geometry is recomputed here from the SAME inputs the draw uses
-/// (`settings_display_lines` + the panel math in `render_frame_with_status`),
-/// so the hit-test can't drift from what's painted.
+/// What a click on the settings overlay landed on. The hit-test recomputes the
+/// geometry from the SAME inputs the draw uses (`settings_display_lines` +
+/// `settings_panel_layout`), so it can't drift from what's painted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsHit {
     /// Outside the panel entirely — dismiss the overlay.
@@ -11923,9 +11766,8 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
         geometry.case_mode,
         format!("Case: {} ›", search.case_mode.label()),
     );
-    // `Invert` never said what it inverts. It flips which direction Enter
-    // searches, so the control now names that directly — and doubles as a
-    // reminder of the keybinding for anyone who has not found it yet.
+    // The invert toggle flips which direction Enter searches, so its label
+    // names that direction. It also reminds users of the Enter keybinding.
     add(
         geometry.invert,
         format!("Enter: {}", if search.invert { "Prev" } else { "Next" }),
@@ -11999,11 +11841,9 @@ fn search_editor_label(search: &SearchOverlay, max_cols: usize) -> String {
         body = fit_single_line_label(&body, inner);
     }
     // One cell of padding on each side rather than `[ ]`. The field already
-    // has its own darker well, so the brackets were a second frame around the
-    // same thing — and they read as syntax next to the `[x]` toggles, as if
-    // the query itself took bracket notation. Same two-column allowance, so
-    // `inner`, the horizontal scroll, and the selection column math are all
-    // unchanged.
+    // has its own darker well, so brackets would frame it twice and read as
+    // query syntax. The padding keeps the two-column allowance that `inner`,
+    // the horizontal scroll, and the selection column math assume.
     let label = format!(" {body} ");
     fit_single_line_label(&label, max_cols)
 }
@@ -12060,11 +11900,10 @@ pub const CONFIRM_BAR_MIN_CONTRAST: f64 = 4.5;
 
 /// Text color for the `palette[1]` confirm bar.
 ///
-/// The bar was painted with the theme's ordinary foreground, which is chosen to
-/// contrast with the theme BACKGROUND, not with a saturated red. On the shipped
-/// TokyoNight Night default that is `#c0caf5` on `#f7768e` — roughly 1.6:1, far
-/// under any legibility floor, so the close confirmation could not be read and
-/// therefore could not be answered.
+/// The theme's ordinary foreground is chosen to contrast with the theme
+/// BACKGROUND, not with a saturated red. On the shipped TokyoNight Night
+/// default that pairing is `#c0caf5` on `#f7768e`, roughly 1.6:1, far under any
+/// legibility floor, so a bar painted with it could not be read or answered.
 ///
 /// Start from the theme's own cursor-text color, which is the same choice the
 /// tab close chip already makes on this same `palette[1]` background, then lift
@@ -12074,9 +11913,8 @@ pub const CONFIRM_BAR_MIN_CONTRAST: f64 = 4.5;
 /// checked without a GPU.
 ///
 /// This holds only because the bar is painted OPAQUE. A translucent bar
-/// composites `palette[1]` over live terminal content, and the real ratio then
-/// depends on the scrollback underneath — which is exactly the guarantee this
-/// function exists to remove.
+/// composites `palette[1]` over live terminal content, so the real ratio would
+/// depend on the scrollback underneath and the AA guarantee would not hold.
 pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
     color::with_min_contrast(
         theme.cursor_text,
@@ -12085,20 +11923,14 @@ pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
     )
 }
 
-/// Maximum monospace columns available to a single-line overlay buffer.
-/// Reserve one column for glyph overhang and fractional cell metrics.
 /// Lay out the confirm bar: prompt (plus help text when it fits) on the left,
 /// the button row flush right, within exactly `max_cols` columns.
 ///
-/// The width this composes to and the width the caller then fits to MUST be the
-/// same number. They were not: composition targeted `floor(sw/cw)` while
-/// `fit_single_line_label` was handed `overlay_label_cols(sw, cw)`, which is one
-/// column less. The bar therefore overflowed its budget by exactly one column at
-/// every window size, and `fit_single_line_label` clipped two columns and
-/// appended `…` — so the rightmost button rendered as `[  Clos…` rather than
-/// `[  Close]` in every close-confirm, quit-confirm and reassign prompt ever
-/// shown. Taking one budget as a parameter is what makes that class of mismatch
-/// impossible to reintroduce silently.
+/// `max_cols` must be the budget the bar is painted and hit-tested in
+/// (`confirm_bar_columns`, the most columns a single-line overlay buffer may
+/// use after reserving one for glyph overhang and fractional cell metrics), or
+/// the button row clips or drifts from its click targets. Taking the budget as
+/// a parameter keeps a second, mismatched width from creeping back in silently.
 fn compose_confirm_bar_label(
     prompt: &str,
     help: &str,
@@ -12237,8 +12069,8 @@ fn middle_ellipsis(s: &str, n: usize) -> String {
 /// Build a tab title that fits `n` display columns. Unlike pane titles, tabs
 /// favor the *right* side of path-like strings when they must truncate: in a
 /// path, the tail is normally the project/leaf (`...flight-event-line-server-go`)
-/// and is more useful than the home or drive prefix. Non-path titles keep the
-/// older middle-ellipsis behavior.
+/// and is more useful than the home or drive prefix. Non-path titles use a
+/// middle ellipsis.
 fn fit_tab_title(s: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
@@ -12255,12 +12087,12 @@ fn fit_tab_title(s: &str, n: usize) -> String {
     format!("...{}", take_cols_back(s, n - 3))
 }
 
-/// v2.26.0: fit a directory-derived tab label into `n` columns by progressively
-/// shedding detail (the user-requested tiering): tier 1 the full (home-
-/// abbreviated) path; tier 2 the leaf directory name alone; tier 3 the tail of
-/// the leaf with a leading `…` once even the name doesn't fit. The rightmost
-/// part (the project / current directory) is the most identifying, so it is kept
-/// to the end — mirroring `fit_pane_title`'s progressive-shed shape.
+/// Fit a directory-derived tab label into `n` columns by progressively
+/// shedding detail: tier 1 the full (home-abbreviated) path; tier 2 the leaf
+/// directory name alone; tier 3 the tail of the leaf with a leading `…` once
+/// even the name doesn't fit. The rightmost part (the project / current
+/// directory) is the most identifying, so it is kept to the end. This mirrors
+/// `fit_pane_titlebar_title`'s progressive-shed shape.
 fn fit_tab_path(full: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
@@ -12307,11 +12139,11 @@ pub fn fit_tab_segment_title(
 }
 
 /// Build a per-pane titlebar label that fits `budget` display columns, shedding
-/// the least-useful parts first (the v2.24.0 progressive-shed UX): full →
-/// drop the `WxH` size text → drop the `[group]` tag → middle-ellipsize the
-/// title (keeping the program/leaf name) → at the floor, the leaf alone. The
-/// bell indicator (if any) is kept throughout — it's small and important.
-/// Mirrors the label format built inline pre-2.24.0 (`"  [g]  title  WxH  🔔"`).
+/// the least-useful parts first: full → drop the `WxH` size text → drop the
+/// `[group]` tag → shorten the title, keeping the program/leaf name (a middle
+/// ellipsis, or `fit_tab_path`'s tiers when `title_path` is set). The bell
+/// indicator (if any) is kept throughout because it is small and important.
+/// The full label reads `"  [g]  title  WxH  🔔"`.
 pub fn fit_pane_titlebar_title(
     group: Option<&str>,
     title_prefix: &str,
@@ -12536,32 +12368,24 @@ mod pane_window_corner_tests {
     }
 }
 
-/// Compatibility fix (audit): draws one cell's underline segment(s),
-/// differentiating the `Flags::ALL_UNDERLINES` style bits instead of
-/// collapsing UNDERLINE / UNDERCURL / DOTTED_UNDERLINE / DASHED_UNDERLINE to
-/// the same straight 1px line. This renderer's only chrome/cell primitive is
-/// the axis-aligned quad (`QuadInstance`/`rect`), so every style here is built
-/// from small rects rather than a real path/curve:
+/// Draws one cell's underline segment(s), giving each `Flags::ALL_UNDERLINES`
+/// style its own shape instead of one straight 1px line. This renderer's only
+/// chrome/cell primitive is the axis-aligned quad (`QuadInstance`/`rect`), so
+/// every style here is built from small rects rather than a real path/curve:
 ///
-/// - UNDERCURL is approximated as a stepped zigzag (a triangle wave built
-///   from 1px-tall quads) spanning a 2-cell period, using `col` (the run's
-///   ABSOLUTE grid column, not cell-local) to phase each cell's 4 segments
-///   into the right quarter of that period — so a run of undercurl cells
-///   shows one continuous wave rather than every cell independently
-///   restarting the same little tent shape. It is NOT a smooth sine curve —
-///   that needs a dedicated shader/SDF path in `quad.rs` (out of scope for a
-///   pure-quad fix) — but it IS visually distinct from a straight line,
-///   which is the actual gap this fixes: docs/RESEARCH.md + docs/TESTING.md
-///   hold undercurl to a "must work" bar for Neovim/AstroNvim LSP
-///   diagnostics (`DiagnosticUnderlineError`/`SpellBad` etc. bind
-///   `gui=undercurl`), and those diagnostics were rendering pixel-identical
-///   to a plain hyperlink underline before this fix.
+/// - UNDERCURL is a stepped zigzag (a triangle wave built from 1px-tall quads)
+///   spanning a 2-cell period. `col` (the run's ABSOLUTE grid column, not
+///   cell-local) phases each cell's 4 segments into its half of that period,
+///   so a run of undercurl cells shows one continuous wave. A smooth sine
+///   would need a dedicated shader/SDF path in `quad.rs`, but the zigzag is
+///   still visibly distinct from a straight line. docs/RESEARCH.md +
+///   docs/TESTING.md hold undercurl to a "must work" bar for Neovim/AstroNvim
+///   LSP diagnostics (`DiagnosticUnderlineError`/`SpellBad` etc. bind
+///   `gui=undercurl`).
 /// - DOTTED_UNDERLINE / DASHED_UNDERLINE tile short marks with gaps across
 ///   the cell (sparser + shorter marks for dotted, longer + denser for
-///   dashed), phased on the absolute `x` pixel position rather than `col` (a
-///   mark width in px doesn't generally divide `cw` evenly, unlike
-///   undercurl's cw-sized segments) — genuinely just gapped lines, so these
-///   need no curve approximation.
+///   dashed). They phase on the absolute `x` pixel position rather than `col`,
+///   because a mark width in px doesn't generally divide `cw` evenly.
 #[allow(clippy::too_many_arguments)]
 fn push_underline_quads(
     quads: &mut Vec<QuadInstance>,
@@ -12584,7 +12408,7 @@ fn push_underline_quads(
         const OFFSETS: [f32; 8] = [0.0, 1.0, 2.0, 1.0, 0.0, -1.0, -2.0, -1.0];
         let seg_w = (cw / STEPS_PER_CELL as f32).max(1.0);
         for i in 0..STEPS_PER_CELL {
-            // `col` phases each cell into its quarter of the shared 8-step
+            // `col` phases each cell into its half of the shared 8-step
             // period, so cell N+1 continues cell N's wave instead of every
             // cell restarting at step 0.
             let phase = (col * STEPS_PER_CELL + i) % OFFSETS.len();
@@ -12614,8 +12438,8 @@ fn push_underline_quads(
         // rather than "dotted" at a glance.
         push_gapped_line(quads, x, base_y, cw, 6.0, 3.5, color);
     } else {
-        // Plain UNDERLINE (and DOUBLE_UNDERLINE's primary line, below) —
-        // unchanged solid line.
+        // Plain UNDERLINE (and DOUBLE_UNDERLINE's primary line, below) is a
+        // solid line.
         quads.push(rect(x, base_y, cw, 1.0, color, 1.0));
     }
     if flags.contains(Flags::DOUBLE_UNDERLINE) {
@@ -12651,8 +12475,8 @@ fn push_gapped_line(
     }
 }
 
-/// Compatibility fix (audit): underline styles must no longer render
-/// pixel-identical to a plain line. Pure functions, no GPU needed.
+/// Underline styles must not render pixel-identical to a plain line. Pure
+/// functions, no GPU needed.
 #[cfg(test)]
 mod underline_style_tests {
     use super::{Flags, push_underline_quads};
@@ -12696,8 +12520,8 @@ mod underline_style_tests {
             quads.len() > 1,
             "undercurl must be built from more than one segment"
         );
-        // At least two distinct y positions — a straight line (the pre-fix
-        // behavior) has only one, which is exactly the bug this fixes.
+        // A zigzag has at least two distinct y positions; a straight line has
+        // only one.
         let ys: std::collections::BTreeSet<i32> =
             quads.iter().map(|q| (q.pos[1] * 1000.0) as i32).collect();
         assert!(
@@ -12715,11 +12539,9 @@ mod underline_style_tests {
 
     #[test]
     fn undercurl_phase_spans_a_two_cell_period_instead_of_resetting_every_cell() {
-        // The wave's period is 2 cells: an even column rises (0, 1, 2, 1) and
-        // the next odd column falls (0, -1, -2, -1) — continuing the SAME
-        // wave — rather than every cell independently redrawing the
-        // identical little tent shape (which would show a seam at every
-        // cell edge instead of one continuous squiggle).
+        // The wave's period is 2 cells. An even column rises (0, 1, 2, 1) and
+        // the next odd column falls (0, -1, -2, -1), continuing the SAME wave.
+        // Redrawing one tent shape per cell would show a seam at every edge.
         let ys_at = |col: usize| -> Vec<f32> {
             quads_for(Flags::UNDERCURL, col)
                 .iter()
@@ -12784,9 +12606,8 @@ mod underline_style_tests {
 
     #[test]
     fn dotted_dashed_and_undercurl_are_all_pairwise_distinct_shapes() {
-        // The actual regression this whole fix targets: before it, these
-        // four styles (plus DOUBLE) all produced the exact same single
-        // full-width quad. None of the "distinctive" styles may do that now.
+        // None of the "distinctive" styles may produce the plain underline's
+        // single full-width quad.
         let plain = shape_of(&quads_for(Flags::UNDERLINE, 0));
         for (name, flags) in [
             ("undercurl", Flags::UNDERCURL),
@@ -12823,11 +12644,10 @@ fn menu_chrome_quads(
     let panel_w = context_menu_panel_width(menu, cw);
     let row_h = ch + 12.0;
     let sep_h = 8.0_f32;
-    // Terminator menu UX: natural panel height
-    // (sum of every row) may exceed the surface. App-side
-    // `context_menu_geometry` already computed the clamped
-    // height; if non-zero we honor it, otherwise fall back to
-    // the natural sum (the original behavior — no clamp).
+    // Terminator menu UX: natural panel height (sum of every row) may exceed
+    // the surface. App-side `context_menu_geometry` already computed the
+    // clamped height; if non-zero we honor it, otherwise use the unclamped
+    // natural sum.
     let natural_h: f32 = menu
         .rows
         .iter()
@@ -12973,8 +12793,8 @@ fn srgb_encode(linear: f64) -> u8 {
 /// `src_factor: SrcAlpha` with `dst_factor: OneMinusSrcAlpha`, which is the
 /// premultiplied "over" operator with the source premultiplied on the fly. The
 /// clear is the one write in the chain that does not pass through a blend, so
-/// it is the only one that has to premultiply itself — and it did not, leaving
-/// a translucent background too bright by exactly the factor it skipped.
+/// it is the only one that has to premultiply itself. Skipping that leaves a
+/// translucent background too bright by exactly the skipped alpha factor.
 ///
 /// The multiply belongs in linear space: the attachment is an sRGB format, so
 /// the hardware decodes before blending and re-encodes on write, and the whole
@@ -13134,13 +12954,13 @@ fn pane_backdrop_rect(
 ///
 /// Order is the whole content of this function, which is why it is a function.
 ///
-/// 1. **SGR 2 dim/faint** blends toward the background. The renderer ignored
-///    `Flags::DIM` entirely at one point, so `\e[2m` looked like normal weight;
-///    fish prompt themers, `less` status lines and `mc` all use it.
+/// 1. **SGR 2 dim/faint** (`\e[2m`) blends toward the background. `less`
+///    status lines, `mc` and fish prompt themers all use it.
 /// 2. **`bold-is-bright`** (Terminator `bold_is_bright`) remaps a bold
 ///    foreground from `palette[0..8]` to its `palette[8..16]` bright variant.
 /// 3. **`minimum-contrast`** lifts toward whichever extreme is reachable, if
-///    the result still falls below the configured WCAG ratio.
+///    the result still falls below the configured WCAG ratio. The caller
+///    applies this step to the returned colour (`MinimumContrastCache`).
 ///
 /// The lift has to be LAST, because it is the only step that reasons about the
 /// colour against the background rather than transforming it. It used to run
@@ -13391,12 +13211,12 @@ fn desired_alpha_mode(
         })
 }
 
-/// Grid column of the cluster a laid-out glyph belongs to (v2.25.0 cell-locked
+/// Grid column of the cluster a laid-out glyph belongs to (cell-locked
 /// rendering). `char_starts[k]` is the byte offset of the k-th char in the row
 /// text, and because `build_pane` writes exactly ONE char per grid cell (the
 /// wide-char spacer included), `k` IS the grid column. A glyph's `cluster_start`
 /// byte indexes into that same row text, so its column is the char whose byte
-/// range contains the cluster start — the last `char_starts` entry `<= start`.
+/// range contains the cluster start (the last `char_starts` entry `<= start`).
 fn glyph_grid_col(char_starts: &[u32], cluster_start: usize) -> usize {
     char_starts
         .partition_point(|&bs| (bs as usize) <= cluster_start)
@@ -13406,10 +13226,10 @@ fn glyph_grid_col(char_starts: &[u32], cluster_start: usize) -> usize {
 /// Cell-locked logical pen X (physical px), snapped to an integer pixel so the
 /// glyph is crisp and shares one subpixel-bin (x_bin = 0) cache slot regardless
 /// of cell: the grid cell's left edge plus any intra-cluster `x_offset` (kept so
-/// a combining mark still stacks on its base). Substituting this for cosmic-text's
-/// advance-accumulated `glyph.x` IS the fix — for a primary-face monospace glyph
-/// (advance == cell_w) it equals the glyph's old position, so ordinary text is
-/// unchanged; only advance-mismatched glyphs (fallback / CJK / ligature) move.
+/// a combining mark still stacks on its base). It replaces cosmic-text's
+/// advance-accumulated `glyph.x`. The two agree for a primary-face monospace
+/// glyph (advance == cell_w), so only advance-mismatched glyphs (fallback / CJK /
+/// ligature) move.
 fn cell_locked_pen_x(cell_left: f32, x_offset_px: f32) -> f32 {
     (cell_left + x_offset_px).round()
 }
@@ -13498,13 +13318,12 @@ fn measure_cell(
     metrics: Metrics,
 ) -> (f32, f32) {
     buf.set_metrics(metrics);
-    // Size the measure box relative to the (physical)
-    // metrics, not a fixed 1000×100. At a large font on a high-DPI display the
-    // physical font size can be ~200px, so the 10-glyph probe is ~1300px wide
-    // and wrapped against the old 1000px box — `line_w` then reflected only the
-    // first wrapped line and `cell_w` came out too narrow, mis-gridding the
-    // terminal. A monospace `M` is ~0.6em, so 10 fit in ~6em; 20em + slack is
-    // ample headroom that can never wrap regardless of size/scale.
+    // Size the measure box from the (physical) metrics so the probe never
+    // wraps. At a large font on a high-DPI display the physical font size can
+    // be ~200px, making the 10-glyph probe ~1300px wide. If it wrapped,
+    // `line_w` would cover only the first line and `cell_w` would come out too
+    // narrow, mis-gridding the terminal. A monospace `M` is ~0.6em, so 10 fit
+    // in ~6em; 20em + slack never wraps at any size or scale.
     let box_w = metrics.font_size * 20.0 + 100.0;
     let box_h = metrics.line_height * 2.0 + 100.0;
     buf.set_size(Some(box_w), Some(box_h));
@@ -13584,42 +13403,36 @@ fn text_layout_damage_key(
     h.finish()
 }
 
-/// Render a representative kettle frame **offscreen** (no window/surface) and
-/// write it to a PNG. Used by `kettle --screenshot <out.png>` to produce the
-/// showcase images embedded in `docs/UX-COMPARISON.md`.
-///
-/// This drives kettle's *real* GPU text + quad path (bundled Nerd Font,
-/// `glyphon` shaping, the `QuadPipeline`, the active theme) over a scripted
-/// demo: a two-pane vertical split under the redesigned tab bar (active tab,
-/// per-tab `✕`, trailing `+`), with a themed shell session on the left and a
-/// monitor-style readout on the right. Content is synthetic; the rendering
-/// pipeline is identical to the live one.
-/// Which synthetic scene to render in [`capture_png_with`].
-///
-/// The default screenshot path renders a single-pane, single-tab,
-/// no-overlay representative frame — what `kettle --screenshot` ships
-/// today. `ContextMenu` adds a synthetic right-click context menu over
-/// the rendered pane so the menu's render path can be visually verified
-/// without opening the windowed app. Visible only via the
-/// `kettle --screenshot-menu PATH` CLI flag.
 /// The kettle version label baked into the `--screenshot` demo scene's
-/// `cargo test` compile line. Wired to the crate (= workspace) version
-/// so the README hero / UX showcase screenshots can never re-stale to a
-/// hardcoded string the way the original `kettle v0.1.0` did — by the
-/// v2.x series that frozen literal made the hero image look years out of
-/// date even though the pixels still matched the (equally frozen) scene.
+/// `cargo test` compile line. It is the crate (= workspace) version, so the
+/// README hero / UX showcase screenshots never show a stale hardcoded version.
 /// `env!` resolves at compile time, so a release version bump regenerates
 /// a correct screenshot with zero code churn.
 pub(crate) const SCREENSHOT_DEMO_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Which synthetic scene to render in [`capture_png_with`].
+///
+/// Every scene is rendered **offscreen** (no window/surface) through kettle's
+/// *real* GPU text + quad path (bundled Nerd Font, `glyphon` shaping, the
+/// `QuadPipeline`, the active theme). The base frame is a scripted two-pane
+/// vertical split under the tab bar (active tab, per-tab `✕`, trailing `+`),
+/// with a themed shell session on the left and a monitor-style readout on the
+/// right. Content is synthetic; the rendering pipeline is identical to the
+/// live one.
+///
+/// `kettle --screenshot <out.png>` renders `Default`, the base frame with no
+/// overlay, to produce the showcase images embedded in `docs/UX-COMPARISON.md`.
+/// `ContextMenu` adds a synthetic right-click context menu over the pane so the
+/// menu's render path can be visually verified without opening the windowed
+/// app; it is visible only via the `kettle --screenshot-menu PATH` CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DebugScene {
     /// Existing `--screenshot` behavior.
     #[default]
     Default,
     /// Render with a synthetic right-click context menu open over the
-    /// pane. The menu carries the eight items kettle ships (Copy,
-    /// Paste, sep, Split Right, Split Down, Close Pane, sep, New
+    /// pane. The menu carries a fixed eight-row subset of the live menu
+    /// (Copy, Paste, sep, Split Right, Split Down, Close Pane, sep, New
     /// Tab) with the first enabled row highlighted, anchored at a
     /// fixed position so the resulting PNG is byte-deterministic
     /// across runs.
@@ -13637,14 +13450,12 @@ pub enum DebugScene {
 /// banner, given the surface height, the banner's own height, and the heights
 /// of any **bottom-anchored** tab / status bars it must stack above.
 ///
-/// The banner is a non-modal bottom strip. When the user
-/// puts the tab bar or status bar at the bottom (`tab-bar-pos = bottom` /
-/// `status-bar = bottom`), drawing the banner flush at `surface_h - banner_h`
-/// painted *over* that bar and — paired with the click handler that treated
-/// the whole bottom band as the banner — stole its clicks (you couldn't switch
-/// tabs while the banner showed). Stacking the banner above the bottom chrome
-/// fixes both. Pure + shared so the renderer's draw and the App's hit-test
-/// agree to the pixel; pass `0.0` for chrome that isn't bottom-anchored.
+/// The banner is a non-modal bottom strip. When the tab bar or status bar sits
+/// at the bottom (`tab-bar-position = bottom` / `status-bar = bottom`), a
+/// banner flush at `surface_h - banner_h` would paint over that bar and steal
+/// its clicks, so it stacks above the bottom chrome instead. Pure + shared so
+/// the renderer's draw and the App's hit-test agree to the pixel; pass `0.0`
+/// for chrome that isn't bottom-anchored.
 pub fn update_banner_top(
     surface_h: f32,
     banner_h: f32,
@@ -13675,8 +13486,7 @@ fn update_banner_chrome_colors(theme: &kettle_config::Theme) -> (Rgb, Rgb) {
     (bg, accent)
 }
 
-/// Back-compat wrapper for `capture_png` callers (the CLI smoke test
-/// and the `--screenshot` end-to-end CI step). Always renders
+/// Back-compat wrapper for external `capture_png` callers. Always renders
 /// [`DebugScene::Default`].
 pub fn capture_png(
     cfg: &Config,
@@ -13770,10 +13580,10 @@ pub fn capture_png_with(
 /// useful for docs, README hero images, and bug reports that want
 /// to caption a screenshot with a version / repro / env note).
 ///
-/// When `annotation` is `Some(text)`, after every existing render
-/// pass kettle paints a translucent dark rect across the bottom 24px
-/// of the image plus the text rendered in `theme.foreground`. When
-/// `None`, this is identical to `capture_png_with`.
+/// When `annotation` is `Some(text)`, kettle paints a translucent
+/// `theme.background` strip, at least 24px tall, across the bottom of the
+/// image and renders the text on it in `theme.foreground`. When `None`, this
+/// is identical to `capture_png_with`.
 ///
 /// Hooked into the `--screenshot --annotate TEXT` CLI surface.
 /// iTerm2's *persistent* annotations (in-terminal sticky notes
@@ -13810,9 +13620,9 @@ pub fn capture_png_with_annotation(
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let mut swash = SwashCache::new();
         let mut quads = QuadPipeline::new(&device, format);
-        // Second pipelines for the `DebugScene::ContextMenu` overlay.
-        // Allocated unconditionally (small, cheap) so the render pass
-        // can always call `draw` / `render` on them — empty uploads
+        // Second pipelines for the debug-scene overlays (context menu, bell
+        // flash, scrollbar). Allocated unconditionally (small, cheap) so the
+        // render pass can always call `draw` / `render` on them; empty uploads
         // are a no-op. Mirrors the live `Renderer`.
         let mut menu_quads_pipe = QuadPipeline::new(&device, format);
         let mut menu_text_renderer =
@@ -13836,7 +13646,7 @@ pub fn capture_png_with_annotation(
         // wgpu's max-texture-per-side is 8192 on every backend / GPU
         // class we care about. The CLI already clamps `--cols ≤ 400` /
         // `--rows ≤ 200`, but at a 72pt clamped font size the
-        // cell can be ~35×90px — so 200 cols × 90px = 18000px wide
+        // cell can be ~35×90px, so 200 rows × 90px = 18000px tall
         // exceeds the limit even without an enormous font config. Cap
         // each side dynamically against the actual cell size so the
         // user never sees a panic about texture dims for any cli /
@@ -13855,21 +13665,18 @@ pub fn capture_png_with_annotation(
         let base = Attrs::new().family(Family::Name(&fam));
         let mut q: Vec<QuadInstance> = Vec::new();
 
-        // --- Tab bar (redesigned: active accent + per-tab ✕ + trailing +).
+        // --- Tab bar (active accent + per-tab ✕ + trailing +).
         //
         // Tab labels are defined once and reused for BOTH the chrome geometry
         // and the text buffer below, so the highlighted segment + separators
-        // always line up with the glyphs. The old fixed 240px segments were
-        // ~2× wider than the ~120px labels, so the second tab's text floated
-        // inside the first tab's highlight.
+        // always line up with the glyphs.
         let tab_text_left = 0.0_f32;
-        // Tabs FILL the bar (the live layout), NOT old compact label-width tabs —
-        // the README hero/showcase must reflect the current style. v2.36.6: tabs
-        // divide the FULL bar width so the tab1/tab2 boundary lands on the split
-        // centre (`split_x`), so the vertical split divider visually continues
-        // the tab boundary — matching the live full-width `tab_strip_layout`.
-        // Only the last tab yields the trailing `+` button. Monospace, so a
-        // label's pixel width is its char count × `cw`.
+        // Tabs divide the FULL bar width, matching the live `tab_strip_layout`,
+        // so the README hero/showcase reflects the current style. The tab1/tab2
+        // boundary lands on the split centre (`split_x`), so the vertical split
+        // divider visually continues it. Only the last tab yields room for the
+        // trailing `+` button. Monospace, so a label's pixel width is its char
+        // count × `cw`.
         let tabplus_label = "  +  ";
         let plus_w = tabplus_label.chars().count() as f32 * cw;
         // Tab 1 spans [0, split_x]; tab 2 spans [split_x, wf - plus_w].
@@ -13941,10 +13748,8 @@ pub fn capture_png_with_annotation(
 
         // Block cursor sitting at the end of the left pane's idle prompt
         // (`kevim@kettle:~/Repos/kettle$ ` = 29 columns, so the cursor's empty
-        // input cell is column 29). The prompt text was lengthened but
-        // this column wasn't, leaving the cursor stranded mid-path on the
-        // "e" of `~/Repos/kettle`. Keep `cur_col` in sync with
-        // the final prompt line in the `left` buffer below.
+        // input cell is column 29). Keep `cur_col` in sync with the final
+        // prompt line in the `left` buffer below, or the cursor lands mid-path.
         let cur_row = 6.0;
         let cur_col = 29.0;
         q.push(rect(
@@ -14046,12 +13851,9 @@ pub fn capture_png_with_annotation(
         );
         right.shape_until_scroll(&mut font_system, false);
 
-        // Optional caption overlay at the bottom of the
-        // image. When `annotation` is Some, paint a translucent dark
-        // strip across the bottom 24px + render the caption text in
-        // theme.foreground. Useful for docs, README hero images, and
-        // bug reports that want to caption a screenshot with a
-        // version / repro / env note.
+        // When `annotation` is Some, paint a translucent caption strip (at
+        // least 24px tall) across the bottom of the image and render the text
+        // in theme.foreground.
         let mut annotate_buf = TextBuffer::new(&mut font_system, metrics);
         let annotate_h = (ch + 8.0).max(24.0);
         if let Some(text) = annotation {
@@ -14217,19 +14019,18 @@ pub fn capture_png_with_annotation(
 
         // `DebugScene::ContextMenu`: build a synthetic context menu at
         // a fixed anchor (so the resulting PNG is byte-deterministic)
-        // with the same eight items the live `App::context_menu_items`
-        // ships. Quads go through the shared `menu_chrome_quads`
+        // with a fixed eight-row subset of the live `App::context_menu_items`.
+        // Quads go through the shared `menu_chrome_quads`
         // helper; text areas are built inline here because the
         // capture-path text-buffer pool is local to this function.
         let mut menu_text_buffers: Vec<TextBuffer> = Vec::new();
         let mut menu_q: Vec<QuadInstance> = Vec::new();
         let mut menu_areas: Vec<TextArea> = Vec::new();
         if scene == DebugScene::ContextMenu {
-            // 8 items mirroring `App::context_menu_items`. Copy is
-            // *disabled* in the synthetic scene because there is no
-            // selection (matches the more-common state a user opens
-            // the menu in). Highlight starts on Paste (idx 1), the
-            // first enabled non-separator row.
+            // Copy is *disabled* in the synthetic scene because there is no
+            // selection (matches the more-common state a user opens the menu
+            // in). Highlight starts on Paste (idx 1), the first enabled
+            // non-separator row.
             let rows = vec![
                 ContextMenuRow {
                     label: "Copy".into(),
@@ -14325,10 +14126,9 @@ pub fn capture_png_with_annotation(
                 }
                 menu_text_buffers.push(buf);
             }
-            // Now build TextAreas referring to the freshly-shaped
-            // buffers. Borrow rules: collect indices first, then push
-            // areas in a second pass so the borrow checker sees a
-            // single shared borrow at the time of `menu_areas.push`.
+            // Second pass: build TextAreas over the freshly-shaped buffers.
+            // Every buffer was pushed above, so no push mutates
+            // `menu_text_buffers` while `menu_areas` borrows from it.
             let mut row_y = ay;
             for (i, row) in menu.rows.iter().enumerate() {
                 if row.separator {
@@ -14445,17 +14245,14 @@ pub fn capture_png_with_annotation(
                     resolve_target: None,
                     ops: wgpu::Operations {
                         // Route through composed_bg_alpha so the screenshot
-                        // path also honors background-type +
-                        // background-darkness, and honor
-                        // cfg.background_opacity here too. The live-window
-                        // clear op already did, but the screenshot path
-                        // hardcoded `a: 1.0` — so `kettle --screenshot
-                        // --config /transparent.conf` produced an opaque PNG
-                        // regardless.
+                        // honors background-type, background-darkness, and
+                        // cfg.background_opacity the way the live window does.
+                        // A hardcoded `a: 1.0` would turn `kettle --screenshot
+                        // --config /transparent.conf` into an opaque PNG.
                         //
                         // This target is ours end to end, so it clears
                         // premultiplied to match what the pipelines drawing
-                        // over it expect, and `unpremultiply_srgb8` converts
+                        // over it expect, and `unpremultiply_rgba8` converts
                         // back to the straight alpha PNG stores before the
                         // pixels are saved.
                         load: wgpu::LoadOp::Clear(surface_clear_color(
@@ -14560,9 +14357,10 @@ pub fn offscreen_selftest() -> anyhow::Result<bool> {
     offscreen_selftest_with_config(&Config::default())
 }
 
-/// Config-aware self-test entry point retained for embedders and focused
-/// diagnostics. Repository CI calls [`offscreen_selftest`], which supplies
-/// `Config::default()` so the gate never depends on developer configuration.
+/// Config-aware self-test entry point for embedders and focused diagnostics.
+/// [`offscreen_selftest`] supplies `Config::default()`; the repository's GPU
+/// unit test passes a config derived from it, so the gate never depends on
+/// developer configuration.
 pub fn offscreen_selftest_with_config(cfg: &Config) -> anyhow::Result<bool> {
     pollster::block_on(async {
         let (_instance, adapter) = match resolve_headless_adapter(cfg, "offscreen_selftest").await {
@@ -14667,18 +14465,11 @@ mod gpu_tests {
     /// libtest runs tests in parallel, so without this several of the tests
     /// below create wgpu instances, adapters, and devices in the same process
     /// at the same moment. On a host whose only adapter is a software or basic
-    /// display driver — which is what the CI Windows runners have — that has
-    /// taken the whole test binary down with `STATUS_ACCESS_VIOLATION`
-    /// (`0xC0000005`), reported by cargo against `kettle-render` with no test
-    /// having failed, because the fault is inside the driver rather than in
-    /// Rust.
-    ///
-    /// The evidence is positional. libtest reports in name order, and every
-    /// observed crash stopped immediately after the last `glyphpipe::` test —
-    /// `gpu_tests` is the module that sorts next, so the process died exactly
-    /// as several threads entered device creation together. The failure does
-    /// not reproduce on a host with a real GPU driver: 175/175 pass
-    /// single-threaded and 20 consecutive parallel runs are clean.
+    /// display driver, such as the CI Windows runners, that can take the whole
+    /// test binary down with `STATUS_ACCESS_VIOLATION` (`0xC0000005`). Cargo
+    /// reports it against `kettle-render` with no test having failed, because
+    /// the fault is inside the driver rather than in Rust. Hosts with a real
+    /// GPU driver do not reproduce it.
     ///
     /// One device at a time costs a little wall clock and removes the whole
     /// class. These tests have no reason to run concurrently with each other.
@@ -14721,10 +14512,10 @@ mod gpu_tests {
 
     /// A half-opaque quad must contribute half its colour, not a quarter.
     ///
-    /// The quad shader returns PREMULTIPLIED colour (`rgb * a`) while the
-    /// pipeline was configured with `ALPHA_BLENDING`, whose source factor is
-    /// `SrcAlpha` — so the GPU multiplied by alpha a second time. Every
-    /// translucent surface kettle draws came out at alpha², darkening images,
+    /// The quad shader returns PREMULTIPLIED colour (`rgb * a`). If the
+    /// pipeline blends with `ALPHA_BLENDING`, whose source factor is
+    /// `SrcAlpha`, the GPU multiplies by alpha a second time and every
+    /// translucent surface kettle draws comes out at alpha², darkening images,
     /// panels, highlights, separators, and the unfocused-pane dim overlay.
     ///
     /// This renders and reads the pixel back, so it is the convention as the
@@ -14873,13 +14664,12 @@ mod gpu_tests {
 
     /// The starfield's stars must land on the GPU where the CPU put them.
     ///
-    /// The model used to be evaluated inside the fragment loop; it is resolved
-    /// once per frame on the CPU now and delivered through a hand-written
-    /// uniform array. Nothing about that layout is checked by the compiler —
-    /// a stride or alignment disagreement between the Rust struct and the WGSL
-    /// is not an error, it is a star read out of the wrong bytes and drawn
-    /// somewhere else. So this renders a real frame and looks for light where
-    /// the CPU said a star would be.
+    /// The model is resolved once per frame on the CPU and delivered through a
+    /// hand-written uniform array. The compiler checks nothing about that
+    /// layout. A stride or alignment disagreement between the Rust struct and
+    /// the WGSL is not an error; the shader just reads a star out of the wrong
+    /// bytes and draws it somewhere else. So this renders a real frame and
+    /// looks for light where the CPU said a star would be.
     #[test]
     fn starfield_stars_land_where_the_cpu_placed_them() {
         let _serialized = gpu_test_guard();
@@ -14922,18 +14712,16 @@ mod gpu_tests {
              different offset than it was written"
         );
 
-        // The star PROFILE, not just its position. The falloff was rewritten
-        // in terms of squared distance and squared radii, and an algebra slip
-        // there still leaves light near the star — it just stops being a
-        // crisp core inside a soft halo.
+        // The star PROFILE, not just its position. The falloff is written in
+        // terms of squared distance and squared radii, and an algebra slip
+        // there still leaves light near the star, just not a crisp core inside
+        // a soft halo.
         //
-        // Measured globally rather than by sampling outward from the peak: a
-        // fixed direction runs into the neighbouring star that happens to lie
-        // that way, which is a property of where the field put its stars and
-        // not of the falloff. Core radii are under 1.5 px, so the pixels above
-        // half the peak are a handful per star; if the core term collapsed
-        // into the bloom the bright region would spread across the halo's
-        // 3–9 px instead.
+        // Measured globally rather than by sampling outward from the peak,
+        // because a fixed direction runs into whatever neighbouring star lies
+        // that way, which reflects where the field put its stars and not the
+        // falloff. Core radii are under 1.5 px, so only a handful of pixels
+        // per star sit above half the peak.
         let half_peak = peak / 2;
         let bright = luma.iter().filter(|&&v| v > half_peak).count();
         // A collapsed core would light the halo's 3–9 px radius instead —
@@ -15252,10 +15040,12 @@ mod gpu_tests {
         }
     }
 
-    /// Render one 50%-alpha black quad over a 50%-alpha white clear, once with
-    /// the premultiplied clear and once with the straight one, and return both
-    /// centre pixels already converted back to straight alpha. `None` when the
-    /// host has no usable adapter.
+    /// Render one 50%-alpha black quad over a 50%-alpha white clear three ways
+    /// (premultiplied clear, straight clear, and premultiplied clear through
+    /// the PostMultiplied presentation pass) and return the three centre pixels
+    /// in that order, all in straight alpha (the first two converted back on
+    /// the CPU, the third by the presentation pass). `None` when the host has
+    /// no usable adapter.
     async fn render_black_quad_over_translucent_clear() -> Option<([u8; 4], [u8; 4], [u8; 4])> {
         let cfg = gpu_test_config();
         let (_instance, adapter) = resolve_headless_adapter(&cfg, "premultiplied_clear_test")
@@ -15613,10 +15403,10 @@ mod gpu_tests {
     fn windows_auto_prefers_dx12_without_preinitializing_vulkan() {
         let _serialized = gpu_test_guard();
         pollster::block_on(async {
-            // Exercise the real default resolver first. In particular, do not
-            // construct an all-backend discovery instance just to decide
-            // whether this assertion should run: that setup used to initialize
-            // Vulkan before the DX12-only path it purported to protect.
+            // Exercise the real default resolver first. Do not construct an
+            // all-backend discovery instance to decide whether this assertion
+            // runs. That would initialize Vulkan before the DX12-only path
+            // under test.
             let cfg = gpu_test_config();
             let (_instance, adapter) = resolve_headless_adapter(&cfg, "windows_auto_policy_test")
                 .await
@@ -15716,15 +15506,13 @@ mod gpu_tests {
         });
     }
 
-    /// v2.32.0 fix #1: the shared `emit_cell_locked_glyphs` — the loop the
-    /// default (Grid) `--screenshot` path now runs over the same `left`/`right`
-    /// pane buffers it used to hand only to glyphon — must produce a NON-EMPTY
-    /// cell-locked glyph set. Before the fix the screenshot path built no
-    /// `GlyphPipeline` at all, so the README hero/showcase imagery (generated by
-    /// this path) rendered through legacy glyphon and misrepresented the shipped
-    /// cell-locked renderer. Shaping a prompt-like buffer exactly as the
-    /// screenshot does and asserting glyphs come out proves the Grid screenshot
-    /// path emits real cell-locked glyphs.
+    /// The shared `emit_cell_locked_glyphs` loop, which the default (Grid)
+    /// `--screenshot` path runs over its `left`/`right` pane buffers, must
+    /// produce a NON-EMPTY cell-locked glyph set. The README hero/showcase
+    /// imagery comes from this path; without a `GlyphPipeline` it would render
+    /// through legacy glyphon and misrepresent the shipped cell-locked renderer.
+    /// The test shapes a prompt-like buffer exactly as the screenshot does and
+    /// asserts glyphs come out.
     #[test]
     fn screenshot_grid_emits_cell_locked_glyphs() {
         let _serialized = gpu_test_guard();
@@ -15806,12 +15594,12 @@ mod gpu_tests {
         });
     }
 
-    /// v2.25.1 regression guard for the grid renderer/cursor interaction. The
+    /// Regression guard for the grid renderer/cursor interaction. The
     /// prompt glyphs are uploaded ONCE through the cell-locked glyph pipeline,
     /// then two offscreen frames are rendered while only the cursor quad toggles.
     /// Every non-cursor pixel must stay byte-identical; a blink may change the
-    /// cursor cell only. Keep several prompt shapes here because the original
-    /// bug was reported with a zsh prompt, but the invariant is renderer-wide.
+    /// cursor cell only. Keep several prompt shapes here because the invariant
+    /// is renderer-wide, not specific to zsh.
     #[test]
     fn grid_prompt_pixels_survive_cursor_blink() {
         let _serialized = gpu_test_guard();
@@ -16269,13 +16057,10 @@ mod screenshot_demo_tests {
 
     /// Drift guard. The README hero / UX showcase screenshots are
     /// generated from the hardcoded `DebugScene::Default` scene, whose demo
-    /// `cargo test` compile line used to bake a literal `kettle v0.1.0` into
-    /// the rendered pixels. By the v2.x series that frozen string made the
-    /// hero image look years out of date even though the PNG still matched
-    /// the (equally frozen) scene. The version is now sourced from the crate
-    /// (= workspace) version via `env!`, so a release bump regenerates a
-    /// correct screenshot for free. Guard that wiring so a future edit can't
-    /// silently reintroduce a hardcoded / stale version label.
+    /// `cargo test` compile line shows a `kettle v<version>` label. The version
+    /// comes from the crate (= workspace) version via `env!`, so a release bump
+    /// regenerates a correct screenshot. Guard that wiring so a future edit
+    /// can't reintroduce a hardcoded, stale label such as `kettle v0.1.0`.
     #[test]
     fn screenshot_demo_version_tracks_crate_version() {
         assert_eq!(
@@ -16314,8 +16099,8 @@ mod pick_titlebar_bg_tests {
     ///      `theme.accent` (the theme's signature accent — Catppuccin Mocha's
     ///      mauve; `palette[4]` for themes without one)
     ///
-    /// Unfocused panes stay on their previous neutral fallbacks
-    /// so the gray + blue (broadcast) defaults don't regress.
+    /// Unfocused panes use the theme-derived fallbacks pinned by the next two
+    /// tests.
     #[test]
     fn focused_titlebar_uses_accent_cascade_when_unset() {
         let theme = Theme::by_name("Default"); // falls back to Catppuccin Mocha
@@ -16337,7 +16122,7 @@ mod pick_titlebar_bg_tests {
             Rgb::new(0xc8, 0x00, 0x03),
             "the hardcoded Terminator red MUST NOT be the focused-titlebar fallback"
         );
-        // 3. accent_color wins over palette[4].
+        // 3. accent_color wins over the theme accent.
         let accent = Rgb::new(0x00, 0xaa, 0x00);
         cfg.accent_color = Some(accent);
         assert_eq!(
@@ -16362,8 +16147,8 @@ mod pick_titlebar_bg_tests {
     }
 
     /// Unfocused + non-broadcast derives from the theme's surface
-    /// `palette[8]` (was a hardcoded `#c0bebf` grey that clashed with dark
-    /// themes like the Catppuccin Mocha default). An explicit
+    /// `palette[8]`, not a hardcoded `#c0bebf` grey that clashes with dark
+    /// themes like the Catppuccin Mocha default. An explicit
     /// `title-inactive-bg-color` still wins.
     #[test]
     fn unfocused_titlebar_derives_from_theme_surface() {
@@ -16383,7 +16168,7 @@ mod pick_titlebar_bg_tests {
     }
 
     /// Unfocused + broadcast mirrors the focused cascade
-    /// (`title-receive-bg-color → resolved accent`) — was a hardcoded `#0076c9`
+    /// (`title-receive-bg-color → resolved accent`), not a hardcoded `#0076c9`
     /// Terminator blue. The resolved accent defaults to the theme's signature
     /// accent (Mocha mauve). An explicit value still wins.
     #[test]
@@ -16507,11 +16292,9 @@ mod clamp_font_size_tests {
 
     #[test]
     fn clamp_font_size_bounds_match_set_font_size() {
-        // Floor + ceiling pinned: 5.0 and 72.0. At one point only
-        // set_font_size enforced these; Renderer::new took
-        // cfg.font_size raw, so a `font-size = 200` config booted with
-        // 200pt cells (texture-limit risk) until a Ctrl+0 reload
-        // happened to flow it through set_font_size.
+        // Floor + ceiling pinned: 5.0 and 72.0. Renderer::new and
+        // set_font_size share these bounds, so a `font-size = 200` config
+        // cannot boot with 200pt cells (texture-limit risk).
         assert_eq!(clamp_font_size(13.0), 13.0, "in-range passes through");
         assert_eq!(clamp_font_size(72.0), 72.0, "at-ceiling stays");
         assert_eq!(clamp_font_size(5.0), 5.0, "at-floor stays");
@@ -16598,9 +16381,8 @@ mod hidpi_scale_tests {
     }
 
     /// Core invariant: a logical font size renders at
-    /// `font_size × scale` physical pixels. This is the bug that made text
-    /// tiny on a 200%-scaled Windows 11 display — `scale` was stored but the
-    /// metrics ignored it, so a 13pt font drew at ~6.5px on a 2× monitor.
+    /// `font_size × scale` physical pixels. If the metrics ignore `scale`, a
+    /// 13pt font draws at ~6.5px on a 200%-scaled (2×) Windows 11 display.
     #[test]
     fn metrics_scale_with_dpi_factor() {
         // 1× display: physical == logical.
@@ -16654,9 +16436,9 @@ mod hidpi_scale_tests {
     }
 
     /// At a large font on a high-DPI display the 10-glyph
-    /// measure probe (~1300px at 72pt×3) exceeded the old fixed 1000px measure
-    /// box and wrapped, so `cell_w` came out too narrow and mis-gridded the
-    /// terminal. With the metrics-relative box it must scale linearly.
+    /// measure probe is ~1300px wide (72pt×3). A fixed 1000px measure box
+    /// wraps it, so `cell_w` comes out too narrow and mis-grids the terminal.
+    /// With the metrics-relative box, `cell_w` must scale linearly.
     #[test]
     fn measured_cell_does_not_wrap_at_large_font_highdpi() {
         let mut fs = FontSystem::new();
@@ -16667,8 +16449,8 @@ mod hidpi_scale_tests {
         let m1 = metrics_for(72.0, 1.0);
         let mut b1 = TextBuffer::new(&mut fs, m1);
         let (w1, _) = measure_cell(&mut fs, &mut b1, fam, m1);
-        // 72pt × 3 = 216px physical; the ~1300px probe would have wrapped the
-        // old 1000px box. Width must still scale ~3×.
+        // 72pt × 3 = 216px physical; the ~1300px probe would wrap a fixed
+        // 1000px box. Width must still scale ~3×.
         let m3 = metrics_for(72.0, 3.0);
         let mut b3 = TextBuffer::new(&mut fs, m3);
         let (w3, _) = measure_cell(&mut fs, &mut b3, fam, m3);
@@ -16863,11 +16645,10 @@ mod titlebar_glyph_fallback_tests {
 
     /// The resolver has to answer against the font system the renderer builds.
     ///
-    /// This exists because it did not. The first version probed
-    /// `Font::unicode_codepoints`, which is empty unless cosmic-text's
-    /// `monospace_fallback` feature is on, and it is not, so every candidate
-    /// was rejected and the whole change became a no-op that the other tests
-    /// reported as a skip rather than a failure.
+    /// `Font::unicode_codepoints` is empty unless cosmic-text's
+    /// `monospace_fallback` feature is on, and it is not. A resolver that probes
+    /// it rejects every candidate, and the other tests report that no-op as a
+    /// skip rather than a failure.
     #[test]
     fn the_resolver_answers_against_the_renderer_font_system() {
         let mut fs = FontSystem::new();
@@ -16986,14 +16767,12 @@ mod titlebar_glyph_fallback_tests {
         );
     }
 
-    /// The concrete Windows regression this closes: Segoe UI Emoji /
-    /// Segoe UI Symbol are stock Windows fonts and cosmic-text's Windows
-    /// fallback list names both, so Advanced must resolve every glyph in
-    /// the label — this is exactly the split-pane titlebar tofu bug. The
-    /// second assert documents the defect Basic still carries; it pins
-    /// upstream cosmic-text behavior, so if it ever starts failing the
-    /// upstream no-fallback contract changed — harmless here since Basic
-    /// is no longer used, just drop that assert.
+    /// Windows regression for the split-pane titlebar tofu bug. Segoe UI
+    /// Emoji and Segoe UI Symbol are stock Windows fonts and cosmic-text's
+    /// Windows fallback list names both, so Advanced must resolve every glyph
+    /// in the label. The second assert pins upstream cosmic-text's no-fallback
+    /// Basic behavior. If it starts failing, that contract changed; Kettle does
+    /// not use Basic, so drop that assert.
     #[cfg(windows)]
     #[test]
     fn advanced_shaping_resolves_titlebar_emoji_on_windows() {
@@ -17012,11 +16791,10 @@ mod titlebar_glyph_fallback_tests {
     /// Source guard (same shape as pane_buffer_lifecycle_tests): Basic
     /// shaping skips the fallback cascade, which is how the titlebar
     /// tofu-boxed emoji while the tab bar rendered them. It must never
-    /// reappear in production code. The only permitted uses are the two
-    /// comparison calls in this module's tests above, so pin the exact
-    /// count; the needle is assembled at runtime so this test's own
-    /// source cannot satisfy the match. `production_source` excludes this
+    /// reappear in production code. `production_source` excludes this
     /// module's two comparison calls, so production must contain zero uses.
+    /// The needle is assembled at runtime so this test's own source cannot
+    /// match it.
     #[test]
     fn no_call_site_uses_basic_shaping() {
         let src = super::production_source();
@@ -17373,7 +17151,7 @@ mod pane_buffer_lifecycle_tests {
     /// close, or they sit at the session's high-water pane count holding idle
     /// glyph buffers. A behavioral test would need a full GPU `Renderer`, so
     /// pin the invariant at the source level (same shape as term.rs's
-    /// detach-never-joins guard): both truncate calls must stay present.
+    /// detach-never-joins guard): all three truncate calls must stay present.
     #[test]
     fn render_frame_truncates_pane_buffers_on_shrink() {
         let src = super::production_source();
@@ -17450,11 +17228,11 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// v2.21.0 (idle perf): an idle repaint (cursor blink, bell decay, focus
-    /// dim) must NOT re-run the whole-viewport glyphon `prepare`, which
-    /// re-encodes every visible glyph's vertices. `build_pane` reports whether
-    /// it reshaped a row; `render_frame_with_status` gates `prepare` (and the
-    /// paired `atlas.trim`) on that + a chrome-text hash + any open overlay.
+    /// An idle repaint (cursor blink, bell decay, focus dim) must NOT re-run
+    /// the whole-viewport glyphon `prepare`, which re-encodes every visible
+    /// glyph's vertices. `build_pane` reports whether it reshaped a row;
+    /// `render_frame_with_status` gates `prepare` (and the paired `atlas.trim`)
+    /// on that + a chrome-text hash + any open overlay.
     #[test]
     fn idle_repaint_skips_glyphon_prepare_when_nothing_changed() {
         let src = super::production_source();
@@ -17469,8 +17247,8 @@ mod pane_buffer_lifecycle_tests {
         );
         // atlas.trim must be gated with the prepare: trimming without a
         // following prepare clears the in-use set and lets a later prepare
-        // evict glyphs the cached vertices still reference. The trim now sits
-        // inside its own `if need_prepare` after `frame.present()`.
+        // evict glyphs the cached vertices still reference. Every trim sits
+        // inside its own `if need_prepare`.
         let trim_idx = src.find("self.atlas.trim();").expect("atlas.trim present");
         let before_trim = &src[trim_idx.saturating_sub(120)..trim_idx];
         assert!(
@@ -17479,8 +17257,8 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// v2.23.0 fix: closing an overlay (settings/palette/search/menu) must force
-    /// ONE clearing prepare, or the closed panel's cached text vertices linger
+    /// Closing an overlay (settings/palette/search/menu) must force ONE
+    /// clearing prepare, or the closed panel's cached text vertices linger
     /// until the next keystroke. The gate tracks the previous overlay-open state
     /// and ORs the open↔closed transition into `need_prepare`.
     #[test]
@@ -17497,11 +17275,11 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// v2.21.0 (idle perf): the inverted glyph under a focused SOLID block
-    /// cursor is drawn in a dedicated 1-glyph renderer ON TOP of the block,
-    /// NOT recolored into the pane text buffer. Recoloring it in-buffer dirtied
-    /// the cursor row every blink and forced the whole-viewport prepare; the
-    /// dedicated pass keeps the pane buffer byte-identical across a blink.
+    /// The inverted glyph under a focused SOLID block cursor is drawn in a
+    /// dedicated 1-glyph renderer ON TOP of the block, NOT recolored into the
+    /// pane text buffer. Recoloring in-buffer would dirty the cursor row every
+    /// blink and force the whole-viewport prepare; the dedicated pass keeps the
+    /// pane buffer byte-identical across a blink.
     #[test]
     fn block_cursor_glyph_is_decoupled_from_the_pane_buffer() {
         let src = super::production_source();
@@ -17520,8 +17298,8 @@ mod pane_buffer_lifecycle_tests {
             "the cursor glyph must be prepared + rendered in its own pass \
              (after the pane + menu text renders)"
         );
-        // The old in-buffer recolor (`fg = if cursor_rt_override...`) is gone:
-        // the glyph keeps its normal fg in the buffer and is overdrawn instead.
+        // The glyph keeps its normal fg in the buffer and is overdrawn, not
+        // recolored in-buffer.
         assert!(
             src.contains("cursor_glyph_capture =\n"),
             "the cursor cell must be captured for the overdraw pass, not \
@@ -17615,8 +17393,8 @@ mod pane_buffer_lifecycle_tests {
             src.contains("filter(|c| !c.frames.is_empty())"),
             "only a successfully-decoded cache entry may render (no stale image)"
         );
-        // v2.21.x: animated backgrounds advance on the media clock, gated for
-        // proactive waking on focus (battery), and never index out of bounds.
+        // Animated backgrounds advance on the media clock, gated for proactive
+        // waking on focus (battery), and never index out of bounds.
         assert!(
             src.contains("bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())")
                 && src.contains("idx.min(c.frames.len() - 1)"),
@@ -17624,12 +17402,12 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// v2.23.0: the wallpaper draws in its OWN pipeline (`bg_imgs`) BEFORE the
+    /// The wallpaper draws in its OWN pipeline (`bg_imgs`) BEFORE the
     /// cell/chrome `quads` pass, so chrome (tab bar/status/titlebar), cell
     /// backgrounds (selection/syntax/TUI), and borders composite opaquely on
-    /// top of it instead of being hidden under an opaque wallpaper (and the
-    /// animation no longer bleeds through the tab bar). Pinned at the source
-    /// level since exercising the pass needs a full GPU `Renderer`.
+    /// top of it instead of being hidden under an opaque wallpaper, and an
+    /// animated wallpaper cannot bleed through the tab bar. Pinned at the
+    /// source level since exercising the pass needs a full GPU `Renderer`.
     #[test]
     fn wallpaper_draws_behind_quads_in_its_own_pass() {
         let src = super::production_source();
@@ -17661,9 +17439,9 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// v2.23.0: `chrome-background` only recolors the chrome with a wallpaper;
-    /// theme mode + the no-wallpaper case keep `palette[8]`; auto keeps the tab
-    /// text readable; black/white are fixed.
+    /// `chrome-background` only recolors the chrome with a wallpaper; theme
+    /// mode + the no-wallpaper case keep `palette[8]`; auto keeps the tab text
+    /// readable; black/white are fixed.
     #[test]
     #[allow(
         clippy::field_reassign_with_default,
@@ -17708,7 +17486,7 @@ mod pane_buffer_lifecycle_tests {
         // Auto with no frame sampled yet → falls back to the theme chrome color.
         assert_eq!(resolve_chrome_bg(&cfg, &theme, None), theme.palette[8]);
 
-        // v2.24.0: the starfield is a wallpaper too, so chrome modes apply.
+        // The starfield is a wallpaper too, so chrome modes apply.
         cfg.background_type = BackgroundType::Starfield;
         cfg.chrome_background = ChromeBackground::Black;
         assert_eq!(resolve_chrome_bg(&cfg, &theme, None), Rgb::new(0, 0, 0));
@@ -17924,12 +17702,11 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard (audit B2/B3/B4). The overlay text-buffer pools
-    /// are grown with `while len < N` exactly like the pane pools and must be
-    /// truncated back down too, or each ratchets to its session high-water mark
-    /// (peak menu rows / hint labels / tab count) holding idle shaped-glyph
-    /// buffers. Pin all five truncate calls at the source level (a behavioral
-    /// test would need a full GPU `Renderer`).
+    /// Drift guard. The overlay text-buffer pools grow with `while len < N`
+    /// exactly like the pane pools and must be truncated back down too, or each
+    /// ratchets to its session high-water mark (peak menu rows / hint labels /
+    /// tab count) holding idle shaped-glyph buffers. Pin the truncate calls at
+    /// the source level (a behavioral test would need a full GPU `Renderer`).
     #[test]
     fn render_frame_truncates_overlay_buffer_pools_on_shrink() {
         let src = super::production_source();
@@ -17959,12 +17736,12 @@ mod pane_buffer_lifecycle_tests {
         }
     }
 
-    /// Drift guard (audit). `build_pane`'s per-cell style-run scratch
-    /// must be POOLED on `self` (taken + returned) and reuse each run's `String`
-    /// buffer by index (clear + refill), not `Vec::new()` + `to_string()` per
-    /// frame — otherwise a busy colored pane mints dozens–hundreds of `String`
-    /// allocations on the 60 fps hot path. A behavioral test needs a full GPU
-    /// `Renderer`; pin the pattern at the source level.
+    /// Drift guard. `build_pane`'s per-cell style-run scratch must be POOLED on
+    /// `self` (taken + returned) and reuse each run's `String` buffer by index
+    /// (clear + refill), not `Vec::new()` + `to_string()` per frame. Otherwise
+    /// a busy colored pane mints dozens to hundreds of `String` allocations on
+    /// the 60 fps hot path. A behavioral test needs a full GPU `Renderer`; pin
+    /// the pattern at the source level.
     #[test]
     fn build_pane_pools_the_span_scratch() {
         let src = super::production_source();
@@ -18014,12 +17791,11 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard (audit C1). Image-placement draw must keep the `quota > 1`
-    /// fast-path so a pane admitted zero or one visible image doesn't pay a
-    /// per-frame `Vec` alloc + sort, AND must still z-sort the 2+ case so
-    /// higher-z images land on top. A behavioral test needs a full GPU
-    /// `Renderer`; pin both at the source level (same shape as the
-    /// buffer-truncate guards above).
+    /// Drift guard. Image-placement draw must keep the `quota > 1` fast-path
+    /// so a pane admitted zero or one visible image doesn't pay a per-frame
+    /// `Vec` alloc + sort, AND must still z-sort the 2+ case so higher-z images
+    /// land on top. A behavioral test needs a full GPU `Renderer`; pin both at
+    /// the source level (same shape as the buffer-truncate guards above).
     #[test]
     fn image_placement_draw_keeps_len_fastpath_and_z_sort() {
         let src = super::production_source();
@@ -18034,18 +17810,20 @@ mod pane_buffer_lifecycle_tests {
         );
     }
 
-    /// Drift guard (audit). `render_frame_with_status` clones
-    /// `self.font_family` every frame (to hold an owned handle while
-    /// `&mut self.font_system` is borrowed across ~20 `Family::Name(&family)`
-    /// reads). The field must stay `Arc<str>` so that clone is a refcount bump,
-    /// not a per-frame heap alloc + memcpy at 60fps. A behavioral test needs a
-    /// GPU `Renderer`; pin the field type at the source level.
     /// Drift guard. `PaneView` must *borrow* its per-frame
     /// images/title/group_name from the frame's `metas` collection (exactly as
-    /// `snap` borrows the pooled `PaneSnapshot`), not own clones — otherwise
+    /// `snap` borrows the pooled `PaneSnapshot`), not own clones. Otherwise
     /// `redraw()` double-clones every visible pane's image `Vec` + title
     /// `String` every frame. A behavioral test needs the full app frame loop;
     /// pin the borrowed field types at the source.
+    ///
+    /// The next test, `font_family_is_arc_str_not_string`, is also a drift
+    /// guard. `render_frame_with_status` clones `self.font_family` every frame
+    /// to hold an owned handle while `&mut self.font_system` is borrowed across
+    /// ~20 `Family::Name(&family)` reads. The field must stay `Arc<str>` so
+    /// that clone is a refcount bump, not a per-frame heap alloc + memcpy at
+    /// 60fps. A behavioral test needs a GPU `Renderer`; pin the field type at
+    /// the source level.
     #[test]
     fn paneview_borrows_per_frame_data() {
         let src = super::production_source();
@@ -18221,11 +17999,9 @@ mod search_bar_tests {
 
     /// A control must never abut the status text, in either layout.
     ///
-    /// `Enter: Next` fills its slot exactly, so with the single-column gap the
-    /// bar rendered `Enter: Next No match` and the control ran into the outcome
-    /// as one phrase. The wide branch got group spacing first; the narrow
-    /// branch kept single gaps and reproduced it on a 2-row bar, which is what
-    /// the deployed app actually showed.
+    /// `Enter: Next` fills its slot exactly, so a single-column gap renders
+    /// `Enter: Next No match` as one phrase. The wide layout and the narrow
+    /// multi-row layout both need the two-column gap between groups.
     #[test]
     fn no_control_abuts_the_status_text_in_either_layout() {
         // Both invert states, so `Enter: Prev` is actually generated rather
@@ -18281,10 +18057,10 @@ mod search_bar_tests {
     ///
     /// The bar stores its layout in pixels and divides back to columns, so a
     /// label that exactly fills its slot sits one f32 rounding step away from
-    /// truncation. `Enter: Next` is exactly the 11 columns of its slot and
-    /// clipped to `Enter: Ne...` at cell widths like 7.007; `x Close` and
-    /// `Case: Ignore >` had the same exposure at 910 widths each. Sweep the
-    /// range instead of trusting one convenient number.
+    /// truncation. `Enter: Next` fills all 11 columns of its slot, and a plain
+    /// floor clips it to `Enter: Ne...` at cell widths like 7.007; `x Close`
+    /// and `Case: Ignore >` share that exposure. Sweep the range instead of
+    /// trusting one convenient number.
     #[test]
     fn no_search_control_label_is_ellipsized_at_any_cell_width() {
         let states = [
@@ -18354,7 +18130,6 @@ mod search_bar_tests {
             !text.contains("[x]") && !text.contains("[ ]"),
             "the checkbox idiom is gone: {text}"
         );
-        // The query well no longer wraps itself in brackets.
         assert!(
             !text.contains("[needle"),
             "the query is not bracket-delimited: {text}"
@@ -19337,16 +19112,15 @@ mod title_fit_tests {
         production_source,
     };
 
-    /// A destructive confirmation has to be readable in EVERY bundled theme,
-    /// not just the ones anyone happened to open.
+    /// A destructive confirmation has to be readable in EVERY bundled theme.
     ///
-    /// The bar paints `palette[1]` and used to draw the theme's ordinary
-    /// foreground on it -- a color picked to contrast with the theme
-    /// BACKGROUND. On the shipped TokyoNight Night default that is `#c0caf5`
-    /// on `#f7768e`, about 1.6:1: the prompt, its buttons and its focus marker
-    /// were all effectively invisible, so the question could not be answered
-    /// and the window would not close. Iterate the whole bundled set, because
-    /// the failure is per-theme and a single spot check is what missed it.
+    /// The bar paints `palette[1]`, but the theme's ordinary foreground is
+    /// picked to contrast with the theme BACKGROUND. On the shipped TokyoNight
+    /// Night default, that foreground on the bar is `#c0caf5` on `#f7768e`,
+    /// about 1.6:1. It would hide the prompt, its buttons, and its focus
+    /// marker, so the question could not be answered and the window would not
+    /// close. The failure is per-theme, so iterate the whole bundled set
+    /// instead of spot-checking one.
     #[test]
     fn confirm_bar_text_is_readable_in_every_bundled_theme() {
         let mut worst: Option<(&str, f64)> = None;
@@ -19371,9 +19145,9 @@ mod title_fit_tests {
         );
     }
 
-    /// The regression this fixes, pinned to the exact shipped default rather
-    /// than to whatever `Theme::default()` happens to be: the raw theme
-    /// foreground fails on the confirm bar, and the helper's output passes.
+    /// On the exact shipped default, not whatever `Theme::default()` happens
+    /// to be, the raw theme foreground fails on the confirm bar and the
+    /// helper's output passes.
     #[test]
     fn tokyonight_night_confirm_bar_was_unreadable_before_the_lift() {
         let theme = kettle_config::Theme::by_name("TokyoNight Night");
@@ -19389,12 +19163,11 @@ mod title_fit_tests {
         );
     }
 
-    /// Wiring guards. The two tests above prove `confirm_bar_text_color` and
+    /// Wiring guards. Value tests prove `confirm_bar_text_color` and
     /// `bell-flash-intensity` compute the right values; neither proves the
     /// renderer USES them. Reverting the bar's text color to `theme.foreground`
     /// or hard-coding the bell peak back to a literal would leave every value
-    /// test green, which is precisely the failure mode that shipped the
-    /// unreadable bar in the first place.
+    /// test green.
     ///
     /// The bar's opacity is pinned here too, because the AA guarantee is
     /// computed against opaque `palette[1]`: a translucent bar composites over
@@ -19451,14 +19224,12 @@ mod title_fit_tests {
 
     /// The confirm bar must never clip its own button row.
     ///
-    /// It composed to `floor(sw/cw)` and was then fitted to
-    /// `overlay_label_cols(sw, cw)` = `floor(sw/cw) - 1`, so it overflowed by
-    /// exactly one column at EVERY window size and `fit_single_line_label`
-    /// dropped two columns for an ellipsis. The rightmost button therefore
-    /// rendered as `[  Clos…` in every confirm dialog on every machine, and the
-    /// click target from `confirm_dialog_button_hit` extended past the last
-    /// painted glyph. Nothing caught it because the composition had no test at
-    /// all -- it was inline in `redraw`, unreachable without a GPU device.
+    /// Compose it to the budget it is fitted to, `overlay_label_cols(sw, cw)`
+    /// = `floor(sw/cw) - 1`. Composing to `floor(sw/cw)` overflows by one
+    /// column at every window size, so `fit_single_line_label` drops two
+    /// columns for an ellipsis, the rightmost button renders as `[  Clos…`,
+    /// and the click target from `confirm_dialog_button_hit` extends past the
+    /// last painted glyph.
     #[test]
     fn confirm_bar_never_clips_its_button_row() {
         let buttons = "[▶ Cancel]  [  Close]";
@@ -19938,10 +19709,10 @@ mod update_banner_top_tests {
         color, update_banner_chrome_colors, update_banner_top, update_banner_top_with_reserved,
     };
 
-    /// Drift guard (audit). The passive update banner must stack
-    /// above any BOTTOM-anchored tab / status bar so it neither paints over
-    /// nor steals clicks from it. The renderer (draw) and the App (hit-test)
-    /// share this pure helper, so they can't drift apart.
+    /// Drift guard. The passive update banner must stack above any
+    /// BOTTOM-anchored tab / status bar so it neither paints over nor steals
+    /// clicks from it. The renderer (draw) and the App (hit-test) share this
+    /// pure helper, so they can't drift apart.
     #[test]
     fn stacks_above_bottom_chrome() {
         // No bottom chrome → flush at the surface bottom (1000 - 30).
@@ -20187,11 +19958,11 @@ mod attributed_foreground_tests {
 
     /// `minimum-contrast` must survive `bold-is-bright`.
     ///
-    /// The lift ran first and `bold_is_bright` then replaced the foreground
-    /// outright with a palette entry, so the guarantee silently did nothing for
-    /// bold text whenever `bold-is-bright` was on — the common configuration.
-    /// And because the bright variant is the LIGHTER one, the case it discarded
-    /// is exactly the one that needed it.
+    /// If the lift runs first, `bold_is_bright` then replaces the foreground
+    /// outright with a palette entry, so the guarantee does nothing for bold
+    /// text under `bold-is-bright`, the common configuration. The bright
+    /// variant is the LIGHTER one, so the case it discards is exactly the one
+    /// that needs the lift.
     #[test]
     fn the_contrast_lift_sees_the_colour_bold_is_bright_actually_produces() {
         let mut theme = Theme {
@@ -20511,11 +20282,9 @@ mod background_darkness_tests {
     /// so.
     ///
     /// Terminator assigns this value straight to the background colour's alpha,
-    /// and its users lower it to get MORE transparency. Both `docs/CONFIG.md`
-    /// and the field's own doc comment described the scale backwards — "1.0 =
-    /// no tint, 0.0 = fully dark" — so anyone configuring kettle from its
-    /// documentation reached for the wrong end. The code was right; the prose
-    /// was not, and nothing tied the two together.
+    /// and its users lower it to get MORE transparency. If `docs/CONFIG.md` or
+    /// the field's own doc comment states the scale backwards ("1.0 = no tint,
+    /// 0.0 = fully dark"), users configuring kettle reach for the wrong end.
     #[test]
     fn darkness_scales_the_backdrop_toward_see_through() {
         let with = |background_type, darkness, opacity| {
@@ -20711,11 +20480,10 @@ mod selection_row_span_tests {
         span.1 + 1 - span.0
     }
 
-    /// A BLOCK (Alt+drag) selection is a column rectangle: every row — including
-    /// interior rows — spans only `min_col..=max_col`, so the highlight matches
+    /// A BLOCK (Alt+drag) selection is a column rectangle. Every row, including
+    /// interior rows, spans only `min_col..=max_col`, so the highlight matches
     /// the rectangular text the copy yields. A linear selection drawn for the
-    /// same endpoints would span the FULL row on an interior row, which is the
-    /// bug this fix closes.
+    /// same endpoints would span the FULL row on an interior row.
     #[test]
     fn block_selection_highlights_column_rectangle_on_every_row() {
         let cols = 200;
@@ -20752,9 +20520,9 @@ mod selection_row_span_tests {
         assert_eq!(span, (5, 20));
     }
 
-    /// Linear (normal drag) selection is unchanged: the start row runs from the
-    /// anchor to the last column, interior rows span the full width, and the end
-    /// row runs from column 0 to the cursor.
+    /// Linear (normal drag) selection wraps full lines. The start row runs from
+    /// the anchor to the last column, interior rows span the full width, and the
+    /// end row runs from column 0 to the cursor.
     #[test]
     fn linear_selection_wraps_full_lines() {
         let cols = 120;
@@ -20801,9 +20569,9 @@ mod selection_row_span_tests {
     /// Drawing a selection must cost what is drawn, not what is selected.
     ///
     /// `Ctrl+A` in a pane holding a million lines of build output is one
-    /// gesture, and the loop walked `start..=end` and skipped the offscreen
-    /// rows inside the body — a million iterations on every repaint, every
-    /// blink, every keystroke, to draw at most `screen_lines` quads.
+    /// gesture. Walking `start..=end` and skipping the offscreen rows inside
+    /// the loop body would cost a million iterations on every repaint, blink,
+    /// and keystroke, to draw at most `screen_lines` quads.
     #[test]
     fn selection_drawing_visits_only_the_rows_on_screen() {
         use super::visible_selection_rows;
@@ -20885,11 +20653,9 @@ mod run_attrs_tests {
     use glyphon::Family;
     use kettle_config::Config;
 
-    /// v2.20.0 P1: `run_attrs` (the per-run half of the retired
-    /// `build_rich_spans`) must map the SGR bits exactly as the old builder
-    /// did — color from the resolved fg, BOLD → `Weight::BOLD`, ITALIC →
-    /// `Style::Italic`, and the family routed through `cfg.family_for` so
-    /// configured bold/italic font variants keep working.
+    /// `run_attrs` must map the SGR bits: color from the resolved fg, BOLD →
+    /// `Weight::BOLD`, ITALIC → `Style::Italic`, and the family routed through
+    /// `cfg.family_for` so configured bold/italic font variants keep working.
     #[test]
     fn run_attrs_maps_color_weight_style_and_family() {
         let cfg = Config::default();
@@ -20908,11 +20674,11 @@ mod run_attrs_tests {
         assert_eq!(bold_italic.family, Family::Name(cfg.family_for(true, true)));
     }
 
-    /// v2.20.0 P1 drift guard: two identical run tuples must produce EQUAL
-    /// `Attrs` (the per-line cache's `set_text` second guard compares
-    /// `AttrsList`s — accidental per-call variation would defeat the cache
-    /// and re-shape every row every frame), and differing tuples must
-    /// produce UNEQUAL `Attrs` (or stale styling would survive).
+    /// Drift guard: identical run tuples must produce EQUAL `Attrs`, and
+    /// differing tuples UNEQUAL ones. The per-line cache's `set_text` second
+    /// guard compares `AttrsList`s, so per-call variation would defeat the
+    /// cache and re-shape every row every frame, and false equality would keep
+    /// stale styling.
     #[test]
     fn run_attrs_is_deterministic_and_distinguishes_runs() {
         let cfg = Config::default();
@@ -20934,10 +20700,10 @@ mod settings_panel_cols_tests {
     use super::settings_panel_cols;
     use unicode_width::UnicodeWidthStr;
 
-    // The settings panel must be wide enough for its two widest
-    // lines — the footer hint and the in-capture chord prompt — both of which
-    // exceed the old hardcoded 44 cols. Live sweep saw "Esc close" clipped to
-    // "Esc clo" and the capture prompt overflowing onto the next row.
+    // The settings panel must be wide enough for its two widest lines, the
+    // footer hint and the in-capture chord prompt. Both exceed the 44-col
+    // floor, so a panel fixed at 44 cols would cut off "Esc close" and the end
+    // of the capture prompt.
     #[test]
     fn settings_panel_fits_footer_and_capture_prompt() {
         let footer = "↑↓ field    ←→ change    Tab category    Esc close";
@@ -20961,7 +20727,7 @@ mod settings_panel_cols_tests {
             "panel ({cols}) clips capture prompt ({})",
             capture.width()
         );
-        // The footer alone already exceeds the old 44-col hardcode.
+        // The footer alone already exceeds the 44-col floor.
         assert!(footer.width() > 44, "regression-guard premise broke");
     }
 
@@ -21150,11 +20916,10 @@ mod glyph_cell_lock_tests {
         );
     }
 
-    /// v2.32.0 fix #1 (durability): the cell-locked emit loop must live in ONE
-    /// free function, `emit_cell_locked_glyphs`, called from both production
-    /// sites (live panes and the screenshot path). Hand-copied loops could
-    /// silently drift so the README imagery no longer matches the live
-    /// renderer; pin the single source of truth here.
+    /// The cell-locked emit loop must live in ONE free function,
+    /// `emit_cell_locked_glyphs`, called from both production sites (live panes
+    /// and the screenshot path). Hand-copied loops could silently drift so the
+    /// README imagery no longer matches the live renderer.
     #[test]
     fn cell_lock_emit_is_a_single_shared_fn() {
         let src = super::production_source();
@@ -21173,12 +20938,12 @@ mod glyph_cell_lock_tests {
         );
     }
 
-    /// v2.32.0 fix #1: the offscreen `--screenshot` path must honor
-    /// `cfg.text_renderer`. In Grid mode (the default) it builds a GlyphPipeline
-    /// and routes the pane body buffers through `emit_cell_locked_glyphs` +
-    /// `grid_glyphs.draw`, leaving glyphon only the annotation/menu chrome; in
-    /// Legacy mode it keeps glyphon. Without this the README hero/showcase
-    /// imagery rendered through legacy glyphon regardless of the shipped default.
+    /// The offscreen `--screenshot` path must honor `cfg.text_renderer`. In Grid
+    /// mode (the default) it builds a GlyphPipeline and routes the pane body
+    /// buffers through `emit_cell_locked_glyphs` + `grid_glyphs.draw`, leaving
+    /// glyphon only the annotation/menu chrome; in Legacy mode it keeps glyphon.
+    /// Otherwise the README hero/showcase imagery renders through legacy glyphon
+    /// regardless of the shipped default.
     #[test]
     fn screenshot_routes_pane_text_by_renderer_mode() {
         let src = super::production_source();

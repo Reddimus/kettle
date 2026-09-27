@@ -25,13 +25,10 @@ struct CodexFooter {
 
 /// Substrings pinned to Codex CLI's transient native-Windows ConPTY footer
 /// (see `docs/TERMINAL-CLIENT-COMPATIBILITY.md`, "Focus and cursor state").
-/// Centralized here — rather than left as inline literals scattered across
-/// the matcher functions below — so a Codex footer wording change shows up
-/// as a single obvious diff instead of several silent ones. If Codex ever
-/// reworks this footer, update these constants AND the fixtures in this
-/// file's test module together: letting them drift apart doesn't fail
-/// loudly, it just quietly stops suppressing and re-introduces the ConPTY
-/// cursor glitch this module exists to hide.
+/// They live here, not inline in the matchers, so a Codex wording change is
+/// one obvious diff. If Codex reworks this footer, update these constants AND
+/// this file's test fixtures together. If they drift apart, nothing fails;
+/// suppression quietly stops and the ConPTY cursor glitch returns.
 const CODEX_HEADER_MARKER: &str = "OpenAI Codex";
 const CODEX_COMPOSER_PREFIX: &str = "›";
 /// Codex's own escape-key hint. Deliberately more specific than the generic
@@ -42,11 +39,10 @@ const CODEX_ACTIVE_STATUS_MARKER: &str = "esc to interrupt";
 const CODEX_MODEL_PREFIX: &str = "gpt-";
 const CODEX_MODEL_SEPARATOR: &str = " · ";
 /// How many leading viewport rows [`has_codex_header`] scans. Codex always
-/// draws this header via an absolute cursor-home at the very top of its
-/// full-screen UI, so the degraded-layout corroboration only needs the top
-/// of the screen — scanning the whole viewport risked corroborating on
-/// stale or incidental "OpenAI Codex" text scrolled into view far from the
-/// actual footer (e.g. a file mentioning the product name).
+/// draws this header at the top of its full-screen UI with an absolute
+/// cursor-home, so the degraded-layout corroboration only needs the top rows.
+/// Scanning the whole viewport could match stale or incidental "OpenAI Codex"
+/// text far from the footer, such as a file that names the product.
 const CODEX_HEADER_SCAN_ROWS: i32 = 3;
 
 fn suppress_windows_codex_footer_cursor(
@@ -394,9 +390,9 @@ mod tests {
         // `gpt-<version>` status row below it and a "to interrupt" status
         // line above it) but the status line uses the generic phrasing many
         // unrelated long-running CLIs print ("Ctrl+C to interrupt") instead
-        // of Codex's specific "esc to interrupt". Before requiring the full
-        // phrase, this combination corroborated a full Codex footer match
-        // and suppressed the cursor over the status row.
+        // of Codex's specific "esc to interrupt". Matching only "to interrupt"
+        // would take this for a full Codex footer and suppress the cursor over
+        // the status row.
         let snap = captured_snap(
             "\x1b[HCtrl+C to interrupt\r\n\
              \x1b[1m\u{203a}\x1b[22m task\r\n\
@@ -415,8 +411,8 @@ mod tests {
         // "gpt-tools" starts with the literal `gpt-` prefix and separates
         // its trailing word with a middot, just like a real Codex model row
         // ("gpt-5.5 · ..."), and it sits directly under a "›"-prefixed line.
-        // Before requiring a digit immediately after `gpt-`, this coincidence
-        // was enough for the degraded-layout fallback to suppress the cursor.
+        // Without requiring a digit right after `gpt-`, this coincidence would
+        // be enough for the degraded-layout fallback to suppress the cursor.
         let snap = captured_snap(
             "\x1b[H\x1b[1m\u{203a}\x1b[22m ready\r\n\
              gpt-tools \u{b7} notes\x1b[2;1H\x1b[?25h",
