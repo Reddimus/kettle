@@ -421,6 +421,12 @@ fn exec_timeout_returns_124() {
         return;
     }
     assert_eq!(code, 124, "timeout must exit 124; stderr: {err}");
+    // Every byte reached the reader, so a delivery warning here would be false
+    // and teach callers to ignore the real one.
+    assert!(
+        !err.contains("stdout was not fully delivered"),
+        "a quiet command's timeout reported undelivered output: {err:?}"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(15),
         "timeout took too long: {:?}",
