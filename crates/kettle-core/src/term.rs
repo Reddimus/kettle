@@ -1452,7 +1452,7 @@ impl Default for TerminalCapabilities {
 /// Point `cmd` at the child's working directory under `policy`.
 fn apply_working_directory(
     cmd: &mut CommandBuilder,
-    cwd: Option<&str>,
+    cwd: Option<&std::path::Path>,
     cwd_policy: WorkingDirectoryPolicy,
 ) {
     match cwd {
@@ -1463,7 +1463,7 @@ fn apply_working_directory(
             cmd.set_require_cwd(true);
         }
         None if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {}
-        Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
+        Some(d) if d.is_dir() => cmd.cwd(d),
         _ => {
             // Recorded cwd is missing or no longer on disk (e.g.,
             // user moved the repo between sessions, or the `-d` arg
@@ -6289,7 +6289,7 @@ impl Terminal {
     ) -> Result<Terminal> {
         Self::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
             argv,
-            cwd,
+            cwd.map(std::path::Path::new),
             scrollback,
             scrollback_bytes,
             geometry,
@@ -6317,7 +6317,7 @@ impl Terminal {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         argv: &[String],
-        cwd: Option<&str>,
+        cwd: Option<&std::path::Path>,
         scrollback: usize,
         scrollback_bytes: usize,
         geometry: PtyGeometry,
@@ -6495,7 +6495,11 @@ impl Terminal {
             startup_sync_pending: true,
             ..CompletionSlot::default()
         }));
-        let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
+        // A launch directory that is not UTF-8 cannot seed the text cell; the
+        // OS-derived fallback below supplies the directory instead.
+        let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(
+            cwd.and_then(std::path::Path::to_str).map(str::to_owned),
+        ));
         // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
         // for native shells with no OSC 7/9;9). Starts empty.
         let native_cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -10925,13 +10929,12 @@ mod wslenv_tests {
 mod working_directory_tests {
     use super::{WorkingDirectoryPolicy, apply_working_directory};
     use portable_pty::CommandBuilder;
-    use std::ffi::OsStr;
 
     /// Automation checks its directory before spawning, so the spawn must use
     /// that directory or fail. Interactive panes keep their HOME recovery.
     #[test]
     fn only_automation_requires_its_directory_at_spawn() {
-        let missing = "/kettle-no-such-directory";
+        let missing = std::path::Path::new("/kettle-no-such-directory");
         let mut automation = CommandBuilder::new("sh");
         apply_working_directory(
             &mut automation,
@@ -10940,7 +10943,7 @@ mod working_directory_tests {
         );
         assert_eq!(
             automation.get_cwd().map(|dir| dir.as_os_str()),
-            Some(OsStr::new(missing))
+            Some(missing.as_os_str())
         );
         assert!(automation.get_require_cwd());
 
@@ -10953,7 +10956,7 @@ mod working_directory_tests {
         assert!(!pane.get_require_cwd());
         assert_ne!(
             pane.get_cwd().map(|dir| dir.as_os_str()),
-            Some(OsStr::new(missing))
+            Some(missing.as_os_str())
         );
     }
 }

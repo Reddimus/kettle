@@ -333,7 +333,8 @@ fn cwd_report_helper() {
         return;
     };
     let cwd = std::env::current_dir().expect("read the child's directory");
-    std::fs::write(report, cwd.to_str().expect("UTF-8 test directory")).expect("write cwd report");
+    // Raw bytes, so a directory whose name is not UTF-8 can be reported too.
+    std::fs::write(report, cwd.as_os_str().as_encoded_bytes()).expect("write cwd report");
 }
 
 /// Without `--cwd` the child must start where `kettle exec` was started. The
@@ -371,6 +372,50 @@ fn exec_without_cwd_runs_in_the_current_directory() {
     assert_eq!(
         std::fs::canonicalize(&child_cwd).unwrap(),
         std::fs::canonicalize(&start).unwrap(),
+        "the child did not start in kettle exec's directory"
+    );
+}
+
+/// Linux allows directory names that are not UTF-8, so exec must start there
+/// instead of rejecting the directory it was started in.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_runs_in_a_directory_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create non-UTF-8 cwd scratch directory");
+    let start = scratch.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&start).unwrap();
+    let report = scratch.path().join("child-cwd");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let output = kettle()
+        .current_dir(&start)
+        .args(["exec", "--timeout", "60", "--"])
+        .args([
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_report_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CWD_REPORT_ENV, &report)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run kettle exec");
+    let err = String::from_utf8_lossy(&output.stderr);
+    if no_pty(output.status.code().unwrap_or(-1), &err) {
+        eprintln!("skipping exec_runs_in_a_directory_whose_name_is_not_utf8: no PTY");
+        return;
+    }
+    assert_eq!(output.status.code(), Some(0), "stderr={err:?}");
+    let reported = std::fs::read(&report).expect("child reported its directory");
+    assert_eq!(
+        reported,
+        std::fs::canonicalize(&start)
+            .unwrap()
+            .as_os_str()
+            .as_bytes(),
         "the child did not start in kettle exec's directory"
     );
 }

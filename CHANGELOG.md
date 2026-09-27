@@ -21,6 +21,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   `cwd`, now run the command in the current directory as documented. They
   used to run it in your home directory, as did `--cwd DIR` when DIR was
   deleted just as the command started.
+- `kettle exec` accepts a working directory whose name is not UTF-8, which
+  Linux allows, instead of refusing to start.
 - `kettle exec`, and the MCP tools built on it, stream large command output
   about 100 times faster on macOS. 8 MiB used to take 23 seconds.
 - `kettle exec --timeout` no longer warns that stdout was not fully delivered

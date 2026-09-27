@@ -1000,7 +1000,7 @@ fn run_exec_engine(
     #[allow(unused_mut)] // mutated only by the Windows ConPTY close handshake
     let mut term = match Terminal::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         &opts.argv,
-        Some(cwd.as_str()),
+        Some(cwd.as_path()),
         // Modest scrollback — exec output streams out immediately, the grid is
         // only used for VT state + query answers.
         2000,
@@ -1709,7 +1709,7 @@ fn pty_completion_snapshot_is_current(
 /// where every `kettle exec` and MCP `kettle_run` without a cwd used to run. A
 /// current directory that no longer exists fails the run rather than falling
 /// back to `$HOME`, a directory the caller never named.
-fn resolve_exec_cwd(explicit: Option<&Path>) -> Result<String, String> {
+fn resolve_exec_cwd(explicit: Option<&Path>) -> Result<PathBuf, String> {
     match explicit {
         Some(cwd) => usable_directory(cwd).map_err(|error| format!("invalid --cwd: {error}")),
         None => std::env::current_dir()
@@ -1719,16 +1719,14 @@ fn resolve_exec_cwd(explicit: Option<&Path>) -> Result<String, String> {
     }
 }
 
-fn usable_directory(cwd: &Path) -> Result<String, String> {
+fn usable_directory(cwd: &Path) -> Result<PathBuf, String> {
     let metadata = cwd
         .metadata()
         .map_err(|error| format!("{}: {error}", cwd.display()))?;
     if !metadata.is_dir() {
         return Err(format!("{} is not a directory", cwd.display()));
     }
-    cwd.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| format!("{} is not valid UTF-8", cwd.display()))
+    Ok(cwd.to_owned())
 }
 
 /// Stop the command's owned process scope for timeout/cancellation.
@@ -6429,10 +6427,7 @@ wait
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(resolve_exec_cwd(Some(&file)).is_err());
-        assert_eq!(
-            resolve_exec_cwd(Some(temp.path())).unwrap(),
-            temp.path().to_str().unwrap()
-        );
+        assert_eq!(resolve_exec_cwd(Some(temp.path())).unwrap(), temp.path());
     }
 
     #[test]
@@ -6440,7 +6435,7 @@ wait
         let current = std::env::current_dir().unwrap();
         assert_eq!(
             resolve_exec_cwd(None).unwrap(),
-            current.to_str().unwrap(),
+            current,
             "the PTY backend would start a child with no directory in $HOME"
         );
     }
