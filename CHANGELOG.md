@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- A confirm bar draws its destructive button, such as Close or Delete, with a
+  bold label, so it stands apart from Cancel.
+
 ## [4.6.0] — 2026-09-27
 
 ### Added

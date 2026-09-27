@@ -4986,8 +4986,8 @@ pub enum ConfirmButton {
     /// Dismiss the modal without action. Always the safe default.
     Cancel,
     /// Dispatch the dialog's `on_confirm` action. `destructive: true`
-    /// renders the button with the accent-red color (Close/Delete);
-    /// `false` uses the standard accent (OK/Apply).
+    /// draws the label in bold (Close/Delete); `false` keeps the regular
+    /// weight (OK/Apply).
     Confirm { label: String, destructive: bool },
 }
 
