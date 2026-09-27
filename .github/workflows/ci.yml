@@ -187,6 +187,10 @@ jobs:
         # the macOS comparator. Keep its required leg with that platform.
         if: runner.os == 'macOS'
         run: just macos-compare-score-self-test
+      - name: macOS standing self-test
+        # GUI-free parsing and statistics checks for macos-standing.py.
+        if: runner.os == 'macOS'
+        run: just macos-standing-self-test
       - name: Shell integration snippets — native interpreters
         # The source/CLI string checks below cannot see interpreter behavior.
         # macOS supplies stock zsh with PROMPT_SUBST off and /bin/bash 3.2;

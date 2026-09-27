@@ -292,10 +292,16 @@ Current performance automation is native to the supported platforms:
 
 ```sh
 just macos-perf
+just macos-standing
 just linux-perf
 ```
 
-The macOS comparator measures the maintained multi-terminal campaign. The Linux
+The macOS comparator measures the maintained multi-terminal campaign and its
+top-half gate. Its timings land on 100 ms polling steps and its memory figure
+is resident set size, so published standings and before/after numbers come
+from `just macos-standing`: exact launch timing, Activity Monitor memory,
+idle CPU and wakeups, and vtebench, or a paired A/B of two Kettle builds with
+`--kettle-b`. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
 comparator remains a narrower diagnostic gate and requires the documented peer
 terminals and a real X11 or Wayland session.
 
@@ -2089,7 +2095,8 @@ retained compile/regression checks on **windows**:
   was drawn.
 - The tracked-file integrity audit on Linux, including UTF-8/LF hygiene,
   Markdown targets, and PNG/SFNT structural checks.
-- The macOS comparator score self-test and the mandatory Kettle-owned portion of
+- The macOS comparator score self-test, the macOS standing self-test, and the
+  mandatory Kettle-owned portion of
   `just agent-cli-smoke` on macOS; unavailable third-party clients are recorded
   as skips rather than claimed as covered.
 - A CLI smoke on every OS: locked rebuild plus exact 12-character Git/dirty

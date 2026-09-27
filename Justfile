@@ -316,6 +316,12 @@ vm-launcher-test:
 vm-launcher-test:
     python scripts/test-vm-launcher.py
 
+# GUI-free checks for macos-standing.py's vtebench parsing, statistics, and
+# summary tables.
+[unix]
+macos-standing-self-test:
+    python3 scripts/perf/macos-standing-self-test.py
+
 # Pin the eligibility rule in macos-compare.sh's embedded scorer: Kettle-only
 # measurements cannot count as competitive evidence. The fixture is GUI-free
 # and portable even though the comparator it guards is macOS-specific.
@@ -383,7 +389,7 @@ full-native-gates: icons-check-required package-templates update-manifest-test r
     @echo "NOT APPLICABLE on Linux: macOS actool and native appearance gates."
 
 [macos]
-full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test agent-cli-smoke
+full-native-gates: icons-check-required package-templates update-manifest-test release-assets-test package-manifest-test online-installer-test icns-smoke gpu-render-smoke cli-smoke touchpad-scroll-smoke split-exit-resize-smoke text-presentation-smoke line-edit-chords-smoke dock-menu-smoke macos-compare-score-self-test macos-standing-self-test agent-cli-smoke
     @echo "NOT APPLICABLE on macOS: Linux installer and Xvfb gates."
 
 # === End-to-end smoke ==============================================
@@ -626,6 +632,14 @@ linux-perf:
 [macos]
 macos-perf:
     ./scripts/perf/macos-compare.sh
+
+# Measure Kettle's standing against installed macOS terminals with exact
+# timing (no polling), Activity Monitor memory (phys_footprint), idle CPU and
+# wakeups, and vtebench. Pass `--kettle-b PATH` to compare two Kettle builds.
+# Writes target/perf-results/macos-standing/.
+[macos]
+macos-standing *ARGS:
+    python3 scripts/perf/macos-standing.py {{ARGS}}
 
 [linux]
 macos-perf:
