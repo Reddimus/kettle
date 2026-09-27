@@ -6,8 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- On macOS, Kettle reads only each pane's own processes when it checks for
+  SSH sessions and shell directories, instead of every process on the
+  machine. An idle window with a blinking cursor uses about 80% less CPU.
+
 ### Fixed
 
+- A command with an enormous argument list in one pane, such as
+  `nvim $(git ls-files)`, no longer freezes SSH labels and shell directories
+  in every other pane until it exits.
 - On macOS, new tabs, splits, and windows no longer pause about 100 ms each
   when Kettle starts from a shell with a high open-file limit, as VS Code and
   other Node-based tools set.

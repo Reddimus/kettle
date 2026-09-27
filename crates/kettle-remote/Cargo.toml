@@ -40,5 +40,14 @@ workspace = true
 # the bare minimum.
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
+# libproc and sysctl for the pane-rooted macOS process walk in src/macos.rs.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 kettle-test-support.workspace = true
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "scan"
+harness = false

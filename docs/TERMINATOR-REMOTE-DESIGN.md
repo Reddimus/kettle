@@ -55,6 +55,13 @@ Three cross-cutting changes:
    handles process enumeration + parent-of relations transparently. Cost:
    one direct dep, modest compile-time hit.
 
+   Revised: the app polls on redraw, and sysinfo's snapshot reads the argv
+   and cwd of every process on the machine, about 3.5 ms for 600 processes.
+   A blinking cursor made that a standing cost of about 1.7% CPU on an idle
+   macOS window. Linux and macOS now walk only the pane trees, through
+   `/proc/<pid>/task/*/children` and libproc respectively. Windows keeps
+   sysinfo.
+
 3. **Title update path**. kettle already supports per-pane title via the
    OSC 0/2 path + the `EditPaneTitle` action + the
    per-pane titlebar (Bucket D). Remote detection just needs to set the
