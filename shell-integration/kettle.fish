@@ -42,7 +42,7 @@ function __kettle_postexec --on-event fish_postexec
     printf '\e]133;D;%d\a' $status
 end
 
-# OSC 7 cwd report (v2.20): powers new-tab/split cwd inheritance and
+# OSC 7 cwd report: powers new-tab/split cwd inheritance and
 # "Open folder" in kettle; the hostname is validated terminal-side so an
 # ssh session's remote cwd is never adopted locally. Segments are
 # percent-encoded individually so the `/` separators stay literal.

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-# Agent-first (A2): the control-plane protocol + transport + client,
+# The control-plane protocol + transport + client,
 # isolated in a UI-free leaf crate. The GUI App hosts the server (kettle-ui),
 # the bin hosts the `kettle ctl` client + `kettle mcp` bridge — but the wire
 # protocol, the platform transport (Unix socket / Windows named pipe), the

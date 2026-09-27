@@ -4,10 +4,9 @@ fails here instead of rendering as an error box on GitHub.
 
 A diagram that does not parse is worse than no diagram: GitHub replaces it with
 a red "Unable to render rich display" panel, which reads as a broken document
-rather than a broken snippet. One shipped that way — a node label containing
-backslash-escaped quotes — and nothing noticed, because nothing looked.
+rather than a broken snippet.
 
-Two mermaid syntax traps this catches, both of which bit while it was written:
+Two mermaid syntax traps this catches:
 
 * `;` separates statements in a sequence diagram, so a literal semicolon in
   message text (`OSC 133;A`) truncates the line. Write `#59;` instead.
@@ -34,9 +33,9 @@ from pathlib import Path
 
 MERMAID_CLI = "@mermaid-js/mermaid-cli@11"
 
-# Where a Chrome that mermaid-cli can drive usually lives. puppeteer's own
-# download is preferred when present; these are the fallbacks so the gate works
-# on a developer machine that never ran `puppeteer browsers install`.
+# Where a Chrome that mermaid-cli can drive usually lives. `find_chrome` tries
+# these after PUPPETEER_EXECUTABLE_PATH and CHROME_PATH, so the gate works on a
+# developer machine that never ran `puppeteer browsers install`.
 CHROME_CANDIDATES = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",

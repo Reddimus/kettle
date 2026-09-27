@@ -27,16 +27,14 @@ crossbeam-channel = "0.5.15"
 kettle-vt.workspace = true
 # Required, not optional: per-pane session logging creates its log through
 # kettle-state's private-file helper, and that path is not behind a feature.
-# While it was optional, `cargo build -p kettle-core` failed without
-# `asciicast` — invisible to CI, because a workspace build turns the feature
-# on via another crate.
+# If it were optional, `cargo build -p kettle-core` would fail without
+# `asciicast`; `just core-default-features-check` catches that.
 kettle-state.workspace = true
 portable-pty = "0.9.0"
 regex.workspace = true
 regex-automata.workspace = true
-# Only used by the `asciicast` recorder (optional) + its JSON escaping;
-# a dev-dependency too (the `replays_asciicast_v2_output_into_grid` test
-# parses .cast).
+# Only used by the `asciicast` recorder (optional), for cross-platform
+# active-cast locks; a dev-dependency too (see below).
 fs4 = { version = "1.1", optional = true }
 # PTY worker failures must remain observable even when the optional recorder is
 # disabled.
@@ -58,11 +56,12 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-# Parses asciicast v2 (.cast) traces in the e2e replay test — the format
-# record.rs writes — so a recorded session can be replayed through the VT
-# pipeline deterministically. Dev-only; not in the shipped crate.
 # `record.rs` is compiled under `cfg(test)` (feature off) so its unit
-# tests + the replay test run in the plain suite.
+# tests + the replay test run in the plain suite, which needs its fs4
+# (cast locks) and serde_json deps here too. serde_json also parses the
+# asciicast v2 (.cast) traces record.rs writes in the e2e replay test, so
+# a recorded session can be replayed through the VT pipeline
+# deterministically. Dev-only; not in the shipped crate.
 fs4 = "1.1"
 kettle-test-support.workspace = true
 serde_json = "1"

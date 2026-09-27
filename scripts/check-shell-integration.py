@@ -166,9 +166,9 @@ def check_zsh(executable: str) -> None:
     assert_completion_field(completion, "zsh Unicode completion field fixture")
     print("zsh Unicode completion field fixture: PASS")
 
-    # Exercise the maximum displayed list with maximum field sizes. The first
-    # encoder used `$(printf ...)` once per byte, turning this bounded 20 KiB
-    # payload into tens of thousands of subshells and multi-second Tab presses.
+    # Exercise the maximum displayed list with maximum field sizes. An encoder
+    # that forks `$(printf ...)` per byte turns this bounded 20 KiB payload
+    # into tens of thousands of subshells and multi-second Tab presses.
     rows = []
     for index in range(64):
         rows.extend((f"item-{index:02d}-" + "x" * 56, "y" * 256))
@@ -702,10 +702,10 @@ def check_fish(executable: str) -> None:
     print("Fish singleton completion stays detached fixture: PASS")
 
     # A real key-binding round trip, not just a helper call. Fish emits its
-    # prompt event during an explicit `repaint`; the first overlay prototype
-    # repainted after publishing and therefore cleared the list in the same
-    # Tab press. Use a capable terminal type so the no-pager assertion cannot
-    # pass merely because Fish suppressed its pager for TERM=dumb.
+    # prompt event during an explicit `repaint`, so repainting after publishing
+    # clears the list in the same Tab press. Use a capable terminal type so the
+    # no-pager assertion cannot pass merely because Fish suppressed its pager
+    # for TERM=dumb.
     import fcntl
     import pty
     import select

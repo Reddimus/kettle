@@ -20,9 +20,9 @@
        workspace.package.version in Cargo.toml so the .app reports
        the same version the CLI prints. The placeholders below are
        valid but only kept current up to the last manual edit.
-       (Reworded to drop a literal double-hyphen, which is
-       illegal inside an XML comment; lenient plist parsers tolerated
-       it but strict XML validators rejected the file.) -->
+       Keep literal double hyphens out of XML comments. XML forbids
+       them; lenient plist parsers accept them, but strict XML
+       validators reject the file. -->
   <key>CFBundleVersion</key>
   <string>1.0.0</string>
   <key>CFBundleShortVersionString</key>
