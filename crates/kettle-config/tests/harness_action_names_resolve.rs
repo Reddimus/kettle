@@ -6,12 +6,6 @@
 //! break is invisible until someone runs them months later and has to work out
 //! whether their own change caused it.
 //!
-//! This existed as a real defect. `scripts/check-live-ui-smoke.py` dispatched
-//! `toggle_broadcast_all`, which was never a valid name, and `broadcast_all`
-//! was later deliberately re-pointed from tab scope to window scope. The
-//! split-titlebar scenario had been dead for long enough that three other
-//! defects had piled up behind it.
-//!
 //! Mechanical on purpose: pull every literal the scripts hand to
 //! `perform_action` and feed it to the same parser the control plane uses.
 //!

@@ -141,10 +141,10 @@ fn mcp_stdio_initialize_list_and_kettle_run() {
     );
 }
 
-/// A modern client sends no `initialize`. Before dual-era support that meant
-/// every call it made came back `-32002 server is not initialized`, which is
-/// the compatibility matrix's "Modern client + Legacy server: Fails" in the
-/// one form a user would actually see.
+/// A modern client sends no `initialize`. A handshake-only server answers
+/// every call it makes with `-32002 server is not initialized`, which is the
+/// compatibility matrix's "Modern client + Legacy server: Fails" in the one
+/// form a user would actually see.
 #[test]
 fn mcp_stdio_serves_a_modern_client_that_never_handshakes() {
     #[cfg(windows)]
@@ -219,9 +219,8 @@ fn mcp_stdio_serves_a_modern_client_that_never_handshakes() {
 ///
 /// A LEGACY `initialize` is not. 2025-11-25 says the server "MUST respond with
 /// another protocol version it supports", and the client disconnects if it
-/// cannot speak that. Returning -32022 there — which an earlier draft of this
-/// change did, calling the correct behaviour a bug — turns a conforming
-/// handshake into a hard failure.
+/// cannot speak that. Returning -32022 there turns a conforming handshake into
+/// a hard failure.
 #[test]
 fn mcp_stdio_negotiates_an_unknown_version_per_era() {
     let messages = [

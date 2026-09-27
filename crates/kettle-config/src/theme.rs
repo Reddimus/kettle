@@ -32,7 +32,7 @@ impl Default for Theme {
         // The hard, self-contained fallback theme (Catppuccin Mocha palette),
         // returned only when a configured theme name matches no bundled theme.
         // NOTE: the SHIPPED default (a fresh config) is TokyoNight Night
-        // (`Config::default`, v2.28.0); this struct stays the safe fallback so it
+        // (`Config::default`); this struct stays the safe fallback so it
         // carries no bundle dependency. Matched verbatim to `assets/themes/
         // Catppuccin Mocha`.
         Theme {
@@ -105,7 +105,7 @@ impl Theme {
         "Night Owl",
     ];
 
-    /// v2.34.0: whether this theme reads as a dark theme, judged by the WCAG
+    /// Whether this theme reads as a dark theme, judged by the WCAG
     /// relative luminance of its `background`. The 0.179 threshold is the
     /// contrast crossover point (backgrounds below it have more contrast
     /// against white than black), so the answer matches which button/title
@@ -189,12 +189,10 @@ impl Theme {
     /// Companion to `by_name`: return the *canonical* bundled name
     /// (with the original casing the theme file ships under) for a
     /// case-insensitive user-typed name, or `None` if no bundled theme
-    /// matches. Used by `Config::parse_collect` to keep `cfg.theme_name`
-    /// in sync with `cfg.theme` — before this helper existed, a user typing
-    /// `theme = TokyoNitght Night` (typo) had `cfg.theme_name` stored
-    /// verbatim ("TokyoNitght Night") while `cfg.theme` silently fell
-    /// back to the default, so `--check-config` showed a name the
-    /// runtime wasn't actually using. Pure.
+    /// matches. `Config::parse_collect` uses it to keep `cfg.theme_name`
+    /// in sync with `cfg.theme`, so a typo like `theme = TokyoNitght Night`
+    /// doesn't make `--check-config` show a name the runtime isn't using.
+    /// Pure.
     pub fn find_name(name: &str) -> Option<&'static str> {
         let want = name.trim();
         BUNDLED_THEMES
@@ -268,12 +266,12 @@ mod tests {
         assert_eq!(t.accent, Rgb::new(0xaa, 0xbb, 0xcc));
     }
 
-    /// `Theme::default()` is a hand-transcribed copy of the
-    /// bundled `Catppuccin Mocha` (it was previously the shipped default). Pin
-    /// that the hard-coded fallback matches the bundled theme byte-for-byte, so a
-    /// typo in the literal palette can't silently diverge the compile-time
-    /// default from what `theme = Catppuccin Mocha` resolves to. (Theme has no
-    /// PartialEq, so compare the Debug fingerprint — the file's convention.)
+    /// `Theme::default()` is a hand-transcribed copy of the bundled
+    /// `Catppuccin Mocha`. Pin that the hard-coded fallback matches the bundled
+    /// theme byte-for-byte, so a typo in the literal palette can't silently
+    /// diverge the compile-time default from what `theme = Catppuccin Mocha`
+    /// resolves to. (Theme has no PartialEq, so compare the Debug fingerprint,
+    /// the file's convention.)
     #[test]
     fn default_matches_bundled_catppuccin_mocha() {
         assert!(
@@ -287,7 +285,7 @@ mod tests {
         );
     }
 
-    /// v2.34.0: `is_dark` classifies by WCAG relative luminance of the
+    /// `is_dark` classifies by WCAG relative luminance of the
     /// background with the 0.179 contrast-crossover threshold. Pin the
     /// classification for the shipped default plus well-known bundled
     /// light/dark pairs, and the pure-black/white/mid-gray boundaries, so a
@@ -355,9 +353,9 @@ mod tests {
         );
     }
 
-    /// `by_name`/`find_name` dropped their per-element
-    /// `to_ascii_lowercase` for `eq_ignore_ascii_case`. Guard that
-    /// case/padding-insensitivity survives the rewrite.
+    /// `by_name`/`find_name` compare the trimmed name with
+    /// `eq_ignore_ascii_case`. Guard that case and padding don't change the
+    /// result.
     #[test]
     fn by_name_and_find_name_are_case_and_pad_insensitive() {
         let first = Theme::list()[0];
