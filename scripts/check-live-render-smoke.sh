@@ -68,7 +68,7 @@ done
 # The control socket can become ready while an interactive shell is still
 # running startup hooks. A late prompt/theme redraw may then clear a command
 # that was successfully written and briefly observed. Require the marker in a
-# final snapshot and retry within the existing launch deadline.
+# final snapshot and try up to three times.
 for attempt in 1 2 3; do
   "$KETTLE" ctl --pid "$pid" send_text --text "printf '\342\236\234  ~ KETTLE_LIVE_RENDER_%s' SMOKE" >/dev/null
   "$KETTLE" ctl --pid "$pid" send_keys --keys enter >/dev/null

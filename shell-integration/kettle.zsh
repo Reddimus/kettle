@@ -14,7 +14,7 @@
 #   OSC 133;B   end of prompt / input start
 #   OSC 133;C   command started executing
 #   OSC 133;D;N command finished (exit code N)
-#   OSC 7       current working directory (v2.20: powers new-tab/split cwd
+#   OSC 7       current working directory (powers new-tab/split cwd
 #               inheritance and "Open folder"; kettle validates the hostname
 #               so an ssh session's remote cwd is never adopted locally)
 
