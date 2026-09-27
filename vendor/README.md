@@ -111,11 +111,25 @@ to route graphics controls around the text parser.
   the job.
   On Unix, dropping the master writer now closes only its duplicate descriptor
   and never writes a newline or VEOF byte into the terminal; deliberate EOF
-  remains Kettle's live-termios `PtyStdin::try_signal_eof` path. Validation-only
-  maintenance also replaces an uninitialized Win32 attribute buffer with
-  initialized storage and applies behavior-preserving lint cleanups required by
-  Kettle's warnings-denied direct-package clippy gate. Five additional
-  Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
+  remains Kettle's live-termios `PtyStdin::try_signal_eof` path.
+  Between `fork` and `exec` the Unix child makes only direct system calls and
+  async-signal-safe library calls, and never allocates. It marks inherited
+  descriptors close-on-exec instead of closing them, so std's exec-error
+  channel still reports a failed `exec`. Linux uses one
+  `close_range(CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it. macOS 11
+  and later mark the descriptors the kernel lists through
+  `proc_pidinfo(PROC_PIDLISTFDS)` into a buffer the parent allocates before
+  `fork`; older macOS kernels can omit high descriptors from that list, so
+  they are not asked. Every other case falls back to one `fcntl` per
+  descriptor number below the soft limit, capped at 1,048,576: other Unix
+  systems, Linux when `close_range` is rejected, and macOS when the list is
+  unreadable or fills the buffer. The macOS list keeps pane spawns from paying
+  that loop under the 1,048,576 soft limit that Node-based launchers such as
+  VS Code set.
+  Validation-only maintenance also replaces an uninitialized Win32 attribute
+  buffer with initialized storage and applies behavior-preserving lint cleanups
+  required by Kettle's warnings-denied direct-package clippy gate. Five
+  additional Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
   borrows, conversions, and `Option` dereferencing. Drop those cleanups if a
   later upstream release already carries them.
 - Excluded: the crates.io package's registry marker, generated lockfile, and

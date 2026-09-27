@@ -840,6 +840,10 @@ descriptor to the pump after spawn. The pump retains it until it reads the first
 bytes, or a non-reaping child-status probe proves the command exited silently.
 This makes short-command capture an ownership guarantee rather than relying on
 the scheduler or the OS to retain output written before a read is pending.
+The spawned child marks every descriptor it inherited above stderr
+close-on-exec before `exec`. macOS asks the kernel which descriptors are open
+instead of trying each number up to the soft limit, so a pane opens just as
+fast when Kettle inherits a 1,048,576-descriptor limit from its launcher.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
