@@ -5,15 +5,14 @@
 //! The search bar is a partial caller. It owns a real
 //! [`crate::search_input::SearchEditor`] with a cursor, a selection, a bounded
 //! insert and its own clipboard chords, so it needs none of the append-only
-//! helpers — but its catch-all arm shares [`accept_text`], because the chords
-//! it does not claim explicitly used to type their letter into the query.
+//! helpers. Its catch-all arm still shares [`accept_text`], so a chord it does
+//! not claim explicitly never types its letter into the query.
 //!
 //! For the other five fields these helpers supply the *correctness* guarantees
 //! search already had — modifier filtering, grapheme-correct deletion, a byte
 //! cap, and a working paste — without pretending they are full editors.
 //!
-//! Each rule below is here because a live probe against the real application
-//! caught its absence; see the module tests for the reproductions.
+//! The module tests reproduce the bug each rule prevents.
 
 use winit::keyboard::ModifiersState;
 
@@ -31,15 +30,14 @@ pub(crate) const MAX_MODAL_INPUT_BYTES: usize = kettle_core::MAX_SEARCH_QUERY_BY
 /// keystroke is not text entry.
 ///
 /// `winit`'s [`KeyEvent::text`] is **not** filtered by Command/Super: on macOS a
-/// `⌘V` arrives as `Some("v")`. Every modal that appended `text` blindly
-/// therefore typed a literal character instead of running the shortcut —
-/// `⌘V` in "Edit tab title" produced a tab named `v`, and in the command palette
-/// it rewrote the query to `v`, which re-ranks the list so the *next* Enter runs
-/// whichever command that query happens to surface.
+/// `⌘V` arrives as `Some("v")`. A modal that appends `text` blindly types a
+/// literal character instead of running the shortcut. `⌘V` in "Edit tab title"
+/// would name the tab `v`, and in the command palette it would rewrite the query
+/// to `v`, which re-ranks the list so the *next* Enter runs whichever command
+/// that query surfaces.
 ///
-/// The confirm dialog already applied exactly this rule inline (its
-/// `Key::Character` arm requires no ctrl/alt/super before reading `y`/`n`/`h`/`l`).
-/// This is that rule, factored out so every modal shares it.
+/// The confirm dialog's `Key::Character` arm keeps a stricter check inline. It
+/// rejects any ctrl, alt, or super before reading `y`/`n`/`h`/`l`.
 ///
 /// Alt is deliberately **not** rejected. On macOS, Option is a legitimate text
 /// producer — `⌥e` composes `´` — and `macos-option-as-alt` has already decided
@@ -100,15 +98,15 @@ pub(crate) fn push_text(buf: &mut String, text: &str) -> bool {
 /// anything was removed.
 ///
 /// `String::pop` removes one `char`, which is not what a person means by
-/// "delete the thing I just typed". A live probe typed `👩‍🚀` (woman + ZWJ +
-/// rocket) into a tab title and pressed Backspace once: the rocket vanished and
-/// the buffer kept a dangling zero-width joiner, because `U+200D` is a format
-/// character rather than a control character and so survived every filter.
+/// "delete the thing I just typed". On `👩‍🚀` (woman + ZWJ + rocket) it removes
+/// only the rocket and leaves a dangling zero-width joiner, because `U+200D` is
+/// a format character rather than a control character and so survives every
+/// filter.
 /// Combining accents fail the same way — one Backspace after `é` typed as
 /// `e` + `U+0301` leaves a bare `e` and looks like nothing happened.
 ///
-/// [`crate::search_input::SearchEditor::backspace`] has always been grapheme-
-/// correct; this shares its boundary helper so the two cannot drift.
+/// [`crate::search_input::SearchEditor::backspace`] is grapheme-correct; this
+/// shares its boundary helper so the two cannot drift.
 pub(crate) fn backspace(buf: &mut String) -> bool {
     let boundary = crate::search_input::previous_grapheme_boundary(buf, buf.len());
     if boundary == buf.len() {
@@ -140,8 +138,8 @@ mod tests {
 
     #[test]
     fn command_chords_are_not_text_entry() {
-        // The reproduction: winit hands `⌘V` to the app as text "v". Before the
-        // guard this became a tab literally named "v".
+        // winit hands `⌘V` to the app as text "v". Without the guard, that
+        // becomes a tab named "v".
         assert_eq!(accept_text(Some("v"), SUPER), None, "cmd+v is not a 'v'");
         assert_eq!(accept_text(Some("a"), SUPER), None, "cmd+a is not an 'a'");
         assert_eq!(accept_text(Some("c"), CONTROL), None, "ctrl+c is not a 'c'");
@@ -165,8 +163,8 @@ mod tests {
 
     #[test]
     fn backspace_removes_a_whole_grapheme_cluster() {
-        // The exact live reproduction: one Backspace on "👩‍🚀" used to leave
-        // "👩\u{200d}" behind, because String::pop took only the rocket.
+        // One Backspace on "👩‍🚀" must remove it whole. String::pop takes only
+        // the rocket and leaves "👩\u{200d}" behind.
         let mut buf = String::from("ab\u{1f469}\u{200d}\u{1f680}");
         assert!(backspace(&mut buf));
         assert_eq!(buf, "ab", "no dangling zero-width joiner");
@@ -234,8 +232,8 @@ mod tests {
 
     #[test]
     fn committed_ime_text_ignores_whatever_modifier_is_latched() {
-        // The regression this exists to prevent: committing a composition with
-        // ⌘Space dropped the entire phrase, because ws.mods still carried SUPER.
+        // Committing a composition with ⌘Space must keep the whole phrase, even
+        // though ws.mods still carries SUPER.
         assert_eq!(
             accept_committed_text("\u{4f60}\u{597d}"),
             Some("\u{4f60}\u{597d}")

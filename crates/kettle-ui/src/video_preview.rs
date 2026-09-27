@@ -559,8 +559,8 @@ fn run_preview_child_once(
                 if !stop_and_reap_child(&mut child) {
                     return PreviewChildAttempt::WorkerLost;
                 }
-                // Joining is the bound here. A read error or panic remains the
-                // non-retryable wait failure that brought us into this arm.
+                // Join only to bound the reader thread. Whatever it returns,
+                // the failed wait already makes this a non-retryable failure.
                 let _ = reader.join();
                 return PreviewChildAttempt::Failed;
             }

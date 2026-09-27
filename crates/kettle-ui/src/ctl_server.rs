@@ -4,9 +4,9 @@
 //! thread binds the kettle-ctl transport (Unix socket / Windows named pipe),
 //! registers a discovery entry, and spawns ONE thread per connection. That
 //! thread reads NDJSON requests and writes responses/events on the SAME handle,
-//! never concurrently. Keeping one sequential protocol owner prevents response
-//! and event frames from interleaving; the transport itself now supports
-//! deadline-bearing overlapped writes on both Windows pipe ends:
+//! never concurrently, so response and event frames cannot interleave. Writes
+//! carry a deadline. On Windows, the transport enforces it with overlapped I/O
+//! on both pipe ends.
 //!
 //!   - request → the App dispatches it on the main thread (the only place
 //!     `self.mux` is touched) and sends the [`Response`] back over a per-request
@@ -102,10 +102,9 @@ pub enum CtlServerMsg {
         conn_id: u64,
         req: Request,
         reply: ReplyTx,
-        /// v2.20.0 (review fix): true for `wait_for`'s internal `read_screen`
-        /// probes — the App skips the per-request dev-record marker (a 300s
-        /// wait at 50ms polls would otherwise land ~6000 markers) and the
-        /// post-drain redraw for them.
+        /// True for `wait_for`'s internal `read_screen` probes. The App skips
+        /// the per-request dev-record marker (a 300s wait at 50ms polls would
+        /// otherwise land ~6000 markers) and the post-drain redraw for them.
         internal_probe: bool,
     },
     /// A malformed line that parsed into a ready-to-send error response.
@@ -137,7 +136,8 @@ pub struct CtlServer {
 impl CtlServer {
     /// Start the server for `mode`. `wake` is called after every message is
     /// enqueued so the App's event loop drains it (it sends `UserEvent::Ctl`).
-    /// Returns `None` (logged) if `mode` is `Off` or binding fails.
+    /// Returns `None` if `mode` is `Off`, or (logged) if binding, registering
+    /// the discovery entry, or spawning the accept thread fails.
     pub fn start(
         mode: AgentServer,
         pid: u32,
@@ -199,20 +199,16 @@ impl CtlServer {
 
     /// Register a freshly-accepted connection.
     ///
-    /// The connection cap is enforced SOLELY at the source in `accept_loop`,
-    /// which gates on the atomic `active` counter and refuses + closes an
-    /// over-cap connection before it ever spawns a thread or sends `NewConn`.
-    /// We must therefore ALWAYS insert here: a second, divergent `conns.len()`
-    /// cap-check on this (App) thread could silently DROP a connection that
-    /// `accept_loop` already admitted — under a cross-thread Disconnect/NewConn
-    /// reorder right at the cap, `conns.len()` can momentarily read full while
-    /// `active` has room. The dropped connection would still serve
-    /// `get_state`/`send_text` (handled on the connection thread) but
-    /// `subscribe`/`attach_pane` would silently no-op (no `ConnState` to flip),
-    /// leaving an untracked-but-live connection. The atomic `active` is the
-    /// single source of truth; `remove_conn` already no-ops on an absent id, so
-    /// always inserting is safe and keeps `conns` membership in lockstep with
-    /// `active`.
+    /// `accept_loop` alone enforces the connection cap. It checks the atomic
+    /// `active` counter and closes an over-cap connection before spawning a
+    /// thread or sending `NewConn`. So this ALWAYS inserts. A second
+    /// `conns.len()` check here could drop a connection `accept_loop` already
+    /// admitted, because a Disconnect/NewConn reorder at the cap can make
+    /// `conns` read full while `active` has room. That connection would stay
+    /// live but untracked. The App still serves its requests, but `subscribe`
+    /// and `attach_pane` silently no-op (no `ConnState` to flip). `remove_conn`
+    /// ignores an absent id, so always inserting is safe and keeps `conns` in
+    /// lockstep with `active`.
     pub fn add_conn(&mut self, conn_id: u64, event_tx: Sender<Event>) {
         self.conns.insert(
             conn_id,
@@ -460,11 +456,11 @@ fn connection_loop(
             let (rtx, rrx) = crossbeam_channel::bounded::<Response>(1);
             let is_subscribe;
             match kettle_ctl::protocol::parse_request_line(trimmed) {
-                // v2.20.0 (agent plane): `wait_for` blocks THIS connection
-                // thread, never the UI thread — it polls the screen via cheap
-                // internal `read_screen` requests (≥50ms apart) until the
-                // condition holds or the deadline passes. The UI thread only
-                // ever answers individual snapshot probes.
+                // `wait_for` blocks THIS connection thread, never the UI
+                // thread. It polls the screen via cheap internal `read_screen`
+                // requests (>=50ms apart) until the condition holds or the
+                // deadline passes. The UI thread only ever answers individual
+                // snapshot probes.
                 Ok(req)
                     if Method::from_name(&req.method)
                         .is_some_and(|method| method.execution() == Execution::Connection) =>
@@ -670,10 +666,10 @@ fn write_serialized_line(
     conn.write_all_until(&line, Instant::now() + timeout, None)
 }
 
-/// v2.20.0 (agent plane): the `wait_for` poll loop. Runs on the CONNECTION
-/// thread; each iteration sends one internal `read_screen` request to the UI
-/// thread (the same cheap snapshot `read_screen` serves) and checks the
-/// condition against the returned text. Params:
+/// The `wait_for` poll loop. Runs on the CONNECTION thread; each iteration
+/// sends one internal `read_screen` request to the UI thread (the same cheap
+/// snapshot `read_screen` serves) and checks the condition against the
+/// returned text. Params:
 ///
 /// - `pane?: u64`      — target pane (default: focused)
 /// - `text?: string`   — substring that must appear on screen
@@ -731,19 +727,18 @@ fn wait_for_poll(
     let mut last_change = std::time::Instant::now();
     let mut last_fingerprint: Option<u64> = None;
     let mut polls = 0u64;
-    // v2.20.0 (review fix): pin the target pane for the WHOLE wait. Without
-    // this, a no-`pane` wait re-resolved "focused" on every probe — a focus
-    // change mid-wait silently retargeted the watch and corrupted the
-    // quiet_ms fingerprint (two panes' screens interleaving looks like
-    // constant change). `read_screen` echoes the resolved pane id in its
-    // result, so the first probe's reply pins it.
+    // Pin the target pane for the WHOLE wait. Otherwise a no-`pane` wait
+    // re-resolves "focused" on every probe, so a focus change mid-wait would
+    // retarget the watch and corrupt the quiet_ms fingerprint (two panes'
+    // screens interleaving looks like constant change). `read_screen` echoes
+    // the resolved pane id in its result, so the first probe's reply pins it.
     let mut pinned_pane: Option<serde_json::Value> = req.params.get("pane").cloned();
     loop {
-        // v2.20.0 (review fix): a vanished client (Ctrl+C'd `kettle ctl`,
-        // crashed MCP host) must not keep this loop polling — it pins one of
-        // the MAX_CONNECTIONS slots and wakes the UI thread every poll for
-        // up to the full timeout. The zero-byte peek is safe here: this IS
-        // the connection thread, with no other I/O outstanding.
+        // A vanished client (Ctrl+C'd `kettle ctl`, crashed MCP host) must not
+        // keep this loop polling. It would pin one of the MAX_CONNECTIONS slots
+        // and wake the UI thread every poll for up to the full timeout. The
+        // zero-byte peek is safe because this IS the connection thread, with no
+        // other I/O outstanding.
         if conn.peer_disconnected() {
             return Response::err(req.id, ec::INTERNAL, "client disconnected during wait_for");
         }
@@ -1026,12 +1021,10 @@ mod tests {
         tx
     }
 
-    /// E2 regression: `add_conn` no longer re-checks `conns.len()` against the
-    /// cap. `accept_loop` is the single gate (atomic `active`); `add_conn` must
-    /// ALWAYS insert so `conns` membership cannot silently diverge from the set
-    /// of connections `accept_loop` admitted. Here we register exactly
-    /// MAX_CONNECTIONS connections (what `accept_loop`'s `active` gate permits)
-    /// and assert every one is tracked — none is dropped by a second counter.
+    /// `accept_loop` is the single cap gate (atomic `active`), so `add_conn`
+    /// must ALWAYS insert or `conns` could diverge from the connections
+    /// `accept_loop` admitted. Register exactly MAX_CONNECTIONS connections
+    /// (what the `active` gate permits) and assert every one is tracked.
     #[test]
     fn add_conn_always_inserts_up_to_cap() {
         let (mut server, _tx) = test_server();
@@ -1049,15 +1042,14 @@ mod tests {
         }
     }
 
-    /// E2 invariant: membership + the admission count agree across a
-    /// Disconnect/NewConn reorder at the cap. Simulate the race that the old
-    /// `conns.len() >= MAX_CONNECTIONS` guard mishandled: with the table full,
-    /// `accept_loop` drops one (decrementing `active`) and admits a replacement
+    /// Membership and the admission count agree across a Disconnect/NewConn
+    /// reorder at the cap. With the table full, `accept_loop` drops one
+    /// connection (decrementing `active`) and admits a replacement
     /// (incrementing `active` back to the cap). The App may process the new
-    /// `NewConn` BEFORE the `Disconnect`; momentarily `conns.len()` would read
-    /// full — the old guard would have silently dropped the replacement. With
-    /// the guard gone, the replacement is always inserted; after the reorder
-    /// settles, `conns` holds exactly the admitted set.
+    /// `NewConn` BEFORE the `Disconnect`, while `conns.len()` still reads full.
+    /// A `conns.len() >= MAX_CONNECTIONS` guard would drop the replacement;
+    /// `add_conn` always inserts it, so once the reorder settles `conns` holds
+    /// exactly the admitted set.
     #[test]
     fn add_conn_survives_disconnect_newconn_reorder_at_cap() {
         let (mut server, _tx) = test_server();
