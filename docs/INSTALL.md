@@ -71,11 +71,11 @@ curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/instal
 ```
 
 `KETTLE_VERSION` and `KETTLE_PREFIX` compose — pin both at once. The installer
-requires a current `curl` with `--max-filesize`, GNU `tar`, and OpenSSL 3.0+
-with Ed25519 support. The published archives are glibc binaries and do not run
-on stock musl-based Alpine; installing GNU tar alone does not make them
-compatible. Alpine users must build for their environment or run Kettle in a
-supported glibc environment.
+requires a current `curl` with `--max-filesize`, GNU `tar`, OpenSSL 3.0+ with
+Ed25519 support, and Python 3. The published archives are glibc binaries and
+do not run on stock musl-based Alpine; installing GNU tar alone does not make
+them compatible. Alpine users must build for their environment or run Kettle
+in a supported glibc environment.
 
 The script accepts only an exact `vMAJOR.MINOR.PATCH`, caps the archive at
 256 MiB, and caps the signed manifest/signature separately. HTTPS-only
@@ -470,23 +470,18 @@ drivers). The workspace also contains native PTY/ConPTY lifecycle tests. See
 ## Regenerating the app icons (contributors)
 
 `scripts/gen-icons.py` is the single source of truth for the icon geometry. It
-emits one custom `>(_)~` terminal-kettle mark for Linux, Windows, and the
-foreground of `packaging/macos/AppIcon.icon`. The punctuation is drawn as five
-font-independent, fully opaque vector strokes on the default TokyoNight
-background at normal sizes. The 16 px fixed-size Linux and Windows assets plus
-the retained compatibility iconset use a simplified `>_` optical-size mark
-because five punctuation strokes merge at that physical limit. The native
-Icon Composer vector retains the full mark in every rendition. Parentheses and
-steam in the full mark use true cubic curves; the raised,
-square-ended underscore keeps the full-size mark from completing a U-shaped
-outline. All five are distinct in the generated 24 px raster. The renderer's
-light review variant swaps the dark face and Kettle-blue mark colors exactly
-while retaining identical geometry; tests cover it, but the generator does not
-write it as a package asset and the native macOS document does not currently
-ship it as a separate appearance. There is no inner rounded face or border
-whose curve can fight the platform mask. The system owns the only outer mask,
-and Xcode generates the previous-release fallback for the macOS 11 deployment
-target.
+emits one two-stroke `>_` terminal mark for Linux, Windows, and
+`packaging/macos/AppIcon.icon`. The strokes are font-independent, fully opaque
+vectors in Kettle blue on the default TokyoNight background. The 16 px
+fixed-size Linux and Windows assets and the matching compatibility iconset
+member use a thicker, wider `>_` optical-size variant. The native Icon Composer
+vector keeps the full mark in every rendition. The light appearance swaps the
+dark face and Kettle-blue mark colors exactly while keeping identical geometry;
+tests cover it. The generator writes it as
+`packaging/linux/kettle-light-256.png` and as the light artwork in
+`AppIcon.icon`, next to the dark artwork. On macOS the system owns the only
+outer mask, the inset face stays parallel to it, and Xcode generates the
+previous-release fallback for the macOS 11 deployment target.
 The generator also writes the fixed-size hicolor PNGs (`kettle-16.png` …
 `kettle-256.png`), the retained compatibility iconset, and a Windows `.ico`
 kept only for compile/regression CI of the retained conditional code:

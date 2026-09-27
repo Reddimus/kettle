@@ -244,24 +244,21 @@ QEMU to exit, and run `qemu-img check ~/VMs/ubuntu-arm.qcow2` only while the
 image is offline. An in-guest `sudo fstrim -av` before shutdown returns freed
 blocks to the sparse qcow2 because the launcher enables discard.
 
-The 2026-08-23 migration preserved the guest OS, user, tools, credentials, and
-repository state, then expanded the root disk from 128 GiB to 256 GiB. A full
-workspace run completed 2,131 tests across 45 binaries with zero failures and
-the release binary linked successfully. The native aarch64 `search-history`
-live-window smoke passed once under Xvfb and once in the real GNOME Wayland
-session. Both runs selected Vulkan through Mesa llvmpipe and reported
-`Adapter type: Cpu`. This proves the software-rendered Vulkan and Wayland
-paths. It does not prove accelerated virtio GPU rendering.
+The guest's root disk is 256 GiB. On 2026-08-23, a full workspace run completed
+2,131 tests across 45 binaries with zero failures and the release binary linked
+successfully. The native aarch64 `search-history` live-window smoke passed once
+under Xvfb and once in the real GNOME Wayland session. Both runs selected
+Vulkan through Mesa llvmpipe and reported `Adapter type: Cpu`. This proves the
+software-rendered Vulkan and Wayland paths. It does not prove accelerated
+virtio GPU rendering.
 
 The retained Windows CI runner compiles and tests portable and conditional
 Windows code, including native ConPTY and PowerShell fixtures. Kettle 4.0 does
 not publish or support a Windows package, installer, GPU smoke, or live-window
 harness. Historical native Windows and Parallels ARM evidence belongs to the
 3.3.0-and-earlier record, not to current release coverage.
-The runner does not use `--ignored`. The former manual `pwsh` OSC 7/ConPTY and
-sysinfo cwd probes were removed rather than presented as required CI evidence.
-The required PowerShell script fixtures, workspace tests, CLI smoke, and
-vendored ConPTY regression remain.
+The runner does not use `--ignored`. Its required evidence is the PowerShell
+script fixtures, workspace tests, CLI smoke, and vendored ConPTY regression.
 
 Read test output for `no GPU adapter ... skipped` and `no PTY ...` messages.
 Those messages leave the portable suite green by design; record the missing
@@ -270,13 +267,13 @@ coverage instead of treating the exit code alone as platform validation.
 ### GPU devices in tests
 
 The `kettle-render` tests that stand up a real GPU device hold a process-wide
-lock so only one of them runs at a time. libtest is otherwise free to run them
-in parallel, and creating and tearing down several wgpu devices at once on a
-host whose only adapter is a software or basic display driver has taken the
-whole test binary down with `STATUS_ACCESS_VIOLATION` — reported against
-`kettle-render` with no test having failed, because the fault is in the driver
-rather than in Rust. A new test that creates an adapter, device, or surface
-belongs behind the same guard.
+lock so only one of them runs at a time. Without it, libtest runs them in
+parallel. On a host whose only adapter is a software or basic display driver,
+creating and tearing down several wgpu devices at once can take the whole test
+binary down with `STATUS_ACCESS_VIOLATION`. Cargo reports that against
+`kettle-render` with no failed test, because the fault is in the driver rather
+than in Rust. A new test that creates an adapter, device, or surface belongs
+behind the same guard.
 
 Every renderer-owned device request uses the same limit policy as the live
 window. Kettle requests the adapter's full 2D texture dimension so a large
@@ -404,8 +401,8 @@ Night"; default keybinds and trigger parsing; the
 `from_name` ↔ `action_names` round-trip drift guard; the
 `defaults_has_no_shadow_collisions` audit (no
 HashMap-shadowed bindings); the palette-completeness drift
-guard (now also covering `OpenContextMenu` / `UndoCloseTab` /
-`DuplicateTab` / `DuplicatePane` from v1.3.0); the
+guard (including `OpenContextMenu` / `UndoCloseTab` /
+`DuplicateTab` / `DuplicatePane`); the
 example-config drift guard; the README-keybind regression guard;
 persistence preserves encoding, newline convention, comments, permissions,
 first-write backups, and symlinked dotfile targets while refusing
@@ -496,8 +493,8 @@ same-user kernel credential path run on every native CI OS. A deterministic
 failed-identity injection proves clients reject before sending protocol
 bytes. Stalled readers prove deadline and cancellation exits from both a
 client handle and an accepted server handle with an 8 MiB write. Windows
-therefore exercises the formerly synchronous server-side arm on a real
-overlapped named-pipe handle. Unix additionally asserts the shared open-file
+therefore exercises the server-side arm on a real overlapped named-pipe
+handle. Unix additionally asserts the shared open-file
 description remains stably nonblocking while a cloned reader retains
 blocking semantics. Control-server regressions occupy all eight slots with
 idle peers, slow-drip an incomplete frame, and stop reading a subscribed
@@ -591,7 +588,7 @@ ordinary pane padding while selection/link/mouse hit testing and the native
 IME anchor consume that same renderer-owned origin.
 The wallpaper no-clip test and zero-sized skipped slots pin the independent
 background contract and indexed batching.
-The v2.25.1 grid-regression guard renders
+The grid-regression guard renders
 zsh-style `➜  ~`, POSIX, lambda/starship-style, git-status, and
 PowerShell-style prompt lines through the cell-locked glyph pipeline,
 toggles only the block cursor between two offscreen frames, and
@@ -600,8 +597,8 @@ asserts every non-cursor prompt pixel remains unchanged. The
 integration test renders both `DebugScene::Default` and
 `DebugScene::ContextMenu` PNGs via `capture_png_with`, then
 asserts ≥ 1000 pixels differ between the two AND ≥ 200 fg-leaning
-pixels appear in the menu area — catches the v1.3.0/v1.3.1
-blank-menu render-pass-order regression class that bare logic
+pixels appear in the menu area. It catches the blank-menu render-pass-order
+regression class that bare logic
 tests can't see. `tests/bell_visual.rs` renders `DebugScene::Default` and
 `DebugScene::BellFlash` for the default dark theme and a bundled light theme,
 measures the mean CIE L\* of a background patch in each, and asserts the
@@ -629,7 +626,7 @@ splits keep every leaf; `Node::leaf_ids` DFS-order +
 `close_window` tab-reaping with active-index
 bookkeeping; `reap_tabs` keeps focus on the same tab
 after a pane death; `close_focused_promotes_sibling_in_two_pane_split`
-(the v1.3.0 fix for `Ctrl+Shift+W` closing whole tabs);
+(`Ctrl+Shift+W` in a split closes the focused pane, not the whole tab);
 `reap_reports_whether_it_removed_a_pane` plus the
 `every_reap_site_schedules_the_survivor_resize` source guard pin that a pane
 dying on its own resizes whatever inherits its rectangle, and that an idle
@@ -814,7 +811,7 @@ empty fallback); the
 guard; the
 `cli_help_preserves_indented_code_examples` drift guard that
 pins `verbatim_doc_comment` on every flag with an indented
-example block (the bug the v1.2.1 patch landed against).
+example block (without it, clap flattens the example into prose).
 
 ## End-to-end harness: selection, copy & `.cast` replay
 
@@ -825,10 +822,10 @@ whole interactive session (Claude Code, Codex CLI, AstroNvim, tmux) can be
 replayed deterministically in CI.
 
 **Selection / copy across scrollback.** Mouse selection involves three
-coordinate spaces; the bug here was a missing `− display_offset`
-when converting a click to the grid-absolute point alacritty's `Selection`
-expects, so copying an earlier chunk *while scrolled up* (the constant motion in
-a long Claude Code conversation) read the wrong rows:
+coordinate spaces. Converting a click to the grid-absolute point alacritty's
+`Selection` expects must apply `− display_offset`; without it, copying an
+earlier chunk *while scrolled up* (the constant motion in a long Claude Code
+conversation) reads the wrong rows:
 
 ```mermaid
 flowchart LR
@@ -1073,18 +1070,17 @@ generation gating (including a hidden/quiet window), a delayed first wake still
 begins close, the second bound starts from successful close-worker creation, and
 worker-start failure retries instead of applying Hold to a live master.
 
-The first negative control inserts a two-second pause into the old post-spawn
-setup window on the pre-fix tree; the real integration test then exits 0 with
-empty output on both its normal run and raw diagnostic retry. The adversarial
-review found that a readiness signal by itself still preceded the actual read,
-so a second two-second pause immediately
-after that signal reproduced the same failure. With the slave-ownership guard,
-the second mutant passes because the delayed reader still receives the retained
-output.
+Two negative controls pin the startup slave handoff. Starting the reader after
+spawn, with a two-second pause between them, makes the real integration test
+exit 0 with empty output on both its normal run and raw diagnostic retry. A
+readiness signal before spawn is not enough, since it still precedes the actual
+read; a two-second pause right after the signal fails the same way. With the
+slave-ownership guard, that second mutant passes because the delayed reader
+still receives the retained output.
 
 `kettle exec` also has platform-specific completion policy tests. Unix may
 report success only after the raw channel disconnects and the core reader
-publishes an orderly EOF; the former 810-ms cross-platform fallback is a failing
+publishes an orderly EOF; an 810-ms cross-platform fallback is a failing
 mutant because silence can mean the reader has not been scheduled yet. An
 unexpected reader error and a five-second Unix no-EOF bound return explicit
 internal failures, but the bound does not override queued raw bytes or
@@ -1281,15 +1277,14 @@ GitHub CI, or native Windows/macOS checks.
 `just mermaid-check` compiles every ```` ```mermaid ```` block in tracked
 Markdown with the mermaid CLI. A diagram that does not parse is replaced by a
 red "Unable to render rich display" panel on GitHub, which reads as a broken
-document rather than a broken snippet — and one had shipped that way, a node
-label containing backslash-escaped quotes, because nothing looked.
+document rather than a broken snippet.
 
 It skips when there is no Node toolchain or no Chrome/Chromium, so the suite
 still runs on a machine without them. CI sets `KETTLE_MERMAID_REQUIRED=1`,
 which turns that skip into a failure: a gate that silently stops running is the
 failure mode this one exists to prevent.
 
-Two mermaid traps it catches, both found by writing it:
+Two mermaid traps it catches:
 
 - `;` separates statements in a sequence diagram, so a literal semicolon in
   message text (`OSC 133;A`) truncates the line. Write `#59;`.
@@ -1308,7 +1303,7 @@ python3 scripts/test-package-manifest.py
 python3 scripts/test-install-online.py
 ```
 
-The current suites cover ten signed-update-manifest cases, six exact
+The current suites cover fourteen signed-update-manifest cases, six exact
 draft-release cases, two release-preparation cases, seventeen package-manifest
 cases (with platform-dependent skips), and seventeen POSIX online-installer
 cases. They pin the checked-in Ed25519 trust root, canonical manifest bytes and
@@ -1488,7 +1483,7 @@ placed its new process group in the foreground; only the parent calls
 A failed foreground handoff closes the barrier and kills/reaps the child
 instead of releasing it in the background. The self-test repeats the success
 transition through a real controlling PTY and injects the failed handoff.
-It remains alive while a same-session background job still needs an
+The wrapper remains alive while a same-session background job still needs an
 identity-stable cleanup anchor. A reported leader is accepted only after a
 stable handle is retained and while it is a live direct child of the
 launched Kettle; Linux retains a pidfd and macOS a process audit token at
@@ -1556,17 +1551,15 @@ children on an M-series Mac hit that window 24 times; the four timed hits
 spanned 29 to 49 microseconds and one retry settled every one of them, and
 all 18 hits whose resolution was classified ended with the proc entry
 disappearing rather than with a change of session. A loaded runner widens
-the window enough to be sampled: `build (macos-latest)` aborted a whole scan
-on `could not retain PTY session member 9105: kern_return=5`, and the same
-commit passed on rerun. The scan now rechecks membership under a one-second
-deadline rather than once instantaneously, and the deadline is scoped to
-exactly that window. A pid still reporting this session when the deadline
-expires fails the scan closed, and so does one that reports a different live
-session mid-retry, because that is a detach under the scan rather than a
-teardown and the single sample this replaces would have aborted on it. Only
-the proc entry disappearing ends a retry quietly. Waiting therefore cannot
-turn any outcome into a skip that was not already one, so the change is
-strictly no weaker than the single recheck. Four self-test injections pin
+the window enough that one instantaneous recheck can abort a whole scan on
+`could not retain PTY session member <pid>` with `kern_return=5`. The scan
+therefore rechecks membership under a one-second deadline scoped to exactly
+that window. A pid still reporting this session when the deadline expires
+fails the scan closed, and so does one that reports a different live session
+mid-retry, because that is a detach under the scan rather than a teardown.
+Only the proc entry disappearing ends a retry quietly. Waiting therefore
+cannot turn any outcome into a skip that was not already one, so the retry
+is no weaker than a single recheck. Four self-test injections pin
 it, each verified to fail on its own mutation: the teardown member must be
 skipped without aborting, an unretainable live member must still abort, a
 mid-retry detach must abort, and both aborts must close every handle they
@@ -1719,11 +1712,10 @@ control-plane scenario: it fills two independent panes, keeps keyboard
 focus on the left, hovers the right, and proves only the right viewport
 moves. It deliberately requires no screenshot so pointer routing remains a
 focused assertion independent of PNG encoding; the broad interaction
-scenario retains its strict screenshot checks. Live captures themselves no
-longer require swapchain `COPY_SRC`, because they read Kettle's offscreen
-scene target. This removes the known capability blocker for RDP/virtual
-adapters, but native capture completion on those backends is not claimed
-until it is exercised there.
+scenario retains its strict screenshot checks. Live captures read Kettle's
+offscreen scene target, so they do not need swapchain `COPY_SRC`, which
+RDP/virtual adapters may not advertise. Native capture completion on those
+backends is not claimed until it is exercised there.
 `just window-close-isolation-smoke` detaches a tab into a second native
 window, exits only that window's shell, requires the logical map to fall to
 one, rejects an exact geometry query for the detached id, and independently
@@ -1782,9 +1774,10 @@ probe coordinates from CoreGraphics and requires the Swift toolchain. Its
 probes remain within the two-logical-point threshold; the portable hosted
 legs exercise their scale >= 1 coordinates, while focused behavior tests
 cover representative positive and invalid display scales.
-It then requires non-empty selected text after the drag. Missing
-Accessibility permission therefore cannot look like an application
-failure. Portable behavioral tests cover the DPI-scaled movement threshold,
+It then requires non-empty selected text after the drag. Native macOS
+checks Accessibility permission before posting events, so a missing grant
+cannot look like an application failure. Portable behavioral tests cover
+the DPI-scaled movement threshold,
 latched drag state, owning-button matching, window-leave latch, edge zones,
 and both rate directions. Source drift guards pin copy-before-clear ordering
 across modal, confirmation, focus-loss, pane invalidation, and
@@ -1832,8 +1825,8 @@ Backpressure regressions must cover both piped stdin and `/dev/null`: a
 query-flooding child that never reads replies must hit the bounded
 64-message reply queue promptly rather than defeating timeout. A separate
 semantic OSC-event flood must trip the 1024-event parser queue.
-Two unit tests pin `--json` rendering. A golden test compares every event kind
-against the bytes the old `serde_json::Value` maps produced. It covers escapes,
+Unit tests pin `--json` rendering. A golden test compares every event kind
+against the bytes equivalent `serde_json::Value` maps produce. It covers escapes,
 invalid bytes, split and carried codepoints, and the lossy tail at exit. A
 counting sink requires exactly one `write` per event, with the carried tail and
 the exit event sharing one. A sink that takes seven bytes per call proves each
@@ -1964,15 +1957,14 @@ carries a separate xdotool tier. Closing it needs either an arming path in
 `ctl_mouse_press` or an xdotool tier here, and the script header records both.
 
 `crates/kettle-config/tests/harness_action_names_resolve.rs` feeds every action
-name these scripts hand to `perform_action` through the real parser. Two dead
-names had accumulated, `toggle_broadcast_all` and `focus_window`, and because
-the scenarios using them are manual rather than gated, both were invisible until
-someone ran them.
+name these scripts hand to `perform_action` through the real parser. The
+scenarios are manual rather than gated, so a dead name would otherwise stay
+invisible until someone runs them.
 
 `just split-repro` is a hunt rather than a gate and runs in no recipe chain. It
 splits and closes in a loop against a pane whose foreground process keeps
-spawning short-lived `bash <script>` helpers, which is the shape that used to be
-cloned into a pane that died on arrival. Exit 2 means it reproduced and printed
+spawning short-lived `bash <script>` helpers. A split must never clone that
+shape, because the clone dies on arrival. Exit 2 means it reproduced and printed
 a capture directory holding the doomed pane's argv, its child pid, a process
 tree rooted at the source pane, and any swallowed split error.
 `just split-repro --claude` drives a real Claude Code pane instead of the
@@ -2082,11 +2074,11 @@ retained compile/regression checks on **windows**:
   one ink and the background. A monochrome glyph stays on that line; a colour
   glyph carries more than one hue and leaves it. Both reference colours are read
   out of the screenshot, so the oracle does not depend on the theme. It **skips**
-  when `ui_geometry` reports a null `text_presentation_face`, which is what a
-  host with no monochrome font carrying U+23FA does, GitHub's Linux runner
-  included: kettle leaves such a system on the platform cascade, so there is
-  nothing to assert. A missing field is a hard failure, so the skip cannot
-  quietly become unconditional.
+  when `ui_geometry` reports a null `text_presentation_face`, as on a host with
+  no monochrome font carrying U+23FA (GitHub's Linux runner included). Kettle
+  leaves such a host on the platform cascade, so there is nothing to assert. A
+  missing field is a hard failure, so the skip cannot quietly become
+  unconditional.
 - A quarantined Linux **live-UI `split-exit-resize` smoke** splits a pane,
   lets the new pane's own shell exit, and asserts the survivor returns to its
   exact pre-split columns and rows, then reads the tty winsize back with
@@ -2129,10 +2121,9 @@ retained compile/regression checks on **windows**:
   `--config /<typo>` + `--working-directory /<typo>` hard-fail
   exit codes, happy-path basename round-trip
   (Windows path-translation parity).
-- The **MSRV verification job** — pinned `dtolnay/rust-
-  toolchain@1.89` builds + tests the workspace at the declared
-  floor, catches a future transitive-dep MSRV bump at PR time
-  instead of release time.
+- The **MSRV verification job** builds and tests the workspace on the
+  declared Rust 1.89 floor (`dtolnay/rust-toolchain` with `toolchain: "1.89"`),
+  so a transitive-dep MSRV bump fails at PR time instead of release time.
 - The **icon raster, actool, and ico packaging smokes** — the cross-platform
   generator gate compares the Linux SVG, `AppIcon.icon`, every PNG, and
   all seven ICO resolutions. The macOS leg compiles the Icon Composer document
@@ -2171,12 +2162,11 @@ retained compile/regression checks on **windows**:
   combinations. It asserts a shape property rather than a byte table: output is
   always `None`, plain text/C0, one ESC prefix plus such a payload, a
   well-formed SS3, or a well-formed CSI whose legacy modifier parameter is
-  exactly `1 + shift + 2*alt + 4*ctrl`. Be precise about its reach: the shape
-  and parameter properties catch any Super bit or any modifier folded into a
-  parameterized sequence, which is the class the Command bug belonged to. They
-  do **not** catch a modifier dropped from a payload that carries no parameter
-  — encoding `Ctrl+A` as a plain `a` still satisfies them — so the per-chord
-  exact-byte tests remain load-bearing rather than decorative. `Alt` implying
+  exactly `1 + shift + 2*alt + 4*ctrl`. The shape and parameter properties
+  catch any Super bit or any modifier folded into a parameterized sequence, the
+  class of the Command bug. They do **not** catch a modifier dropped from a
+  payload with no parameter (encoding `Ctrl+A` as a plain `a` still satisfies
+  them), so the per-chord exact-byte tests are still required. `Alt` implying
   an ESC prefix holds for every legacy chord it emits, with plain Enter as the
   one recorded exception. Source
   drift guards pin that each legacy entry point consults the Super predicate
@@ -2206,9 +2196,9 @@ retained compile/regression checks on **windows**:
   ambiguous sibling branches directly under the shell. Native PTY readiness
   markers are assembled from separate shell words so the shell's own input echo
   cannot satisfy the assertion before the child actually prints them.
-- The Windows installer and fault-injection smoke retired with 3.3.0. Its
-  historical contract remains in the `v3.3.0` source and documentation. The
-  Windows CI leg in 4.0 does not install, upgrade, uninstall, or package Kettle.
+- The Windows CI leg does not install, upgrade, uninstall, or package Kettle.
+  The retired Windows installer and fault-injection smoke remain in the
+  `v3.3.0` source and documentation.
 - **Session recording** — recording is a runtime toggle (`record = on` /
   `--record`) compiled into every build, so the default build/clippy/test
   exercise the GUI recording flags, input tokens, markers, and status UI
@@ -2216,11 +2206,12 @@ retained compile/regression checks on **windows**:
 
 Separate workflows:
 
-- `.github/workflows/audit.yml` — pull requests run the editable scope guard
-  and both `cargo audit` scans in a read-only job whose checkout does not
-  persist credentials. Pushes to `main` and the daily 06:00 UTC schedule run
-  `rustsec/audit-check` in a separate trusted job; Checks/issues writes are
-  job-scoped and the token is passed only to the RustSec action step.
+- `.github/workflows/audit.yml` — pull requests run the editable ttf-parser and
+  lru scope guards and both `cargo audit` scans in a read-only job whose
+  checkout does not persist credentials. Pushes to `main` and the daily
+  06:00 UTC schedule run `rustsec/audit-check` in a separate trusted job;
+  Checks/issues writes are job-scoped and the token is passed only to the
+  RustSec action step.
 - `.github/workflows/nix.yml` — on every pull request and push to `main`,
   installs upstream Nix, rejects lock-file drift, evaluates every supported
   system, builds the x86_64 Linux cargo-test check, launches the installed
@@ -2280,12 +2271,12 @@ Separate workflows:
   icon, no-follow helper, provenance, and `local-dev` ownership state. It
   preserves unrelated shared-prefix content and reproduces the audited
   `share/kettle` symlink replacement, proving uninstall refuses before mutation
-  and the external victim sentinel survives. It proves that this normal
-  binary is refused for `--record-dir`, builds the `dev-record` variant, and
-  repeats with prefix/record paths containing every Desktop Entry quoting edge
-  (`\\`, `%`, `$`, `"`, and backtick), plus private mode and symlink-refusal
-  checks. The original normal binary is restored for a simulated stable
-  release-tarball install. When the matching release tag and platform asset are
+  and the external victim sentinel survives. It then installs the same binary
+  with `--record-dir` into prefix/record paths containing every Desktop Entry
+  quoting edge (`\\`, `%`, `$`, `"`, and backtick), plus private mode and
+  symlink-refusal checks. A simulated stable release-tarball install refuses
+  `--record-dir`, then installs and uninstalls with the `stable` marker. When
+  the matching release tag and platform asset are
   both published, the script also runs `install-online.sh` and verifies SHA-256
   and prefix-local uninstall behavior. A tag whose asset still returns 404 is
   treated as an in-progress release; other asset-probe failures remain fatal.
