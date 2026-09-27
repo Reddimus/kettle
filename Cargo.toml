@@ -14,6 +14,9 @@ members = [
     "crates/kettle",
 ]
 exclude = [
+    # scripts/perf/macos-standing.py clones and builds vtebench here; without
+    # this entry cargo refuses to build a package inside this workspace root.
+    "target/perf-tools/macos-standing/vtebench",
     "vendor/alacritty_terminal-0.26.0",
     "vendor/portable-pty-0.9.0",
     "vendor/vte-0.15.0",

@@ -13,7 +13,7 @@ argument path. Workloads:
                 Monitor's Memory, which includes GPU driver memory) of a window
                 left alone, sampled over --idle-window seconds after
                 --idle-settle seconds
-  flood-memory  phys_footprint after printing a 32 MiB text file
+  flood-memory  phys_footprint after printing 32 MiB of seeded text
   vtebench      Alacritty's vtebench at a pinned revision, per-benchmark
                 medians and their geometric mean
 
@@ -49,7 +49,7 @@ from typing import Dict, List, Optional
 REPO = Path(__file__).resolve().parents[2]
 PROBES = Path(__file__).resolve().parent / "macos-standing"
 VTEBENCH_URL = "https://github.com/alacritty/vtebench"
-VTEBENCH_REV = "ead80031f8d0bde07c34543e5146ef23c7ea3e22"
+VTEBENCH_REV = "ead80032e57dee2e75f0b51f2ea67528647d9944"
 COLS, ROWS = 120, 36
 FLOOD_BYTES = 32 * 1024 * 1024
 
@@ -78,20 +78,91 @@ def build_probes(tools: Path) -> Dict[str, Path]:
     return built
 
 
-def build_vtebench(tools: Path) -> Path:
-    """Clone and build vtebench at the pinned revision into `tools`."""
-    checkout = tools / "vtebench"
-    binary = checkout / "target" / "release" / "vtebench"
+FLOOD_WORDS = (
+    "fn", "let", "mut", "self", "impl", "pub", "match", "Some(value)", "None", "Ok(())",
+    "return", "&str", "Vec<u8>", "0x7f", "=>", "{", "}", "(", ");", "// note:",
+    "error:", "warning:", "src/main.rs:42:7", "--flag=value", "\"quoted\"", "42",
+)
+
+
+def write_flood(path: Path, size: int = FLOOD_BYTES) -> None:
+    """Write `size` bytes of plain text that is the same on every run.
+
+    Lines stay under the 120-column grid so no terminal has to wrap them. The
+    flood used to be Kettle's own Rust sources, which changed with every commit
+    and made two releases' flood-memory figures print different text; a
+    checkout without `crates/` also looped forever.
+    """
+    # Only `random()` is guaranteed to give the same sequence for a seed on
+    # every Python version; `choice` and `randrange` are not, so every pick
+    # is derived from it.
+    rng = random.Random(4096)
+
+    def pick(n: int) -> int:
+        return int(rng.random() * n)
+
+    lines = []
+    length = 0
+    while length < 1 << 20:
+        words: List[str] = []
+        width = pick(118)
+        while sum(len(word) + 1 for word in words) < width:
+            words.append(FLOOD_WORDS[pick(len(FLOOD_WORDS))])
+        line = " ".join(words)[:119] + "\n"
+        lines.append(line)
+        length += len(line)
+    block = "".join(lines).encode("ascii")
+    whole, rest = divmod(size, len(block))
+    with path.open("wb") as out:
+        for _ in range(whole):
+            out.write(block)
+        out.write(block[:rest])
+
+
+def checkout_vtebench(checkout: Path, url: str = VTEBENCH_URL, rev: str = VTEBENCH_REV) -> bool:
+    """Put `checkout` at `rev`, cloning if needed. True if it moved.
+
+    A pin that names no real commit must fail here with its value, not as a
+    bare `git checkout` error halfway through a long run.
+    """
     if not checkout.exists():
-        subprocess.run(["git", "clone", "--quiet", VTEBENCH_URL, str(checkout)], check=True)
-    head = subprocess.run(
-        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        subprocess.run(["git", "clone", "--quiet", url, str(checkout)], check=True)
+
+    def head() -> str:
+        return subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+    dirty = subprocess.run(
+        ["git", "-C", str(checkout), "status", "--porcelain"],
         check=True, capture_output=True, text=True,
     ).stdout.strip()
-    if head != VTEBENCH_REV:
-        subprocess.run(["git", "-C", str(checkout), "fetch", "--quiet", "origin"], check=True)
-        subprocess.run(["git", "-C", str(checkout), "checkout", "--quiet", VTEBENCH_REV], check=True)
-    if not binary.exists() or head != VTEBENCH_REV:
+    if dirty:
+        # A local edit would be built and benchmarked as if it were the pin.
+        raise SystemExit(
+            f"vtebench checkout {checkout} has local changes; commit, stash, or delete it:\n{dirty}"
+        )
+    if head() == rev:
+        return False
+    subprocess.run(["git", "-C", str(checkout), "fetch", "--quiet", "origin"], check=True)
+    moved = subprocess.run(
+        ["git", "-C", str(checkout), "checkout", "--quiet", rev], capture_output=True, text=True,
+    )
+    if moved.returncode != 0 or head() != rev:
+        raise SystemExit(f"vtebench pin {rev} is not a commit in {url}: {moved.stderr.strip()}")
+    return True
+
+
+def build_vtebench(tools: Path) -> Path:
+    """Clone and build vtebench at the pinned revision into `tools`.
+
+    The checkout sits inside Kettle's workspace root, so the root `Cargo.toml`
+    lists it under `workspace.exclude`; the self-test keeps the two in step.
+    """
+    checkout = tools / "vtebench"
+    binary = checkout / "target" / "release" / "vtebench"
+    if checkout_vtebench(checkout) or not binary.exists():
         subprocess.run(["cargo", "build", "--release", "--locked", "--quiet"], cwd=checkout, check=True)
     return binary
 
@@ -404,14 +475,7 @@ def main() -> int:
         runner = Runner(probes, work, kettle)
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
-            sources = sorted((REPO / "crates").rglob("*.rs"))
-            with flood.open("wb") as out:
-                while out.tell() < FLOOD_BYTES:
-                    for source in sources:
-                        out.write(source.read_bytes())
-                        if out.tell() >= FLOOD_BYTES:
-                            break
-                out.truncate(FLOOD_BYTES)
+            write_flood(flood)
         for workload in workloads:
             rows: Dict[str, List[dict]] = {name: [] for name in names}
             rounds = args.vtebench_rounds if workload == "vtebench" else args.rounds
