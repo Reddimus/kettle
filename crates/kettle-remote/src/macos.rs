@@ -20,6 +20,9 @@ const INITIAL_CHILD_SLOTS: usize = 64;
 #[derive(Default)]
 pub(crate) struct MacProcessTree {
     entries: HashMap<u32, MacProcessEntry>,
+    /// Roots whose subtree holds an argv this walk could not read whole. Only
+    /// those panes keep their previous snapshot; the rest still publish.
+    pub(crate) partial_roots: HashSet<u32>,
     /// Reused `KERN_PROCARGS2` buffer.
     args: Vec<u8>,
     /// Reused `proc_listchildpids` buffer.
@@ -37,9 +40,11 @@ enum ArgvRead {
     /// The process exited, is a zombie, or belongs to another user. This is
     /// normal during a walk and does not make the snapshot partial.
     Unavailable,
-    /// The argument area exceeded a byte limit or changed between reads, so
-    /// publishing could rest on a truncated argv.
-    Incomplete,
+    /// This process's argument area exceeded a per-process limit or changed
+    /// between reads, so its pane must not publish a guess.
+    Truncated,
+    /// The walk's shared byte budget is spent, so the whole scan is partial.
+    OverBudget,
 }
 
 impl MacProcessTree {
@@ -49,12 +54,19 @@ impl MacProcessTree {
     pub(crate) fn refresh_roots(&mut self, roots: &[u32]) -> bool {
         let deadline = Instant::now() + MAX_PROC_SCAN_DURATION;
         self.entries.clear();
+        self.partial_roots.clear();
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
         let mut scheduled: HashSet<_> = roots.iter().copied().collect();
+        let mut root_of = HashMap::new();
         let mut children = Vec::new();
         let mut total_bytes = 0_u64;
         let mut complete = true;
         while let Some((pid, parent)) = queue.pop_front() {
+            // Parents are visited first, so every descendant finds its root.
+            let root = parent
+                .and_then(|parent| root_of.get(&parent).copied())
+                .unwrap_or(pid);
+            root_of.insert(pid, root);
             if Instant::now() >= deadline {
                 complete = false;
                 break;
@@ -66,7 +78,11 @@ impl MacProcessTree {
             let argv = match self.read_argv(pid, &mut total_bytes) {
                 ArgvRead::Complete(argv) => Some(argv),
                 ArgvRead::Unavailable => None,
-                ArgvRead::Incomplete => {
+                ArgvRead::Truncated => {
+                    self.partial_roots.insert(root);
+                    None
+                }
+                ArgvRead::OverBudget => {
                     complete = false;
                     None
                 }
@@ -143,7 +159,7 @@ impl MacProcessTree {
             return ArgvRead::Unavailable;
         };
         if MAX_PROC_TREE_TOTAL_BYTES.saturating_sub(*total_bytes) == 0 {
-            return ArgvRead::Incomplete;
+            return ArgvRead::OverBudget;
         }
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut needed = 0_usize;
@@ -163,7 +179,7 @@ impl MacProcessTree {
             return ArgvRead::Unavailable;
         }
         if needed as u64 >= MAX_PROC_FILE_BYTES {
-            return ArgvRead::Incomplete;
+            return ArgvRead::Truncated;
         }
         let capacity = needed + 1;
         if self.args.len() < capacity {
@@ -186,15 +202,18 @@ impl MacProcessTree {
             return ArgvRead::Unavailable;
         }
         if size >= capacity {
-            return ArgvRead::Incomplete;
+            return ArgvRead::Truncated;
         }
         let Some(parsed) = parse_kern_procargs2(&self.args[..size]) else {
-            return ArgvRead::Incomplete;
+            return ArgvRead::Truncated;
         };
         let argv_bytes: usize = parsed.argv.iter().map(|arg| arg.len() + 1).sum();
         *total_bytes = total_bytes.saturating_add(argv_bytes as u64);
-        if !parsed.complete || *total_bytes > MAX_PROC_TREE_TOTAL_BYTES {
-            return ArgvRead::Incomplete;
+        if *total_bytes > MAX_PROC_TREE_TOTAL_BYTES {
+            return ArgvRead::OverBudget;
+        }
+        if !parsed.complete {
+            return ArgvRead::Truncated;
         }
         ArgvRead::Complete(parsed.argv)
     }
@@ -405,6 +424,36 @@ mod tests {
         }
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn a_long_argv_holds_back_only_its_own_pane() {
+        let long = crate::spawn_detached_shell("/bin/sleep 30; true", 300);
+        let short = crate::spawn_detached_shell("/bin/sleep 30; true", 0);
+        struct Stop(u32, u32);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                crate::kill_detached_shell(self.0);
+                crate::kill_detached_shell(self.1);
+            }
+        }
+        let _cleanup = Stop(long, short);
+        let mut tree = MacProcessTree::default();
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if tree.refresh_roots(&[long, short])
+                && tree.partial_roots.contains(&long)
+                && tree.argv_of(short).is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the long argv was never isolated"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!tree.partial_roots.contains(&short));
     }
 
     #[test]

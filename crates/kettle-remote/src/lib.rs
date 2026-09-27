@@ -357,6 +357,21 @@ impl RemoteScanner {
         }
     }
 
+    /// Whether the last [`refresh_roots`](Self::refresh_roots) left `root`'s
+    /// pane unresolved: a process under it had an argv past the per-process
+    /// caps. The scan still published for every other pane.
+    pub fn root_is_partial(&self, root: u32) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            self.use_rooted && self.rooted.partial_roots.contains(&root)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = root;
+            false
+        }
+    }
+
     /// Resolve the remote context for the pane rooted at `child_pid`, using the
     /// index built by the last [`refresh`](Self::refresh). No OS walk, no map
     /// rebuild — safe to call once per pane.
@@ -486,7 +501,8 @@ pub struct RemoteProbeSnapshot {
 /// one wake token. Results likewise replace an unconsumed older snapshot.
 /// A Linux or macOS scan that reaches its byte/node/task/deadline ceiling is
 /// not published, so a partial hostile subtree cannot erase the last good UI
-/// state.
+/// state. A process whose argv exceeds the per-process caps leaves only its
+/// own pane out of the published snapshot.
 pub struct RemoteScanWorker {
     pending: std::sync::Arc<std::sync::Mutex<Option<Vec<RemoteProbeTarget>>>>,
     latest: std::sync::Arc<std::sync::Mutex<Option<RemoteProbeSnapshot>>>,
@@ -526,6 +542,13 @@ impl RemoteScanWorker {
                         }
                         let mut probes = std::collections::HashMap::with_capacity(targets.len());
                         for target in targets {
+                            // The app keeps a pane's previous state when the
+                            // snapshot has no probe for it, so one pane running
+                            // a command with an enormous argv no longer freezes
+                            // every other pane's labels.
+                            if scanner.root_is_partial(target.pid) {
+                                continue;
+                            }
                             let remote = scanner.detect_root(target.pid);
                             let foreground_shell = scanner.foreground_shell(target.pid);
                             let foreground_process = match target.foreground_pid {
@@ -839,6 +862,43 @@ mod kern_procargs2_tests {
     }
 }
 
+/// Starts `sh -c SCRIPT a0 a1 ...` with `extra_args` trailing arguments,
+/// detached from the test process, and returns its pid. Other tests use the
+/// test process's own pid as a pane root, so no process with a long argv may
+/// ever be its descendant: the child waits until its launching shell has
+/// exited and it has been reparented to init or launchd, and only then execs
+/// with the long argv. The caller kills the pid when done.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn spawn_detached_shell(script: &str, extra_args: usize) -> u32 {
+    let args: Vec<String> = (0..extra_args).map(|i| format!("a{i}")).collect();
+    let launcher = format!(
+        "(sleep 0.2; exec /bin/sh -c '{script}' {}) </dev/null >/dev/null 2>&1 & echo $!",
+        args.join(" ")
+    );
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", &launcher])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn detached shell");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("detached shell pid")
+}
+
+/// Stops a shell from [`spawn_detached_shell`] and the command it is waiting
+/// on, which would otherwise outlive the test.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn kill_detached_shell(pid: u32) {
+    let pid = pid.to_string();
+    let _ = std::process::Command::new("pkill")
+        .args(["-KILL", "-P", &pid])
+        .status();
+    let _ = std::process::Command::new("/bin/kill")
+        .args(["-KILL", &pid])
+        .status();
+}
+
 /// The pane-rooted process tree for this platform.
 #[cfg(target_os = "linux")]
 type RootedProcessTree = LinuxProcessTree;
@@ -849,6 +909,9 @@ type RootedProcessTree = macos::MacProcessTree;
 #[derive(Default)]
 struct LinuxProcessTree {
     entries: std::collections::HashMap<u32, LinuxProcessEntry>,
+    /// Roots whose subtree holds an argv past the per-process caps. Only
+    /// those panes keep their previous snapshot; the rest still publish.
+    partial_roots: std::collections::HashSet<u32>,
     proc_root: std::path::PathBuf,
     bytes_read: u64,
     task_files_read: usize,
@@ -885,14 +948,21 @@ impl LinuxProcessTree {
 
         let deadline = std::time::Instant::now() + MAX_PROC_SCAN_DURATION;
         self.entries.clear();
+        self.partial_roots.clear();
         self.proc_root.clear();
         self.proc_root.push(proc_root);
         let mut queue: VecDeque<_> = roots.iter().copied().map(|pid| (pid, None)).collect();
         let mut scheduled: HashSet<_> = roots.iter().copied().collect();
+        let mut root_of = std::collections::HashMap::new();
         let mut total_bytes: u64 = 0;
         let mut task_files_read = 0_usize;
         let mut complete = true;
         while let Some((pid, parent)) = queue.pop_front() {
+            // Parents are visited first, so every descendant finds its root.
+            let root = parent
+                .and_then(|parent| root_of.get(&parent).copied())
+                .unwrap_or(pid);
+            root_of.insert(pid, root);
             if std::time::Instant::now() >= deadline {
                 complete = false;
                 break;
@@ -906,7 +976,9 @@ impl LinuxProcessTree {
             {
                 ProcFileRead::Complete(bytes) => {
                     let parsed = parse_proc_argv(&bytes);
-                    complete &= parsed.complete;
+                    if !parsed.complete {
+                        self.partial_roots.insert(root);
+                    }
                     Some(parsed.argv)
                 }
                 ProcFileRead::Unavailable => None,
@@ -2957,10 +3029,45 @@ mod tests {
 
         let mut tree = LinuxProcessTree::default();
         assert!(
-            !tree.refresh_from(&root, &[10]),
-            "argv parser truncation must prevent publishing the scan"
+            tree.refresh_from(&root, &[10]),
+            "a long argv under one pane must not hold back the whole scan"
+        );
+        assert!(
+            tree.partial_roots.contains(&10),
+            "argv parser truncation must keep this pane from publishing"
         );
         assert!(detect_in_tree(10, &mut tree).is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_scanner_isolates_a_long_argv_to_its_own_pane() {
+        let root = std::env::temp_dir().join(format!(
+            "kettle-proc-tree-partial-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (pid, argc) in [(10, 300), (20, 2)] {
+            let dir = root.join(pid.to_string());
+            std::fs::create_dir_all(dir.join(format!("task/{pid}"))).unwrap();
+            let mut cmdline = Vec::new();
+            for i in 0..argc {
+                cmdline.extend_from_slice(format!("a{i}\0").as_bytes());
+            }
+            std::fs::write(dir.join("cmdline"), cmdline).unwrap();
+            std::fs::write(dir.join(format!("task/{pid}/children")), b"").unwrap();
+        }
+
+        let mut tree = LinuxProcessTree::default();
+        assert!(tree.refresh_from(&root, &[10, 20]));
+        assert!(tree.partial_roots.contains(&10));
+        assert!(!tree.partial_roots.contains(&20));
+        assert_eq!(tree.argv_of(20), Some(vec!["a0".into(), "a1".into()]));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -5508,6 +5615,39 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn background_probe_worker_omits_only_the_pane_with_an_oversized_argv() {
+        let long = super::spawn_detached_shell("sleep 30; true", 300);
+        let short = super::spawn_detached_shell("sleep 30; true", 0);
+        // Let both exec into their final argv before the first scan.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let target = |pid| RemoteProbeTarget {
+            pid,
+            foreground_pid: None,
+            allow_native_cwd: false,
+        };
+        let worker = RemoteScanWorker::spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let published = loop {
+            worker.submit(vec![target(long), target(short)]);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(snapshot) = worker.take_latest()
+                && snapshot.probes.contains_key(&short)
+            {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no snapshot published for the ordinary pane"
+            );
+        };
+        for pid in [long, short] {
+            super::kill_detached_shell(pid);
+        }
+        assert!(!published.probes.contains_key(&long));
     }
 
     /// Drift guard: `ssh-with-credentials` wrappers

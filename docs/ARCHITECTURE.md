@@ -1606,7 +1606,9 @@ The most recent additions:
   incomplete. Each scan is capped by 1 MiB per file or argument area, 4 MiB
   aggregate argv and child-list content, 4096 nodes, 1024 Linux task-file
   reads, bounded argv count/decoded bytes, and a 25 ms deadline; an
-  incomplete scan never replaces the last applied state.
+  incomplete scan never replaces the last applied state. An argv past the
+  per-process caps holds back only its own pane, which keeps its previous
+  state while every other pane still updates.
   Cwd is read on demand only for each pane's selected local foreground pid,
   while detected remotes, direct nonlocal clients, and nested WSL sessions
   suppress the misleading host cwd. Per-pane detection reuses scanner-owned

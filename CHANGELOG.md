@@ -14,6 +14,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A command with an enormous argument list in one pane, such as
+  `nvim $(git ls-files)`, no longer freezes SSH labels and shell directories
+  in every other pane until it exits.
 - On macOS, new tabs, splits, and windows no longer pause about 100 ms each
   when Kettle starts from a shell with a high open-file limit, as VS Code and
   other Node-based tools set.
