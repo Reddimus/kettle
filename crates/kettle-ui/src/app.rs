@@ -15724,14 +15724,23 @@ impl App {
                 }
             }
             Action::Paste => self.paste_clipboard(ws),
-            Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
+            // The font size is window-wide, so zooming all panes is the same
+            // as zooming one.
+            Action::IncreaseFontSize
+            | Action::DecreaseFontSize
+            | Action::ResetFontSize
+            | Action::ZoomInAll
+            | Action::ZoomOutAll
+            | Action::ZoomNormalAll => {
                 if let Some(r) = ws.renderer.as_mut() {
                     // Step the logical font size directly. Back-
                     // deriving from `r.cell_h` (now physical-px after the DPI
                     // fix) would double-apply the scale factor on HiDPI.
                     let new = match action {
-                        Action::IncreaseFontSize => r.font_size() + 1.0,
-                        Action::DecreaseFontSize => (r.font_size() - 1.0).max(6.0),
+                        Action::IncreaseFontSize | Action::ZoomInAll => r.font_size() + 1.0,
+                        Action::DecreaseFontSize | Action::ZoomOutAll => {
+                            (r.font_size() - 1.0).max(6.0)
+                        }
                         _ => self.cfg.font_size,
                     };
                     r.set_font_size(new);
@@ -16697,28 +16706,6 @@ impl App {
                 // The `[RO]` titlebar badge reflects the new state.
                 if let Some(w) = &ws.window {
                     w.request_redraw();
-                }
-            }
-            // Broadcast zoom. kettle's font-size is
-            // window-wide (not per-pane like VTE's per-terminal
-            // scale), so zoom-all has the same effect as the
-            // existing single-pane zoom. Compose by reusing the
-            // IncreaseFontSize / DecreaseFontSize / ResetFontSize
-            // arm — same shape as ResetAndClear.
-            Action::ZoomInAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    // Step logical size (see IncreaseFontSize).
-                    r.set_font_size(r.font_size() + 1.0);
-                }
-            }
-            Action::ZoomOutAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.set_font_size((r.font_size() - 1.0).max(6.0));
-                }
-            }
-            Action::ZoomNormalAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.set_font_size(self.cfg.font_size);
                 }
             }
             // Insert pane index. Pane index is 1-based
@@ -34858,6 +34845,26 @@ mod tests {
         assert!(
             !code.contains("cfg.font_size"),
             "ScaledZoom must not scale from the (stale) config font size"
+        );
+    }
+
+    /// Zoom-all changes the window-wide font size like Ctrl+Plus, so it must
+    /// also drop a stale scaled-zoom baseline. Otherwise leaving scaled zoom
+    /// restores the size from before the zoom-all.
+    #[test]
+    fn zoom_all_shares_the_font_size_arm() {
+        let src = production_source();
+        let arm = src
+            .split_once("| Action::ZoomNormalAll => {")
+            .expect("zoom-all joins the font-size arm")
+            .1
+            .split_once("Action::StartSearch =>")
+            .expect("end of the font-size arm")
+            .0;
+        assert!(arm.contains("ws.scaled_zoom_prev_font_size = None;"));
+        assert!(
+            !src.contains("Action::ZoomInAll => {"),
+            "no separate zoom-all arm"
         );
     }
 
