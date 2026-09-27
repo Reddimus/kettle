@@ -244,7 +244,9 @@ QEMU to exit, and run `qemu-img check ~/VMs/ubuntu-arm.qcow2` only while the
 image is offline. An in-guest `sudo fstrim -av` before shutdown returns freed
 blocks to the sparse qcow2 because the launcher enables discard.
 
-The guest's root disk is 256 GiB. On 2026-08-23, a full workspace run completed
+The 2026-08-23 migration kept the guest OS, user, tools, credentials, and
+repository state, and grew the root disk to 256 GiB. A full workspace run then
+completed
 2,131 tests across 45 binaries with zero failures and the release binary linked
 successfully. The native aarch64 `search-history` live-window smoke passed once
 under Xvfb and once in the real GNOME Wayland session. Both runs selected
