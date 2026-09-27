@@ -13375,17 +13375,8 @@ impl App {
             kettle_config::StatusBarMode::Bottom => surface_h - self.search_bar_h(ws) - h,
             kettle_config::StatusBarMode::Off => 0.0,
         };
-        // Compose text: HH:MM:SS · theme · focused pane title.
-        // SystemTime → seconds since UNIX → HH:MM:SS via div/mod, no
-        // dep on chrono. The displayed time is UTC by design (a
-        // future change could honor $TZ — std::time has no built-in
-        // local-tz conversion, would need chrono or time crate).
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let day = secs % 86400;
-        let (hh, mm, ss) = (day / 3600, (day % 3600) / 60, day % 60);
+        // Compose text: local HH:MM:SS · theme · focused pane title.
+        let (hh, mm, ss) = crate::wall_clock::now_local();
         let title = ws
             .mux
             .focused()
@@ -13399,7 +13390,7 @@ impl App {
         // so we can drift-guard it in tests.
         let title_capped = cap_title_for_status_bar(&title, 60);
         let text = format!(
-            "{hh:02}:{mm:02}:{ss:02} UTC  ·  {}  ·  {title_capped}",
+            "{hh:02}:{mm:02}:{ss:02}  ·  {}  ·  {title_capped}",
             self.cfg.theme_name
         );
         kettle_render::StatusBar { height: h, y, text }
@@ -17166,19 +17157,15 @@ impl App {
         let Some(schedule) = self.cfg.theme_schedule else {
             return;
         };
-        // Compute now in local-ish HH:MM (UTC for v1 — same as the
-        // status-bar clock; a follow-up could pick up
-        // `$TZ` but no extra dep yet).
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let day_secs = secs % 86_400;
-        let h = (day_secs / 3600) as u8;
-        let m = ((day_secs % 3600) / 60) as u8;
-        // Branch on the schedule variant.
         let is_dark = match schedule {
+            // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
+                let (h, m, _) = crate::wall_clock::now_local();
                 kettle_config::schedule_decision_clock((h, m), schedule)
             }
             kettle_config::ThemeSchedule::SunriseSunset { lat, long } => {
