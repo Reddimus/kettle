@@ -10,8 +10,8 @@
 //! This module is the pure, host-agnostic decoder for that text encoding:
 //! the diacritic⇄number table, per-cell diacritic parsing, the image-id
 //! reconstruction, and the left-inheritance algorithm for omitted
-//! diacritics. Compositing resolved placeholder cells against the grid
-//! happens in the renderer (a follow-up item on the roadmap); this layer is
+//! diacritics. `kettle-core` scans the grid for placeholder cells and slices
+//! the virtual image into per-cell tiles for the renderer; this layer is
 //! fully unit tested in isolation.
 
 /// The Private-Use placeholder code point (`IMAGE_PLACEHOLDER_CHAR`,
@@ -138,13 +138,9 @@ pub fn resolve_run(cells: &[RawCell]) -> Vec<ResolvedCell> {
         };
         let col = match c.diacritics.col {
             Some(cc) => cc,
-            // The previous `same_neighbor && row.is_none()` arm produced the
-            // same `left.col + 1` as the plain `same_neighbor` arm below, so
-            // it was a dead duplicate — merged.
-            // Saturating add: `resolve_run` is a pure-spec `pub` fn; a
-            // >65,536-cell same-neighbor run would overflow `u16` and, under
-            // the release profile (`panic = "abort"` + overflow-checks), abort
-            // the process. Saturate at `u16::MAX` instead of wrapping/aborting.
+            // Saturating add: `resolve_run` is a pure-spec `pub` fn, and a
+            // >65,536-cell same-neighbor run would overflow `u16`. A plain
+            // `+ 1` panics under debug overflow checks and wraps to 0 in release.
             None if same_neighbor => left.map(|l| l.col.saturating_add(1)).unwrap_or(0),
             None => 0,
         };
@@ -373,9 +369,9 @@ mod tests {
     fn inherited_column_saturates_at_u16_max() {
         // A same-neighbor cell whose left neighbor sits at the last column
         // (`u16::MAX`) and omits its own column must NOT overflow when it
-        // inherits `left.col + 1`. Under the release profile (overflow-checks
-        // + `panic = "abort"`) a wrapping `+ 1` would abort the process; the
-        // saturating add pins it at `u16::MAX` instead.
+        // inherits `left.col + 1`. A plain `+ 1` panics under debug overflow
+        // checks and wraps to 0 in release; the saturating add pins it at
+        // `u16::MAX` instead.
         let head = RawCell {
             fg: 7,
             placement_id: 0,

@@ -54,14 +54,13 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
     let grid = term.grid();
     let cols = grid.columns();
     let rows = grid.screen_lines();
-    // Scan the VISIBLE viewport, not the active screen (user-reported on
-    // native Ubuntu). A visible viewport row `row` maps to grid line
-    // `row - display_offset` (alacritty addresses history with NEGATIVE lines);
-    // `grid[Line(row)]` always read the active (bottom) screen, so scrolling
-    // Claude Code up returned the active screen's links and the renderer painted
-    // their underlines over the scrolled-back history ("leftover/ghost
-    // underlines"). Mirrors the same grid-absolute-to-viewport conversion the
-    // renderer uses for cell decorations and selection.
+    // Scan the VISIBLE viewport, not the active screen. A visible viewport row
+    // `row` maps to grid line `row - display_offset` (alacritty addresses history
+    // with NEGATIVE lines). `grid[Line(row)]` always reads the active (bottom)
+    // screen, so while scrolled back it would return the active screen's links
+    // and the renderer would paint their underlines over the scrolled-back history.
+    // This mirrors the grid-absolute-to-viewport conversion the renderer uses for
+    // cell decorations and selection.
     let off = grid.display_offset() as i32;
     let mut out: Vec<Link> = Vec::new();
     // Reuse the URL-scan scratch buffers across every viewport row instead of
@@ -72,11 +71,10 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
 
     for row in 0..rows {
         let gl = row as i32 - off; // visible viewport row -> grid-absolute line
-        // This row's OSC 8 links occupy `out[osc8_start..osc8_end]`.
-        // The autodetect overlap check below scans only that slice instead of
-        // all-rows `out`, turning an O(total_links)-per-match scan (→ O(n²) on a
-        // link-dense viewport, e.g. a log full of URLs) into one bounded by this
-        // row's OSC 8 count.
+        // This row's OSC 8 links occupy `out[osc8_start..osc8_end]`. The
+        // autodetect overlap checks below scan only this row's links, not all
+        // of `out`, which would be O(n²) on a link-dense viewport (e.g. a log
+        // full of URLs).
         let osc8_start = out.len();
         // OSC 8 runs: consecutive cells sharing a hyperlink URI.
         let mut c = 0usize;
@@ -106,8 +104,8 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
 
         // Autodetected URLs (skip cells already covered by an OSC 8 link on
         // THIS row).
-        // Spacer-aware text + byte→column map via the shared helper (v2.26.0)
-        // so an IRI/path with wide chars isn't truncated at the first CJK glyph.
+        // Spacer-aware text + byte→column map via the shared helper, so an
+        // IRI/path with wide chars isn't truncated at the first CJK glyph.
         crate::grid_text::row_text_into(grid, gl, cols, &mut text, &mut col_of_byte);
         for m in url_re().find_iter(&text) {
             let matched = trim_trailing(m.as_str());
@@ -291,21 +289,18 @@ pub fn is_safe_url(uri: &str) -> bool {
 
 /// Whether a `file://` URI points at the local machine with no traversal.
 ///
-/// The old check was `starts_with("file://") && !contains("..")`
-/// — it blocked traversal but not a remote authority. `file://evil.example.com/share`
-/// passed, and on Windows `file://host/path` maps to the UNC `\\host\path`, so the
-/// OS opener transparently connects to `host` over SMB/WebDAV and leaks the user's
-/// NTLMv2 hash (forced authentication / pass-the-hash) plus SSRF to an arbitrary
-/// host — all reachable from untrusted PTY output (autodetected link or OSC 8).
-/// Accept only an empty authority (`file:///path`) or an explicit loopback host,
-/// and reject any backslash / `file:////` / percent-encoded traversal that could
-/// smuggle an authority back in.
+/// Blocking `..` alone is not enough. On Windows a remote authority such as
+/// `file://host/path` maps to the UNC `\\host\path`, so the OS opener transparently
+/// connects to `host` over SMB/WebDAV and leaks the user's NTLMv2 hash (forced
+/// authentication / pass-the-hash) plus SSRF to an arbitrary host, all reachable
+/// from untrusted PTY output (autodetected link or OSC 8). Accept only an empty
+/// authority (`file:///path`) or an explicit loopback host, and reject any
+/// backslash / `file:////` / percent-encoded traversal that could smuggle an
+/// authority back in.
 fn is_local_file_url(uri: &str) -> bool {
-    // The scheme is matched case-insensitively upstream (is_safe_url
-    // lowercases it before the `file` arm), so accept
-    // `FILE://` / `File://` here too — a case-sensitive strip rejected valid
-    // uppercase-scheme local files while the authority/traversal checks below
-    // (which already use a lowercased copy) stayed intact.
+    // is_safe_url lowercases the scheme before the `file` arm, so accept
+    // `FILE://` / `File://` here too. The authority and traversal checks below
+    // already use a lowercased copy.
     let rest = match uri.get(..7) {
         Some(p) if p.eq_ignore_ascii_case("file://") => &uri[7..],
         _ => return false,
