@@ -1,7 +1,6 @@
-//! Terminator parity, background-image Bucket-D phase 2:
-//! background-image decode helper. Reads a user-supplied file path,
-//! decodes via the `image` crate, returns RGBA bytes + dimensions
-//! ready for wgpu texture upload.
+//! Background-image decode helper (Terminator parity). Reads a
+//! user-supplied file path, decodes via the `image` crate, returns RGBA
+//! bytes + dimensions ready for wgpu texture upload.
 //!
 //! Supported formats (per the enabled Cargo.toml image-crate features):
 //!   - PNG (default, also used for kitty/iTerm2 inline images)
@@ -18,9 +17,7 @@
 //!   - Format unsupported → log::warn, return None.
 //!   - Decode failed → log::warn, return None.
 //!
-//! Design doc: docs/TERMINATOR-BG-IMAGE-DESIGN.md phase 2.
-//! Subsequent phases add the wgpu texture upload (3) + render
-//! pass (4) + UV-mode variants (5+6) + blur shader (9).
+//! Design doc: docs/TERMINATOR-BG-IMAGE-DESIGN.md.
 
 /// Decompression-bomb defense for the user-configured
 /// `background-image` path. The bg-image source is a config-file
@@ -33,7 +30,7 @@
 const MAX_BG_IMAGE_DIM: u32 = 8192;
 const MAX_BG_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Animated background bounds (v2.21.x). A multi-frame background (animated
+/// Animated background bounds. A multi-frame background (animated
 /// GIF / APNG / animated WebP) decodes EVERY frame's RGBA up front, so the
 /// envelope is the SUM across frames, not one frame: a 1080p × 200-frame GIF
 /// would be ~1.6 GB. Cap the total decoded bytes AND the frame count; on
@@ -41,7 +38,7 @@ const MAX_BG_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 /// `log::warn`, degrading gracefully to a shorter loop / first-frame-static
 /// rather than OOMing on launch. A 0 ms inter-frame gap (common in
 /// "play as fast as possible" GIFs) is clamped up so the loop has a real
-/// period and the render tick (capped at ~30 fps) governs the actual wake rate.
+/// period and a bounded wake rate.
 const MAX_BG_ANIM_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BG_FRAMES: usize = 128;
 const MIN_BG_FRAME_GAP_MS: u32 = 20;
@@ -92,7 +89,7 @@ pub fn bg_current_frame(gaps: &[u32], elapsed_ms: u128) -> usize {
 /// frame's dwell `gaps` (ms) and the wall-clock `elapsed_ms` since playback
 /// started. The companion to [`bg_current_frame`]: the render loop sleeps this
 /// long, then wakes to show the next frame, so an N-fps animated background
-/// repaints N×/s instead of at a fixed 30 fps (the v2.23.1 animated-idle fix).
+/// repaints N×/s instead of at a fixed 30 fps.
 /// `None` for a still image (≤ 1 frame) or all-zero gaps. Floored at 16 ms so a
 /// degenerate fast GIF can't drive the loop past ~60 fps. Pure; unit-tested.
 pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
@@ -114,37 +111,27 @@ pub fn bg_next_frame_ms(gaps: &[u32], elapsed_ms: u128) -> Option<u64> {
     Some(16)
 }
 
-/// Decode a background image from disk. Returns None on any I/O,
-/// format, or decode error (with a `log::warn` so users discover
-/// the misconfiguration in their kettle logs).
-///
-/// Empty paths are handled silently (cfg.background_image defaults
-/// to empty string when bg-image isn't configured).
-/// Terminator parity, bg-image Bucket-D phase 9:
-/// CPU-side separable box blur (3-pass approximates a Gaussian
-/// — same technique Photoshop / GIMP / CSS use for fast
-/// "Gaussian blur" with much less compute). Applied to the
-/// decoded RGBA buffer at load time so subsequent renders just
-/// upload the blurred texture; no per-frame shader needed.
+/// CPU-side separable box blur. Three passes approximate a Gaussian, the same
+/// technique Photoshop / GIMP / CSS use for a fast "Gaussian blur". Applied to
+/// the decoded RGBA buffer at load time so later renders just upload the
+/// blurred texture; no per-frame shader needed. Returns `false` if the scratch
+/// buffer can't be allocated.
 ///
 /// `radius` clamped to a sane range (1..=16). A 1080p image at
 /// radius 8 blurs in ~30-50ms on a modern CPU — acceptable for a
 /// one-time startup cost (background_image config rarely
 /// changes mid-session).
 ///
-/// A wgpu-side Gaussian shader (the docs/TERMINATOR-BG-IMAGE-
-/// DESIGN.md phase 9 design) gives the same visual at
-/// negligible per-frame cost; CPU-side is the bounded
-/// foundation that ships the user-visible effect today.
+/// A wgpu-side Gaussian shader (the docs/TERMINATOR-BG-IMAGE-DESIGN.md phase 9
+/// design) would give the same look at negligible per-frame cost.
 fn box_blur(img: &mut BgImage, radius: u32) -> bool {
     if radius == 0 || img.width == 0 || img.height == 0 {
         return true;
     }
     let r = radius.min(16);
-    // One scratch buffer reused across all six sub-passes
-    // (the old code allocated a fresh full-image Vec in each — up to 6 × 256 MB
-    // at MAX_BG_IMAGE_DIM). Each pass writes into `scratch` then swaps, so the
-    // result always lands back in `img.rgba`.
+    // One scratch buffer serves all six sub-passes; a fresh full-image Vec per
+    // pass would cost up to 6 × 256 MB at MAX_BG_IMAGE_DIM. Each pass writes
+    // into `scratch` then swaps, so the result always lands back in `img.rgba`.
     let mut scratch = Vec::new();
     if scratch.try_reserve_exact(img.rgba.len()).is_err() {
         return false;
@@ -197,11 +184,10 @@ fn unpremultiply_linear_rgba8(rgba: &mut [u8]) {
 /// vertical axis, reading `img.rgba` and writing the blurred result back into
 /// it via `scratch`.
 ///
-/// A sliding-window running sum makes the pass O(W·H)
-/// regardless of radius (the old code summed `2r+1` samples *per pixel*,
-/// O(W·H·R)). The divisor stays a constant `2r+1` — like the old brute force,
-/// which counted every clamped sample — so the output is byte-identical. The
-/// telescoping `sum += entering − leaving` holds even under edge clamping
+/// A sliding-window running sum makes the pass O(W·H) regardless of radius.
+/// The divisor is a constant `2r+1` because every clamped edge sample counts,
+/// so the output is byte-identical to the brute-force reference in the tests.
+/// The telescoping `sum += entering − leaving` holds even under edge clamping
 /// because the clamp is applied per index consistently on both windows.
 fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<u8>) {
     let w = img.width as usize;
@@ -255,10 +241,9 @@ fn box_blur_axis(img: &mut BgImage, r: u32, horizontal: bool, scratch: &mut Vec<
     std::mem::swap(&mut img.rgba, scratch);
 }
 
-/// Home directory for `~/` expansion. Windows is
-/// the primary platform and sets `USERPROFILE`, not `HOME`, so a HOME-only probe
-/// silently failed every `background-image = ~/wallpaper.png` there. Mirrors
-/// kettle-core's `home_dir_fallback` (HOME -> USERPROFILE -> APPDATA).
+/// Home directory for `~/` expansion. Windows sets `USERPROFILE`, not `HOME`,
+/// so a HOME-only probe would fail every `background-image = ~/wallpaper.png`
+/// there. Mirrors kettle-core's `home_dir_fallback` (HOME -> USERPROFILE -> APPDATA).
 fn home_dir() -> Option<String> {
     for key in ["HOME", "USERPROFILE", "APPDATA"] {
         if let Ok(v) = std::env::var(key)
@@ -364,10 +349,10 @@ fn single_frame(path: &str) -> Option<Vec<BgFrame>> {
     decode_bg_image(path).map(|image| vec![BgFrame { image, gap_ms: 0 }])
 }
 
-/// Decode a background image into ONE-OR-MORE frames (v2.21.x animated
-/// background). Animated GIF / APNG / animated WebP yield every frame (bounded
-/// by `MAX_BG_ANIM_BYTES` + `MAX_BG_FRAMES`, truncating gracefully on
-/// exceedance); a still image, or a non-animated GIF/PNG/WebP, yields exactly
+/// Decode a background image into ONE-OR-MORE frames. Animated GIF / APNG /
+/// animated WebP yield every frame (bounded by `MAX_BG_ANIM_BYTES` +
+/// `MAX_BG_FRAMES`, truncating gracefully on exceedance); a still image, or a
+/// non-animated GIF/PNG/WebP, yields exactly
 /// one frame (`gap_ms = 0`). Returns `None` on any I/O/format/decode error
 /// (with a `log::warn`), matching [`decode_bg_image`]. Frames decode once here;
 /// the render loop only swaps the already-decoded RGBA per the playback clock.
@@ -390,8 +375,9 @@ pub fn decode_bg_image_frames(path: &str) -> Option<Vec<BgFrame>> {
         return single_frame(path);
     }
     let inner = reader.into_inner();
-    // Build the format-specific animation frame iterator, or fall back to the
-    // single-frame path for a non-animated GIF/PNG/WebP (or any decoder error).
+    // Build the format-specific animation frame iterator. A still PNG/WebP (or
+    // a PNG the decoder rejects) takes the single-frame path; a still GIF
+    // decodes as a one-frame animation.
     let (mut frames, frame_upper_bound) = match format {
         Some(ImageFormat::Gif) => match image::codecs::gif::GifDecoder::new(inner) {
             Ok(d) if decoder_dimensions_fit(d.dimensions()) => {
@@ -571,8 +557,8 @@ mod tests {
         assert_eq!(MAX_BG_FRAMES, 128);
     }
 
-    /// O(W·H·R) brute-force reference predating the sliding-window
-    /// optimization, kept as a correctness oracle.
+    /// O(W·H·R) brute-force blur, kept as a correctness oracle for the
+    /// sliding-window version.
     fn box_blur_reference(img: &mut BgImage, radius: u32) {
         if radius == 0 || img.width == 0 || img.height == 0 {
             return;
@@ -617,7 +603,7 @@ mod tests {
     }
 
     /// Drift guard: the O(W·H) sliding-window blur must be
-    /// byte-identical to the O(W·H·R) brute force it replaced, across odd/even
+    /// byte-identical to the O(W·H·R) brute-force reference, across odd/even
     /// dimensions, single-row/column degenerates, and a radius larger than the
     /// image (the clamping edge case).
     #[test]
@@ -675,7 +661,7 @@ mod tests {
         );
     }
 
-    /// v2.21.x: the animated-background clock loops through frames per their
+    /// The animated-background clock loops through frames per their
     /// dwell gaps and never indexes out of bounds, including the degenerate
     /// single-frame / zero-gap cases.
     #[test]
@@ -701,7 +687,7 @@ mod tests {
         assert_eq!(bg_current_frame(&[0, 0, 0], 12345), 0);
     }
 
-    /// v2.23.1 animated-idle fix: the wake interval is the time to the NEXT frame
+    /// The wake interval is the time to the NEXT frame
     /// boundary, so the loop ticks at the GIF's fps, not a fixed 30 fps.
     #[test]
     fn bg_next_frame_ms_wakes_at_frame_boundaries() {
@@ -724,7 +710,7 @@ mod tests {
         assert_eq!(bg_next_frame_ms(&[5, 5], 0), Some(16));
     }
 
-    /// v2.21.x: a still PNG decodes to exactly one frame via the animated entry
+    /// A still PNG decodes to exactly one frame via the animated entry
     /// point, so still + animated callers are uniform.
     #[test]
     fn still_png_decodes_to_one_frame() {
@@ -745,7 +731,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// v2.21.x: an animated GIF decodes to multiple frames with per-frame gaps,
+    /// An animated GIF decodes to multiple frames with per-frame gaps,
     /// proving the animated-background path (and that the clock would cycle it).
     #[test]
     fn animated_gif_decodes_to_multiple_frames() {
@@ -800,13 +786,9 @@ mod tests {
 
     #[test]
     fn real_png_roundtrip() {
-        // Terminator parity, bg-image Bucket-D phase 12:
-        // acceptance test. Generate a known 8x4 RGBA PNG in-memory,
-        // write to a temp file, decode via decode_bg_image, assert
-        // the round-trip yields the expected dimensions + a
-        // non-empty rgba buffer. Doesn't pixel-compare (PNG encoders
-        // can vary on the precise byte layout); just confirms the
-        // full path works.
+        // Acceptance test for the full decode path. Writes a known 8x4 RGBA
+        // PNG to a temp file, decodes it via decode_bg_image, and checks the
+        // dimensions, buffer length, and first pixel.
         // PID + nanos in the filename so parallel `cargo
         // test` runs and CI-runner concurrency don't race on a shared
         // /tmp path. Matches the pattern used in session::tests.

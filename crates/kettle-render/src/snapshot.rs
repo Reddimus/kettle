@@ -1,21 +1,19 @@
-//! v2.20.0 P2 (perf): decouple PTY parsing from GPU rendering.
+//! Decouple PTY parsing from GPU rendering.
 //!
-//! `redraw` used to hand the renderer a `&Term<EventProxy>` borrowed from a
-//! held `MutexGuard` — so every pane's Term lock stayed held across the WHOLE
-//! GPU frame (cosmic-text shaping, `surface.get_current_texture()` which can
-//! block up to a vsync, submit, present). Under output flood, frames fire at
-//! the 16ms coalescer budget, which kept the lock held nearly continuously
-//! and starved the PTY reader thread (`processor.advance` blocks on the same
-//! lock). Measured cost on the v2.19.0 baseline: 0.42–0.8 MB/s throughput vs
-//! 3–9 MB/s for WT / Alacritty / WezTerm on the identical harness.
+//! Rendering from a `&Term<EventProxy>` borrowed through a held `MutexGuard`
+//! would keep the pane's Term lock held across the WHOLE GPU frame
+//! (cosmic-text shaping, `surface.get_current_texture()` which can block up
+//! to a vsync, submit, present). Under output flood, frames fire at the
+//! output coalescer's paint budget, so the lock would stay held nearly
+//! continuously and starve the PTY reader thread (`processor.advance` blocks
+//! on the same lock).
 //!
-//! The fix: capture the pane's renderable state into a [`PaneSnapshot`]
-//! while the lock is held — a µs-scale flat copy — then drop the guard and
+//! Instead, capture the pane's renderable state into a [`PaneSnapshot`]
+//! while the lock is held (a µs-scale flat copy), then drop the guard and
 //! render from the snapshot. Cells are captured RAW (unresolved `AnsiColor`,
 //! raw `Flags`) in exact `display_iter` order, so the renderer's per-cell
-//! loop (SGR resolution, INVERSE swap, DIM blend, minimum-contrast lift,
-//! run merging) runs byte-identical logic — it just no longer holds the lock
-//! while doing it.
+//! loop (SGR resolution, INVERSE swap, DIM blend, minimum-contrast lift, run
+//! merging) runs the same logic without holding the lock.
 //!
 //! Snapshots are pooled per window (`WindowState::pane_snapshots`): the
 //! `cells` Vec keeps its high-water capacity across frames, so steady-state
@@ -49,17 +47,16 @@ pub struct SnapCell {
     pub line: i32,
     pub col: usize,
     pub c: char,
-    /// RAW (unresolved) colors — `color::resolve` runs render-side so the
-    /// per-cell pipeline stays identical to the borrowed-Term era.
+    /// RAW (unresolved) colors; `color::resolve` runs render-side.
     pub fg: AnsiColor,
     pub bg: AnsiColor,
     pub flags: Flags,
     /// SGR 58 per-cell underline color (neovim spell squiggles).
     pub underline_color: Option<AnsiColor>,
-    /// Combining (zero-width) marks layered on `c` — a decomposed accent
-    /// (`e`+U+0301), an emoji ZWJ sequence, a variation selector. Captured so
-    /// the renderer draws the full grapheme rather than a stripped base char
-    /// (audit v2.32.0). Stored inline (see [`MAX_ZEROWIDTH`]); read via
+    /// Combining (zero-width) marks layered on `c`, such as a decomposed
+    /// accent (`e`+U+0301), an emoji ZWJ sequence, or a variation selector.
+    /// Captured so the renderer draws the full grapheme rather than a
+    /// stripped base char. Stored inline (see [`MAX_ZEROWIDTH`]); read via
     /// [`SnapCell::zerowidth`], mirroring the grid `Cell::zerowidth`.
     zerowidth: [char; MAX_ZEROWIDTH],
     zerowidth_len: u8,
