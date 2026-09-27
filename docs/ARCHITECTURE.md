@@ -845,12 +845,20 @@ close-on-exec before `exec`. macOS asks the kernel which descriptors are open
 instead of trying each number up to the soft limit, so a pane opens just as
 fast when Kettle inherits a 1,048,576-descriptor limit from its launcher.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
-keeping blocking OS writes off the lifecycle thread. The lifecycle counts
+keeping blocking OS writes off the lifecycle thread. The writer hands each
+rendered command to the sink in one `write_all`. The Unix sink is an unbuffered
+descriptor, so a `--json` event costs one syscall rather than the roughly 30 a
+`writeln!` of a `serde_json::Value` made, and a stop has one write to
+interrupt rather than 30. It can still cut a line whose write is blocked in
+the OS when `process::exit` runs. Events serialize from borrowed structs into a reused line
+buffer, and a chunk that is already valid UTF-8 is borrowed rather than copied.
+The structs declare their fields alphabetically, which keeps the sorted-key
+bytes the `Value` maps produced. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
 and cancellation therefore remain observable after child exit, while ordinary
 completion still drains losslessly. Between turns the lifecycle waits on the
 raw-output and event channels, or on the writer queue when that is full,
-rather than sleeping a fixed 8 ms: each macOS PTY read is about 1.2 KiB, so a
+rather than sleeping a fixed 8 ms: each macOS PTY read is at most 1 KiB, so a
 fixed sleep per drain capped output near 0.35 MiB/s. The wait still returns
 within 8 ms to keep timeout and cancellation checks on schedule.
 Every stdout write and flush returns through a worker-outcome channel to the
