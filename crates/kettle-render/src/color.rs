@@ -111,9 +111,8 @@ pub fn reply_for_query(
 /// 1000 px instead. Sixel, kitty graphics and iTerm2-OSC-1337-aware apps use
 /// this reply for pixel-perfect placement.
 ///
-/// Same layering rationale as `reply_for_query`: keep the engine
-/// `WindowSize` type contained here so kettle-ui can stay engine-internal-
-/// free and just call this helper with the exact totals the PTY already knows.
+/// Like `reply_for_query`, this keeps the engine's `WindowSize` type out of
+/// kettle-ui; callers pass the exact totals the PTY already knows.
 pub fn reply_for_text_area_size(
     pixel_width: u16,
     pixel_height: u16,
@@ -275,10 +274,11 @@ pub fn dim(fg: Rgb, bg: Rgb) -> Rgb {
     blend(fg, bg, 0.5)
 }
 
-/// Return `fg` adjusted toward the higher-contrast endpoint (white or
-/// black, relative to `bg`) until the WCAG contrast ratio reaches
-/// `min_ratio`. `min_ratio <= 1.0` is a no-op. Pure — binary-searches
-/// the blend parameter to keep theme tint as much as possible.
+/// Return `fg` blended toward white or black until its WCAG contrast ratio
+/// with `bg` reaches `min_ratio`, taking the endpoint that gets there with the
+/// smallest change (or, if neither can, the higher-contrast endpoint itself).
+/// `min_ratio <= 1.0` is a no-op. Pure; binary-searches the blend parameter to
+/// keep as much of the theme tint as possible.
 pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
@@ -304,12 +304,11 @@ pub fn with_min_contrast(fg: Rgb, bg: Rgb, min_ratio: f64) -> Rgb {
     // Which endpoint to head for. Two rules, in order:
     //
     // 1. It must be able to REACH `min_ratio`. Thresholding background
-    //    luminance at 0.5 got this wrong, because WCAG's
-    //    `(L+0.05)/(L'+0.05)` is not symmetric about the midpoint — white and
-    //    black cross over at ~0.1791. On `#969696` that chose white at 2.96:1
-    //    where black gives 7.10:1, so a requested 4.5 was unreachable from the
-    //    chosen end and the function returned white anyway, silently failing
-    //    the guarantee it exists to provide.
+    //    luminance at 0.5 gets this wrong, because WCAG's
+    //    `(L+0.05)/(L'+0.05)` is not symmetric about the midpoint. White and
+    //    black cross over at ~0.1791. On `#969696` a 0.5 threshold picks white
+    //    at 2.96:1 where black gives 7.10:1, so a requested 4.5 is unreachable
+    //    from that end.
     //
     // 2. Among endpoints that can reach it, take the one that gets there with
     //    the SMALLEST change to the caller's colour. Neither "maximum
@@ -395,10 +394,8 @@ pub fn average_color(rgba: &[u8]) -> Rgb {
 ///
 /// The runtime override is `colors[258]`, not `resolve_query(258, ..)`.
 /// `resolve_query` falls back to the theme and so always answers `Some`, which
-/// made this branch unconditional and left `cursor-fg-color` unreachable:
-/// setting a conspicuous cursor foreground did nothing unless an application
-/// happened to send OSC 12. Keeping the decision in one named function is what
-/// makes that testable — inline, the renderer's copy of it was not.
+/// would make this branch unconditional and leave `cursor-fg-color`
+/// unreachable. The decision lives in one named function so a test can pin it.
 pub fn cursor_glyph_color(theme: &Theme, colors: &TermColors, cell_bg: Rgb) -> Rgb {
     if colors[258].is_some() {
         cell_bg
@@ -550,9 +547,8 @@ mod tests {
     /// answer must reach the glyph.
     ///
     /// Driven through `cursor_glyph_color`, the function the frame builder
-    /// calls — an earlier version of this test asserted the distinction on
-    /// `resolve_query` and `colors[258]` directly, so restoring the bug at the
-    /// call site left it green.
+    /// calls. Asserting on `resolve_query` and `colors[258]` directly would
+    /// stay green if the call site regressed.
     #[test]
     fn the_cursor_glyph_follows_reverse_video_only_under_a_runtime_override() {
         let theme = Theme::default();
@@ -581,12 +577,10 @@ mod tests {
     /// `resolve_query` answers "what colour is this slot", NOT "did an
     /// application override it".
     ///
-    /// The renderer used `resolve_query(258, ..).is_some()` to decide whether
-    /// a runtime OSC 12 cursor colour was in force. It falls back to the theme
-    /// and so always returns `Some`, which made that branch unconditional and
-    /// left `theme.cursor_text` — the field `cursor-fg-color` sets —
-    /// unreachable. The setting did nothing unless an application happened to
-    /// send OSC 12.
+    /// `resolve_query` falls back to the theme and so always returns `Some`.
+    /// Using `resolve_query(258, ..).is_some()` to detect a runtime OSC 12
+    /// cursor colour would always say yes and leave `theme.cursor_text` (the
+    /// field `cursor-fg-color` sets) unreachable.
     ///
     /// The distinction lives in `term_colors[258]`, and this pins it so a
     /// future caller cannot make the same substitution.
@@ -630,9 +624,8 @@ mod tests {
     /// `#969696` on `#5a5a5a` asking for 3.0 is the case that separates them:
     /// by luminance the foreground sits nearer black (0.305 from it, 0.695
     /// from white), so a nearest-endpoint rule heads for black and lands at
-    /// roughly `#020202` — while white reaches the very same 3.0 at about
-    /// `#ababab`. Both rules I tried before this one got a case wrong;
-    /// measuring the actual journey gets all of them right.
+    /// roughly `#020202`, while white reaches the very same 3.0 at about
+    /// `#ababab`.
     #[test]
     fn the_endpoint_is_chosen_by_distance_travelled_not_by_starting_side() {
         let bg = Rgb::parse("#5a5a5a").expect("hex");
@@ -666,11 +659,11 @@ mod tests {
 
     /// Lifting contrast must not invert the text.
     ///
-    /// `#fdfdfd` on `#767676` is 4.465:1 — a shortfall of 0.035 against a
+    /// `#fdfdfd` on `#767676` is 4.465:1, a shortfall of 0.035 against a
     /// requested 4.5. Both endpoints clear it (white 4.542, black 4.623), so
-    /// choosing by *maximum* contrast flipped near-white text to near-black
-    /// over nothing. Prefer the endpoint the foreground is already nearest, and
-    /// cross over only when that side cannot reach the target.
+    /// choosing by *maximum* contrast would flip near-white text to near-black
+    /// over nothing. The endpoint that reaches the target with the smallest
+    /// change keeps it light.
     #[test]
     fn lifting_contrast_moves_the_colour_as_little_as_possible() {
         let bg = Rgb::parse("#767676").expect("hex");
@@ -706,8 +699,8 @@ mod tests {
     }
 
     /// When only ONE endpoint can reach the ratio, that one must be used even
-    /// if the foreground started nearer the other. This is the original
-    /// mid-tone bug: `#969696` on itself can only reach 4.5 through black.
+    /// if the foreground started nearer the other. `#969696` on itself can only
+    /// reach 4.5 through black.
     #[test]
     fn contrast_crosses_over_when_the_near_side_cannot_reach_the_target() {
         for (hex, want) in [("#969696", 4.5_f64), ("#8a8a8a", 4.5), ("#a0a0a0", 5.0)] {
@@ -726,9 +719,8 @@ mod tests {
     }
 
     /// Ratios inside the real 1..=21 range, not an unreachable sentinel. A
-    /// previous version asked for 25 — above the 21:1 maximum — so it only
-    /// ever exercised the "neither endpoint reaches it" branch and could not
-    /// see a wrong choice among reachable ones.
+    /// ratio above the 21:1 maximum only exercises the "neither endpoint
+    /// reaches it" branch and cannot catch a wrong choice among reachable ones.
     #[test]
     fn contrast_endpoint_choice_holds_across_attainable_ratios() {
         for hex in [
