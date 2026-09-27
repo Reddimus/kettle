@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/gen-starfield.py` writes a 1280×720 loop that fits Kettle's 128 MiB
+  animation cap, so all 32 frames play. At 1920×1080 only 16 loaded and the
+  loop jumped halfway. The BACKGROUNDS example `ffmpeg` command fits the cap
+  too.
+- A Lua plugin refuses to load if Kettle cannot remove the unsafe standard
+  functions from its sandbox, as documented. Failures used to be ignored.
+- `just install`, `uninstall`, `install-local` and `install-recording` run only
+  on Linux. On macOS they ran the Linux installer.
+
 ## [4.6.0] — 2026-09-27
 
 ### Added
