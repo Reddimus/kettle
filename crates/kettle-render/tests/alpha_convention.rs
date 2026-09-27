@@ -1,13 +1,12 @@
 //! Every render pipeline must pair its fragment shader's alpha convention with
 //! a matching blend state.
 //!
-//! `quad` and `imgpipe` return PREMULTIPLIED color (`rgb * a`) while both were
-//! configured with `ALPHA_BLENDING`, whose source factor is `SrcAlpha` — so the
-//! GPU multiplied by alpha a second time and a 50%-opaque surface contributed
-//! 25%. That darkened every translucent image, panel, highlight, separator, and
-//! the unfocused-pane dim overlay. `glyphpipe` returns STRAIGHT alpha and is
-//! correct with `ALPHA_BLENDING`; the bug was the mismatch, not either
-//! convention.
+//! `quad` and `imgpipe` return PREMULTIPLIED color (`rgb * a`); `glyphpipe`
+//! returns STRAIGHT alpha. Pairing premultiplied output with `ALPHA_BLENDING`,
+//! whose source factor is `SrcAlpha`, multiplies by alpha a second time, so a
+//! 50%-opaque surface contributes 25%. That darkens every translucent image,
+//! panel, highlight, separator, and the unfocused-pane dim overlay. Either
+//! convention is correct on its own; the bug is the mismatch.
 //!
 //! This checks the pair per pipeline rather than searching for either token
 //! independently — "a premultiply exists somewhere" and "a blend constant
@@ -21,21 +20,21 @@
 //! test cannot cheaply stand up, and it is a cross-check rather than the last
 //! line of defence.
 //!
-//! Two things stop it passing vacuously: the shader body is parsed for the
-//! exact number of alpha multiplications (so a double-multiply `rgb * a * a` is
-//! caught, not just any `* a`) — resolving local `let` bindings first, so
-//! multiplying through an alias is still counted — and the detectors are
-//! themselves tested against canned strings of every shape they must tell
-//! apart.
+//! Two things stop it passing vacuously. The shader body is parsed for the
+//! exact number of alpha multiplications, after resolving local `let`
+//! bindings, so a double-multiply `rgb * a * a` or a multiply through an alias
+//! is caught, not just any `* a`. And the detectors are themselves tested
+//! against canned strings of every shape they must tell apart.
 
 /// How many times does this pipeline's fragment entry point multiply its color
 /// by alpha? Premultiplied output is exactly one; straight is zero; anything
 /// else is a bug in its own right.
 ///
 /// Alpha reaches the multiply under several names: `in.color.a` (quad), `c.a`
-/// (imgpipe), or any local bound to one of those. Counting only the two literal
-/// spellings meant `let a2 = in.color.a; return vec4(lin * in.color.a * a2, ..)`
-/// read as a single multiply while premultiplying twice.
+/// (imgpipe), or any local bound to one of those. Counting only the two
+/// literal spellings would read
+/// `let a2 = in.color.a; return vec4(lin * in.color.a * a2, ..)` as a single
+/// multiply, though it premultiplies twice.
 fn alpha_multiplications(src: &str) -> usize {
     let fs = src
         .split("fn fs(")
@@ -152,8 +151,7 @@ fn the_convention_detectors_distinguish_the_shapes_they_must() {
     let straight = "fn fs(in: VsOut) -> f32 {\n    return textureSample(t, s, in.uv);\n}";
     let premul = "fn fs(in: VsOut) -> f32 {\n    return vec4(lin * in.color.a, in.color.a);\n}";
     let double = "fn fs(in: VsOut) -> f32 {\n    return vec4(c.rgb * c.a * c.a, c.a);\n}";
-    // The evasion this detector previously missed: one recognised multiply,
-    // plus a second one through a local alias.
+    // One recognised multiply, plus a second one through a local alias.
     let aliased = "fn fs(in: VsOut) -> f32 {\n    let extra = in.color.a;\n    \
                    return vec4(lin * in.color.a * extra, in.color.a);\n}";
     // And through a chain of them.

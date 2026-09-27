@@ -1,4 +1,4 @@
-//! Cell-locked instanced glyph pipeline (v2.25.0).
+//! Cell-locked instanced glyph pipeline.
 //!
 //! Terminal text must sit on a fixed cell grid: every grapheme cluster's glyph
 //! has to render at exactly `pane_origin + col * cell_w`. glyphon/cosmic-text lay
@@ -7,8 +7,8 @@
 //! icons, color emoji, CJK, ligature clusters, a bold/italic face with a
 //! different width — shifts every following glyph off the `col * cell_w` grid
 //! that selection highlights, the block cursor, link underlines and mouse
-//! hit-testing all assume. Glyphs drift, the grid does not → "every now and then
-//! the text is misaligned" and "selecting text is off by one letter".
+//! hit-testing all assume. Glyphs drift while the grid does not, so text looks
+//! misaligned and selection lands one letter off.
 //!
 //! This module renders pane text the way Alacritty / kitty / WezTerm / Ghostty
 //! do: the row is still shaped by cosmic-text (unchanged — the per-line shaping
@@ -130,13 +130,13 @@ enum CacheOutcome {
 /// *policy* is unit-testable with plain keys, without needing a real
 /// `CacheKey` (which can only be constructed from a loaded font face).
 ///
-/// This runs on the render thread, inside the frame that overflowed the cache,
-/// over `MAX_GLYPH_SLOTS` (131,072) entries, with `n` = 16,384 — the single
-/// caller evicts down to 7/8 of capacity. Fully sorting them to keep a prefix did `O(len log len)`
-/// comparisons for an answer that needs `O(len)`: partition around the nth
-/// element and take what falls below it. `select_nth_unstable_by_key` is
-/// average linear and leaves the prefix unordered, which is all a victim list
-/// needs — nothing downstream depends on the order they are dropped in.
+/// This runs on the render thread, mid-frame, over up to `MAX_GLYPH_SLOTS`
+/// (131,072) entries, and both callers ask for about an eighth of the cache
+/// (16,384 at the cap). A full sort costs `O(len log len)` for an answer that
+/// needs `O(len)`, so partition around the nth element instead.
+/// `select_nth_unstable_by_key` is average linear and leaves the prefix
+/// unordered, which is fine because nothing downstream depends on the order
+/// victims are dropped in.
 fn lru_victims<K: Copy>(ages: impl Iterator<Item = (K, u64)>, n: usize) -> Vec<K> {
     if n == 0 {
         return Vec::new();
@@ -832,24 +832,20 @@ impl GlyphPipeline {
             cached.last_used = self.epoch;
             return cached.slot;
         }
-        // Bound an unbounded stream of cached glyph and whitespace entries at
-        // stream of misses would still grow this map forever. Bound it at a
-        // deterministic ceiling, but instead of refusing every new glyph from
-        // then on, evict the coldest (least-recently-touched) slots first to
-        // make room. Every instance-buffer rebuild re-emits all visible panes,
-        // so a glyph still being drawn gets `last_used` refreshed before cold
-        // slots are reclaimed — a long session that floods through many distinct glyphs
-        // (unicode/emoji streaming, repeated zoom-driven subpixel bins)
-        // self-heals instead of permanently losing glyph rendering once the
-        // cap is first hit.
+        // An endless stream of glyph and whitespace misses would grow this map
+        // forever, so cap it at a fixed ceiling. At the cap, evict the coldest
+        // (least-recently-touched) slots instead of refusing new glyphs. Every
+        // instance-buffer rebuild re-emits all visible panes, so a glyph still
+        // being drawn has a fresh `last_used` before cold slots are reclaimed.
+        // A long session that floods through many distinct glyphs
+        // (unicode/emoji streaming, repeated zoom-driven subpixel bins) then
+        // self-heals instead of losing glyph rendering for good.
         const MAX_GLYPH_SLOTS: usize = 131_072;
         if self.slots.len() >= MAX_GLYPH_SLOTS {
             // Evict down to 7/8 capacity rather than one slot at a time, so
             // the age scan amortizes over the next ~16K misses instead of
             // running on every single insert once the cache is steady-state at
-            // the cap. (The scan is linear, not `O(n log n)` — see
-            // `lru_victims`. This comment said otherwise for as long as the
-            // sort it described was there.)
+            // the cap. The scan is linear (see `lru_victims`).
             let target = MAX_GLYPH_SLOTS - MAX_GLYPH_SLOTS / 8;
             self.evict_lru(self.slots.len().saturating_sub(target));
         }
@@ -1032,11 +1028,10 @@ impl GlyphPipeline {
         screen: [f32; 2],
         data: &[GlyphInstance],
     ) {
-        // Bump the frame counter once per frame, matching every `ensure_glyph`
-        // touch this frame having already stamped `last_used` with the *prior*
-        // value — the next frame's misses (if any) evict against this new
-        // value, so a slot untouched since is unambiguously older than one
-        // touched this frame.
+        // Bump the frame counter once per frame. Every `ensure_glyph` touch
+        // this frame already stamped `last_used` with the prior value, so next
+        // frame's evictions see any slot left untouched since as strictly older
+        // than one touched this frame.
         self.epoch = self.epoch.saturating_add(1);
         if self.bg_dirty {
             self.bind_group = Self::make_bg(
@@ -1382,7 +1377,7 @@ mod tests {
         );
     }
 
-    /// Drift guard (eviction-not-refusal fix). `ensure_glyph` must evict cold
+    /// Drift guard. `ensure_glyph` must evict cold
     /// slots to make room once `MAX_GLYPH_SLOTS` is hit, not silently return
     /// `None` for every new glyph from then on — the latter turns a long
     /// session's rare glyph combinations (unicode/emoji floods, zoom-driven
