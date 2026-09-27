@@ -109,6 +109,11 @@ to route graphics controls around the text parser.
   `CreateProcessW`'s owning backend because attaching from Kettle after spawn
   leaves an unavoidable window in which immediate descendants do not inherit
   the job.
+  A third opt-in, `CommandBuilder::set_require_cwd`, hands the configured
+  `cwd` to the OS unchanged. Upstream replaces a `cwd` that is not a directory
+  at spawn time with the home directory, so a directory deleted after Kettle's
+  automation checked it would relocate the command. With the opt-in the spawn
+  fails instead. Interactive panes leave it off and keep the HOME recovery.
   On Unix, dropping the master writer now closes only its duplicate descriptor
   and never writes a newline or VEOF byte into the terminal; deliberate EOF
   remains Kettle's live-termios `PtyStdin::try_signal_eof` path.

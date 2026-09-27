@@ -679,6 +679,27 @@ mod tests {
         Ok(())
     }
 
+    /// A caller that checked its directory must not have the child relocated
+    /// to HOME when the directory disappears before the spawn.
+    #[test]
+    fn a_missing_required_cwd_fails_the_spawn() -> anyhow::Result<()> {
+        let missing = std::env::temp_dir().join(format!(
+            "portable-pty-spawn-missing-cwd-{}",
+            std::process::id()
+        ));
+        assert!(!missing.exists());
+        let (_master, slave) = openpty(PtySize::default())?;
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        command.cwd(&missing);
+        command.set_require_cwd(true);
+        assert!(
+            slave.spawn_command(command).is_err(),
+            "the child started somewhere other than its required directory"
+        );
+        Ok(())
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn kernel_descriptor_list_tracks_an_open_descriptor() -> anyhow::Result<()> {

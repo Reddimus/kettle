@@ -206,7 +206,9 @@ CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
 `portable-pty` on Linux, macOS, and Windows because each compiles its own
 descriptor or pipe code: Linux uses `close_range`, macOS lists open
 descriptors through `proc_pidinfo`, and only the Windows runner executes the
-`PIPE_NOWAIT` ConPTY regression. A local `just vendor-check` is therefore
+`PIPE_NOWAIT` ConPTY regression. The `require_cwd` opt-in has a Unix test that
+spawns into a missing directory and must fail, and a Windows test of the
+directory handed to `CreateProcessW`. A local `just vendor-check` is therefore
 evidence only for the platform it ran on.
 
 The vendored trees intentionally preserve their upstream release formatting so
