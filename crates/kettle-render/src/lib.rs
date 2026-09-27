@@ -4522,6 +4522,51 @@ fn live_surface_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32,
     (width.clamp(1, max), height.clamp(1, max))
 }
 
+/// The starfield shader's clock. `background-animation = off` freezes it on
+/// its first frame, as the image path shows frame 0. Otherwise it runs, and a
+/// repaint while animation is paused for focus shows the time-correct frame.
+fn starfield_time(
+    animation: kettle_config::BackgroundAnimation,
+    elapsed: std::time::Duration,
+) -> f32 {
+    if animation == kettle_config::BackgroundAnimation::Off {
+        0.0
+    } else {
+        elapsed.as_secs_f32()
+    }
+}
+
+#[cfg(test)]
+mod starfield_time_tests {
+    use super::{production_source, starfield_time};
+    use kettle_config::BackgroundAnimation;
+    use std::time::Duration;
+
+    #[test]
+    fn animation_off_freezes_the_starfield() {
+        let later = Duration::from_secs(90);
+        assert_eq!(starfield_time(BackgroundAnimation::Off, later), 0.0);
+        assert_eq!(starfield_time(BackgroundAnimation::Always, later), 90.0);
+        assert_eq!(
+            starfield_time(BackgroundAnimation::WhenFocused, later),
+            90.0
+        );
+    }
+
+    #[test]
+    fn the_starfield_uniform_takes_its_time_from_starfield_time() {
+        let production = production_source();
+        let upload = production
+            .split_once("self.starfield.upload(")
+            .expect("starfield upload")
+            .1
+            .split_once(");")
+            .expect("end of upload")
+            .0;
+        assert!(upload.contains("starfield_time(cfg.background_animation"));
+    }
+}
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -8798,7 +8843,7 @@ impl Renderer {
             self.starfield.upload(
                 &self.gpu.queue,
                 [sw, sh],
-                self.starfield_started.elapsed().as_secs_f32(),
+                starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
             );
         }
         self.imgs
