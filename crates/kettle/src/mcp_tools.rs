@@ -49,7 +49,7 @@ pub fn tool_specs() -> Vec<Value> {
                     "command": {"type": "array", "items": {"type": "string"}, "description": "argv, e.g. [\"ls\",\"-la\"]"},
                     "cols": {"type": "integer", "description": "terminal width (default 80)"},
                     "rows": {"type": "integer", "description": "terminal height (default 24)"},
-                    "cwd": {"type": "string", "description": "working directory"},
+                    "cwd": {"type": "string", "description": "working directory (default: the MCP server's current directory)"},
                     "timeout_s": {"type": "number", "description": "kill + report timeout after N seconds"},
                     "strip_ansi": {"type": "boolean", "description": "strip ANSI escapes (default true)"}
                 },
