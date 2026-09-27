@@ -43,7 +43,8 @@ resident set size leaves out. Workloads:
 - `startup`: spawn to the first on-screen window, and to the child's first
   instruction
 - `idle`: CPU share, wakeups per second, and memory of a window left alone
-- `flood-memory`: memory after printing a 32 MiB text file
+- `flood-memory`: memory after printing 32 MiB of seeded text that is the same
+  on every run, in lines narrower than the grid
 - `vtebench`: Alacritty's vtebench at a pinned revision
 
 Every terminal runs with its default configuration on a 120x36 grid. Helpers
