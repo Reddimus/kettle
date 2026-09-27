@@ -25,7 +25,7 @@ graph TD
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
-    remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>sysinfo process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
+    remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
 ```
@@ -1442,8 +1442,10 @@ text, so its bitmap is already resident).
   against winit's per-frame work.
 - **Synchronization and unsafe-code audit**: unsafe code is confined to narrow
   OS FFI/handle ownership boundaries (Windows named pipes/window APIs, libc
-  `sendmsg`/`recvmsg`/SCM_RIGHTS, signal setup, `pre_exec`, and raw-fd
-  adoption) plus UTF-8 conversion after an explicit valid-prefix check. Each
+  `sendmsg`/`recvmsg`/SCM_RIGHTS, signal setup, `pre_exec`, raw-fd
+  adoption, and the macOS libproc/`sysctl` process walk in
+  `kettle-remote/src/macos.rs`, the only module that crate allows unsafe code
+  in) plus UTF-8 conversion after an explicit valid-prefix check. Each
   site documents its ownership or validity contract. There is no `transmute`
   and no custom `Send`/`Sync` implementation. Per-pane `Arc<Mutex<...>>` are contended only on PTY
   read or App snapshot; lock-hold times are O(bytes) — designed to
@@ -1590,15 +1592,21 @@ The most recent additions:
   context, daemon address, namespace, config file, in-pod container) so the
   reconnect command reproduces the original session rather than whatever the
   client's defaults reach; an option that cannot be reproduced faithfully
-  suppresses the menu entry instead. Windows and macOS retain the
-  cross-platform `sysinfo`
-  snapshot. One coalescing worker owns process enumeration for all windows and
-  wakes the event loop only after publishing a complete latest snapshot.
-  Linux starts from known PTY child PIDs and follows bounded
-  `/proc/<pid>/task/*/children` trees, including children created by non-leader
-  threads. Each scan is capped by 1 MiB per file, 4 MiB aggregate content,
-  4096 nodes, 1024 task-file reads, bounded argv count/decoded bytes, and a
-  25 ms deadline; an incomplete scan never replaces the last applied state.
+  suppresses the menu entry instead. Windows retains the cross-platform
+  `sysinfo` snapshot. One coalescing worker owns process enumeration for all
+  windows and wakes the event loop only after publishing a complete latest
+  snapshot. The app polls on redraw, at most every 200 ms, so a blinking
+  cursor keeps the scan running while a window sits idle; Linux and macOS
+  therefore walk only the pane trees. Linux starts from known PTY child PIDs
+  and follows bounded `/proc/<pid>/task/*/children` trees, including children
+  created by non-leader threads. macOS follows `proc_listchildpids` from the
+  same PIDs and reads argv from `KERN_PROCARGS2`. A buffer smaller than that
+  argument area silently receives its tail, the environment, so the walk asks
+  for the exact size first and treats a read that still fills the buffer as
+  incomplete. Each scan is capped by 1 MiB per file or argument area, 4 MiB
+  aggregate argv and child-list content, 4096 nodes, 1024 Linux task-file
+  reads, bounded argv count/decoded bytes, and a 25 ms deadline; an
+  incomplete scan never replaces the last applied state.
   Cwd is read on demand only for each pane's selected local foreground pid,
   while detected remotes, direct nonlocal clients, and nested WSL sessions
   suppress the misleading host cwd. Per-pane detection reuses scanner-owned

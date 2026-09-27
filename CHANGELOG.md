@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- On macOS, Kettle reads only each pane's own processes when it checks for
+  SSH sessions and shell directories, instead of every process on the
+  machine. An idle window with a blinking cursor uses about 80% less CPU.
+
 ### Fixed
 
 - On macOS, new tabs, splits, and windows no longer pause about 100 ms each

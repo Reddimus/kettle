@@ -1967,7 +1967,9 @@ dependencies = [
 name = "kettle-remote"
 version = "4.5.2"
 dependencies = [
+ "criterion",
  "kettle-test-support",
+ "libc",
  "sysinfo",
 ]
 

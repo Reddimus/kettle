@@ -19,7 +19,13 @@
 //!   "the SSH detector *will* ship" forward-looking comments now that
 //!   the phases above had all landed.
 
-#![forbid(unsafe_code)]
+// Unsafe code is confined to the macOS libproc walk in `macos.rs`, which
+// allows it for that module alone.
+#![deny(unsafe_code)]
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos;
 
 /// Re-export `sysinfo::System` so kettle-ui can own one
 /// (and pass it to `detect_remote_with`) without pulling sysinfo
@@ -287,10 +293,10 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
 /// existing tests.
 pub struct RemoteScanner {
     sys: sysinfo::System,
-    #[cfg(target_os = "linux")]
-    procfs: LinuxProcessTree,
-    #[cfg(target_os = "linux")]
-    use_procfs: bool,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    rooted: RootedProcessTree,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use_rooted: bool,
     index: std::collections::HashMap<u32, Vec<u32>>,
     detect_queue: std::collections::VecDeque<u32>,
     detect_visited: std::collections::HashSet<u32>,
@@ -306,10 +312,10 @@ impl RemoteScanner {
     pub fn new() -> Self {
         Self {
             sys: sysinfo::System::new(),
-            #[cfg(target_os = "linux")]
-            procfs: LinuxProcessTree::default(),
-            #[cfg(target_os = "linux")]
-            use_procfs: false,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            rooted: RootedProcessTree::default(),
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            use_rooted: false,
             index: std::collections::HashMap::new(),
             detect_queue: std::collections::VecDeque::new(),
             detect_visited: std::collections::HashSet::new(),
@@ -322,27 +328,28 @@ impl RemoteScanner {
     pub fn refresh(&mut self) {
         self.sys.refresh();
         self.index = build_children_index(&self.sys);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            self.use_procfs = false;
+            self.use_rooted = false;
         }
     }
 
     /// Refresh the process snapshot for the pane roots that will be queried.
     ///
     /// Linux walks only those roots' bounded `/proc/<pid>/task/*/children`
-    /// trees, including children created by non-leader threads. That avoids an
-    /// OS-wide process walk. Platforms without that rooted procfs interface
-    /// retain the cross-platform sysinfo snapshot.
+    /// trees, including children created by non-leader threads. macOS walks
+    /// the same roots through libproc. Both avoid an OS-wide process walk,
+    /// which matters because the app polls on redraw. Other platforms retain
+    /// the cross-platform sysinfo snapshot.
     pub fn refresh_roots(&mut self, roots: &[u32]) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let complete = self.procfs.refresh_roots(roots);
-            self.index = build_children_index(&self.procfs);
-            self.use_procfs = true;
+            let complete = self.rooted.refresh_roots(roots);
+            self.index = build_children_index(&self.rooted);
+            self.use_rooted = true;
             complete
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = roots;
             self.refresh();
@@ -358,13 +365,13 @@ impl RemoteScanner {
         self.detect_visited.clear();
         self.detect_visited.reserve(self.index.len());
 
-        #[cfg(target_os = "linux")]
-        let tree: &dyn ProcessTree = if self.use_procfs {
-            &self.procfs
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let tree: &dyn ProcessTree = if self.use_rooted {
+            &self.rooted
         } else {
             &self.sys
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let tree: &dyn ProcessTree = &self.sys;
 
         detect_root_in_index_with_scratch(
@@ -403,13 +410,13 @@ impl RemoteScanner {
         self.detect_queue.clear();
         self.detect_visited.clear();
         self.detect_visited.reserve(self.index.len());
-        #[cfg(target_os = "linux")]
-        let tree: &dyn ProcessTree = if self.use_procfs {
-            &self.procfs
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let tree: &dyn ProcessTree = if self.use_rooted {
+            &self.rooted
         } else {
             &self.sys
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let tree: &dyn ProcessTree = &self.sys;
         find_foreground_composer_in_index_with_scratch(
             child_pid,
@@ -429,15 +436,15 @@ impl RemoteScanner {
     }
 
     fn tree(&self) -> &dyn ProcessTree {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            if self.use_procfs {
-                &self.procfs
+            if self.use_rooted {
+                &self.rooted
             } else {
                 &self.sys
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             &self.sys
         }
@@ -477,8 +484,9 @@ pub struct RemoteProbeSnapshot {
 /// Process enumeration and procfs reads never run on the window event loop.
 /// Submitting replaces any queued roots with the newest set and emits at most
 /// one wake token. Results likewise replace an unconsumed older snapshot.
-/// A Linux scan that reaches its byte/node/task/deadline ceiling is not
-/// published, so a partial hostile subtree cannot erase the last good UI state.
+/// A Linux or macOS scan that reaches its byte/node/task/deadline ceiling is
+/// not published, so a partial hostile subtree cannot erase the last good UI
+/// state.
 pub struct RemoteScanWorker {
     pending: std::sync::Arc<std::sync::Mutex<Option<Vec<RemoteProbeTarget>>>>,
     latest: std::sync::Arc<std::sync::Mutex<Option<RemoteProbeSnapshot>>>,
@@ -596,31 +604,32 @@ fn normalize_probe_targets(targets: &mut Vec<RemoteProbeTarget>) {
     targets.truncate(write.min(MAX_REMOTE_PROBE_TARGETS));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_FILE_BYTES: u64 = 1 << 20;
 const MAX_REMOTE_PROBE_TARGETS: usize = 4096;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_TREE_NODES: usize = MAX_REMOTE_PROBE_TARGETS;
 #[cfg(target_os = "linux")]
 const MAX_PROC_TASKS_PER_PROCESS: usize = 1024;
 #[cfg(target_os = "linux")]
 const MAX_PROC_TASK_FILE_READS: usize = 1024;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_SCAN_DURATION: std::time::Duration = std::time::Duration::from_millis(25);
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_PROC_ARGS_PER_PROCESS: usize = 256;
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_PROC_ARG_DECODED_BYTES: usize = 64 * 1024;
 /// Audit (robustness): aggregate ceiling, in bytes, on ALL `cmdline` +
 /// `children` file content read across a single [`LinuxProcessTree::refresh_from`]
-/// walk. `MAX_PROC_FILE_BYTES` only bounds a SINGLE file's size; without an
+/// walk, and on the argv bytes of a macOS walk. `MAX_PROC_FILE_BYTES` only
+/// bounds a SINGLE file's or argument area's size; without an
 /// aggregate cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each near
 /// that 1 MiB per-file ceiling could retain multiple GiB in `self.entries`
 /// and cost multiple GiB of file I/O on one `refresh_roots` tick. Four MiB is
 /// generous next to legitimate shell argv/child-list totals while keeping a
 /// hostile pane's background scan bounded. The app consumes these snapshots
 /// asynchronously; it never performs this walk on the event-loop thread.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_TREE_TOTAL_BYTES: u64 = 4 * MAX_PROC_FILE_BYTES;
 
 #[cfg(any(target_os = "linux", test))]
@@ -631,13 +640,13 @@ fn parse_proc_children(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
         .filter_map(|pid| std::str::from_utf8(pid).ok()?.parse().ok())
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 struct ParsedProcArgv {
     argv: Vec<String>,
     complete: bool,
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn parse_proc_argv(bytes: &[u8]) -> ParsedProcArgv {
     let mut argv = Vec::new();
     let mut decoded_bytes = 0_usize;
@@ -669,6 +678,172 @@ fn parse_proc_argv(bytes: &[u8]) -> ParsedProcArgv {
         complete: true,
     }
 }
+
+/// Argv from a `KERN_PROCARGS2` buffer: a native-endian `argc`, the
+/// executable path, NUL padding, `argc` NUL-terminated arguments, then the
+/// environment. See `sysctl_procargsx` in XNU's `bsd/kern/kern_sysctl.c`.
+/// `None` means the buffer ended before the last argument, so the argv cannot
+/// be trusted.
+#[cfg(any(target_os = "macos", test))]
+fn parse_kern_procargs2(area: &[u8]) -> Option<ParsedProcArgv> {
+    let (argc, strings) = area.split_first_chunk::<4>()?;
+    let argc = usize::try_from(i32::from_ne_bytes(*argc)).ok()?;
+    let path_end = strings.iter().position(|&byte| byte == 0)?;
+    let rest = &strings[kern_procargs2_args_start(strings, path_end)?..];
+    let mut end = 0;
+    for _ in 0..argc {
+        let len = rest[end..].iter().position(|&byte| byte == 0)?;
+        end += len + 1;
+    }
+    Some(parse_proc_argv(&rest[..end]))
+}
+
+/// Where the arguments start after the executable path. The kernel pads the
+/// path and its NUL to pointer alignment, so an empty `argv[0]` is a real
+/// slot rather than more padding; skipping every NUL, as `ps` does, would
+/// misread it and shift the last argument into the environment. A layout
+/// that does not match falls back to that skip. `None` when the buffer ends
+/// inside the padding.
+#[cfg(any(target_os = "macos", test))]
+fn kern_procargs2_args_start(strings: &[u8], path_end: usize) -> Option<usize> {
+    const ALIGN: usize = std::mem::size_of::<usize>();
+    let aligned = (path_end + 1).div_ceil(ALIGN) * ALIGN;
+    if let Some(padding) = strings.get(path_end..aligned)
+        && padding.iter().all(|&byte| byte == 0)
+    {
+        return Some(aligned);
+    }
+    if aligned > strings.len() && strings[path_end..].iter().all(|&byte| byte == 0) {
+        return Some(strings.len());
+    }
+    let skip = strings[path_end..].iter().position(|&byte| byte != 0)?;
+    Some(path_end + skip)
+}
+
+#[cfg(test)]
+mod kern_procargs2_tests {
+    use super::{MAX_PROC_ARGS_PER_PROCESS, parse_kern_procargs2};
+
+    /// Builds a buffer in the kernel's layout: argc, the exec path and its
+    /// NUL padded to pointer alignment, arguments, then environment strings.
+    fn area(argc: i32, path: &str, args: &[&str], env: &[&str]) -> Vec<u8> {
+        let mut out = argc.to_ne_bytes().to_vec();
+        out.extend_from_slice(path.as_bytes());
+        out.push(0);
+        let align = std::mem::size_of::<usize>();
+        while !(out.len() - 4).is_multiple_of(align) {
+            out.push(0);
+        }
+        for value in args.iter().chain(env) {
+            out.extend_from_slice(value.as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    #[test]
+    fn reads_exactly_argc_arguments_and_ignores_the_environment() {
+        let bytes = area(
+            3,
+            "/bin/zsh",
+            &["-zsh", "-l", "-i"],
+            &["HOME=/tmp", "SSH_AUTH_SOCK=x"],
+        );
+        let parsed = parse_kern_procargs2(&bytes).expect("complete area");
+        assert!(parsed.complete);
+        assert_eq!(parsed.argv, ["-zsh", "-l", "-i"]);
+    }
+
+    #[test]
+    fn zero_arguments_before_the_environment_parse_as_empty() {
+        let parsed = parse_kern_procargs2(&area(0, "/bin/sleep", &[], &["A=b"])).expect("area");
+        assert!(parsed.complete);
+        assert!(parsed.argv.is_empty());
+        let parsed = parse_kern_procargs2(&area(0, "/bin/sleep", &[], &[])).expect("area");
+        assert!(parsed.argv.is_empty());
+    }
+
+    #[test]
+    fn an_empty_first_argument_does_not_pull_in_the_environment() {
+        // With `ps`-style NUL skipping, the empty argv[0] looks like padding
+        // and the environment entry becomes the last argument.
+        let bytes = area(
+            3,
+            "/usr/bin/ssh",
+            &["", "ssh", "host.example"],
+            &["SSH=evil"],
+        );
+        let parsed = parse_kern_procargs2(&bytes).expect("complete area");
+        assert!(parsed.complete);
+        assert_eq!(parsed.argv, ["ssh", "host.example"]);
+    }
+
+    #[test]
+    fn every_path_length_finds_the_first_argument() {
+        for len in 1..=40 {
+            let path = format!("/{}", "p".repeat(len - 1));
+            let bytes = area(2, &path, &["first", "second"], &["A=b"]);
+            let parsed = parse_kern_procargs2(&bytes).expect("complete area");
+            assert_eq!(parsed.argv, ["first", "second"], "path length {len}");
+        }
+    }
+
+    #[test]
+    fn unexpected_padding_falls_back_to_skipping_nuls() {
+        // Not the kernel's layout: one NUL, then the arguments right away.
+        let mut bytes = 2_i32.to_ne_bytes().to_vec();
+        bytes.extend_from_slice(b"/bin/sh\0-sh\0-c\0HOME=/\0");
+        let parsed = parse_kern_procargs2(&bytes).expect("fallback parse");
+        assert_eq!(parsed.argv, ["-sh", "-c"]);
+    }
+
+    #[test]
+    fn a_buffer_cut_before_the_last_argument_is_rejected() {
+        let mut bytes = area(3, "/usr/bin/ssh", &["ssh", "-p22", "host.example"], &[]);
+        // The kernel truncates silently to the caller's buffer.
+        bytes.truncate(bytes.len() - 3);
+        assert!(parse_kern_procargs2(&bytes).is_none());
+    }
+
+    #[test]
+    fn malformed_headers_are_rejected() {
+        assert!(parse_kern_procargs2(&[1, 0]).is_none(), "short argc");
+        assert!(
+            parse_kern_procargs2(&area(-1, "/bin/sh", &[], &[])).is_none(),
+            "negative argc"
+        );
+        let mut no_path_end = 1_i32.to_ne_bytes().to_vec();
+        no_path_end.extend_from_slice(b"/bin/sh");
+        assert!(
+            parse_kern_procargs2(&no_path_end).is_none(),
+            "unterminated path"
+        );
+        assert!(
+            parse_kern_procargs2(&area(2, "/bin/sh", &[], &[])).is_none(),
+            "missing args"
+        );
+    }
+
+    #[test]
+    fn the_shared_argument_cap_marks_a_long_argv_incomplete() {
+        let args: Vec<String> = (0..=MAX_PROC_ARGS_PER_PROCESS)
+            .map(|i| format!("a{i}"))
+            .collect();
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let argc = i32::try_from(args.len()).expect("argc");
+        let parsed = parse_kern_procargs2(&area(argc, "/bin/echo", &args, &[])).expect("area");
+        assert!(
+            !parsed.complete,
+            "argument 257 must mark the argv truncated"
+        );
+    }
+}
+
+/// The pane-rooted process tree for this platform.
+#[cfg(target_os = "linux")]
+type RootedProcessTree = LinuxProcessTree;
+#[cfg(target_os = "macos")]
+type RootedProcessTree = macos::MacProcessTree;
 
 #[cfg(target_os = "linux")]
 #[derive(Default)]
