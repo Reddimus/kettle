@@ -1824,6 +1824,12 @@ Backpressure regressions must cover both piped stdin and `/dev/null`: a
 query-flooding child that never reads replies must hit the bounded
 64-message reply queue promptly rather than defeating timeout. A separate
 semantic OSC-event flood must trip the 1024-event parser queue.
+Two unit tests pin `--json` rendering. A golden test compares every event kind
+against the bytes the old `serde_json::Value` maps produced. It covers escapes,
+invalid bytes, split and carried codepoints, and the lossy tail at exit. A
+counting sink requires exactly one `write` per event, with the carried tail and
+the exit event sharing one. A sink that takes seven bytes per call proves each
+event is still written in full.
 `admitted_reply_preempts_a_pending_eof_retry` stages a mock first VEOF step
 returning `Pending`, records the arbiter's stale empty-channel fast-path
 observation, admits a DSR reply through the publication gate, and proves

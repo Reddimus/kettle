@@ -3026,6 +3026,47 @@ impl ExecOutput for WorkerOutput {
     }
 }
 
+/// `--json` event shapes, serialized without building a `serde_json::Value`.
+///
+/// Fields are declared in alphabetical order because that is the order the
+/// `Value` maps these replaced serialized in (serde_json sorts keys unless
+/// `preserve_order` is enabled), so every event keeps its exact bytes.
+#[derive(serde::Serialize)]
+struct JsonStartEvent {
+    cols: u16,
+    event: &'static str,
+    rows: u16,
+    v: u8,
+}
+
+/// An `output` or `title` event, borrowing its text.
+#[derive(serde::Serialize)]
+struct JsonDataEvent<'a> {
+    data: &'a str,
+    event: &'static str,
+    v: u8,
+}
+
+#[derive(serde::Serialize)]
+struct JsonExitEvent {
+    code: i32,
+    duration_ms: u64,
+    event: &'static str,
+    v: u8,
+}
+
+/// Append `event` to `line` as one newline-terminated JSON line.
+///
+/// Callers hand the finished line to the sink in one `write_all`. `writeln!`
+/// on a `serde_json::Value` issued one `write` per formatter piece, about 30
+/// per event, and the Unix sink is an unbuffered descriptor: 30 syscalls, and
+/// 30 places where a stop or failure left half a JSON line behind.
+fn append_json_line(line: &mut Vec<u8>, event: &impl serde::Serialize) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *line, event)?;
+    line.push(b'\n');
+    Ok(())
+}
+
 /// Render child output to stdout in the selected mode.
 struct Outputter {
     mode: OutputMode,
@@ -3034,6 +3075,11 @@ struct Outputter {
     /// Carry for an incomplete multibyte UTF-8 sequence split across reads
     /// (JSON mode, where output is decoded to a string per chunk).
     utf8_carry: Vec<u8>,
+    /// Decoded text of a chunk that needed the carry (JSON mode).
+    text: String,
+    /// The JSON line being assembled. Reused across events, so its capacity
+    /// settles at the largest event, which one PTY read bounds.
+    line: Vec<u8>,
 }
 
 impl Outputter {
@@ -3043,13 +3089,24 @@ impl Outputter {
             stripper: AnsiStripper::default(),
             scratch: Vec::with_capacity(8192),
             utf8_carry: Vec::new(),
+            text: String::new(),
+            line: Vec::new(),
         }
     }
 
     fn start(&mut self, sink: &mut dyn Write, cols: u16, rows: u16) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
-            let v = serde_json::json!({"v":1,"event":"start","cols":cols,"rows":rows});
-            writeln!(sink, "{v}")?;
+            self.line.clear();
+            append_json_line(
+                &mut self.line,
+                &JsonStartEvent {
+                    cols,
+                    event: "start",
+                    rows,
+                    v: 1,
+                },
+            )?;
+            sink.write_all(&self.line)?;
             sink.flush()?;
         }
         Ok(())
@@ -3068,13 +3125,29 @@ impl Outputter {
                 sink.flush()?;
             }
             OutputMode::Json => {
-                let mut data = String::new();
-                push_utf8_streaming(&mut self.utf8_carry, bytes, &mut data);
+                // Most chunks are complete UTF-8 with nothing carried over, so
+                // borrow them instead of copying through the carry.
+                let data = match std::str::from_utf8(bytes) {
+                    Ok(text) if self.utf8_carry.is_empty() => text,
+                    _ => {
+                        self.text.clear();
+                        push_utf8_streaming(&mut self.utf8_carry, bytes, &mut self.text);
+                        self.text.as_str()
+                    }
+                };
                 if data.is_empty() {
                     return Ok(()); // only an incomplete sequence so far — wait for more
                 }
-                let v = serde_json::json!({"v":1,"event":"output","data":data});
-                writeln!(sink, "{v}")?;
+                self.line.clear();
+                append_json_line(
+                    &mut self.line,
+                    &JsonDataEvent {
+                        data,
+                        event: "output",
+                        v: 1,
+                    },
+                )?;
+                sink.write_all(&self.line)?;
                 sink.flush()?;
             }
         }
@@ -3083,8 +3156,16 @@ impl Outputter {
 
     fn title(&mut self, sink: &mut dyn Write, title: &str) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
-            let v = serde_json::json!({"v":1,"event":"title","data":title});
-            writeln!(sink, "{v}")?;
+            self.line.clear();
+            append_json_line(
+                &mut self.line,
+                &JsonDataEvent {
+                    data: title,
+                    event: "title",
+                    v: 1,
+                },
+            )?;
+            sink.write_all(&self.line)?;
             sink.flush()?;
         }
         Ok(())
@@ -3095,16 +3176,29 @@ impl Outputter {
             // v2.27.0 (audit): flush any trailing incomplete UTF-8 sequence
             // lossily before the exit event, so a stream that ends mid-codepoint
             // doesn't silently drop its final bytes.
+            // Both lines go to the sink in one `write_all`.
+            self.line.clear();
             if !self.utf8_carry.is_empty() {
-                let data = String::from_utf8_lossy(&self.utf8_carry).into_owned();
+                append_json_line(
+                    &mut self.line,
+                    &JsonDataEvent {
+                        data: &String::from_utf8_lossy(&self.utf8_carry),
+                        event: "output",
+                        v: 1,
+                    },
+                )?;
                 self.utf8_carry.clear();
-                let v = serde_json::json!({"v":1,"event":"output","data":data});
-                writeln!(sink, "{v}")?;
             }
-            let v = serde_json::json!({
-                "v":1,"event":"exit","code":code,"duration_ms":dur.as_millis() as u64
-            });
-            writeln!(sink, "{v}")?;
+            append_json_line(
+                &mut self.line,
+                &JsonExitEvent {
+                    code,
+                    duration_ms: dur.as_millis() as u64,
+                    event: "exit",
+                    v: 1,
+                },
+            )?;
+            sink.write_all(&self.line)?;
         }
         sink.flush()
     }
@@ -6123,6 +6217,134 @@ wait
         let s = String::from_utf8(sink).unwrap();
         assert!(s.contains("\"event\":\"start\""), "got: {s}");
         assert!(s.contains("\"cols\":80"));
+    }
+
+    /// The event types replaced `serde_json::Value` maps, whose keys serialize
+    /// in alphabetical order. Consumers may compare lines byte for byte, so
+    /// every event must keep the bytes those maps produced.
+    #[test]
+    fn json_events_keep_the_bytes_of_the_value_maps_they_replaced() {
+        fn line(value: serde_json::Value) -> String {
+            format!("{value}\n")
+        }
+
+        let mut outputter = Outputter::new(OutputMode::Json);
+        let mut sink = Vec::new();
+        let mut expected = String::new();
+
+        outputter.start(&mut sink, 120, 36).unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"start","cols":120,"rows":36}));
+        for text in [
+            "plain",
+            "quote \" backslash \\ slash /",
+            "\u{1b}[31mred\u{1b}[0m\r\n\t\u{7}\u{0}",
+            "é 中文 🦀 \u{FFFD} \u{2028}",
+        ] {
+            outputter.output(&mut sink, text.as_bytes()).unwrap();
+            expected += &line(serde_json::json!({"v":1,"event":"output","data":text}));
+            outputter.title(&mut sink, text).unwrap();
+            expected += &line(serde_json::json!({"v":1,"event":"title","data":text}));
+        }
+        outputter.title(&mut sink, "").unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"title","data":""}));
+
+        // Invalid bytes become U+FFFD.
+        outputter.output(&mut sink, b"a\xffb").unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"output","data":"a\u{FFFD}b"}));
+        // A codepoint split across reads is carried and joined.
+        let euro = "€".as_bytes();
+        outputter.output(&mut sink, &euro[..1]).unwrap();
+        outputter
+            .output(&mut sink, &[&euro[1..], b"!"].concat())
+            .unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"output","data":"€!"}));
+        // A carried prefix that the next read does not complete is invalid,
+        // even when that read is valid UTF-8 on its own.
+        outputter.output(&mut sink, &euro[..1]).unwrap();
+        outputter.output(&mut sink, b"abc").unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"output","data":"\u{FFFD}abc"}));
+        // A tail still carried at exit is flushed lossily before the exit event.
+        outputter.output(&mut sink, &euro[..2]).unwrap();
+        outputter
+            .finish(&mut sink, 124, Duration::from_millis(1500))
+            .unwrap();
+        expected += &line(serde_json::json!({"v":1,"event":"output","data":"\u{FFFD}"}));
+        expected += &line(serde_json::json!({"v":1,"event":"exit","code":124,"duration_ms":1500}));
+
+        assert_eq!(String::from_utf8(sink).unwrap(), expected);
+    }
+
+    /// The Unix sink is an unbuffered descriptor, so every `write` call is a
+    /// syscall and a point where a stop can cut a JSON line in half.
+    #[test]
+    fn each_json_event_reaches_stdout_in_one_write() {
+        #[derive(Default)]
+        struct CountingSink {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+
+        impl Write for CountingSink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut outputter = Outputter::new(OutputMode::Json);
+        let mut sink = CountingSink::default();
+        outputter.start(&mut sink, 80, 24).unwrap();
+        assert_eq!(sink.writes, 1, "start");
+        outputter
+            .output(&mut sink, "x\u{1b}[0m\"".repeat(1024).as_bytes())
+            .unwrap();
+        assert_eq!(sink.writes, 2, "output");
+        outputter.title(&mut sink, "title").unwrap();
+        assert_eq!(sink.writes, 3, "title");
+        outputter.output(&mut sink, &"€".as_bytes()[..1]).unwrap();
+        assert_eq!(sink.writes, 3, "a partial codepoint writes nothing yet");
+        outputter.finish(&mut sink, 0, Duration::ZERO).unwrap();
+        assert_eq!(
+            sink.writes, 4,
+            "the carried tail and the exit event share one write"
+        );
+        assert_eq!(String::from_utf8(sink.bytes).unwrap().lines().count(), 5);
+    }
+
+    /// A pipe may accept only part of a write. The rest must follow, so an
+    /// event is never left half written while the writer keeps running.
+    #[test]
+    fn a_json_event_is_completed_after_a_short_write() {
+        struct ShortWrites(Vec<u8>);
+
+        impl Write for ShortWrites {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let taken = bytes.len().min(7);
+                self.0.extend_from_slice(&bytes[..taken]);
+                Ok(taken)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut short = ShortWrites(Vec::new());
+        let mut whole = Vec::new();
+        for sink in [&mut short as &mut dyn Write, &mut whole] {
+            let mut outputter = Outputter::new(OutputMode::Json);
+            outputter.start(sink, 80, 24).unwrap();
+            outputter
+                .output(sink, "é \u{1b}[1m\"x\"".as_bytes())
+                .unwrap();
+            outputter.finish(sink, 0, Duration::ZERO).unwrap();
+        }
+        assert_eq!(short.0, whole);
     }
 
     struct ErrorSink {

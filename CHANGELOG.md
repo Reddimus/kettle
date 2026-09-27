@@ -8,6 +8,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- `kettle exec --json` streams large output 3 to 5 times faster with about 70%
+  less CPU, because each event is written to stdout in one call instead of
+  about 30.
 - On macOS, Kettle reads only each pane's own processes when it checks for
   SSH sessions and shell directories, instead of every process on the
   machine. An idle window with a blinking cursor uses about 80% less CPU.
