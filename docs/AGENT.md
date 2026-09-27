@@ -109,7 +109,10 @@ returns 74 when that teardown is verified (125 otherwise); JSON mode cannot
 promise a final exit event after its output sink has failed.
 `--cwd DIR` validates an explicit directory before PTY creation and never falls
 back to HOME: a missing path or regular file returns 125 without spawning the
-command. Omitting `--cwd` inherits Kettle's current directory.
+command. Omitting `--cwd` runs the command in Kettle's current directory, and
+MCP `kettle_run` without a `cwd` runs it in the MCP server's. If that directory
+no longer exists, the run returns 125 without spawning the command rather than
+falling back to HOME.
 
 On Windows, if a verified managed update is already staged but another Kettle
 window still holds the installed image, every argument-bearing invocation exits

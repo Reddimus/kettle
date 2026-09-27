@@ -954,14 +954,14 @@ fn run_exec_engine(
     opts.cols = opts.cols.clamp(1, u16::MAX);
     opts.rows = opts.rows.clamp(1, u16::MAX);
 
-    let cwd = match validate_exec_cwd(opts.cwd.as_deref()) {
+    let cwd = match resolve_exec_cwd(opts.cwd.as_deref()) {
         Ok(cwd) => cwd,
         Err(error) => {
             return startup_failure(
                 opts.mode,
                 capturing,
                 output,
-                format!("kettle exec: invalid --cwd: {error}"),
+                format!("kettle exec: {error}"),
             );
         }
     };
@@ -1000,7 +1000,7 @@ fn run_exec_engine(
     #[allow(unused_mut)] // mutated only by the Windows ConPTY close handshake
     let mut term = match Terminal::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         &opts.argv,
-        cwd,
+        Some(cwd.as_path()),
         // Modest scrollback — exec output streams out immediately, the grid is
         // only used for VT state + query answers.
         2000,
@@ -1023,9 +1023,10 @@ fn run_exec_engine(
             contain_process_tree: true,
             ..TerminalCapabilities::default()
         },
-        // An explicit automation cwd is a contract. Passing it to the OS even
-        // after the preflight closes the deletion race: spawn fails instead of
-        // silently falling back to HOME if the directory vanishes.
+        // The resolved cwd is a contract, whether given or inherited. This
+        // policy hands it to the OS with `require_cwd`, so a directory that
+        // vanishes after the preflight fails the spawn instead of falling
+        // back to HOME.
         WorkingDirectoryPolicy::RejectInvalidExplicit,
         tx,
         waker,
@@ -1700,19 +1701,32 @@ fn pty_completion_snapshot_is_current(
         && final_progress.pending_chunks == 0
 }
 
-fn validate_exec_cwd(cwd: Option<&Path>) -> Result<Option<&str>, String> {
-    let Some(cwd) = cwd else {
-        return Ok(None);
-    };
+/// Resolve the directory the child starts in.
+///
+/// Without `--cwd` the child runs where `kettle exec` was started, like any
+/// other command runner. That directory is passed to the PTY explicitly
+/// because the backend starts a child with no directory in `$HOME`, which is
+/// where every `kettle exec` and MCP `kettle_run` without a cwd used to run. A
+/// current directory that no longer exists fails the run rather than falling
+/// back to `$HOME`, a directory the caller never named.
+fn resolve_exec_cwd(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    match explicit {
+        Some(cwd) => usable_directory(cwd).map_err(|error| format!("invalid --cwd: {error}")),
+        None => std::env::current_dir()
+            .map_err(|error| error.to_string())
+            .and_then(|cwd| usable_directory(&cwd))
+            .map_err(|error| format!("cannot start in the current directory: {error}; pass --cwd")),
+    }
+}
+
+fn usable_directory(cwd: &Path) -> Result<PathBuf, String> {
     let metadata = cwd
         .metadata()
         .map_err(|error| format!("{}: {error}", cwd.display()))?;
     if !metadata.is_dir() {
         return Err(format!("{} is not a directory", cwd.display()));
     }
-    cwd.to_str()
-        .map(Some)
-        .ok_or_else(|| format!("{} is not valid UTF-8", cwd.display()))
+    Ok(cwd.to_owned())
 }
 
 /// Stop the command's owned process scope for timeout/cancellation.
@@ -6408,14 +6422,21 @@ wait
     fn explicit_exec_cwd_validation_rejects_missing_paths_and_files() {
         let temp = tempfile::tempdir().unwrap();
         let missing = temp.path().join("missing");
-        assert!(validate_exec_cwd(Some(&missing)).is_err());
+        assert!(resolve_exec_cwd(Some(&missing)).is_err());
 
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
-        assert!(validate_exec_cwd(Some(&file)).is_err());
+        assert!(resolve_exec_cwd(Some(&file)).is_err());
+        assert_eq!(resolve_exec_cwd(Some(temp.path())).unwrap(), temp.path());
+    }
+
+    #[test]
+    fn an_omitted_exec_cwd_resolves_to_the_current_directory() {
+        let current = std::env::current_dir().unwrap();
         assert_eq!(
-            validate_exec_cwd(Some(temp.path())).unwrap(),
-            temp.path().to_str()
+            resolve_exec_cwd(None).unwrap(),
+            current,
+            "the PTY backend would start a child with no directory in $HOME"
         );
     }
 

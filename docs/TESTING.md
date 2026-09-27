@@ -206,7 +206,9 @@ CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
 `portable-pty` on Linux, macOS, and Windows because each compiles its own
 descriptor or pipe code: Linux uses `close_range`, macOS lists open
 descriptors through `proc_pidinfo`, and only the Windows runner executes the
-`PIPE_NOWAIT` ConPTY regression. A local `just vendor-check` is therefore
+`PIPE_NOWAIT` ConPTY regression. The `require_cwd` opt-in has a Unix test that
+spawns into a missing directory and must fail, and a Windows test of the
+directory handed to `CreateProcessW`. A local `just vendor-check` is therefore
 evidence only for the platform it ran on.
 
 The vendored trees intentionally preserve their upstream release formatting so
@@ -1819,7 +1821,10 @@ wait: a stopped JSON run hands a slow but reading consumer its exit event
 before returning, a write blocked in the OS is reported once the grace ends,
 and a command still held on the lifecycle thread is reported without waiting. Another native test
 supplies a nonexistent explicit `--cwd`, requires exit 125, and proves a
-child-side marker was never created.
+child-side marker was never created. Two more pin the default: a child started
+without `--cwd` must report `kettle exec`'s own directory, not HOME, and on
+Unix a deleted current directory must return 125 before spawn. On Linux, a
+directory whose name is not UTF-8 must work as the starting directory.
 Backpressure regressions must cover both piped stdin and `/dev/null`: a
 query-flooding child that never reads replies must hit the bounded
 64-message reply queue promptly rather than defeating timeout. A separate

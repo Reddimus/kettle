@@ -1449,6 +1449,54 @@ impl Default for TerminalCapabilities {
     }
 }
 
+/// Point `cmd` at the child's working directory under `policy`.
+fn apply_working_directory(
+    cmd: &mut CommandBuilder,
+    cwd: Option<&std::path::Path>,
+    cwd_policy: WorkingDirectoryPolicy,
+) {
+    match cwd {
+        Some(d) if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {
+            // Without `require_cwd` portable-pty replaces a directory that
+            // vanished after the caller checked it with HOME.
+            cmd.cwd(d);
+            cmd.set_require_cwd(true);
+        }
+        None if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {}
+        Some(d) if d.is_dir() => cmd.cwd(d),
+        _ => {
+            // Recorded cwd is missing or no longer on disk (e.g.,
+            // user moved the repo between sessions, or the `-d` arg
+            // pointed at a since-deleted path). Fall back to the OS
+            // home directory. The previous version only checked
+            // `HOME`, which is unset on Windows by default — so
+            // Windows users with a stale recorded cwd silently
+            // ended up in whatever directory they happened to
+            // launch kettle from. `home_dir_fallback` probes
+            // `HOME` then `USERPROFILE` then `APPDATA`, in that
+            // order, so all three platforms (Linux/macOS/Windows)
+            // converge on the same "user-home" intent. Same shape
+            // as an earlier macOS universal2 packaging fix — Linux+macOS
+            // worked, Windows didn't, the env var probe order is
+            // the difference.
+            // Also gate the fallback on `is_dir`. The env
+            // var could be set to something that exists but isn't a
+            // directory (an exotic `HOME=/etc/passwd` misconfig, or
+            // a path that's a regular file / symlink to a file) —
+            // `cmd.cwd` would then hand the OS spawn an invalid
+            // target. Treating that the same as "no home" lets
+            // `portable_pty` inherit kettle's launch directory
+            // (the same recovery as when no env
+            // var was set or it was empty).
+            if let Some(home) = home_dir_fallback(|k| std::env::var_os(k))
+                && home.is_dir()
+            {
+                cmd.cwd(home);
+            }
+        }
+    }
+}
+
 /// How an explicitly supplied child working directory is handled.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum WorkingDirectoryPolicy {
@@ -6241,7 +6289,7 @@ impl Terminal {
     ) -> Result<Terminal> {
         Self::new_with_env_and_output_geometry_capabilities_and_cwd_policy(
             argv,
-            cwd,
+            cwd.map(std::path::Path::new),
             scrollback,
             scrollback_bytes,
             geometry,
@@ -6269,7 +6317,7 @@ impl Terminal {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_env_and_output_geometry_capabilities_and_cwd_policy(
         argv: &[String],
-        cwd: Option<&str>,
+        cwd: Option<&std::path::Path>,
         scrollback: usize,
         scrollback_bytes: usize,
         geometry: PtyGeometry,
@@ -6365,41 +6413,7 @@ impl Terminal {
             "WSLENV",
             child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
         );
-        match cwd {
-            Some(d) if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => cmd.cwd(d),
-            None if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {}
-            Some(d) if std::path::Path::new(d).is_dir() => cmd.cwd(d),
-            _ => {
-                // Recorded cwd is missing or no longer on disk (e.g.,
-                // user moved the repo between sessions, or the `-d` arg
-                // pointed at a since-deleted path). Fall back to the OS
-                // home directory. The previous version only checked
-                // `HOME`, which is unset on Windows by default — so
-                // Windows users with a stale recorded cwd silently
-                // ended up in whatever directory they happened to
-                // launch kettle from. `home_dir_fallback` probes
-                // `HOME` then `USERPROFILE` then `APPDATA`, in that
-                // order, so all three platforms (Linux/macOS/Windows)
-                // converge on the same "user-home" intent. Same shape
-                // as an earlier macOS universal2 packaging fix — Linux+macOS
-                // worked, Windows didn't, the env var probe order is
-                // the difference.
-                // Also gate the fallback on `is_dir`. The env
-                // var could be set to something that exists but isn't a
-                // directory (an exotic `HOME=/etc/passwd` misconfig, or
-                // a path that's a regular file / symlink to a file) —
-                // `cmd.cwd` would then hand the OS spawn an invalid
-                // target. Treating that the same as "no home" lets
-                // `portable_pty` inherit kettle's launch directory
-                // (the same recovery as when no env
-                // var was set or it was empty).
-                if let Some(home) = home_dir_fallback(|k| std::env::var_os(k))
-                    && home.is_dir()
-                {
-                    cmd.cwd(home);
-                }
-            }
-        }
+        apply_working_directory(&mut cmd, cwd, cwd_policy);
         #[cfg(unix)]
         let reader_poll_fd = pair
             .master
@@ -6481,7 +6495,11 @@ impl Terminal {
             startup_sync_pending: true,
             ..CompletionSlot::default()
         }));
-        let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(cwd.map(|s| s.to_string())));
+        // A launch directory that is not UTF-8 cannot seed the text cell; the
+        // OS-derived fallback below supplies the directory instead.
+        let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(
+            cwd.and_then(std::path::Path::to_str).map(str::to_owned),
+        ));
         // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
         // for native shells with no OSC 7/9;9). Starts empty.
         let native_cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -10903,6 +10921,42 @@ mod wslenv_tests {
         assert_eq!(
             child_wslenv("PARENT/p", &extra_env),
             "USER_BASE/p:EDITOR/u:COLORTERM/u:TERM_PROGRAM/u:TERM_PROGRAM_VERSION/u"
+        );
+    }
+}
+
+#[cfg(test)]
+mod working_directory_tests {
+    use super::{WorkingDirectoryPolicy, apply_working_directory};
+    use portable_pty::CommandBuilder;
+
+    /// Automation checks its directory before spawning, so the spawn must use
+    /// that directory or fail. Interactive panes keep their HOME recovery.
+    #[test]
+    fn only_automation_requires_its_directory_at_spawn() {
+        let missing = std::path::Path::new("/kettle-no-such-directory");
+        let mut automation = CommandBuilder::new("sh");
+        apply_working_directory(
+            &mut automation,
+            Some(missing),
+            WorkingDirectoryPolicy::RejectInvalidExplicit,
+        );
+        assert_eq!(
+            automation.get_cwd().map(|dir| dir.as_os_str()),
+            Some(missing.as_os_str())
+        );
+        assert!(automation.get_require_cwd());
+
+        let mut pane = CommandBuilder::new("sh");
+        apply_working_directory(
+            &mut pane,
+            Some(missing),
+            WorkingDirectoryPolicy::FallbackToHome,
+        );
+        assert!(!pane.get_require_cwd());
+        assert_ne!(
+            pane.get_cwd().map(|dir| dir.as_os_str()),
+            Some(missing.as_os_str())
         );
     }
 }

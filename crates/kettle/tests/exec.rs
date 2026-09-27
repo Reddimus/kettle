@@ -325,6 +325,142 @@ fn exec_rejects_an_explicit_missing_cwd_before_spawn() {
     assert!(!marker.exists(), "invalid --cwd still spawned the child");
 }
 
+const CWD_REPORT_ENV: &str = "KETTLE_EXEC_CWD_REPORT";
+
+#[test]
+fn cwd_report_helper() {
+    let Some(report) = std::env::var_os(CWD_REPORT_ENV) else {
+        return;
+    };
+    let cwd = std::env::current_dir().expect("read the child's directory");
+    // Raw bytes, so a directory whose name is not UTF-8 can be reported too.
+    std::fs::write(report, cwd.as_os_str().as_encoded_bytes()).expect("write cwd report");
+}
+
+/// Without `--cwd` the child must start where `kettle exec` was started. The
+/// PTY backend starts a child with no directory in `$HOME`, so every command
+/// used to run there, including MCP `kettle_run` calls without a `cwd`.
+#[test]
+fn exec_without_cwd_runs_in_the_current_directory() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create cwd-inheritance scratch directory");
+    let start = scratch.path().join("start");
+    std::fs::create_dir(&start).unwrap();
+    let report = scratch.path().join("child-cwd");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let output = kettle()
+        .current_dir(&start)
+        .args(["exec", "--timeout", "60", "--"])
+        .args([
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_report_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CWD_REPORT_ENV, &report)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run kettle exec");
+    let err = String::from_utf8_lossy(&output.stderr);
+    if no_pty(output.status.code().unwrap_or(-1), &err) {
+        eprintln!("skipping exec_without_cwd_runs_in_the_current_directory: no PTY");
+        return;
+    }
+    assert_eq!(output.status.code(), Some(0), "stderr={err:?}");
+    let child_cwd = std::fs::read_to_string(&report).expect("child reported its directory");
+    assert_eq!(
+        std::fs::canonicalize(&child_cwd).unwrap(),
+        std::fs::canonicalize(&start).unwrap(),
+        "the child did not start in kettle exec's directory"
+    );
+}
+
+/// Linux allows directory names that are not UTF-8, so exec must start there
+/// instead of rejecting the directory it was started in.
+#[cfg(target_os = "linux")]
+#[test]
+fn exec_runs_in_a_directory_whose_name_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create non-UTF-8 cwd scratch directory");
+    let start = scratch.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir(&start).unwrap();
+    let report = scratch.path().join("child-cwd");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let output = kettle()
+        .current_dir(&start)
+        .args(["exec", "--timeout", "60", "--"])
+        .args([
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_report_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CWD_REPORT_ENV, &report)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run kettle exec");
+    let err = String::from_utf8_lossy(&output.stderr);
+    if no_pty(output.status.code().unwrap_or(-1), &err) {
+        eprintln!("skipping exec_runs_in_a_directory_whose_name_is_not_utf8: no PTY");
+        return;
+    }
+    assert_eq!(output.status.code(), Some(0), "stderr={err:?}");
+    let reported = std::fs::read(&report).expect("child reported its directory");
+    assert_eq!(
+        reported,
+        std::fs::canonicalize(&start)
+            .unwrap()
+            .as_os_str()
+            .as_bytes(),
+        "the child did not start in kettle exec's directory"
+    );
+}
+
+/// A current directory that was deleted cannot be inherited. Falling back to
+/// `$HOME` would run the command somewhere the caller never named, so the run
+/// fails before spawning, as an invalid `--cwd` does.
+#[cfg(unix)]
+#[test]
+fn exec_in_a_deleted_directory_fails_before_spawn() {
+    let scratch = tempfile::tempdir_in(private_test_scratch_root())
+        .expect("create deleted-cwd scratch directory");
+    let doomed = scratch.path().join("doomed");
+    let marker = scratch.path().join("child-spawned");
+    let helper = std::env::current_exe().expect("resolve integration-test helper");
+    let output = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"mkdir "$1" && cd "$1" && rmdir "$1" && shift && exec "$@""#)
+        .arg("sh")
+        .arg(&doomed)
+        .arg(env!("CARGO_BIN_EXE_kettle"))
+        .args(["exec", "--timeout", "60", "--"])
+        .args([
+            helper.to_str().expect("integration-test path is UTF-8"),
+            "--exact",
+            "cwd_spawn_marker_helper",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CWD_SPAWN_MARKER_ENV, &marker)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run kettle exec from a deleted directory");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(125), "stderr={err:?}");
+    assert!(
+        err.contains("kettle exec: cannot start in the current directory") && err.contains("--cwd"),
+        "deleted-cwd diagnostic: {err:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "a deleted current directory still spawned the child"
+    );
+}
+
 /// `kettle exec` used to sleep a fixed 8 ms turn whenever its four-slot output
 /// queue was momentarily empty, so each turn moved at most four PTY reads:
 /// about 5 KiB on macOS and about 16 KiB on Linux. 32 MiB took about 90 s on

@@ -324,6 +324,11 @@ pub struct CommandBuilder {
     /// all descendants in a kill-on-close Job Object.
     #[cfg_attr(feature = "serde_support", serde(default))]
     contain_process_tree: bool,
+    /// Opt-in: hand `cwd` to the OS unchanged, so a directory that is missing
+    /// at spawn time fails the spawn instead of starting the child in the
+    /// home directory.
+    #[cfg_attr(feature = "serde_support", serde(default))]
+    require_cwd: bool,
 }
 
 impl CommandBuilder {
@@ -338,6 +343,7 @@ impl CommandBuilder {
             umask: None,
             controlling_tty: true,
             contain_process_tree: false,
+            require_cwd: false,
         }
     }
 
@@ -351,6 +357,7 @@ impl CommandBuilder {
             umask: None,
             controlling_tty: true,
             contain_process_tree: false,
+            require_cwd: false,
         }
     }
 
@@ -379,6 +386,18 @@ impl CommandBuilder {
         self.contain_process_tree
     }
 
+    /// Require the configured `cwd`. Without this, a `cwd` that is not a
+    /// directory at spawn time is replaced by the home directory, so a
+    /// directory deleted after the caller checked it silently relocates the
+    /// child. With it, the spawn fails instead.
+    pub fn set_require_cwd(&mut self, require: bool) {
+        self.require_cwd = require;
+    }
+
+    pub fn get_require_cwd(&self) -> bool {
+        self.require_cwd
+    }
+
     /// Create a new builder instance that will run some idea of a default
     /// program.  Such a builder will panic if `arg` is called on it.
     pub fn new_default_prog() -> Self {
@@ -390,6 +409,7 @@ impl CommandBuilder {
             umask: None,
             controlling_tty: true,
             contain_process_tree: false,
+            require_cwd: false,
         }
     }
 
@@ -630,11 +650,12 @@ impl CommandBuilder {
         use std::os::unix::process::CommandExt;
 
         let home = self.get_home_dir()?;
-        let dir: &OsStr = self
-            .cwd
-            .as_deref()
-            .filter(|dir| std::path::Path::new(dir).is_dir())
-            .unwrap_or(home.as_ref());
+        let dir: &OsStr = match self.cwd.as_deref() {
+            Some(dir) if self.require_cwd => dir,
+            cwd => cwd
+                .filter(|dir| std::path::Path::new(dir).is_dir())
+                .unwrap_or(home.as_ref()),
+        };
         let shell = self.get_shell();
 
         let mut cmd = if self.is_default_prog() {
@@ -772,7 +793,10 @@ impl CommandBuilder {
         let home: Option<&OsStr> = self
             .get_env("USERPROFILE")
             .filter(|path| Path::new(path).is_dir());
-        let cwd: Option<&OsStr> = self.cwd.as_deref().filter(|path| Path::new(path).is_dir());
+        let cwd: Option<&OsStr> = match self.cwd.as_deref() {
+            Some(cwd) if self.require_cwd => Some(cwd),
+            cwd => cwd.filter(|path| Path::new(path).is_dir()),
+        };
         let dir: Option<&OsStr> = cwd.or(home);
 
         dir.map(|dir| {
@@ -1054,6 +1078,61 @@ mod tests {
         let restored: CommandBuilder =
             serde_json::from_value(serialized).expect("round-trip contained builder");
         assert_eq!(restored, contained);
+    }
+
+    #[cfg(feature = "serde_support")]
+    #[test]
+    fn older_serialized_builder_does_not_require_its_cwd() {
+        let mut original = CommandBuilder::new("dummy");
+        original.env_clear();
+        let mut serialized = serde_json::to_value(&original).expect("serialize command builder");
+        serialized
+            .as_object_mut()
+            .expect("builder serializes as an object")
+            .remove("require_cwd");
+        let restored: CommandBuilder =
+            serde_json::from_value(serialized).expect("deserialize pre-require_cwd builder");
+        assert_eq!(restored, original);
+        assert!(!restored.get_require_cwd());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_required_cwd_is_passed_to_the_os_unchanged() {
+        let missing =
+            std::env::temp_dir().join(format!("portable-pty-missing-cwd-{}", std::process::id()));
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.cwd(&missing);
+        assert_ne!(
+            cmd.as_command().unwrap().get_current_dir(),
+            Some(missing.as_path()),
+            "without the opt-in a missing cwd is replaced by the home directory"
+        );
+        cmd.set_require_cwd(true);
+        assert_eq!(
+            cmd.as_command().unwrap().get_current_dir(),
+            Some(missing.as_path())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_required_cwd_is_passed_to_create_process_unchanged() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let missing =
+            std::env::temp_dir().join(format!("portable-pty-missing-cwd-{}", std::process::id()));
+        // `current_directory` returns the NUL-terminated form CreateProcessW takes.
+        let wide: Vec<u16> = missing.as_os_str().encode_wide().chain([0]).collect();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.cwd(&missing);
+        assert_ne!(
+            cmd.current_directory().as_deref(),
+            Some(wide.as_slice()),
+            "without the opt-in a missing cwd is replaced by the home directory"
+        );
+        cmd.set_require_cwd(true);
+        assert_eq!(cmd.current_directory().as_deref(), Some(wide.as_slice()));
     }
 
     /// A scratch directory that removes itself, so these tests need no
