@@ -1,7 +1,7 @@
 use std::cmp::max;
 use std::mem;
 use std::mem::MaybeUninit;
-use std::ops::{Index, IndexMut};
+use std::ops::{Index, IndexMut, Range};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -187,6 +187,57 @@ impl<T> Storage<T> {
 
         let len = self.inner.len();
         self.zero = (self.zero as isize + count + len as isize) as usize % len;
+    }
+
+    /// Rotate the visible lines in `lines` by `positions` as one slice move.
+    ///
+    /// With `up`, line `i` takes line `i + positions` and the top rows wrap to
+    /// the bottom; otherwise line `i` takes line `i - positions` and the bottom
+    /// rows wrap to the top. That is what a region scroll's row-by-row swaps
+    /// do, but one `memmove` instead of a wrapped index per row.
+    ///
+    /// Returns `false`, changing nothing, when the rows wrap around the end of
+    /// the ring buffer; the caller then swaps row by row.
+    #[inline]
+    pub fn rotate_lines(&mut self, lines: Range<Line>, positions: usize, up: bool) -> bool {
+        if lines.start >= lines.end {
+            return true;
+        }
+        debug_assert!(positions <= (lines.end - lines.start).0 as usize);
+
+        // Visible lines are stored bottom first, so the range runs from the
+        // row of `lines.end - 1` up to the row of `lines.start`.
+        let first = self.compute_index(lines.end - 1);
+        let last = self.compute_index(lines.start);
+        if first > last {
+            return false;
+        }
+        let rows = &mut self.inner[first..=last];
+        if up {
+            rows.rotate_right(positions);
+        } else {
+            rows.rotate_left(positions);
+        }
+        true
+    }
+
+    /// Move the ring to start at index 0 when the rows of `lines` wrap around
+    /// the end of the buffer, so [`Storage::rotate_lines`] can move them.
+    ///
+    /// Region scrolls do not move the ring, so the rows stay contiguous for
+    /// every later scroll of the same region. Moving every row costs more than
+    /// swapping the region once, so this does nothing when the buffer is more
+    /// than four times as long as the region, as with a long scrollback.
+    #[inline]
+    pub fn unwrap_lines(&mut self, lines: &Range<Line>) {
+        if lines.start >= lines.end {
+            return;
+        }
+        let count = (lines.end - lines.start).0 as usize;
+        let wraps = self.compute_index(lines.end - 1) > self.compute_index(lines.start);
+        if wraps && self.inner.len() <= 4 * count {
+            self.rezero();
+        }
     }
 
     /// Rotate all existing lines down in history.
