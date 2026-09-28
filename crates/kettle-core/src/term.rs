@@ -37,6 +37,8 @@ use crate::persistence::{AsyncFileWriter, AsyncWriterStatus};
 
 const PTY_READ_BUFFER_BYTES: usize = 64 * 1024;
 const PTY_PUMP_QUEUE_DEPTH: usize = 4;
+/// Pending [`Terminal::apply_local_output`] requests per pane.
+const LOCAL_OUTPUT_QUEUE_DEPTH: usize = 4;
 /// Maximum time to wait for EOF after the direct child exits.
 ///
 /// A daemonized descendant can retain the slave descriptor forever. The
@@ -3990,45 +3992,134 @@ fn forward_pty_buffer_or_drain(
     }
 }
 
-/// Receive one bounded pump chunk while enforcing the DEC 2026 deadline ahead
-/// of ready data, and flushing immediately when EOF makes a terminator impossible.
+/// One unit of parser work.
+enum ParserInput {
+    /// A pump read: source generation, buffer, and bytes read.
+    Pty(u64, Vec<u8>, usize),
+    /// Bytes Kettle parses without the child writing them. See
+    /// [`Terminal::apply_local_output`].
+    Local(Vec<u8>),
+}
+
+/// A local output request: the pump's read generation when it was made, and
+/// the bytes.
+type LocalOutput = (u64, Vec<u8>);
+
+/// Receive the next pump chunk or local output while enforcing the DEC 2026
+/// deadline ahead of ready data, and flushing immediately when EOF makes a
+/// terminator impossible. `None` means the pump has finished.
+///
+/// A local request waits in `pending_local` until the reader has handled
+/// every PTY read that finished before it was made (`handled_generation`), so
+/// output the terminal had already read cannot land after a Reset. At most
+/// the queued reads come first, so a flood cannot hold it back.
+fn receive_parser_input(
+    processor: &mut Processor,
+    raw_rx: &crossbeam_channel::Receiver<Option<(u64, Vec<u8>, usize)>>,
+    local_rx: &mut crossbeam_channel::Receiver<LocalOutput>,
+    pending_local: &mut Option<LocalOutput>,
+    handled_generation: u64,
+    context: &mut SyncFlushContext<'_>,
+) -> Option<ParserInput> {
+    enum Received {
+        Pty(Result<Option<(u64, Vec<u8>, usize)>, crossbeam_channel::RecvError>),
+        Local(Result<LocalOutput, crossbeam_channel::RecvError>),
+        Timeout,
+    }
+
+    loop {
+        let deadline = processor.sync_timeout().sync_timeout();
+        let now = std::time::Instant::now();
+        if deadline.is_some_and(|deadline| now >= deadline) {
+            force_sync_update_flush(processor, context);
+            continue;
+        }
+        if pending_local
+            .as_ref()
+            .is_some_and(|(generation, _)| *generation <= handled_generation)
+        {
+            let (_, bytes) = pending_local.take().expect("checked above");
+            return Some(ParserInput::Local(bytes));
+        }
+
+        // While a request waits for earlier reads, take only PTY chunks.
+        let waiting = crossbeam_channel::never();
+        let local_source = if pending_local.is_some() {
+            &waiting
+        } else {
+            &*local_rx
+        };
+        // Try both without blocking first. A flood keeps the PTY queue
+        // non-empty, and `select!` costs more per chunk than a plain receive.
+        let ready = match local_source.try_recv() {
+            Ok(request) => Some(Received::Local(Ok(request))),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Some(Received::Local(Err(crossbeam_channel::RecvError)))
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => match raw_rx.try_recv() {
+                Ok(chunk) => Some(Received::Pty(Ok(chunk))),
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    Some(Received::Pty(Err(crossbeam_channel::RecvError)))
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => None,
+            },
+        };
+        let received = match (ready, deadline) {
+            (Some(ready), _) => ready,
+            (None, Some(deadline)) => crossbeam_channel::select! {
+                recv(raw_rx) -> chunk => Received::Pty(chunk),
+                recv(local_source) -> request => Received::Local(request),
+                default(deadline.saturating_duration_since(now)) => Received::Timeout,
+            },
+            (None, None) => crossbeam_channel::select! {
+                recv(raw_rx) -> chunk => Received::Pty(chunk),
+                recv(local_source) -> request => Received::Local(request),
+            },
+        };
+        match received {
+            Received::Pty(Ok(chunk)) => {
+                // A ready chunk and the timeout can race at the wait boundary.
+                // The expired synchronized update takes priority so sustained
+                // output cannot starve its flush. EOF also proves no closing
+                // sequence can still arrive.
+                if deadline.is_some_and(|deadline| {
+                    chunk.is_none() || std::time::Instant::now() >= deadline
+                }) {
+                    force_sync_update_flush(processor, context);
+                }
+                return chunk
+                    .map(|(generation, buffer, n)| ParserInput::Pty(generation, buffer, n));
+            }
+            Received::Pty(Err(crossbeam_channel::RecvError)) => {
+                if deadline.is_some() {
+                    force_sync_update_flush(processor, context);
+                }
+                return None;
+            }
+            // Released at the top of the loop once its earlier reads are in.
+            Received::Local(Ok(request)) => *pending_local = Some(request),
+            // The `Terminal` is gone. A closed channel is always ready, so stop
+            // selecting on it and keep draining the child's output.
+            Received::Local(Err(crossbeam_channel::RecvError)) => {
+                *local_rx = crossbeam_channel::never();
+            }
+            Received::Timeout => force_sync_update_flush(processor, context),
+        }
+    }
+}
+
+/// The pump-only form of [`receive_parser_input`] used by tests that
+/// exercise the DEC 2026 deadline.
+#[cfg(test)]
 fn receive_pty_chunk(
     processor: &mut Processor,
     raw_rx: &crossbeam_channel::Receiver<Option<(u64, Vec<u8>, usize)>>,
     context: &mut SyncFlushContext<'_>,
 ) -> Option<(u64, Vec<u8>, usize)> {
-    loop {
-        match processor.sync_timeout().sync_timeout() {
-            Some(deadline) => {
-                let now = std::time::Instant::now();
-                if now >= deadline {
-                    force_sync_update_flush(processor, context);
-                    continue;
-                }
-
-                let wait = deadline.saturating_duration_since(now);
-                match raw_rx.recv_timeout(wait) {
-                    Ok(chunk) => {
-                        // A ready chunk and the timeout can race at the wait
-                        // boundary. The expired synchronized update takes
-                        // priority so sustained output cannot starve its flush.
-                        // EOF also proves no closing sequence can still arrive.
-                        if chunk.is_none() || std::time::Instant::now() >= deadline {
-                            force_sync_update_flush(processor, context);
-                        }
-                        return chunk;
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        force_sync_update_flush(processor, context);
-                    }
-                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                        force_sync_update_flush(processor, context);
-                        return None;
-                    }
-                }
-            }
-            None => return raw_rx.recv().ok().flatten(),
-        }
+    let mut local_rx = crossbeam_channel::never();
+    match receive_parser_input(processor, raw_rx, &mut local_rx, &mut None, 0, context)? {
+        ParserInput::Pty(generation, buffer, n) => Some((generation, buffer, n)),
+        ParserInput::Local(_) => unreachable!("the local channel never delivers"),
     }
 }
 
@@ -4289,6 +4380,8 @@ pub struct Terminal {
     #[cfg(windows)]
     pty_close: Option<Arc<ConPtyCloseState>>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// Requests for [`Terminal::apply_local_output`], parsed by the reader.
+    local_output: crossbeam_channel::Sender<LocalOutput>,
     /// Unix `O_NONBLOCK` is status on the shared PTY master open-file
     /// description, not on one duplicated descriptor. Permit exactly one
     /// `PtyStdin` lease so an older handle can never restore blocking mode
@@ -4630,6 +4723,139 @@ mod foreground_job_tests {
             "the raw child did not take the PTY foreground process group"
         );
         terminal.write(b"x");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod local_output_tests {
+    use super::*;
+
+    /// `/bin/cat` in cooked mode: the line discipline echoes every byte the
+    /// child receives, so input that reaches the child shows up on screen.
+    fn cat_terminal() -> Option<(Terminal, crossbeam_channel::Receiver<TermEvent>)> {
+        spawn_terminal(&["/bin/cat".to_string()])
+    }
+
+    fn spawn_terminal(
+        argv: &[String],
+    ) -> Option<(Terminal, crossbeam_channel::Receiver<TermEvent>)> {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = Arc::new(|| {});
+        match Terminal::new(
+            argv,
+            None,
+            100,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(terminal) => Some((terminal, rx)),
+            Err(error) => {
+                eprintln!("skipping local output test: no PTY ({error})");
+                None
+            }
+        }
+    }
+
+    fn wait_for(
+        terminal: &Terminal,
+        events: &crossbeam_channel::Receiver<TermEvent>,
+        done: impl Fn(&Terminal, &str) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = events.try_recv() {
+                if let TermEvent::PtyWrite(reply) = event {
+                    terminal.write(reply.as_bytes());
+                }
+            }
+            if let Some(screen) = terminal.screen_text(0)
+                && done(terminal, &screen.text)
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn a_local_reset_clears_the_terminal_and_never_reaches_the_child() {
+        let Some((terminal, events)) = cat_terminal() else {
+            return;
+        };
+        terminal.write(b"before\n");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("before")));
+
+        assert!(terminal.apply_local_output(b"\x1bc"));
+        assert!(
+            wait_for(&terminal, &events, |_, text| !text.contains("before")),
+            "RIS did not reset the terminal"
+        );
+
+        // Anything the child received would be echoed before this line.
+        terminal.write(b"after\n");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("after")));
+        let text = terminal.screen_text(0).expect("screen").text;
+        assert!(
+            !text.contains("^["),
+            "the reset reached the child: {text:?}"
+        );
+    }
+
+    /// The extractor holds a private completion OSC until its terminator and
+    /// counts `ESC` followers as payload. A local reset must not wait behind
+    /// a string the child left open, and must not print its payload.
+    #[test]
+    fn a_local_reset_applies_while_the_child_holds_a_private_string_open() {
+        let script = r"printf 'before\n\033]777;kettle-completion;partial'; exec sleep 10";
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let Some((terminal, events)) = spawn_terminal(&argv) else {
+            return;
+        };
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("before")));
+
+        assert!(terminal.apply_local_output(b"\x1bc"));
+        assert!(
+            wait_for(&terminal, &events, |_, text| !text.contains("before")),
+            "the unfinished private string swallowed the reset"
+        );
+        let text = terminal.screen_text(0).expect("screen").text;
+        assert!(
+            !text.contains("partial"),
+            "the private payload leaked: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_local_history_clear_keeps_the_screen() {
+        let Some((terminal, events)) = cat_terminal() else {
+            return;
+        };
+        let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
+        terminal.write(lines.as_bytes());
+        let history = |terminal: &Terminal| terminal.term.lock().unwrap().grid().history_size();
+        assert!(wait_for(&terminal, &events, |terminal, text| {
+            text.contains("line 39") && history(terminal) > 0
+        }));
+
+        assert!(terminal.apply_local_output(b"\x1b[3J"));
+        assert!(
+            wait_for(&terminal, &events, |terminal, _| history(terminal) == 0),
+            "CSI 3 J did not clear the scrollback"
+        );
+        let text = terminal.screen_text(0).expect("screen").text;
+        assert!(text.contains("line 39"), "the visible screen was cleared");
+        assert!(
+            !text.contains("^["),
+            "the clear reached the child: {text:?}"
+        );
     }
 }
 
@@ -6532,6 +6758,9 @@ impl Terminal {
             UnixPtyWatcher,
         )>(1);
 
+        let (local_output, local_output_rx) =
+            crossbeam_channel::bounded::<LocalOutput>(LOCAL_OUTPUT_QUEUE_DEPTH);
+
         let reader_thread = {
             let term = term.clone();
             let images = images.clone();
@@ -6791,6 +7020,9 @@ impl Terminal {
                     }
                     let mut image_pruner = ImageHistoryPruner::default();
                     let mut deferred_graphics = DeferredGraphicsJournal::new();
+                    let mut local_output_rx = local_output_rx;
+                    let mut pending_local = None;
+                    let mut handled_generation = 0;
                     loop {
                         // Bail out after the detached reaper completes the
                         // platform close and publishes `stop`.
@@ -6846,7 +7078,14 @@ impl Terminal {
                                 out_gen: &out_gen_reader,
                                 output_wake: &output_wake,
                             };
-                            receive_pty_chunk(&mut processor, &raw_rx, &mut sync_flush)
+                            receive_parser_input(
+                                &mut processor,
+                                &raw_rx,
+                                &mut local_output_rx,
+                                &mut pending_local,
+                                handled_generation,
+                                &mut sync_flush,
+                            )
                         };
                         match received {
                             None => {
@@ -6880,20 +7119,35 @@ impl Terminal {
                                 proxy.send_event_exit();
                                 break;
                             }
-                            Some((read_generation, buffer, n)) => {
+                            Some(input) => {
                                 if stop.load(Ordering::Relaxed) {
                                     break;
                                 }
+                                let (read_generation, buffer, n, from_child) = match input {
+                                    ParserInput::Pty(generation, buffer, n) => {
+                                        handled_generation = generation;
+                                        (generation, buffer, n, true)
+                                    }
+                                    ParserInput::Local(bytes) => {
+                                        let n = bytes.len();
+                                        (reader_progress.load().generation, bytes, n, false)
+                                    }
+                                };
                                 // Evaluated once per PTY read. If logging starts
                                 // while a bounded control string is in flight,
                                 // the extractor publishes the complete sequence
                                 // when its terminator arrives instead of a
-                                // malformed suffix.
+                                // malformed suffix. Local output never reaches
+                                // the session log or the recorder, which hold
+                                // what the child wrote.
                                 let tap_raw = log_active
                                     .load(std::sync::atomic::Ordering::Relaxed)
                                     || output_tx.is_some();
-                                let raw_output =
-                                    private_output_filter.feed(&buffer[..n], tap_raw);
+                                let raw_output = if from_child {
+                                    private_output_filter.feed(&buffer[..n], tap_raw)
+                                } else {
+                                    Vec::new()
+                                };
                                 if !raw_output.is_empty() {
                                     // Publish at most once per PTY read. OSC-heavy output can
                                     // produce thousands of parser chunks, while the logger and
@@ -6925,8 +7179,11 @@ impl Terminal {
                                 }
                                 // Raw consumers are handled once above; parser chunks now serve
                                 // only the terminal and semantic side channels.
+                                // Local output skips the extractor; see below.
+                                let child_bytes: &[u8] =
+                                    if from_child { &buffer[..n] } else { &[] };
                                 extractor.set_raw_tap(false);
-                                extractor.feed_with(&buffer[..n], |extractor, chunk| {
+                                extractor.feed_with(child_bytes, |extractor, chunk| {
                                     let chunk = match chunk {
                                         Chunk::Raw(_) => return,
                                         chunk => chunk,
@@ -7531,8 +7788,60 @@ impl Terminal {
                                         }
                                     }
                                 });
+                                // The extractor may hold an unfinished control
+                                // string from the child, such as a private
+                                // completion OSC, which would swallow local
+                                // bytes. The VT parser never sees a string the
+                                // extractor holds, so parsing local output there
+                                // applies it at once and leaves the child's
+                                // string captured.
+                                if !from_child {
+                                    let _graphics_guard = graphics_gate
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    let generation = graphics_reflow_generation
+                                        .load(std::sync::atomic::Ordering::Acquire);
+                                    if generation != observed_reflow_generation {
+                                        clear_reflowed_regular_placements(
+                                            &images,
+                                            &relatives,
+                                            &inactive_graphics,
+                                        );
+                                        extractor.clear_reflowed_regular_placements();
+                                        observed_reflow_generation = generation;
+                                    }
+                                    let mut sync_graphics = SyncGraphicsContext {
+                                        active_alternate: &mut active_alternate,
+                                        deferred: &mut deferred_graphics,
+                                        registries: GraphicsRegistries {
+                                            inactive: &inactive_graphics,
+                                            images: &images,
+                                            virtuals: &virtuals,
+                                            anims: &anims,
+                                            relatives: &relatives,
+                                        },
+                                        actions: GraphicsActionContext {
+                                            images: &images,
+                                            virtuals: &virtuals,
+                                            anims: &anims,
+                                            relatives: &relatives,
+                                            geometry: &shared_geometry,
+                                        },
+                                        extractor: &mut extractor,
+                                    };
+                                    advance_terminal_bytes(
+                                        &mut processor,
+                                        &term,
+                                        &buffer[..n],
+                                        &mut sync_graphics,
+                                    );
+                                }
                                 image_pruner.prune_if_changed(&term, &images);
-                                let _ = recycle_tx.try_send(buffer);
+                                // Local buffers are not the pump's 64 KiB read
+                                // buffers and were never counted as reads.
+                                if from_child {
+                                    let _ = recycle_tx.try_send(buffer);
+                                }
                                 // Publish every grid and parser-sidechannel
                                 // mutation through one generation-ordered,
                                 // per-pane-gated wake. Graphics, progress, and
@@ -7545,7 +7854,9 @@ impl Terminal {
                                     &out_gen_reader,
                                     &output_wake,
                                 );
-                                reader_progress.mark_chunk_handled();
+                                if from_child {
+                                    reader_progress.mark_chunk_handled();
+                                }
                             }
                         }
                     }
@@ -7597,6 +7908,7 @@ impl Terminal {
             #[cfg(windows)]
             pty_close: None,
             writer: Arc::new(Mutex::new(writer)),
+            local_output,
             #[cfg(unix)]
             stdin_lease_phase: Arc::new(Mutex::new(PtyStdinLeasePhase::Available)),
             child_pid,
@@ -7649,6 +7961,25 @@ impl Terminal {
     /// `Acquire`.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Parse `bytes` as terminal output without sending them to the child.
+    ///
+    /// Reset (RIS) and Clear Scrollback (CSI 3 J) change the terminal, not
+    /// the program in it. The reader parses these bytes once it has handled
+    /// every PTY read that finished before this call; a read finishing at the
+    /// same moment may land on either side, like output arriving just after
+    /// it. Graphics, synchronized output and redraws behave as if the child had
+    /// written them. They skip the extractor, so a control string the child
+    /// left unfinished cannot absorb them. They are not added to the session
+    /// log or the recording.
+    /// Returns `false` when the reader has stopped or already holds
+    /// `LOCAL_OUTPUT_QUEUE_DEPTH` requests.
+    pub fn apply_local_output(&self, bytes: &[u8]) -> bool {
+        let generation = self.pty_read_progress.load().generation;
+        self.local_output
+            .try_send((generation, bytes.to_vec()))
+            .is_ok()
     }
 
     /// Update whether DA1 may advertise OSC 52 clipboard writes.
@@ -11005,7 +11336,7 @@ mod home_dir_tests {
     fn session_log_raw_publisher_only_uses_bounded_worker_admission() {
         let source = super::production_source();
         let publisher = source
-            .split("private_output_filter.feed(&buffer[..n], tap_raw);")
+            .split("private_output_filter.feed(&buffer[..n], tap_raw)")
             .nth(1)
             .and_then(|body| body.split("extractor.set_raw_tap(false);").next())
             .expect("per-read raw-output publisher");
@@ -13662,7 +13993,8 @@ mod teardown_tests {
         let source = super::production_source();
         assert!(!source.contains("buffer.truncate(n)"));
         assert!(source.contains("private_output_filter.feed(&buffer[..n], tap_raw)"));
-        assert!(source.contains("extractor.feed_with(&buffer[..n]"));
+        assert!(source.contains("if from_child { &buffer[..n] } else { &[] }"));
+        assert!(source.contains("extractor.feed_with(child_bytes"));
     }
 
     /// Regression guard (runtime). Dropping a `Terminal` whose
@@ -15210,8 +15542,9 @@ mod sync_update_flush_guard {
     use alacritty_terminal::vte::ansi::Processor;
 
     use super::{
-        GraphicsEvent, ImageHistoryPruner, PTY_PUMP_QUEUE_DEPTH, SharedTerm, SyncFlushContext,
-        SyncGraphicsDispatch, publish_output_if_ready, receive_pty_chunk,
+        GraphicsEvent, ImageHistoryPruner, LOCAL_OUTPUT_QUEUE_DEPTH, PTY_PUMP_QUEUE_DEPTH,
+        ParserInput, SharedTerm, SyncFlushContext, SyncGraphicsDispatch, publish_output_if_ready,
+        receive_parser_input, receive_pty_chunk,
     };
     use crate::event::OutputWakeGate;
     use crate::{EventProxy, Waker};
@@ -15424,6 +15757,68 @@ mod sync_update_flush_guard {
             term.lock().unwrap().grid()[Point::new(Line(1), Column(2))].c,
             'f'
         );
+    }
+
+    #[test]
+    fn local_output_waits_for_earlier_reads_and_a_closed_channel_is_skipped() {
+        let term = shared_term();
+        let mut processor: Processor = Processor::new();
+        let generation = AtomicU64::new(0);
+        let output_wake = OutputWakeGate::new(Arc::new(|| {}));
+        let (images, mut image_pruner) = image_pruning_fixture();
+        let graphics_gate = Mutex::new(());
+        let mut on_graphics = ignore_sync_graphics;
+        let mut sync_flush = SyncFlushContext {
+            term: &term,
+            images: &images,
+            graphics_gate: &graphics_gate,
+            image_pruner: &mut image_pruner,
+            on_graphics: &mut on_graphics,
+            out_gen: &generation,
+            output_wake: &output_wake,
+        };
+        let (raw_tx, raw_rx) = crossbeam_channel::bounded(PTY_PUMP_QUEUE_DEPTH);
+        let (local_tx, mut local_rx) = crossbeam_channel::bounded(LOCAL_OUTPUT_QUEUE_DEPTH);
+        let mut pending = None;
+        let mut receive = |pending: &mut Option<_>, local_rx: &mut _, handled| {
+            receive_parser_input(
+                &mut processor,
+                &raw_rx,
+                local_rx,
+                pending,
+                handled,
+                &mut sync_flush,
+            )
+        };
+
+        // Read 3 finished before the request, so it comes first even though
+        // the request is also ready. `select!` picks at random, so repeat.
+        for _ in 0..16 {
+            raw_tx.send(Some((3, b"queued".to_vec(), 6))).unwrap();
+            local_tx.send((3, b"\x1bc".to_vec())).unwrap();
+            let first = receive(&mut pending, &mut local_rx, 2);
+            assert!(matches!(first, Some(ParserInput::Pty(3, _, 6))));
+            let second = receive(&mut pending, &mut local_rx, 3);
+            assert!(matches!(second, Some(ParserInput::Local(bytes)) if bytes == b"\x1bc"));
+        }
+
+        // A request whose reads are all handled goes straight through.
+        local_tx.send((3, b"\x1b[3J".to_vec())).unwrap();
+        assert!(matches!(
+            receive(&mut pending, &mut local_rx, 3),
+            Some(ParserInput::Local(bytes)) if bytes == b"\x1b[3J"
+        ));
+
+        // Dropping the `Terminal` closes the local channel. The child's output
+        // must keep arriving, and EOF must still end the reader.
+        drop(local_tx);
+        raw_tx.send(Some((4, b"tail".to_vec(), 4))).unwrap();
+        assert!(matches!(
+            receive(&mut pending, &mut local_rx, 3),
+            Some(ParserInput::Pty(4, _, 4))
+        ));
+        raw_tx.send(None).unwrap();
+        assert!(receive(&mut pending, &mut local_rx, 4).is_none());
     }
 
     #[test]

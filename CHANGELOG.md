@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- Reset, Clear Scrollback, and Reset and Clear now act on the terminal.
+  They were typing `ESC c` or `CSI 3 J` into the running program, so in zsh
+  or bash Reset capitalized a word instead of resetting. Like Terminator's,
+  they also work on a read-only pane, since nothing reaches the program.
+
 ## [4.7.0] — 2026-09-28
 
 ### Changed

@@ -572,7 +572,9 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 `0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `y` yanks it to
 the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
-**Misc**: `reset` (RIS — full terminal reset including engine state),
+**Misc**: `reset` (RIS — full terminal reset including engine state;
+like `clear_history`, it acts on Kettle's terminal, not the program in it,
+so it also works on a read-only pane),
 `reload_config`, `detach_tab` (alias of `move_tab_to_new_window`),
 `text:BYTES` (send literal text to the focused pane, as though typed — so
 while broadcast is on it reaches every pane in scope, exactly as typing the
