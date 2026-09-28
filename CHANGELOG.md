@@ -6,8 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.7.0] — 2026-09-28
+
 ### Changed
 
+- Scrolling inside a scroll region, as `vim`, `less` and status-line TUIs
+  do, is up to twice as fast. The region's rows move in one step instead
+  of one row at a time.
 - An idle window wakes about 0.3 times a second instead of 1.3. The
   event-loop watchdog now sleeps while the loop is idle instead of checking
   every second.
