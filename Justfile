@@ -879,7 +879,8 @@ alt-arrow-zoom-smoke:
 
 # Prove the grid stays mouse-interactive under an open search bar: drag
 # selection, bar-control clicks, the bar's Copy chord, a right-click menu that
-# leaves the bar open, focus-following across splits, and Esc.
+# leaves the bar open, focus-following across splits, Kettle's shortcuts while
+# the bar is open, and Esc.
 # Captures geometry/screen JSON under target/diagnostics/search-selection-*.
 [unix]
 search-selection-smoke:

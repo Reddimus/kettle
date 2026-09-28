@@ -618,8 +618,11 @@ command palette (fuzzy actions)
 open the scrollback search bar. Patterns use strict Rust regex
 syntax and are capped at 4096 UTF-8 bytes. The bar provides Previous, Next,
 Wrap, Case (Smart / Match / Ignore), Invert, and Close. Enter / Shift+Enter
-search in the default / opposite direction; F3 / Shift+F3 always search next /
-previous. Invalid patterns are reported, not treated as literals. The status
+search in the default / opposite direction; F3 / Shift+F3 and Ctrl+G /
+Ctrl+Shift+G always search next / previous. Ctrl+Z / Ctrl+Shift+Z undo and
+redo an edit to the query, and Kettle's other shortcuts keep working while the
+bar is open. A pattern that fails to parse is searched as literal text. The
+status
 does not precompute a global match count. Valid patterns that exceed the
 512-KiB NFA ceiling report
 .BR Pattern " " too " " complex ;

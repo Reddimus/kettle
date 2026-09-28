@@ -14,6 +14,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The right-click menu adds rows from Ghostty's menu: Split Left, Split Up,
   Close Tab, New Window, Close Window, Set Tab Title…, Set Pane Title…, and
   Reset Terminal.
+- In the search bar, `Cmd+G` / `Shift+Cmd+G` (`Ctrl+G` / `Ctrl+Shift+G` on
+  Linux) step to the next or previous match, and the find shortcut pressed
+  again selects the query. Buttons show hover and pressed states.
+- The search query has undo and redo (`Cmd+Z` / `Shift+Cmd+Z`, or `Ctrl+Z` /
+  `Ctrl+Shift+Z` on Linux). On macOS, `Cmd+Backspace` / `Cmd+Delete` delete to
+  the ends of the query, `Ctrl+A` / `E` / `B` / `F` / `D` / `H` work as in any
+  macOS text field, and `Ctrl+K` deletes to the end when `vim-menu-nav` is off.
 
 ### Changed
 
@@ -25,6 +32,28 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Kettle's shortcuts work while the search bar is open. A new tab, font zoom,
+  tab switching, split focus and the rest did nothing until the bar closed.
+  On Linux, `Ctrl+Shift+A` and `Ctrl+Shift+X` split and zoom again instead of
+  selecting or cutting the query, and `Alt+1`…`9` switch tabs instead of
+  typing a digit.
+- The search bar's text is centered in its buttons and editor. Labels sat
+  5 px low and flush against the left edge of each button, and the query's
+  characters jumped a column whenever the caret moved or focus changed.
+- Clicking a search button no longer takes focus from the query, and a
+  button now acts on release. Wrap and Invert keep the current match instead
+  of jumping back to where search opened, and Case searches again from it.
+- CJK and emoji in a search query no longer push the controls after the
+  editor out of place, and the caret and selection now sit on the glyphs.
+- Space on a focused search button presses it instead of typing a space, and
+  a focused button's label is readable on the accent color. Holding Space or
+  Enter on a toggle or Close acts once, and the held key no longer types into
+  the terminal once the bar closes.
+- The search status no longer flashes `Searching…` on every keystroke of a
+  query that has no match.
+- A search that restarted after output stopped could stay at `Searching…`
+  with nothing running when no match was on screen. It now goes on to search
+  the rest of the history.
 - Reset, Clear Scrollback, and Reset and Clear now act on the terminal.
   They were typing `ESC c` or `CSI 3 J` into the running program, so in zsh
   or bash Reset capitalized a word instead of resetting. Like Terminator's,

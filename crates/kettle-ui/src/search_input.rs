@@ -28,6 +28,10 @@ pub(crate) struct SearchState {
     pub(crate) scan_token: Option<kettle_core::SearchScanToken>,
     pub(crate) status: kettle_render::SearchStatus,
     pub(crate) focused_control: kettle_render::SearchControl,
+    /// Control under the pointer, for the hover fill.
+    pub(crate) hovered_control: Option<kettle_render::SearchControl>,
+    /// Button the pointer pressed; it activates on release over the same one.
+    pub(crate) pressed_control: Option<kettle_render::SearchControl>,
     pub(crate) dragging_editor: bool,
     pub(crate) wrap: bool,
     pub(crate) case_mode: kettle_config::SearchCaseSensitivity,
@@ -37,7 +41,22 @@ pub(crate) struct SearchState {
     pub(crate) quiet_retry_pending: bool,
     pub(crate) pre_open_display_offset: Option<usize>,
     pub(crate) background: Option<BackgroundSearch>,
+    /// When the current `Searching` status began, and what the bar shows until
+    /// it says `Searching…` (see `searching_label_at`).
+    pub(crate) searching_since: Option<std::time::Instant>,
+    pub(crate) status_before_search: Option<kettle_render::SearchStatus>,
+    /// The end of the typing pause the full scan waits for. Only edits set it;
+    /// output and retries do not.
+    pub(crate) typing_pause_until: Option<std::time::Instant>,
+    /// A wake armed for the moment the bar starts saying `Searching…`.
+    pub(crate) searching_label_wake: Option<std::time::Instant>,
 }
+
+/// How long the full scan waits for typing to pause.
+pub(crate) const TYPING_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long a scan may run before the bar says `Searching…`.
+pub(crate) const SEARCHING_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl Default for SearchState {
     fn default() -> Self {
@@ -59,6 +78,8 @@ impl Default for SearchState {
             scan_token: None,
             status: kettle_render::SearchStatus::Typing,
             focused_control: kettle_render::SearchControl::Editor,
+            hovered_control: None,
+            pressed_control: None,
             dragging_editor: false,
             wrap: true,
             case_mode: kettle_config::SearchCaseSensitivity::Smart,
@@ -68,6 +89,10 @@ impl Default for SearchState {
             quiet_retry_pending: false,
             pre_open_display_offset: None,
             background: None,
+            searching_since: None,
+            status_before_search: None,
+            typing_pause_until: None,
+            searching_label_wake: None,
         }
     }
 }
@@ -77,16 +102,22 @@ impl SearchState {
         self.editor.text()
     }
 
+    /// Whether a gesture that began in the bar owns the pointer: an editor
+    /// drag, or a button held down. Motion and the release go to the bar.
+    pub(crate) fn pointer_captured(&self) -> bool {
+        self.dragging_editor || self.pressed_control.is_some()
+    }
+
     pub(crate) fn note_edit(&mut self, now: std::time::Instant) {
         self.revision = self.revision.wrapping_add(1);
-        self.unlimited_retry_at =
-            (!self.editor.text().is_empty()).then_some(now + std::time::Duration::from_millis(500));
+        self.unlimited_retry_at = (!self.editor.text().is_empty()).then_some(now + TYPING_PAUSE);
         self.quiet_retry_pending = false;
-        self.status = if self.editor.text().is_empty() {
+        let status = if self.editor.text().is_empty() {
             kettle_render::SearchStatus::Typing
         } else {
             kettle_render::SearchStatus::Searching
         };
+        self.start_typing_pause(status, now);
         self.compiled = None;
         self.compiled_revision = None;
         self.focused = None;
@@ -120,14 +151,80 @@ impl SearchState {
         self.visible_key = None;
         self.background = None;
         self.quiet_retry_pending = false;
-        self.unlimited_retry_at = (!compile_error && !self.editor.text().is_empty())
-            .then_some(now + std::time::Duration::from_millis(500));
+        self.unlimited_retry_at =
+            (!compile_error && !self.editor.text().is_empty()).then_some(now + TYPING_PAUSE);
         if !compile_error {
-            self.status = if self.editor.text().is_empty() {
+            let status = if self.editor.text().is_empty() {
                 kettle_render::SearchStatus::Typing
             } else {
                 kettle_render::SearchStatus::Searching
             };
+            self.start_typing_pause(status, now);
+        }
+    }
+
+    /// Set the status after an edit, which defers the full scan by the
+    /// typing pause. Once the bar says `Searching…`, a further edit leaves it
+    /// saying so instead of going back to an older status.
+    fn start_typing_pause(&mut self, status: kettle_render::SearchStatus, now: std::time::Instant) {
+        let label_shown = self.searching_label_at().is_some_and(|at| now >= at);
+        self.set_status_at(status, now);
+        if !label_shown && status == kettle_render::SearchStatus::Searching {
+            self.typing_pause_until = Some(now + TYPING_PAUSE);
+        }
+    }
+
+    /// Set the status, remembering when a search began and what to show
+    /// until it says `Searching…`. A scan that re-enters `Searching` keeps its
+    /// start time, so a genuinely slow search still says so.
+    pub(crate) fn set_status_at(
+        &mut self,
+        status: kettle_render::SearchStatus,
+        now: std::time::Instant,
+    ) {
+        if status == kettle_render::SearchStatus::Searching
+            && self.status != kettle_render::SearchStatus::Searching
+        {
+            // The status stays `Searching` only while the scan near the
+            // viewport has found nothing, so `No match` still holds. Every
+            // other status described the old query or a step through it, and
+            // the slot stays blank instead (`Match` paints no label).
+            self.status_before_search = Some(match self.status {
+                kettle_render::SearchStatus::NoMatch => kettle_render::SearchStatus::NoMatch,
+                _ => kettle_render::SearchStatus::Match,
+            });
+            self.searching_since = Some(now);
+        }
+        self.status = status;
+    }
+
+    /// When the bar starts saying `Searching…`: once the scan has run for
+    /// the grace period, not counting the typing pause before it starts.
+    /// Output and retries never extend it. `None` unless searching.
+    pub(crate) fn searching_label_at(&self) -> Option<std::time::Instant> {
+        if self.status != kettle_render::SearchStatus::Searching {
+            return None;
+        }
+        let since = self.searching_since?;
+        let started = self
+            .typing_pause_until
+            .map_or(since, |until| until.max(since));
+        Some(started + SEARCHING_GRACE)
+    }
+
+    /// The status the bar paints at `now`, given the status automation
+    /// reports. A search that finishes within the grace period never flashes
+    /// `Searching…`.
+    pub(crate) fn painted_status(
+        &self,
+        status: kettle_render::SearchStatus,
+        now: std::time::Instant,
+    ) -> kettle_render::SearchStatus {
+        match self.searching_label_at() {
+            Some(at) if status == kettle_render::SearchStatus::Searching && now < at => self
+                .status_before_search
+                .unwrap_or(kettle_render::SearchStatus::Match),
+            _ => status,
         }
     }
 }
@@ -247,26 +344,72 @@ pub(crate) struct EditOutcome {
     pub(crate) truncated: bool,
 }
 
+/// The grapheme boundary at or before `byte`.
+fn grapheme_boundary_at_or_before(text: &str, byte: usize) -> usize {
+    if byte >= text.len() {
+        return text.len();
+    }
+    let mut boundary = 0;
+    for (start, _) in text.grapheme_indices(true) {
+        if start > byte {
+            break;
+        }
+        boundary = start;
+    }
+    boundary
+}
+
+/// The query byte of the painted caret position nearest `x`, from the
+/// renderer's (query byte, window x) stops.
+pub(crate) fn nearest_stop_byte(stops: &[(usize, f32)], x: f32) -> Option<usize> {
+    stops
+        .iter()
+        .min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs()))
+        .map(|stop| stop.0)
+}
+
+/// The first query byte of the character painted under `x`: the cluster that
+/// covers it, else the nearest one.
+pub(crate) fn cluster_byte_at(
+    clusters: &[kettle_render::SearchEditorCluster],
+    x: f32,
+) -> Option<usize> {
+    let distance = |cluster: &kettle_render::SearchEditorCluster| {
+        (cluster.left - x).max(x - cluster.right).max(0.0)
+    };
+    clusters
+        .iter()
+        .find(|cluster| cluster.left <= x && x < cluster.right)
+        .or_else(|| {
+            clusters
+                .iter()
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        })
+        .map(|cluster| cluster.start)
+}
+
 /// Map a signed editor-cell offset to a query display column.
 ///
-/// Cell zero is the opening bracket and cell one is the first visible query column. Keeping the
-/// offset signed lets a drag beyond the left edge walk backward through a scrolled query.
-pub(crate) fn pointer_query_column(
-    horizontal_scroll: usize,
-    relative_cell: isize,
-    cursor_column: usize,
-    caret_visible: bool,
-) -> usize {
-    let column = if relative_cell >= 1 {
+/// Cell zero is the editor's left padding and cell one is the first visible query column. Keeping
+/// the offset signed lets a drag beyond the left edge walk backward through a scrolled query. The
+/// caret is painted between cells, so it never occupies a column of its own.
+pub(crate) fn pointer_query_column(horizontal_scroll: usize, relative_cell: isize) -> usize {
+    if relative_cell >= 1 {
         horizontal_scroll.saturating_add(relative_cell.saturating_sub(1) as usize)
     } else {
         horizontal_scroll.saturating_sub(1isize.saturating_sub(relative_cell) as usize)
-    };
-    if caret_visible && column > cursor_column {
-        column - 1
-    } else {
-        column
     }
+}
+
+/// How many edits the query can undo.
+const UNDO_LIMIT: usize = 100;
+
+/// The query and caret as they were before an edit.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct EditorSnapshot {
+    text: String,
+    cursor: usize,
+    anchor: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -275,13 +418,109 @@ pub(crate) struct SearchEditor {
     cursor: usize,
     anchor: Option<usize>,
     horizontal_scroll: usize,
+    /// Earlier states, newest last, and the states undone since the last
+    /// edit.
+    undo: Vec<EditorSnapshot>,
+    redo: Vec<EditorSnapshot>,
+    /// The run of edits the next one can join, so typed text or a held
+    /// Backspace undoes in one step, as in a native text field.
+    run: Option<EditRun>,
+}
+
+/// A run of like edits at a caret that has not moved.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditRun {
+    Typing,
+    DeletingBack,
+    DeletingForward,
+}
+
+/// A place in the query found from a pointer: a byte from the painted glyphs,
+/// or a display column counted in cells where nothing is painted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueryPoint {
+    Byte(usize),
+    Column(usize),
+}
+
+impl QueryPoint {
+    /// A key that is equal for two presses on the same spot, for counting
+    /// double and triple clicks.
+    pub(crate) fn click_key(self) -> usize {
+        match self {
+            Self::Byte(byte) => byte,
+            Self::Column(column) => column,
+        }
+    }
+}
+
+/// Display width as the editor counts it: the sum of its graphemes' widths.
+/// Paint and scrolling count the same way, so a column means one thing.
+pub(crate) fn display_width(text: &str) -> usize {
+    text.graphemes(true).map(|grapheme| grapheme.width()).sum()
 }
 
 impl SearchEditor {
     pub(crate) fn from_text(text: String, max_bytes: usize) -> Self {
         let mut editor = Self::default();
         editor.replace_all(&text, max_bytes);
+        editor.undo.clear();
         editor
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            anchor: self.anchor,
+        }
+    }
+
+    /// Record `before` as an undo step when an edit changed the query's text.
+    /// An edit that continues the last one's `run` joins its step. Returns
+    /// whether the text changed.
+    fn edited(&mut self, before: EditorSnapshot, run: Option<EditRun>) -> bool {
+        if before.text == self.text {
+            return false;
+        }
+        if run.is_none() || run != self.run {
+            self.undo.push(before);
+            if self.undo.len() > UNDO_LIMIT {
+                self.undo.remove(0);
+            }
+        }
+        self.redo.clear();
+        self.run = run;
+        true
+    }
+
+    /// Put back `snapshot`. Returns whether the text changed, which is when
+    /// the search has to run again.
+    fn restore(&mut self, snapshot: EditorSnapshot) -> bool {
+        let changed = snapshot.text != self.text;
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor;
+        self.anchor = snapshot.anchor;
+        self.run = None;
+        changed
+    }
+
+    /// Undo the last edit. Returns whether the text changed.
+    pub(crate) fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo.pop() else {
+            return false;
+        };
+        self.redo.push(self.snapshot());
+        self.restore(previous)
+    }
+
+    /// Redo the last undone edit. Returns whether the text changed.
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else {
+            return false;
+        };
+        self.undo.push(self.snapshot());
+        self.restore(next)
     }
 
     pub(crate) fn text(&self) -> &str {
@@ -318,11 +557,34 @@ impl SearchEditor {
             return outcome;
         }
         outcome.changed = replacement.text != self.text;
-        *self = replacement;
+        let before = self.snapshot();
+        self.text = replacement.text;
+        self.cursor = replacement.cursor;
+        self.anchor = None;
+        self.horizontal_scroll = 0;
+        self.edited(before, None);
+        self.run = None;
         outcome
     }
 
+    /// Insert `value` over the selection or at the caret, as one undo step.
     pub(crate) fn insert(&mut self, value: &str, max_bytes: usize) -> EditOutcome {
+        let before = self.snapshot();
+        let outcome = self.insert_text(value, max_bytes);
+        self.edited(before, None);
+        outcome
+    }
+
+    /// Insert typed text. Consecutive typing, including the character that
+    /// replaced a selection, undoes as one step.
+    pub(crate) fn type_text(&mut self, value: &str, max_bytes: usize) -> EditOutcome {
+        let before = self.snapshot();
+        let outcome = self.insert_text(value, max_bytes);
+        self.edited(before, Some(EditRun::Typing));
+        outcome
+    }
+
+    fn insert_text(&mut self, value: &str, max_bytes: usize) -> EditOutcome {
         let selected = self.selection();
         let selected_len = selected.as_ref().map_or(0, Range::len);
         let retained = self.text.len().saturating_sub(selected_len);
@@ -356,54 +618,63 @@ impl SearchEditor {
         }
     }
 
+    /// Delete the character before the caret. A held Backspace undoes in
+    /// one step.
     pub(crate) fn backspace(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
         let previous = previous_grapheme_boundary(&self.text, self.cursor);
-        if previous == self.cursor {
-            return false;
-        }
-        self.text.replace_range(previous..self.cursor, "");
-        self.cursor = previous;
-        true
+        self.delete_back_to(previous, Some(EditRun::DeletingBack))
     }
 
     pub(crate) fn delete(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
         let next = next_grapheme_boundary(&self.text, self.cursor);
-        if next == self.cursor {
-            return false;
-        }
-        self.text.replace_range(self.cursor..next, "");
-        true
+        self.delete_forward_to(next, Some(EditRun::DeletingForward))
     }
 
     pub(crate) fn delete_word_backward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
         let previous = previous_word_boundary(&self.text, self.cursor);
-        if previous == self.cursor {
-            return false;
-        }
-        self.text.replace_range(previous..self.cursor, "");
-        self.cursor = previous;
-        true
+        self.delete_back_to(previous, None)
     }
 
     pub(crate) fn delete_word_forward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
         let next = next_word_boundary(&self.text, self.cursor);
-        if next == self.cursor {
-            return false;
+        self.delete_forward_to(next, None)
+    }
+
+    /// Delete from the caret to the start of the query (`Cmd+Backspace`).
+    pub(crate) fn delete_to_start(&mut self) -> bool {
+        self.delete_back_to(0, None)
+    }
+
+    /// Delete from the caret to the end of the query (`Cmd+Delete`, `Ctrl+K`).
+    pub(crate) fn delete_to_end(&mut self) -> bool {
+        self.delete_forward_to(self.text.len(), None)
+    }
+
+    /// Delete the selection if there is one, as its own step, else the text
+    /// from `start` to the caret.
+    fn delete_back_to(&mut self, start: usize, run: Option<EditRun>) -> bool {
+        let before = self.snapshot();
+        if self.delete_selection() {
+            return self.edited(before, None);
         }
-        self.text.replace_range(self.cursor..next, "");
-        true
+        if start < self.cursor {
+            self.text.replace_range(start..self.cursor, "");
+            self.cursor = start;
+        }
+        self.edited(before, run)
+    }
+
+    /// Delete the selection if there is one, as its own step, else the text
+    /// from the caret to `end`.
+    fn delete_forward_to(&mut self, end: usize, run: Option<EditRun>) -> bool {
+        let before = self.snapshot();
+        if self.delete_selection() {
+            return self.edited(before, None);
+        }
+        if end > self.cursor {
+            self.text.replace_range(self.cursor..end, "");
+        }
+        self.edited(before, run)
     }
 
     pub(crate) fn move_left(&mut self, selecting: bool, by_word: bool) {
@@ -433,16 +704,32 @@ impl SearchEditor {
     }
 
     pub(crate) fn select_all(&mut self) {
+        self.run = None;
         self.anchor = Some(0);
         self.cursor = self.text.len();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_cursor_column(&mut self, column: usize, selecting: bool) {
-        let byte = byte_at_display_column(&self.text, column);
+        self.set_cursor_at(QueryPoint::Column(column), selecting);
+    }
+
+    /// The query byte at `point`, on a grapheme boundary.
+    fn byte_at(&self, point: QueryPoint) -> usize {
+        match point {
+            QueryPoint::Byte(byte) => grapheme_boundary_at_or_before(&self.text, byte),
+            QueryPoint::Column(column) => byte_at_display_column(&self.text, column),
+        }
+    }
+
+    /// Put the caret at `point`, extending the selection when `selecting`.
+    pub(crate) fn set_cursor_at(&mut self, point: QueryPoint, selecting: bool) {
+        let byte = self.byte_at(point);
         self.move_cursor(byte, selecting);
     }
 
     pub(crate) fn set_character_selection(&mut self, anchor: usize, focus: usize) {
+        self.run = None;
         let byte_at_character = |index: usize| {
             self.text
                 .char_indices()
@@ -455,8 +742,16 @@ impl SearchEditor {
         self.cursor = focus;
     }
 
+    #[cfg(test)]
     pub(crate) fn select_word_at_column(&mut self, column: usize) {
-        let byte = byte_at_display_column(&self.text, column);
+        self.select_word_at(QueryPoint::Column(column));
+    }
+
+    /// Select the word at `point`, or the character there if it is not in a
+    /// word.
+    pub(crate) fn select_word_at(&mut self, point: QueryPoint) {
+        self.run = None;
+        let byte = self.byte_at(point);
         if let Some((start, word)) = self
             .text
             .unicode_word_indices()
@@ -473,6 +768,7 @@ impl SearchEditor {
     }
 
     pub(crate) fn clear_selection(&mut self) {
+        self.run = None;
         self.anchor = None;
     }
 
@@ -499,7 +795,7 @@ impl SearchEditor {
         while cursor_byte > 0 && !text.is_char_boundary(cursor_byte) {
             cursor_byte -= 1;
         }
-        let cursor = text[..cursor_byte].width();
+        let cursor = display_width(&text[..cursor_byte]);
         if visible_columns == 0 {
             return cursor;
         }
@@ -509,19 +805,21 @@ impl SearchEditor {
         );
         let maximum = display_column_boundary_at_or_after(
             text,
-            text.width()
-                .saturating_sub(visible_columns.saturating_sub(1)),
+            display_width(text).saturating_sub(visible_columns.saturating_sub(1)),
         )
         .min(cursor);
         current_scroll.clamp(minimum.min(maximum), maximum)
     }
 
+    #[cfg(test)]
     pub(crate) fn cursor_column(&self) -> usize {
-        self.text[..self.cursor].width()
+        display_width(&self.text[..self.cursor])
     }
 
     fn move_cursor(&mut self, next: usize, selecting: bool) {
         debug_assert!(self.text.is_char_boundary(next));
+        // Editing somewhere else starts a new undo step.
+        self.run = None;
         if selecting {
             self.anchor.get_or_insert(self.cursor);
         } else {
@@ -758,18 +1056,278 @@ mod tests {
 
     #[test]
     fn pointer_drag_can_walk_left_of_a_scrolled_editor() {
-        assert_eq!(super::pointer_query_column(7, 1, 9, false), 7);
-        assert_eq!(super::pointer_query_column(7, 0, 9, false), 6);
-        assert_eq!(super::pointer_query_column(7, -2, 9, false), 4);
-        assert_eq!(super::pointer_query_column(0, -20, 9, false), 0);
-        assert_eq!(super::pointer_query_column(7, 4, 9, false), 10);
+        assert_eq!(super::pointer_query_column(7, 1), 7);
+        assert_eq!(super::pointer_query_column(7, 0), 6);
+        assert_eq!(super::pointer_query_column(7, -2), 4);
+        assert_eq!(super::pointer_query_column(0, -20), 0);
+        assert_eq!(super::pointer_query_column(7, 4), 10);
+    }
+
+    /// Typing undoes as one step; a paste, a deletion and a jump of the caret
+    /// each start a new one; redo replays what undo took back.
+    #[test]
+    fn undo_steps_back_through_edits_like_a_text_field() {
+        let mut editor = SearchEditor::default();
+        for ch in ["g", "a", "m"] {
+            editor.type_text(ch, 64);
+        }
+        editor.insert(" pasted", 64);
+        editor.move_home(false);
+        editor.type_text(">", 64);
+        assert_eq!(editor.text(), ">gam pasted");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "gam pasted");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "gam");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "");
+        assert!(!editor.undo());
+        assert!(editor.redo());
+        assert_eq!(editor.text(), "gam");
+        assert_eq!(editor.cursor(), 3);
+        // A new edit drops the redo history.
+        editor.backspace();
+        assert!(!editor.redo());
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "gam");
+        // An edit that changes nothing is not a step.
+        let mut empty = SearchEditor::default();
+        assert!(!empty.backspace());
+        assert!(!empty.undo());
+        // A query restored from a pane starts with no history.
+        assert!(!SearchEditor::from_text("kept".into(), 64).undo());
+        // A held Backspace undoes in one step, however long the query.
+        let long = "a".repeat(150);
+        let mut editor = SearchEditor::default();
+        editor.insert(&long, 4096);
+        while editor.backspace() {}
+        assert!(editor.undo());
+        assert_eq!(editor.text(), long);
+        // A caret moved by accessibility ends a typing run.
+        let mut editor = SearchEditor::default();
+        editor.type_text("foo", 64);
+        editor.set_character_selection(0, 0);
+        editor.type_text("x", 64);
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "foo");
+        // Replacing the query with the same text is not a step, and undo
+        // reports no change, so the search is not restarted.
+        let mut editor = SearchEditor::from_text("foo".into(), 64);
+        editor.select_all();
+        editor.insert("foo", 64);
+        assert!(!editor.undo());
+        // Typing over a selection undoes back to the selection in one step.
+        let mut editor = SearchEditor::from_text("shalom".into(), 64);
+        editor.select_all();
+        for ch in ["x", "y", "z"] {
+            editor.type_text(ch, 64);
+        }
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "shalom");
+        assert_eq!(editor.selected_text(), Some("shalom"));
+    }
+
+    /// `Cmd+Backspace`, `Cmd+Delete` and `Ctrl+K` delete to the ends, or the
+    /// selection when there is one.
+    #[test]
+    fn line_deletes_reach_the_ends_of_the_query() {
+        let mut editor = SearchEditor::from_text("alpha beta".into(), 64);
+        editor.move_left(false, true);
+        assert!(editor.delete_to_start());
+        assert_eq!((editor.text(), editor.cursor()), ("beta", 0));
+        editor.move_right(false, false);
+        assert!(editor.delete_to_end());
+        assert_eq!(editor.text(), "b");
+        assert!(!editor.delete_to_end());
+        let mut editor = SearchEditor::from_text("alpha beta".into(), 64);
+        editor.set_character_selection(1, 3);
+        assert!(editor.delete_to_start());
+        assert_eq!(editor.text(), "aha beta");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), "alpha beta");
+    }
+
+    /// A click maps to what was painted, not to the cell grid: a fallback
+    /// font here draws each CJK glyph 1.5 cells wide instead of 2, so by cells
+    /// "b" would sit at column 6 while it is painted at 3.5 to 4.5.
+    #[test]
+    fn pointer_mapping_follows_the_painted_glyphs() {
+        let cluster = |start, end, left, right| kettle_render::SearchEditorCluster {
+            start,
+            end,
+            left,
+            right,
+            rtl: false,
+        };
+        let clusters = [
+            cluster(0, 3, 10.0, 25.0),
+            cluster(3, 6, 25.0, 40.0),
+            cluster(6, 7, 40.0, 50.0),
+        ];
+        let stops = [(0, 10.0), (3, 25.0), (6, 40.0), (7, 50.0)];
+        // Caret: the nearest boundary.
+        assert_eq!(super::nearest_stop_byte(&stops, 11.0), Some(0));
+        assert_eq!(super::nearest_stop_byte(&stops, 30.0), Some(3));
+        assert_eq!(super::nearest_stop_byte(&stops, 44.0), Some(6));
+        assert_eq!(super::nearest_stop_byte(&stops, 99.0), Some(7));
+        // Character under the pointer, for word and line selection.
+        assert_eq!(super::cluster_byte_at(&clusters, 41.0), Some(6));
+        assert_eq!(super::cluster_byte_at(&clusters, 25.0), Some(3));
+        assert_eq!(super::cluster_byte_at(&clusters, 24.9), Some(0));
+        assert_eq!(super::cluster_byte_at(&clusters, 80.0), Some(6));
+        assert_eq!(super::cluster_byte_at(&[], 5.0), None);
+        let mut editor = SearchEditor::from_text("日本b".into(), 64);
+        editor.set_cursor_at(super::QueryPoint::Byte(6), false);
+        assert_eq!(editor.cursor(), 6);
+        // A painted byte past the text, from a stale frame, lands on the end.
+        editor.set_cursor_at(super::QueryPoint::Byte(99), false);
+        assert_eq!(editor.cursor(), 7);
+    }
+
+    /// A painted byte is used as is. Converting it to a column and back
+    /// counted lam-alef as one column one way and two the other, so a click
+    /// at the end of an Arabic word landed a letter early.
+    #[test]
+    fn a_click_lands_on_the_painted_byte_in_arabic() {
+        let mut editor = SearchEditor::from_text("السلام".into(), 64);
+        editor.set_cursor_at(super::QueryPoint::Byte(12), false);
+        assert_eq!(editor.cursor(), 12);
+        editor.set_cursor_at(super::QueryPoint::Byte(10), false);
+        assert_eq!(editor.cursor(), 10);
+        // A byte inside a grapheme snaps back to its start.
+        let mut editor = SearchEditor::from_text("e\u{301}x".into(), 64);
+        editor.set_cursor_at(super::QueryPoint::Byte(2), false);
+        assert_eq!(editor.cursor(), 0);
+        editor.select_word_at(super::QueryPoint::Byte(3));
+        assert_eq!(editor.selected_text(), Some("e\u{301}x"));
     }
 
     #[test]
-    fn pointer_mapping_subtracts_the_caret_to_its_right() {
-        assert_eq!(super::pointer_query_column(0, 4, 3, true), 3);
-        assert_eq!(super::pointer_query_column(0, 5, 3, true), 3);
-        assert_eq!(super::pointer_query_column(0, 6, 3, true), 4);
+    fn a_new_search_remembers_the_status_shown_before_it() {
+        let now = std::time::Instant::now();
+        let mut state = super::SearchState {
+            editor: SearchEditor::from_text("zz".into(), 64),
+            status: kettle_render::SearchStatus::NoMatch,
+            ..Default::default()
+        };
+        state.note_edit(now);
+        assert_eq!(state.status, kettle_render::SearchStatus::Searching);
+        assert_eq!(
+            state.status_before_search,
+            Some(kettle_render::SearchStatus::NoMatch)
+        );
+        assert_eq!(state.searching_since, Some(now));
+        // Another edit while the search is still running keeps its start.
+        state.note_edit(now + std::time::Duration::from_millis(50));
+        assert_eq!(
+            state.status_before_search,
+            Some(kettle_render::SearchStatus::NoMatch)
+        );
+        assert_eq!(state.searching_since, Some(now));
+        // Once it finishes, the next edit starts a new grace period.
+        state.status = kettle_render::SearchStatus::Match;
+        let later = now + std::time::Duration::from_millis(400);
+        state.note_edit(later);
+        assert_eq!(
+            state.status_before_search,
+            Some(kettle_render::SearchStatus::Match)
+        );
+        assert_eq!(state.searching_since, Some(later));
+    }
+
+    /// Only `No match` is held over a new search. A prompt, an error or a
+    /// step result belongs to the old query, so the slot stays blank.
+    #[test]
+    fn only_no_match_is_held_over_a_new_search() {
+        use kettle_render::SearchStatus as S;
+        let now = std::time::Instant::now();
+        for (before, held) in [
+            (S::NoMatch, S::NoMatch),
+            (S::Match, S::Match),
+            (S::Typing, S::Match),
+            (S::Invalid, S::Match),
+            (S::TooComplex, S::Match),
+            (S::TooLong, S::Match),
+            (S::End, S::Match),
+            (S::Start, S::Match),
+            (S::Wrapped, S::Match),
+            (S::Limited, S::Match),
+        ] {
+            let mut state = super::SearchState {
+                editor: SearchEditor::from_text("zz".into(), 64),
+                status: before,
+                ..Default::default()
+            };
+            state.note_edit(now);
+            assert_eq!(state.painted_status(S::Searching, now), held, "{before:?}");
+        }
+    }
+
+    /// The grace runs from the end of the typing pause, stays over once the
+    /// bar says `Searching…`, and never stretches with output or retries.
+    #[test]
+    fn the_searching_label_waits_for_a_slow_scan_and_then_stays() {
+        use kettle_render::SearchStatus as S;
+        let ms = std::time::Duration::from_millis;
+        let t0 = std::time::Instant::now();
+        let mut state = super::SearchState {
+            editor: SearchEditor::from_text("zz".into(), 64),
+            status: S::NoMatch,
+            ..Default::default()
+        };
+        state.note_edit(t0);
+        // Typing again inside the pause moves the pause.
+        state.note_edit(t0 + ms(300));
+        assert_eq!(state.searching_label_at(), Some(t0 + ms(1000)));
+        // The full scan starts at the end of the pause and clears the retry
+        // deadline; the grace still runs from there.
+        state.unlimited_retry_at = None;
+        assert_eq!(state.painted_status(S::Searching, t0 + ms(950)), S::NoMatch);
+        assert_eq!(
+            state.painted_status(S::Searching, t0 + ms(1000)),
+            S::Searching
+        );
+        // Output re-arms a quiet retry: the label does not go back.
+        state.quiet_retry_pending = true;
+        state.unlimited_retry_at = Some(t0 + ms(1600));
+        assert_eq!(
+            state.painted_status(S::Searching, t0 + ms(1100)),
+            S::Searching
+        );
+        // Nor does another edit once the label is up.
+        state.note_edit(t0 + ms(1200));
+        assert_eq!(
+            state.painted_status(S::Searching, t0 + ms(1250)),
+            S::Searching
+        );
+        // A finished search paints its own status.
+        state.status = S::Match;
+        assert_eq!(state.searching_label_at(), None);
+        assert_eq!(state.painted_status(S::Match, t0 + ms(1250)), S::Match);
+    }
+
+    /// Output that arrives after a finished search starts a search with no
+    /// typing pause: its grace runs from the output.
+    #[test]
+    fn a_search_after_output_says_searching_once_its_grace_ends() {
+        use kettle_render::SearchStatus as S;
+        let ms = std::time::Duration::from_millis;
+        let t0 = std::time::Instant::now();
+        let mut state = super::SearchState {
+            editor: SearchEditor::from_text("zz".into(), 64),
+            status: S::NoMatch,
+            ..Default::default()
+        };
+        state.note_edit(t0);
+        state.status = S::Match;
+        state.set_status_at(S::Searching, t0 + ms(2000));
+        state.unlimited_retry_at = Some(t0 + ms(2500));
+        assert_eq!(state.searching_label_at(), Some(t0 + ms(2200)));
+        assert_eq!(state.painted_status(S::Searching, t0 + ms(2100)), S::Match);
+        assert_eq!(
+            state.painted_status(S::Searching, t0 + ms(2200)),
+            S::Searching
+        );
     }
 
     #[test]

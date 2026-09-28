@@ -91,13 +91,13 @@ every platform.
 ## 5. Search screen and scrollback
 
 Press **`Ctrl+Shift+F`** to open the bottom search bar. Enter a Rust regular
-expression (up to 4096 UTF-8 bytes); an incomplete or invalid expression is
-shown as **Invalid pattern** instead of being changed into a literal search. A
-valid expression that exceeds the bounded engine budget shows **Pattern too
-complex**.
+expression (up to 4096 UTF-8 bytes). One that fails to parse, such as `call(x`,
+is searched as literal text. A valid expression that exceeds the bounded engine
+budget shows **Pattern too complex**.
 
 - `Enter` / `Shift+Enter` finds in the default / opposite direction.
-- `F3` / `Shift+F3` always finds next / previous.
+- `F3` / `Shift+F3` always finds next / previous, and so do `Cmd+G` /
+  `Shift+Cmd+G` (`Ctrl+G` / `Ctrl+Shift+G` on Linux).
 - **Wrap** controls whether stepping crosses the history boundary.
 - **Smart** ignores case until the pattern contains an uppercase character;
   **Match** always matches case; **Ignore** never matches case.
@@ -108,8 +108,11 @@ The bar is a lane below the grid, not a dialog over it: while it is open you
 can still drag-select text, double-click words, open links, scroll, and
 right-click for the menu, exactly as in Terminator. Keyboard focus stays in the
 query. `Ctrl+Shift+C` copies the query's own selection if it has one, otherwise
-the text you selected in the grid. Clicking another split moves the bar to that
-pane and searches it with the same query and toggles. A program that has turned
+the text you selected in the grid. Kettle's other shortcuts keep working, such
+as a new tab or font zoom, and `Ctrl+Z` (`Cmd+Z` on macOS) undoes an edit to
+the query. Clicking
+another split moves the bar to that pane and searches it with the same query and
+toggles. A program that has turned
 on mouse reporting receives your clicks while the bar is open, just as it does
 without it.
 

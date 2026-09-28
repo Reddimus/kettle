@@ -193,7 +193,8 @@ pub fn tool_specs() -> Vec<Value> {
             "name": "kettle_dispatch_ui_key",
             "description": "Press bounded key tokens in the currently open Kettle UI modal. \
                 Unlike kettle_send_keys, this never writes bytes to the terminal PTY. Use it \
-                after kettle_perform_action start_search to test search editing/navigation safely. \
+                after kettle_perform_action start_search to test search editing/navigation safely; \
+                with Search open, a chord the bar does not use runs its Kettle shortcut. \
                 Requires the agent server in `full` mode.",
             "inputSchema": {
                 "type": "object",

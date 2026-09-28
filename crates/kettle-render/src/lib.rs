@@ -31,7 +31,7 @@ use std::sync::Arc;
 use alacritty_terminal::term::cell::Flags;
 use anyhow::{Result, anyhow};
 use glyphon::cosmic_text::{
-    AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap, fontdb,
+    Align, AttrsList, BufferLine, FeatureTag, FontFeatures, LineEnding, Wrap, fontdb,
 };
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
@@ -864,6 +864,10 @@ pub struct SearchOverlay {
     pub invert: bool,
     pub status: SearchStatus,
     pub focused: SearchControl,
+    /// Control under the pointer, drawn with a hover fill.
+    pub hovered: Option<SearchControl>,
+    /// Button held down by the pointer. It activates on release over it.
+    pub pressed: Option<SearchControl>,
 }
 
 /// A shell-owned completion list projected over the focused pane. Kettle only
@@ -956,6 +960,8 @@ impl Default for SearchOverlay {
             invert: false,
             status: SearchStatus::Typing,
             focused: SearchControl::Editor,
+            hovered: None,
+            pressed: None,
         }
     }
 }
@@ -2711,6 +2717,18 @@ pub struct Renderer {
     /// different bar takes over, it re-shapes once, the same cost a fresh
     /// buffer pays on its first frame.
     search_buffer_text: String,
+    /// One buffer per piece of search-lane text (see `search_bar_segments`),
+    /// each drawn in its own slot, and the text last shaped into it.
+    search_segment_buffers: Vec<TextBuffer>,
+    search_segment_texts: Vec<String>,
+    /// Glyph boundaries of the query painted last frame, as (query byte,
+    /// window x). Empty while the search lane is closed.
+    search_editor_stops: Vec<(usize, f32)>,
+    /// The clusters of the query painted last frame, in query bytes and
+    /// window x. Empty while the search lane is closed.
+    search_editor_clusters: Vec<SearchEditorCluster>,
+    /// Whether the query painted last frame reads right to left.
+    search_editor_rtl: bool,
     /// Status-bar text. Single line, reused every frame
     /// via `set_text` — same one-buffer pattern `tabbar_buffer` uses
     /// for tab labels. Stays at length 0 when the status bar is off.
@@ -4912,6 +4930,13 @@ impl Renderer {
         let tab_close_buffer = TextBuffer::new(&mut font_system, metrics);
         let mut search_buffer = TextBuffer::new(&mut font_system, metrics);
         search_buffer.set_wrap(Wrap::None);
+        let search_segment_buffers = (0..SEARCH_SEGMENTS)
+            .map(|_| {
+                let mut buffer = TextBuffer::new(&mut font_system, metrics);
+                buffer.set_wrap(Wrap::None);
+                buffer
+            })
+            .collect();
         let status_bar_buffer = TextBuffer::new(&mut font_system, metrics);
         let resize_overlay_buffer = TextBuffer::new(&mut font_system, metrics);
         let mut completion_header_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -5074,6 +5099,11 @@ impl Renderer {
             tab_close_buffer,
             search_buffer,
             search_buffer_text: String::new(),
+            search_segment_buffers,
+            search_segment_texts: vec![String::new(); SEARCH_SEGMENTS],
+            search_editor_stops: Vec::new(),
+            search_editor_clusters: Vec::new(),
+            search_editor_rtl: false,
             status_bar_buffer,
             pane_bases,
             live_pane_bases,
@@ -5210,6 +5240,26 @@ impl Renderer {
         }
         self.config.alpha_mode = alpha_mode;
         self.surface.configure(&self.gpu.device, &self.config);
+    }
+
+    /// Glyph boundaries of the search query painted last frame, as (query
+    /// byte, window x), sorted by byte. Empty while the search lane is closed.
+    /// Pointer input maps a click to the nearest one, so the caret lands where
+    /// it is drawn whatever width the font gives each glyph.
+    pub fn search_editor_stops(&self) -> &[(usize, f32)] {
+        &self.search_editor_stops
+    }
+
+    /// The clusters of the search query painted last frame, sorted by byte.
+    /// Pointer input uses them to find the character under a click.
+    pub fn search_editor_clusters(&self) -> &[SearchEditorCluster] {
+        &self.search_editor_clusters
+    }
+
+    /// Whether the search query painted last frame reads right to left, so
+    /// its start is at its right end.
+    pub fn search_editor_rtl(&self) -> bool {
+        self.search_editor_rtl
     }
 
     pub fn surface_size(&self) -> (u32, u32) {
@@ -5709,6 +5759,7 @@ impl Renderer {
                 self.media_receipt_title_text.clear();
                 self.media_receipt_detail_text.clear();
                 self.search_buffer_text.clear();
+                self.search_segment_texts.iter_mut().for_each(String::clear);
             }
         }
         // Ensure one text buffer per pane.
@@ -6751,7 +6802,6 @@ impl Renderer {
         // modals remain single-line overlays.
         let mut have_search = false;
         let mut search_rect = (0.0, sh - (ch + 10.0), sw, ch + 10.0);
-        let mut search_text_top = None;
         // Confirmation chrome is drawn in the final menu pass, so its text
         // must use the companion menu text renderer. Other bottom bars remain
         // in the ordinary chrome text pass.
@@ -6761,14 +6811,18 @@ impl Renderer {
         // ordinary chrome background. The confirm bar is the exception: it
         // paints a saturated `palette[1]` and has to raise its own contrast.
         let mut search_text_color = None;
+        // The search lane draws each control's text in its own area:
+        // (segment index, left, top, clip bounds).
+        let mut search_segment_places: Vec<(usize, f32, f32, TextBounds, Option<Rgb>)> = Vec::new();
+        self.search_editor_stops.clear();
+        self.search_editor_clusters.clear();
+        self.search_editor_rtl = false;
         if overlay.confirm_dialog.is_none()
             && let Some(search) = overlay.search.as_ref()
         {
-            have_search = true;
             let geometry = search_bar_geometry(sw, sh, cw, ch);
             search_rect = geometry.rect;
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
-            search_text_top = Some(geometry.rect.1 + ((row_h - ch) * 0.5).max(0.0));
             let accent = cfg.search_background.unwrap_or(theme.palette[3]);
 
             quads.push(rect(
@@ -6781,7 +6835,8 @@ impl Renderer {
             ));
             // A distinct editor well survives low-contrast themes. All button
             // rectangles get a subtle surface; the focused one uses the same
-            // accent as the active terminal match.
+            // accent as the active terminal match, and the one under the
+            // pointer is lifted so it reads as clickable.
             quads.push(rect(
                 geometry.editor.0,
                 geometry.editor.1 + 2.0,
@@ -6790,6 +6845,18 @@ impl Renderer {
                 theme.background,
                 0.72,
             ));
+            // Hover lifts a button toward the text color; a press held over it
+            // sinks toward the background instead.
+            let tint_of = |control: SearchControl| -> Option<(Rgb, f32)> {
+                let over = search.hovered == Some(control);
+                if over && search.pressed == Some(control) {
+                    Some((theme.background, 0.45))
+                } else if over {
+                    Some((theme.foreground, 0.14))
+                } else {
+                    None
+                }
+            };
             for control in SearchControl::ALL {
                 let control_rect = geometry.control_rect(control);
                 if control != SearchControl::Editor {
@@ -6804,11 +6871,129 @@ impl Renderer {
                             theme.background
                         },
                         if search.focused == control {
-                            0.92
+                            SEARCH_FOCUSED_FILL_ALPHA
                         } else {
                             0.28
                         },
                     ));
+                    if let Some((tint, alpha)) = tint_of(control) {
+                        quads.push(rect(
+                            control_rect.0,
+                            control_rect.1 + 2.0,
+                            control_rect.2,
+                            (control_rect.3 - 4.0).max(1.0),
+                            tint,
+                            alpha,
+                        ));
+                    }
+                }
+            }
+            // Shape every label first: the caret and selection are placed
+            // from the editor's shaped glyphs, not from a cell grid, so they
+            // stay on the text whatever width a fallback font gives it.
+            // cosmic-text centers each line's glyphs in the line height, so a
+            // line as tall as the row, placed at the row's top, is centered.
+            let segment_metrics = Metrics::new(metrics.font_size, row_h.max(metrics.font_size));
+            let linear = self.config.format.is_srgb();
+            let on_accent = search_focused_label(
+                theme.cursor_text,
+                color::over(theme.background, theme.palette[8], 0.98, linear),
+                accent,
+                tint_of(search.focused),
+                linear,
+            );
+            let mut editor_left = geometry.editor.0 + cw;
+            let mut editor_clusters = Vec::new();
+            for (index, segment) in search_bar_segments(search, geometry, cw)
+                .into_iter()
+                .enumerate()
+            {
+                let shaped = segment.shaped_text();
+                let text_changed = self.search_segment_texts[index] != shaped;
+                if text_changed {
+                    self.search_segment_texts[index] = shaped.into_owned();
+                }
+                shape_search_segment(
+                    &mut self.font_system,
+                    &mut self.search_segment_buffers[index],
+                    &segment,
+                    segment_metrics,
+                    Family::Name(&family),
+                    text_changed,
+                );
+                if segment.control == Some(SearchControl::Editor) {
+                    editor_left = segment.left;
+                    self.search_editor_rtl = segment.rtl;
+                    editor_clusters =
+                        segment_clusters(&self.search_segment_buffers[index], &segment);
+                }
+                let color = (segment.control == Some(search.focused)
+                    && search.focused != SearchControl::Editor)
+                    .then_some(on_accent);
+                let (x, y, w, h) = segment.rect;
+                if w > 0.0 && h > 0.0 && !self.search_segment_texts[index].is_empty() {
+                    search_segment_places.push((
+                        index,
+                        segment.left,
+                        y,
+                        TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        color,
+                    ));
+                }
+            }
+
+            // The visible query's clusters and caret positions, in query bytes
+            // and window pixels. The UI hit-tests clicks against the same lists.
+            let editor_cols = search_bar_columns(geometry.editor.2, cw).max(1);
+            let (_, skip) = search_editor_body(search, editor_cols);
+            let clusters = editor_clusters;
+            let stops = cluster_stops(&clusters);
+            self.search_editor_clusters = clusters
+                .iter()
+                .map(|cluster| SearchEditorCluster {
+                    start: skip + cluster.start,
+                    end: skip + cluster.end,
+                    left: editor_left + cluster.left,
+                    right: editor_left + cluster.right,
+                    ..*cluster
+                })
+                .collect();
+            self.search_editor_stops = stops
+                .iter()
+                .map(|&(byte, x)| (skip + byte, editor_left + x))
+                .collect();
+            // Keep marks a pixel inside the editor. A slot under two pixels
+            // wide collapses the range instead of inverting it.
+            let lowest = geometry.editor.0 + 1.0;
+            let highest = (geometry.editor.0 + geometry.editor.2 - 1.0).max(lowest);
+            let inside = |x: f32| x.max(lowest).min(highest);
+            let x_at =
+                |byte: usize| inside(editor_left + stop_x(&stops, byte.saturating_sub(skip)));
+            // The selection goes under the caret, so a caret at either end of
+            // it stays whole.
+            if let Some((a, b)) = search.selection {
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                for (left, right) in cluster_spans(
+                    &clusters,
+                    start.saturating_sub(skip),
+                    end.saturating_sub(skip),
+                ) {
+                    let (left, right) = (inside(editor_left + left), inside(editor_left + right));
+                    if right > left {
+                        quads.push(rect(
+                            left,
+                            geometry.editor.1 + 2.0,
+                            right - left,
+                            (geometry.editor.3 - 4.0).max(1.0),
+                            theme.selection_background,
+                            1.0,
+                        ));
+                    }
                 }
             }
             if search.focused == SearchControl::Editor {
@@ -6822,62 +7007,16 @@ impl Renderer {
                     accent,
                     1.0,
                 ));
+                // The caret is a bar on the boundary between two glyphs.
+                quads.push(rect(
+                    x_at(search.cursor_byte.min(search.query.len())) - 1.0,
+                    geometry.editor.1 + ((geometry.editor.3 - ch) * 0.5).max(0.0),
+                    2.0,
+                    ch.min(geometry.editor.3),
+                    theme.foreground,
+                    1.0,
+                ));
             }
-            if let Some((a, b)) = search.selection {
-                let (start, end) = if a <= b { (a, b) } else { (b, a) };
-                if start != end {
-                    let focused = search.focused == SearchControl::Editor;
-                    let start_col = search_query_painted_column(
-                        &search.query,
-                        start,
-                        search.cursor_byte,
-                        search.horizontal_scroll,
-                        focused,
-                    );
-                    let end_col = search_query_painted_column(
-                        &search.query,
-                        end,
-                        search.cursor_byte,
-                        search.horizontal_scroll,
-                        focused,
-                    );
-                    let inner_cols = search_bar_columns(geometry.editor.2, cw).saturating_sub(2);
-                    let start_col = start_col.min(inner_cols);
-                    let end_col = end_col.min(inner_cols);
-                    if end_col > start_col {
-                        quads.push(rect(
-                            geometry.editor.0 + (start_col + 1) as f32 * cw,
-                            geometry.editor.1 + 2.0,
-                            (end_col - start_col) as f32 * cw,
-                            (geometry.editor.3 - 4.0).max(1.0),
-                            theme.selection_background,
-                            1.0,
-                        ));
-                    }
-                }
-            }
-
-            let label = search_bar_text(search, geometry, cw);
-            self.search_buffer.set_metrics(Metrics::new(
-                metrics.font_size,
-                row_h.max(metrics.font_size),
-            ));
-            self.search_buffer
-                .set_size(Some(sw), Some(geometry.reserved_height));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
         } else if overlay.confirm_dialog.is_none()
             && let Some(q) = &overlay.search_query
         {
@@ -8380,12 +8519,23 @@ impl Renderer {
                 });
             }
         }
+        for (index, left, top, bounds, color) in search_segment_places {
+            let color = color.unwrap_or(fg);
+            areas.push(TextArea {
+                buffer: &self.search_segment_buffers[index],
+                left,
+                top,
+                scale: 1.0,
+                bounds,
+                default_color: GColor::rgb(color.r, color.g, color.b),
+                custom_glyphs: &[],
+            });
+        }
         if have_search {
             let area = TextArea {
                 buffer: &self.search_buffer,
                 left: search_rect.0,
-                top: search_text_top
-                    .unwrap_or(search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0)),
+                top: search_rect.1 + ((search_rect.3 - ch) * 0.5).max(0.0),
                 scale: 1.0,
                 bounds: TextBounds {
                     left: search_rect.0 as i32,
@@ -11621,12 +11771,14 @@ pub fn search_bar_geometry(
     const PREVIOUS: usize = 8;
     const NEXT: usize = 8;
     const WRAP: usize = 10;
-    const CASE: usize = 14;
-    const INVERT: usize = 11;
+    // Each button is at least one column wider than its longest label, so the
+    // centered label keeps half a cell of fill on both sides.
+    const CASE: usize = 15;
+    const INVERT: usize = 12;
     // Wide mode must fit every bounded status label without ellipsis. Narrow mode may shrink and
     // wrap the status lane along with the other secondary controls.
     const STATUS: usize = 19;
-    const CLOSE: usize = 7;
+    const CLOSE: usize = 8;
     const EDITOR_MIN: usize = 12;
     // 8 single-column gaps between the nine controls, plus one extra column
     // for each of the four gaps that separate groups rather than siblings
@@ -11827,51 +11979,317 @@ pub fn search_bar_columns(rect_width: f32, cell_width: f32) -> usize {
     (rect_width / cell_width + 1e-3).floor().max(0.0) as usize
 }
 
-fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_width: f32) -> String {
-    let row_height = geometry.reserved_height / geometry.rows.max(1) as f32;
-    let mut rows = vec![Vec::<(usize, usize, String)>::new(); geometry.rows];
-    let mut add = |rect: Rect4, text: String| {
-        if rect.2 <= 0.0 || rect.3 <= 0.0 {
-            return;
-        }
-        let row = if row_height > 0.0 {
-            ((rect.1 - geometry.rect.1) / row_height).round().max(0.0) as usize
+/// Number of text segments in the search lane: label, editor, Previous, Next,
+/// Wrap, Case, Invert, status and Close.
+const SEARCH_SEGMENTS: usize = 9;
+
+/// One piece of search-lane text, placed in pixels and clipped to its slot.
+#[derive(Debug, Clone, PartialEq)]
+struct SearchBarSegment {
+    /// The control this text labels, if it is one.
+    control: Option<SearchControl>,
+    /// The slot the text is clipped to.
+    rect: Rect4,
+    /// Left edge of the text.
+    left: f32,
+    text: String,
+    /// The editor's whole query reads right to left (`starts_right_to_left`),
+    /// so its visible slice is shaped as a right-to-left paragraph.
+    rtl: bool,
+}
+
+/// Bytes of the direction mark that starts the editor's shaped text.
+const EDITOR_MARK_LEN: usize = 3;
+
+impl SearchBarSegment {
+    /// The text shaped for this segment. The editor's slice starts with a
+    /// zero-width direction mark (U+200E or U+200F) taken from the whole
+    /// query, so the slice keeps the query's reading order however far it is
+    /// scrolled; cosmic-text would otherwise take the direction from the
+    /// slice's own first letter.
+    fn shaped_text(&self) -> std::borrow::Cow<'_, str> {
+        if self.control == Some(SearchControl::Editor) {
+            let mark = if self.rtl { '\u{200F}' } else { '\u{200E}' };
+            std::borrow::Cow::Owned(format!("{mark}{}", self.text))
         } else {
-            0
+            std::borrow::Cow::Borrowed(&self.text)
         }
-        .min(rows.len().saturating_sub(1));
-        let col = (rect.0 / cell_width).round().max(0.0) as usize;
-        let width = search_bar_columns(rect.2, cell_width).max(1);
-        rows[row].push((col, width, fit_single_line_label(&text, width)));
+    }
+}
+
+/// Whether `text` reads right to left: its first strong character is
+/// right-to-left (Unicode bidi rule P2). Digits, marks and punctuation do not
+/// decide it, and text with no strong character reads left to right.
+fn starts_right_to_left(text: &str) -> bool {
+    unicode_bidi::get_base_direction(text) == unicode_bidi::Direction::Rtl
+}
+
+/// Opacity of a focused search button's accent fill.
+const SEARCH_FOCUSED_FILL_ALPHA: f32 = 0.92;
+
+/// The label color for the focused search button.
+///
+/// The button sits on the accent, which the theme foreground was never chosen
+/// to contrast with. The theme's cursor text is held to AA against the fill
+/// as painted: the accent over the bar, then any hover or press `tint`,
+/// composited the way the surface blends (`linear` for an sRGB surface).
+fn search_focused_label(
+    cursor_text: Rgb,
+    bar: Rgb,
+    accent: Rgb,
+    tint: Option<(Rgb, f32)>,
+    linear: bool,
+) -> Rgb {
+    let fill = color::over(bar, accent, f64::from(SEARCH_FOCUSED_FILL_ALPHA), linear);
+    let fill = tint.map_or(fill, |(tint, alpha)| {
+        color::over(fill, tint, f64::from(alpha), linear)
+    });
+    color::with_min_contrast(cursor_text, fill, CONFIRM_BAR_MIN_CONTRAST)
+}
+
+/// One cluster of the painted search query: the bytes it covers and the x
+/// span its glyphs cover.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchEditorCluster {
+    pub start: usize,
+    pub end: usize,
+    pub left: f32,
+    pub right: f32,
+    /// Right-to-left text starts at `right` and ends at `left`.
+    pub rtl: bool,
+}
+
+/// Lay out one piece of search-lane text in its own buffer.
+///
+/// The line is as tall as `metrics` says, and cosmic-text centers glyphs in
+/// their line, so text placed at the row's top is centered in the row. Text is
+/// set flush left: a query that starts with Hebrew or Arabic is a
+/// right-to-left paragraph, which would otherwise be pushed against the far
+/// edge of the slot and clipped.
+fn shape_search_segment(
+    font_system: &mut FontSystem,
+    buffer: &mut TextBuffer,
+    segment: &SearchBarSegment,
+    metrics: Metrics,
+    family: Family<'_>,
+    text_changed: bool,
+) {
+    buffer.set_metrics(metrics);
+    // No width: a right-to-left line is laid out against the width it is
+    // given, so one wider than its slot would start past the slot's far edge.
+    // The text area's bounds clip it instead.
+    buffer.set_size(None, Some(metrics.line_height));
+    if text_changed {
+        buffer.set_text(
+            &segment.shaped_text(),
+            &Attrs::new().family(family),
+            Shaping::Advanced,
+            Some(Align::Left),
+        );
+    }
+    buffer.shape_until_scroll(font_system, false);
+}
+
+/// The clusters of a shaped segment in the segment's own text bytes: the
+/// editor's direction mark is dropped.
+fn segment_clusters(buffer: &TextBuffer, segment: &SearchBarSegment) -> Vec<SearchEditorCluster> {
+    let clusters = glyph_clusters(buffer);
+    if segment.control != Some(SearchControl::Editor) {
+        return clusters;
+    }
+    clusters
+        .into_iter()
+        .filter(|cluster| cluster.end > EDITOR_MARK_LEN)
+        .map(|cluster| SearchEditorCluster {
+            start: cluster.start.max(EDITOR_MARK_LEN) - EDITOR_MARK_LEN,
+            end: cluster.end - EDITOR_MARK_LEN,
+            ..cluster
+        })
+        .collect()
+}
+
+/// The clusters in the first line of `buffer`, sorted by byte. The glyphs of
+/// one cluster (a split vowel, an emoji sequence the font does not ligate)
+/// share its bytes and sit next to each other, so the cluster spans them all.
+fn glyph_clusters(buffer: &TextBuffer) -> Vec<SearchEditorCluster> {
+    let glyphs = buffer.layout_runs().next().into_iter().flat_map(|run| {
+        run.glyphs.iter().map(|glyph| SearchEditorCluster {
+            start: glyph.start,
+            end: glyph.end,
+            left: glyph.x,
+            right: glyph.x + glyph.w,
+            rtl: glyph.level.is_rtl(),
+        })
+    });
+    merge_clusters(glyphs)
+}
+
+/// Merge neighbouring glyphs that share their bytes into one cluster, and
+/// sort the clusters by byte.
+fn merge_clusters(glyphs: impl Iterator<Item = SearchEditorCluster>) -> Vec<SearchEditorCluster> {
+    let mut clusters: Vec<SearchEditorCluster> = Vec::new();
+    for glyph in glyphs {
+        match clusters.last_mut() {
+            Some(last) if last.start == glyph.start && last.end == glyph.end => {
+                last.left = last.left.min(glyph.left);
+                last.right = last.right.max(glyph.right);
+            }
+            _ => clusters.push(glyph),
+        }
+    }
+    clusters.sort_by_key(|cluster| cluster.start);
+    clusters
+}
+
+/// Every caret position among `clusters`, as (byte, x), sorted by byte.
+///
+/// A byte sits at the leading edge of the cluster it starts, or, at the end
+/// of the text, at the trailing edge of the cluster it ends. Right-to-left
+/// clusters lead from their right edge.
+fn cluster_stops(clusters: &[SearchEditorCluster]) -> Vec<(usize, f32)> {
+    let leading = clusters.iter().map(|cluster| {
+        let x = if cluster.rtl {
+            cluster.right
+        } else {
+            cluster.left
+        };
+        (cluster.start, x)
+    });
+    let trailing = clusters.iter().map(|cluster| {
+        let x = if cluster.rtl {
+            cluster.left
+        } else {
+            cluster.right
+        };
+        (cluster.end, x)
+    });
+    let mut stops: Vec<(usize, f32)> = leading.chain(trailing).collect();
+    // The sort is stable, so a leading edge stays ahead of a trailing edge at
+    // the same byte and survives the dedup.
+    stops.sort_by_key(|stop| stop.0);
+    stops.dedup_by_key(|stop| stop.0);
+    if stops.is_empty() {
+        stops.push((0, 0.0));
+    }
+    stops
+}
+
+/// The x of `byte` among `stops`: exact when it is a caret position, else the
+/// position before it (a byte inside a cluster), else the end of the text.
+fn stop_x(stops: &[(usize, f32)], byte: usize) -> f32 {
+    match stops.binary_search_by_key(&byte, |stop| stop.0) {
+        Ok(index) => stops[index].1,
+        Err(0) => stops.first().map_or(0.0, |stop| stop.1),
+        Err(index) => stops[index - 1].1,
+    }
+}
+
+/// The x ranges covered by the clusters that overlap bytes `start..end`,
+/// merged where they touch. Text that mixes directions can need several.
+fn cluster_spans(clusters: &[SearchEditorCluster], start: usize, end: usize) -> Vec<(f32, f32)> {
+    if start >= end {
+        return Vec::new();
+    }
+    let mut spans: Vec<(f32, f32)> = clusters
+        .iter()
+        .filter(|cluster| cluster.start < end && cluster.end > start)
+        .map(|cluster| (cluster.left, cluster.right))
+        .collect();
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut merged: Vec<(f32, f32)> = Vec::with_capacity(spans.len());
+    for (left, right) in spans {
+        match merged.last_mut() {
+            Some(last) if left <= last.1 + 0.5 => last.1 = last.1.max(right),
+            _ => merged.push((left, right)),
+        }
+    }
+    merged
+}
+
+/// Lay out every piece of search-lane text in its own slot.
+///
+/// Each control is placed from its own rectangle instead of padding one line
+/// per row with spaces, so a glyph whose advance is not a whole cell (a CJK
+/// fallback in the query, for one) cannot push the controls after it. Button
+/// labels are centered as a block as wide as the control's widest label, so a
+/// toggle such as `Wrap: On` / `Wrap: Off` changes its value without moving
+/// its name.
+fn search_bar_segments(
+    search: &SearchOverlay,
+    geometry: SearchBarGeometry,
+    cell_width: f32,
+) -> Vec<SearchBarSegment> {
+    let mut segments = Vec::with_capacity(SEARCH_SEGMENTS);
+    let rtl = starts_right_to_left(&search.query);
+    let mut push = |control: Option<SearchControl>, rect: Rect4, text: String, left: f32| {
+        segments.push(SearchBarSegment {
+            control,
+            rect,
+            left,
+            text,
+            rtl: rtl && control == Some(SearchControl::Editor),
+        });
+    };
+    let cols = |rect: Rect4| search_bar_columns(rect.2, cell_width);
+    // Centre `text` in `rect` as part of a block `block` columns wide.
+    let centered = |rect: Rect4, block: usize| -> f32 {
+        let block = block.min(cols(rect)) as f32 * cell_width;
+        rect.0 + ((rect.2 - block) * 0.5).max(0.0).round()
+    };
+    let button = |rect: Rect4, text: String, variants: &[&str]| -> (String, f32) {
+        let block = variants
+            .iter()
+            .map(|variant| display_width(variant))
+            .max()
+            .unwrap_or(0);
+        let fitted = fit_single_line_label(&text, cols(rect).max(1));
+        (fitted, centered(rect, block))
     };
 
-    let label_cols = search_bar_columns(geometry.label.2, cell_width);
-    add(
+    let label_cols = cols(geometry.label);
+    push(
+        None,
         geometry.label,
         if label_cols >= 6 { "Search" } else { "?" }.to_string(),
+        geometry.label.0,
     );
     let editor_cols = search_bar_columns(geometry.editor.2, cell_width).max(1);
-    add(geometry.editor, search_editor_label(search, editor_cols));
-    add(geometry.previous, "‹ Prev".to_string());
-    add(geometry.next, "Next ›".to_string());
+    push(
+        Some(SearchControl::Editor),
+        geometry.editor,
+        search_editor_body(search, editor_cols).0,
+        geometry.editor.0 + cell_width,
+    );
+    let (text, left) = button(geometry.previous, "‹ Prev".to_string(), &["‹ Prev"]);
+    push(Some(SearchControl::Previous), geometry.previous, text, left);
+    let (text, left) = button(geometry.next, "Next ›".to_string(), &["Next ›"]);
+    push(Some(SearchControl::Next), geometry.next, text, left);
     // Say the state, not a checkbox. `[x] Wrap` makes someone decode a TUI
     // idiom to learn whether wrapping is on; `Wrap: On` just tells them. The
     // trailing chevron on Case is the affordance for "clicking cycles this",
     // which nothing else in the bar communicated.
-    add(
+    let (text, left) = button(
         geometry.wrap,
         format!("Wrap: {}", if search.wrap { "On" } else { "Off" }),
+        &["Wrap: On", "Wrap: Off"],
     );
-    add(
+    push(Some(SearchControl::Wrap), geometry.wrap, text, left);
+    // The mode name is padded to the longest one, so the chevron stays put as
+    // the mode cycles.
+    let (text, left) = button(
         geometry.case_mode,
-        format!("Case: {} ›", search.case_mode.label()),
+        format!("Case: {:<6} ›", search.case_mode.label()),
+        &["Case: Ignore ›"],
     );
+    push(Some(SearchControl::Case), geometry.case_mode, text, left);
     // The invert toggle flips which direction Enter searches, so its label
     // names that direction. It also reminds users of the Enter keybinding.
-    add(
+    let (text, left) = button(
         geometry.invert,
         format!("Enter: {}", if search.invert { "Prev" } else { "Next" }),
+        &["Enter: Next", "Enter: Prev"],
     );
+    push(Some(SearchControl::Invert), geometry.invert, text, left);
     // `Match` is the one status the user can already see: the hit is
     // highlighted in the pane and the viewport has jumped to it. Printing it
     // too spends the widest slot in the bar restating the obvious, and it
@@ -11879,11 +12297,38 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
     // `Results limited` — look like just another word in the strip rather than
     // an answer. The slot keeps its width either way, so nothing shifts when
     // the status appears and disappears.
-    if search.status != SearchStatus::Match {
-        add(geometry.status, search.status.label().to_string());
-    }
-    add(geometry.close, "× Close".to_string());
+    let status = if search.status == SearchStatus::Match {
+        String::new()
+    } else {
+        fit_single_line_label(search.status.label(), cols(geometry.status).max(1))
+    };
+    push(None, geometry.status, status, geometry.status.0);
+    let (text, left) = button(geometry.close, "× Close".to_string(), &["× Close"]);
+    push(Some(SearchControl::Close), geometry.close, text, left);
+    segments
+}
 
+/// The search lane as text, one line per row, each segment at its column.
+/// Tests read layout invariants from it; paint uses the segments directly.
+#[cfg(test)]
+fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_width: f32) -> String {
+    let row_height = geometry.reserved_height / geometry.rows.max(1) as f32;
+    let mut rows = vec![Vec::<(usize, usize, String)>::new(); geometry.rows];
+    for segment in search_bar_segments(search, geometry, cell_width) {
+        let rect = segment.rect;
+        if rect.2 <= 0.0 || rect.3 <= 0.0 {
+            continue;
+        }
+        let row = if row_height > 0.0 {
+            ((rect.1 - geometry.rect.1) / row_height).round().max(0.0) as usize
+        } else {
+            0
+        }
+        .min(rows.len().saturating_sub(1));
+        let col = (segment.left / cell_width).round().max(0.0) as usize;
+        let width = search_bar_columns(rect.2, cell_width).max(1);
+        rows[row].push((col, width, segment.text));
+    }
     rows.iter_mut()
         .map(|segments| {
             segments.sort_by_key(|segment| segment.0);
@@ -11907,44 +12352,57 @@ fn search_bar_text(search: &SearchOverlay, geometry: SearchBarGeometry, cell_wid
         .join("\n")
 }
 
-fn search_editor_label(search: &SearchOverlay, max_cols: usize) -> String {
-    if max_cols == 0 {
-        return String::new();
+/// The editor's visible query text, without padding or caret, and the query
+/// byte it starts at.
+///
+/// The caret is painted as a bar between glyphs, so moving it or focusing
+/// another control never shifts the characters. Text past the right edge is
+/// clipped, as in any text field: an ellipsis there would cover the character
+/// next to the caret.
+fn search_editor_body(search: &SearchOverlay, max_cols: usize) -> (String, usize) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+    use unicode_width::UnicodeWidthStr as _;
+    let inner = max_cols.saturating_sub(2);
+    if inner == 0 {
+        return (String::new(), 0);
     }
-    if max_cols == 1 {
-        return "│".to_string();
-    }
-
     // Do not let a pasted line break create extra chrome rows. The UI also
     // normalizes paste, but paint is a trust boundary for callers of this crate.
+    // Each control character becomes as many spaces as it has bytes, so body
+    // bytes still map one to one onto query bytes.
     let mut query = String::with_capacity(search.query.len().min(4096));
     for ch in search.query.chars() {
         if query.len() + ch.len_utf8() > 4096 {
             break;
         }
-        query.push(if ch.is_control() { ' ' } else { ch });
+        if ch.is_control() {
+            query.extend(std::iter::repeat_n(' ', ch.len_utf8()));
+        } else {
+            query.push(ch);
+        }
     }
-    let mut cursor = search.cursor_byte.min(query.len());
-    while cursor > 0 && !query.is_char_boundary(cursor) {
-        cursor -= 1;
+    let visible = drop_cols_front(&query, search.horizontal_scroll);
+    let skip = query.len() - visible.len();
+    let mut body = String::with_capacity(visible.len());
+    let mut cols = 0usize;
+    for grapheme in visible.graphemes(true) {
+        let width = grapheme.width();
+        if cols + width > inner {
+            break;
+        }
+        cols += width;
+        body.push_str(grapheme);
     }
-    let caret = if search.focused == SearchControl::Editor {
-        "│"
-    } else {
-        ""
-    };
-    query.insert_str(cursor, caret);
+    (body, skip)
+}
 
-    let inner = max_cols.saturating_sub(2);
-    let mut body = drop_cols_front(&query, search.horizontal_scroll);
-    if display_width(&body) > inner {
-        body = fit_single_line_label(&body, inner);
+/// The editor text with its one-cell padding on each side, as tests see it.
+#[cfg(test)]
+fn search_editor_label(search: &SearchOverlay, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
     }
-    // One cell of padding on each side rather than `[ ]`. The field already
-    // has its own darker well, so brackets would frame it twice and read as
-    // query syntax. The padding keeps the two-column allowance that `inner`,
-    // the horizontal scroll, and the selection column math assume.
-    let label = format!(" {body} ");
+    let label = format!(" {} ", search_editor_body(search, max_cols).0);
     fit_single_line_label(&label, max_cols)
 }
 
@@ -11952,45 +12410,19 @@ fn drop_cols_front(s: &str, cols: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation as _;
     use unicode_width::UnicodeWidthStr as _;
     let mut skipped = 0usize;
-    let mut byte = 0usize;
+    let mut byte = s.len();
+    // Stop at the first grapheme that is not wholly inside the dropped
+    // columns, so a zero-width one at the boundary (a leading combining mark,
+    // a zero-width space) stays.
     for (idx, grapheme) in s.grapheme_indices(true) {
         let width = grapheme.width();
-        if skipped + width > cols {
+        if skipped >= cols || skipped + width > cols {
             byte = idx;
             break;
         }
         skipped += width;
-        byte = idx + grapheme.len();
-        if skipped == cols {
-            break;
-        }
     }
     s[byte..].to_string()
-}
-
-fn search_query_column(query: &str, byte: usize) -> usize {
-    let mut byte = byte.min(query.len());
-    while byte > 0 && !query.is_char_boundary(byte) {
-        byte -= 1;
-    }
-    display_width(&query[..byte])
-}
-
-/// Map a query byte boundary to the column occupied by the painted editor.
-/// The caret is a real one-column glyph, so boundaries strictly to its right
-/// move by one while the editor has focus.
-pub fn search_query_painted_column(
-    query: &str,
-    byte: usize,
-    cursor_byte: usize,
-    horizontal_scroll: usize,
-    focused: bool,
-) -> usize {
-    let byte = byte.min(query.len());
-    let cursor_byte = cursor_byte.min(query.len());
-    search_query_column(query, byte)
-        .saturating_add(usize::from(focused && byte > cursor_byte))
-        .saturating_sub(horizontal_scroll)
 }
 
 /// Minimum contrast the confirm bar's text holds against its own background.
@@ -18101,9 +18533,9 @@ mod pane_buffer_lifecycle_tests {
 #[cfg(test)]
 mod search_bar_tests {
     use super::{
-        HighlightRect, SearchBarGeometry, SearchCaseMode, SearchControl, SearchOverlay,
-        SearchStatus, drop_cols_front, search_bar_geometry, search_bar_text, search_editor_label,
-        search_highlight_at, search_query_painted_column,
+        HighlightRect, SEARCH_SEGMENTS, SearchBarGeometry, SearchCaseMode, SearchControl,
+        SearchOverlay, SearchStatus, drop_cols_front, search_bar_geometry, search_bar_segments,
+        search_bar_text, search_editor_label, search_highlight_at,
     };
 
     fn center(rect: (f32, f32, f32, f32)) -> (f32, f32) {
@@ -18394,13 +18826,376 @@ mod search_bar_tests {
         assert!(super::display_width(&label) <= 8);
     }
 
+    /// The caret is painted between cells, so moving it, or moving focus off
+    /// the editor, never shifts the query's characters.
     #[test]
-    fn backward_selection_accounts_for_the_painted_caret_column() {
-        let query = "abcdef";
-        assert_eq!(search_query_painted_column(query, 4, 4, 0, true), 4);
-        assert_eq!(search_query_painted_column(query, 6, 4, 0, true), 7);
-        assert_eq!(search_query_painted_column(query, 4, 6, 0, true), 4);
-        assert_eq!(search_query_painted_column(query, 6, 6, 0, true), 6);
+    fn caret_and_focus_never_shift_the_query_text() {
+        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 20.0);
+        let base = SearchOverlay {
+            query: "abcdef".to_string(),
+            cursor_byte: 6,
+            focused: SearchControl::Editor,
+            ..SearchOverlay::default()
+        };
+        let reference = search_bar_segments(&base, bar, 10.0)[1].clone();
+        assert_eq!(reference.text, "abcdef");
+        for cursor_byte in 0..=6 {
+            for focused in [SearchControl::Editor, SearchControl::Next] {
+                let search = SearchOverlay {
+                    cursor_byte,
+                    focused,
+                    ..base.clone()
+                };
+                assert_eq!(search_bar_segments(&search, bar, 10.0)[1], reference);
+            }
+        }
+    }
+
+    /// Button labels sit in the middle of their slots with at least half a
+    /// cell of fill on each side, and a toggle keeps its name in place when
+    /// its value changes.
+    #[test]
+    fn button_labels_are_centered_and_toggles_do_not_move() {
+        let cell = 10.0;
+        let bar = search_bar_geometry(1400.0, 800.0, cell, 20.0);
+        let variants = |index: usize| -> Vec<SearchOverlay> {
+            let base = SearchOverlay::default();
+            match index {
+                4 => vec![
+                    base.clone(),
+                    SearchOverlay {
+                        wrap: false,
+                        ..base
+                    },
+                ],
+                5 => [
+                    SearchCaseMode::Smart,
+                    SearchCaseMode::Match,
+                    SearchCaseMode::Ignore,
+                ]
+                .into_iter()
+                .map(|case_mode| SearchOverlay {
+                    case_mode,
+                    ..base.clone()
+                })
+                .collect(),
+                6 => vec![
+                    base.clone(),
+                    SearchOverlay {
+                        invert: true,
+                        ..base
+                    },
+                ],
+                _ => vec![base],
+            }
+        };
+        for index in [2, 3, 4, 5, 6, 8] {
+            let segments: Vec<_> = variants(index)
+                .iter()
+                .map(|search| search_bar_segments(search, bar, cell)[index].clone())
+                .collect();
+            for segment in &segments {
+                let width = super::display_width(&segment.text) as f32 * cell;
+                let before = segment.left - segment.rect.0;
+                let after = segment.rect.0 + segment.rect.2 - (segment.left + width);
+                assert!(
+                    before >= cell / 2.0 - 0.5 && after >= cell / 2.0 - 0.5,
+                    "under half a cell of padding: {segment:?}"
+                );
+                assert!((before - after).abs() <= cell, "not centered: {segment:?}");
+                assert_eq!(segment.left, segments[0].left, "label moved: {segment:?}");
+            }
+            if index == 5 {
+                let chevron = |segment: &super::SearchBarSegment| {
+                    let (at, _) = segment
+                        .text
+                        .char_indices()
+                        .find(|(_, c)| *c == '›')
+                        .unwrap();
+                    super::display_width(&segment.text[..at])
+                };
+                for segment in &segments {
+                    assert_eq!(chevron(segment), chevron(&segments[0]), "{segment:?}");
+                }
+            }
+        }
+    }
+
+    /// A focused button's label stays readable while it is hovered or held,
+    /// not only on the plain accent. One Dark's dark label on its yellow
+    /// accent fell to about 3.3:1 while pressed.
+    #[test]
+    fn a_focused_label_holds_contrast_on_the_fill_as_painted() {
+        let rgb = |hex: u32| super::Rgb::new((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let (background, foreground) = (rgb(0x282c34), rgb(0xabb2bf));
+        let (accent, bar) = (rgb(0xe5c07b), rgb(0x5c6370));
+        for linear in [true, false] {
+            for tint in [None, Some((foreground, 0.14)), Some((background, 0.45))] {
+                let label = super::search_focused_label(background, bar, accent, tint, linear);
+                let alpha = f64::from(super::SEARCH_FOCUSED_FILL_ALPHA);
+                let fill = super::color::over(bar, accent, alpha, linear);
+                let fill = tint.map_or(fill, |(tint, alpha)| {
+                    super::color::over(fill, tint, f64::from(alpha), linear)
+                });
+                let ratio = super::color::contrast_ratio(label, fill);
+                assert!(ratio >= 4.49, "{tint:?} linear={linear}: {ratio:.2}:1");
+            }
+        }
+    }
+
+    /// An sRGB surface blends in linear light. Kettle's default theme showed
+    /// its pressed, focused Next button at (166, 131, 82): the accent fill
+    /// (216, 170, 104) under the background (26, 27, 38) at 45%.
+    #[test]
+    fn compositing_matches_what_an_srgb_surface_paints() {
+        let painted = super::color::over(
+            super::Rgb::new(216, 170, 104),
+            super::Rgb::new(26, 27, 38),
+            0.45,
+            true,
+        );
+        for (got, want) in [(painted.r, 166), (painted.g, 131), (painted.b, 82)] {
+            assert!(got.abs_diff(want) <= 1, "{painted:?}");
+        }
+    }
+
+    /// Lay out every segment the way paint does, and return each one's glyph
+    /// clusters in window x.
+    fn shaped_lane(search: &SearchOverlay) -> Vec<Vec<super::SearchEditorCluster>> {
+        let (cell, row) = (10.0, 26.0);
+        let bar = search_bar_geometry(1400.0, 800.0, cell, 16.0);
+        let mut font_system = glyphon::FontSystem::new();
+        for face in kettle_config::font::all() {
+            super::load_bundled_font(&mut font_system, face);
+        }
+        let metrics = glyphon::Metrics::new(13.0, row);
+        search_bar_segments(search, bar, cell)
+            .iter()
+            .map(|segment| {
+                let mut buffer = glyphon::Buffer::new(&mut font_system, metrics);
+                buffer.set_wrap(glyphon::cosmic_text::Wrap::None);
+                super::shape_search_segment(
+                    &mut font_system,
+                    &mut buffer,
+                    segment,
+                    metrics,
+                    glyphon::Family::Name("JetBrains Mono"),
+                    true,
+                );
+                super::segment_clusters(&buffer, segment)
+                    .into_iter()
+                    .map(|cluster| super::SearchEditorCluster {
+                        left: segment.left + cluster.left,
+                        right: segment.left + cluster.right,
+                        ..cluster
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Each control is shaped in its own buffer from its own slot, so wide or
+    /// fallback glyphs in the query cannot push the controls after the editor.
+    #[test]
+    fn query_content_never_moves_other_controls() {
+        let ascii = shaped_lane(&SearchOverlay {
+            query: "abcd".to_string(),
+            ..SearchOverlay::default()
+        });
+        let wide = shaped_lane(&SearchOverlay {
+            query: "日本語🙂é 日本語🙂é".to_string(),
+            ..SearchOverlay::default()
+        });
+        for index in (0..SEARCH_SEGMENTS).filter(|index| *index != 1) {
+            assert_eq!(
+                ascii[index], wide[index],
+                "segment {index} moved with the query"
+            );
+        }
+        assert!(!ascii[8].is_empty(), "Close has glyphs");
+    }
+
+    /// Caret positions follow the shaped glyphs: one per character boundary,
+    /// moving right through left-to-right text, whatever each glyph's width.
+    #[test]
+    fn caret_positions_follow_the_shaped_query() {
+        let lane = shaped_lane(&SearchOverlay {
+            query: "a日b".to_string(),
+            ..SearchOverlay::default()
+        });
+        let stops = super::cluster_stops(&lane[1]);
+        let bytes: Vec<usize> = stops.iter().map(|stop| stop.0).collect();
+        assert_eq!(bytes, [0, 1, 4, 5]);
+        assert!(
+            stops.windows(2).all(|pair| pair[0].1 < pair[1].1),
+            "stops must move right: {stops:?}"
+        );
+        assert_eq!(
+            super::stop_x(&stops, 2),
+            stops[1].1,
+            "inside 日 is its start"
+        );
+        assert_eq!(
+            super::stop_x(&stops, 99),
+            stops[3].1,
+            "past the end is the end"
+        );
+    }
+
+    /// A query that starts with Hebrew is a right-to-left paragraph. It is
+    /// still set flush left in the editor, and its caret positions run from
+    /// right to left.
+    #[test]
+    fn a_right_to_left_query_stays_in_view_and_its_caret_runs_leftward() {
+        let search = SearchOverlay {
+            query: "שלום".to_string(),
+            ..SearchOverlay::default()
+        };
+        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 16.0);
+        let editor_left = search_bar_segments(&search, bar, 10.0)[1].left;
+        let clusters = &shaped_lane(&search)[1];
+        assert_eq!(clusters.len(), 4);
+        assert!(clusters.iter().all(|cluster| cluster.rtl));
+        let leftmost = clusters.iter().map(|c| c.left).fold(f32::MAX, f32::min);
+        assert!(
+            (leftmost - editor_left).abs() < 1.0,
+            "flush left, not against the far edge: {leftmost} vs {editor_left}"
+        );
+        let stops = super::cluster_stops(clusters);
+        let bytes: Vec<usize> = stops.iter().map(|stop| stop.0).collect();
+        assert_eq!(bytes, [0, 2, 4, 6, 8]);
+        assert!(
+            stops.windows(2).all(|pair| pair[0].1 > pair[1].1),
+            "stops must move left: {stops:?}"
+        );
+        // Selecting the first letter covers exactly its glyph.
+        let first = clusters.iter().find(|cluster| cluster.start == 0).unwrap();
+        assert_eq!(
+            super::cluster_spans(clusters, 0, 2),
+            [(first.left, first.right)]
+        );
+    }
+
+    /// A right-to-left query wider than the editor still starts at its left
+    /// edge, so the end being typed stays in view.
+    #[test]
+    fn a_long_right_to_left_query_keeps_its_typing_end_in_view() {
+        let search = SearchOverlay {
+            query: "שלום ".repeat(60),
+            cursor_byte: usize::MAX,
+            ..SearchOverlay::default()
+        };
+        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 16.0);
+        let editor_left = search_bar_segments(&search, bar, 10.0)[1].left;
+        let clusters = &shaped_lane(&search)[1];
+        let leftmost = clusters.iter().map(|c| c.left).fold(f32::MAX, f32::min);
+        assert!(
+            (leftmost - editor_left).abs() < 1.0,
+            "{leftmost} vs {editor_left}"
+        );
+    }
+
+    /// The editor's reading order comes from the whole query, not from the
+    /// slice that is scrolled into view, so scrolling never reorders it.
+    #[test]
+    fn scrolling_a_mixed_query_keeps_its_reading_order() {
+        let query = "xx שלום abc def";
+        let at = |horizontal_scroll: usize| {
+            let search = SearchOverlay {
+                query: query.to_string(),
+                horizontal_scroll,
+                ..SearchOverlay::default()
+            };
+            let clusters = shaped_lane(&search)[1].clone();
+            let skip = super::search_editor_body(&search, 999).1;
+            let left_of = |needle: &str| {
+                let byte = query.find(needle).unwrap() - skip;
+                clusters.iter().find(|c| c.start == byte).unwrap().left
+            };
+            (left_of("ם"), left_of("abc"))
+        };
+        // Unscrolled, and scrolled so the slice starts with a Hebrew letter:
+        // the Hebrew stays left of "abc" both times.
+        for scroll in [0, 6] {
+            let (hebrew, latin) = at(scroll);
+            assert!(hebrew < latin, "scroll {scroll}: {hebrew} vs {latin}");
+        }
+        assert!(super::starts_right_to_left("123 שלום abc"));
+        assert!(!super::starts_right_to_left("(abc שלום"));
+        assert!(!super::starts_right_to_left(""));
+        // Only strong characters decide: a byte-order mark, Arabic-Indic
+        // digits and a leading combining mark do not; RLM does.
+        assert!(!super::starts_right_to_left("\u{FEFF}error: "));
+        assert!(!super::starts_right_to_left("٣ abc"));
+        assert!(super::starts_right_to_left("\u{200F}abc"));
+    }
+
+    /// Glyphs that share bytes form one cluster, so the caret after a split
+    /// vowel such as the one in "कि" goes after the whole cluster.
+    #[test]
+    fn a_cluster_drawn_as_several_glyphs_is_one_caret_step() {
+        let glyph = |start, end, left, right| super::SearchEditorCluster {
+            start,
+            end,
+            left,
+            right,
+            rtl: false,
+        };
+        // "कित": the i-matra is drawn first, then क, then त.
+        let clusters = super::merge_clusters(
+            [
+                glyph(0, 6, 0.0, 6.7),
+                glyph(0, 6, 6.7, 26.4),
+                glyph(6, 9, 26.4, 40.5),
+            ]
+            .into_iter(),
+        );
+        assert_eq!(clusters, [glyph(0, 6, 0.0, 26.4), glyph(6, 9, 26.4, 40.5)]);
+        assert_eq!(
+            super::cluster_stops(&clusters),
+            [(0, 0.0), (6, 26.4), (9, 40.5)]
+        );
+        assert_eq!(super::cluster_spans(&clusters, 0, 6), [(0.0, 26.4)]);
+    }
+
+    /// Mixed-direction text: a selection is painted over each cluster it
+    /// covers, in as many pieces as the layout needs.
+    #[test]
+    fn a_selection_covers_its_clusters_in_every_direction() {
+        let cluster = |start, end, left, right, rtl| super::SearchEditorCluster {
+            start,
+            end,
+            left,
+            right,
+            rtl,
+        };
+        // "ab" then a right-to-left run "שב" drawn as ב ש, then "c".
+        let clusters = vec![
+            cluster(0, 1, 0.0, 10.0, false),
+            cluster(1, 2, 10.0, 20.0, false),
+            cluster(2, 4, 30.0, 40.0, true),
+            cluster(4, 6, 20.0, 30.0, true),
+            cluster(6, 7, 40.0, 50.0, false),
+        ];
+        assert_eq!(
+            super::cluster_stops(&clusters),
+            [
+                (0, 0.0),
+                (1, 10.0),
+                (2, 40.0),
+                (4, 30.0),
+                (6, 40.0),
+                (7, 50.0)
+            ]
+        );
+        // "bש" covers b and ש, which are not next to each other.
+        assert_eq!(
+            super::cluster_spans(&clusters, 1, 4),
+            [(10.0, 20.0), (30.0, 40.0)]
+        );
+        assert_eq!(super::cluster_spans(&clusters, 0, 7), [(0.0, 50.0)]);
+        assert!(super::cluster_spans(&clusters, 3, 3).is_empty());
+        assert_eq!(super::cluster_stops(&[]), [(0, 0.0)]);
     }
 
     #[test]
@@ -18414,6 +19209,10 @@ mod search_bar_tests {
 
     #[test]
     fn editor_horizontal_clip_never_splits_extended_graphemes() {
+        // Nothing scrolled means nothing dropped, even a zero-width start.
+        assert_eq!(drop_cols_front("\u{200B}abc", 0), "\u{200B}abc");
+        assert_eq!(drop_cols_front("\u{301}abc", 0), "\u{301}abc");
+        assert_eq!(drop_cols_front("ab", 5), "");
         assert_eq!(drop_cols_front("a\u{301}b", 1), "b");
         assert_eq!(drop_cols_front("👩‍💻x", 1), "👩‍💻x");
         assert_eq!(drop_cols_front("👩‍💻x", 2), "x");

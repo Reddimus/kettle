@@ -1224,8 +1224,11 @@ disturbing the selection, the bar's Copy chord puts the grid selection on the
 clipboard (proven by pasting it back into the shell), a right-click opens the
 menu with the bar still open and its Copy row closes only the menu, a click on
 another split moves focus and `ui_geometry.search.target_pane` together and a
-query then matches text that exists only in that pane, and Esc closes the bar
-with the last selection intact.
+query then matches text that exists only in that pane, Kettle's shortcuts run
+with the bar open (`Ctrl+=` and `Ctrl+0` change the cell size, `Ctrl+Shift+N`
+moves focus and the bar), and Esc closes the bar with the last selection
+intact. A press on Case, moved off before the release, leaves it unchanged;
+a press and release on it cycles it.
 
 Media-receipt visual smokes pass the receipt bounds back through the four
 `crop_*` screenshot fields. The renderer crops the GPU readback before it opens

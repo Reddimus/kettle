@@ -235,10 +235,36 @@ than an eager global match count. Search state belongs to the OS window, while
 the last query is remembered per pane within that window.
 
 `Enter` follows the configured default direction and `Shift+Enter` reverses it;
-`F3` / `Shift+F3` are always Next / Previous. `Escape` closes the bar without
-snapping the viewport away from the selected result. Search input is Kettle UI
-chrome and is not sent to tmux, AstroNvim, Codex CLI, Claude Code CLI, or any
-other program in the PTY.
+`F3` / `Shift+F3` are always Next / Previous, and so are `Cmd+G` / `Shift+Cmd+G`
+(`Ctrl+G` / `Ctrl+Shift+G` on Linux). The `start_search` shortcut pressed again
+returns to the query and selects it. Clicking a button runs it without taking
+focus from the query. A button acts when released over it, so moving off before
+releasing cancels, and Space or Enter on a focused toggle or Close acts once
+however long it is held. Wrap and Invert keep the current match; Case searches
+again from it. `Escape` closes the bar without snapping the viewport away from
+the selected result. Search input is Kettle UI chrome and is not sent to tmux,
+AstroNvim, Codex CLI, Claude Code CLI, or any other program in the PTY.
+
+The query edits like a native text field: word movement and deletion with
+`Option` on macOS or `Ctrl` elsewhere, `Cmd+Left` / `Cmd+Right` and
+`Cmd+Backspace` / `Cmd+Delete` for the line ends on macOS, and undo with
+`Cmd+Z` / `Shift+Cmd+Z` (`Ctrl+Z` / `Ctrl+Shift+Z` on Linux). Typing, or a
+held Backspace, undoes in one step. On macOS, `Ctrl+A` / `E` / `B` / `F` /
+`D` / `H` work as in its text fields, and `Ctrl+K` deletes to the end when
+`vim-menu-nav` is off; with it on (the default), `Ctrl+J` / `K` / `N` / `P`
+step through matches. `Shift+Left` / `Shift+Right` and `Shift+Home` /
+`Shift+End` select in the query, so the split resize and select-to-top or
+bottom bound to them work once the bar closes or a button has focus.
+
+Kettle's other shortcuts keep working while the bar is open: a new tab, font
+zoom, tab switching (with `Alt+1`…`9` on Linux too), split focus, vertical split
+resize, scrolling, and the rest. The bar follows focus to another pane.
+Shortcuts that type into the terminal do nothing while the bar is open: `text:`
+bindings, `send_newline`, `paste_primary`, and the pane-number inserts. Paste
+goes into the query, and Copy takes the query's selection if it has one,
+otherwise the text selected in the grid. On Linux, `Ctrl+Shift+A` and
+`Ctrl+Shift+X` keep their split and zoom meanings rather than selecting or
+cutting the query.
 
 ### Auto light/dark theme switching
 
