@@ -219,10 +219,9 @@ impl AsyncFileWriter {
         self.request_finish();
     }
 
-    /// Recorder-only: the session log has no overload/finish protocol of
-    /// its own. Gated exactly like `mod record`, which is also built under
-    /// `cfg(test)` with the feature off, so this is absent rather than dead
-    /// code in a plain build.
+    /// Recorder-only, since the session log has no overload/finish protocol
+    /// of its own. Gated like `mod record` so a plain build omits it instead
+    /// of carrying dead code.
     #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn stop_overloaded(&mut self) {
         self.stop_with(AsyncWriterStatus::Overloaded);
@@ -233,10 +232,9 @@ impl AsyncFileWriter {
         drop(self.sender.take());
     }
 
-    /// Recorder-only: the session log has no overload/finish protocol of
-    /// its own. Gated exactly like `mod record`, which is also built under
-    /// `cfg(test)` with the feature off, so this is absent rather than dead
-    /// code in a plain build.
+    /// Recorder-only, since the session log has no overload/finish protocol
+    /// of its own. Gated like `mod record` so a plain build omits it instead
+    /// of carrying dead code.
     #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn finish_requested(&self) -> bool {
         self.finish_requested
@@ -259,10 +257,9 @@ impl AsyncFileWriter {
         true
     }
 
-    /// Recorder-only: the session log has no overload/finish protocol of
-    /// its own. Gated exactly like `mod record`, which is also built under
-    /// `cfg(test)` with the feature off, so this is absent rather than dead
-    /// code in a plain build.
+    /// Recorder-only, since the session log has no overload/finish protocol
+    /// of its own. Gated like `mod record` so a plain build omits it instead
+    /// of carrying dead code.
     #[cfg(any(feature = "asciicast", test))]
     pub(crate) fn finish_with_timeout(&mut self, timeout: Duration) -> bool {
         self.request_finish();
@@ -308,12 +305,11 @@ fn run_writer(
     loop {
         // Check the deadline here rather than relying on `recv_timeout` to
         // report it. Once the deadline has passed the computed timeout is
-        // zero, and a zero timeout does NOT yield `Timeout` while an item is
-        // ready — it yields the item. So a continuously writing producer
-        // starved the flush arm completely: buffered data sat past the bound
-        // until the stream went idle, and a flush failure (a full disk, say)
-        // stayed invisible for exactly as long, which is the opposite of what
-        // the visible-failure design is for.
+        // zero, and a zero timeout returns a ready item instead of `Timeout`.
+        // A producer that writes continuously would then starve the flush
+        // arm, keeping buffered data past the bound and a flush failure (a
+        // full disk, say) hidden until the stream goes idle. That defeats the
+        // visible-failure design.
         if dirty && Instant::now() >= flush_deadline {
             if writer.flush().is_err() {
                 set_failure(status, notifier, AsyncWriterStatus::IoError);

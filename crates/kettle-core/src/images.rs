@@ -208,11 +208,10 @@ impl AnimEntry {
     /// The image to draw right now per the playback clock, or `None` if the
     /// entry has no frames. A well-formed entry always has `imgs[0]` (the
     /// root frame), but the frame list is assembled from untrusted PTY
-    /// control sequences — a malformed kitty animation could register an
-    /// entry with an empty `imgs`, and the previous `&self.imgs[…]` would
-    /// then index `imgs[0]` (via `saturating_sub(1)` → 0) and panic at
-    /// render time. Returning `Option` lets the caller skip the swap and
-    /// keep the placement's existing image instead of crashing.
+    /// control sequences, so a malformed kitty animation can register an
+    /// entry with an empty `imgs`. Returning `None` then lets the caller skip
+    /// the swap and keep the placement's existing image instead of panicking
+    /// at render time.
     pub fn current(&self) -> Option<&ImageData> {
         if self.imgs.is_empty() {
             return None;
@@ -274,9 +273,8 @@ mod tests {
     #[test]
     fn current_is_none_for_an_empty_frame_list() {
         // A malformed kitty animation could register an entry with no
-        // frames. The old `&self.imgs[…]` indexed imgs[0] and panicked at
-        // render time; now we get a clean `None` and the caller keeps the
-        // placement's existing image.
+        // frames. `current` must return `None` instead of panicking, so the
+        // caller keeps the placement's existing image.
         let e = AnimEntry {
             imgs: Vec::new(),
             gaps: Vec::new(),

@@ -1,5 +1,4 @@
-//! Multi-window cycle (Peacock accents): the cross-process window-presence
-//! registry.
+//! Cross-process window-presence registry for per-window Peacock accents.
 //!
 //! Every live kettle WINDOW (across every kettle process) writes a
 //! `<pid>-w<seq>.json` entry recording the accent color it claimed, so a new
@@ -51,9 +50,7 @@ pub struct PresenceEntry {
     pub win: u64,
     /// Claimed accent as `#rrggbb`.
     pub rgb: String,
-    /// True when the claim came from the Peacock auto pool (a pinned
-    /// `accent-color = <hex>` window still registers, so auto windows can
-    /// avoid colliding with it).
+    /// True when the claim came from the Peacock auto pool.
     pub auto: bool,
     /// Unix seconds at claim time (diagnostics only).
     pub started_unix: u64,
@@ -121,10 +118,10 @@ pub fn pid_alive(pid: u32) -> bool {
         // `kill` reads its first argument as a SIGNED pid, and the special
         // values are all <= 0: `0` is "every process in my group", `-1` is
         // "every process I may signal", and any other negative is a process
-        // group. A record is attacker-influenced data on disk, so casting a
-        // `u32` straight through meant `u32::MAX` became `-1` and probed
-        // everything — reporting a dead owner as live, forever, and keeping
-        // its stale claim alive with it.
+        // group. A record is attacker-influenced data on disk. A `u32` cast
+        // straight through would turn `u32::MAX` into `-1` and probe
+        // everything, reporting a dead owner as live forever and keeping its
+        // stale claim alive with it.
         //
         // Reject anything that cannot be a real pid before asking the kernel.
         let Ok(pid) = libc::pid_t::try_from(pid) else {
@@ -343,8 +340,9 @@ pub fn claim(dir: &Path, entry: PresenceEntry) -> Option<PresenceGuard> {
     Some(PresenceGuard { path, entry })
 }
 
-/// Every live claim, stale entries pruned as a side effect. Unreadable or
-/// unparseable files are skipped (and removed — they can only be leftovers).
+/// Every live claim, stale entries pruned as a side effect. Unparseable files
+/// are removed, since they can only be leftovers. A file this process cannot
+/// open or read is skipped but kept, because it may be a live claim.
 pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
     let mut out = Vec::new();
     if !crate::private_dir_is_valid(dir) {
@@ -375,9 +373,9 @@ pub fn live_entries(dir: &Path) -> Vec<PresenceEntry> {
             EntryRead::Garbage => {
                 let _ = std::fs::remove_file(&path);
             }
-            // Never examined. Deleting on the strength of a failure to look
-            // took live windows' colors out of the pool whenever this process
-            // was short of descriptors.
+            // Never examined, so keep it. Deleting on a failed look would take
+            // live windows' colors out of the pool whenever this process runs
+            // short of descriptors.
             EntryRead::Unexamined => {}
         }
     }
@@ -402,9 +400,9 @@ fn prune_stale(path: &Path, judged: &PresenceEntry) {
 /// What a presence file turned out to be.
 ///
 /// The two failure arms are deliberately separate. `live_entries` deletes what
-/// it judges unusable, and running out of descriptors made every claim in the
-/// directory look unusable at once — including the live windows of other
-/// processes, whose colours then went back into the pool.
+/// it judges unusable, and running out of descriptors would make every claim in
+/// the directory look unusable at once, including other processes' live
+/// windows, whose colours would then go back into the pool.
 enum EntryRead {
     Record(PresenceEntry),
     /// Read through and it is not a presence record. Nothing to preserve.
@@ -508,10 +506,9 @@ mod tests {
 
     /// A claim this reader cannot open must survive the sweep.
     ///
-    /// The sweep deleted anything `read_entry` returned `None` for, and that
-    /// covered failing to open the file at all. One process short of
-    /// descriptors therefore erased every claim in the directory, including
-    /// live windows belonging to other processes, and their colours went back
+    /// If the sweep deleted every file it failed to open, one process short of
+    /// descriptors would erase every claim in the directory, including live
+    /// windows belonging to other processes, and their colours would go back
     /// into the pool for anyone to take.
     ///
     /// Mode `0000` stands in for the resource failure: both reach the same
@@ -727,9 +724,9 @@ mod tests {
         assert!(!pid_alive(u32::MAX - 1));
         // `kill` takes a SIGNED pid and every special value is <= 0: `0` means
         // "my whole process group", `-1` means "everything I may signal", and
-        // other negatives mean a process group. Casting a `u32` straight
-        // through turned `u32::MAX` into `-1`, so a crafted record probed
-        // every process and came back "alive" — keeping a dead owner's claim
+        // other negatives mean a process group. A `u32` cast straight through
+        // would turn `u32::MAX` into `-1`, so a crafted record would probe
+        // every process, come back "alive", and keep a dead owner's claim
         // permanently. These must all be rejected before the kernel sees them.
         assert!(!pid_alive(u32::MAX), "u32::MAX would cast to -1");
         assert!(!pid_alive(0), "0 addresses the caller's own process group");

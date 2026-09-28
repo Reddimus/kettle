@@ -1,4 +1,4 @@
-//! The blocking control-plane client (agent-first A2).
+//! The blocking control-plane client.
 //!
 //! Connects to a running kettle's control server (discovered via the registry
 //! or named by pid/endpoint), issues correlated `call(method, params)`
@@ -130,16 +130,14 @@ impl Client {
     /// Discover a running server and connect. If `pid` is `Some`, connect to
     /// that pid's server; otherwise pick the newest live entry.
     ///
-    /// Robustness (audit): an entry is only *pruned* when its owning process is
-    /// genuinely gone (`presence::owner_alive` says so — dead, or a pid the OS
-    /// has since handed to a stranger). A `connect_endpoint`
-    /// failure can also come from a *client-side* hiccup (a `try_clone` /
-    /// BufReader error while the server is alive and already connected) or a
-    /// transient transport error — pruning on those would permanently delete a
-    /// healthy server's entry, since the server `register`s exactly once at
-    /// start (no heartbeat). When the connect fails but the pid is still alive,
-    /// we leave the entry in place and remember the error, surfacing it rather
-    /// than masking every failure as a blanket `NoServer`.
+    /// An entry is only *pruned* when `presence::owner_alive` says its owning
+    /// process is gone (dead, or its pid since handed to a stranger). A
+    /// `connect_endpoint` failure can also come from a client-side `try_clone`
+    /// error or a transient transport error while the server is alive. Pruning
+    /// on those would permanently delete a healthy server's entry, since the
+    /// server `register`s exactly once at start (no heartbeat). So when the
+    /// owner is still alive, the entry stays and discovery surfaces the connect
+    /// error instead of a blanket `NoServer`.
     pub fn discover(pid: Option<u32>) -> Result<Self, CtlError> {
         let dir = discovery::registry_dir();
         Self::discover_in(&dir, pid, Self::connect_endpoint, discovery::owner_alive)
@@ -177,13 +175,12 @@ impl Client {
                 Ok(c) => return Ok(c),
                 Err(err) => {
                     // Only prune a TRULY dead server. If the owning process is
-                    // still alive the failure is client-side (a try_clone /
-                    // BufReader hiccup while the server is alive and already
-                    // connected) or a transient transport error — do NOT delete
-                    // a healthy entry; remember the error instead. Even then the
-                    // delete is conditional: the connect attempts above take
-                    // real time, and this entry's pid may by now belong to a new
-                    // kettle that registered at the same path.
+                    // still alive the failure is client-side (a `try_clone`
+                    // hiccup) or a transient transport error, so do NOT delete a
+                    // healthy entry; remember the error instead. Even for a dead
+                    // owner the delete is conditional, since the connect attempts
+                    // above take real time and this entry's pid may by now belong
+                    // to a new kettle that registered at the same path.
                     if !owner_alive(&e) {
                         discovery::prune_stale(dir, &e);
                     }
@@ -321,12 +318,11 @@ impl Client {
             }
         };
         frame.push(b'\n');
-        // Everything above this line leaves the wire untouched, so those
-        // failures keep the connection reusable. So does a write that never
-        // placed a byte on it — a deadline or a cancellation can land before
-        // the first one, and a request the server never saw needs no
-        // correlating. Only from the first byte onwards is an exchange under
-        // way that nothing but its own response can end in step.
+        // Failures above this line never touch the wire, so they keep the
+        // connection reusable. So does a failed write that sent no bytes (a
+        // deadline or cancellation can land before the first one), since the
+        // server never saw that request. Once a byte is out, the connection
+        // stays in step only if this request's response is read.
         let writer = self.writer.as_mut().ok_or_else(Self::retired)?;
         let (written, write) = writer.write_all_until_counted(&frame, deadline, cancelled);
         if let Err(error) = write {
@@ -746,11 +742,11 @@ mod tests {
         )
     }
 
-    /// Fix 1 invariant: when `connect_endpoint` fails but the owning pid is
-    /// still ALIVE (a client-side `try_clone`/BufReader hiccup or a transient
-    /// transport error — the server `register`s exactly once, no heartbeat), the
-    /// healthy entry MUST NOT be pruned, and the real transport error must be
-    /// surfaced rather than masked as a blanket `NoServer`.
+    /// When `connect_endpoint` fails but the owning pid is still ALIVE (a
+    /// client-side `try_clone` hiccup or a transient transport error; the server
+    /// `register`s exactly once, no heartbeat), the healthy entry MUST NOT be
+    /// pruned, and the real transport error must surface rather than be masked
+    /// as a blanket `NoServer`.
     #[test]
     fn discover_does_not_prune_live_pid_on_connect_failure() {
         let dir =
@@ -767,13 +763,11 @@ mod tests {
         };
         let res = Client::discover_in(&dir, None, connect, |_entry| true);
 
-        // The error is surfaced (not masked as NoServer)…
         match res {
             Err(CtlError::Io(_)) => {}
             Err(other) => panic!("expected the transport Io error to surface, got {other:?}"),
             Ok(_) => panic!("connect closure always errs; discover must not succeed"),
         }
-        // …and crucially the live entry is STILL on disk (not pruned).
         assert!(
             discovery::list(&dir).iter().any(|e| e.pid == pid),
             "a live server's entry must survive a transient connect failure"
@@ -781,8 +775,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Conversely, a connect failure whose pid is DEAD does prune the entry
-    /// (the complementary half of the gate).
+    /// Conversely, an entry whose owner is DEAD is pruned (the complementary
+    /// half of the gate).
     #[test]
     fn discover_prunes_dead_pid_on_connect_failure() {
         let dir =
@@ -1031,11 +1025,11 @@ mod tests {
     /// connection would read it as the NEXT call's response, and would put a
     /// second (possibly mutating) request onto a stream nobody can correlate.
     ///
-    /// Three separate things make that impossible, and this pins all three at
-    /// the server end, where the client cannot flatter itself: the second
-    /// request is refused locally, **no second request ever reaches the
-    /// wire**, and the transport is closed as part of retiring — while this
-    /// client is still alive and un-dropped.
+    /// Three guards prevent that, and this test pins each one: the second
+    /// request is refused locally, **no second request ever reaches the wire**,
+    /// and retiring closes the transport while this client is still alive and
+    /// un-dropped. The last two are checked at the server, not on the client's
+    /// word.
     #[test]
     fn a_timed_out_call_retires_the_connection_before_a_late_response_lands() {
         let (listener, endpoint) = test_listener("late");
@@ -1045,11 +1039,10 @@ mod tests {
         // Wait for the server to be INSIDE a connection before the client does
         // anything. On Windows the pipe instance exists from `bind`, so without
         // this the client could connect, write, hit its 40 ms deadline, retire,
-        // and close its handle before the thread ever reached `accept` — which
-        // then tore down the poisoned instance, created a fresh one, and blocked
-        // forever on a client that was never coming. `closed` was never sent and
-        // the test failed roughly one run in twenty. `client_stalled` above
-        // synchronizes the same way.
+        // and close its handle before the thread reaches `accept`. That `accept`
+        // would then tear down the poisoned instance, create a fresh one, and
+        // block forever on a client that never comes, so `closed` is never
+        // sent. `client_stalled` above synchronizes the same way.
         let (accepted, wait_for_accept) = std::sync::mpsc::sync_channel(0);
         std::thread::spawn(move || {
             use std::io::BufRead as _;

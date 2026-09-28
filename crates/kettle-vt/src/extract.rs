@@ -82,7 +82,7 @@ pub enum Chunk {
     /// kitty animation snapshot for image `id`: the full display sequence
     /// (`imgs[0]` = base/root frame) with each frame's gap in ms and the
     /// current animation control state. Emitted whenever a frame or the
-    /// control state changes; an empty/▒single-image non-running snapshot
+    /// control state changes; an empty or single-image non-running snapshot
     /// means the animation was cleared.
     Animation {
         id: u32,
@@ -151,14 +151,12 @@ const MAX_NOTIFY_FIELD_BYTES: usize = 8 << 10;
 
 /// Longest raw OSC 7 / OSC 9;9 body converted to a `String` for cwd parsing.
 ///
-/// `safe_reported_cwd` already rejects an oversized path, but it saw the
-/// decoded path, so the conversion had already happened. An OSC body runs to
-/// `GraphicsLimits::sequence_bytes`, and `from_utf8_lossy` turns each invalid
-/// byte into a three-byte replacement character, so 16 MiB of `0xff` allocated
-/// 48 MiB outside any budget to produce a path that was then thrown away.
-/// Three times [`MAX_REPORTED_CWD_BYTES`] is the widest a fully
-/// percent-encoded path can be, so nothing that could have been accepted is
-/// lost.
+/// `safe_reported_cwd` rejects an oversized path only after the conversion. An
+/// OSC body can reach `GraphicsLimits::sequence_bytes`, and `from_utf8_lossy`
+/// turns each invalid byte into a three-byte replacement character, so 16 MiB
+/// of `0xff` would allocate 48 MiB outside any budget for a path that is then
+/// thrown away. Three times [`MAX_REPORTED_CWD_BYTES`] is the widest a fully
+/// percent-encoded path can be, so no acceptable path is lost.
 const MAX_CWD_REPORT_BYTES: usize = 3 * MAX_REPORTED_CWD_BYTES;
 
 /// Longest cwd `safe_reported_cwd` accepts, above common `PATH_MAX` values
@@ -821,17 +819,12 @@ impl Extractor {
         }
     }
 
-    /// v2.20.0 P3 (perf): the PTY front stage. Plain bytes (the overwhelming
-    /// majority of real output) used to walk a per-byte state machine —
-    /// `match` + bounds-checked `Vec::push` for every single byte of a 64KiB
-    /// read. Now each loop iteration `memchr`-scans (SIMD) to the next byte
-    /// that can change state — ESC in pass-through; ESC / raw ST (and BEL for
-    /// OSC) inside a sequence — and bulk-copies the run before it with
-    /// `extend_from_slice`. That also collapses the old doubling-ladder
-    /// reallocs (a taken `pass` buffer re-grew 0→64KiB in ~17 steps under
-    /// flood) into a single exact `reserve` per run. State semantics are
-    /// byte-identical to the old loop, including ESC / ESC-\ split across
-    /// `feed` calls.
+    /// The PTY front stage. Plain bytes are most of real output, so each loop
+    /// iteration `memchr`-scans (SIMD) to the next byte that can change state
+    /// and bulk-copies the run before it with `extend_from_slice`, at most one
+    /// reallocation per run. Stop bytes are ESC in pass-through, and ESC, raw
+    /// ST, CAN, SUB, and (OSC only) BEL inside a sequence. An ESC or `ESC \`
+    /// split across `feed` calls parses the same as an unsplit one.
     pub fn feed(&mut self, input: &[u8]) -> Vec<Chunk> {
         let mut collected = Vec::new();
         self.feed_with(input, |_, chunk| collected.push(chunk));
@@ -850,8 +843,8 @@ impl Extractor {
     where
         F: FnMut(&mut Self, Chunk),
     {
-        // `finish_seq` and `flush_pass` each emit at most one chunk. Reusing a
-        // tiny staging Vec keeps their established, heavily-tested parsing
+        // `finish_seq` and `flush_pass` each emit at most two chunks. Reusing
+        // a tiny staging Vec keeps their established, heavily-tested parsing
         // paths intact while still handing chunks off at sequence boundaries.
         let mut out: Vec<Chunk> = Vec::with_capacity(1);
         let mut i = 0usize;
@@ -920,10 +913,8 @@ impl Extractor {
                         }
                         // CAN/SUB cancel here too. An ESC arriving mid-string
                         // sets `st_pending` and this branch owns the next byte,
-                        // so checking for cancellation only on the bulk path
-                        // left `ESC CAN` appending both bytes as payload and
-                        // the string still open — the same freeze, reachable by
-                        // putting an ESC in front of the CAN.
+                        // so `ESC CAN` must cancel the string rather than count
+                        // as payload and leave it open.
                         if b == 0x18 || b == 0x1a {
                             i += 1;
                             self.cancel_seq();
@@ -965,9 +956,8 @@ impl Extractor {
                         continue;
                     } else {
                         // Bulk path: sequence bytes run to the next ESC, raw
-                        // ST (0x9c), or — OSC only — BEL terminator. A BEL
-                        // inside a DCS/APC body is payload, exactly as the
-                        // old per-byte arm treated it.
+                        // ST (0x9c), or (OSC only) BEL terminator. A BEL
+                        // inside a DCS/APC body is payload.
                         let hay = &input[i..];
                         let terminator = if self.mode == Mode::Osc {
                             memchr::memchr3(0x1b, 0x9c, 0x07, hay)
@@ -1004,10 +994,10 @@ impl Extractor {
                                 if b == 0x9c && self.seq_expects_utf8_continuation() {
                                     // A raw 0x9c that continues an in-progress
                                     // UTF-8 character is payload, not an 8-bit
-                                    // ST — matching the downstream VT engine,
+                                    // ST, matching the downstream VT engine,
                                     // xterm, and Windows Terminal. Cutting here
-                                    // leaked the rest of the string to the grid
-                                    // as text (stray "C" / stale-row bugs).
+                                    // would leak the rest of the string to the
+                                    // grid as text (stray "C" / stale-row bugs).
                                     let consumed = self.consume_seq_bytes(&hay[off..off + 1]);
                                     i += consumed;
                                     // If the discard-recovery boundary landed on
@@ -1071,8 +1061,8 @@ impl Extractor {
     /// mode at `Pass`. The outer loop then carries on in the wrong mode and
     /// paints the rest of the sequence onto the grid as text.
     ///
-    /// Two synchronized graphics frames in one PTY read was enough, which is the
-    /// ordinary case for an animation.
+    /// Two synchronized graphics frames in one PTY read, the ordinary case for
+    /// an animation, are enough to trigger this.
     fn dispatch_escape_follower<F>(&mut self, b: u8, out: &mut Vec<Chunk>, handle: &mut F)
     where
         F: FnMut(&mut Self, Chunk),
@@ -1323,10 +1313,9 @@ impl Extractor {
     /// CAN (0x18) / SUB (0x1a) abandon the control string in progress.
     ///
     /// DEC defines both as immediate cancellation of DCS/OSC/APC/PM/SOS, and
-    /// every real terminal implements it. Treating them as payload meant the
-    /// extractor stayed in the string state waiting for a terminator that was
-    /// never coming: a single stray `0x18` inside an OSC swallowed the rest of
-    /// the stream, so the pane simply stopped updating and looked frozen.
+    /// every real terminal implements it. Treated as payload, one stray `0x18`
+    /// inside an OSC would leave the extractor waiting for a terminator that
+    /// never comes, and the pane would stop updating.
     ///
     /// The accumulated bytes are dropped rather than emitted — a cancelled
     /// string was never a command, and printing its half-finished payload to
@@ -1338,10 +1327,9 @@ impl Extractor {
             return;
         }
         // Release the memory, not just the length. `clear()` keeps the whole
-        // capacity — up to the 16 MiB sequence cap — while dropping the
-        // reservation tells the graphics budget it is free, so a near-limit
-        // string cancelled once per pane retained megabytes the budget
-        // believed it had reclaimed.
+        // capacity (up to the 16 MiB sequence cap), while dropping the
+        // reservation tells the graphics budget it is free, so a cancelled
+        // near-limit string would keep megabytes the budget counts as reclaimed.
         self.seq = Vec::new();
         let _seq_reservation = self.seq_reservation.take();
         self.mode = Mode::Pass;
@@ -1408,10 +1396,8 @@ impl Extractor {
         // OSC 9;9;<path> — ConEmu "set working directory" (the Windows
         // convention Windows Terminal also honors). The payload is a PLAIN
         // filesystem path (often double-quoted), NOT a file:// URI like OSC 7.
-        // MUST precede the OSC 9 notification handler below, which strips the
-        // `9;` prefix and would otherwise swallow `9;9;C:\path` as a bogus
-        // notification. Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins;
-        // both are shell-volunteered truth).
+        // Surfaces the same Chunk::Cwd as OSC 7 (last-writer-wins; both are
+        // shell-volunteered truth).
         if mode == Mode::Osc && seq.starts_with(b"9;9;") {
             self.emit_raw_control(mode, &seq, out);
             let body = &seq[4..];
@@ -1532,12 +1518,11 @@ impl Extractor {
 
         let result = match mode {
             Mode::Dcs => {
-                // Sixel: params then 'q' then data.
-                // A Sixel DCS is `P1;P2;P3 q
-                // <data>` — the bytes before `q` are only digits / `;`. Requiring
-                // that prefix shape stops other DCS strings whose body contains a
-                // `q` (DECRQSS `$q…`, XTGETTCAP `+q…`) from being swallowed as
-                // tiny spurious images; those now forward verbatim (R::None).
+                // A Sixel DCS is `P1;P2;P3 q <data>`, where the bytes before `q`
+                // are only digits and `;`. Requiring that prefix shape stops other
+                // DCS strings whose body contains a `q` (DECRQSS `$q...`,
+                // XTGETTCAP `+q...`) from being swallowed as tiny spurious
+                // images. Those forward verbatim (R::None).
                 match seq
                     .iter()
                     .position(|&c| c == b'q')
@@ -1629,10 +1614,9 @@ impl Extractor {
             }
             Mode::Osc => {
                 // Test the iTerm prefix on the raw bytes (byte-exact for an
-                // ASCII prefix) and only allocate the owned String on a match.
-                // Every other OSC — titles, colors, OSC 8 hyperlinks, OSC 52,
-                // OSC 104 — reaches this branch and would otherwise heap-alloc a
-                // full String just to fail `starts_with`.
+                // ASCII prefix) before validating UTF-8, so every other OSC
+                // (titles, colors, OSC 8 hyperlinks, OSC 52, OSC 104) skips the
+                // full-body check.
                 if seq.starts_with(b"1337;File=") {
                     std::str::from_utf8(&seq)
                         .ok()
@@ -1807,14 +1791,13 @@ fn parse_osc7_with_host(s: &str, local_host: Option<&str>) -> Option<String> {
     })
 }
 
-/// v2.29.0: parse an OSC 9;9 working-directory payload (everything after the
-/// `9;9;`). ConEmu's "set working directory" convention — a PLAIN filesystem
-/// path (e.g. `C:\Users\me\proj` or `/home/me/proj`), frequently wrapped in
-/// double quotes — NOT a `file://` URI like OSC 7, so it is taken verbatim
-/// (after unquoting) rather than URL-decoded. Returns the unquoted path, or
-/// `None` if empty. Because Windows Terminal honors this sequence, any
-/// oh-my-posh / starship / custom prompt a user already configured for WT
-/// reports its cwd to kettle for free.
+/// Parse an OSC 9;9 working-directory payload (everything after the `9;9;`).
+/// ConEmu's "set working directory" convention sends a PLAIN filesystem path
+/// (e.g. `C:\Users\me\proj` or `/home/me/proj`), often double-quoted, NOT a
+/// `file://` URI like OSC 7. So it is taken verbatim after unquoting, not
+/// URL-decoded. Returns the unquoted path, or `None` if empty. Windows Terminal
+/// honors this sequence, so any oh-my-posh / starship / custom prompt a user
+/// already configured for WT reports its cwd to kettle for free.
 fn parse_osc9_9(payload: &[u8]) -> Option<String> {
     let s = String::from_utf8_lossy(payload);
     let trimmed = s.trim().trim_matches('"').trim();
@@ -1924,15 +1907,15 @@ fn same_host(host: &str, local: &str) -> bool {
             .is_some_and(|label| label.eq_ignore_ascii_case(local))
 }
 
-/// v2.20.0 (Ghostty parity): parse an OSC 7 body, accepting BOTH schemes —
-/// `file://host/path` (percent-encoded) and kitty's `kitty-shell-cwd://host/path`
-/// (raw bytes, NOT percent-encoded — kitty invented the scheme precisely so
-/// shells don't have to URL-encode) — and validating the hostname: a report
-/// whose host is non-empty, not `localhost`, and not THIS machine is dropped.
-/// An ssh session's shell integration reports the REMOTE host's cwd; treating
-/// `/home/user` from another machine as a local directory breaks new-tab
-/// cwd inheritance and `OpenCwdInFileManager`. (Ghostty applies the same
-/// check in its stream handler.) `is_local` decides what "this machine" means.
+/// Parse an OSC 7 body in either scheme and validate its hostname.
+/// `file://host/path` is percent-encoded. Kitty's `kitty-shell-cwd://host/path`
+/// carries raw bytes, NOT percent-encoded; kitty invented the scheme so shells
+/// don't have to URL-encode. A report whose host is non-empty, not `localhost`,
+/// and not THIS machine is dropped. An ssh session's shell integration reports
+/// the REMOTE host's cwd; treating `/home/user` from another machine as a local
+/// directory breaks new-tab cwd inheritance and `OpenCwdInFileManager`. Ghostty
+/// applies the same check in its stream handler. `is_local` decides what "this
+/// machine" means.
 fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<String> {
     // Split scheme; kitty-shell-cwd paths are used VERBATIM (no decode).
     let (rest, percent_encoded) = if let Some(r) = s.strip_prefix("kitty-shell-cwd://") {
@@ -1956,12 +1939,10 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
     if !percent_encoded {
         return Some(normalize_drive_path(path.to_string()));
     }
-    // Decode into a *byte* buffer first: shells percent-encode each UTF-8
+    // Decode into a *byte* buffer first. Shells percent-encode each UTF-8
     // byte of a non-ASCII path individually (zsh's `print -P %d` emits
-    // `%C3%A9` for `é`), so we need to reassemble the bytes before
-    // interpreting them as UTF-8. The old code pushed each decoded byte as
-    // a `char`, which gave `Ã©` instead of `é` and corrupted every cwd
-    // outside the ASCII range.
+    // `%C3%A9` for `é`), so the bytes must be reassembled before being read
+    // as UTF-8. Pushing each decoded byte as a `char` would turn `é` into `Ã©`.
     let mut bytes = Vec::with_capacity(path.len());
     let b = path.as_bytes();
     let mut i = 0;
@@ -1969,19 +1950,15 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
         if b[i] == b'%'
             && i + 2 < b.len()
             // Require BOTH escape bytes to be ASCII hex digits. `u8::from_str_radix`
-            // also accepts a leading sign (`+5`/`-5`), so `%+5`/`%-5` would
-            // otherwise mis-decode to a byte instead of being passed through as
-            // the literal text they are — guard the digits explicitly first.
+            // also accepts a leading `+`, so `%+5` would otherwise mis-decode to a
+            // byte instead of passing through as literal text.
             && b[i + 1].is_ascii_hexdigit()
             && b[i + 2].is_ascii_hexdigit()
-            // Slice the *bytes* (never the &str): a `%` immediately
-            // followed by a multibyte UTF-8 char would otherwise make
-            // `&path[i+1..i+3]` land on a non-char-boundary and panic
-            // (a hard crash under panic=abort) before from_str_radix
-            // could reject it. from_utf8 rejects a mid-char byte pair,
-            // so the `%` falls through and is pushed as a literal byte.
-            // (Both bytes are now known ASCII hex, so from_utf8 / from_str_radix
-            // cannot fail here, but keep the chained form for robustness.)
+            // Slice the *bytes*, never the &str. Without the hex checks above, a
+            // `%` followed by a multibyte UTF-8 char would put `&path[i+1..i+3]`
+            // off a char boundary and panic (a hard crash under panic=abort).
+            // Both bytes are known ASCII hex here, so from_utf8 / from_str_radix
+            // cannot fail, but the chained form stays as a safeguard.
             && let Ok(hex) = std::str::from_utf8(&b[i + 1..i + 3])
             && let Ok(c) = u8::from_str_radix(hex, 16)
         {
@@ -1999,11 +1976,10 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
     ))
 }
 
-/// v2.20.0: a Windows drive path travels in URL form as `/C:/Users/x`
-/// (leading slash before the drive letter — the WT / Ghostty convention).
-/// Strip that slash so the reported cwd is a usable Windows path
-/// (`C:/Users/x`; Windows APIs accept forward slashes). Unix paths are
-/// untouched.
+/// A Windows drive path travels in URL form as `/C:/Users/x` (leading slash
+/// before the drive letter, the WT / Ghostty convention). Strip that slash so
+/// the reported cwd is a usable Windows path (`C:/Users/x`; Windows APIs accept
+/// forward slashes). Unix paths are untouched.
 fn normalize_drive_path(path: String) -> String {
     let b = path.as_bytes();
     if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
@@ -2103,8 +2079,8 @@ fn parse_prompt(rest: &[u8]) -> Option<PromptKind> {
         b'D' => {
             // Only the second `;`-separated field carries the exit code, so
             // read it out of the borrowed bytes. Converting the whole body
-            // first allocated up to three times a 16 MiB OSC payload to parse
-            // one integer out of its first few bytes.
+            // first would allocate up to three times a 16 MiB OSC payload to
+            // parse one integer out of its first few bytes.
             let code = rest
                 .splitn(3, |&b| b == b';')
                 .nth(1)
@@ -2195,10 +2171,10 @@ mod tests {
     /// CAN/SUB must cancel a control string, or the terminal freezes.
     ///
     /// DEC defines `0x18` and `0x1a` as immediate cancellation of any
-    /// DCS/OSC/APC string. Treating them as payload left the extractor waiting
-    /// for a terminator that never arrived, so ONE stray byte swallowed the
-    /// entire rest of the stream — the pane stopped updating and looked hung.
-    /// Untrusted program output can contain that byte.
+    /// DCS/OSC/APC string. Treated as payload, they leave the extractor waiting
+    /// for a terminator that never arrives, so ONE stray byte swallows the rest
+    /// of the stream and the pane looks hung. Untrusted program output can
+    /// contain that byte.
     #[test]
     fn can_and_sub_cancel_a_control_string_instead_of_wedging_it() {
         for cancel in [0x18_u8, 0x1a] {
@@ -2311,9 +2287,8 @@ mod tests {
     /// An ESC in front of the cancel must not reopen the freeze.
     ///
     /// An ESC arriving mid-string sets `st_pending`, and that branch owns the
-    /// next byte — so checking for CAN/SUB only on the bulk path left
-    /// `ESC CAN` appending both bytes as payload with the string still open.
-    /// Same hang, one byte of disguise.
+    /// next byte. If only the bulk path checked for CAN/SUB, `ESC CAN` would
+    /// append both bytes as payload and leave the string open, the same hang.
     #[test]
     fn an_escape_before_the_cancel_still_cancels() {
         for cancel in [0x18_u8, 0x1a] {
@@ -2968,11 +2943,10 @@ mod tests {
             (&b"\x1b]9;9;/\x07"[..], "/"),
             // MSYS/Cygwin spell a Windows drive this way.
             (&b"\x1b]9;9;/c/Users/me\x07"[..], "/c/Users/me"),
-            // The WSL plan-9 shares. UNC in spelling only — served by the
-            // local P9 redirector, no SMB handshake and no credentials — and
-            // `wslpath -w "$PWD"` is exactly what Microsoft's documented
-            // OSC 9;9 WSL integration emits, which is the integration this
-            // code exists to harvest.
+            // The WSL plan-9 shares are UNC in spelling only. The local P9
+            // redirector serves them, with no SMB handshake and no credentials.
+            // Microsoft's documented OSC 9;9 WSL integration, which this code
+            // exists to harvest, emits exactly this via `wslpath -w "$PWD"`.
             (
                 &b"\x1b]9;9;\\\\wsl.localhost\\Ubuntu\\home\\me\x07"[..],
                 "\\\\wsl.localhost\\Ubuntu\\home\\me",
@@ -3006,11 +2980,10 @@ mod tests {
         }
     }
 
-    /// v2.29.0: OSC 9;9 (ConEmu "set working directory") is consumed as a Cwd
-    /// chunk — a PLAIN path (often quoted), NOT a file:// URI. CRITICAL: it must
-    /// be handled by the dedicated 9;9 branch and NOT swallowed by the OSC 9
-    /// notification handler, while a bare `OSC 9;<msg>` still notifies and 9;4
-    /// still reports progress.
+    /// OSC 9;9 (ConEmu "set working directory") is consumed as a Cwd chunk. It
+    /// carries a plain path (often quoted), not a file:// URI. The dedicated 9;9
+    /// branch must handle it rather than the OSC 9 notification handler. A bare
+    /// `OSC 9;<msg>` still notifies, and 9;4 still reports progress.
     #[test]
     fn osc9_9_sets_cwd_without_colliding_with_osc9_notification() {
         let mut ex = Extractor::new();
@@ -3047,8 +3020,8 @@ mod tests {
         );
     }
 
-    /// v2.20.0 P3 regression guards for the memchr bulk path: byte-exact
-    /// state semantics at every boundary the old per-byte loop handled.
+    /// Returns the `Pass` bytes of `out`, for the memchr bulk-path regression
+    /// guards that pin byte-exact state semantics at every boundary.
     fn passed(out: &[Chunk]) -> Vec<u8> {
         out.iter()
             .filter_map(|c| match c {
@@ -3059,9 +3032,9 @@ mod tests {
             .collect()
     }
 
-    /// v2.20.0 (Ghostty parity): OSC 7 accepts the kitty-shell-cwd scheme
-    /// (raw path, no percent-decode) and validates the hostname — a remote
-    /// host's cwd (ssh shell integration) must be DROPPED, not adopted.
+    /// As in Ghostty, OSC 7 accepts the kitty-shell-cwd scheme (raw path, no
+    /// percent-decode) and validates the hostname. A remote host's cwd (ssh
+    /// shell integration) must be DROPPED, not adopted.
     #[test]
     fn osc7_kitty_scheme_and_hostname_validation() {
         use super::parse_osc7_with_host;
@@ -3098,8 +3071,8 @@ mod tests {
             parse_osc7_with_host("file://buildbox/home/u", Some("myhost")),
             None
         );
-        // A host with NO path component (no slash) is not a usable cwd — reject
-        // rather than emit a bogus relative cwd like "localhost" (audit v2.25.0).
+        // A host with NO path component (no slash) is not a usable cwd. Reject
+        // it rather than emit a bogus relative cwd like "localhost".
         assert_eq!(
             parse_osc7_with_host("file://localhost", Some("myhost")),
             None
@@ -3132,8 +3105,8 @@ mod tests {
         );
     }
 
-    /// macOS renamed a real Mac from `<name>-MacBook-Pro.local` to `Mac` when
-    /// its network changed. Shells started before and after the rename report
+    /// macOS can rename a Mac from `<name>-MacBook-Pro.local` to `Mac` when its
+    /// network changes. Shells started before and after the rename report
     /// different names, and both are this machine.
     #[test]
     fn a_renamed_host_still_counts_as_this_machine() {
@@ -3195,8 +3168,8 @@ mod tests {
 
     #[test]
     fn raw_st_terminates_a_sequence() {
-        // 0x9c (raw C1 ST) ends an OSC; the forwarded copy is re-terminated
-        // with ESC \ (term_bel = false), exactly as the per-byte loop did.
+        // 0x9c (raw C1 ST) ends an OSC, and the forwarded copy is
+        // re-terminated with ESC \.
         let mut ex = Extractor::new();
         let out = ex.feed(b"\x1b]2;title\x9cafter");
         assert_eq!(passed(&out), b"\x1b]2;title\x1b\\after");
@@ -3225,7 +3198,7 @@ mod tests {
 
     #[test]
     fn utf8_continuation_0x9c_inside_dcs_is_payload() {
-        // The memchr2 (DCS/APC) arm has the same defect: 末 (U+672B) =
+        // The same applies to the memchr2 (DCS/APC) arm: 末 (U+672B) =
         // E6 9C AB. The non-sixel DCS forwards verbatim, uncut.
         let mut ex = Extractor::new();
         let out = ex.feed(b"\x1bPnot-sixel \xe6\x9c\xab\x1b\\after");
@@ -3304,11 +3277,11 @@ mod tests {
         }
     }
 
-    /// FIX 1: ConEmu/Windows-Terminal OSC 9 subcommands (`9;1`, `9;2`, `9;3`,
-    /// bare `9;4`, …) are structured commands, NOT iTerm2 free-text
-    /// notifications. They must NOT fire a spurious desktop notification with a
-    /// numeric/garbled title; they forward downstream instead. iTerm2 free text
-    /// (digits not directly followed by `;`) must STILL notify.
+    /// ConEmu/Windows-Terminal OSC 9 subcommands (`9;1`, `9;2`, `9;3`, bare
+    /// `9;4`, …) are structured commands, NOT iTerm2 free-text notifications.
+    /// They forward downstream instead of firing a spurious desktop notification
+    /// with a numeric/garbled title. iTerm2 free text (digits not directly
+    /// followed by `;`) must STILL notify.
     #[test]
     fn osc9_conemu_subcommands_do_not_notify() {
         let mut ex = Extractor::new();
@@ -3510,10 +3483,10 @@ mod tests {
         }
     }
 
-    /// FIX 3: the OSC 7 percent-decoder must require BOTH escape bytes to be
-    /// ASCII hex digits. `u8::from_str_radix` accepts a sign prefix (`+5`),
-    /// which would otherwise mis-decode `%+5` to a byte; it must instead pass
-    /// the `%` (and the rest) through literally — no panic, no mis-decode.
+    /// The OSC 7 percent-decoder must require BOTH escape bytes to be ASCII hex
+    /// digits. `u8::from_str_radix` accepts a sign prefix (`+5`), which would
+    /// mis-decode `%+5` to a byte. Instead the `%` and the rest pass through
+    /// literally, with no panic and no mis-decode.
     #[test]
     fn osc7_percent_decoder_rejects_sign_prefixed_escape() {
         use super::parse_osc7_with_host;
