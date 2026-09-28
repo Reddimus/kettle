@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- An idle window wakes about 0.3 times a second instead of 1.3. The
+  event-loop watchdog now sleeps while the loop is idle instead of checking
+  every second.
+
 ## [4.6.0] — 2026-09-27
 
 ### Added

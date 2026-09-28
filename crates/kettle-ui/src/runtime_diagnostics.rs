@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -25,6 +25,17 @@ struct PhaseState {
 
 struct Shared {
     phase: Mutex<PhaseState>,
+    /// Wakes the watchdog when a phase starts while it is parked, and on stop.
+    wake: Condvar,
+    /// The watchdog is waiting with no deadline, which it does only while the
+    /// event loop is idle. Read and written with `phase` locked.
+    parked: AtomicBool,
+    /// How long a phase may run before it is recorded as a stall.
+    stall_after: Duration,
+    gpu_init_stall_after: Duration,
+    /// Watchdog loop iterations, so tests can see when it wakes.
+    #[cfg(test)]
+    loops: AtomicUsize,
     windows: AtomicUsize,
     stop: AtomicBool,
     stall_written: AtomicBool,
@@ -45,11 +56,26 @@ pub(crate) struct PhaseGuard {
 
 impl RuntimeTracker {
     pub(crate) fn start(cache_dir: Option<PathBuf>, version: String) -> Self {
+        Self::start_with(cache_dir, version, NORMAL_STALL, GPU_INIT_STALL)
+    }
+
+    fn start_with(
+        cache_dir: Option<PathBuf>,
+        version: String,
+        stall_after: Duration,
+        gpu_init_stall_after: Duration,
+    ) -> Self {
         let shared = Arc::new(Shared {
             phase: Mutex::new(PhaseState {
                 name: "idle",
                 entered: Instant::now(),
             }),
+            wake: Condvar::new(),
+            parked: AtomicBool::new(false),
+            stall_after,
+            gpu_init_stall_after,
+            #[cfg(test)]
+            loops: AtomicUsize::new(0),
             windows: AtomicUsize::new(0),
             stop: AtomicBool::new(false),
             stall_written: AtomicBool::new(false),
@@ -71,14 +97,16 @@ impl RuntimeTracker {
     }
 
     pub(crate) fn set_phase(&self, phase: &'static str) {
-        let mut state = self
-            .shared
-            .phase
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = lock(&self.shared.phase);
         state.name = phase;
         state.entered = Instant::now();
         self.shared.stall_written.store(false, Ordering::Release);
+        // Only a phase that starts while the watchdog is parked wakes it. A
+        // busy loop starts a phase every turn, and the watchdog already waits
+        // for the current phase's deadline.
+        if !is_quiet(phase) && self.shared.parked.swap(false, Ordering::Relaxed) {
+            self.shared.wake.notify_one();
+        }
     }
 
     pub(crate) fn set_window_count(&self, count: usize) {
@@ -95,15 +123,15 @@ impl RuntimeTracker {
     }
 
     pub(crate) fn stop(&self) {
+        // Set under the lock so the watchdog cannot check `stop` and then
+        // park after this notification.
+        let _state = lock(&self.shared.phase);
         self.shared.stop.store(true, Ordering::Release);
+        self.shared.wake.notify_one();
     }
 
     fn snapshot(&self) -> PhaseState {
-        self.shared
-            .phase
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        lock(&self.shared.phase).clone()
     }
 }
 
@@ -113,33 +141,72 @@ impl Drop for PhaseGuard {
     }
 }
 
+fn lock(phase: &Mutex<PhaseState>) -> MutexGuard<'_, PhaseState> {
+    phase.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Phases in which the event loop is not running a task that could stall.
+fn is_quiet(phase: &str) -> bool {
+    matches!(phase, "idle" | "suspended" | "exiting")
+}
+
+/// Record a phase that outlives its deadline.
+///
+/// The watchdog sleeps until the current phase's deadline, and parks once the
+/// event loop has been quiet for a whole threshold. A busy loop wakes it at
+/// most once per threshold, and an idle window not at all.
 fn watchdog_loop(shared: Arc<Shared>) {
+    let mut state = lock(&shared.phase);
     while !shared.stop.load(Ordering::Acquire) {
-        std::thread::sleep(Duration::from_secs(1));
-        let phase = shared
-            .phase
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if phase.name == "idle" || phase.name == "suspended" || phase.name == "exiting" {
+        #[cfg(test)]
+        shared.loops.fetch_add(1, Ordering::Relaxed);
+        if is_quiet(state.name) {
+            let quiet_for = state.entered.elapsed();
+            state = if quiet_for < shared.stall_after {
+                // A busy loop goes quiet between turns. Wait out a threshold
+                // before parking, so the next turn does not have to wake it.
+                shared
+                    .wake
+                    .wait_timeout(state, shared.stall_after - quiet_for)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0
+            } else {
+                shared.parked.store(true, Ordering::Relaxed);
+                shared
+                    .wake
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner)
+            };
             continue;
         }
-        let threshold = if phase.name == "gpu_init" {
-            GPU_INIT_STALL
+        let threshold = if state.name == "gpu_init" {
+            shared.gpu_init_stall_after
         } else {
-            NORMAL_STALL
+            shared.stall_after
         };
-        if phase.entered.elapsed() < threshold
-            || shared
+        let elapsed = state.entered.elapsed();
+        if elapsed >= threshold
+            && shared
                 .stall_written
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
+                .is_ok()
         {
+            let phase = state.clone();
+            drop(state);
+            if let Err(error) = write_incident(&shared, "event_loop_stall", &phase, None) {
+                log::warn!("runtime stall diagnostic write failed: {error}");
+            }
+            state = lock(&shared.phase);
             continue;
         }
-        if let Err(error) = write_incident(&shared, "event_loop_stall", &phase, None) {
-            log::warn!("runtime stall diagnostic write failed: {error}");
-        }
+        // Before the deadline, sleep until it. After a recorded stall, check
+        // again a threshold later: a new phase re-arms the record.
+        let wait = threshold.checked_sub(elapsed).unwrap_or(threshold);
+        state = shared
+            .wake
+            .wait_timeout(state, wait)
+            .unwrap_or_else(PoisonError::into_inner)
+            .0;
     }
 }
 
@@ -307,6 +374,38 @@ mod tests {
         assert_eq!(output.chars().count(), MAX_ERROR_CHARS);
     }
 
+    /// Nothing can stall while the event loop is idle, so an idle watchdog has
+    /// no reason to wake. A timer that fires anyway is a wakeup every second
+    /// for the life of every idle window. After one quiet threshold it parks.
+    #[test]
+    fn an_idle_watchdog_parks() {
+        let stall = Duration::from_millis(200);
+        let tracker = RuntimeTracker::start_with(None, "test".to_string(), stall, stall);
+        std::thread::sleep(Duration::from_millis(3500));
+        let loops = tracker.shared.loops.load(Ordering::Relaxed);
+        tracker.stop();
+        assert!(loops <= 2, "an idle watchdog woke {loops} times in 3.5 s");
+    }
+
+    /// A busy event loop enters a phase on every turn. Only the first phase
+    /// after an idle stretch may wake the watchdog; then it waits for that
+    /// phase's stall deadline.
+    #[test]
+    fn a_busy_event_loop_wakes_the_watchdog_at_most_once_per_deadline() {
+        let tracker = RuntimeTracker::start(None, "test".to_string());
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(1500) {
+            drop(tracker.enter("about_to_wait"));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let loops = tracker.shared.loops.load(Ordering::Relaxed);
+        tracker.stop();
+        assert!(
+            loops <= 3,
+            "300 phase changes woke the watchdog {loops} times"
+        );
+    }
+
     #[cfg(unix)]
     const REPAIR_CHILD_ENV: &str = "KETTLE_UI_DIAGNOSTIC_REPAIR_CHILD";
 
@@ -370,6 +469,11 @@ mod tests {
                         name: "redraw",
                         entered: Instant::now(),
                     }),
+                    wake: Condvar::new(),
+                    parked: AtomicBool::new(false),
+                    stall_after: NORMAL_STALL,
+                    gpu_init_stall_after: GPU_INIT_STALL,
+                    loops: AtomicUsize::new(0),
                     windows: AtomicUsize::new(1),
                     stop: AtomicBool::new(false),
                     stall_written: AtomicBool::new(false),
@@ -389,6 +493,56 @@ mod tests {
                         dir.display()
                     );
                 }
+            },
+        );
+    }
+
+    /// A phase that runs past its deadline is still recorded, once, while the
+    /// watchdog sleeps between deadlines instead of polling.
+    #[cfg(unix)]
+    #[test]
+    fn a_stuck_phase_is_recorded_once() {
+        in_child(
+            "runtime_diagnostics::tests::a_stuck_phase_is_recorded_once",
+            || {
+                let root = kettle_test_support::private_tempdir("kettle-runtime-stall-test-");
+                // SAFETY: only the isolated child reaches this closure.
+                unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+                let stall = Duration::from_millis(300);
+                let tracker = RuntimeTracker::start_with(
+                    Some(root.path().to_path_buf()),
+                    "test".to_string(),
+                    stall,
+                    stall,
+                );
+                let dir = diagnostic_dir(Some(root.path()));
+                let incidents = || std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+
+                tracker.set_phase("redraw");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while incidents() == 0 && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert_eq!(
+                    incidents(),
+                    1,
+                    "a phase stuck past its deadline was not recorded"
+                );
+                let text = std::fs::read_to_string(
+                    std::fs::read_dir(&dir)
+                        .unwrap()
+                        .next()
+                        .unwrap()
+                        .unwrap()
+                        .path(),
+                )
+                .unwrap();
+                assert!(text.contains("\"event_loop_stall\"") && text.contains("\"redraw\""));
+
+                // Still stuck: no second incident for the same phase.
+                std::thread::sleep(stall * 3);
+                tracker.stop();
+                assert_eq!(incidents(), 1, "the same stall was recorded twice");
             },
         );
     }
@@ -414,6 +568,11 @@ mod tests {
                         name: "redraw",
                         entered: Instant::now(),
                     }),
+                    wake: Condvar::new(),
+                    parked: AtomicBool::new(false),
+                    stall_after: NORMAL_STALL,
+                    gpu_init_stall_after: GPU_INIT_STALL,
+                    loops: AtomicUsize::new(0),
                     windows: AtomicUsize::new(2),
                     stop: AtomicBool::new(false),
                     stall_written: AtomicBool::new(false),
