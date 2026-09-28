@@ -21,6 +21,9 @@ const GPU_INIT_STALL: Duration = Duration::from_secs(25);
 struct PhaseState {
     name: &'static str,
     entered: Instant,
+    /// When the watchdog's timed sleep ends, or `None` while it runs or is
+    /// parked. A phase that would stall sooner wakes it.
+    watchdog_deadline: Option<Instant>,
 }
 
 struct Shared {
@@ -69,6 +72,7 @@ impl RuntimeTracker {
             phase: Mutex::new(PhaseState {
                 name: "idle",
                 entered: Instant::now(),
+                watchdog_deadline: None,
             }),
             wake: Condvar::new(),
             parked: AtomicBool::new(false),
@@ -98,14 +102,24 @@ impl RuntimeTracker {
 
     pub(crate) fn set_phase(&self, phase: &'static str) {
         let mut state = lock(&self.shared.phase);
+        let now = Instant::now();
         state.name = phase;
-        state.entered = Instant::now();
+        state.entered = now;
         self.shared.stall_written.store(false, Ordering::Release);
-        // Only a phase that starts while the watchdog is parked wakes it. A
-        // busy loop starts a phase every turn, and the watchdog already waits
-        // for the current phase's deadline.
-        if !is_quiet(phase) && self.shared.parked.swap(false, Ordering::Relaxed) {
-            self.shared.wake.notify_one();
+        // A phase wakes the watchdog only when it is parked, or sleeping
+        // toward a later deadline than this phase's, as after `gpu_init`. A
+        // busy loop starts a phase every turn, each with a later deadline than
+        // the one the watchdog already waits for.
+        if !is_quiet(phase) {
+            let deadline = now + self.shared.threshold(phase);
+            let parked = self.shared.parked.swap(false, Ordering::Relaxed);
+            if parked
+                || state
+                    .watchdog_deadline
+                    .is_some_and(|sleeping| deadline < sleeping)
+            {
+                self.shared.wake.notify_one();
+            }
         }
     }
 
@@ -141,6 +155,17 @@ impl Drop for PhaseGuard {
     }
 }
 
+impl Shared {
+    /// How long `phase` may run before it is recorded as a stall.
+    fn threshold(&self, phase: &str) -> Duration {
+        if phase == "gpu_init" {
+            self.gpu_init_stall_after
+        } else {
+            self.stall_after
+        }
+    }
+}
+
 fn lock(phase: &Mutex<PhaseState>) -> MutexGuard<'_, PhaseState> {
     phase.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -165,12 +190,9 @@ fn watchdog_loop(shared: Arc<Shared>) {
             state = if quiet_for < shared.stall_after {
                 // A busy loop goes quiet between turns. Wait out a threshold
                 // before parking, so the next turn does not have to wake it.
-                shared
-                    .wake
-                    .wait_timeout(state, shared.stall_after - quiet_for)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0
+                sleep_until(&shared, state, shared.stall_after - quiet_for)
             } else {
+                state.watchdog_deadline = None;
                 shared.parked.store(true, Ordering::Relaxed);
                 shared
                     .wake
@@ -179,11 +201,7 @@ fn watchdog_loop(shared: Arc<Shared>) {
             };
             continue;
         }
-        let threshold = if state.name == "gpu_init" {
-            shared.gpu_init_stall_after
-        } else {
-            shared.stall_after
-        };
+        let threshold = shared.threshold(state.name);
         let elapsed = state.entered.elapsed();
         if elapsed >= threshold
             && shared
@@ -202,12 +220,24 @@ fn watchdog_loop(shared: Arc<Shared>) {
         // Before the deadline, sleep until it. After a recorded stall, check
         // again a threshold later: a new phase re-arms the record.
         let wait = threshold.checked_sub(elapsed).unwrap_or(threshold);
-        state = shared
-            .wake
-            .wait_timeout(state, wait)
-            .unwrap_or_else(PoisonError::into_inner)
-            .0;
+        state = sleep_until(&shared, state, wait);
     }
+}
+
+/// Sleep for `wait` or until woken, recording the deadline for `set_phase`.
+fn sleep_until<'a>(
+    shared: &'a Shared,
+    mut state: MutexGuard<'a, PhaseState>,
+    wait: Duration,
+) -> MutexGuard<'a, PhaseState> {
+    state.watchdog_deadline = Some(Instant::now() + wait);
+    let mut state = shared
+        .wake
+        .wait_timeout(state, wait)
+        .unwrap_or_else(PoisonError::into_inner)
+        .0;
+    state.watchdog_deadline = None;
+    state
 }
 
 #[derive(Serialize)]
@@ -468,6 +498,7 @@ mod tests {
                     phase: Mutex::new(PhaseState {
                         name: "redraw",
                         entered: Instant::now(),
+                        watchdog_deadline: None,
                     }),
                     wake: Condvar::new(),
                     parked: AtomicBool::new(false),
@@ -547,6 +578,47 @@ mod tests {
         );
     }
 
+    /// A short-threshold phase that hangs right after a long one is recorded
+    /// at its own deadline. The watchdog was sleeping toward the long phase's
+    /// deadline, so the new phase has to wake it.
+    #[cfg(unix)]
+    #[test]
+    fn a_hang_after_gpu_init_is_recorded_at_its_own_deadline() {
+        in_child(
+            "runtime_diagnostics::tests::a_hang_after_gpu_init_is_recorded_at_its_own_deadline",
+            || {
+                let root = kettle_test_support::private_tempdir("kettle-runtime-stall-order-");
+                // SAFETY: only the isolated child reaches this closure.
+                unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+                let tracker = RuntimeTracker::start_with(
+                    Some(root.path().to_path_buf()),
+                    "test".to_string(),
+                    Duration::from_millis(300),
+                    Duration::from_secs(5),
+                );
+                let dir = diagnostic_dir(Some(root.path()));
+                let incidents = || std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+
+                // Long enough for the watchdog to read `gpu_init` and sleep
+                // toward its 5 s deadline.
+                tracker.set_phase("gpu_init");
+                std::thread::sleep(Duration::from_millis(600));
+                let hung = Instant::now();
+                tracker.set_phase("redraw");
+                while incidents() == 0 && hung.elapsed() < Duration::from_secs(6) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let recorded_after = hung.elapsed();
+                tracker.stop();
+                assert_eq!(incidents(), 1, "the hang after gpu_init was not recorded");
+                assert!(
+                    recorded_after < Duration::from_secs(2),
+                    "recorded {recorded_after:?} after the hang, not near its 300 ms deadline"
+                );
+            },
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn incident_is_private_and_rotated() {
@@ -567,6 +639,7 @@ mod tests {
                     phase: Mutex::new(PhaseState {
                         name: "redraw",
                         entered: Instant::now(),
+                        watchdog_deadline: None,
                     }),
                     wake: Condvar::new(),
                     parked: AtomicBool::new(false),
