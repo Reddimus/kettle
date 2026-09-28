@@ -71,8 +71,7 @@ unverified teardown).
 
 On Unix a child killed by a signal reports the shell's `128 + signal`, so
 `143` is SIGTERM, `137` is SIGKILL and `130` is SIGINT. Automation can therefore
-tell a terminated command from one that merely failed — these used to collapse
-to a generic `1`, indistinguishable from the command running `exit 1`.
+tell a terminated command from one that ran `exit 1`.
 
 ```sh
 kettle exec -- python -c "print(2+2)"           # → 4
@@ -131,7 +130,7 @@ own deadline and never wait in a blocking writer join.
 
 ### ConPTY caveats (Windows)
 
-On Windows the child runs under a ConPTY (pseudoconsole). Two consequences:
+On Windows the child runs under a ConPTY (pseudoconsole). Four consequences:
 
 - **Raw mode includes ConPTY's startup handshake** (`ESC[6n`, mode-set
   sequences) and is a *re-rendered* screen, not byte-verbatim. For assertions
@@ -296,9 +295,9 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `ui_geometry` | read-only | live window geometry and OS focus state: surface/content rects, renderer cell metrics, `text_presentation_face` (the monochrome face this system serves text-presentation codepoints from, or null when it has none and kettle leaves them on the platform cascade), resize-overlay grid, tab-bar segment/new-tab rects, tab segment `path`/`fitted_title` diagnostics, pane titlebar rect/title/path/`fitted_title` diagnostics, open context-menu rect/rows, cursor, tab drag armed/visible state, additive Search geometry/status/control metadata, and the bounds/state of a visible pasted-media receipt, including whether its body is openable. Search omits its query and matched terminal text; receipts omit retained paths, extensions, and pixels |
 | `screenshot` | full | save a live PNG (`pane`, `full_window`, `path`, or all four window-relative physical-pixel `crop_*` fields); filesystem writes are never allowed through read-only mode |
 | `subscribe` | read-only | switches the connection to the event stream |
-| `wait_for` | read-only | v2.20: block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000; `poll_ms` default 100, clamped to 50–5000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
+| `wait_for` | read-only | block until the screen matches (`text` substring / `regex` / `quiet_ms` settle — AND when combined; `timeout_ms` default 30 000; `poll_ms` default 100, clamped to 50–5000). Returns `{matched, elapsed_ms, polls}`; a timeout is `matched: false`, not an error. Runs on the connection thread — the UI is never blocked. The screen-text regex runs against per-line right-trimmed, newline-joined text — use `(?m)` end-of-line anchors rather than end-of-string |
 | `send_text` | full | type text into a pane (`pane`, `text`) |
-| `send_keys` | full | v2.20: press 1–1,024 named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`), with 64-byte tokens and a 64 KiB encoded-byte budget. Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
+| `send_keys` | full | press 1–1,024 named keys / chords (`pane`, `keys: ["escape","ctrl+c","down","G",…]`), with 64-byte tokens and a 64 KiB encoded-byte budget. Tokens: key names (`escape`, `enter`, `tab`, `backspace`, `delete`, `insert`, `space`, arrows, `home`/`end`, `pageup`/`pagedown`, `f1`–`f12`), chords with `ctrl`/`alt`/`shift`/`super` (+ aliases), or single characters (case preserved). Encoded through the same path as GUI keystrokes against the pane's live modes (DECCKM- and negotiated Kitty CSI-u-aware); all tokens parse before any byte is sent |
 | `dispatch_keybind` | full | diagnostic app-keybind dispatch (`logical`, `physical`, `mods`) using the same resolver as real window keyboard input. It does not write PTY bytes; it returns the candidate triggers, matched action, whether a modal blocked dispatch, and `terminal_fallthrough: true` when the real keyboard path would hand the chord to the program instead (a default `Alt+Arrow` focus chord with no visible pane in that direction, including every zoomed multi-pane tab) |
 | `dispatch_ui_key` | full | press 1–64 pre-parsed key tokens (each at most 64 bytes) in the currently open supported Kettle modal — the command palette, the Settings path prompt, the layout picker, the SSH launcher, the title editors, or Search, resolved in that order. Each modal consumes them through its own real key handler. No token is ever encoded as terminal input or written to the PTY — but a modal's own Enter can dispatch its normal action, and some of those do reach a PTY or spawn a process (the palette runs the selected command, the SSH launcher opens a session, the layout picker spawns `kettle --layout`). Same privilege tier as `perform_action`, which is why both require full agent mode. The reply names the modal it typed into. All tokens validate before the first state change, the batch stops early if the modal closes mid-way, and no open modal is an error |
 | `send_mouse` | full | deterministic mouse input for diagnostics (`event`: `move`/`press`/`release`/`click`/`wheel`, window-relative `x`/`y`, `button`, `wheel_lines` **or** `wheel_delta`, optional event-local `mods`). Synthetic motion can expand a pasted-media receipt but does not retarget the OS cursor or unrelated tab hover. A wheel event takes exactly one of `wheel_lines` (signed whole scroll lines, entering downstream of quantization) or `wheel_delta` (signed raw wheel detents, fractions allowed — runs the real sub-detent accumulator, so it can emulate a precision touchpad) |
@@ -306,7 +305,7 @@ so press Enter with `send_keys`, not a trailing `\n`.
 | `perform_action` | full | dispatch a named Kettle app action (`action`, for example `start_search`, `command_palette`, `open_ssh`, `hint_mode`, `edit_tab_title`). The control-only `focus_window` action shows and focuses its target without toggling visibility. Use this for app chrome that is not pane input; `send_keys` intentionally writes terminal keystrokes to the focused pane |
 | `run_command` | full | run `command` in a pane, reply with `{exit_code, duration_ms, output, output_truncated}`; capture is capped at the newest 10,000 retained lines and then 512 KiB, and `output_truncated` is true if either cap drops output |
 
-**Multi-window (v2.18)**: a kettle process can host several OS windows.
+**Multi-window**: a kettle process can host several OS windows.
 `list_tabs` / `list_panes` enumerate them all, ordered by window seq;
 `index`, `tab`, `active`, and `focused` are *within-window* values — the
 `window` field disambiguates. Pane ids are process-global and stable across
@@ -383,9 +382,10 @@ screen between steps with `read_screen` — its `cursor` + `cursor_visible`
 cursor at all (vim's command line, fzf and less hide it).
 
 Events (after `subscribe`): `command_finished`, `pane_focus`, `title`,
-`agent_attached`, `tab_moved` (`{from_window, to_window, tab}` — a tab was
-torn off / moved to another window), and `lag` (when a slow subscriber's
-queue overflowed).
+`agent_attached`, `protocol_notification` (`{title, body}` from a pane's OSC 9
+or OSC 777 notification), `tab_moved` (`{from_window, to_window, tab}` — a tab
+was torn off / moved to another window), `ping` (idle keepalive), and `lag`
+(when a slow subscriber's queue overflowed).
 
 ### When an agent attaches a pane
 
@@ -480,8 +480,8 @@ verified-ancestor policy.
 `kettle mcp --self-test` runs an in-process handshake + `tools/list` + one
 `kettle_run`, for CI.
 
-The stdio server negotiates MCP `2025-11-25` and the compatible `2025-06-18`
-revision. Clients must send `initialize`, wait for its response, then send the
+A `2026-07-28` client sends no handshake. A legacy `2025-11-25` or compatible
+`2025-06-18` client must send `initialize`, wait for its response, then send the
 exact `notifications/initialized` notification before calling tools. Tool calls
 run on four workers behind a 16-request queue; `ping` remains available during
 the initialization handshake. Unknown tools and malformed `tools/call`
@@ -542,15 +542,14 @@ recipe asks Cargo to build and report the current checkout's exact release
 executable (including a custom `CARGO_TARGET_DIR` or configured target triple),
 and fails nonzero instead of reporting success when the graphical session is
 missing or locked. On macOS the preflight wakes an unlocked display before the
-window starts. It
-then drives a shell marker, optional Codex
-CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
-`claude --print --help` output captures, a prompt-shaped `➜  ~` marker, and
-tmux attach/send/capture
-when `tmux` is installed, including a build-capability-gated SIXEL render on
-tmux 3.4 or newer built with `--enable-sixel`, and clean/configured
-Neovim/AstroNvim marker buffers plus clean and configured Neovim vertical-split
-workflow states through `kettle ctl`. The awaited editor text is assembled from
+window starts. Through `kettle ctl` it then drives a shell marker, optional
+Codex CLI and Claude Code CLI `--version` probes plus `codex exec --help` /
+`claude --print --help` output captures, and a prompt-shaped `➜  ~` marker.
+When `tmux` is installed it drives tmux attach/send/capture, including a
+build-capability-gated SIXEL render on tmux 3.4 or newer built with
+`--enable-sixel`. It also drives clean/configured Neovim/AstroNvim marker
+buffers plus clean and configured Neovim vertical-split workflow states.
+The awaited editor text is assembled from
 separate halves inside Vimscript and never appears literally in the typed shell
 command, so shell command echo cannot pass an editor-state probe. Set
 `KETTLE_AGENT_AUTH_SMOKE=1` to also
@@ -670,9 +669,9 @@ delta fixtures were active, and records per-row pixel hit counts for SGR
 underlined rows, neighboring plain rows, and autodetected `/` and `\` path
 overlay underlines, so a delayed underline draw fails as an alignment/leak
 error, not just as a missing terminal attribute.
-On native Windows, `just tabbar-click-smoke` and `just underline-scroll-smoke`
-delegate to `scripts/check-live-ui-smoke.py`; on WSL they use the Unix shell
-scripts above.
+`just tabbar-click-smoke` runs `scripts/check-tabbar-click-smoke.sh` and
+`just underline-scroll-smoke` runs `scripts/check-live-ui-smoke.py`. Both
+recipes are Unix-only, so WSL runs them and native Windows has neither.
 
 ```sh
 just linux-perf
@@ -680,8 +679,9 @@ just linux-perf
 
 Runs the Linux Hyperfine peer gate when `terminator` and `ghostty` are installed
 (`alacritty` is included when present). It builds the release binary, launches
-each terminal for a `/bin/true` startup probe and a ~4 MiB ASCII flood probe,
-then fails if Kettle does not beat Terminator or stay within 10% of Ghostty.
+each terminal for a `/bin/true` startup probe, a ~4 MiB ASCII flood probe, and a
+35k-line SGR/underline flood probe, then fails if Kettle does not beat
+Terminator or stay within 10% of Ghostty on each.
 This is also desktop-local because it opens real GUI terminal windows.
 
 ## Security & threat model

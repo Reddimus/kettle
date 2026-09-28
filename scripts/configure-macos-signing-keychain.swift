@@ -265,7 +265,7 @@ func runNativeRegression(in directory: String) throws {
     }()
     try assertKeychains(originalAgain, originalPaths, "removal did not recover the original list")
 
-    // The old cleanup rejected an empty original list before calling the API.
+    // Cleanup must not reject an empty original list before calling the API.
     // Drive the exact composition with injected operations and pin that its
     // writer receives an empty list, without touching the user domain.
     written = nil

@@ -45,7 +45,7 @@ fn a_configured_file_budget_prunes_a_managed_directory() {
     configure_limits(MAX_RECORD_BYTES, 3, MAX_RECORD_DIRECTORY_BYTES);
     assert_eq!(record_max_files(), 3);
 
-    // Starting a managed recording applies retention, then adds its own cast.
+    // Starting a managed recording adds its own cast, then applies retention.
     let (recorder, path) = Recorder::start_target(
         &RecordingTarget::Directory(temp.path().to_path_buf()),
         80,

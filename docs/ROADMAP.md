@@ -64,10 +64,9 @@ unrelated fixes.
 
 ## Retired platform work
 
-The signed Windows MSI and its code-signing certificate were removed from the
-roadmap when Windows distribution support was scheduled to end with 3.3.0.
-Version 4.0.0 keeps Windows only as a compile and regression CI leg; it does not
-publish a Windows archive or installer.
+The signed Windows MSI and its code-signing certificate are off the roadmap
+because Windows distribution ended with 3.3.0. Since 4.0.0, Windows is only a
+compile and regression CI leg; releases ship no Windows archive or installer.
 
 ## Upstream blockers
 

@@ -14,8 +14,8 @@ without editing a config file. Open it with **`Ctrl + ,`** or
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Close |
 
-The panel is also fully **mouse-driven** (v2.24.0): **left-click** a row to cycle
-its value forward, **right-click** to cycle back, **scroll-wheel** over a row to
+The panel is also fully **mouse-driven**: **left-click** a row to cycle its
+value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **click a category tab** to switch pages, and **click outside** the
 panel to close. (A keybind row starts capture on click; the image-path row opens
 an inline text prompt.)
@@ -23,11 +23,11 @@ an inline text prompt.)
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
 jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
-same scheme works in the right-click context menu and the new-tab dropdown
-(`h` closes / pops a submenu, `l` drills in or activates), `y`/`n` answer
-confirm dialogs, and text-input overlays with a selection (palette, search,
-layout picker) use `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) for stepping so
-plain letters keep typing. Turn it off with `vim-menu-nav = false`.
+same scheme works in the right-click context menu and the new-tab dropdown,
+where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
+answer confirm dialogs. Text-input overlays with a selection (palette, search,
+layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
+letters keep typing. Turn it off with `vim-menu-nav = false`.
 
 Every change applies **immediately** and is written to your config file (shown
 by `kettle --config-path`), so it survives restarts. There's nothing to "save".
@@ -38,7 +38,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which now **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
+| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
@@ -48,7 +48,7 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
 | Show pane titlebars | `show-titlebar` | on / off |
 
-**Background** (v2.24.0) — options that don't apply to the chosen type are dimmed
+**Background** — options that don't apply to the chosen type are dimmed
 and skipped; the page dims its backdrop so the **live** wallpaper previews around
 the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 
@@ -95,7 +95,7 @@ yields resume without that warning. See
 [CONFIG.md#scrollback-search](CONFIG.md#scrollback-search) for shortcuts,
 history-scan bounds, and TUI behavior.
 
-**Tabs** (v2.28.0)
+**Tabs**
 
 | Option | Config key | Notes |
 |---|---|---|
@@ -137,7 +137,7 @@ For those, edit the config file directly — the full reference is in
 The pre-negotiation Enter fallback `modify-other-keys = auto|always|off` is one of
 these config-only options; edits still reload immediately for every open pane.
 
-**Live theme preview (v2.24.0):** in **right-click → Theme**, hovering (or
+**Live theme preview:** in **right-click → Theme**, hovering (or
 arrowing over) a theme applies it instantly so you can browse all 500+ themes
 live; moving off, pressing Esc, or clicking away reverts to your current theme,
 and clicking a theme commits it.

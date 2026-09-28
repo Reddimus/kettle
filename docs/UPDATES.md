@@ -45,12 +45,7 @@ Updating **to** 3.2.0 on macOS has to be done by hand, once. The updater is
 part of 3.2.0, so a 3.1.1 app has no code to run it: it still notices a new
 release and still offers the release page, but it cannot install one. Download
 `kettle-macos-universal.zip`, unzip it, and replace the app in `/Applications`.
-Every release after that updates itself. First exercised against the real feed
-on 2026-08-24: an installed 3.2.0 `kettle.app` fetched 3.2.1, replaced its own
-bundle, and still assessed as `source=Notarized Developer ID` afterwards, with
-no staging or previous-bundle directories left in `/Applications`. Until 3.2.1
-existed there was no published macOS target newer than the installed one, so
-this path could be designed and unit-tested but not demonstrated.
+Every release after that updates itself.
 
 Official installers write a small ownership marker beside the managed layout.
 The updater derives the install prefix from the running executable and requires
@@ -64,9 +59,9 @@ signature instead: the bundle must be laid out as
 team, and sitting in a directory this user can write. A locally built app is
 ad-hoc signed and is therefore refused, which is the same answer a `local-dev`
 marker gets elsewhere.
-Repository installs deliberately use a `local-dev` marker (recording no longer
-affects the channel — it is a runtime toggle in every build; the legacy
-`local-dev-record` marker is still recognized and refused for older installs).
+Repository installs deliberately use a `local-dev` marker. Recording is a
+runtime toggle in every build and does not affect the channel. The legacy
+`local-dev-record` marker on older installs is still recognized and refused.
 Refusing those channels prevents the stable updater from replacing a
 source-built binary or rewriting its launcher. Only an extracted release
 tarball or the online installer writes a `stable` marker.
@@ -279,8 +274,8 @@ exact leaf-by-leaf backup cleanup, so recovery never points at data it already
 removed. A crash after that durable boundary can leave only a bounded,
 marker-bound orphan backup; startup removes it under the update lock and refuses
 unknown names, reparse points, or payload paths. Schema-1 journals left by v2.34
-remain recoverable in the corrected order, but cleanup still requires their
-exact journaled tree and never removes an unjournaled sentinel. Before the first
+remain recoverable in the same order, but cleanup still requires their exact
+journaled tree and never removes an unjournaled sentinel. Before the first
 destination mutation, both new transactions and recovery preflight the aggregate
 backup set against the 512 MiB limit. Backup copies stream through a bounded
 64 KiB buffer rather than allocating each destination in memory.
@@ -366,8 +361,8 @@ that Gatekeeper then blocks.
 The displaced bundle is kept until the next run rather than deleted at once. A
 running Kettle reads its icon and asset catalog out of the bundle it launched
 from, and pulling that directory away from a live app buys nothing. The next
-start removes it, so a launch cannot delete files an update in another window
-is still using. Two things stop that: the sweep takes the same update lock, and
+start removes it, but must not delete files an update in another window is
+still using. Two things stop that: the sweep takes the same update lock, and
 a staging directory holds an advisory lock on itself for as long as it exists.
 The second is the one to rely on, because two processes can disagree about
 where a lock file lives if they inherited different environments, and cannot

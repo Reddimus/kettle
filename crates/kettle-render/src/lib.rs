@@ -12972,25 +12972,6 @@ fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
     }
 }
 
-/// Terminator parity, terminatorlib/config.py:106 + 117:
-/// compose the kettle background-opacity with Terminator's
-/// `background_darkness` + `background_type`. Logic:
-///
-///   bg-type = solid (default):  alpha = background_opacity
-///   bg-type = transparent:      alpha = background_opacity * background_darkness
-///   bg-type = image/starfield:  same as transparent — darkness lets the
-///                               backdrop show through the terminal area, not
-///                               only behind the chrome
-///
-/// `background_darkness` runs SEE-THROUGH (`0.0`) to FULLY-COVERED (`1.0`),
-/// because Terminator assigns it straight to the background colour's alpha and
-/// its users lower it for more transparency. `docs/CONFIG.md` and the field's
-/// own doc comment both used to describe that backwards, which sent anyone
-/// following the documentation to the wrong end of the scale;
-/// `darkness_scales_the_backdrop_toward_see_through` pins the direction so
-/// prose and behaviour cannot drift apart again.
-///
-/// All inputs already clamped at parse time so no defensive math needed.
 /// Surface-pixel origin of a pane's terminal grid.
 ///
 /// A top titlebar consumes space before row zero; a bottom titlebar consumes
@@ -13201,6 +13182,22 @@ fn resolved_cell_foreground_cached(
     cache.resolve(fg, bg, cfg.minimum_contrast as f64)
 }
 
+/// Terminator parity, terminatorlib/config.py:106 + 117: compose the kettle
+/// background opacity with Terminator's `background_darkness` and
+/// `background_type`:
+///
+///   bg-type = solid (default):  alpha = background_opacity
+///   bg-type = transparent:      alpha = background_opacity * background_darkness
+///   bg-type = image/starfield:  same as transparent; darkness lets the
+///                               backdrop show through the terminal area, not
+///                               only behind the chrome
+///
+/// `background_darkness` runs from see-through (`0.0`) to fully covered
+/// (`1.0`), because Terminator assigns it straight to the background colour's
+/// alpha and its users lower it for more transparency.
+/// `darkness_scales_the_backdrop_toward_see_through` pins that direction.
+///
+/// Parsing already clamps every input.
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     use kettle_config::BackgroundType;
     match cfg.background_type {
@@ -20904,8 +20901,9 @@ mod glyph_cell_lock_tests {
             1,
             "interior byte of '你' → col 1"
         );
-        // Defensive: a start before the first char clamps to column 0.
-        assert_eq!(glyph_grid_col(&starts, 0), 0);
+        // Defensive: a cluster that starts before the first char clamps to
+        // column 0 rather than underflowing.
+        assert_eq!(glyph_grid_col(&[2, 3], 0), 0);
     }
 
     /// The pen is pinned to the cell and snapped to an integer pixel; a

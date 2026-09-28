@@ -9,11 +9,11 @@ const MAX_DIM: usize = 8192;
 
 /// Bounding total paint work, not just each repeat.
 ///
-/// `!` repeats and `$` carriage returns are each bounded on their own — one
-/// repeat run stops at `MAX_DIM` columns — but nothing stopped a payload from
-/// alternating them. `!8191~$` is seven bytes and paints 8191 columns, so a
-/// 16 MiB DCS drove on the order of 1.9e10 column writes and froze the pane
-/// for minutes. `GraphicsLimits::sixel_column_writes` caps the total.
+/// `!` repeats and `$` carriage returns are each bounded on their own (one
+/// repeat run stops at `MAX_DIM` columns), but a payload can alternate them.
+/// `!8191~$` is seven bytes and paints 8191 columns, so a 16 MiB DCS could
+/// drive about 1.9e10 column writes and freeze the pane for minutes.
+/// `GraphicsLimits::sixel_column_writes` caps the total.
 
 #[derive(Clone, Copy)]
 struct Rgb(u8, u8, u8);
@@ -73,9 +73,8 @@ fn hls_to_rgb(h: f32, l: f32, s: f32) -> Rgb {
 
 /// Geometric capacity growth: the smallest power-of-two multiple of `cur`
 /// (floored at 1) that is `>= needed`, never exceeding `MAX_DIM` (callers
-/// guarantee `needed <= MAX_DIM`). Doubling the allocation
-/// makes total re-layout work across a decode amortized **O(W·H)** instead of
-/// the old exact-fit regrow's **O(W²·H)**.
+/// guarantee `needed <= MAX_DIM`). Doubling keeps total re-layout work across
+/// a decode amortized **O(W·H)**; exact-fit regrowth would be **O(W²·H)**.
 fn grow_cap(cur: usize, needed: usize) -> usize {
     let mut c = cur.max(1);
     while c < needed {
@@ -88,11 +87,11 @@ fn grow_cap(cur: usize, needed: usize) -> usize {
 /// are decoupled from the **logical** extent (`width`/`height`): capacity grows
 /// geometrically (cheap, rare), while the extent tracks the last pixel touched.
 ///
-/// The previous decoder reallocated to the EXACT new size and
-/// full-copied every existing row on each growth — and a spec-legal sixel that
-/// omits the raster-attribute size hint grows its width one pixel at a time, so
-/// that was O(W) reallocations of O(W·H) each = O(W²·H), seconds-to-minutes of
-/// single-threaded work blocking the render/PTY loop on one small escape.
+/// A spec-legal sixel that omits the raster-attribute size hint grows its width
+/// one pixel at a time. Reallocating to the exact size and copying every row on
+/// each growth would mean O(W) reallocations of O(W·H) each, or O(W²·H) total,
+/// seconds to minutes of single-threaded work blocking the render/PTY loop on
+/// one small escape.
 struct SixelCanvas {
     buf: Vec<u8>,
     cap_w: usize,
@@ -369,13 +368,13 @@ fn read_num(data: &[u8], mut i: usize) -> (i64, usize) {
     let mut v: i64 = 0;
     let mut any = false;
     while i < data.len() && data[i].is_ascii_digit() {
-        // Saturating, not `v * 10 + d`. Every numeric param
-        // (`!<n>` repeat, `#<n>` palette, `"<n>` raster) is attacker-controlled
-        // from a DCS body up to 64 MiB; a ~20-digit run overflowed the i64
-        // multiply — a hard process abort under debug/test (panic=abort), a
-        // silent wrap in release. Saturating makes it total; downstream already
-        // rejects over-large dims/indices, and the repeat loop bails via the
-        // MAX_DIM `ensure` cap, so no legal sixel is affected.
+        // Saturating, not `v * 10 + d`. Every numeric param (`!<n>` repeat,
+        // `#<n>` palette, `"<n>` raster) is attacker-controlled from a DCS body
+        // up to the 16 MiB sequence limit, and a ~20-digit run overflows the i64
+        // multiply (a panic under debug/test overflow checks, a silent wrap in
+        // release). Saturating makes it total; downstream already rejects
+        // over-large dims/indices, and the repeat loop bails via the MAX_DIM
+        // `ensure` cap, so no legal sixel is affected.
         v = v.saturating_mul(10).saturating_add((data[i] - b'0') as i64);
         i += 1;
         any = true;
@@ -416,10 +415,10 @@ mod tests {
 
     /// `$` returns the cursor to column 0 without growing the canvas, so a
     /// payload can alternate it with `!` repeats and repaint the same band for
-    /// as long as its bytes hold out. Each construct is bounded on its own; the
-    /// product of the two was not. Measured before the aggregate cap, a 2 MiB
-    /// body took 13.3 s, which scales to about 107 s at the 16 MiB sequence
-    /// limit — one `cat` of a hostile file froze the pane for minutes.
+    /// as long as its bytes hold out. Each construct is bounded on its own, but
+    /// not their product. Without the aggregate cap, a 2 MiB body takes 13.3 s,
+    /// which scales to about 107 s at the 16 MiB sequence limit, so one `cat` of
+    /// a hostile file can freeze the pane for minutes.
     #[test]
     fn alternating_repeat_and_carriage_return_cannot_paint_forever() {
         let limits = crate::GraphicsLimits {
@@ -446,10 +445,9 @@ mod tests {
         );
     }
 
-    /// A long digit run in any numeric param must not
-    /// overflow `read_num`'s i64 accumulate (a debug/test panic=abort). A
-    /// 25-digit count decodes cleanly (saturates, then the dim/ensure caps
-    /// reject it) rather than aborting the process.
+    /// A long digit run in any numeric param must not overflow `read_num`'s i64
+    /// accumulate (a panic under debug/test overflow checks). A 25-digit count
+    /// saturates, then the dim/ensure caps reject it cleanly.
     #[test]
     fn long_digit_run_does_not_overflow() {
         // 25 nines as a repeat count, then a sixel char — saturates, the ensure
@@ -461,12 +459,12 @@ mod tests {
         let _ = decode(body2.as_bytes()); // must not panic (result either way ok)
     }
 
-    /// A `#Pc;2;Pr;Pg;Pb` RGB palette entry with an absurd
-    /// (saturated) component must not overflow the `* 255 / 100` scaling. Before
-    /// the clamp, `i64::MAX * 255` aborted the process under overflow checks.
+    /// A `#Pc;2;Pr;Pg;Pb` RGB palette entry with an absurd (saturated) component
+    /// must not overflow the `* 255 / 100` scaling. Unclamped, `i64::MAX * 255`
+    /// panics under overflow checks.
     #[test]
     fn rgb_palette_component_does_not_overflow() {
-        // 19-digit component saturates read_num to i64::MAX; then a pixel + ST.
+        // 19-digit component saturates read_num to i64::MAX; then a pixel.
         let body = format!("#0;2;{};1;1#0~", "9".repeat(19));
         // Must not panic; an image (1 painted pixel) decodes either way.
         let _ = decode(body.as_bytes());
@@ -474,10 +472,9 @@ mod tests {
         assert!(decode(b"#0;2;100;0;0#0~").is_some());
     }
 
-    /// A wide raster-attribute-LESS sixel (width grows one
-    /// pixel at a time) was the O(W²·H) DoS trigger. It must still decode to the
-    /// correct dimensions — and now does so in O(W·H) (instant rather than the
-    /// seconds-to-minutes the old exact-fit regrow took).
+    /// A wide sixel without raster attributes grows its width one pixel at a
+    /// time, which makes exact-fit regrowth an O(W²·H) DoS (seconds to
+    /// minutes). It must decode to the correct dimensions in O(W·H).
     #[test]
     fn wide_unhinted_sixel_decodes_correctly() {
         // `!2000~` = repeat the full-column sixel (~, all 6 bits) 2000× in band
@@ -554,7 +551,7 @@ mod tests {
 
     #[test]
     fn empty_input_decodes_to_nothing() {
-        // No pixels ⇒ 0×0 ⇒ ImageData::new rejects it as None.
+        // No pixels ⇒ 0×0 canvas ⇒ `into_image` returns None.
         assert!(decode(b"").is_none());
     }
 

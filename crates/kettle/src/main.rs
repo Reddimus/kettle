@@ -1,25 +1,16 @@
 //! kettle - a fast, cross-platform GPU terminal emulator.
 
 // kettle runs as a Windows GUI-subsystem app so Windows never
-// auto-allocates a console — there is ZERO phantom-console flash on
-// Explorer / Start-menu launch (the long-standing complaint). When launched
-// from a terminal, `attach_parent_console_if_needed()` (called first in
-// `main`) attaches the parent console so CLI subcommands (`--version`,
-// `--check-update`, `--print-completions`, `--shell-integration`, …) still
-// print.
-//
-// History — why the conditional attach matters: an earlier attempt set this
-// attribute but paired it with an *unconditional* AttachConsole + CONOUT$
-// reopen, which OVERWROTE the inherited stdout PIPE on `kettle --flag | grep`
-// (and the `>> $PROFILE` redirect), so piped output vanished and Windows CI
-// went red. That was reverted to the default console subsystem +
-// `ShowWindow(SW_HIDE)` — correct stdout, but a sub-50ms console flash. The
-// current approach restores the GUI subsystem AND fixes the earlier stdout
-// bug by reopening CONOUT$
-// ONLY for std handles that are NOT already inherited (detected via
-// `GetFileType` → pipe/file/char), so piped/redirected output is never
-// touched. The `not(test)` guard keeps `cargo test` on the console subsystem
-// so unit-test output is never hidden.
+// auto-allocates a console, and an Explorer / Start-menu launch shows no
+// console flash. When launched from a terminal,
+// `attach_parent_console_if_needed()` (called first in `main`) attaches the
+// parent console so CLI subcommands (`--version`, `--check-update`,
+// `--print-completions`, `--shell-integration`, ...) still print. It reopens
+// CONOUT$/CONIN$ ONLY for std handles that are NOT already inherited
+// (detected via `GetFileType` as a pipe, file, or char device), so piped or
+// redirected output (`kettle --flag | grep`, `>> $PROFILE`) is never touched.
+// The `not(test)` guard keeps `cargo test` on the console subsystem so
+// unit-test output is never hidden.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 use clap::Parser;
@@ -448,7 +439,7 @@ struct Cli {
     toggle: bool,
 
     /// Send TEXT to a running kettle via the remote-command file
-    /// (default `<config-dir>/kettle/remote.cmd`) and exit. Used by
+    /// (default `<config-dir>/remote.cmd`) and exit. Used by
     /// external scripts to drive an already-open Kettle without launching a
     /// new window. Example:
     ///
@@ -476,7 +467,7 @@ struct Cli {
     remote_send: Option<String>,
 
     /// Remote-command file path. Default
-    /// `<config-dir>/kettle/remote.cmd`. Honored by both the
+    /// `<config-dir>/remote.cmd`. Honored by both the
     /// `--remote-send` sender side and the kettle window's
     /// notify-watcher receiver side; both must agree on the path.
     /// See `--remote-send` above for the usage example.
@@ -663,10 +654,8 @@ fn init_logging() {
         .with_target(true)
         // Diagnostics belong on stderr. `tracing_subscriber`'s default writer
         // is stdout, which for `kettle exec` is the machine-readable data
-        // channel: one `warn!` would splice a log line into byte-exact child
-        // output, or between the NDJSON records agent callers parse. The ANSI
-        // decision below already assumed stderr, so the writer had simply
-        // drifted from the intent.
+        // channel. One `warn!` there would splice a log line into byte-exact
+        // child output, or between the NDJSON records agent callers parse.
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal())
         .init();
@@ -803,15 +792,13 @@ fn stable_path_hash(path: &std::path::Path) -> u64 {
     })
 }
 
-/// Install a `panic = "abort"`-safe panic hook as the very first
-/// thing `main` does. Before this, a panic on a Start-menu launch was
-/// invisible — an earlier console-hide approach (`ShowWindow(SW_HIDE)`)
-/// swallows stderr, and `panic = "abort"` (Cargo.toml) skips unwinding — so
-/// earlier debugging attempts had to *guess* at a crash's cause. The hook prints a full report (message,
-/// thread, location, backtrace) to stderr AND appends it to a crash-log file
-/// under the state dir, so a crash is always recoverable from a user even
-/// with no console. The hook itself never panics (all `let _ =` / `unwrap_or`)
-/// to avoid a double-fault under abort.
+/// Install a `panic = "abort"`-safe panic hook early in `main`. A Start-menu
+/// launch has no console to show stderr, and `panic = "abort"` (Cargo.toml)
+/// skips unwinding, so without the hook a panic there leaves no trace. The
+/// hook prints a full report (message, thread, location, backtrace) to stderr
+/// AND appends it to a crash-log file under the state dir, so a user can
+/// always recover a crash report even with no console. The hook itself never
+/// panics (all `let _ =` / `unwrap_or`) to avoid a double-fault under abort.
 fn install_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         // `force_capture` yields frames even when RUST_BACKTRACE is unset.
@@ -856,17 +843,16 @@ fn install_panic_hook() {
     }));
 }
 
-/// Windows GUI-subsystem console bridge. On a terminal launch,
-/// attach the parent console and wire up ONLY the std handles that aren't
-/// already inherited — so a piped/redirected stdout (`kettle --flag | grep`,
-/// `… > $PROFILE`), the trap that broke the earlier unconditional-reopen
-/// approach, is left untouched. This applies to stdin too: `echo y | kettle
-/// update` (stdout/stderr left as the plain console) must keep the piped
-/// stdin intact so `std::io::stdin().is_terminal()` downstream (e.g.
+/// Windows GUI-subsystem console bridge. On a terminal launch, attach the
+/// parent console and wire up ONLY the std handles that aren't already
+/// inherited, so a piped/redirected stdout (`kettle --flag | grep`,
+/// `... > $PROFILE`) is left untouched. Stdin gets the same check: `echo y |
+/// kettle update` (stdout/stderr left as the plain console) must keep the
+/// piped stdin so `std::io::stdin().is_terminal()` downstream (e.g.
 /// `update_cli`'s `--yes` guard) still sees a pipe, not a freshly reopened
-/// CONIN$ console handle. On an
-/// Explorer/Start-menu launch there is no parent console, so this is a no-op
-/// and kettle stays a pure GUI app: no console window, no flash.
+/// CONIN$ console handle. On an Explorer/Start-menu launch there is no parent
+/// console, so this is a no-op and kettle stays a pure GUI app with no
+/// console window and no flash.
 #[cfg(windows)]
 fn attach_parent_console_if_needed() {
     use windows_sys::Win32::Foundation::{
@@ -894,7 +880,7 @@ fn attach_parent_console_if_needed() {
 
     // True when the parent already handed us this handle via STARTUPINFO
     // (a pipe for `| grep`, a file for `> out`, or a console char device).
-    // Re-pointing such a handle is exactly the stdout-pipe regression described above.
+    // Re-pointing such a handle would break piped or redirected output.
     unsafe fn is_inherited(h: HANDLE) -> bool {
         if h.is_null() || h == INVALID_HANDLE_VALUE {
             return false;
@@ -964,12 +950,10 @@ fn attach_parent_console_if_needed() {
                 SetStdHandle(STD_ERROR_HANDLE, h);
             }
         }
-        // Guarded exactly like out/err above: only reopen CONIN$ when stdin
-        // wasn't already a valid inherited handle. Without this guard, every
-        // terminal launch that needs an out/err reopen (the common case —
-        // any plain, non-redirected launch) would unconditionally overwrite
-        // an already-piped stdin with the parent console's input, even
-        // though stdin needed no fixing at all.
+        // Reopen CONIN$ only when stdin wasn't inherited. Any plain,
+        // non-redirected launch reopens out/err, and without this guard it
+        // would also replace an already-piped stdin with the parent console's
+        // input.
         if !in_ok {
             let h = open(CONIN);
             if h != INVALID_HANDLE_VALUE {
@@ -1043,13 +1027,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(warning) = startup_update_warning.as_deref() {
         eprintln!("kettle update recovery: {warning}");
     }
-    // Log the build identity at info level on startup. A user
-    // grep'ing their stderr for warnings to file a bug report can paste
-    // the surrounding lines — the version line lands once near the top,
-    // disambiguating which kettle build emitted the warning. `info` level
-    // is below the `warn` default filter, so the line only appears when
-    // the user has bumped logging (`RUST_LOG=info kettle …`); on the
-    // default filter it stays out of the way.
+    // Log the build identity once at startup so pasted stderr for a bug
+    // report shows which kettle build emitted a warning. `info` is below the
+    // default `warn` filter, so the line appears only when the user raises
+    // logging (`RUST_LOG=info kettle ...`).
     log::info!("kettle {KETTLE_VERSION} starting");
     let cli = Cli::parse();
 
@@ -1085,8 +1066,7 @@ fn main() -> anyhow::Result<()> {
                 // negative, NaN, infinite, or overflowing value — all reachable
                 // from the CLI (`--timeout=nan`, `--timeout=-1`, `--timeout=1e400`
                 // which parses to +inf). Validate before converting and exit
-                // cleanly. The MCP / control-server timeout paths already clamp;
-                // this brings the `kettle exec` CLI to parity. Audit, v2.25.0.
+                // cleanly. The MCP / control-server timeout paths clamp instead.
                 let timeout = match args.timeout {
                     None => None,
                     Some(s) if s.is_finite() && (0.0..=u32::MAX as f64).contains(&s) => {
@@ -1136,45 +1116,33 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(update_cli::run(false, env!("CARGO_PKG_VERSION")));
     }
 
-    // Explicit `--config PATH` must point at a regular file. Every
-    // downstream branch silently fell back to `Config::default()`
-    // otherwise — the user got a screenshot / table / window with
-    // their carefully-crafted theme nowhere in sight and no clue why.
-    //
-    // An earlier fix caught the "no such file" case; this check extends it to
-    // *not a regular file* (typically a directory — a user
-    // typing `--config ~/.config/kettle` instead of
-    // `--config ~/.config/kettle/config` would have `read_to_string`
-    // return an `IsADirectory` error, the diagnostics path would
-    // log a warning and use defaults, and the user would see the
-    // same "my config didn't apply" symptom as the no-such-file
-    // case). Same shape as `--working-directory` below: existence
-    // is necessary but not sufficient — also gate on the right type.
-    // Omitting `--config` (relying on the default path) still
-    // silently falls back to defaults; that's the intended
-    // "kettle works out of the box" behavior.
-    // Skip the must-already-exist check when `--write-default-config`
-    // is set — there `--config PATH` names the file to *create*, so a missing
-    // path is the expected, valid case rather than a typo to reject.
+    // Explicit `--config PATH` must be an existing, readable regular file.
+    // Otherwise every downstream branch would silently fall back to
+    // `Config::default()`, leaving the user with a screenshot / table /
+    // window that ignores their config and no clue why. A directory
+    // (`--config ~/.config/kettle` instead of `--config ~/.config/kettle/config`)
+    // would only log a read warning and use defaults, so existence alone is
+    // not enough. Omitting `--config` still falls back to defaults silently;
+    // that's the intended "kettle works out of the box" behavior.
+    // Skip this check with `--write-default-config`, where `--config PATH`
+    // names the file to *create*, so a missing path is expected.
     if !cli.write_default_config
         && let Some(p) = &cli.config
         && let Some(reason) = config_path_problem(p)
     {
         return Err(anyhow::anyhow!("--config {}: {reason}", p.display()));
     }
-    // `--profile NAME` gets the same treatment, and for a sharper reason than
-    // `--config` had. A profile that does not resolve used to fall all the way
-    // through to `Config::default()` — so `--profile darkk` launched with
-    // COMPILE-TIME defaults rather than the user's own config: stock theme,
-    // stock font, stock keybinds, no diagnostic. Losing every setting is a
-    // worse outcome than refusing to start, and `--config` already treats a
-    // bad path as fatal, so a typo'd profile should not be quietly different.
-    // `--config` wins when both are given (see the resolution below), so this
-    // only fires when the profile is the one actually being used.
-    // Skipped for the modes that never load a profile. `--print-default-config`
-    // and `--write-default-config` early-return further down and emit compiled
-    // defaults, so refusing to start over an unrelated `--profile` typo would
-    // block work the profile has no bearing on.
+    // `--profile NAME` gets the same treatment. A profile that does not
+    // resolve falls through to `Config::default()`, so `--profile darkk` would
+    // launch with COMPILE-TIME defaults (stock theme, font, and keybinds)
+    // instead of the user's own config, with no diagnostic. Refusing to start
+    // beats losing every setting, and `--config` already treats a bad path as
+    // fatal, so a typo'd profile must not be quietly different. `--config`
+    // wins when both are given (see the resolution below), so this only fires
+    // when the profile is used. Modes that never load a profile skip the
+    // check. For example, `--print-default-config` and
+    // `--write-default-config` return early below and emit compiled defaults,
+    // so an unrelated `--profile` typo must not block them.
     if cli.config.is_none()
         && !ignores_profile(&cli)
         && let Some(name) = cli.profile.as_deref()
@@ -1193,14 +1161,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.print_default_config {
-        // `kettle --print-default-config > ~/.config/kettle/config`
-        // is the one-command bootstrap. The example file lives at
-        // `docs/kettle.example.config` (also linked from README and
-        // CONFIG.md); embedding it at build time means the binary
-        // always emits the version that shipped with it — no
-        // disk-read at runtime, no path-resolution surprises, and
-        // `cargo install kettle` users get the correct content
-        // even if the source tree is gone.
+        // Embed `docs/kettle.example.config` at build time so the binary
+        // always emits the version that shipped with it, with no runtime
+        // disk read. `cargo install kettle` users get the correct content even
+        // without the source tree.
         print!("{}", include_str!("../../../docs/kettle.example.config"));
         return Ok(());
     }
@@ -1265,11 +1229,6 @@ fn main() -> anyhow::Result<()> {
         // accessible) get the right snippet, and so the binary's
         // output can never drift from the in-tree source of truth
         // under `shell-integration/`.
-        //
-        // PowerShell support (alias `powershell` / `ps1` /
-        // `pwsh`) was added later so Windows users + cross-platform PowerShell
-        // Core users get jump-to-prompt parity with bash/zsh/fish. Same
-        // include_str!-at-build-time embedding pattern.
         let snippet = match shell {
             "bash" => include_str!("../../../shell-integration/kettle.bash"),
             "zsh" => include_str!("../../../shell-integration/kettle.zsh"),
@@ -1323,14 +1282,11 @@ fn main() -> anyhow::Result<()> {
     }
     if cli.list_actions {
         // Onboarding pair to `--list-keybinds`: that one shows what's
-        // currently bound; this one shows what `keybind = trigger=…`
-        // values are valid. Without this, users writing a new bind had
-        // to grep the source or hit `--check-config` to confirm a name
-        // they guessed. The parametric forms cannot be enumerated, so
-        // each gets a one-line tail blurb instead. Every one of them
-        // needs its own line: `switch_to_tab_N` was accepted by the
-        // parser and named nowhere in this output, which made the
-        // documented "complete set" claim false.
+        // currently bound; this one shows which `keybind = trigger=...`
+        // values are valid. The parametric forms cannot be enumerated, so
+        // each gets its own one-line tail blurb. Every form the parser
+        // accepts needs a line, or the documented "complete set" claim is
+        // false.
         for name in kettle_config::keybinds::action_names() {
             println!("{name}");
         }
@@ -1349,14 +1305,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if cli.list_keybinds {
-        // Honor `--config FILE` (and the default config path if it
-        // exists) so users see their *effective* keymap — defaults +
-        // their overrides + their unbinds — not just the built-in set.
-        // Previously a user who had spent time customizing their config
-        // had to restart kettle and inspect by hand to confirm a
-        // `keybind = …` line took effect; now they can introspect from
-        // the CLI in one shot.
-        // Honor `--profile NAME` here too.
+        // Honor `--config FILE` / `--profile NAME` (and the default config
+        // path if it exists) so users see their *effective* keymap (defaults
+        // plus their overrides and unbinds), not just the built-in set.
         let lines = match resolve_config_path(&cli) {
             Some(p) if p.exists() => {
                 let cfg = load_resolved_config(&cli, &p);
@@ -1397,9 +1348,7 @@ fn main() -> anyhow::Result<()> {
     if cli.check_config {
         // Route through `resolve_config_path` so this
         // path honors `--profile NAME` uniformly with every other
-        // introspection flag. An earlier fix did the same inline in just this
-        // spot; this extracts the helper because the same gap existed at
-        // every other site.
+        // introspection flag.
         let path = resolve_config_path(&cli);
         // Surface read errors explicitly while sharing the hardened single-read
         // path used by startup and reload. This must not regress to a raw
@@ -1450,13 +1399,9 @@ fn main() -> anyhow::Result<()> {
             Some(p) if p.exists() => println!("config:  {}", p.display()),
             Some(p) => {
                 println!("config:  {} (not found — using defaults)", p.display());
-                // When no config exists at the resolved
-                // default path, point the user at the bootstrap
-                // one-liner. Without this, a newcomer who ran
-                // `--check-config` and saw "using defaults" had to
-                // know on their own that `--print-default-config`
-                // is the way to create one. The hint
-                // names the actual resolved path so copy-paste works.
+                // Point a newcomer who sees "using defaults" at the
+                // bootstrap one-liner. The hint names the actual resolved
+                // path so copy-paste works.
                 println!("hint:    kettle --print-default-config > {}", p.display());
             }
             None => println!("config:  (no path resolvable — using defaults)"),
@@ -1465,10 +1410,8 @@ fn main() -> anyhow::Result<()> {
         println!("font:    {} {}pt", cfg.font_family, cfg.font_size);
         println!("scrollback: {}", cfg.scrollback);
         println!("keybinds: {} bound", cfg.keybinds.len());
-        // Echo back the resolved values of the per-feature config gates so
-        // users can verify with `kettle --check-config` that their tweaks
-        // are taking effect (rather than greping the source). Grouped by
-        // theme of related settings; only one line per group for brevity.
+        // Echo the resolved per-feature config gates so users can verify
+        // their tweaks took effect. One line per group of related settings.
         println!(
             "cursor:  {:?} (blink={}, interval={}ms, timeout={})",
             cfg.cursor_style,
@@ -1477,12 +1420,10 @@ fn main() -> anyhow::Result<()> {
             cfg.cursor_blink_timeout()
                 .map_or_else(|| "never".to_string(), |t| format!("{}s", t.as_secs()))
         );
-        // When force_no_bell silences every bell flavor
-        // regardless of mode, annotate the existing line so the user
-        // doesn't read "bell: Visual" while wondering why no bell
-        // actually fires. The `extra_check_config_lines` function
-        // also echoes "bell:    force-no-bell=true (silences ...)"
-        // as its own line; this annotation pairs the two.
+        // `force_no_bell` silences every bell flavor regardless of mode, so
+        // annotate this line; otherwise "bell: Visual" suggests a bell fires.
+        // `extra_check_config_lines` prints the matching
+        // `force-no-bell=true` line.
         let bell_suffix = if cfg.force_no_bell {
             " (force-no-bell overrides)"
         } else {
@@ -1533,12 +1474,9 @@ fn main() -> anyhow::Result<()> {
         if !cfg.ssh_hosts.is_empty() {
             println!("ssh:     {} host(s) configured", cfg.ssh_hosts.len());
         }
-        // Repeatable / opt-in keys: only echo when actually set so the
-        // default-config case stays terse, but show the count when the
-        // user has tuned them — otherwise `--check-config` silently
-        // dropped `font-feature` / per-style font families / palette
-        // overrides from its summary even when the user had taken the
-        // time to configure them. Symmetric with the `ssh:` line above.
+        // Echo repeatable / opt-in keys (`font-feature`, per-style font
+        // families) only when set, so the default-config case stays terse.
+        // Symmetric with the `ssh:` line above.
         if !cfg.font_features.is_empty() {
             println!(
                 "font-features: {} configured (ligatures={})",
@@ -1562,22 +1500,15 @@ fn main() -> anyhow::Result<()> {
                 styles_set.join(", ")
             );
         }
-        // Echo the Terminator-parity / status-bar opt-in
-        // keys when the user has actually set them. Extracted as a
-        // pure helper (`extra_check_config_lines`) so the contract
-        // is unit-testable — without this, a user who set
-        // `accent-color = #00d4ff` couldn't verify it parsed and
-        // there'd be no regression test catching a future silent
-        // drop. Symmetric with the lines above.
+        // Echo the Terminator-parity / status-bar opt-in keys the user set.
+        // The pure helper (`extra_check_config_lines`) keeps this contract
+        // unit-testable. Symmetric with the lines above.
         for line in extra_check_config_lines(&cfg) {
             println!("{line}");
         }
-        // Count and display I/O errors (the read failures surfaced
-        // above) as their own category rather than reusing the
-        // "malformed value:" prefix — a permission-denied file isn't
-        // a value-parsing failure, and labeling it as one was
-        // confusing the diagnostic. Read errors get an `i/o error:`
-        // line instead.
+        // Report the read failure above as its own `i/o error:` category,
+        // not as "malformed value:". A permission-denied file isn't a
+        // value-parsing failure.
         let io_count = if read_error.is_some() { 1 } else { 0 };
         let issues = unknown.len() + malformed.len() + ignored.len() + io_count;
         if issues == 0 {
@@ -1623,15 +1554,11 @@ fn main() -> anyhow::Result<()> {
             })
         });
     if let Some((out, scene, flag_name)) = screenshot_target {
-        // The renderer's `capture_png` writes via `image::save`, which
-        // dispatches on file extension and is compiled with PNG-only
-        // support (kettle-render/Cargo.toml: `features = ["png"]`).
-        // A typo'd `.jpg` / `.bmp` / no-extension argument used to
-        // reach `image::save` and surface a crate-internal error like
-        //   `The file extension `."txt"` was not recognized as an
-        //   image format`
-        // *after* doing all the GPU work — confusing and wasted. Pre-
-        // validate so the message is clear and the failure is cheap.
+        // Screenshots are PNG-only. The renderer writes via `image::save`,
+        // which picks the format from the file extension, so any other
+        // extension would write a different format or fail with a
+        // crate-internal error only after all the GPU work. Pre-validate so
+        // the message is clear and the failure is cheap.
         match out.extension().and_then(|e| e.to_str()) {
             Some(e) if e.eq_ignore_ascii_case("png") => {}
             Some(e) => {
@@ -1648,15 +1575,10 @@ fn main() -> anyhow::Result<()> {
                 ));
             }
         }
-        // Use `load_from` (same path the in-window reload uses) instead
-        // of an open-coded `parse_collect`: now a typo in the config
-        // emits the same `log::warn!` on stderr when generating a
-        // screenshot as it does when running interactively. Previously
-        // `--screenshot` was the only flag that silently swallowed
-        // both unknown keys *and* malformed values, which made it
-        // confusing when a screenshot didn't reflect what the user
-        // thought their config said.
-        // Honor `--profile NAME` here too.
+        // `load_resolved_config` warns on stderr about unknown keys and
+        // malformed values, as an interactive run does, so a screenshot that
+        // ignores part of the config says why. Honor `--profile NAME` here
+        // too.
         let mut cfg = match resolve_config_path(&cli) {
             Some(p) if p.exists() => load_resolved_config(&cli, &p),
             _ => kettle_config::Config::default(),
@@ -1668,12 +1590,11 @@ fn main() -> anyhow::Result<()> {
         if let Some(rgb) = cli.accent.as_deref().and_then(kettle_config::Rgb::parse) {
             cfg.accent_color = Some(rgb);
         }
-        // Clamp dimensions to a sane range — wgpu textures cap at 8192 px
-        // per side on most GPUs, so a typo like `--cols 100000` used to
-        // panic with `dimension X exceeds the limit of 8192` instead of
-        // producing a friendly error. Worst-case cell size ~20 px wide /
-        // ~40 px tall keeps 400×200 cells comfortably under the limit;
-        // every realistic screenshot fits.
+        // Clamp dimensions to a sane range. wgpu textures cap at 8192 px
+        // per side on most GPUs, and a typo like `--cols 100000` would
+        // otherwise panic with `dimension X exceeds the limit of 8192`.
+        // Worst-case cell size ~20 px wide / ~40 px tall keeps 400x200 cells
+        // comfortably under the limit; every realistic screenshot fits.
         let cols = cli.cols.clamp(20, 400);
         let rows = cli.rows.clamp(8, 200);
         // `capture_png_with` may shrink (cols, rows) further to fit
@@ -1743,9 +1664,8 @@ fn main() -> anyhow::Result<()> {
     });
     // --accent parses via the same Rgb parser the config uses, so
     // every format the config key accepts (#rrggbb / #rgb / 0xRRGGBB
-    // / X11 names) works on the CLI too. A malformed value silently
-    // falls through to the config's accent-color (or palette[4]) —
-    // same shape as the config parse arm, no hard fail.
+    // / X11 names) works on the CLI too. `flag_value_problem` has already
+    // rejected a malformed value.
     let accent_override = cli.accent.as_deref().and_then(kettle_config::Rgb::parse);
     let window_state_override = window_state_from_flags(cli.maximise, cli.fullscreen, cli.hidden);
     // Only override to `true` when the flag is present — its absence must NOT
@@ -1849,9 +1769,9 @@ fn main() -> anyhow::Result<()> {
         tab_handoff: cli.tab_handoff,
         tab_handoff_fd: cli.tab_handoff_fd,
         record,
-        // Bool-PARSE the env var — `is_some()` turned `=0`/`=false`/empty all
-        // ON, the opposite of intent, silently enabling raw keystroke (password)
-        // capture into the trace. Only an explicit truthy value enables it.
+        // `KETTLE_RECORD_RAW_INPUT` is bool-parsed above. Only an explicit
+        // truthy value enables raw keystroke (password) capture; `=0`,
+        // `=false`, and empty leave it off.
         record_raw_input,
     })
 }
@@ -1972,12 +1892,6 @@ fn open_remote_command_file(path: &std::path::Path) -> std::io::Result<std::fs::
 /// precedence. Used by every introspection flag (`--check-config`,
 /// `--list-keybinds`, `--list-ssh-hosts`, `--config-path`,
 /// `--screenshot`) so they all honor `--profile` uniformly.
-///
-/// Before this helper, only the windowed-run path (and, from a later
-/// fix, `--check-config`) honored `--profile`. A user running e.g.
-/// `kettle --profile dev --list-keybinds` would silently get the
-/// default config's keymap rather than the dev profile's — the same
-/// silent-fallback shape as the config read-error handling above.
 fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config
         .clone()
@@ -2021,23 +1935,18 @@ fn load_resolved_config(cli: &Cli, path: &std::path::Path) -> kettle_config::Con
     kettle_config::Config::load_from_with_trust(path, resolved_config_trust(cli))
 }
 
-/// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
-/// by name, two columns aligned to the longest name (floor 4 so single-
 /// Validate a `--config PATH` argument: must be an existing regular file
 /// the current process can open. Returns `None` when the path is acceptable,
-/// or `Some(reason)` ready to slot into the CLI error template. Pure-modulo-
-/// the-filesystem so the typo / wrong-kind / unreadable paths (no such file,
-/// directory mistyped for the file inside, perm-denied file) are unit-
-/// testable without spawning the binary. The matching `--working-directory`
-/// check is still inlined below — the messages differ (`not a regular file`
-/// vs `not a directory`) and the call site is short enough; extracting both
-/// into a shared kind-enum helper would add more glue than it removes.
+/// or `Some(reason)` ready to slot into the CLI error template. It touches
+/// only the filesystem, so the missing, wrong-kind (a directory mistyped for
+/// the file inside), and unreadable cases are unit-testable without spawning
+/// the binary. The `--working-directory` check stays separate in
+/// `flag_value_problem` because the messages differ (`not a regular file` vs
+/// `not a directory`) and a shared kind-enum helper would add more glue than
+/// it removes.
 ///
-/// Also probe `File::open` so a permission-denied file fails
-/// at the CLI surface instead of at the silent runtime fallback. The no-
-/// such-file, not-a-regular-file, and unreadable-file checks together cover
-/// the three classes of "user typed `--config FILE` but kettle ignored
-/// it" complaints.
+/// The `File::open` probe makes a permission-denied file fail at the CLI
+/// instead of silently falling back to defaults at runtime.
 fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
     if !p.exists() {
         Some("no such file")
@@ -2058,10 +1967,9 @@ fn config_path_problem(p: &std::path::Path) -> Option<&'static str> {
 fn ignores_profile(cli: &Cli) -> bool {
     // Any mode that DOES resolve the profile disqualifies the whole
     // invocation, because clap lets several be set at once and only the first
-    // in source order runs. An any-of-the-ignorers test let a mixed
-    // invocation skip validation for a mode that needed it:
-    // `--profile typo --list-profiles --list-ssh-hosts` ran `list-ssh-hosts`
-    // first and silently printed defaults.
+    // in source order runs. Otherwise `--profile typo --list-profiles
+    // --list-ssh-hosts` would skip validation, run `--list-ssh-hosts` first,
+    // and silently print defaults.
     let reads_profile = cli.list_keybinds
         || cli.list_layouts
         || cli.list_ssh_hosts
@@ -2151,9 +2059,9 @@ fn write_default_config(
             Ok(DefaultConfigWrite::Written)
         }
         // A directory at the config path is also "something is already here,
-        // leave it alone" — but Windows reports it as a permission error rather
-        // than AlreadyExists, so testing only for the latter turned a friendly
-        // exit 0 into `Access is denied` and exit 1.
+        // leave it alone". Windows reports it as a permission error, not
+        // AlreadyExists, so `create_error` also checks `symlink_metadata`.
+        // Otherwise the friendly exit 0 would become `Access is denied`, exit 1.
         Err(e) => create_error(e),
     }
 }
@@ -2161,18 +2069,17 @@ fn write_default_config(
 /// Reject flag VALUES that are parsed again later by code that shrugs when the
 /// parse fails.
 ///
-/// A flag whose value silently falls back is worse than one that errors: it
-/// looks like it worked. `--accent` was parsed with `and_then(Rgb::parse)` in
-/// both of its consumers, so an unparseable color started kettle with the
-/// configured accent and no message. `--working-directory` was the same shape —
-/// `kettle_core::term::Terminal::new` uses `Some(d) if is_dir => cmd.cwd(d)`
-/// and falls back to `$HOME` otherwise, so a typo'd `-d ~/projets` opened the
-/// shell in the home directory with nothing to indicate the request was
+/// A flag whose value silently falls back is worse than one that errors,
+/// because it looks like it worked. Both `--accent` consumers parse with
+/// `and_then(Rgb::parse)`, so an unparseable color would start kettle with the
+/// configured accent and no message. `kettle_core::term::Terminal::new` falls
+/// back to `$HOME` when the working directory is not a directory, so a typo'd
+/// `-d ~/projets` would open the shell at home with no sign the request was
 /// dropped.
 ///
 /// This is one function so a test can drive it from a parsed `Cli` exactly as
-/// `run` does. It reports the first problem it finds, message included, in the
-/// same shape as `--profile`.
+/// `main` does. It reports the first problem it finds, message included, in
+/// the same shape as `--profile`.
 fn flag_value_problem(cli: &Cli) -> Option<String> {
     if let Some(accent) = cli.accent.as_deref()
         && kettle_config::Rgb::parse(accent).is_none()
@@ -2232,10 +2139,6 @@ fn profile_problem(name: &str) -> Option<String> {
     }
 }
 
-/// character names don't collapse the column), padded with two spaces.
-/// Empty input yields a single "(no ssh-host entries configured)" line so
-/// the user sees their config is empty rather than no output at all.
-/// Pure so the formatting is unit-testable without the CLI.
 /// Format the opt-in echo lines for `--check-config`.
 /// Pure helper: takes a `Config`, returns one `String` per echo line
 /// the user should see. Empty `Vec` for a default config — terse
@@ -2248,6 +2151,7 @@ fn profile_problem(name: &str) -> Option<String> {
 /// will catch a branch that fires on default config.
 ///
 /// Each variant gates on a single field's non-default-ness:
+///   - `inert` — `inert_keys` non-empty
 ///   - `accent` — `accent_color` is `Some`
 ///   - `bell: force-no-bell` — `force_no_bell` is `true`
 ///   - `triggers` — at least one trigger
@@ -2313,6 +2217,12 @@ fn extra_check_config_lines(cfg: &kettle_config::Config) -> Vec<String> {
     lines
 }
 
+/// Render `ssh-host` entries as the `--list-ssh-hosts` table: alphabetical
+/// by name, two columns aligned to the longest name (floor 4 so single-
+/// character names don't collapse the column), padded with two spaces.
+/// Empty input yields a single "(no ssh-host entries configured)" line so
+/// the user sees their config is empty rather than no output at all.
+/// Pure so the formatting is unit-testable without the CLI.
 fn format_ssh_hosts(hosts: &[(String, String)]) -> Vec<String> {
     if hosts.is_empty() {
         return vec!["(no ssh-host entries configured)".into()];
@@ -2374,8 +2284,8 @@ mod window_state_flag_tests {
     use super::window_state_from_flags;
     use kettle_config::WindowState;
 
-    /// Full truth table — in particular `-H` must win over
-    /// `-m`/`-f` (it used to be silently dropped when combined).
+    /// Full truth table. In particular `-H` must win over `-m`/`-f`
+    /// instead of being silently dropped when combined.
     #[test]
     fn hidden_wins_then_fullscreen_then_maximise() {
         assert_eq!(window_state_from_flags(false, false, false), None);
@@ -2714,15 +2624,15 @@ mod tests {
     /// `--write-default-config` must refuse to clobber, and must say so
     /// pleasantly rather than failing.
     ///
-    /// The atomic `create_new` that closed the symlink TOCTOU also changed the
-    /// error surface: an existing DIRECTORY at the config path reports as a
-    /// permission error on Windows, not `AlreadyExists`, so matching only the
-    /// latter turned the friendly "already exists, leaving it untouched" exit 0
-    /// into `Access is denied` and exit 1.
+    /// The atomic `create_new` that closes the symlink TOCTOU reports an
+    /// existing DIRECTORY at the config path as a permission error on Windows,
+    /// not `AlreadyExists`. Matching only the latter would turn the friendly
+    /// "already exists, leaving it untouched" exit 0 into `Access is denied`
+    /// and exit 1.
     ///
     /// Every case goes through `write_default_config`, the function the CLI arm
-    /// calls — an earlier version of this test restated `create_new` and the
-    /// error predicate locally, so deleting the production code left it green.
+    /// calls. Restating `create_new` and the error predicate locally would let
+    /// the test stay green with the production code deleted.
     #[test]
     fn write_default_config_leaves_anything_already_there_untouched() {
         let dir = kettle_test_support::private_tempdir("kettle-default-config-");
@@ -2741,8 +2651,8 @@ mod tests {
             "an existing config must be left exactly as it was"
         );
 
-        // A DIRECTORY at the config path — the case that regressed. Windows
-        // reports this as a permission error rather than AlreadyExists.
+        // A DIRECTORY at the config path. Windows reports this as a
+        // permission error rather than AlreadyExists.
         let as_dir = dir.path().join("config-dir");
         std::fs::create_dir(&as_dir).expect("seed dir");
         assert_eq!(
@@ -2838,11 +2748,11 @@ mod tests {
 
     /// A flag value that silently falls back is worse than one that errors.
     ///
-    /// `--accent` was parsed with `and_then(Rgb::parse)` by both of its
-    /// consumers, so `--accent tael` started kettle with the configured accent
-    /// and said nothing: the flag looked like it worked. `--working-directory`
-    /// had the same shape, falling back to `$HOME`. Both are checked at the
-    /// surface now, through the function `run` itself calls.
+    /// Both consumers of `--accent` parse it with `and_then(Rgb::parse)`, so
+    /// without this check `--accent tael` would start kettle with the
+    /// configured accent and say nothing. A bad `--working-directory` would
+    /// likewise fall back to `$HOME`. Both are checked at the surface, through
+    /// the function `run` itself calls.
     #[test]
     fn flag_values_that_would_be_silently_dropped_are_rejected_at_the_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2925,7 +2835,7 @@ mod tests {
             ],
             vec!["kettle", "--profile", "typo"],
             // MIXED modes: clap allows several at once and only the first in
-            // source order runs, so an any-of-the-ignorers test let this skip
+            // source order runs, so an any-of-the-ignorers check would skip
             // validation and then execute a mode that DOES read the profile.
             vec![
                 "kettle",
@@ -3101,23 +3011,20 @@ mod tests {
         );
     }
 
-    /// Windows GUI-subsystem drift guard (supersedes the guards for earlier
-    /// console-handling approaches).
+    /// Windows GUI-subsystem drift guard.
     /// kettle is a Windows GUI-subsystem app (`#![cfg_attr(all(windows,
     /// not(test)), windows_subsystem = "windows")]`), so Explorer / Start-menu
-    /// launches never get a phantom console — zero flash. A terminal launch
+    /// launches never flash a phantom console. A terminal launch
     /// instead attaches the parent console in `attach_parent_console_if_needed`,
     /// reopening CONOUT$/CONIN$ ONLY for std handles that aren't already
-    /// inherited (detected via `GetFileType`) — so piped/redirected stdout is
+    /// inherited (detected via `GetFileType`), so piped/redirected stdout is
     /// never clobbered.
     ///
-    /// That conditional is the whole point: an earlier attempt set the same
-    /// attribute but reopened the console UNCONDITIONALLY, overwriting the
-    /// inherited stdout pipe on `kettle --flag | grep` and breaking Windows
-    /// CI; that was reverted to the console subsystem + a `SW_HIDE` flash. If a future
-    /// contributor drops the GetFileType inherited-handle early-return, piped
-    /// CLI output silently disappears on Windows again. These asserts catch
-    /// both directions (attribute removed, or guard removed) at gauntlet time.
+    /// That conditional is the whole point. Reopening the console
+    /// UNCONDITIONALLY overwrites the inherited stdout pipe on
+    /// `kettle --flag | grep`, so piped CLI output silently disappears on
+    /// Windows. These asserts catch both directions (attribute removed, or
+    /// guard removed) at gauntlet time.
     #[test]
     fn windows_gui_subsystem_with_conditional_attach_survives() {
         let src = super::production_source();
@@ -3144,11 +3051,10 @@ mod tests {
                 "missing console-attach token: {needle}"
             );
         }
-        // The inherited-handle guard (the fix for the earlier unconditional-reopen
-        // regression) is present: without
-        // GetFileType + GetStdHandle there is no way to tell a piped stdout
-        // from an allocated console, so an unconditional reopen would re-break
-        // `kettle --flag | grep` on Windows CI.
+        // The inherited-handle guard is present. Without GetFileType +
+        // GetStdHandle there is no way to tell a piped stdout from an
+        // allocated console, so an unconditional reopen would break
+        // `kettle --flag | grep` on Windows.
         for needle in [
             "GetFileType(h)",
             "GetStdHandle(STD_OUTPUT_HANDLE)",
@@ -3161,11 +3067,10 @@ mod tests {
         }
         // The stdin-specific guard: `attach_parent_console_if_needed` must
         // also skip reopening CONIN$ when stdin is already an inherited pipe
-        // (`echo y | kettle update`), the same shape of bug the out/err
-        // guard above was added to fix. Without `if !in_ok` gating the
-        // CONIN$ reopen, any terminal launch that needs an out/err reopen
-        // (i.e. most terminal launches) unconditionally clobbers a piped
-        // stdin with the parent console's keyboard input.
+        // (`echo y | kettle update`). Without `if !in_ok` gating the CONIN$
+        // reopen, any terminal launch that needs an out/err reopen (most of
+        // them) clobbers a piped stdin with the parent console's keyboard
+        // input.
         for needle in ["let in_ok = is_inherited(stdin_handle);", "if !in_ok {"] {
             assert!(
                 src.contains(needle),
@@ -3173,11 +3078,10 @@ mod tests {
                  (piped stdin would be silently clobbered by CONIN$ reopen)"
             );
         }
-        // Belt-and-suspenders: the earlier console-hide hack must be gone —
-        // under the GUI subsystem there is no auto-console to hide, and a stray
-        // hide could hide the user's *parent* console after attach. The needle
-        // is built at runtime so this assertion doesn't self-match via
-        // include_str!.
+        // Belt-and-suspenders: no console-hide call. Under the GUI subsystem
+        // there is no auto-console to hide, and a stray hide could hide the
+        // user's *parent* console after attach. The needle is built at
+        // runtime so this assertion doesn't self-match via include_str!.
         let hide_call = format!("ShowWindow(hwnd, {})", "SW_HIDE");
         assert!(
             !src.contains(&hide_call),
@@ -3189,23 +3093,20 @@ mod tests {
     #[test]
     fn config_path_problem_catches_missing_and_directory() {
         use std::io::Write;
-        // Missing path → "no such file" (preserved from the original check).
+        // Missing path → "no such file".
         let missing = std::path::PathBuf::from("/definitely/not/a/real/path/kettle.conf");
         assert_eq!(config_path_problem(&missing), Some("no such file"));
 
-        // Real temp dir: `--config DIR` was the not-a-regular-file gap. Pre-fix,
-        // `--config ~/.config/kettle` (where the file is `.config/kettle/config`
-        // and the user dropped the trailing component) silently fell back to
-        // defaults — `read_to_string` returned IsADirectory, `load_from_with_diagnostics`
-        // logged a warn and used defaults, and the user saw their carefully-
-        // crafted theme nowhere with no obvious cue why.
-        // PID + nanos. Stale directories from a previously
-        // panicked test run (Ctrl+C, OOM, hardware fault) used to
-        // collide with a re-run sharing the same PID — common on
-        // Windows where PIDs cycle quickly and rare-but-real on Linux
-        // CI runners. The nanos suffix means even the same PID gets a
-        // fresh dir. Matches the pattern in session::tests +
-        // config_tests + the bg-image / lua config test fixtures.
+        // A directory must be rejected as not a regular file. Otherwise
+        // `--config ~/.config/kettle` (the user dropped the trailing `/config`)
+        // fails to read, and `load_from_with_diagnostics` logs a warning and
+        // silently uses defaults, leaving the user's theme gone with no
+        // obvious cue why.
+        // The name uses PID + nanos. A stale dir from a panicked run (Ctrl+C,
+        // OOM, hardware fault) can collide with a re-run that reuses the PID,
+        // which is common on Windows where PIDs cycle quickly and rare-but-real
+        // on Linux CI runners. The nanos suffix gives even the same PID a
+        // fresh dir. Same pattern as the bg-image and lua test fixtures.
         let tmp = std::env::temp_dir().join(format!(
             "kettle-config-test-{}-{}",
             std::process::id(),
@@ -3294,7 +3195,7 @@ mod tests {
     fn shell_integration_snippets_match_in_tree_files() {
         // `kettle --shell-integration <shell>` emits one
         // of the embedded `shell-integration/kettle.{bash,zsh,fish,ps1}`
-        // files (ps1 added later). The contract: the embedded
+        // files. The contract: the embedded
         // content must equal the in-tree file byte-for-byte (so
         // docs/SHELL-INTEGRATION.md and `--shell-integration` never
         // diverge) and each snippet must include the OSC 133 prefix
@@ -3321,7 +3222,7 @@ mod tests {
                 "{shell}: embedded snippet missing OSC 133 marker — \
                  the file's body probably regressed"
             );
-            // v2.20.0: every snippet also reports the cwd via OSC 7 (powers
+            // Every snippet also reports the cwd via OSC 7 (powers
             // new-tab/split cwd inheritance + "Open folder").
             assert!(
                 embedded.contains("]7;file://"),
@@ -3337,9 +3238,9 @@ mod tests {
     }
 
     /// The guide installs the canonical snippets generated by the binary. It
-    /// must not grow a second copy of their function bodies: duplicated shell
-    /// code drifted before, while the one-line install route stays tied to the
-    /// `include_str!` sources checked above.
+    /// must not carry a second copy of their function bodies, which can drift.
+    /// The one-line install route stays tied to the `include_str!` sources
+    /// checked above.
     #[test]
     fn documentation_installs_the_canonical_shell_snippets() {
         let doc = include_str!("../../../docs/SHELL-INTEGRATION.md");
@@ -3399,13 +3300,9 @@ mod tests {
             "embedded example config emits diagnostics: {diags:?}"
         );
         // Drift guard: the example config must document the extended
-        // configuration surface. If a
-        // future contributor strips the section, this test catches it
-        // before users see a stripped-down `--print-default-config`
-        // output.
-        //
-        // This includes window accents, a global bell override, and output
-        // triggers.
+        // configuration surface, including window accents, a global bell
+        // override, and output triggers, so users never see a stripped-down
+        // `--print-default-config` output.
         for key in &[
             "window-state",
             "borderless",
@@ -3488,8 +3385,8 @@ mod tests {
         assert!(d.exec.is_empty() && d.working_directory.is_none() && d.config.is_none());
     }
 
-    /// `--screenshot` and `--screenshot-menu` are mutually
-    /// exclusive — passing both now fails loudly instead of silently dropping one.
+    /// `--screenshot` and `--screenshot-menu` are mutually exclusive, so
+    /// passing both fails loudly instead of silently dropping one.
     #[test]
     fn cli_screenshot_flags_are_mutually_exclusive() {
         assert!(
@@ -3512,10 +3409,8 @@ mod tests {
     fn cli_help_text_has_no_internal_cycle_refs() {
         // `--help` is the very first contact most users have with the CLI.
         // Internal engineering-note parentheticals in rustdoc-style comments
-        // helped trace history during development but leak as
-        // mysterious-looking parentheticals when piped to a real terminal
-        // user. That history lives in CHANGELOG and code comments; the
-        // user-facing help text should not.
+        // leak into it and look mysterious to a real user. Those notes belong
+        // in CHANGELOG and code comments, not in user-facing help.
         //
         // Walk every argument's long+short help string and assert none
         // contain "cycle " — same shape as the
@@ -3552,11 +3447,8 @@ mod tests {
     }
 
     /// The hand-written man page must document every
-    /// `--<long>` flag and must not leak internal `cycle N` refs. An earlier
-    /// version of the page was missing `--check-update` + `--write-default-config`
-    /// and carried cycle parentheticals precisely because the only man-page
-    /// guard checked keybinds, not flags. Walk the complete clap command tree
-    /// (including every subcommand) and pin both.
+    /// `--<long>` flag and must not leak internal `cycle N` refs. Walk the
+    /// complete clap command tree (including every subcommand) and pin both.
     #[test]
     fn man_page_documents_every_flag_without_cycle_refs() {
         use clap::CommandFactory;
@@ -3570,9 +3462,8 @@ mod tests {
         );
         // Internal/handoff-only flags + ones documented by their short form
         // (`--exec` is documented as `-e`) that the man page intentionally omits.
-        // The `--record*` flags are now a shipped, runtime feature and MUST be
-        // documented in the man page (see docs/RECORDING.md), so they are no
-        // longer excluded here.
+        // The `--record*` flags ship as a runtime feature and MUST be documented
+        // in the man page (see docs/RECORDING.md), so they are not excluded here.
         let allow_missing: &[&str] = &["tab-handoff", "tab-handoff-fd", "exec"];
         fn collect_missing_flags(
             cmd: &clap::Command,
@@ -3617,15 +3508,12 @@ mod tests {
     #[test]
     fn cli_help_preserves_indented_code_examples() {
         // A `#[arg(...)]` whose doc-comment contains an indented `  kettle …`
-        // example must declare `verbatim_doc_comment` — otherwise clap
+        // example must declare `verbatim_doc_comment`. Otherwise clap
         // collapses the leading spaces in `--help`, flattening the example
-        // back into prose. The original fixes covered
-        // --shell-integration and --print-completions; --print-default-config
-        // had the same indented-example pattern and the
-        // same wrapping bug, which is what this guard pins.
+        // back into prose.
         //
-        // Same shape as `cli_help_text_has_no_internal_cycle_refs` directly
-        // above: walk the clap-built `Cli::command()`, pull each flag's
+        // Same shape as `cli_help_text_has_no_internal_cycle_refs` above:
+        // walk the clap-built `Cli::command()`, pull each flag's
         // `get_long_help()`, assert the indented example survives literally.
         use clap::CommandFactory;
         let cmd = Cli::command();
@@ -3655,36 +3543,28 @@ mod tests {
 
     #[test]
     fn man_page_documents_load_bearing_default_keybinds() {
-        // Drift guard. The hand-written `kettle.1` man
-        // page documents the default keybind set. An earlier audit caught four
-        // entries that had drifted from the actual defaults (`Ctrl+Shift+
-        // arrow` was a scroll binding, not focus; `Ctrl+Shift+Z` /
-        // `Ctrl+Shift+D` weren't default-bound at all). This guard pins
-        // the man page against `--list-keybinds`'s ground truth so the
-        // next time a default-keybind set changes (or the man page text
-        // gets edited carelessly), CI fails instead of a user trying
-        // `man kettle` + the documented hotkey getting a different
-        // action.
+        // Drift guard. The hand-written `kettle.1` man page documents the
+        // default keybind set. This guard fails CI if an edit drops one of
+        // the load-bearing chords below from the page.
         //
-        // Check shape: every "load-bearing" (Trigger, Action) the default
-        // config carries must have its Trigger string textually present
-        // somewhere in the man page. We don't require the *Action* name
-        // to appear — the man page uses human-readable prose ("new tab",
-        // not `NewTab`). And we don't enforce the full keybind set —
+        // Check shape: every load-bearing Trigger listed below must be
+        // textually present somewhere in the man page. We don't require the
+        // *Action* name to appear — the man page uses human-readable prose
+        // ("new tab", not `NewTab`). And we don't enforce the full keybind set —
         // the man page intentionally summarizes; binding additions
         // shouldn't fail the guard just because the doc didn't grow.
         //
         // The load-bearing list is the set of bindings a user typically
         // hits in the first hour: tab management, splits, focus, copy/
-        // paste, scrollback movement, broadcast. If you add a NEW load-
-        // bearing default and forget to document it, this test fails.
+        // paste, scrollback movement, broadcast. Add any NEW load-bearing
+        // default to this list so the test pins its man page entry too.
         const MAN_PAGE: &str = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../packaging/linux/kettle.1"
         ));
         // The keybind triggers we expect documented. Strings are the
-        // `Trigger`'s canonical display form as `kettle --list-keybinds`
-        // prints them — see `kettle_config::keybinds::Trigger::Display`.
+        // `Trigger::label` form `kettle --list-keybinds` prints, except the
+        // man page abbreviates PageUp/PageDown as PgUp/PgDn.
         let load_bearing: &[&str] = &[
             // Tabs
             "Ctrl+Shift+T", // NewTab
@@ -3860,7 +3740,7 @@ mod tests {
                 .any(|l| l.starts_with("bell:    force-no-bell=true"))
         );
 
-        // Triggers branch — verifies pluralization renders correctly.
+        // Triggers branch: verifies the count renders.
         let mut cfg = kettle_config::Config::default();
         cfg.triggers.push(kettle_config::OutputTrigger {
             pattern: "error:.*".into(),
@@ -3932,9 +3812,7 @@ mod tests {
         // user-facing — internal "cycle N" / "cycle-N" references
         // shouldn't leak into it (same anti-pattern the
         // `user_facing_docs_have_no_internal_cycle_refs` guard catches in
-        // markdown docs, but for binary runtime output). An earlier fix
-        // caught one in the triggers echo (a stray cycle-number stamp in
-        // the trigger-action text) that the markdown file-scan didn't reach.
+        // markdown docs, but for binary runtime output).
         //
         // Build a cfg that triggers EVERY echo branch + assert no
         // resulting line matches "cycle " or "cycle-" followed by
@@ -3954,7 +3832,13 @@ mod tests {
         cfg.background_image = "/tmp/wp.jpg".into();
         cfg.borderless = true;
         cfg.status_bar = kettle_config::StatusBarMode::Bottom;
-        for line in extra_check_config_lines(&cfg) {
+        cfg.inert_keys = vec!["example-inert-key".into()];
+        let lines = extra_check_config_lines(&cfg);
+        assert!(
+            lines.iter().any(|line| line.starts_with("inert:")),
+            "the inert-key echo must be exercised too: {lines:?}"
+        );
+        for line in lines {
             let lower = line.to_ascii_lowercase();
             for needle in ["cycle ", "cycle-"] {
                 if let Some(pos) = lower.find(needle)
@@ -3969,7 +3853,7 @@ mod tests {
 
     /// Drift guard. `scripts/menu-screenshot.sh` is the
     /// repro harness for the context-menu screenshot work —
-    /// `just menu-shot` and the CONTRIBUTING workflow both depend on
+    /// `just menu-shot` depends on
     /// it being checked in, executable, and pointing at the right
     /// kettle binary. Pin the contract:
     ///   1. file exists at the expected path.
@@ -3982,12 +3866,7 @@ mod tests {
     /// Gated `#[cfg(unix)]` because the test uses
     /// `std::os::unix::fs::PermissionsExt::mode()` for the
     /// executable-bit check (Windows has no equivalent — NTFS doesn't
-    /// have a Unix-style mode word). Before this guard was added, this
-    /// test failed compilation on Windows MSVC builds with E0433 "cannot
-    /// find `unix` in `os`". Caught locally on a Windows 11 test pass;
-    /// the fix matches the same `#[cfg(unix)]` pattern the
-    /// `config_path_problem_catches_missing_and_directory` unreadable-config
-    /// test already uses for an equivalent unix-only chmod check.
+    /// have a Unix-style mode word).
     #[cfg(unix)]
     #[test]
     fn scripts_menu_shot_exists_and_executable() {
@@ -4067,10 +3946,10 @@ mod tests {
             "remote-command file must be owner-only (0600), got {file_mode:o}"
         );
 
-        // Re-opening an already-existing file (created before this fix, or
-        // widened by some external umask) must also be tightened back down —
-        // `OpenOptions::mode` only applies to a newly-created inode, so the
-        // explicit `set_permissions` after `open` is load-bearing here.
+        // Re-opening an existing file widened by some external umask must
+        // also tighten it back down. The open's create mode (0600) only
+        // applies to a newly-created inode, so the explicit `set_permissions`
+        // after `open` is load-bearing here.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let file = open_remote_command_file(&path).expect("re-open existing file");
         drop(file);

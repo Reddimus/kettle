@@ -55,13 +55,13 @@ impl Rgb {
 ///
 /// The spec allows **1–4 hex digits** per component, scaled by digit width so
 /// the value fills the channel range: `f` → `0xff`, `ff` → `0xff`, `fff` →
-/// `0xff`, `ffff` → `0xff`. The old parser sliced the first
-/// two bytes and read them as the whole value, so `rgb:f/8/0` (full red in X11)
-/// came out near-black `(15, 8, 0)` and 3-digit forms silently dropped a nibble.
+/// `0xff`, `ffff` → `0xff`. Reading the first two digits as the whole value
+/// would turn `rgb:f/8/0` (full red in X11) into near-black `(15, 8, 0)` and
+/// drop a nibble from 3-digit forms.
 ///
-/// Validating each **byte** as an ASCII hex digit first keeps the multibyte
-/// safety the previous code had (a component like `rgb:€/00/00` is rejected as
-/// `None`, never a non-char-boundary slice that would panic under panic=abort).
+/// Each **byte** is validated as an ASCII hex digit first, so a multibyte
+/// component like `rgb:€/00/00` returns `None` instead of a non-char-boundary
+/// slice that panics under panic=abort.
 fn parse_x11_rgb_component(h: &str) -> Option<u8> {
     let hb = h.as_bytes();
     if hb.is_empty() || hb.len() > 4 || !hb.iter().all(u8::is_ascii_hexdigit) {
@@ -82,12 +82,9 @@ fn parse_x11_rgb_component(h: &str) -> Option<u8> {
 /// The standard named colors, as CSS Color Level 4 defines them — which is the
 /// X11 `rgb.txt` list every terminal and theme format draws from.
 ///
-/// Nine names used to be recognised. `--accent`'s own `--help` gives
-/// `kettle --accent teal` as an example, and `teal` was not one of them: before
-/// the flag was validated it silently fell back to the configured accent, and
-/// after it was validated it became a hard error on kettle's own documented
-/// example. Anything a person would actually type — `orange`, `purple`,
-/// `pink`, `navy` — failed the same way.
+/// `--accent` rejects a name this table lacks, so the table covers names a
+/// person would actually type, such as `teal` (the `--help` example),
+/// `orange`, `purple`, `pink`, or `navy`.
 ///
 /// The nine original entries keep their original values. `green` and
 /// `gray`/`grey` differ between CSS and X11 `rgb.txt`, and configs have been
@@ -270,11 +267,8 @@ mod tests {
 
     /// A named color a person would actually type has to resolve.
     ///
-    /// The table held nine names. `--accent`'s own `--help` gives
-    /// `kettle --accent teal` as its example, so kettle documented an
-    /// invocation it rejected — and once `--accent` started validating its
-    /// value at the CLI surface, that example became a hard error instead of a
-    /// silent fallback.
+    /// `--accent`'s own `--help` gives `kettle --accent teal` as its example,
+    /// and `--accent` rejects a name the table lacks.
     #[test]
     fn the_named_colors_cover_what_the_docs_and_themes_use() {
         for (name, want) in [
@@ -317,11 +311,11 @@ mod tests {
     /// (1–4 hex digits), they aren't first-two-digits-truncated.
     #[test]
     fn rgb_components_scale_by_digit_width() {
-        // 1-digit: f → 0xff (was the near-black bug: 15,8,0).
+        // 1-digit: f → 0xff, not near-black (15, 8, 0).
         assert_eq!(Rgb::parse("rgb:f/8/0"), Some(Rgb::new(255, 136, 0)));
         // 2-digit: unchanged.
         assert_eq!(Rgb::parse("rgb:ff/88/00"), Some(Rgb::new(255, 136, 0)));
-        // 3-digit: fff → 0xff; f00 → (0xf00*0xff)/0xfff = 239.
+        // 3-digit: fff → 0xff; 800 → (0x800*0xff)/0xfff = 127.
         assert_eq!(Rgb::parse("rgb:fff/000/800"), Some(Rgb::new(255, 0, 127)));
         // 4-digit: ffff → 0xff (high byte); 8000 → 0x80.
         assert_eq!(
@@ -345,11 +339,9 @@ mod tests {
 
     #[test]
     fn rgb_form_with_multibyte_component_does_not_panic() {
-        // Regression: `rgb:` component slicing used `&h[..2.min(h.len())]`
-        // on the &str, so a component starting with a multibyte char made
-        // the slice land on a non-char-boundary and panic — a hard crash
-        // under panic=abort, reachable from theme/OSC color parsing. The
-        // fix slices the *bytes* and validates via from_utf8, yielding None.
+        // A multibyte char in an `rgb:` component must yield None. Slicing
+        // the &str there could land on a non-char boundary and panic, a hard
+        // crash under panic=abort that theme and OSC color parsing can reach.
         assert_eq!(Rgb::parse("rgb:€/00/00"), None);
         assert_eq!(Rgb::parse("rgb:e€/00/00"), None);
         assert_eq!(Rgb::parse("rgb:00/00/日本"), None);

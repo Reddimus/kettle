@@ -5,8 +5,8 @@ A split sometimes produces a pane that never becomes usable. Two mechanisms
 can do that and they look identical from the outside:
 
   1. `split_geometry` / `split_with_geometry` returned an error. No pane is
-     grafted at all, and until `report_split_failure` landed the only trace was
-     a `warn` line nobody sees at the default level.
+     grafted at all, and `report_split_failure` logs "could not split pane" at
+     error level and posts a desktop notification.
   2. The split cloned the source pane's *foreground* shell, and what the
      background process scan had latched was a transient helper. The clone runs
      its command, exits, and the pane is reaped. It flashes and is gone.

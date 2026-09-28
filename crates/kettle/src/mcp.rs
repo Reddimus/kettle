@@ -43,15 +43,12 @@ const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabiliti
 const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
 const MAX_MCP_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_MCP_RESPONSE_BYTES: usize = 768 * 1024;
-// A 1 MiB line can pack roughly a million `[`/`{` characters, and byte size
-// alone does not bound parser recursion depth. `serde_json`'s own recursive-
-// descent parser refuses to recurse past its internal default (128, absent
-// the opt-in `unbounded_depth` feature), but that is an implementation
-// detail of a dependency this crate does not own: a future Cargo feature-
-// unification change elsewhere in the workspace could silently disable it.
-// Reject over-nested input ourselves, before it ever reaches
-// `serde_json::from_str`, so the stdio loop's recursion bound is explicit and
-// independent of how `serde_json` happens to be compiled.
+// A 1 MiB line can pack roughly a million `[`/`{` characters, so byte size
+// alone does not bound parser recursion depth. `serde_json`'s parser refuses
+// to recurse past 128 levels unless its opt-in `unbounded_depth` feature is
+// on, and Cargo feature unification elsewhere in the workspace could turn that
+// on silently. Reject over-nested input before `serde_json::from_str`, so the
+// recursion bound does not depend on how `serde_json` is compiled.
 const MAX_JSON_NESTING_DEPTH: u32 = 64;
 const TOOL_WORKERS: usize = 4;
 const TOOL_QUEUE_CAPACITY: usize = 16;
@@ -121,20 +118,19 @@ type Pending = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 /// spending the real budget in wall clock. The production value itself is
 /// asserted by `the_production_stall_limit_is_the_documented_one`.
 #[cfg(not(test))]
-const STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
+const STDOUT_STALL_LIMIT: Duration = PRODUCTION_STDOUT_STALL_LIMIT;
+/// The stall limit release builds use.
+const PRODUCTION_STDOUT_STALL_LIMIT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const STDOUT_STALL_LIMIT: Duration = Duration::from_millis(400);
 
 /// What the writer thread is doing, so a stalled PEER can be told apart from
 /// busy WORK.
 ///
-/// These have to be distinguished, and a wall-clock budget cannot do it. An
-/// earlier version gave shutdown 30 seconds to join its workers and exited when
-/// that expired — which killed a perfectly healthy `kettle_run` whose
-/// `timeout_s` exceeded 30 (the tool's schema allows up to 600), delivered no
-/// result for it, and printed a diagnostic blaming stdout while stdout was
-/// being read the whole time. That is worse than the hang it replaced: it
-/// silently loses an agent's build output.
+/// A wall-clock budget cannot tell them apart. A healthy `kettle_run` may run
+/// for up to 600 seconds (`timeout_s`), so a shorter shutdown budget would kill
+/// it, lose the agent's build output, and blame stdout while stdout is being
+/// read. That is worse than a hang.
 ///
 /// The only thing that means "the peer stopped reading" is the writer being
 /// parked inside a single `write` that has not returned. That is what this
@@ -307,8 +303,7 @@ pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static
     // then never returns, `drop(responses_tx)` below is unreachable, and the
     // process stays alive holding a terminal until something kills it.
     // `wait_unless_stdout_stalled` tells that apart from a worker that is
-    // simply busy — an earlier version used a 30-second budget and killed the
-    // healthy case.
+    // simply busy, which a fixed time budget would kill.
     drop(jobs_tx);
     let mut stalled = responses_tx.peer_gone();
     for worker in workers {
@@ -326,10 +321,9 @@ pub fn run_mcp_with(mut input: impl BufRead, output: impl Write + Send + 'static
     drop(responses_tx);
     if !stalled {
         // The workers are done and the channel is closed, so the writer is
-        // finishing its queue. It can still be parked in a write here — with
-        // few enough responses in flight the channel never filled, so nothing
-        // upstream ever noticed, and this join was the remaining way to hang
-        // forever.
+        // finishing its queue. It can still be parked in a write here. With few
+        // enough responses in flight the channel never fills, so nothing
+        // upstream notices, and a plain join would hang forever.
         stalled =
             !wait_unless_stdout_stalled(&progress, STDOUT_STALL_LIMIT, || writer.is_finished());
     }
@@ -508,12 +502,11 @@ fn dispatch_message(
     let id = id.unwrap();
 
     // Era selection. A request carrying `_meta` protocol fields is modern and
-    // is served statelessly — no handshake, no lifecycle gate, because on this
-    // revision "an open connection, such as a STDIO process, is not a
+    // is served statelessly, with no handshake and no lifecycle gate, because
+    // on this revision "an open connection, such as a STDIO process, is not a
     // conversation or session". An `initialize` selects legacy semantics
-    // below. Both eras are served on the same process, which is what makes a
-    // modern client work against kettle at all: before this, one got
-    // SERVER_NOT_INITIALIZED for every call it made.
+    // below. Serving both eras on one process keeps a modern client from
+    // getting SERVER_NOT_INITIALIZED for every call.
     let era = request_era(&params);
     if let Era::Malformed(reason) = era {
         respond(responses, error_response(id, INVALID_PARAMS, reason));
@@ -524,10 +517,10 @@ fn dispatch_message(
             respond(responses, unsupported_protocol_version(id, requested));
             return;
         }
-        // Both fields the specification marks required are required. A request
-        // missing one is malformed, not a request to fill in defaults for.
-        // An object, not merely present: a `null` or a string here would let a
-        // request through that the server cannot actually characterize.
+        // The specification requires `clientCapabilities`, so a request without
+        // it is malformed, not one to fill in defaults for. It must also be an
+        // object, since a `null` or a string would admit a request the server
+        // cannot characterize.
         if !params
             .get("_meta")
             .and_then(|meta| meta.get(META_CLIENT_CAPABILITIES))
@@ -797,9 +790,8 @@ fn handle_initialize(id: Value, params: &Value) -> Result<Value, Value> {
     // client then decides whether it can speak that, and disconnects if not.
     //
     // Do NOT return UnsupportedProtocolVersion (-32022) here. That is the
-    // modern negotiation, and a legacy client has no rule for interpreting it —
-    // an earlier version of this change made exactly that mistake and turned a
-    // conforming handshake into a hard failure.
+    // modern negotiation, and a legacy client has no rule for interpreting it,
+    // so returning it would turn a conforming handshake into a hard failure.
     let version = match params.protocol_version.as_str() {
         MCP_COMPAT_VERSION => MCP_COMPAT_VERSION,
         _ => MCP_PROTOCOL_VERSION,
@@ -999,12 +991,10 @@ fn write_message(writer: &mut impl Write, message: &Value) -> std::io::Result<()
 }
 
 /// Scan raw (not-yet-parsed) JSON text for `{`/`[` nesting deeper than
-/// `limit`, without allocating or recursing. Bracket characters inside JSON
-/// string literals (including escaped quotes and backslashes) are skipped so
-/// they are never mistaken for structural nesting; this only needs to track
-/// "am I inside a string" well enough to find the real closing quote, not to
-/// fully validate escape sequences, since malformed strings are still caught
-/// by `serde_json::from_str` afterwards.
+/// `limit`, without allocating or recursing. Brackets inside string literals
+/// are skipped, honoring escaped quotes and backslashes. The scan only needs to
+/// find each string's real closing quote; `serde_json::from_str` still catches
+/// malformed strings afterwards.
 fn json_nesting_too_deep(text: &str, limit: u32) -> bool {
     let mut depth: u32 = 0;
     let mut in_string = false;
@@ -1095,22 +1085,16 @@ mod tests {
     #[test]
     fn the_production_stall_limit_is_the_documented_one() {
         // `STDOUT_STALL_LIMIT` is 400 ms under cfg(test) so the fixtures below
-        // run in a second rather than a minute. The value that ships is this.
-        let shipped = if cfg!(test) {
-            Duration::from_secs(30)
-        } else {
-            STDOUT_STALL_LIMIT
-        };
-        assert_eq!(shipped, Duration::from_secs(30));
+        // run in a second rather than a minute; release builds use this value.
+        assert_eq!(PRODUCTION_STDOUT_STALL_LIMIT, Duration::from_secs(30));
     }
 
     /// A worker that is simply BUSY must not be mistaken for a stalled peer.
     ///
-    /// Shutdown used to give the workers a flat 30-second budget, which killed
-    /// a healthy `kettle_run` whose `timeout_s` exceeded it — the tool's schema
-    /// allows up to 600 — delivered no result, and printed a diagnostic blaming
-    /// stdout while stdout was being read the whole time. Losing an agent's
-    /// build output is worse than the hang that budget was meant to prevent.
+    /// A flat shutdown budget would kill a healthy `kettle_run` whose
+    /// `timeout_s` exceeds it (the tool allows up to 600), deliver no result,
+    /// and blame stdout while stdout is being read. Losing an agent's build
+    /// output is worse than the hang such a budget prevents.
     #[test]
     fn a_busy_worker_is_not_mistaken_for_a_stalled_peer() {
         let progress = WriterProgress::default();
@@ -1129,13 +1113,11 @@ mod tests {
         //
         // Progress is published from inside the poll predicate rather than
         // from a helper thread. The property under test is that a changing
-        // `completed` resets the stall timer — not the operating system's
-        // willingness to schedule a second thread within the limit. A helper
-        // ticking every 10ms against a 50ms budget has only five missed
-        // wake-ups of headroom, and a loaded macOS runner spends that
-        // routinely: the test failed in CI having proven nothing about the
-        // code. Driving the counter from the detector's own loop removes the
-        // race entirely and tests the same thing.
+        // `completed` resets the stall timer, not that the OS schedules a
+        // second thread within the limit. A helper ticking every 10ms against a
+        // 50ms budget has only five missed wake-ups of headroom, which a loaded
+        // macOS runner routinely spends. Driving the counter from the
+        // detector's own loop removes that race.
         let progress = WriterProgress::default();
         progress.in_write.store(true, Ordering::Release);
         let polls = std::cell::Cell::new(0u32);
@@ -1171,27 +1153,25 @@ mod tests {
     /// A peer that stops reading kettle's stdout must not strand the process.
     ///
     /// The writer thread blocks in `write`, the bounded response channel fills
-    /// behind it, and every tool worker blocks mid-`send`. Shutdown then joined
-    /// those workers — which never return — so `drop(responses_tx)` was
-    /// unreachable and the server sat holding a terminal, answering nothing,
-    /// until something killed it. The reader loop had the same problem earlier:
-    /// its own `send` blocked, so it stopped reading stdin, which is where the
-    /// `notifications/cancelled` that would free everything arrives.
+    /// behind it, and every tool worker blocks mid-`send`. An unbounded join on
+    /// those workers never returns, leaving `drop(responses_tx)` unreachable
+    /// and the server holding a terminal, answering nothing, until something
+    /// kills it. A blocked `send` in the reader loop stops it reading stdin,
+    /// which is where the `notifications/cancelled` that would free everything
+    /// arrives.
     ///
-    /// The waits are bounded now. This drives the real `run_mcp_with` against a
+    /// The waits are bounded. This drives the real `run_mcp_with` against a
     /// writer that never completes a write, and requires the server to return.
     #[test]
     fn a_peer_that_stops_reading_stdout_does_not_strand_the_server() {
         // BOTH shapes.
         //
         // The many-message one fills the bounded response channel, so `respond`
-        // times out and latches `peer_gone`. The few-message one never fills it
-        // — nothing times out, nothing latches — and the only thing left
-        // holding the process is the writer's own join at the end. An earlier
-        // version of this fix handled only the first shape, and this test only
-        // covered the first shape, so it was green on a server that still hung
-        // forever on a single ping. One or two calls and a client that stops
-        // reading is the ordinary case; fifty is not.
+        // times out and latches `peer_gone`. The few-message one never fills
+        // it. Nothing times out or latches, and only the writer's own join at
+        // the end holds the process. Testing the first shape alone passes on a
+        // server that still hangs forever on a single ping. One or two calls
+        // and a client that stops reading is the ordinary case; fifty is not.
         for requests in [3, TOOL_QUEUE_CAPACITY + TOOL_WORKERS + 32] {
             let mut input = String::new();
             input.push_str(&format!(

@@ -29,11 +29,9 @@ if ($global:__fixture_prompt_status -ne $false) {
 }
 
 # Regression: the `D;<code>` payload must report the USER's last exit code,
-# not whatever the rendered prompt's own work left behind.
-#
-# This case was missing, and its absence is why the defect shipped: the checks
-# above assert `$?` and marker ordering but never read the payload, so a
-# wrapper that always emitted `D;0` passed every one of them.
+# not whatever the rendered prompt's own work left behind. The checks above
+# assert `$?` and marker ordering but never read the payload, so a wrapper
+# that always emits `D;0` passes every one of them.
 #
 # Starship, oh-my-posh and posh-git all shell out while rendering, and every
 # native call overwrites $LASTEXITCODE. This prompt reproduces that by setting
@@ -114,7 +112,7 @@ if ($capture.ToString() -notmatch '\]133;D;1') {
 }
 
 # A prompt boundary must advance the managed completion session and publish
-# the exact v3 sync the terminal will use for subsequent Tab request IDs.
+# the exact v4 sync the terminal will use for subsequent Tab request IDs.
 $sessionBefore = [uint64]$global:__kettle_completion_session
 $capture = [System.IO.StringWriter]::new()
 [Console]::SetOut($capture)

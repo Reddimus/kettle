@@ -50,23 +50,42 @@ fn run_exec_with_env(
         child.stdin.take().unwrap().write_all(data).unwrap();
         // stdin dropped here → EOF to the pump.
     }
-    let mut out = String::new();
-    let mut err = String::new();
-    child
-        .stdout
-        .take()
-        .unwrap()
-        .read_to_string(&mut out)
-        .unwrap();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut err)
-        .unwrap();
-    let status = child.wait().expect("wait");
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut out = String::new();
+        stdout.read_to_string(&mut out).unwrap();
+        out
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).unwrap();
+        err
+    });
+    // Most callers pass no --timeout, and exec has no default one, so a hung
+    // run would otherwise hang the whole test binary.
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll kettle exec") {
+            break status;
+        }
+        if started.elapsed() >= RUN_EXEC_WATCHDOG {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "kettle exec {extra:?} -- {argv:?} exceeded the {RUN_EXEC_WATCHDOG:?} test watchdog"
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let out = stdout_reader.join().expect("join stdout reader");
+    let err = stderr_reader.join().expect("join stderr reader");
     (status.code().unwrap_or(-1), out, err)
 }
+
+/// Long enough for the slowest caller on a loaded CI runner, short enough that
+/// a hang fails the test instead of the job's time limit.
+const RUN_EXEC_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// True if the run looks like a PTY-less sandbox failure we should soft-skip.
 fn no_pty(code: i32, err: &str) -> bool {
@@ -150,20 +169,17 @@ fn set_pipe_nowait(handle: &impl std::os::windows::io::AsRawHandle) -> std::io::
 /// Load the nonblocking writer with a fixed `LOAD_BYTES` of stdin, so Kettle's
 /// forwarding path is carrying real input when the child emits its query.
 ///
-/// Two properties matter here, and both were learned the hard way.
+/// This must not require the pipe to *remain* full. ConPTY buffers input
+/// without a bound a test can drive to exhaustion, so a wait for sustained zero
+/// progress fails, because every accepted byte restarts its timer.
 ///
-/// First, this must not require the pipe to *remain* full. ConPTY buffers input
-/// without a bound a test can drive to exhaustion; an earlier revision demanded
-/// 200 ms of uninterrupted zero progress and instead failed after admitting
-/// 1.6 MiB, because every accepted byte restarted its timer.
-///
-/// Second, the volume must be fixed rather than "as much as fits in a window".
+/// The volume must also be fixed rather than "as much as fits in a window".
 /// ConPTY echoes this input back, so a variable volume produces a variable
 /// output backlog that competes with the caller's bounded wait for the child's
-/// query marker — reintroducing, in a new place, exactly the nondeterminism the
-/// first property removes. `LOAD_BYTES` fills the default 64 KiB Windows
-/// anonymous pipe buffer once, which is enough to prove the writer path was
-/// loaded without delaying the observation the test actually asserts on.
+/// query marker and makes that wait nondeterministic. `LOAD_BYTES` fills the
+/// default 64 KiB Windows anonymous pipe buffer once, which is enough to prove
+/// the writer path was loaded without delaying the observation the test
+/// asserts on.
 ///
 /// Zero progress before that point is stronger evidence of the same thing, so it
 /// returns early and the caller's floor check still holds.
@@ -338,8 +354,8 @@ fn cwd_report_helper() {
 }
 
 /// Without `--cwd` the child must start where `kettle exec` was started. The
-/// PTY backend starts a child with no directory in `$HOME`, so every command
-/// used to run there, including MCP `kettle_run` calls without a `cwd`.
+/// PTY backend starts a child with no directory in `$HOME`, which would run
+/// every command there, including MCP `kettle_run` calls without a `cwd`.
 #[test]
 fn exec_without_cwd_runs_in_the_current_directory() {
     let scratch = tempfile::tempdir_in(private_test_scratch_root())
@@ -461,12 +477,12 @@ fn exec_in_a_deleted_directory_fails_before_spawn() {
     );
 }
 
-/// `kettle exec` used to sleep a fixed 8 ms turn whenever its four-slot output
-/// queue was momentarily empty, so each turn moved at most four PTY reads:
-/// about 5 KiB on macOS and about 16 KiB on Linux. 32 MiB took about 90 s on
-/// macOS. The bound leaves slow debug CI hosts room, so it proves the fix on
-/// macOS; Linux's larger reads kept its old loop near 16 s. `--timeout` turns
-/// a hang into a failure rather than a stuck test.
+/// `kettle exec` must not sleep a fixed turn whenever its output queue is
+/// momentarily empty. With an 8 ms sleep and a four-slot queue, each turn would
+/// move at most four PTY reads, about 5 KiB on macOS and 16 KiB on Linux, so
+/// 32 MiB would take about 90 s on macOS and 16 s on Linux. The bound leaves
+/// slow debug CI hosts room, so it catches that polling on macOS only.
+/// `--timeout` turns a hang into a failure rather than a stuck test.
 #[cfg(unix)]
 #[test]
 fn exec_streams_a_large_output_without_idle_polling() {
@@ -498,23 +514,14 @@ fn exec_streams_stdout_and_exits_zero() {
         return;
     }
     assert_eq!(code, 0, "stderr: {err}");
-    // Print STDERR too. This assertion has failed intermittently on macOS CI
-    // with empty stdout, and stderr is where the answer lives -- the one
-    // captured instance carried "asciicast capture stopped (recording I/O
-    // failed or finalization exceeded its bound)" immediately before, which is
-    // the difference between "the child produced nothing" and "we stopped
-    // reading too early". Without it the failure report says only that stdout
-    // was empty, which is the symptom every candidate cause shares.
+    // Print stderr too. Empty stdout is the symptom every candidate cause
+    // shares, while stderr can tell "the child produced nothing" from "we
+    // stopped reading too early" (for example, "asciicast capture stopped").
     if !out.contains("agent-marker-7f3") {
-        // Self-diagnose, because this fires only on CI. Thirty full-binary
-        // runs and forty single-test runs under CPU load reproduced it zero
-        // times on an Apple-silicon host at this commit, so the next CI
-        // occurrence is the evidence — and it is worth more than the symptom.
-        //
-        // The question the symptom cannot answer: did the child produce
+        // Self-diagnose, because this failure is rare. Did the child produce
         // nothing, or did we stop reading before it did? `--strip-ansi` is on
-        // above, so an empty result is also consistent with the stripper
-        // consuming everything. Re-run raw, and report both.
+        // above, so an empty result may also mean the stripper consumed
+        // everything. Re-run raw, and report both.
         let (raw_code, raw_out, raw_err) = run_exec(&[], &argv, None);
         panic!(
             "exec produced no marker.\n\
@@ -852,13 +859,14 @@ fn stdout_burst_then_exit_helper() {
     std::fs::write(pid_path, std::process::id().to_string())
         .expect("publish stdout-burst helper pid");
 
-    // This helper must EXIT while its output is still undelivered — that is the
-    // whole premise of the regression above. Kettle's own stdout is stalled
-    // before this process starts, so once Kettle's bounded queues fill it stops
-    // draining the PTY, and a blocking `write_all` of the full burst parks here
-    // forever: the helper never exits, the setup loop times out, and the test
-    // fails having proven nothing. How much Kettle absorbs first depends on how
-    // it happens to chunk PTY reads, which is why that failure was intermittent.
+    // This helper must EXIT while its output is still undelivered; that is the
+    // premise of `exec_timeout_bounds_stalled_output_after_child_exit` below.
+    // Kettle's own stdout is stalled before this process starts, so once
+    // Kettle's bounded queues fill it stops draining the PTY, and a blocking
+    // `write_all` of the full burst parks here forever: the helper never exits,
+    // the setup loop times out, and the test fails having proven nothing. How
+    // much Kettle absorbs first depends on how it chunks PTY reads, which makes
+    // that failure intermittent.
     //
     // So push what the PTY will accept and then leave. Writing the descriptor
     // directly keeps the accounting honest — Rust's `Stdout` is a `LineWriter`,
@@ -1427,21 +1435,20 @@ fn exec_timeout_closes_a_saturated_conpty_after_a_query() {
     // duration of this call.
     let event_signaled = unsafe { SetEvent(release_event.0) };
     // Observing the child's query is a precondition, not the behavior under
-    // test, so it must not lose a race it does not need to win. One second was
-    // enough in isolation but not inside a full-workspace run, where the
-    // helper's write, the ConPTY round trip, and this reader thread all compete
-    // for a loaded machine — the marker did arrive, just past the deadline.
-    // Five seconds still proves the query was prompt relative to the eight
-    // second `--timeout` this test actually asserts on.
+    // test, so it must not lose a race it does not need to win. In a
+    // full-workspace run the helper's write, the ConPTY round trip, and this
+    // reader thread all compete for a loaded machine, and one second is too
+    // short. Five seconds still proves the query was prompt relative to the
+    // eight second `--timeout` this test asserts on.
     let query_observed = query_rx.recv_timeout(Duration::from_secs(5));
 
-    // The regression this guards is UNBOUNDED: before the fix, a saturated
-    // ConPTY meant Kettle never reached its timeout branch at all. So the
-    // watchdog only has to exceed scheduling delay, not sit close to the 8s
-    // deadline. A 4s margin measured the machine instead of the code — it
-    // failed roughly one run in eight with every core busy, which is what a
-    // full-workspace build looks like. The assertions below still prove the
-    // deadline fired: Kettle exits on its own, with 124, from its own timeout.
+    // The failure this guards is UNBOUNDED: a saturated ConPTY can keep Kettle
+    // from ever reaching its timeout branch. So the watchdog only has to exceed
+    // scheduling delay, not sit close to the 8s deadline. A tight margin such
+    // as 4s measures the machine instead of the code and flakes when every
+    // core is busy, as in a full-workspace build. The assertions below still
+    // prove the deadline fired: Kettle exits on its own, with 124, from its own
+    // timeout.
     const WATCHDOG: Duration = Duration::from_secs(30);
     let (status, watchdog_killed) = loop {
         if let Some(status) = child.try_wait().expect("poll backpressured exec") {
@@ -1683,8 +1690,8 @@ fn pty_stdin_eof_then_query_helper() {
     let expected = std::env::var("KETTLE_EXEC_EOF_EXPECTED").unwrap();
     assert_eq!(input, expected.as_bytes());
 
-    // Query only after read_to_end observed EOF. This catches closing the
-    // shared Unix PTY master writer: that old behavior made the reply vanish.
+    // Query only after read_to_end observed EOF. This catches Kettle closing
+    // the shared Unix PTY master writer, which makes the reply vanish.
     assert_post_eof_terminal_queries("default canonical mode");
 
     println!("PTY_EOF_QUERY_OK");

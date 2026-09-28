@@ -14,8 +14,8 @@
 #   OSC 133;B   end of prompt / input start
 #   OSC 133;C   command started executing
 #   OSC 133;D;N command finished (exit code N)
-#   OSC 7       current working directory (v2.20: powers new-tab/split cwd
-#               inheritance and "Open folder"; kettle validates the hostname
+#   OSC 7       current working directory (powers new-tab/split cwd
+#               inheritance and `open_cwd`; kettle validates the hostname
 #               so an ssh session's remote cwd is never adopted locally)
 
 # Percent-encode $PWD byte-by-byte (LC_ALL=C makes ${p:i:1} a BYTE, so
@@ -128,12 +128,10 @@ kettle_completion_clear() {
 }
 # Capture the command's status FIRST, and hand it back on the way out.
 #
-# kettle deliberately runs first in PROMPT_COMMAND so its own `$?` read is the
-# real one — but it used to end on a successful `printf`, so every segment
-# chained after it saw `$?` as 0. Anything that colours a prompt by exit
-# status, or appends `[$?]`, silently reported success after a failing command
-# purely because kettle was installed. Returning the saved status makes this
-# hook transparent to whatever follows it.
+# kettle runs first in PROMPT_COMMAND so its own `$?` read is the real one.
+# Returning the saved status keeps this hook transparent. Otherwise every later
+# segment sees `$?` as 0 from the last `printf`, and a prompt that colours by
+# exit status or appends `[$?]` reports success after a failing command.
 __kettle_pc() {
   local __kettle_status=$?
   kettle_completion_clear
@@ -141,12 +139,10 @@ __kettle_pc() {
   __kettle_osc7
   return "$__kettle_status"
 }
-# bash 5.1 allows PROMPT_COMMAND to be an ARRAY. The string form below happens
-# to survive that — bash assigns a plain string to index 0 and leaves the later
-# elements alone, so they still run — but only by accident, and it rewrites the
-# user's first element into a compound string. Prepending in kind says what is
-# meant. Verified both ways against a real bash: every segment runs exactly
-# once.
+# bash 5.1 allows PROMPT_COMMAND to be an ARRAY. The string form below works on
+# one only by accident. It replaces only element 0, so later elements still
+# run, but it folds the user's first element into a compound string. Prepending
+# to the array keeps every element intact, and each still runs exactly once.
 #
 # `declare -p` is checked rather than `${PROMPT_COMMAND@a}` because that
 # transformation is itself 5.1-only and is a parse error on the bash 5.0 Ubuntu

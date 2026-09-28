@@ -1,12 +1,10 @@
 //! Asciicast v2 session recorder (cargo feature `asciicast`).
 //!
-//! This started as kettle-ui's developer-only `dev-record`
-//! recorder; it was later promoted here to kettle-core (agent-first A1) — the
-//! crate that owns the `Terminal` — so it is the ONE shared recorder behind
-//! both the GUI's `--record` (kettle-ui `dev-record` feature) and `kettle exec
-//! --record` (the bin enables `kettle-core/asciicast` unconditionally, so
-//! recording an agent run ships in release builds; that path is output-only —
-//! no keystroke-privacy surface).
+//! It lives in kettle-core, the crate that owns the `Terminal`, so it is the
+//! ONE shared recorder behind both the GUI's `--record` and `kettle exec
+//! --record`. kettle-ui and the bin both enable `kettle-core/asciicast`
+//! unconditionally, so recording ships in release builds. The `kettle exec`
+//! path is output-only, with no keystroke-privacy surface.
 //!
 //! Writes an asciicast v2-compatible NDJSON trace that replays in
 //! `asciinema play`:
@@ -36,6 +34,44 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::persistence::{
     AsyncFileWriter, AsyncWriterStatus, MAX_PERSISTENCE_ITEM_BYTES, PersistenceLimits,
 };
+
+/// Decode as much of `bytes` as possible: valid UTF-8 as is and each invalid
+/// run as one U+FFFD, leaving only an incomplete trailing sequence for the next
+/// read. Returns the text and the number of bytes it consumed.
+///
+/// One cursor pass. Draining from the front per invalid run shifts the whole
+/// tail each time, which made a read of `0xff` bytes quadratic.
+fn decode_lossy_prefix(bytes: &[u8]) -> (String, usize) {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let incomplete = loop {
+        let rest = &bytes[cursor..];
+        if rest.is_empty() {
+            break 0;
+        }
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                break 0;
+            }
+            Err(e) => {
+                let valid = e.valid_up_to();
+                // SAFETY: `valid_up_to` guarantees this prefix is valid UTF-8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
+                match e.error_len() {
+                    // An incomplete trailing sequence waits for the next read.
+                    None => break rest.len() - valid,
+                    // An invalid run becomes one replacement character.
+                    Some(n) => {
+                        out.push('\u{FFFD}');
+                        cursor += valid + n;
+                    }
+                }
+            }
+        }
+    };
+    (out, bytes.len() - incomplete)
+}
 
 /// Decode large PTY reads in bounded pieces before JSON expansion. Invalid or
 /// control-heavy bytes can expand several-fold, so admitting the raw read as
@@ -145,11 +181,11 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
     kettle_test_support::private_tempdir("kettle-core-test-")
 }
 
-/// Where a GUI development recording should be written.
+/// Where a GUI recording should be written.
 ///
-/// Explicit files preserve the historical overwrite behavior. Directory
-/// targets create a private directory as needed, allocate a collision-safe
-/// file with `create_new`, and apply the bounded retention policy.
+/// Explicit files are overwritten. Directory targets create a private
+/// directory as needed, allocate a collision-safe file with `create_new`, and
+/// apply the bounded retention policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingTarget {
     File(PathBuf),
@@ -439,14 +475,14 @@ impl Recorder {
         );
     }
 
-    /// Compatibility poll for callers written before the persistence worker
-    /// owned the wall-clock flush deadline. It performs no filesystem I/O.
+    /// Compatibility poll. The persistence worker owns the wall-clock flush
+    /// deadline, so this performs no filesystem I/O.
     pub fn flush_if_stale(&mut self) {
         let _ = self.writer.try_join();
     }
 
-    /// The worker now waits directly until the precise stale-flush deadline, so
-    /// the event loop no longer needs a timer wake merely to perform disk I/O.
+    /// Always returns `None`. The worker waits for the stale-flush deadline
+    /// itself, so the event loop needs no timer wake to perform disk I/O.
     pub fn flush_deadline(&self) -> Option<Instant> {
         None
     }
@@ -474,47 +510,7 @@ impl Recorder {
             return;
         }
         self.utf8_carry.extend_from_slice(bytes);
-        let mut out = String::new();
-        // Decode as much valid UTF-8 as possible so a chunk containing
-        // [valid][invalid][valid] emits all of it, retaining only a genuinely-
-        // incomplete trailing sequence for the next call.
-        //
-        // Advance a cursor rather than draining per invalid run. Draining from
-        // the front shifts the entire remaining tail every time, so a hostile
-        // 64 KiB chunk of `0xff` — one invalid run per byte — cost about 65,536
-        // iterations and gigabytes of cumulative movement before a single event
-        // was written, stalling whichever thread called this: the UI, or
-        // `kettle exec`'s lifecycle. One pass now, then one move of the
-        // at-most-three-byte incomplete suffix.
-        let mut cursor = 0usize;
-        let incomplete = loop {
-            let rest = &self.utf8_carry[cursor..];
-            if rest.is_empty() {
-                break 0;
-            }
-            match std::str::from_utf8(rest) {
-                Ok(s) => {
-                    out.push_str(s);
-                    break 0;
-                }
-                Err(e) => {
-                    let valid = e.valid_up_to();
-                    // SAFETY: `valid_up_to` guarantees this prefix is valid UTF-8.
-                    out.push_str(unsafe { std::str::from_utf8_unchecked(&rest[..valid]) });
-                    match e.error_len() {
-                        // Incomplete trailing sequence — keep it for the next chunk.
-                        None => break rest.len() - valid,
-                        // A genuinely-invalid run — emit one replacement and
-                        // step past it.
-                        Some(n) => {
-                            out.push('\u{FFFD}');
-                            cursor += valid + n;
-                        }
-                    }
-                }
-            }
-        };
-        let consumed = self.utf8_carry.len() - incomplete;
+        let (out, consumed) = decode_lossy_prefix(&self.utf8_carry);
         self.utf8_carry.drain(..consumed);
         if !out.is_empty() {
             self.emit("o", &out);
@@ -979,12 +975,11 @@ impl RetentionCandidate {
 
 /// Whether a name matches the grammar this module GENERATES, exactly.
 ///
-/// Retention used to accept anything starting `kettle-session-` and ending
-/// `.cast`, which is far looser than what is produced and contradicts the
-/// promise that unrecognized files are left alone. A file a user named
-/// `kettle-session-important.cast` and left in the recording directory
-/// qualified, and if it was the oldest, private, regular and unlocked, it was
-/// deleted.
+/// Matching only the `kettle-session-` prefix and `.cast` suffix is far looser
+/// than what is produced and breaks the promise that unrecognized files are
+/// left alone. A user's own `kettle-session-important.cast` in the recording
+/// directory would qualify, and if it were the oldest, private, regular and
+/// unlocked, retention would delete it.
 ///
 /// The generated shape is `kettle-session-<seconds>-<pid>-<sequence>.cast`, so
 /// the middle must be exactly three non-empty decimal fields.
@@ -1013,10 +1008,10 @@ fn is_generated_record_name(name: &str) -> bool {
 /// The smallest number of candidates a scan holds in memory.
 ///
 /// Retention only ever deletes from the oldest end, so only the oldest few
-/// entries are worth holding. Collecting every match and sorting the lot cost
-/// O(n) memory and O(n log n) time to enforce a 50-file target: a directory
-/// with a million matching names allocated a path and a metadata record for
-/// each, at recorder startup, on a liveness-sensitive path.
+/// entries are worth holding. Collecting and sorting every match would cost
+/// O(n) memory and O(n log n) time to enforce a 50-file target. A directory
+/// with a million matching names would allocate a path and a metadata record
+/// for each, at recorder startup, on a liveness-sensitive path.
 ///
 /// This is the floor rather than a fixed size because a scan too small for the
 /// overage just means more passes — see [`retention_batch_for`].
@@ -1143,12 +1138,12 @@ fn prune_recording_directory(
     max_files: usize,
 ) -> std::io::Result<()> {
     // Windowing the scan must not narrow what retention is willing to examine.
-    // A candidate is skipped whenever it is locked, unreadable, or no longer
-    // the file the scan saw, and the previous code simply walked on to the next
-    // oldest — so a batch whose entries are all active has to advance past
-    // them, not stop. The cursor is the (modified, path) ordering key of the
-    // last candidate examined, so each pass considers strictly newer entries
-    // and the walk covers the whole directory in bounded memory.
+    // A candidate that is locked, unreadable, or no longer the file the scan
+    // saw is skipped for the next oldest, so a batch whose entries are all
+    // active has to advance past them, not stop. The cursor is the (modified,
+    // path) ordering key of the last candidate examined, so each pass considers
+    // strictly newer entries and the walk covers the whole directory in bounded
+    // memory.
     let mut after: Option<(SystemTime, PathBuf)> = None;
     let mut total_bytes;
     let mut total_files;
@@ -1309,9 +1304,9 @@ mod tests {
 
     #[test]
     fn a_unit_slip_directory_budget_cannot_wipe_the_namespace() {
-        // `record-max-directory-bytes = 500` from someone who meant 500 MB used
-        // to reach prune_recording_directory verbatim and delete every
-        // completed cast. It must fall back instead.
+        // `record-max-directory-bytes = 500` from someone who meant 500 MB must
+        // fall back, not reach prune_recording_directory and delete every
+        // completed cast.
         let slot = std::sync::atomic::AtomicU64::new(super::MAX_RECORD_DIRECTORY_BYTES);
         super::store_limit_u64(
             &slot,
@@ -1492,12 +1487,11 @@ mod tests {
     }
 
     /// The worker's timed flush must survive a producer that never stops
-    /// writing. It did not: once the deadline passed, the computed timeout was
-    /// zero, and a zero timeout yields the ready item rather than `Timeout`, so
-    /// the flush arm was starved for as long as output kept arriving. Buffered
-    /// data then sat past the bound and a flush failure stayed invisible for
-    /// exactly as long — the opposite of what the visible-failure design is
-    /// for.
+    /// writing. Once the deadline passes, the computed timeout is zero, and a
+    /// zero timeout yields the ready item rather than `Timeout`, so relying on
+    /// it starves the flush arm for as long as output keeps arriving. Buffered
+    /// data would then sit past the bound and a flush failure would stay
+    /// invisible for exactly as long, defeating the visible-failure design.
     #[test]
     fn timed_flush_runs_while_a_producer_keeps_writing() {
         let sink = ControlledSink::new();
@@ -1771,41 +1765,46 @@ mod tests {
         );
     }
 
-    /// A child can emit a whole PTY read of bytes that are never valid UTF-8.
-    /// Draining per invalid run made that quadratic — 64 KiB of `0xff` meant
-    /// about 65,536 tail shifts and gigabytes of movement before one event was
-    /// written, on whichever thread called this. The bound below is far looser
-    /// than the linear implementation needs and far tighter than the quadratic
-    /// one achieves, so it discriminates without being timing-fragile. The
-    /// separation was measured, not assumed — an earlier bound of this shape
-    /// passed against the quadratic code and would have been false assurance.
+    /// Decoding bytes that are never valid UTF-8 must stay linear. Draining per
+    /// invalid run made it quadratic: 1 MiB of `0xff` took 13.3 s against
+    /// 26 ms linear. The 2 s bound separates the two by two orders of
+    /// magnitude either way. This times the decoder directly, because
+    /// `record_output` splits input into 16 KiB pieces, which would hide a
+    /// quadratic decoder under the bound.
     #[test]
-    fn hostile_invalid_utf8_chunk_stays_linear_and_lossless() {
-        use std::io::Read;
-        use std::time::Instant;
+    fn decoding_an_invalid_utf8_read_is_linear() {
+        const LEN: usize = 1024 * 1024;
+        let payload = vec![0xff_u8; LEN];
+        let started = std::time::Instant::now();
+        let (text, consumed) = super::decode_lossy_prefix(&payload);
+        let elapsed = started.elapsed();
+        assert_eq!(consumed, LEN);
+        assert_eq!(
+            text.chars().count(),
+            LEN,
+            "one replacement per invalid byte"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "invalid-UTF-8 decoding is not linear: {elapsed:?} for {LEN} bytes"
+        );
+    }
 
-        // Deliberately larger than a real 64 KiB PTY read. At 64 KiB the
-        // quadratic path moves ~2 GiB and takes a couple hundred milliseconds:
-        // real jank when a child sustains it, but not separable from a linear
-        // run by any bound that stays stable on a busy machine. Measured on
-        // this workspace at 1 MiB: 26 ms linear against 13.3 s quadratic, so
-        // the bound below discriminates by two orders of magnitude in both
-        // directions instead of passing whatever it is handed.
+    /// A read of bytes that are never valid UTF-8 is recorded losslessly: one
+    /// replacement per invalid run.
+    #[test]
+    fn hostile_invalid_utf8_chunk_is_recorded_losslessly() {
+        use std::io::Read;
+
         const CHUNK: usize = 1024 * 1024;
         let temp = test_tempdir();
         let path = temp.path().join("invalid.cast");
-        // Allocate the payload and open the recorder OUTSIDE the timed region:
-        // a 1 MiB allocation and a file create are noise against the thing
-        // under measurement, and they make a failure harder to read.
         let payload = vec![0xff_u8; CHUNK];
-        let elapsed = {
+        {
             let mut rec = super::Recorder::start(&path, 80, 24, false).expect("start");
-            let started = Instant::now();
             rec.record_output(&payload);
-            let elapsed = started.elapsed();
             rec.finish();
-            elapsed
-        };
+        }
 
         let mut s = String::new();
         std::fs::File::open(&path)
@@ -1820,11 +1819,11 @@ mod tests {
             .filter_map(|v| v[2].as_str().map(String::from))
             .collect();
 
-        // Semantics are unchanged, and the trace stays valid UTF-8 rather than
-        // truncating the child's output. The rule is one replacement per
-        // invalid *run*, not per byte — a run can span several bytes. This
-        // input is the case where the two coincide: `0xff` can never begin a
-        // sequence, so `error_len()` is 1 and every byte is its own run.
+        // The trace stays valid UTF-8 rather than truncating the child's
+        // output. The rule is one replacement per invalid *run*, not per byte,
+        // and a run can span several bytes. On this input the two coincide.
+        // `0xff` can never begin a sequence, so `error_len()` is 1 and every
+        // byte is its own run.
         assert_eq!(
             joined.chars().count(),
             CHUNK,
@@ -1834,14 +1833,10 @@ mod tests {
             joined.chars().all(|c| c == '\u{FFFD}'),
             "an all-invalid chunk must decode to replacements only"
         );
-        assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "invalid-UTF-8 recording is not linear: {elapsed:?} for {CHUNK} bytes"
-        );
     }
 
-    /// The cursor rewrite must not lose the one thing the drain loop got right:
-    /// an incomplete trailing sequence is carried, not replaced.
+    /// An incomplete trailing sequence is carried to the next chunk, not
+    /// replaced, even when invalid runs precede it in the same chunk.
     #[test]
     fn invalid_runs_and_a_split_codepoint_survive_together() {
         use std::io::Read;
@@ -2125,8 +2120,7 @@ mod tests {
             assert!(is_generated_record_name(name), "{name} is generated");
         }
         for name in [
-            // The shape that motivated this: a user's own note file sharing
-            // the prefix and suffix, previously eligible for deletion.
+            // A user's own note file sharing the prefix and suffix.
             "kettle-session-important.cast",
             "kettle-session-backup-copy.cast",
             // Too few fields, too many fields, and an empty field.
@@ -2148,8 +2142,8 @@ mod tests {
     }
 
     /// Retention deletes; a file it does not recognise must survive even when
-    /// it is the oldest thing present and the caps demand a deletion. Against
-    /// the previous prefix/suffix match this file was deleted.
+    /// it is the oldest thing present and the caps demand a deletion. A bare
+    /// prefix/suffix match would delete this file.
     #[test]
     fn retention_never_deletes_a_user_named_cast() {
         let temp = test_tempdir();
@@ -2218,7 +2212,7 @@ mod tests {
     }
 
     /// The bound is the whole point: a directory far larger than the batch must
-    /// still cost O(batch) to examine, not O(directory).
+    /// still cost O(batch) memory to scan, not O(directory).
     #[test]
     fn a_scan_holds_no_more_than_one_batch() {
         let temp = test_tempdir();
@@ -2255,10 +2249,9 @@ mod tests {
         );
     }
 
-    /// Each pass re-reads the directory, so the batch has to track the overage
-    /// or a large directory turns into many full scans on a startup path —
-    /// while still never exceeding the memory ceiling that makes batching
-    /// worthwhile in the first place.
+    /// Each pass re-reads the directory, so the batch must track the overage to
+    /// avoid many full scans of a large directory on a startup path. It must
+    /// still never exceed the memory ceiling that makes batching worthwhile.
     #[test]
     fn the_batch_tracks_the_overage_between_its_floor_and_ceiling() {
         // At or under the cap there is nothing to clear, so the floor stands.

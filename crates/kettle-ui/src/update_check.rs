@@ -365,7 +365,7 @@ mod tests {
         let back: UpdateCache = serde_json::from_str(&json).unwrap();
         assert_eq!(back.last_check, cache.last_check);
         assert!(back.auto_update_announced);
-        // A pre-v2.37 cache file without the new field still parses (defaults).
+        // An older cache file missing newer fields still parses (defaults).
         let partial: UpdateCache = serde_json::from_str(r#"{"last_check":42}"#).unwrap();
         assert_eq!(partial.last_check, 42);
         assert_eq!(partial.latest_tag, None);
