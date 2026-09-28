@@ -245,10 +245,10 @@ impl FeedClient {
         Ok(())
     }
 
-    /// Download one Linux update into the single bounded buffer that both the
-    /// digest verifier and archive extractor consume. Keeping verified bytes
-    /// off disk closes the remaining same-user in-place-overwrite window
-    /// between two reads of a temporary archive inode.
+    /// Download one update into the single bounded buffer that both the digest
+    /// verifier and archive extractor consume. Keeping verified bytes off disk
+    /// closes the remaining same-user in-place-overwrite window between two
+    /// reads of a temporary archive inode.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn download_bytes(&self, update: &AvailableUpdate) -> Result<Vec<u8>, UpdateError> {
         let asset = update
@@ -334,12 +334,12 @@ fn evaluate_manifest(
         return Ok(CheckOutcome::UpToDate { latest });
     }
 
-    // A manifest that does not name this build's target is the retired-platform
-    // case: Windows stopped being published in 4.0.0, and a 3.x client still
-    // asks for `x86_64-pc-windows-msvc`. Erroring here would reduce that to a
-    // log line and tell the user nothing, so use the same shape a build with no
-    // target at all produces. The newer version is still announced with a
-    // release URL, and only the in-place download is unavailable.
+    // Windows stopped being published in 4.0.0, but a 3.x client still asks for
+    // `x86_64-pc-windows-msvc`. An error would only reach a log line and tell
+    // the user nothing, so a 4.0.0 or later manifest without that target gets
+    // the same result as a build with no target. The newer version is still
+    // announced with a release URL, and only the in-place download is
+    // unavailable. Any other missing target still fails closed.
     // Installation re-verifies the signed manifest, resolves `current_target()`
     // against it again, and requires the selected asset to match. The installer
     // also rejects a missing `update.asset` before download, so this
@@ -686,12 +686,11 @@ mod tests {
     /// Every shipped target resolves its own asset out of the four-entry
     /// manifest, and no other.
     ///
-    /// 3.2.0 added `universal-apple-darwin` to a feed that had carried three
-    /// entries since the updater shipped. Deployed clients pick their asset by
-    /// exact target match and ignore the rest, so the addition reaches nobody
-    /// else — but "ignores the rest" was an argument about a `find` call rather
-    /// than something anyone had run. `deny_unknown_fields` does not cover it
-    /// either: it governs object keys, not array length.
+    /// Deployed clients pick their asset by exact target match and ignore the
+    /// rest, so adding `universal-apple-darwin` to a three-entry feed must reach
+    /// nobody else. This test runs that lookup rather than arguing from a `find`
+    /// call. `deny_unknown_fields` does not cover it, since it governs object
+    /// keys, not array length.
     #[test]
     fn a_fourth_target_leaves_the_other_three_alone() {
         let released = [
@@ -788,8 +787,7 @@ mod tests {
         // Windows was retired in 4.0.0, so a client built before that still
         // asks for a target the manifest no longer names. That must announce
         // the newer release with its URL rather than failing the check, which
-        // the UI would only log. Reverting to the `ok_or_else(MissingTarget)`
-        // form makes this `unwrap` panic.
+        // the UI would only log.
         let mut without_windows = manifest();
         without_windows.version = "4.0.0".into();
         without_windows.tag = "v4.0.0".into();

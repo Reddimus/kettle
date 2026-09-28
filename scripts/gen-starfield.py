@@ -8,8 +8,9 @@ a radial progress p that loops 0->1), so on-screen density and
 brightness are directly controlled and the field looks right at any aspect ratio.
 
 Seamless loop: a star's brightness fades to 0 at both ends of p (center and
-edge), so the wrap is invisible. Output is bounded under kettle's 256 MB
-decoded-animation cap (W*H*4*frames). MIT — part of kettle. Requires Pillow.
+edge), so the wrap is invisible. The decoded animation (W*H*4*frames) stays
+under kettle's 128 MiB cap, so every frame of the loop loads. MIT, part of
+kettle. Requires Pillow.
 
 Why this look? The community keeps terminal backgrounds that *recede*: slow,
 dark, subtle (WezTerm users drop GIFs to 0.2x). A drifting starfield reads as
@@ -26,8 +27,9 @@ import sys
 
 from PIL import Image, ImageDraw
 
-# 1920x1080 * 4 * 32 = 253 MB decoded, under kettle's 256 MB cap. 16:9 source.
-W, H = 1920, 1080
+# 1280x720 * 4 * 32 = 118 MB decoded, under kettle's 128 MiB (134 MB) cap.
+# 1920x1080 would load only 16 of the 32 frames and jump mid-loop. 16:9 source.
+W, H = 1280, 720
 NFRAMES = 32
 FPS = 8                  # 4.0 s loop — slow, gentle drift
 NSTARS = 90

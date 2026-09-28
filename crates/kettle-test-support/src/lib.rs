@@ -1,4 +1,4 @@
-//! Shared filesystem fixtures for Kettle's workspace tests.
+//! Shared test fixtures and source-guard helpers for Kettle's workspace tests.
 
 use std::path::Path;
 
@@ -29,13 +29,11 @@ fn strip_test_items(src: &str) -> Result<String, ()> {
     // Start of the doc-comment run immediately preceding `cursor`, tracked as
     // the forward lex proceeds.
     //
-    // This used to be recovered afterwards by searching BACKWARDS for `/*`,
-    // which is unsound: the search happily paired a `// */` line with an
-    // already-closed doc comment further up and deleted every line between
-    // them. On one three-line input the entire production half disappeared,
-    // which a negative guard reads as a pass. `skip_lexeme` already walks
-    // comments correctly going forward, so record the position there instead of
-    // reconstructing it later.
+    // Recovering it afterwards by searching backwards for `/*` is unsound. That
+    // search pairs a `// */` line with an already-closed doc comment further up
+    // and deletes every line between them, which a negative guard reads as a
+    // pass. `skip_lexeme` already walks comments correctly going forward, so
+    // the position is recorded there.
     let mut doc_start: Option<usize> = None;
 
     while cursor < bytes.len() {
@@ -245,7 +243,8 @@ fn eval_predicate(contents: &[u8], cursor: usize) -> Result<(Tri, usize), ()> {
     };
     cursor = skip_trivia(contents, end)?;
 
-    // `key = "value"` and bare identifiers other than `test` are unknown to us.
+    // `key = "value"` and bare identifiers other than `test`, `true`, and
+    // `false` are unknown to us.
     if contents.get(cursor) != Some(&b'(') {
         if contents.get(cursor) == Some(&b'=') {
             cursor = skip_trivia(contents, cursor + 1)?;
@@ -676,12 +675,10 @@ const STALE_SCRATCH_AFTER: std::time::Duration = std::time::Duration::from_secs(
 
 /// Remove scratch directories that *earlier processes* left behind.
 ///
-/// A guard cannot run after an abrupt process termination, and an earlier
-/// activation-test server also pinned its lock until process exit on Windows.
-/// Activation tests now own a stoppable server guard, but sweeping old entries
-/// remains useful for crashes and for cleaning the historical leftovers. Each
-/// prefix can reach only directories this helper made: a real `kettle-<uid>`
-/// runtime directory shares no prefix with `kettle-activation-…`.
+/// A guard cannot run after an abrupt process termination, so this sweep
+/// cleans up after crashed runs. Each prefix can reach only directories this
+/// helper made: a real `kettle-<uid>` runtime directory shares no prefix with
+/// `kettle-activation-…`.
 fn sweep_stale_scratch(base: &Path, prefix: &str, max_age: std::time::Duration) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
@@ -884,10 +881,8 @@ mod tests {
     #[test]
     fn keeps_an_item_whose_cfg_excludes_test_rather_than_requiring_it() {
         // `not(any(feature = "fastest", test))` compiles when the feature is
-        // OFF and test is OFF — production-only code, the exact opposite of a
-        // test item, despite the predicate mentioning `test`. This test
-        // previously asserted the item was removed, which encoded the bug: any
-        // appearance of the `test` identifier was treated as "test-only".
+        // OFF and test is OFF. That is production-only code, the exact opposite
+        // of a test item, despite the predicate mentioning `test`.
         let src = "#[cfg(not(any(feature = \"fastest\", test)))]\nconst PRODUCTION_ONLY: bool = true;\nconst KEEP: bool = true;\n";
         assert_eq!(production_source(src), src);
     }
@@ -944,11 +939,10 @@ mod tests {
 
     #[test]
     fn malformed_input_panics_rather_than_passing_the_file_through() {
-        // This previously returned the input UNCHANGED, on the theory that
-        // callers' postconditions would catch it. Several callers read another
-        // file's source directly and assert nothing, so a pass-through handed
-        // them the whole file — test module included — and every guard built on
-        // it silently went back to satisfying itself. Fail closed instead.
+        // Malformed input must not pass through unchanged. Several callers read
+        // another file's source directly and assert nothing, so a pass-through
+        // would hand them the whole file, test module included, and every guard
+        // built on it would silently satisfy itself. Fail closed instead.
         for malformed in [
             "#[cfg(test)]\nmod tests {\n",
             "#[cfg(test)]\nfn test_only() { let _ = \"unterminated; }\n",

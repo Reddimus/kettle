@@ -8,8 +8,8 @@
 //! byte-for-byte (BEL vs ST terminator preserved) so the engine still
 //! sees a correct VT stream.
 //!
-//! The extractor also handles two non-image protocols whose semantics
-//! belong upstream of the engine:
+//! The extractor also handles non-image protocols whose semantics belong
+//! upstream of the engine, including:
 //! - **OSC 7** (cwd report) — `Chunk::Cwd(path)` for the UI's cwd
 //!   tracker; powers session restore + new-tab/new-split inheriting the
 //!   focused pane's directory.
@@ -109,10 +109,8 @@ mod tests {
             .collect();
         assert_eq!(forwarded2, b"\x1b]2;vim - file.rs\x1b\\");
 
-        // OSC 0 / OSC 2 are untouched (we don't want to double-rewrite
-        // or accidentally munge a real OSC 2). The previous test
-        // (`non_image_osc_passes_through`) already pins OSC 0; pin OSC
-        // 2 here too for symmetry.
+        // OSC 0 / OSC 2 are untouched (no double rewrite of a real OSC 2).
+        // `non_image_osc_passes_through` pins OSC 0; pin OSC 2 here too.
         let mut e3 = Extractor::new();
         let chunks3 = e3.feed(b"\x1b]2;real title\x07");
         let forwarded3: Vec<u8> = chunks3
@@ -145,14 +143,14 @@ mod tests {
     fn osc7_percent_decodes_utf8_paths_correctly() {
         // Shells (zsh `print -P %d`, bash via `printf`) percent-encode
         // each *UTF-8 byte* of a non-ASCII filename individually, so a
-        // path ending in `café` arrives as `caf%C3%A9` — two encoded
-        // bytes that together form U+00E9 (é). The old parser pushed
-        // each decoded byte as a `char`, which gave the Latin-1 garbage
-        // `cafÃ©` and broke prompt-tracking on any non-ASCII directory.
+        // path ending in `café` arrives as `caf%C3%A9`, two encoded
+        // bytes that together form U+00E9 (é). Decoding each byte as a
+        // `char` would give the Latin-1 garbage `cafÃ©` and break
+        // prompt-tracking on any non-ASCII directory.
         // `localhost` host: hostname-neutral so the decode coverage is
-        // deterministic on every machine (v2.20.0 validates real hostnames
-        // against this machine's name — that policy has its own
-        // injected-host test in extract.rs).
+        // deterministic on every machine. Real hostnames are validated
+        // against this machine's name; extract.rs tests that policy with
+        // an injected host.
         let mut e = Extractor::new();
         let chunks = e.feed(b"\x1b]7;file://localhost/home/u/caf%C3%A9\x1b\\");
         let cwd = chunks.iter().find_map(|c| match c {
@@ -161,8 +159,7 @@ mod tests {
         });
         assert_eq!(cwd.as_deref(), Some("/home/u/café"));
 
-        // Mixed: space + UTF-8 + plain. Combines the three cases that
-        // were each broken in isolation.
+        // Mixed: space + UTF-8 + plain segments in one path.
         let mut e2 = Extractor::new();
         let chunks2 = e2.feed(b"\x1b]7;file:///tmp/work%20dir/caf%C3%A9/x\x07");
         let cwd2 = chunks2.iter().find_map(|c| match c {
@@ -174,13 +171,13 @@ mod tests {
 
     #[test]
     fn osc7_percent_followed_by_multibyte_char_does_not_panic() {
-        // Regression: the percent-decoder sliced the &str (`&path[i+1..i+3]`)
-        // when it saw `%`. A `%` immediately followed by a multibyte UTF-8
-        // char (here `€`, 3 bytes) made the slice land on a non-char-boundary
-        // and panic — a hard crash under panic=abort, triggerable by any
-        // program writing an OSC 7 report to the PTY. The fix slices the
-        // *bytes* and validates via from_utf8, so the stray `%` is kept
-        // literally and decoding continues.
+        // A `%` immediately followed by a multibyte UTF-8 char (here `€`,
+        // 3 bytes) would make a &str slice (`&path[i+1..i+3]`) land on a
+        // non-char-boundary and panic, a hard crash under panic=abort that
+        // any program writing an OSC 7 report to the PTY can trigger. The
+        // decoder slices the *bytes* instead and validates them via
+        // from_utf8, so the stray `%` is kept literally and decoding
+        // continues.
         // `localhost` (hostname-neutral): a REJECTED host short-circuits
         // before the decoder runs, which would silently skip the
         // panic-regression path this test exists for.

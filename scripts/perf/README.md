@@ -36,9 +36,9 @@ just macos-compare-score-self-test
 
 `macos-standing.py` measures what the comparator above cannot resolve. It
 times each launch on one monotonic clock instead of polling, so startup
-differences below 100 ms are visible, and it reports memory as
-`phys_footprint`, the Activity Monitor figure that includes GPU driver memory
-resident set size leaves out. Workloads:
+differences below 100 ms are visible. It reports memory as `phys_footprint`,
+the Activity Monitor figure, which includes GPU driver memory that resident
+set size leaves out. Workloads:
 
 - `startup`: spawn to the first on-screen window, and to the child's first
   instruction

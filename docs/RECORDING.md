@@ -40,8 +40,8 @@ record-max-directory-bytes = 1GiB
 
 Target precedence is fixed: `--record`, `--record-dir`, `KETTLE_RECORD`,
 `KETTLE_RECORD_DIR`, then the `record`/`record-dir` config keys. `--record PATH`
-and `KETTLE_RECORD=PATH` preserve historical behavior: an existing directory
-gets managed-directory behavior, while any other path is an explicit file.
+and `KETTLE_RECORD=PATH` treat an existing directory as a managed directory and
+any other path as an explicit file.
 `--record-dir` / `KETTLE_RECORD_DIR` / `record-dir` always mean a directory,
 including when it does not exist yet. Empty environment variables are ignored.
 `record = on` with no explicit path records into `<config-dir>/recordings`.
@@ -70,11 +70,11 @@ Managed recording directories are created with mode `0700` on Unix. Each cast
 uses a collision-safe `kettle-session-<time>-<pid>-<counter>.cast` name,
 `create_new`, an exclusive active-file lock, and owner-only permissions:
 `0600` on Unix or a protected current-user DACL on Windows. Two launches in the
-same second therefore cannot truncate or interleave one another. An explicit
-file retains the established overwrite behavior, but Kettle secures and locks
-it before truncating it; a second active writer is refused. Unix symbolic links
-and Windows reparse-point files or parent directories are refused before an
-explicit or managed recording file is opened.
+same second therefore cannot truncate or interleave one another. Kettle
+overwrites an explicit file, but secures and locks it before truncating it; a
+second active writer is refused. Unix symbolic links and Windows reparse-point
+files or parent directories are refused before an explicit or managed
+recording file is opened.
 
 Each session stops at a complete NDJSON event boundary before
 `record-max-bytes` (512 MiB by default). When space permits, its last event is
@@ -86,12 +86,11 @@ desktop notification says that the trace is incomplete. A startup, write,
 flush, or bounded-finalization failure uses `[REC ERROR]` and emits one desktop
 notification. None of these conditions terminates the terminal session.
 
-Kettle stops capture instead of adding an in-band overload marker. Once the
-bounded queue is full, admitting that marker cannot be guaranteed; relying on
-it would make the same missing event silent. The persistent title and desktop
-notification (or the explicit `kettle exec` stderr diagnostic) are therefore
-the truthful out-of-band signal, while the cast contains every complete event
-accepted before capture stopped.
+Kettle stops capture instead of adding an in-band overload marker. A full
+queue cannot guarantee room for that marker, and a dropped marker would leave
+the loss silent. The persistent title and desktop notification (or the
+explicit `kettle exec` stderr diagnostic) signal the stop out of band instead,
+and the cast holds every complete event accepted before capture stopped.
 
 The GUI event loop, `kettle exec` lifecycle, and PTY parser never write, flush,
 or close recording files. One worker owns secure target initialization, timed

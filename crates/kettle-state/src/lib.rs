@@ -58,8 +58,8 @@ pub struct AtomicWriteOptions {
 
 impl AtomicWriteOptions {
     /// Enforced private user state (`0600` on Unix; a protected current-user
-    /// DACL on Windows), rejecting symbolic-link destinations even when
-    /// replacing a more permissive legacy file.
+    /// DACL on Windows), even when replacing a more permissive legacy file.
+    /// Rejects symbolic-link destinations.
     pub const PRIVATE: Self = Self {
         unix_mode: 0o600,
         preserve_permissions: false,
@@ -430,9 +430,8 @@ fn reap_stale_staged_files(destination: &Path, parent_guard: &private::PrivatePa
         })
         .unwrap_or(0);
     if removed != 0 {
-        // Cleanup is best-effort and must not make the requested atomic write
-        // fail. The subsequent publication sync still persists this directory
-        // mutation on every supported platform.
+        // Cleanup is best-effort, so a failed sync is ignored. A removal lost
+        // to a crash leaves a dead creator's staged file for a later reap.
         let _ = private::sync_guarded_parent(parent_guard);
     }
 }
@@ -707,11 +706,10 @@ pub struct ExclusiveFileLock {
 impl ExclusiveFileLock {
     /// Block until an exclusive lock on `path` is acquired.
     ///
-    /// This blocks indefinitely: a holder that is merely stuck (suspended,
-    /// debugger-attached) rather than crashed keeps every other caller
-    /// waiting forever with no diagnostic. Prefer [`Self::acquire_timeout`]
-    /// for call sites that must surface a stuck lock as an actionable error
-    /// instead of an indefinite hang.
+    /// A holder that is stuck (suspended, debugger-attached) rather than
+    /// crashed keeps every other caller waiting forever with no diagnostic.
+    /// Prefer [`Self::acquire_timeout`] where a stuck lock must surface as an
+    /// error.
     pub fn acquire(path: &Path) -> io::Result<Self> {
         let file = open_lock_file(path)?;
         fs4::FileExt::lock(&file)?;
@@ -784,12 +782,11 @@ impl Drop for SharedFileLock {
     }
 }
 
-/// Poll `try_once` with capped exponential backoff until it yields a value
-/// or `timeout` elapses, in which case a distinct `io::ErrorKind::TimedOut`
-/// error is returned. This gives lock call sites a bounded-wait option
-/// between `acquire`'s indefinite block and `try_acquire`'s instant failure,
-/// so a holder that is stuck rather than crashed surfaces as an actionable
-/// error instead of silently wedging every other caller forever.
+/// Poll `try_once` with capped exponential backoff until it yields a value,
+/// or return a distinct `io::ErrorKind::TimedOut` error once `timeout`
+/// elapses. This gives lock callers a bounded wait between `acquire`'s
+/// indefinite block and `try_acquire`'s instant failure, so a holder that is
+/// stuck rather than crashed surfaces as an error.
 fn poll_with_timeout<T>(
     path: &Path,
     timeout: Duration,

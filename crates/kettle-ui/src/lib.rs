@@ -27,8 +27,8 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod app;
-// C1 (multi-window foundation): per-window state container. `App` keeps only
-// process-global state; everything tied to one OS window lives here.
+// Per-window state container. `App` keeps only process-global state;
+// everything tied to one OS window lives here.
 mod window_state;
 // In-process control server (agent-first A2). The accept/reader/
 // writer threads run kettle-ctl's transport; the App drains requests on the
@@ -49,18 +49,18 @@ mod runtime_diagnostics;
 mod search_input;
 mod session;
 mod settings;
-// In-app "newer release available" checker (notify-only). Kept a
-// private mod (its spawn fn references the crate-internal `UserEvent`); the
-// `kettle` bin reaches the synchronous `--check-update` path via the public
-// `check_for_update_cli` wrapper below.
+// In-app release checker. It notifies of a newer release, or installs one under
+// `update-policy = auto`. Kept a private mod (its spawn fn references the
+// crate-internal `UserEvent`); the `kettle` bin reaches the synchronous
+// `--check-update` path via the public `check_for_update_cli` wrapper below.
 mod update_check;
 mod video_preview;
+mod wall_clock;
 // OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 
-// SCM_RIGHTS fd-passing for detachable-tabs Bucket-D.
-// Unix-only (Linux + macOS + BSDs); Windows users get the
-// Action::MoveTabToNewWindow keyboard-driven fallback.
+// SCM_RIGHTS fd-passing, used only by the deprecated `--tab-handoff-fd` receive
+// path. Unix-only (Linux + macOS + BSDs).
 #[cfg(unix)]
 mod fd_transport;
 // Drag state machine for detachable tabs. Pure-data
@@ -137,30 +137,24 @@ pub struct Options {
     /// the `kettle` namespace installed. Errors are logged + don't
     /// block the launch.
     pub lua_script: Option<std::path::PathBuf>,
-    /// Terminator parity, detachable-tabs Bucket-D file-fallback: JSON
-    /// handoff file written by another kettle process (via the
-    /// Action::MoveTabToNewWindow fallback).
-    /// When set, kettle reads + deserializes a STab from this
-    /// path + uses it as the startup tab (replacing the default
-    /// shell). Path is deleted after read (one-shot handoff).
+    /// Deprecated receive-only JSON tab handoff (`--tab-handoff`) written by an
+    /// older kettle process. When set, kettle loads the startup session from
+    /// this path (replacing the default shell) and deletes the file after
+    /// reading (one-shot handoff).
     pub tab_handoff: Option<std::path::PathBuf>,
-    /// Terminator parity, detachable-tabs Bucket-D
-    /// SCM_RIGHTS live-PTY transfer: inherited
-    /// socket fd carrying the serialized tab JSON + PTY-fd
-    /// SCM_RIGHTS ancillary payload. The target kettle calls
-    /// fd_transport::recv_fds on this fd to receive both the
-    /// JSON state + the duplicated PTY fds, then reconstructs
-    /// the tab with adopted fds (running shells preserved).
-    /// Unix-only.
+    /// Deprecated receive-only SCM_RIGHTS tab handoff (`--tab-handoff-fd`) from
+    /// an older kettle process. The inherited socket fd carries the serialized
+    /// session JSON plus PTY fds. kettle receives both with
+    /// `fd_transport::recv_fds`, restores the session from the JSON, and closes
+    /// the PTY fds, so running shells are not preserved. Unix-only.
     pub tab_handoff_fd: Option<i32>,
     /// `--restore` — restore the previous session (tabs/splits/dirs)
     /// for THIS launch, regardless of the `restore-session` config default
     /// (which is off). A one-shot "continue where I left off" without editing
     /// config. `--layout`/`--tab-handoff` remain independent explicit paths.
     pub restore: bool,
-    /// Agent-first A2: `--agent-server MODE` — override the
-    /// `agent-server` config for THIS launch (`off`|`read-only`|`full`). `None`
-    /// = use the config value (default off).
+    /// `--agent-server MODE` overrides the `agent-server` config for THIS launch
+    /// (`off`|`read-only`|`full`). `None` = use the config value (default off).
     pub agent_server: Option<kettle_config::AgentServer>,
     /// One-shot session-recorder file or managed directory target from the
     /// CLI/env (`--record`/`--record-dir`/`KETTLE_RECORD*`). Writes an
@@ -190,9 +184,10 @@ pub fn list_layouts() -> Vec<String> {
     session::Session::list_layouts()
 }
 
-/// The synchronous `kettle --check-update` path. Does one GitHub
-/// "latest release" GET (bypassing the once/24h throttle — the user asked
-/// explicitly) and returns a human-readable line for the `kettle` bin to print.
+/// The synchronous `kettle --check-update` path. Fetches and verifies the
+/// signed manifest from the latest GitHub release once, bypassing the
+/// `update-check-interval-hours` throttle (default 24h) because the user asked
+/// explicitly. Returns a human-readable line for the `kettle` bin to print.
 pub fn check_for_update_cli() -> String {
     update_check::run_blocking_check(env!("CARGO_PKG_VERSION"))
 }
