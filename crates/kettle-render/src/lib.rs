@@ -366,6 +366,54 @@ fn production_source() -> String {
 }
 
 #[cfg(test)]
+mod font_reload_tests {
+    use super::production_source;
+
+    /// A font-family reload must invalidate the quick-select hint cache too:
+    /// the same labels would otherwise keep glyphs shaped in the old family.
+    #[test]
+    fn a_font_reload_resets_the_hint_label_cache() {
+        let production = production_source();
+        let reload = production
+            .split_once("self.resize_overlay_text.clear();")
+            .expect("font reload invalidation")
+            .1
+            .split_once("// Ensure one text buffer per pane.")
+            .expect("end of font reload invalidation")
+            .0;
+        assert!(reload.contains("for label in &mut self.hint_texts"));
+    }
+}
+
+#[cfg(test)]
+mod dim_blend_tests {
+    use super::dim_blend;
+    use crate::color::contrast_ratio;
+    use kettle_config::Rgb;
+
+    #[test]
+    fn dimmed_text_keeps_45_percent_of_the_foreground() {
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        assert_eq!(dim_blend(white, black), Rgb::new(115, 115, 115));
+    }
+
+    /// Disabled rows and shortcut hints must stay readable. On TokyoNight
+    /// Night the old blend kept a sixth of the foreground: about 1.6:1.
+    #[test]
+    fn dimmed_text_stays_readable_on_a_dark_theme() {
+        let fg = Rgb::parse("#c0caf5").unwrap();
+        let bg = Rgb::parse("#1a1b26").unwrap();
+        let ratio = contrast_ratio(dim_blend(fg, bg), bg);
+        assert!(ratio >= 3.0, "{ratio:.2}:1");
+        assert!(
+            ratio < contrast_ratio(fg, bg),
+            "still dimmer than normal text"
+        );
+    }
+}
+
+#[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
         ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
@@ -597,15 +645,11 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.update_available.is_some()
 }
 
-/// Disabled / secondary menu text: blend the foreground toward the panel
-/// background (~55% mute) without alpha-blending through to whatever lives
-/// under the panel.
+/// Disabled and secondary menu text: 45% foreground over the panel
+/// background, so it reads as about 55% transparent without alpha-blending
+/// through to whatever lives under the panel.
 fn dim_blend(fg: Rgb, bg: Rgb) -> Rgb {
-    Rgb::new(
-        ((fg.r as u16 + bg.r as u16 * 5) / 6) as u8,
-        ((fg.g as u16 + bg.g as u16 * 5) / 6) as u8,
-        ((fg.b as u16 + bg.b as u16 * 5) / 6) as u8,
-    )
+    solid_blend(fg, bg, 45)
 }
 
 /// Opaque color mixture used for UI surfaces that must remain legible over a
@@ -1069,8 +1113,8 @@ pub struct ConfirmDialogOverlay {
     pub focus_idx: usize,
 }
 
-/// Paint-side button shape. `destructive: true` gets
-/// the red-accent treatment (Close / Delete buttons).
+/// Paint-side button shape. `destructive: true` draws the label in bold
+/// (Close / Delete buttons).
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogButton {
     pub label: String,
@@ -4522,6 +4566,51 @@ fn live_surface_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32,
     (width.clamp(1, max), height.clamp(1, max))
 }
 
+/// The starfield shader's clock. `background-animation = off` freezes it on
+/// its first frame, as the image path shows frame 0. Otherwise it runs, and a
+/// repaint while animation is paused for focus shows the time-correct frame.
+fn starfield_time(
+    animation: kettle_config::BackgroundAnimation,
+    elapsed: std::time::Duration,
+) -> f32 {
+    if animation == kettle_config::BackgroundAnimation::Off {
+        0.0
+    } else {
+        elapsed.as_secs_f32()
+    }
+}
+
+#[cfg(test)]
+mod starfield_time_tests {
+    use super::{production_source, starfield_time};
+    use kettle_config::BackgroundAnimation;
+    use std::time::Duration;
+
+    #[test]
+    fn animation_off_freezes_the_starfield() {
+        let later = Duration::from_secs(90);
+        assert_eq!(starfield_time(BackgroundAnimation::Off, later), 0.0);
+        assert_eq!(starfield_time(BackgroundAnimation::Always, later), 90.0);
+        assert_eq!(
+            starfield_time(BackgroundAnimation::WhenFocused, later),
+            90.0
+        );
+    }
+
+    #[test]
+    fn the_starfield_uniform_takes_its_time_from_starfield_time() {
+        let production = production_source();
+        let upload = production
+            .split_once("self.starfield.upload(")
+            .expect("starfield upload")
+            .1
+            .split_once(");")
+            .expect("end of upload")
+            .0;
+        assert!(upload.contains("starfield_time(cfg.background_animation"));
+    }
+}
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -5597,15 +5686,15 @@ impl Renderer {
                 self.new_tab_arrow_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
-                // v2.38.2 P1b: the context-menu/settings/search-family caches
-                // added alongside the equality gates below have the exact
-                // same font-staleness hazard — unlike `hint_texts` (whose
-                // pool truncates to 0 whenever `hint_labels` empties, so it
-                // self-invalidates on next open), these overlays' buffer
-                // pools are only touched while the overlay is OPEN, so a
-                // font-family reload that lands while one is closed (or that
-                // doesn't change the label text) would otherwise leave a
-                // stale cache pointing at glyphs shaped in the old family.
+                // The overlay text caches are touched only while their overlay
+                // is open, so a font-family reload that lands while one is
+                // closed, or that keeps the same labels, would leave glyphs
+                // shaped in the old family.
+                // Quick-select hint buffers stay allocated; an empty label
+                // forces each one to reshape on its next fill.
+                for label in &mut self.hint_texts {
+                    label.clear();
+                }
                 self.context_menu_texts.clear();
                 self.context_menu_hint_texts.clear();
                 self.settings_texts.clear();
@@ -6975,18 +7064,7 @@ impl Renderer {
             // the real ratio drifts with the scrollback and a valid custom theme
             // could land under the floor the helper advertises.
             menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
-            let mut buttons_label = String::new();
-            for (i, btn) in dlg.buttons.iter().enumerate() {
-                if !buttons_label.is_empty() {
-                    buttons_label.push_str("  ");
-                }
-                let marker = if i == dlg.focus_idx { "▶" } else { " " };
-                buttons_label.push('[');
-                buttons_label.push_str(marker);
-                buttons_label.push(' ');
-                buttons_label.push_str(&btn.label);
-                buttons_label.push(']');
-            }
+            let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);
             // The bar is `palette[1]`, not the chrome background, so the theme
             // foreground is not guaranteed to be readable on it. On the shipped
             // TokyoNight Night default it is light lavender (#c0caf5) on light
@@ -7015,19 +7093,43 @@ impl Renderer {
                 &buttons_label,
                 confirm_bar_columns(sw, cw),
             );
+            let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             // Same equality gate as the other chrome buffers. Only one arm of
             // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
+            // enough (see `search_buffer_text`'s doc comment). The key marks
+            // the bold spans, so the same text with different weights still
+            // re-sets the buffer.
+            let key: String = spans
+                .iter()
+                .map(|&(text, bold)| {
+                    if bold {
+                        format!("\u{1}{text}\u{1}")
+                    } else {
+                        text.to_string()
+                    }
+                })
+                .collect();
+            if self.search_buffer_text != key {
+                let regular = Attrs::new().family(Family::Name(&family));
+                let bold = regular.clone().weight(Weight::BOLD);
+                self.search_buffer.set_rich_text(
+                    spans.iter().map(|&(text, is_bold)| {
+                        (
+                            text,
+                            if is_bold {
+                                bold.clone()
+                            } else {
+                                regular.clone()
+                            },
+                        )
+                    }),
+                    &regular,
                     Shaping::Advanced,
                     None,
                 );
-                self.search_buffer_text = label;
+                self.search_buffer_text = key;
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -8402,9 +8504,8 @@ impl Renderer {
                     row_y += sep_h;
                     continue;
                 }
-                // Disabled rows blend toward the panel bg so a greyed
-                // Copy reads as ~55% transparent without alpha-blending
-                // through to whatever lives under the panel.
+                // Disabled rows blend toward the panel background (see
+                // `dim_blend`).
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
@@ -8797,7 +8898,7 @@ impl Renderer {
             self.starfield.upload(
                 &self.gpu.queue,
                 [sw, sh],
-                self.starfield_started.elapsed().as_secs_f32(),
+                starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
             );
         }
         self.imgs
@@ -11959,6 +12060,69 @@ fn compose_confirm_bar_label(
     format!("{left}{}{buttons_label}", " ".repeat(gap))
 }
 
+/// The confirm bar's button row, and the byte range of each destructive
+/// button's label within it.
+///
+/// Destructive labels (Close, Delete) are drawn bold. The whole bar is already
+/// `palette[1]`, so a red accent on one button would not show.
+fn confirm_bar_buttons(
+    buttons: &[ConfirmDialogButton],
+    focus_idx: usize,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let mut row = String::new();
+    let mut bold = Vec::new();
+    for (i, btn) in buttons.iter().enumerate() {
+        if !row.is_empty() {
+            row.push_str("  ");
+        }
+        row.push('[');
+        row.push_str(if i == focus_idx { "▶" } else { " " });
+        row.push(' ');
+        let start = row.len();
+        row.push_str(&btn.label);
+        if btn.destructive {
+            bold.push(start..row.len());
+        }
+        row.push(']');
+    }
+    (row, bold)
+}
+
+/// Split the fitted bar `label` into `(text, bold)` spans.
+///
+/// `compose_confirm_bar_label` keeps the button `row` intact and flush right,
+/// or returns an empty label, so the row's `bold` ranges shift by the row's
+/// offset in `label`.
+fn confirm_bar_spans<'a>(
+    label: &'a str,
+    row: &str,
+    bold: &[std::ops::Range<usize>],
+) -> Vec<(&'a str, bool)> {
+    if label.is_empty() {
+        return Vec::new();
+    }
+    if !label.ends_with(row) {
+        return vec![(label, false)];
+    }
+    let offset = label.len() - row.len();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in bold {
+        let (start, end) = (offset + range.start, offset + range.end);
+        if start > at {
+            spans.push((&label[at..start], false));
+        }
+        if end > start {
+            spans.push((&label[start..end], true));
+        }
+        at = end;
+    }
+    if at < label.len() {
+        spans.push((&label[at..], false));
+    }
+    spans
+}
+
 /// Columns in which the confirm bar is painted. The App uses this same budget
 /// for mouse hit-testing so the live row cannot extend past visible glyphs.
 pub fn confirm_bar_columns(width: f32, cell_width: f32) -> usize {
@@ -12883,25 +13047,6 @@ fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
     }
 }
 
-/// Terminator parity, terminatorlib/config.py:106 + 117:
-/// compose the kettle background-opacity with Terminator's
-/// `background_darkness` + `background_type`. Logic:
-///
-///   bg-type = solid (default):  alpha = background_opacity
-///   bg-type = transparent:      alpha = background_opacity * background_darkness
-///   bg-type = image/starfield:  same as transparent — darkness lets the
-///                               backdrop show through the terminal area, not
-///                               only behind the chrome
-///
-/// `background_darkness` runs SEE-THROUGH (`0.0`) to FULLY-COVERED (`1.0`),
-/// because Terminator assigns it straight to the background colour's alpha and
-/// its users lower it for more transparency. `docs/CONFIG.md` and the field's
-/// own doc comment both used to describe that backwards, which sent anyone
-/// following the documentation to the wrong end of the scale;
-/// `darkness_scales_the_backdrop_toward_see_through` pins the direction so
-/// prose and behaviour cannot drift apart again.
-///
-/// All inputs already clamped at parse time so no defensive math needed.
 /// Surface-pixel origin of a pane's terminal grid.
 ///
 /// A top titlebar consumes space before row zero; a bottom titlebar consumes
@@ -13112,6 +13257,22 @@ fn resolved_cell_foreground_cached(
     cache.resolve(fg, bg, cfg.minimum_contrast as f64)
 }
 
+/// Terminator parity, terminatorlib/config.py:106 + 117: compose the kettle
+/// background opacity with Terminator's `background_darkness` and
+/// `background_type`:
+///
+///   bg-type = solid (default):  alpha = background_opacity
+///   bg-type = transparent:      alpha = background_opacity * background_darkness
+///   bg-type = image/starfield:  same as transparent; darkness lets the
+///                               backdrop show through the terminal area, not
+///                               only behind the chrome
+///
+/// `background_darkness` runs from see-through (`0.0`) to fully covered
+/// (`1.0`), because Terminator assigns it straight to the background colour's
+/// alpha and its users lower it for more transparency.
+/// `darkness_scales_the_backdrop_toward_see_through` pins that direction.
+///
+/// Parsing already clamps every input.
 fn composed_bg_alpha(cfg: &kettle_config::Config) -> f64 {
     use kettle_config::BackgroundType;
     match cfg.background_type {
@@ -19227,11 +19388,80 @@ mod startup_fonts_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        CONFIRM_BAR_MIN_CONTRAST, color, compose_confirm_bar_label, confirm_bar_text_color,
-        display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
-        fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
-        production_source,
+        CONFIRM_BAR_MIN_CONTRAST, ConfirmDialogButton, color, compose_confirm_bar_label,
+        confirm_bar_buttons, confirm_bar_spans, confirm_bar_text_color, display_width,
+        fit_pane_titlebar_title, fit_single_line_label, fit_tab_path, fit_tab_segment_title,
+        fit_tab_title, middle_ellipsis, overlay_label_cols, production_source,
     };
+
+    fn button(label: &str, destructive: bool) -> ConfirmDialogButton {
+        ConfirmDialogButton {
+            label: label.to_string(),
+            destructive,
+        }
+    }
+
+    /// Destructive buttons (Close, Delete) draw their label in bold. The whole
+    /// bar is already `palette[1]`, so a red accent on one button could not
+    /// show. Only the label is bold; the brackets and focus marker stay
+    /// regular, and every byte of the bar lands in exactly one span.
+    #[test]
+    fn confirm_bar_bolds_only_destructive_labels() {
+        let buttons = [button("Cancel", false), button("Close", true)];
+        let (row, bold) = confirm_bar_buttons(&buttons, 0);
+        assert_eq!(row, "[▶ Cancel]  [  Close]");
+
+        let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", &row, 60);
+        let spans = confirm_bar_spans(&label, &row, &bold);
+        assert_eq!(
+            spans.iter().map(|(text, _)| *text).collect::<String>(),
+            label
+        );
+        let bold_text: Vec<&str> = spans
+            .iter()
+            .filter(|(_, bold)| *bold)
+            .map(|(text, _)| *text)
+            .collect();
+        assert_eq!(bold_text, ["Close"]);
+    }
+
+    /// A bar too narrow for its buttons paints nothing, and a dialog without a
+    /// destructive button stays regular weight.
+    #[test]
+    fn confirm_bar_spans_handle_narrow_bars_and_safe_dialogs() {
+        let (row, bold) = confirm_bar_buttons(&[button("Delete", true)], 0);
+        let empty = compose_confirm_bar_label("  ⚠ Delete it?", "", &row, 3);
+        assert!(confirm_bar_spans(&empty, &row, &bold).is_empty());
+
+        let (row, bold) = confirm_bar_buttons(&[button("OK", false)], 0);
+        let label = compose_confirm_bar_label("  ⚠ Apply?", "", &row, 40);
+        let spans = confirm_bar_spans(&label, &row, &bold);
+        assert!(!spans.is_empty());
+        assert!(spans.iter().all(|(_, bold)| !bold));
+
+        // No buttons at all still shows the prompt.
+        let (row, bold) = confirm_bar_buttons(&[], 0);
+        let label = compose_confirm_bar_label("  ⚠ Working...", "", &row, 40);
+        assert_eq!(
+            confirm_bar_spans(&label, &row, &bold),
+            [(label.as_str(), false)]
+        );
+    }
+
+    /// The span helpers prove nothing unless the bar is drawn from them.
+    #[test]
+    fn the_confirm_bar_draws_destructive_labels_bold() {
+        let src = production_source();
+        assert!(
+            src.contains("let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);"),
+            "the confirm bar must build its button row with confirm_bar_buttons"
+        );
+        assert!(
+            src.contains("let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);")
+                && src.contains("let bold = regular.clone().weight(Weight::BOLD);"),
+            "the confirm bar must draw its spans, with destructive labels bold"
+        );
+    }
 
     /// A destructive confirmation has to be readable in EVERY bundled theme.
     ///
@@ -20937,8 +21167,9 @@ mod glyph_cell_lock_tests {
             1,
             "interior byte of '你' → col 1"
         );
-        // Defensive: a start before the first char clamps to column 0.
-        assert_eq!(glyph_grid_col(&starts, 0), 0);
+        // Defensive: a cluster that starts before the first char clamps to
+        // column 0 rather than underflowing.
+        assert_eq!(glyph_grid_col(&[2, 3], 0), 0);
     }
 
     /// The pen is pinned to the cell and snapped to an integer pixel; a

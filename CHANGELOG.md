@@ -8,11 +8,52 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- The first shell starts before the window and GPU are set up, about 45 ms
+- An idle window wakes about 0.3 times a second instead of 1.3. The
+  event-loop watchdog now sleeps while the loop is idle instead of checking
+  every second.
+- A confirm bar draws its destructive button, such as Close or Delete, with a
+  bold label, so it stands apart from Cancel.
+- Output no longer restarts the cursor blink after `cursor-blink-timeout`.
+  Only typing, pastes, focus, and settings changes do, as in kitty and
+  Alacritty, so a window whose program keeps printing stops redrawing for
+  the cursor.
+- The first shell starts before the window and GPU are set up, about 50 ms
   sooner. The font is measured first, and the renderer reuses it instead of
   loading the system fonts a second time.
 - `window-width` and `window-height` open a window at exactly that grid. A
   120x36 request used to open at 123x35. The default window keeps its size.
+
+### Fixed
+
+- `theme-schedule` clock times and the status-bar clock use local time. Both
+  used to run on UTC, so `19:00 dark` switched at 12:00 in California.
+- An explicit `font-family` or `font-size` wins over Terminator-style
+  `font = Mono 10` wherever the lines sit, and the `font` size is clamped to
+  5 to 72 points like `font-size`. `--check-config` now flags an out-of-range
+  `font` size.
+- A `trigger` pattern's `^` and `$` anchor to each row of output, so a
+  pattern like `^Build failed: (.+)$` can match. They used to anchor only to
+  the start and end of the whole visible screen.
+- `background-animation = off` freezes the starfield. It used to jump forward
+  on every repaint from typing or output.
+- Quick-select hint labels use the new font after a font-family change. They
+  could keep the old font until the labels themselves changed.
+- Zooming all panes after a scaled zoom keeps the new size when you leave the
+  scaled zoom. It used to snap back to the size from before.
+- A mistyped `--profile` is reported with `--gpu-info` and `--config-path`
+  even when `--check-update` is also given. The combination used to show the
+  default config instead.
+- Disabled menu items and shortcut hints are readable: they keep 45% of the
+  text color instead of a sixth, about 3:1 contrast on TokyoNight instead of
+  1.6:1.
+- `scripts/gen-starfield.py` writes a 1280×720 loop that fits Kettle's 128 MiB
+  animation cap, so all 32 frames play. At 1920×1080 only 16 loaded and the
+  loop jumped halfway. The BACKGROUNDS example `ffmpeg` command fits the cap
+  too.
+- A Lua plugin refuses to load if Kettle cannot remove the unsafe standard
+  functions from its sandbox, as documented. Failures used to be ignored.
+- `just install`, `uninstall`, `install-local` and `install-recording` run only
+  on Linux. On macOS they ran the Linux installer.
 
 ## [4.6.0] — 2026-09-27
 

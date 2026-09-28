@@ -219,8 +219,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["block", "beam (bar)", "underline"],
                 ),
                 toggle("Cursor blink", "cursor-blink"),
-                // Seconds of no typing or output before the blink rests on a
-                // visible cursor; 0 blinks indefinitely.
+                // Seconds without typing before the blink rests on a visible
+                // cursor; 0 blinks indefinitely.
                 number(
                     "Stop blinking after",
                     "cursor-blink-timeout",

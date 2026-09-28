@@ -170,10 +170,13 @@ with `background-blur = true` + a high `background-darkness`, and
 
 - **Bundled generator** (recommended): `python scripts/gen-starfield.py out.gif`
   — tweak the constants for density, speed, color.
-- **From a clearly-licensed clip** with `ffmpeg` — keep it short, low-fps, dark:
+- **From a clearly-licensed clip** with `ffmpeg`. Keep it short, low-fps and
+  dark, and keep width × height × 4 bytes × frames under 128 MiB, or kettle
+  loads only the first part of the loop. This one is 32 frames at 1280×720,
+  about 118 MB:
 
   ```sh
-  ffmpeg -t 8 -i clip.mp4 -vf "fps=12,scale=1600:-1:flags=lanczos" \
+  ffmpeg -t 4 -i clip.mp4 -vf "fps=8,scale=1280:-1:flags=lanczos" \
     -loop 0 ~/kettle-backgrounds/my-bg.gif
   ```
 

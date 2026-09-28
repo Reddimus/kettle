@@ -42,14 +42,18 @@ and local patches.
   launched inside an untrusted project; the same probe was removed from
   `portable-pty` for the same reason. Kettle does not use this backend — panes
   come from `portable-pty` — but `tty` still compiles into the binary, and a
-  known preload pattern should not ship even unreferenced.
+  known preload pattern should not ship even unreferenced. Scrolling a region
+  rotates its rows in one slice move while they sit contiguously in the ring
+  buffer. Upstream swaps them one at a time, one wrapped index per row in the
+  region for every line scrolled.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
   Kettle's public terminal-parser integration but does not run package-owned
   targets. Retained direct unit tests cover the mode stack, monotonic history
   origin, selection eviction, alternate-screen semantics, graphics-event
-  ordering/coalescing, and overflow recovery; run them with
+  ordering/coalescing, overflow recovery, and region scrolls against the
+  row-by-row swap; run them with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p alacritty_terminal`.
 
