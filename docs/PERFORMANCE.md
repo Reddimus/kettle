@@ -1190,8 +1190,8 @@ cargo build --release -p kettle
 ./scripts/bench.sh
 ```
 
-`scripts/bench.sh` requires `time` (GNU coreutils — on macOS use
-`gtime` from `brew install coreutils`). Output goes to stdout; pipe
+`scripts/bench.sh` requires GNU `time` (on macOS, `gtime` from
+`brew install gnu-time`). Output goes to stdout; pipe
 to a file or markdown table as you like.
 
 ### Historical Windows 11 reproduction

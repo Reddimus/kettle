@@ -71,15 +71,6 @@ pub(crate) fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
     })
 }
 
-/// Create `dir` (and its parents) as a directory only this user can enter, and
-/// verify that is what it actually is.
-///
-/// Shared by the activation endpoint and the control-socket listener: both put
-/// a local-IPC endpoint inside a path that is predictable from the uid, so
-/// another local user can pre-create it. `create_dir_all` succeeds against an
-/// existing directory and says nothing about who owns it, so ownership and mode
-/// are checked after creation -- via `symlink_metadata`, so a symlink is
-/// rejected rather than silently followed to its target.
 /// Whether a directory with these attributes is safe to hold a local-IPC
 /// endpoint.
 ///
@@ -93,10 +84,9 @@ pub(crate) fn stable_hash(bytes: impl IntoIterator<Item = u8>) -> u64 {
 /// Anything else -- notably a directory some other unprivileged user created at
 /// kettle's predictable, uid-derived endpoint path -- is rejected.
 ///
-/// Rejecting the sticky root instead breaks every Linux system, where
-/// `std::env::temp_dir()` IS `/tmp`. That asymmetry is why the first version of
-/// this check passed on macOS (whose per-user `$TMPDIR` we own) and failed
-/// every kettle-ctl test on Linux.
+/// Rejecting the sticky root would break every Linux system, where
+/// `std::env::temp_dir()` IS `/tmp`. macOS does not show the failure, because
+/// we own its per-user `$TMPDIR`.
 #[cfg(unix)]
 pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -> bool {
     if !is_dir {
@@ -125,26 +115,24 @@ pub(crate) fn unix_dir_is_safe_for_endpoint(is_dir: bool, uid: u32, mode: u32) -
 /// `clippy -D warnings` rejects it.
 #[cfg(unix)]
 pub(crate) fn ensure_owned_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    // Make kettle's own ancestors private on the way in. This looked exempt —
-    // the leaf is chmod'd just below, and the parents are either a shared temp
-    // root we must not touch or a directory some earlier path already fixed —
-    // but the ordering refutes it: `CtlServer::start` binds the socket through
-    // here BEFORE `discovery::register` repairs anything, so an agent-enabled
-    // launch on a fresh install would bind under a 0775 `<base>/kettle` and
-    // leave a window in which a group peer can rename the endpoint out of it.
+    // Make kettle's own ancestors private on the way in. `CtlServer::start`
+    // binds the socket through here BEFORE `discovery::register` repairs
+    // anything, so without this an agent-enabled launch on a fresh install
+    // would bind under a 0775 `<base>/kettle` and leave a window in which a
+    // group peer can rename the endpoint out of it.
     kettle_state::create_private_dirs(dir)?;
     {
         use std::os::unix::fs::MetadataExt as _;
 
         // No path-based chmod here. `create_private_dirs` above already set the
-        // mode through a descriptor, so this was redundant — and in the
-        // `<tmp>/kettle-<uid>` fallback it was a primitive: creating a NEW name
-        // in a sticky /tmp is allowed, so a peer can plant that path as a
-        // symlink to a directory they want narrowed. The helper correctly skips
-        // it (ELOOP), and then this line followed the link and chmodded the
-        // target before the check below could reject the bind.
-        // `symlink_metadata`, so a symlink planted at this path is rejected
-        // rather than followed to a directory its owner does control.
+        // mode through a descriptor, and in the `<tmp>/kettle-<uid>` fallback a
+        // path-based chmod is an attack primitive. Creating a NEW name in a
+        // sticky /tmp is allowed, so a peer can plant that path as a symlink
+        // to a directory they want narrowed. The helper skips the link (ELOOP),
+        // but a chmod would follow it and narrow the target before the check
+        // below rejects the bind. `symlink_metadata` sees the link itself, so a
+        // symlink planted at this path is rejected rather than followed to a
+        // directory its owner does control.
         let metadata = std::fs::symlink_metadata(dir)?;
         if !unix_dir_is_safe_for_endpoint(
             metadata.file_type().is_dir(),
@@ -413,11 +401,10 @@ mod private_dir_chain_umask_tests {
     /// skipped and left to the ownership checks at the call site, rather than
     /// having its target chmodded the way path-based `set_permissions` would.
     ///
-    /// An ANCESTOR link is different, and the test says so rather than leaving
-    /// the stronger-sounding claim standing: it resolves the way it does for
-    /// every other path, so the real directory behind it is repaired. For a
-    /// dotfile-managed tree that is the wanted outcome — the directory kettle
-    /// actually uses gets secured — but it is not "never through a symlink".
+    /// An ANCESTOR link resolves like any other path, so the real directory
+    /// behind it is repaired. That secures the directory kettle actually uses,
+    /// which is what a dotfile-managed tree wants, but it is not "never through
+    /// a symlink".
     #[test]
     fn symlink_repair_skips_the_final_component_and_resolves_ancestors() {
         in_child(
@@ -466,12 +453,8 @@ mod private_dir_chain_umask_tests {
                 make_base(&inner_link);
                 create_private_dirs(&inner_link.join("kettle").join("ctl"))
                     .expect("an intermediate link resolves like any path");
-                // O_NOFOLLOW protects the FINAL component only. An ancestor
-                // link resolves the way it does for every other path, so the
-                // real directory behind it IS repaired — which is the right
-                // outcome for a dotfile-managed tree, but not what "never
-                // through a symlink" would suggest, so assert it rather than
-                // leave the weaker claim standing.
+                // O_NOFOLLOW protects the FINAL component only, so the real
+                // directory behind an ancestor link IS repaired.
                 assert_eq!(
                     mode_of(&inner_real.join("kettle")),
                     0o700,
@@ -546,8 +529,8 @@ mod endpoint_dir_safety_tests {
 
     // `std::env::temp_dir()` is `/tmp` on Linux: root-owned and world-writable,
     // but sticky, so no other user can unlink our socket. Rejecting this shape
-    // broke every kettle-ctl test on Linux while passing on macOS, whose
-    // per-user `$TMPDIR` we do own.
+    // would fail every kettle-ctl test on Linux but not on macOS, whose
+    // per-user `$TMPDIR` we own.
     #[test]
     fn the_sticky_shared_temp_root_is_safe() {
         assert!(unix_dir_is_safe_for_endpoint(

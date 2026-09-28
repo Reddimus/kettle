@@ -609,9 +609,6 @@ pub struct GlyphPipeline {
     instance_gpu: GraphicsReservation,
     budget: GraphicsBudget,
     count: u32,
-    /// Surface size [w, h] in physical px from the last `upload`, used to clamp
-    /// per-pane scissor rects in `draw`.
-    screen: [f32; 2],
 }
 
 impl GlyphPipeline {
@@ -781,7 +778,6 @@ impl GlyphPipeline {
             instance_gpu,
             budget,
             count: 0,
-            screen: [0.0; 2],
         })
     }
 
@@ -1044,7 +1040,6 @@ impl GlyphPipeline {
             );
             self.bg_dirty = false;
         }
-        self.screen = screen;
         queue.write_buffer(
             &self.screen_buf,
             0,

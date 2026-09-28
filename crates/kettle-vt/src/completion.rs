@@ -88,7 +88,7 @@ pub fn parse(payload: &[u8]) -> Option<CompletionUpdate> {
     if !matches!(version, "1" | "2" | "3" | "4") {
         return None;
     }
-    // v4 adds one presentation field to `show`/`update`. Its session, request,
+    // v4 adds two presentation fields to `show`/`update`. Session, request,
     // keymap, and clear semantics are v3's, so both versions share this path.
     let sequenced = matches!(version, "3" | "4");
     let operation = fields.next()?;
@@ -262,8 +262,8 @@ fn decode_field(field: &str, max_bytes: usize) -> Option<String> {
 
 /// Keep terminal-owned UI from interpreting invisible direction controls as
 /// part of a candidate. Joiners and variation selectors remain valid for emoji;
-/// only Unicode controls and the bidi marks that can reorder neighboring text
-/// are refused.
+/// only Unicode controls, line and paragraph separators, and the bidi marks
+/// that can reorder neighboring text are refused.
 fn unsafe_display_scalar(value: char) -> bool {
     value.is_control()
         || matches!(
@@ -525,8 +525,8 @@ mod tests {
     }
 
     /// The shell encoders truncate by characters against these byte caps, so
-    /// the exact boundary is load-bearing: one byte over and the whole message
-    /// is dropped, taking every candidate with it.
+    /// the exact boundary is load-bearing. One byte over a label cap hides that
+    /// candidate, and one byte over a description cap drops its description.
     #[test]
     fn field_length_caps_are_inclusive() {
         for (max, exact) in [
