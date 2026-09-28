@@ -58,7 +58,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Pane zoom/maximize | ✅ `Ctrl+Shift+X` | ✅ | ✅ | ✅ `is_zoomed` | ✅ | — |
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
 | Broadcast / group input | ✅ `Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, `Super+G` elsewhere (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
-| **Right-click context menu** | ✅ floating panel with copy/paste, split, pane, tab and group rows, Theme / Profile / Preferences submenus, and config and Lua items | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
+| **Right-click context menu** | ✅ floating panel with copy/paste, split (auto, right, left, down, up), pane, tab, window, title, reset and group rows, Theme / Profile / Preferences submenus, and config and Lua items | ✅ copy/paste, clear, reset, four split sides, tab, window and title rows | ⛔ | 🟡 | ✅ origin | ⛔ |
 | **macOS Dock menu** | ✅ New Window + New Tab + open-window list | ✅ | ✅ New OS Window | ✅ | — | ⛔ (open since 2022) |
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
 | **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 102 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
