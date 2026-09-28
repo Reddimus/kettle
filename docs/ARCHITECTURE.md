@@ -490,11 +490,13 @@ winit window, its renderer, its `Mux` tab/split tree, input + overlay
 state) lives in `WindowState`, while `App` keeps the process globals
 (config, event-loop proxy, ctl server, Lua VM).
 
-Both window constructors size a new window through one rule
-(`startup_inner_size` in `app.rs`) before font metrics exist, using the 8×16 px
-startup baseline in **logical** pixels so HiDPI gets the same grid. An explicit
-`window-width`/`window-height` is honoured as typed (a missing axis comes from
-the 160×45 default grid); with neither set, the default grid is fitted to the
+Both window constructors measure the font before creating the window
+(`StartupFonts` in `kettle-render`) and size a fresh window through one rule
+(`startup_surface` in `app.rs`). An explicit `window-width`/`window-height`
+opens at exactly that grid. An unset axis keeps the 160×45 default grid's pixel
+size, converted with an 8×16 px baseline in **logical** pixels
+(`startup_inner_size`) so HiDPI gets the same grid; with neither set, the
+default grid is fitted to the
 primary monitor, or the largest one on Wayland, at 90 % × 85 %
 (`default_startup_inner_size`), so a fresh window clears the ~144 columns agent
 TUIs want without becoming a screen-wide canvas on an ultrawide. The restore

@@ -17,6 +17,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Only typing, pastes, focus, and settings changes do, as in kitty and
   Alacritty, so a window whose program keeps printing stops redrawing for
   the cursor.
+- The first shell starts before the window and GPU are set up, about 50 ms
+  sooner. The font is measured first, and the renderer reuses it instead of
+  loading the system fonts a second time.
+- `window-width` and `window-height` open a window at exactly that grid. A
+  120x36 request used to open at 123x35. The default window keeps its size.
 
 ### Fixed
 

@@ -15475,17 +15475,16 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
             f"default-window-size smoke: the default surface exceeds the 1296 px target ({surface_w})"
         )
 
+    # The fonts are measured before the window, so a configured grid opens
+    # exactly, tab bar and padding included.
     explicit = launch("explicit", ["window-width = 100", "window-height = 30"])
-    cell_w = float(explicit["cell"]["width"])  # type: ignore[index]
-    _, expected_cols = startup_geometry_metrics(explicit)
-    if abs(explicit["cols"] - expected_cols) > 1:  # type: ignore[operator]
+    if (explicit["cols"], explicit["rows"]) != (100, 30):
         raise SystemExit(
-            "default-window-size smoke: window-width = 100 must follow the 8 px startup baseline "
-            f"(expected about {expected_cols} columns at cell {cell_w:.2f}, got {explicit['cols']})"
+            "default-window-size smoke: window-width = 100 and window-height = 30 must open "
+            f"exactly 100x30 cells (got {explicit['cols']}x{explicit['rows']})"
         )
     (out / "analysis.json").write_text(
-        json.dumps({"default": default, "explicit": explicit, "expected_explicit_cols": expected_cols}, indent=2)
-        + "\n"
+        json.dumps({"default": default, "explicit": explicit}, indent=2) + "\n"
     )
     return out
 

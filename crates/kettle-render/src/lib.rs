@@ -4646,6 +4646,9 @@ impl Renderer {
     /// For winit, `display_handle` should be
     /// `ActiveEventLoop::owned_display_handle()`. It is cheap to clone and,
     /// unlike an `Arc<Window>`, does not keep a closed OS window alive.
+    ///
+    /// `fonts`, when loaded for the same font and scale, are taken over
+    /// instead of loading the system fonts again.
     pub async fn new_with_display_handle<W, D>(
         window: Arc<W>,
         display_handle: D,
@@ -4653,19 +4656,21 @@ impl Renderer {
         height: u32,
         scale: f32,
         cfg: &Config,
+        fonts: Option<StartupFonts>,
     ) -> Result<Renderer>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
         D: HasDisplayHandle + Send + Sync + 'static,
     {
-        Self::new_with_escalation_and_display_handle(
+        Self::new_with_escalation_inner(
             window,
-            display_handle,
+            Some(OwnedGpuDisplayHandle::new(display_handle)),
             width,
             height,
             scale,
             cfg,
             AdapterSelection::new(AdapterEscalation::Preferred, None),
+            fonts,
         )
         .await
     }
@@ -4690,6 +4695,7 @@ impl Renderer {
             scale,
             cfg,
             AdapterSelection::new(escalation, avoid),
+            None,
         )
         .await
     }
@@ -4716,10 +4722,12 @@ impl Renderer {
             scale,
             cfg,
             selection,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn new_with_escalation_inner<W>(
         window: Arc<W>,
         display_handle: Option<OwnedGpuDisplayHandle>,
@@ -4728,6 +4736,7 @@ impl Renderer {
         scale: f32,
         cfg: &Config,
         selection: AdapterSelection,
+        fonts: Option<StartupFonts>,
     ) -> Result<Renderer>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
@@ -4784,7 +4793,7 @@ impl Renderer {
         };
         let device_ms = t_device.elapsed().as_secs_f64() * 1000.0;
         let t_rest = std::time::Instant::now();
-        let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg);
+        let built = Self::with_gpu_and_surface(gpu, surface, width, height, scale, cfg, fonts);
         // This span covers everything after device creation, INCLUDING the
         // font-system time logged separately, so do not add the two together.
         log::info!(
@@ -4808,6 +4817,7 @@ impl Renderer {
         height: u32,
         scale: f32,
         cfg: &Config,
+        fonts: Option<StartupFonts>,
     ) -> Result<Renderer>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
@@ -4818,7 +4828,7 @@ impl Renderer {
                 "the shared GPU adapter cannot present to the new window's surface"
             ));
         }
-        Self::with_gpu_and_surface(gpu.clone(), surface, width, height, scale, cfg)
+        Self::with_gpu_and_surface(gpu.clone(), surface, width, height, scale, cfg, fonts)
     }
 
     /// Shared constructor tail: everything after a surface + GPU exist
@@ -4830,6 +4840,7 @@ impl Renderer {
         height: u32,
         scale: f32,
         cfg: &Config,
+        fonts: Option<StartupFonts>,
     ) -> Result<Renderer> {
         let GpuContext {
             adapter,
@@ -4865,21 +4876,19 @@ impl Renderer {
         surface.configure(&device, &config);
         let supported_alpha_modes = caps.alpha_modes;
 
-        let t_font_system = std::time::Instant::now();
-        let mut font_system = FontSystem::new();
-        let font_system_ms = t_font_system.elapsed().as_secs_f64() * 1000.0;
-        let t_bundled = std::time::Instant::now();
-        load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
-        // Resolved once: fontdb is already populated and the answer cannot
-        // change while this renderer lives.
-        let text_symbol_family = resolve_text_symbol_family(&mut font_system);
-        log::info!("renderer init: text-presentation face {text_symbol_family:?}");
-        // Split, because `FontSystem::new()` is the one people suspect (it
-        // enumerates system fonts) and a combined figure cannot exonerate it.
-        log::info!(
-            "renderer init: FontSystem::new {font_system_ms:.1}ms, bundled font {:.1}ms",
-            t_bundled.elapsed().as_secs_f64() * 1000.0
-        );
+        // Fonts loaded before the window reach here already measured. Ones
+        // measured for another scale or font are reloaded, not reused.
+        let StartupFonts {
+            mut font_system,
+            text_symbol_family,
+            cell: (cell_w, cell_h),
+            ..
+        } = match fonts {
+            Some(fonts) if fonts.matches(cfg, scale) => fonts,
+            _ => StartupFonts::load(cfg, scale),
+        };
+        let cell_scale_w = cfg.cell_width.max(0.01);
+        let cell_scale_h = cfg.cell_height.max(0.01);
 
         let swash = SwashCache::new();
         let cache = Cache::new(&device);
@@ -4896,7 +4905,6 @@ impl Renderer {
         let font_size = clamp_font_size(cfg.font_size);
         // Physical-pixel metrics — logical font size × DPI scale.
         let metrics = metrics_for(font_size, scale);
-        let mut measure = TextBuffer::new(&mut font_system, metrics);
         let tabbar_buffer = TextBuffer::new(&mut font_system, metrics);
         let new_tab_arrow_buffer = TextBuffer::new(&mut font_system, metrics);
         let scroll_left_buffer = TextBuffer::new(&mut font_system, metrics);
@@ -4932,15 +4940,6 @@ impl Renderer {
         );
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
-        let (cell_w, cell_h) =
-            measure_cell(&mut font_system, &mut measure, &cfg.font_family, metrics);
-        // Honor cfg.cell_width / cell_height multipliers
-        // (Terminator parity). Values are pre-clamped to [0.5, 3.0]
-        // at parse time so the cell can't degenerate to 0 here.
-        let cell_scale_w = cfg.cell_width.max(0.01);
-        let cell_scale_h = cfg.cell_height.max(0.01);
-        let cell_w = cell_w * cell_scale_w;
-        let cell_h = cell_h * cell_scale_h;
 
         let pane_bases = QuadPipeline::new_replace(&device, format);
         let live_pane_bases = QuadPipeline::new_replace(&device, format);
@@ -13472,6 +13471,84 @@ fn emit_cell_locked_glyphs(
     }
 }
 
+/// The fonts and cell size a window needs before its GPU exists.
+///
+/// A pane's grid depends only on the cell size, so loading these first lets
+/// the first pane start while the GPU initializes. A renderer built with them
+/// takes them over instead of enumerating the system fonts a second time.
+pub struct StartupFonts {
+    font_system: FontSystem,
+    text_symbol_family: Option<&'static str>,
+    /// Physical-pixel cell size, with `cell-width` and `cell-height` applied.
+    pub cell: (f32, f32),
+    /// The inputs `cell` was measured from.
+    key: StartupFontsKey,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct StartupFontsKey {
+    family: String,
+    font_size: f32,
+    scale: f32,
+    cell_width: f32,
+    cell_height: f32,
+}
+
+impl StartupFontsKey {
+    fn new(cfg: &Config, scale: f32) -> Self {
+        Self {
+            family: cfg.font_family.clone(),
+            font_size: clamp_font_size(cfg.font_size),
+            scale,
+            cell_width: cfg.cell_width,
+            cell_height: cfg.cell_height,
+        }
+    }
+}
+
+impl StartupFonts {
+    /// Enumerate the system fonts, load the bundled face, and measure the
+    /// cell for `cfg` at `scale`, the display's scale factor.
+    pub fn load(cfg: &Config, scale: f32) -> Self {
+        let t_font_system = std::time::Instant::now();
+        let mut font_system = FontSystem::new();
+        let font_system_ms = t_font_system.elapsed().as_secs_f64() * 1000.0;
+        let t_bundled = std::time::Instant::now();
+        load_bundled_font(&mut font_system, kettle_config::font::REGULAR);
+        // Resolved once: fontdb is already populated and the answer cannot
+        // change while the renderer lives.
+        let text_symbol_family = resolve_text_symbol_family(&mut font_system);
+        log::info!("renderer init: text-presentation face {text_symbol_family:?}");
+        // Split, because `FontSystem::new()` is the one people suspect (it
+        // enumerates system fonts) and a combined figure cannot exonerate it.
+        log::info!(
+            "renderer init: FontSystem::new {font_system_ms:.1}ms, bundled font {:.1}ms",
+            t_bundled.elapsed().as_secs_f64() * 1000.0
+        );
+        let key = StartupFontsKey::new(cfg, scale);
+        let metrics = metrics_for(key.font_size, scale);
+        let mut measure = TextBuffer::new(&mut font_system, metrics);
+        let (cell_w, cell_h) = measure_cell(&mut font_system, &mut measure, &key.family, metrics);
+        // `cell-width` and `cell-height` are clamped to [0.5, 3.0] at parse
+        // time, so the cell cannot degenerate to 0 here.
+        let cell = (
+            cell_w * key.cell_width.max(0.01),
+            cell_h * key.cell_height.max(0.01),
+        );
+        Self {
+            font_system,
+            text_symbol_family,
+            cell,
+            key,
+        }
+    }
+
+    /// Whether these fonts were measured for `cfg` at `scale`.
+    pub fn matches(&self, cfg: &Config, scale: f32) -> bool {
+        self.key == StartupFontsKey::new(cfg, scale)
+    }
+}
+
 fn measure_cell(
     fs: &mut FontSystem,
     buf: &mut TextBuffer,
@@ -19261,6 +19338,50 @@ mod completion_panel_tests {
 
         frame.search_query = Some(String::new());
         assert!(text_overlay_requires_continuous_prepare(&frame));
+    }
+}
+
+#[cfg(test)]
+mod startup_fonts_tests {
+    use super::{StartupFonts, production_source};
+    use kettle_config::Config;
+
+    /// A window's first renderer takes over the fonts its first pane was
+    /// sized with. Loading them again would enumerate the system fonts twice
+    /// at startup and could measure a different cell than the pane got.
+    #[test]
+    fn the_renderer_takes_over_matching_startup_fonts() {
+        let src = production_source();
+        let body = src
+            .split_once("fn with_gpu_and_surface(")
+            .expect("with_gpu_and_surface")
+            .1
+            .split_once("\n    }\n")
+            .expect("end of with_gpu_and_surface")
+            .0;
+        assert!(body.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
+        assert!(!body.contains("FontSystem::new()"));
+    }
+
+    /// Fonts measured for one scale or size are not reused for another.
+    #[test]
+    fn startup_fonts_match_only_their_own_font_and_scale() {
+        let cfg = Config::default();
+        let fonts = StartupFonts::load(&cfg, 2.0);
+        assert!(fonts.matches(&cfg, 2.0));
+        assert!(!fonts.matches(&cfg, 1.0));
+        let mut larger = cfg.clone();
+        larger.font_size += 2.0;
+        assert!(!fonts.matches(&larger, 2.0));
+
+        let one = StartupFonts::load(&cfg, 1.0);
+        assert!(one.cell.0 > 0.0 && one.cell.1 > 0.0);
+        assert!(
+            (fonts.cell.1 - 2.0 * one.cell.1).abs() < 0.01,
+            "the cell is measured in physical pixels: {:?} at 2x, {:?} at 1x",
+            fonts.cell,
+            one.cell
+        );
     }
 }
 

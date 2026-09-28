@@ -3491,6 +3491,34 @@ fn startup_inner_size(cfg: &Config, monitor: Option<StartupMonitor>) -> (f64, f6
     }
 }
 
+/// The surface size, in physical pixels, whose content area holds exactly
+/// `grid` cells of `cell` inside `pad` and the chrome `bands` describe.
+///
+/// `content_rect_for_with_strip` subtracts fixed bands, so their total is read
+/// off a probe surface and added back. Half a pixel of slack before rounding
+/// up keeps float error from costing a column; the slack stays under a cell.
+fn surface_for_grid(
+    grid: (usize, usize),
+    cell: (f32, f32),
+    pad: (f32, f32),
+    bands: ContentBands,
+    tab_bar_pos: kettle_config::TabBarPos,
+    status_bar: kettle_config::StatusBarMode,
+    strip_w: f32,
+) -> (u32, u32) {
+    const PROBE: u32 = 1 << 16;
+    let (_, _, content_w, content_h) =
+        content_rect_for_with_strip((PROBE, PROBE), bands, tab_bar_pos, status_bar, strip_w);
+    let chrome_w = PROBE as f32 - content_w;
+    let chrome_h = PROBE as f32 - content_h;
+    let width = grid.0 as f32 * cell.0 + pad.0 * 2.0 + chrome_w;
+    let height = grid.1 as f32 * cell.1 + pad.1 * 2.0 + chrome_h;
+    (
+        (width + 0.5).ceil().max(1.0) as u32,
+        (height + 0.5).ceil().max(1.0) as u32,
+    )
+}
+
 /// What the startup sizing needs to know about the monitor a fresh window
 /// will most likely land on.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -8409,7 +8437,7 @@ impl App {
             TabBarMode::Always => true,
         };
         if show {
-            ws.renderer.as_ref().map(|r| r.cell_h + 8.0).unwrap_or(24.0)
+            Self::cell_size(ws).map_or(24.0, |(_, ch)| ch + 8.0)
         } else {
             0.0
         }
@@ -8422,7 +8450,7 @@ impl App {
     fn status_bar_h(&self, ws: &WindowState) -> f32 {
         match self.cfg.status_bar {
             kettle_config::StatusBarMode::Off => 0.0,
-            _ => ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(22.0),
+            _ => Self::cell_size(ws).map_or(22.0, |(_, ch)| ch + 6.0),
         }
     }
 
@@ -8517,23 +8545,120 @@ impl App {
         pane_titlebar_hit(px, py, &rects, self.cfg.title_at_bottom, bar_h)
     }
 
-    fn area(&self, ws: &WindowState) -> Rect {
-        let surface = ws
-            .renderer
+    /// The cell size in physical pixels: the renderer's, or the one measured
+    /// before it existed.
+    fn cell_size(ws: &WindowState) -> Option<(f32, f32)> {
+        ws.renderer
+            .as_ref()
+            .map(|r| (r.cell_w, r.cell_h))
+            .or(ws.startup_cell)
+    }
+
+    /// The surface size in physical pixels: the renderer's, or the one chosen
+    /// before it existed.
+    fn surface_size(ws: &WindowState) -> Option<(u32, u32)> {
+        ws.renderer
             .as_ref()
             .map(|r| r.surface_size())
-            .unwrap_or((800, 600));
+            .or(ws.startup_surface)
+    }
+
+    /// The first window's surface in physical pixels, before the renderer
+    /// exists. An axis `window-width` or `window-height` sets holds exactly
+    /// that many cells at the startup cell size. An axis the config leaves
+    /// alone keeps the default window's pixel size, fitted to the monitor
+    /// when neither is set. `None` before the cell is measured.
+    fn startup_surface(
+        &self,
+        ws: &WindowState,
+        monitor: Option<StartupMonitor>,
+    ) -> Option<(u32, u32)> {
+        let cell = Self::cell_size(ws)?;
+        let scale = monitor.map_or(1.0, |m| m.scale);
+        let (default_w, default_h) = startup_inner_size(&self.cfg, monitor);
+        let physical = |logical: f64| (logical * scale).round().max(1.0) as u32;
+        let cols = self.cfg.window_width.map(|cols| {
+            cols.clamp(
+                kettle_config::WINDOW_WIDTH_MIN,
+                kettle_config::WINDOW_WIDTH_MAX,
+            )
+        });
+        let rows = self.cfg.window_height.map(|rows| {
+            rows.clamp(
+                kettle_config::WINDOW_HEIGHT_MIN,
+                kettle_config::WINDOW_HEIGHT_MAX,
+            )
+        });
+        let (exact_w, exact_h) = surface_for_grid(
+            (
+                cols.unwrap_or(STARTUP_DEFAULT_COLS) as usize,
+                rows.unwrap_or(STARTUP_DEFAULT_ROWS) as usize,
+            ),
+            cell,
+            (self.cfg.padding_x, self.cfg.padding_y),
+            self.content_bands(ws),
+            self.cfg.tab_bar_pos,
+            self.cfg.status_bar,
+            self.cfg.tab_bar_width,
+        );
+        Some((
+            if cols.is_some() {
+                exact_w
+            } else {
+                physical(default_w)
+            },
+            if rows.is_some() {
+                exact_h
+            } else {
+                physical(default_h)
+            },
+        ))
+    }
+
+    /// Start the first tab at the current startup grid: the `-e` command and
+    /// working directory when given, else the shell.
+    fn spawn_first_tab(
+        &mut self,
+        ws: &mut WindowState,
+        launch_override: bool,
+    ) -> Result<(), String> {
+        let area = self.area(ws);
+        let (cols, rows) = self.grid_of(ws, area);
+        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
+        if launch_override {
+            let argv = self.startup.command.take().unwrap_or_default();
+            let cwd = self
+                .startup
+                .cwd
+                .take()
+                .map(|p| p.to_string_lossy().into_owned());
+            ws.mux
+                .new_tab_with_geometry(&self.cfg, geometry, self.waker(), &argv, cwd.as_deref())
+                .map_err(|e| format!("failed to spawn `-e` command: {e}"))
+        } else {
+            ws.mux
+                .new_tab_geometry(&self.cfg, geometry, self.waker())
+                .map_err(|e| format!("failed to spawn shell: {e}"))
+        }
+    }
+
+    fn content_bands(&self, ws: &WindowState) -> ContentBands {
+        ContentBands {
+            tab_bar_h: self.tab_bar_h(ws),
+            status_bar_h: self.status_bar_h(ws),
+            update_banner_h: self.update_banner_h(ws),
+            vertical_title_edit_h: self.vertical_title_edit_h(ws),
+        }
+    }
+
+    fn area(&self, ws: &WindowState) -> Rect {
+        let surface = Self::surface_size(ws).unwrap_or((800, 600));
         // Delegate to the pure helper, threading
         // `cfg.tab_bar_width` so a user-configured strip width
         // is honored.
         let mut area = content_rect_for_with_strip(
             surface,
-            ContentBands {
-                tab_bar_h: self.tab_bar_h(ws),
-                status_bar_h: self.status_bar_h(ws),
-                update_banner_h: self.update_banner_h(ws),
-                vertical_title_edit_h: self.vertical_title_edit_h(ws),
-            },
+            self.content_bands(ws),
             self.cfg.tab_bar_pos,
             self.cfg.status_bar,
             self.cfg.tab_bar_width,
@@ -8914,11 +9039,7 @@ impl App {
     }
 
     fn grid_of_inset(&self, ws: &WindowState, rect: Rect, titlebar_h: f32) -> (usize, usize) {
-        let (cw, ch) = ws
-            .renderer
-            .as_ref()
-            .map(|r| (r.cell_w, r.cell_h))
-            .unwrap_or((8.0, 16.0));
+        let (cw, ch) = Self::cell_size(ws).unwrap_or((8.0, 16.0));
         let (_, _, w, h) = rect;
         grid_dims_px(
             (w, h),
@@ -8929,11 +9050,7 @@ impl App {
     }
 
     fn pty_geometry_for_grid(&self, ws: &WindowState, columns: usize, rows: usize) -> PtyGeometry {
-        let fractional_cell = ws
-            .renderer
-            .as_ref()
-            .map(|renderer| (renderer.cell_w, renderer.cell_h))
-            .unwrap_or((8.0, 16.0));
+        let fractional_cell = Self::cell_size(ws).unwrap_or((8.0, 16.0));
         let (pixel_width, pixel_height) = pty_pixel_size(fractional_cell, (columns, rows));
         PtyGeometry::new(columns, rows, pixel_width, pixel_height)
     }
@@ -10857,6 +10974,7 @@ impl App {
             size.height.max(1),
             scale,
             &self.cfg,
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -10942,6 +11060,7 @@ impl App {
                 size.height.max(1),
                 scale,
                 &cfg,
+                None,
             )
             .map_err(|error| error.to_string())?;
             if let Some(snapshot) = snapshot.as_ref() {
@@ -24600,7 +24719,24 @@ impl App {
             (_, kettle_config::WindowState::Hidden) => kettle_config::WindowState::Normal,
             (_, s) => s,
         };
-        let mut attrs = self.window_attributes(state, startup_monitor(event_loop));
+        let monitor = startup_monitor(event_loop);
+        let mut attrs = self.window_attributes(state, monitor);
+        // Load the fonts before the window, as the first window does: a fresh
+        // normal window then opens at exactly the configured grid, and the
+        // renderer takes the fonts over.
+        let fonts =
+            kettle_render::StartupFonts::load(&self.cfg, monitor.map_or(1.0, |m| m.scale) as f32);
+        if matches!(open, WindowOpen::Fresh { .. })
+            && matches!(state, kettle_config::WindowState::Normal)
+            && pos.is_none()
+            && size.is_none()
+        {
+            let mut probe = WindowState::new(0, false, Mux::new());
+            probe.startup_cell = Some(fonts.cell);
+            if let Some((width, height)) = self.startup_surface(&probe, monitor) {
+                attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
+            }
+        }
         // A restored window lands at its saved geometry, clamped to the
         // live monitor layout (its monitor may be unplugged).
         if let WindowOpen::Restore(sw) = &open
@@ -24637,6 +24773,7 @@ impl App {
             size.height.max(1),
             scale,
             &self.cfg,
+            Some(fonts),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -25722,11 +25859,57 @@ impl App {
             Some((windows, geometries))
         });
 
+        // Load the fonts before the window. A pane's grid needs only the cell,
+        // so a fresh window can size itself to exactly the configured grid and
+        // start its first pane while the window and GPU initialize. The
+        // renderer takes the fonts over.
+        let startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
+        let fonts = kettle_render::StartupFonts::load(&self.cfg, startup_scale);
+        ws.startup_cell = Some(fonts.cell);
+        // A restored window keeps its saved geometry, and a maximized or
+        // full-screen one gets its size from the OS after creation. Only a
+        // fresh normal or hidden window knows its size before it exists.
+        let early_start = restore_plan.is_none()
+            && matches!(
+                self.cfg.window_state,
+                kettle_config::WindowState::Normal | kettle_config::WindowState::Hidden
+            );
+        let startup_surface = if early_start {
+            self.startup_surface(ws, monitor)
+        } else {
+            None
+        };
+        ws.startup_surface = startup_surface;
+        // The pane starts before the window only when the window will open at
+        // this scale and size: on the monitor the cell was measured for, which
+        // a configured position could change, and within it, where the OS
+        // would shrink it. Otherwise it starts after the renderer, at the
+        // window's real size.
+        let fits_monitor = |(width, height): (u32, u32)| {
+            monitor.is_some_and(|m| {
+                f64::from(width)
+                    <= (m.logical.0 * STARTUP_MONITOR_WIDTH_FRACTION).floor() * m.scale + 1.0
+                    && f64::from(height)
+                        <= (m.logical.1 * STARTUP_MONITOR_HEIGHT_FRACTION).floor() * m.scale + 1.0
+            })
+        };
+        let spawned_early = startup_surface.is_some_and(fits_monitor)
+            && self.cfg.window_position_x.is_none()
+            && self.cfg.window_position_y.is_none();
+        if spawned_early && let Err(e) = self.spawn_first_tab(ws, has_launch_override) {
+            log::error!("{e}");
+            event_loop.exit();
+            return;
+        }
+
         // Create the window hidden while renderer init runs on the event-loop
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
         ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
         let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
+        if let Some((width, height)) = startup_surface {
+            attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
+        }
         if let Some(geometry) = restore_plan
             .as_ref()
             .and_then(|(_, geometries)| geometries.first())
@@ -25835,6 +26018,7 @@ impl App {
                 size.height.max(1),
                 scale,
                 &self.cfg,
+                Some(fonts),
             ))
         };
         // Disarm the watchdog the moment init returns, on BOTH the success and
@@ -25866,6 +26050,8 @@ impl App {
         }));
         self.gpu = Some(gpu);
         ws.renderer = Some(renderer);
+        ws.startup_cell = None;
+        ws.startup_surface = None;
         ws.accessibility = Some(accessibility);
         ws.window = Some(window);
         self.sync_output_frame_budget(ws, true);
@@ -25922,7 +26108,9 @@ impl App {
         };
         // The `--agent-server` override for the control-server start below.
         let startup_agent_server = self.startup.agent_server;
-        let restored = if has_launch_override {
+        let restored = if spawned_early {
+            true
+        } else if has_launch_override {
             let argv = cmd_override.unwrap_or_default();
             let cwd = cwd_override
                 .as_ref()
@@ -32459,7 +32647,10 @@ mod tests {
         let resumed = src
             .find("fn resumed_inner(")
             .expect("resumed_inner present");
-        let resumed_body = &src[resumed..resumed + 9000];
+        let resumed_tail = &src[resumed..];
+        let resumed_body = &resumed_tail[..resumed_tail
+            .find("\n    fn ")
+            .expect("end of resumed_inner")];
         assert!(
             resumed_body.contains("Renderer::new_with_display_handle(")
                 && resumed_body.contains("event_loop.owned_display_handle()"),
@@ -32824,6 +33015,86 @@ mod tests {
                 && last_toggle <= Duration::from_secs(10) + interval,
             "last toggle at {last_toggle:?}"
         );
+    }
+
+    /// The first window opens at exactly `window-width` x `window-height`
+    /// cells, whatever the cell size, padding, and chrome. The old 8x16 guess
+    /// opened a 120x36 request at 123x35.
+    #[test]
+    fn a_startup_surface_holds_exactly_the_requested_grid() {
+        use kettle_config::{StatusBarMode, TabBarPos};
+        let pad = (8.0, 8.0);
+        let strip = 180.0;
+        for pos in [
+            TabBarPos::Top,
+            TabBarPos::Bottom,
+            TabBarPos::Left,
+            TabBarPos::Right,
+        ] {
+            for status in [
+                StatusBarMode::Off,
+                StatusBarMode::Top,
+                StatusBarMode::Bottom,
+            ] {
+                for tab_bar_h in [0.0, 25.5] {
+                    for hundredths in (500..3000).step_by(7) {
+                        let cw = hundredths as f32 / 100.0;
+                        let ch = cw * 2.1;
+                        let bands = super::ContentBands {
+                            tab_bar_h,
+                            status_bar_h: if matches!(status, StatusBarMode::Off) {
+                                0.0
+                            } else {
+                                ch + 6.0
+                            },
+                            ..Default::default()
+                        };
+                        for grid in [(20, 5), (80, 24), (120, 36), (211, 57), (300, 100)] {
+                            let surface = super::surface_for_grid(
+                                grid,
+                                (cw, ch),
+                                pad,
+                                bands,
+                                pos,
+                                status,
+                                strip,
+                            );
+                            let (_, _, w, h) = super::content_rect_for_with_strip(
+                                surface, bands, pos, status, strip,
+                            );
+                            assert_eq!(
+                                super::grid_dims_px((w, h), (cw, ch), pad, 0.0),
+                                grid,
+                                "cell {cw}x{ch}, {pos:?}, status {status:?}, surface {surface:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A fresh window starts its first pane before it creates the window and
+    /// the GPU, so the shell starts while they initialize. The renderer then
+    /// takes over the fonts the pane was sized with.
+    #[test]
+    fn a_fresh_window_starts_its_first_pane_before_the_window_and_gpu() {
+        let src = super::production_source();
+        let body = src
+            .split_once("fn resumed_inner(")
+            .expect("resumed_inner")
+            .1;
+        let spawn = body
+            .find("self.spawn_first_tab(ws, has_launch_override)")
+            .expect("early spawn");
+        let window = body
+            .find("event_loop.create_window(attrs)")
+            .expect("window creation");
+        let gpu = body
+            .find("Renderer::new_with_display_handle(")
+            .expect("renderer init");
+        assert!(spawn < window && window < gpu);
+        assert!(body[gpu..].contains("Some(fonts),"));
     }
 
     #[test]
@@ -33243,9 +33514,15 @@ mod tests {
             "exactly the two window constructors build attributes"
         );
         assert!(
-            src.contains("self.window_attributes(state, startup_monitor(event_loop))")
-                && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
+            src.contains(
+                "let monitor = startup_monitor(event_loop);\n        let mut attrs = self.window_attributes(state, monitor);"
+            ) && src.contains("self.window_attributes(self.cfg.window_state, monitor)"),
             "both constructors must pass the startup monitor"
+        );
+        assert_eq!(
+            src.matches("self.startup_surface(").count(),
+            2,
+            "both constructors size a fresh window to the exact configured grid"
         );
         assert!(
             src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),
@@ -35665,10 +35942,11 @@ mod tests {
         let exit_needle = concat!("event_loop", ".exit();");
         let n_exits = src.matches(exit_needle).count();
         assert_eq!(
-            n_exits, 6,
-            "expected exactly 6 event_loop.exit() sites (2 in \
-             finish_window_dispatch + 4 resumed_inner startup failures); a \
-             new one must route through request_window_close instead"
+            n_exits, 7,
+            "expected exactly 7 event_loop.exit() sites (2 in \
+             finish_window_dispatch + 5 resumed_inner startup failures, one of \
+             them the first pane failing to start before the window); a new \
+             one must route through request_window_close instead"
         );
         // The close paths all flag instead of exiting: keybind CloseTab /
         // ClosePane / CloseWindow, the three confirm-dialog arms, the OS
