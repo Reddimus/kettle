@@ -179,12 +179,11 @@ impl GraphicsBudget {
 
     /// Reserve short-lived renderer storage in the process GPU account only.
     ///
-    /// A live screenshot target is bounded by its own 256 MiB readback limit,
-    /// but can legitimately exceed the 64 MiB cap for one retained terminal
-    /// image (a 6K window is about 78 MiB). It is not retained window state, so
-    /// charging it to the process limit for exactly the GPU submission/readback
-    /// lifetime preserves that distinction without weakening the hostile-image
-    /// boundary enforced by [`Self::reserve_gpu`].
+    /// A live screenshot target has its own 256 MiB readback limit and can
+    /// exceed the 64 MiB cap on one retained terminal image (a 6K window is
+    /// about 78 MiB). It is not retained window state, so it counts only
+    /// against the process limit, and only for the GPU submission and readback.
+    /// [`Self::reserve_gpu`] still holds hostile images to the per-image cap.
     pub fn reserve_transient_gpu(&self, bytes: usize) -> Option<GraphicsReservation> {
         if bytes == 0 {
             return None;

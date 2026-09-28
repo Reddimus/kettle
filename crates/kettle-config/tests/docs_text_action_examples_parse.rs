@@ -1,11 +1,11 @@
 //! Every `text:` binding printed in the docs must parse to the payload it claims.
 //!
 //! `#` opens a comment only at the START of a line, so a `keybind` example
-//! written with a trailing annotation silently absorbs it: the documented
+//! written with a trailing annotation silently absorbs it. For example,
 //! `keybind = cmd+backspace = text:\x15   # ^U — delete to start of line`
-//! parsed as `Send text "\x15   # ^U — delete to start of line"`, and a reader
-//! copying it would have sent that comment to their shell. The examples are
-//! copy-paste material, so they are held to the parser rather than to review.
+//! parses as `Send text "\x15   # ^U — delete to start of line"`, and a reader
+//! copying it sends that comment to their shell. The examples are copy-paste
+//! material, so they are held to the parser rather than to review.
 
 use std::path::{Path, PathBuf};
 

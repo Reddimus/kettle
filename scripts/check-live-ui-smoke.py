@@ -698,15 +698,10 @@ def _process_state(
 
 # macOS tears a process's Mach task down during exit while its BSD proc entry is
 # still in the session, so for a few microseconds a dying process reads as a live
-# member that `task_name_for_pid` refuses to retain. Locally that window measured
-# 29-49us across six hits in 24,000 forks, every one resolving by leaving the
-# session on the first recheck. A loaded runner widens it enough to be sampled:
-# `build (macos-latest)` aborted a whole scan on `could not retain PTY session
-# member 9105: kern_return=5` while `kill(pid, 0)` still succeeded for that pid.
-# Recheck under a deadline rather than once instantaneously. This is strictly no
-# weaker than the single recheck it replaces: a pid that stays a member and stays
-# unretainable for the full window still fails the scan closed, so the worst case
-# is the behavior that shipped before.
+# member that `task_name_for_pid` refuses to retain (`kern_return=5`). A loaded
+# runner widens that window enough to abort a whole scan, so recheck membership
+# under a deadline instead of once. A pid that stays a member and stays
+# unretainable for the full window still fails the scan closed.
 MEMBER_RETAIN_TEARDOWN_DEADLINE = 1.0
 MEMBER_RETAIN_TEARDOWN_INTERVAL = 0.001
 
@@ -730,21 +725,18 @@ def _retain_session_member(
             try:
                 sampled = os.getsid(pid)
             except ProcessLookupError:
-                # The proc entry is gone, which is how all 18 observed teardowns
-                # resolved. There is no longer a process here to own.
+                # The proc entry is gone, so teardown finished and there is no
+                # process left to own.
                 return None
             if sampled != session_id:
                 if retried:
-                    # It reported this session when the retry began and is a
-                    # live member of a different one now, so it detached under
-                    # the scan rather than finishing teardown. The single sample
-                    # this replaces would have aborted on that pid; keep
-                    # aborting, so waiting can never launder a detach into a
-                    # silent skip.
+                    # It reported this session when the retry began and now
+                    # belongs to another live session, so it detached under the
+                    # scan instead of finishing teardown. Abort, so waiting can
+                    # never launder a detach into a silent skip.
                     raise
-                # First sample, unchanged from before the deadline existed: it
-                # had already left the session, so it is not this scan's to own
-                # and the exact-environment pass is what covers it.
+                # It had already left the session on the first sample, so it is
+                # not this scan's to own. The exact-environment pass covers it.
                 return None
             if time.monotonic() >= deadline:
                 raise
@@ -5349,8 +5341,8 @@ def _create_owned_nvim_sandbox(
     windows_job: Optional[WindowsKillJob] = None
     linux_subreaper: Optional[LinuxSubreaperScope] = None
     if shell_target.powershell:
-        # Job construction is the containment precondition.  Creating the
-        # sandbox first stranded it whenever CreateJobObject/limit setup failed.
+        # Job construction is the containment precondition. Create the job
+        # first so a CreateJobObject/limit setup failure cannot strand a sandbox.
         windows_job = job_factory(named=True)
     elif shell_target.mode == "native" and platform.system() == "Linux":
         # Acquire orphan adoption before Neovim or a configured plugin starts.
@@ -5512,9 +5504,9 @@ if child == 0:
     os.close(handoff_write)
     os.setpgid(0, 0)
     # Do not let the payload touch the controlling terminal until the session
-    # leader has made this process group foreground.  Letting both processes
-    # race tcsetpgrp allowed the child, after restoring SIGTTOU, to stop itself
-    # forever as a background group.
+    # leader has made this process group foreground. If both processes race
+    # tcsetpgrp, the child can restore SIGTTOU and then stop itself forever as
+    # a background group.
     while True:
         try:
             if os.read(handoff_read, 1) == b"1":
@@ -5865,8 +5857,8 @@ while True:
 
         # Stable handles make PID reuse harmless, but an exited wrapper can no
         # longer anchor its session. The wrapper deliberately outlives its
-        # payload, so dropping one here is an explicit cleanup failure rather
-        # than the ordinary shell-exit path that used to strand descendants.
+        # payload so a shell exit cannot strand descendants; dropping one here
+        # is an explicit cleanup failure, not the ordinary shell-exit path.
         for session, handle in list(self._tracker_sessions.items()):
             if time.monotonic() >= deadline:
                 errors.append("PTY session revalidation exceeded its time limit")
@@ -6084,14 +6076,13 @@ while True:
         return probe.stdout if probe.returncode == 0 else None
 
     def __enter__(self) -> "LiveKettle":
-        # Machine-local escape hatch. Every scenario writes its own minimal
-        # config, which means it inherits none of the developer's real settings
-        # — including a pinned `gpu-device-id`/`gpu-vendor-id`. On a dual-GPU
-        # laptop that silently drops the harness onto the integrated GPU, where
-        # a driver fault can abort the process before the control server ever
-        # comes up (an 0xC0000005 with an empty log). Appending extra config
-        # here lets such a machine run the live smokes without hardcoding one
-        # developer's hardware into the repo. Unset in CI, so it is a no-op.
+        # Machine-local escape hatch. Each scenario writes a minimal config
+        # without the developer's settings, such as a pinned
+        # `gpu-device-id`/`gpu-vendor-id`. A dual-GPU laptop then silently runs
+        # the harness on the integrated GPU, where a driver fault can abort the
+        # process before the control server comes up (0xC0000005 with an empty
+        # log). Extra config lets such a machine run the live smokes without
+        # hardcoding one developer's hardware into the repo. CI leaves it unset.
         config_additions: List[str] = []
         extra_cfg = os.environ.get("KETTLE_SMOKE_EXTRA_CONFIG", "").strip()
         if extra_cfg:
@@ -8684,12 +8675,12 @@ def live_helper_selftest() -> None:
             ]
         ).returncode == 0
         if os.name != "nt":
-            # A completed leader is reaped by communicate. The internal anchor
-            # must still reserve the private PGID until cleanup, or this numeric
-            # kill target can be redirected by immediate PID/PGID reuse. Signal
-            # the exact anchor with HUP while its leader is still blocked, too:
-            # removing the inherited HUP ignore must make this test fail safely
-            # while the live leader still reserves the group.
+            # communicate() reaps a completed leader. The internal anchor must
+            # still reserve the private PGID until cleanup, or immediate
+            # PID/PGID reuse can redirect this numeric kill target. Also send
+            # HUP to the exact anchor while its leader is still blocked, so
+            # removing the inherited HUP ignore fails this test safely while
+            # the live leader still reserves the group.
             with tempfile.TemporaryDirectory(
                 prefix="kettle-provenance-anchor-"
             ) as anchor_fixture:
@@ -9612,10 +9603,9 @@ def live_helper_selftest() -> None:
         cargo_fixture.resolve()
     )
 
-    # cwd_title_command: the tab-title/split-titlebar fixtures used to be
-    # POSIX-only. Exercise both command shapes from whichever host actually
-    # runs this self-test, the same `windows=`-override pattern
-    # `agent_auth_command` already uses above.
+    # cwd_title_command (tab-title/split-titlebar fixtures): exercise both
+    # command shapes from whichever host runs this self-test, with the same
+    # `windows=` override `agent_auth_command` uses above.
     cwd_marker = "KETTLE_CWD_TITLE_TEST_MARKER"
     cwd_title = "..PI-1/platform"
     win_cwd_command = cwd_title_command(
@@ -9625,9 +9615,9 @@ def live_helper_selftest() -> None:
         "/tmp/kettle-fixture", cwd_title, cwd_marker, windows=False
     )
     # Windows: OSC 9;9 (native path, verbatim) + OSC 2, NOT the OSC 7
-    # `file://` URI shape (which would require a separator/percent-encoding
-    # translation `abbreviate_home`'s literal `$HOME`-prefix match can't
-    # tolerate).
+    # `file://` URI shape. A URI needs separator and percent-encoding
+    # translation, which `abbreviate_home`'s literal `$HOME`-prefix match
+    # can't tolerate.
     assert "Set-Location" in win_cwd_command
     assert "[Console]::Write" in win_cwd_command
     assert "]9;9;" in win_cwd_command
@@ -9638,7 +9628,7 @@ def live_helper_selftest() -> None:
     assert shell_quote(cwd_marker_left, windows=True) in win_cwd_command
     assert shell_quote(cwd_marker_right, windows=True) in win_cwd_command
     assert "Start-Sleep -Seconds 5" in win_cwd_command
-    # POSIX: unchanged `cd` + `printf` OSC 7 shape.
+    # POSIX: `cd` + `printf` OSC 7 shape.
     assert "printf" in posix_cwd_command
     assert "file://localhost" in posix_cwd_command
     assert "Set-Location" not in posix_cwd_command
@@ -10657,10 +10647,9 @@ def live_helper_selftest() -> None:
                 "the PTY tracker converted signal termination into an exit code: "
                 f"{signalled_exit.returncode}"
             )
-            # Use a real controlling terminal.  The old wrapper restored
-            # SIGTTOU in the child and let parent/child race tcsetpgrp; the
-            # losing child stopped forever before exec.  A synchronized parent
-            # handoff must reliably make the payload group foreground.
+            # Use a real controlling terminal. The parent must reliably make the
+            # payload group foreground before the child restores SIGTTOU and
+            # execs, or a child racing tcsetpgrp can stop forever.
             import fcntl
             import select
             import termios
@@ -10961,8 +10950,7 @@ def live_helper_selftest() -> None:
                     json.dumps({"panes": [{"id": 7, "child_pid": tracked.pid}]})
                 )
                 # The append-only tracker must remain active after the first
-                # successful control inventory; later panes are the exact case
-                # the old `_control_inventory_seen` shortcut discarded.
+                # successful control inventory so it still retains later panes.
                 tracked_late = subprocess.Popen(
                     tracked_argv[execute_at + 1 :],
                     env=tracked_env,
@@ -11244,10 +11232,9 @@ def live_helper_selftest() -> None:
             # A member caught in the Darwin exit-teardown window: its Mach task
             # is already gone, so retention fails, but its BSD proc entry has not
             # left the session yet, so an instantaneous recheck still calls it a
-            # member. That window measured 29-49us locally and is what aborted a
-            # `build (macos-latest)` scan on `could not retain PTY session member
-            # 9105: kern_return=5`. The injection is portable because it replaces
-            # the retention primitive outright, so Linux CI pins it too.
+            # member and would abort the scan. That window measured 29-49us
+            # locally. The injection is portable because it replaces the
+            # retention primitive outright, so Linux CI pins it too.
             teardown_batch = subprocess.Popen(
                 [
                     sys.executable,
@@ -11372,9 +11359,8 @@ def live_helper_selftest() -> None:
                 )
 
                 # A member that reports a different live session mid-retry
-                # detached under the scan rather than finishing teardown. Waiting
-                # must not launder that into a silent skip: the single sample
-                # this deadline replaced would have aborted on it.
+                # detached under the scan rather than finishing teardown. The
+                # retry must abort on it, never turn it into a silent skip.
                 teardown_attempts["count"] = 0
                 teardown_opened.clear()
                 teardown_closed.clear()
@@ -12692,8 +12678,8 @@ def live_helper_selftest() -> None:
     assert "nvim -n" in sidebar_posix and "--clean" not in sidebar_posix
     assert "+silent! LazyVCS blame toggle" in sidebar_posix
     assert "+silent! LazyVCS sidebar open" in sidebar_posix
-    # The marker must reach the buffer as an expression, never as a literal, or
-    # `wait_for_text` matches the command echo instead of the rendered buffer.
+    # The marker reaches the ready file only as a Lua expression, never as a
+    # literal in the command.
     assert lazyvcs_marker not in sidebar_posix
     # Discovery is asynchronous; without this wait the probe races the render.
     assert "lazyvcs_discovering" in sidebar_posix
@@ -12712,21 +12698,21 @@ def live_helper_selftest() -> None:
     # out -- Neovim reports the error and runs the next `+` command anyway.
     assert "pcall(require, 'lazyvcs.source_control.native')" in sidebar_posix
     assert "rendered and" in sidebar_posix
-    # Neither outcome token may appear literally in the echoed shell command:
-    # the waiter reads the terminal while that command is still being entered.
-    # Seeing a literal failure token there used to abort before Neovim even ran.
+    # Neither outcome token may appear literally in the echoed shell command.
+    # The waiter reads the terminal while that command is still being entered,
+    # so a literal failure token would abort the probe before Neovim runs.
     assert "KETTLE_LAZYVCS_SIDEBAR_ABSENT" not in sidebar_posix
     # The marker gate uses stable, visible state only. Gutter and blame are
-    # validated from the terminal grid by `lazyvcs_screen_evidence`; coupling
-    # this command to LazyVCS's private caches or extmark namespaces duplicated
-    # that proof and failed even while the required UI was visibly present.
+    # validated from the terminal grid by `lazyvcs_screen_evidence`. Reading
+    # LazyVCS's private caches or extmark namespaces here would duplicate that
+    # proof and can fail even while the required UI is visibly present.
     assert "lazyvcs_repo_cache" not in sidebar_posix
     assert "nvim_get_namespaces" not in sidebar_posix
     assert "nvim_buf_get_extmarks" not in sidebar_posix
     assert "vim.fs.normalize(vim.uv.fs_realpath" in sidebar_posix
-    # This expression is parsed by Lua. Reusing `nvim_string_expression`
-    # emitted Vimscript's single-dot concatenation and made Neovim stop at
-    # E5107 before it ever inspected LazyVCS state.
+    # This expression is parsed by Lua. Using `nvim_string_expression` here
+    # would emit Vimscript's single-dot concatenation and stop Neovim at E5107
+    # before any LazyVCS state is inspected.
     assert (
         nvim_lua_string_expression("AB")
         == "string.char(65) .. string.char(66)"
@@ -13117,15 +13103,12 @@ def lazyvcs_sidebar_command(
         else posixpath.join(repo, "tracked.txt")
     )
     tracked = shell_quote(tracked_path, windows=windows)
-    # The marker is echoed ONLY when the sidebar really rendered a repository.
-    #
-    # Writing it unconditionally after the wait would make the probe pass when
-    # `:LazyVCS` does not exist, when the plugin fails to load, or when
-    # discovery times out -- Neovim reports the error and carries on to the next
-    # `+` command regardless, so `wait_for_text` would find the marker and
-    # conclude the sidebar rendered. A distinct failure string is echoed
-    # instead, so the timeout that follows carries the reason in the captured
-    # grid rather than just "marker not found".
+    # The marker reaches `run/lazyvcs-ready` ONLY when the sidebar really
+    # rendered this repository. Neovim still runs the next `+` command after a
+    # missing `:LazyVCS`, a plugin load failure, or a discovery timeout, so an
+    # unconditional marker would satisfy the marker gate. On failure, a
+    # distinct string carrying the reason is echoed instead, and the sidebar
+    # waiter stops on it.
     check = (
         "+lua local ok, native = pcall(require, 'lazyvcs.source_control.native'); "
         "local info = ok and debug.getinfo(native._state, 'S') or nil; "
@@ -16504,9 +16487,8 @@ def run_interaction(kettle: str, root: Path) -> Path:
         live.ctl("send_keys", params={"keys": ["ctrl+c"]})
         states.append(capture_live_state(live, out, "confirm-cancelled"))
 
-        # Keep the same focused scenario embedded in the broad interaction
-        # walk, while also exposing it alone for virtual surfaces that cannot
-        # be copied into the screenshot pipeline.
+        # The hover-wheel smoke also runs this scenario alone, for virtual
+        # surfaces that cannot be copied into the screenshot pipeline.
         exercise_hovered_pane_wheel(live, out)
 
         before_resize_geo = live.json_ctl("ui_geometry")
@@ -16600,10 +16582,9 @@ def run_interaction(kettle: str, root: Path) -> Path:
             raise SystemExit(f"interaction smoke: search overlay changed too few pixels ({search_changes})")
         states.append(capture_live_state(live, out, "search-open"))
 
-        # Keyed by action rather than written as positional tuples so the
-        # drift guard in kettle-config sees these six the same way it sees
-        # every inline dispatch. As tuples they were invisible to it and could
-        # all have gone stale while it stayed green.
+        # Keyed by action, not positional tuples, because the drift guard in
+        # kettle-config finds action names by their `"action":` key. Tuples
+        # would let these six go stale while the guard stays green.
         modal_sequence = [
             {"action": "ssh", "modal": "ssh_launcher", "label": "ssh-launcher"},
             {"action": "open_layout_picker", "modal": "layout_picker", "label": "layout-picker"},
@@ -17217,10 +17198,9 @@ def run_window_close_isolation(kettle: str, root: Path) -> Path:
         # asynchronous PTY reap path is the one under test. That is the path a
         # CLI exiting inside one of several Kettle windows takes.
         # `send_text` is literal. A line feed submits a Unix shell line but is
-        # not the Enter key ConPTY expects, so the Windows run previously sat
-        # here without ever exercising the child-exit path. Type the command,
-        # then encode Enter through the pane's live terminal mode just as a
-        # real key press does.
+        # not the Enter key ConPTY expects, so the Windows child would never
+        # exit. Type the command, then encode Enter through the pane's live
+        # terminal mode as a real key press does.
         live.ctl("send_text", params={"pane": detached_pane, "text": "exit"})
         live.ctl(
             "send_keys",
@@ -17495,9 +17475,8 @@ def run_split_titlebar_position(
             raise SystemExit(str(error)) from error
 
         action = live.json_ctl(
-            # `toggle_broadcast_all` was never an action name and no longer
-            # resolves at all. `broadcast_all` was deliberately re-pointed at
-            # window scope, so spell the scope this scenario wants.
+            # Spell out the scope this scenario wants. `broadcast_all` also
+            # resolves to window scope, but its name does not say so.
             "perform_action", params={"action": "toggle_broadcast_window"}
         )
         receiving_geometry = live.json_ctl("ui_geometry")
@@ -18303,8 +18282,7 @@ def run_line_edit_chords(kettle: str, root: Path) -> Path:
         query = f"{seed} ZZZZ"
         # `parse_ui_key` splits a token on `+` and then trims it, so a bare
         # " " token trims to the empty string and is rejected. The space bar
-        # has a name for exactly this reason. (`run_search_history` types a
-        # single-word query and never met it.)
+        # has a name for exactly this reason.
         keys = ["space" if c == " " else c for c in query]
         applied = live.json_ctl("dispatch_ui_key", {"keys": keys})
         if int(applied.get("keys", 0)) != len(query) or applied.get("open") is not True:
@@ -18401,8 +18379,7 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         # Which face can serve these codepoints is a property of the host. A
         # runner with no monochrome family that carries U+23FA cannot produce a
         # monochrome bullet, and kettle deliberately leaves such a system on the
-        # cascade it had, so asserting one here would be asserting something
-        # about the image rather than about kettle.
+        # cascade it had. Asserting one here would test the host, not kettle.
         if "text_presentation_face" not in geometry:
             raise SystemExit(
                 "text-presentation smoke: ui_geometry has no "

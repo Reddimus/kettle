@@ -4,8 +4,8 @@
 //! - `pane_rooted`: `RemoteScanner::refresh_roots` for one pane-like tree, the
 //!   path the app uses. Linux and macOS walk only that tree.
 //! - `whole_process_table`: `RemoteScanner::refresh`, the sysinfo snapshot of
-//!   every process with argv and cwd, which macOS used for every poll before
-//!   the rooted walk.
+//!   every process with argv and cwd. Platforms other than Linux and macOS use
+//!   it for every poll.
 //!
 //! Run: `cargo bench -p kettle-remote`. The whole-table figure scales with the
 //! number of processes on the machine, so compare runs on the same host.

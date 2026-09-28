@@ -50,14 +50,13 @@ STEP_HEADING = re.compile(r"^(?P<indent> *)- name: (?P<name>.*?) *$")
 def workflow_step(workflow: str, name: str) -> str:
     """Return the workflow step named `name`, heading line included.
 
-    Bounding a step with the name of the step that follows it ties the
-    slice to an unrelated heading: insert a step between the two and the
-    slice quietly grows to cover it, so assertions about the first step
-    pass on the inserted step's script. Give the following step a new
-    name and the slice runs to the end of the file instead, still
-    silently. This locates the step by its own heading, requires that
-    heading to appear exactly once, and ends the step where its block
-    ends -- at the first line indented no deeper than the heading's `-`.
+    Slicing up to the next step's heading, found by that step's name, is
+    fragile. A step inserted between the two silently joins the slice, so
+    assertions about this step can pass on the inserted step's script.
+    Renaming the next step silently runs the slice to the end of the file.
+    Instead, this finds the step by its own heading, requires that heading
+    to appear exactly once, and ends the step at the first line indented no
+    deeper than the heading's `-`.
     """
     lines = workflow.splitlines(keepends=True)
     headings = [
@@ -309,11 +308,9 @@ class ManifestTests(unittest.TestCase):
             self.assertIn("--locked", cargo_line)
 
     def test_workflow_step_ends_where_its_own_block_ends(self):
-        # A step read as "everything between my heading and the next
-        # heading I happen to name" absorbs whatever is inserted between
-        # the two, so an assertion about the first step passes on text
-        # that belongs to a later one. Here the changelog copy lives in
-        # the step after the Linux one, and must not be found in it.
+        # The changelog copy lives in the step after the Linux one. Slicing
+        # up to a later heading, such as the macOS step's, would absorb that
+        # step, so the copy must not be found in the Linux slice.
         linux = workflow_step(SPLIT_TRAP_WORKFLOW, "Package (Linux)")
 
         self.assertIn("mkdir -p dist/kettle/packaging/linux", linux)

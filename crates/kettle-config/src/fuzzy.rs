@@ -1,9 +1,9 @@
 //! A small, dependency-free fuzzy matcher (subsequence scoring) shared by
-//! the SSH launcher and any future command palette.
+//! the SSH launcher and the command palette.
 //!
 //! `pattern` matches `candidate` if its characters appear in order (a
 //! subsequence), case-insensitively. The score rewards matches that are
-//! contiguous, at word boundaries (`-`, `_`, `.`, ` `, `/`, or camelCase),
+//! contiguous, at word boundaries (`-`, `_`, `.`, ` `, `/`, `:`, or camelCase),
 //! and especially a leading-prefix match — so `gp` ranks `gpu-box` above
 //! `staging-prod`. Higher is better; `None` means no match. Pure.
 
@@ -14,12 +14,10 @@ pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
     if pattern.is_empty() {
         return Some(0);
     }
-    // Fold the pattern one char→one char, exactly as the
-    // candidate side does below (`cc.to_lowercase().next()`). The old
-    // `flat_map(to_lowercase)` expanded a multi-codepoint fold (e.g. `İ`→`i̇`,
-    // `ß` stays) into several pattern chars while the candidate kept one per
-    // position, so such characters never matched. Symmetric single-char folding
-    // keeps the positional walk consistent.
+    // Fold each pattern char to one char, exactly as the candidate side does
+    // below (`cc.to_lowercase().next()`). A full `flat_map(to_lowercase)` fold
+    // can expand one char into several (e.g. `İ`→`i̇`; `ß` stays one), while the
+    // candidate keeps one per position, so such a char would never match.
     let pat: Vec<char> = pattern
         .chars()
         .map(|c| c.to_lowercase().next().unwrap_or(c))
@@ -58,7 +56,7 @@ pub fn score(pattern: &str, candidate: &str) -> Option<i32> {
         pi += 1;
     }
     if pi == pat.len() {
-        // Prefer shorter candidates and earlier completion (less gap).
+        // Prefer shorter candidates (fewer unmatched chars).
         Some(total - (cand.len() as i32 - pat.len() as i32).max(0) / 4)
     } else {
         None
@@ -86,8 +84,8 @@ mod tests {
 
     /// A char whose `to_lowercase()` expands to multiple
     /// codepoints (`İ` → `i` + combining dot) must still fuzzy-match itself.
-    /// The old asymmetric folding (multi-char pattern vs single-char candidate)
-    /// made it never match.
+    /// Asymmetric folding (multi-char pattern vs single-char candidate) would
+    /// make it never match.
     #[test]
     fn score_matches_multi_codepoint_case_fold() {
         assert!(score("İ", "İ").is_some(), "a char must fuzzy-match itself");

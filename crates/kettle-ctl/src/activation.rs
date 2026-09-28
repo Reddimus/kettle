@@ -76,10 +76,10 @@ pub struct ActivationRequest {
     cwd: Option<String>,
     identity: LaunchIdentity,
     /// Idempotency key: one value per *launch*, kept across that launch's
-    /// retries. Delivery here is at-least-once — the primary opens the window
-    /// before its response is written, so a response lost to a slow cold start
-    /// makes the secondary re-send the identical request — and without a key
-    /// the primary cannot tell that retry apart from a second launcher click.
+    /// retries. Delivery is at-least-once. The primary opens the window before
+    /// it writes the response, so when a slow cold start loses the response,
+    /// the secondary re-sends the identical request. Without a key the primary
+    /// cannot tell that retry apart from a second launcher click.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch_id: Option<String>,
 }
@@ -387,12 +387,12 @@ impl LaunchLedger {
             });
             let Some(existing) = records.iter().find(|record| record.launch_id == launch_id) else {
                 if records.len() >= MAX_REMEMBERED_LAUNCHES {
-                    // Oldest settled first; in-flight records must survive or
-                    // a duplicate could re-enter the handler. With nothing
-                    // settled to drop, this launch goes unremembered instead —
-                    // the concurrent-client cap keeps that unreachable today,
-                    // and it must stay a lost guarantee for the new launch
-                    // rather than a broken one for an older launch.
+                    // Evict the oldest settled record. In-flight records must
+                    // survive, or a duplicate could re-enter the handler. With
+                    // nothing settled to drop, this launch goes unremembered
+                    // instead. The concurrent-client cap keeps that unreachable
+                    // today. If it ever happens, the new launch must be the one
+                    // to lose duplicate protection, never an older launch.
                     let Some(victim) = records.iter().position(|record| record.status.is_some())
                     else {
                         return LaunchClaim::Unrecorded;
@@ -588,27 +588,25 @@ fn activate_once(
         LaunchClaim::Unrecorded => run(request),
         // The first attempt is still inside the handler and this wait is up.
         //
-        // The wait is deliberately SHORTER than the handler's own bound —
-        // `LAUNCH_JOIN_WAIT` is 2.5 s against the UI's 5 s
-        // `UI_CONFIRM_TIMEOUT` — because it is bounded by the requester's read
-        // deadline, not by the handler (see the static assertion on
+        // `LAUNCH_JOIN_WAIT` (2.5 s) is deliberately shorter than the handler's
+        // bound, the UI's 5 s `UI_CONFIRM_TIMEOUT`, because the requester's read
+        // deadline bounds it, not the handler (see the static assertion on
         // `LAUNCH_JOIN_WAIT`). Waiting the handler out would produce an answer
         // nobody is left to read.
         //
-        // So this is not "the owner has certainly failed"; it is "no answer
-        // can be had in the time available". `Busy` is the launcher's "carry on
-        // in your own process" path, so the click still opens a window —
-        // which running the handler again here could not promise, because the
-        // outcome this launch is waiting on is not ours to produce.
+        // So `Busy` here means "no answer in time", not "the owner has certainly
+        // failed". It sends the launcher down its "carry on in your own process"
+        // path, so the click still opens a window. Running the handler again
+        // could not promise that, because this launch's outcome is the owner's
+        // to produce.
         //
-        // The cost is stated plainly: a duplicate that arrives while the owner
-        // is between 2.5 s and 5 s into the handler gets `Busy` and opens a
-        // second window, where waiting the full 5 s would have let it inherit
-        // the owner's success. That band is hard to reach — a retry follows the
-        // previous attempt's own 5 s read timeout, by which point the 5 s-bounded
-        // handler has settled — and the alternative is an answer that arrives
-        // after the requester has given up, which opens a second window anyway
-        // and takes twice as long to do it.
+        // The cost: a duplicate arriving 2.5 s to 5 s into the owner's handler
+        // gets `Busy` and opens a second window, where a full 5 s wait would have
+        // inherited the owner's success. That band is hard to reach, since a
+        // retry follows the previous attempt's 5 s read timeout, by which point
+        // the 5 s-bounded handler has settled. A longer wait would answer after
+        // the requester gave up, opening a second window anyway and taking twice
+        // as long.
         LaunchClaim::Undecided => ResponseStatus::Busy,
     }
 }
@@ -766,14 +764,9 @@ mod tests {
 
     /// A scratch directory that removes itself.
     ///
-    /// This used to build a path from the pid and delete whatever the *previous*
-    /// run with that pid and label had left, never its own — so every test run
-    /// leaked one directory, and since the pid varies they accumulated without
-    /// bound. A sweep of a Windows machine found 148 `kettle*` entries in
-    /// `%TEMP%`, most of them from this helper. `PrivateTempDir` owns a
-    /// `TempDir`, so the directory goes away when the returned guard drops;
-    /// callers that name it `_dir` keep it alive for the test body, which is
-    /// what the binding was already doing.
+    /// `PrivateTempDir` owns a `TempDir`, so the directory goes away when the
+    /// returned guard drops instead of leaking one per test run. Callers that
+    /// name it `_dir` keep it alive for the test body.
     fn test_paths(label: &str) -> (kettle_test_support::PrivateTempDir, ActivationPaths) {
         let dir = kettle_test_support::private_tempdir(&format!("kettle-activation-{label}-"));
         let paths = activation_paths(dir.path());
@@ -931,7 +924,7 @@ mod tests {
 
     /// The test server must close the election lock before its scratch guard
     /// drops. Windows cannot remove an open lock file, so a detached
-    /// process-lifetime thread leaked one directory per test run there.
+    /// process-lifetime thread would leak one directory per test run there.
     #[test]
     fn a_stopped_test_server_releases_its_scratch_directory() {
         let (dir, paths) = test_paths("cleanup-stopped");
@@ -1080,11 +1073,10 @@ mod tests {
     }
 
     /// The wait a duplicate spends in the ledger is only worth spending if its
-    /// answer can still be delivered. The requester is reading under a deadline
-    /// of one `IO_TIMEOUT` that started *before* the wait did — it had to send
-    /// the request first — so a wait that runs to the same bound produces a
-    /// status written into a socket nobody is reading, and the launch has
-    /// waited the whole time for nothing.
+    /// answer can still be delivered. The requester sent the request first, so
+    /// its one-`IO_TIMEOUT` read deadline started *before* the wait did. A wait
+    /// that runs to the same bound writes a status into a socket nobody is
+    /// reading, and the launch has waited the whole time for nothing.
     #[test]
     fn a_duplicate_of_a_stuck_launch_is_answered_before_its_requester_gives_up() {
         assert!(

@@ -1,6 +1,6 @@
-//! `kettle exec` (agent-first A1) — run a command under a real
-//! PTY with full VT emulation, headlessly (no GPU, no window, no winit), and
-//! stream its output to this process's real stdout.
+//! `kettle exec` runs a command under a real PTY with full VT emulation,
+//! headlessly (no GPU, no window, no winit), and streams its output to this
+//! process's real stdout.
 //!
 //! This is the non-interactive half of "agents work great with kettle". An AI
 //! agent (or any script) gets: a real TTY for the child (so `ls --color`,
@@ -47,9 +47,9 @@ use kettle_core::{
 /// screen-differ can emit a final paint after the child is gone. Same order of
 /// magnitude as the dev-record reap settle.
 const SETTLE: Duration = Duration::from_millis(60);
-/// How long an exit event may lead the authoritative child status. Keep the
-/// lifecycle loop polling during this window so cancellation and deadlines
-/// remain enforceable.
+/// How long an exit event may lead the authoritative child status.
+/// `wait_for_exit_code` polls up to this long for a killed child's status
+/// during teardown.
 const CHILD_EXIT_STATUS_WAIT: Duration = Duration::from_millis(250);
 /// How long ConPTY may keep its reader alive after the child is gone before
 /// ordinary completion closes the pseudoconsole to obtain a real EOF.
@@ -348,20 +348,20 @@ pub struct AnsiStripper {
     /// UTF-8 continuation bytes still owed by the character being decoded.
     ///
     /// Terminal output is UTF-8, and the C1 control bytes this stripper
-    /// recognizes — `0x90` DCS, `0x98` SOS, `0x9b` CSI, `0x9d` OSC, `0x9e` PM,
-    /// `0x9f` APC — are all in the `0x80..=0xbf` continuation range. Treating
-    /// them as controls wherever they appeared ate the middle of ordinary
-    /// characters and left invalid UTF-8 behind:
+    /// recognizes (`0x90` DCS, `0x98` SOS, `0x9b` CSI, `0x9d` OSC, `0x9e` PM,
+    /// `0x9f` APC) are all in the `0x80..=0xbf` continuation range. Treating
+    /// them as controls wherever they appear would eat the middle of ordinary
+    /// characters and leave invalid UTF-8 behind:
     ///
-    /// * `Û` is `c3 9b` — the `9b` was read as CSI, so `Ûh` became a lone `c3`.
-    /// * `‘` is `e2 80 98` — the `98` was read as SOS.
-    /// * `▐` is `e2 96 90` — the `90` was read as DCS.
+    /// * `Û` is `c3 9b`; reading `9b` as CSI would turn `Ûh` into a lone `c3`.
+    /// * `‘` is `e2 80 98`; the `98` would read as SOS.
+    /// * `▐` is `e2 96 90`; the `90` would read as DCS.
     ///
     /// Box-drawing and smart quotes are exactly what a TUI emits, and MCP's
-    /// `kettle_run` strips by default, so this corrupted the output an agent
-    /// reads. Counting the sequence keeps a continuation byte a continuation
-    /// byte; a C1 byte in ground position, where UTF-8 could not put one, is
-    /// still honored for genuinely 8-bit streams.
+    /// `kettle_run` strips by default, so this would corrupt the output an
+    /// agent reads. Counting the sequence keeps a continuation byte a
+    /// continuation byte; a C1 byte in ground position, where UTF-8 could not
+    /// put one, is still honored for genuinely 8-bit streams.
     utf8_continuation: u8,
     /// Whether the lead byte of that character reached `out`.
     ///
@@ -394,21 +394,19 @@ impl AnsiStripper {
     pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
         for &b in input {
             // Mid-character: a continuation byte belongs to the character being
-            // decoded and can never be a control, in ANY state. Tracking this
-            // only in Ground still let `0x9c` inside an OSC read as ST — so
-            // `ESC ] 0 ; ✳ title BEL` (`✳` is `e2 9c b3`) terminated the string
-            // early and leaked the rest of it as visible text.
+            // decoded and can never be a control, in ANY state. Otherwise `0x9c`
+            // inside an OSC reads as ST, so `ESC ] 0 ; ✳ title BEL` (`✳` is
+            // `e2 9c b3`) ends the string early and leaks the rest as visible
+            // text.
             if self.utf8_continuation > 0 {
                 if matches!(b, 0x80..=0xbf) {
                     self.utf8_continuation -= 1;
                     // A continuation goes wherever its LEAD went, not wherever
-                    // the state machine has since arrived. Asking the current
-                    // state instead split characters in half: the forced
+                    // the state machine has since arrived. The forced
                     // resynchronization that ends an over-long control string
-                    // can land on a lead byte, swallowing it and leaving the
-                    // machine in ground — and the continuations were then
-                    // emitted with no lead in front of them, so everything
-                    // decoding stdout saw invalid UTF-8 from that point on.
+                    // can swallow a lead byte and return to ground. Emitting
+                    // its continuations there would leave them with no lead,
+                    // and stdout would be invalid UTF-8 from then on.
                     if self.utf8_emitted {
                         out.push(b);
                     }
@@ -421,22 +419,18 @@ impl AnsiStripper {
                 self.utf8_continuation = 0;
             }
             // A lead byte is tracked in EVERY state, not only where text is
-            // read.
+            // read. `ESC [` followed by 64 KiB of parameter bytes forces a
+            // resynchronization out of `Csi`. If that bound lands on a lead
+            // byte, the lead is consumed there, and untracked continuations
+            // would then be emitted in ground with nothing in front of them.
+            // `EscapeIntermediate` has the same bound, and `ESC` followed
+            // directly by a lead byte splits a character the same way without
+            // any 64 KiB.
             //
-            // Restricting this to `Ground | String` left the same split-character
-            // hole in the other two bounded states. `ESC [` followed by 64 KiB of
-            // parameter bytes forces a resynchronization out of `Csi`, and if
-            // that bound lands on a lead byte the lead is consumed there while
-            // its continuations arrive in ground — emitted with nothing in front
-            // of them. `EscapeIntermediate` has the identical bound, and `ESC`
-            // followed directly by a lead byte reaches it with no 64 KiB
-            // required at all.
-            //
-            // Tracking everywhere is also strictly safer than not: a byte in
-            // `0xc2..=0xf4` is not a legal CSI parameter, intermediate, or final
-            // byte, so the only streams this changes are already malformed — and
-            // if the bytes that follow turn out NOT to be continuations, the
-            // shield above releases them on the spot.
+            // Tracking everywhere changes only malformed streams, because a
+            // byte in `0xc2..=0xf4` is not a legal CSI parameter, intermediate,
+            // or final byte. If the bytes that follow are NOT continuations,
+            // the shield above releases them at once.
             self.utf8_continuation = match b {
                 0xc2..=0xdf => 1,
                 0xe0..=0xef => 2,
@@ -503,10 +497,8 @@ impl AnsiStripper {
                         StripState::Ground
                     } else if escaped {
                         // ESC starts a fresh escape sequence from every control
-                        // string. OSC used to be the lone exception because
-                        // its BEL terminator was folded into this condition:
-                        // `ESC ] title ESC c` therefore swallowed all later
-                        // text while DCS/APC/PM/SOS correctly dispatched `c`.
+                        // string, OSC included, so `ESC ] title ESC c`
+                        // dispatches `c` instead of swallowing all later text.
                         // The terminators above still win for ESC \\ and BEL.
                         Self::after_escape(b)
                     } else if remaining <= 1 {
@@ -610,11 +602,10 @@ pub fn run_exec(opts: ExecOpts) -> i32 {
     run_exec_engine(opts, &default_size_probe, &mut output, None, false)
 }
 
-/// (agent-first A3): run a command headlessly and CAPTURE its output
-/// in-process (instead of streaming to stdout) — the engine behind the
-/// `kettle_run` MCP tool. Returns `(exit_code, output)`; the output is the
-/// tail-capped (1 MiB) child output in the requested mode (strip-ansi
-/// recommended for agent assertions).
+/// Run a command headlessly and CAPTURE its output in-process instead of
+/// streaming it to stdout. This is the engine behind the `kettle_run` MCP tool.
+/// Returns `(exit_code, output)`; the output is the tail-capped (1 MiB) child
+/// output in the requested mode (strip-ansi recommended for agent assertions).
 pub fn run_exec_capture(opts: ExecOpts) -> (i32, String) {
     run_exec_capture_inner(opts, None)
 }
@@ -629,11 +620,11 @@ pub fn run_exec_capture_cancellable(opts: ExecOpts, cancelled: &AtomicBool) -> (
 /// A sink that keeps only the last `cap` bytes, so an unbounded producer cannot
 /// exhaust memory. Agents want "what just happened" anyway.
 ///
-/// Trimming to exactly `cap` on every write made this quadratic in the output
-/// volume: once full, a 4-KiB chunk shifted the whole 1-MiB buffer down by 4
-/// KiB. A build emitting 100 MiB moved ~25 GiB of memory to keep the last 1 MiB
-/// of it, on the thread draining the PTY. Letting the buffer run to `cap` bytes
-/// of slack before compacting makes each shift pay for at least `cap` bytes of
+/// Trimming to exactly `cap` on every write would be quadratic in the output
+/// volume. Once full, each 4-KiB chunk would shift the whole 1-MiB buffer, so a
+/// build emitting 100 MiB would move ~25 GiB of memory to keep the last 1 MiB,
+/// on the thread draining the PTY. Letting the buffer run to `cap` bytes of
+/// slack before compacting makes each shift pay for at least `cap` bytes of
 /// input, so the total work is linear. The peak cost is one extra `cap` of
 /// memory.
 struct TailSink {
@@ -770,14 +761,11 @@ fn wait_for_lifecycle_input(
 /// A disconnected one IS evidence: the reader owns the only sender and drops it
 /// on the way out of its loop, after EOF.
 ///
-/// Treating "empty" as "finished" cost the child's output. For a command that
-/// writes a little and exits at once, the exit status could be observed and the
-/// settle window elapse while the bytes were still in flight; the loop then
-/// finished the recorder and closed stdout, and they arrived with nowhere to
-/// go. It showed up as two macOS intermittents that looked unrelated —
-/// `exec_streams_stdout_and_exits_zero` returning exit 0 with empty stdout, and
-/// `exec_record_writes_replayable_asciicast` writing a trace containing only its
-/// header — because one gate feeds both stdout and the recorder.
+/// Treating "empty" as "finished" loses output. A command that writes a little
+/// and exits at once can have its status observed and the settle window elapse
+/// while its bytes are still in flight. The loop would then finish the recorder
+/// and close stdout before they arrive, and because one gate feeds both, stdout
+/// and the recorder would lose the same bytes.
 fn drain_output_slice(
     receiver: &Receiver<Vec<u8>>,
     recorder: &mut Option<kettle_core::record::Recorder>,
@@ -910,14 +898,14 @@ fn drain_event_slice_until<T>(receiver: &Receiver<T>, mut handle: impl FnMut(T) 
 
 /// Report a failure that happens before the PTY exists.
 ///
-/// The message still goes to stderr, and now also into the output sink when
-/// that sink is a plain byte stream. `run_exec_capture` returns only an exit
-/// code and that sink, and the MCP `kettle_run` tool builds its whole reply
-/// from those two, so an agent that typo'd a binary name received
-/// `exit code: 125` and nothing else. Command-not-found and a bad working
-/// directory are the two most common ways that tool fails, and 125 is
-/// documented as an internal error, so the agent concluded kettle was broken
-/// rather than fixing its own argument.
+/// The message goes to stderr, and also into the output sink when that sink is
+/// a plain byte stream. `run_exec_capture` returns only an exit code and that
+/// sink, and the MCP `kettle_run` tool builds its whole reply from those two.
+/// Without the message, an agent that mistypes a binary name gets only
+/// `exit code: 125`. Command-not-found and a bad working directory are the two
+/// most common ways that tool fails, and 125 is documented as an internal
+/// error, so the agent would conclude kettle is broken instead of fixing its
+/// own argument.
 ///
 /// JSON mode is deliberately left alone. Its stream is a documented sequence
 /// that opens with a `start` event, and emitting an `output` event before one
@@ -1708,10 +1696,9 @@ fn pty_completion_snapshot_is_current(
 ///
 /// Without `--cwd` the child runs where `kettle exec` was started, like any
 /// other command runner. That directory is passed to the PTY explicitly
-/// because the backend starts a child with no directory in `$HOME`, which is
-/// where every `kettle exec` and MCP `kettle_run` without a cwd used to run. A
-/// current directory that no longer exists fails the run rather than falling
-/// back to `$HOME`, a directory the caller never named.
+/// because the backend starts a child with no directory in `$HOME`. A current
+/// directory that no longer exists fails the run rather than falling back to
+/// `$HOME`, a directory the caller never named.
 fn resolve_exec_cwd(explicit: Option<&Path>) -> Result<PathBuf, String> {
     match explicit {
         Some(cwd) => usable_directory(cwd).map_err(|error| format!("invalid --cwd: {error}")),
@@ -1823,7 +1810,7 @@ impl ExecProcessTree {
 
 /// Say so when a child could not be terminated.
 ///
-/// `kettle exec` is about to report a timeout and exit. If the kill genuinely
+/// `kettle exec` is about to stop the run and exit. If the kill genuinely
 /// failed the child is still running, which the caller — often an automation
 /// harness that will move on to the next command — needs to know. An
 /// already-exited child is not a failure and is reported as success by the
@@ -2446,10 +2433,10 @@ fn poll_recording_finish(
 /// `STATUS_ACCESS_VIOLATION` 0xC0000005), so we reinterpret the bits rather
 /// than truncating or saturating.
 ///
-/// Saturating was wrong for exactly the case the line above names: it turned
-/// 0xC0000005 into 0x7FFFFFFF and destroyed the diagnostic. `as i32` preserves
-/// every bit, and Windows takes the low 32 bits back off the process exit, so
-/// the caller sees the status the child really died with.
+/// Saturating would turn 0xC0000005 into 0x7FFFFFFF and destroy the
+/// diagnostic. `as i32` preserves every bit, and Windows takes the low 32 bits
+/// back off the process exit, so the caller sees the status the child really
+/// died with.
 fn clamp_code(code: u32) -> i32 {
     #[cfg(unix)]
     {
@@ -3045,9 +3032,9 @@ impl ExecOutput for WorkerOutput {
 
 /// `--json` event shapes, serialized without building a `serde_json::Value`.
 ///
-/// Fields are declared in alphabetical order because that is the order the
-/// `Value` maps these replaced serialized in (serde_json sorts keys unless
-/// `preserve_order` is enabled), so every event keeps its exact bytes.
+/// Fields are declared in alphabetical order, the order a `serde_json::Value`
+/// map serializes in (serde_json sorts keys unless `preserve_order` is
+/// enabled), so every event keeps its exact bytes.
 #[derive(serde::Serialize)]
 struct JsonStartEvent {
     cols: u16,
@@ -3074,10 +3061,10 @@ struct JsonExitEvent {
 
 /// Append `event` to `line` as one newline-terminated JSON line.
 ///
-/// Callers hand the finished line to the sink in one `write_all`. `writeln!`
-/// on a `serde_json::Value` issued one `write` per formatter piece, about 30
-/// per event, and the Unix sink is an unbuffered descriptor: 30 syscalls, and
-/// 30 places where a stop or failure left half a JSON line behind.
+/// Callers hand the finished line to the sink in one `write_all`. The Unix
+/// sink is an unbuffered descriptor, and serializing straight into it takes
+/// one `write` per formatter piece, about 30 per event. Each is a syscall and
+/// a place where a stop or failure can leave half a JSON line behind.
 fn append_json_line(line: &mut Vec<u8>, event: &impl serde::Serialize) -> std::io::Result<()> {
     serde_json::to_writer(&mut *line, event)?;
     line.push(b'\n');
@@ -3190,9 +3177,9 @@ impl Outputter {
 
     fn finish(&mut self, sink: &mut dyn Write, code: i32, dur: Duration) -> std::io::Result<()> {
         if self.mode == OutputMode::Json {
-            // v2.27.0 (audit): flush any trailing incomplete UTF-8 sequence
-            // lossily before the exit event, so a stream that ends mid-codepoint
-            // doesn't silently drop its final bytes.
+            // Flush any trailing incomplete UTF-8 sequence lossily before the
+            // exit event, so a stream that ends mid-codepoint doesn't silently
+            // drop its final bytes.
             // Both lines go to the sink in one `write_all`.
             self.line.clear();
             if !self.utf8_carry.is_empty() {
@@ -3735,10 +3722,10 @@ mod tests {
     /// A capturing caller must be told *why* a run never started.
     ///
     /// `run_exec_capture` returns an exit code and the sink, and the MCP
-    /// `kettle_run` tool builds its whole reply from those two. Before this,
-    /// a command that could not be spawned produced `exit code: 125` and an
-    /// empty capture, so an agent that mistyped a binary name had nothing to
-    /// act on and 125 is documented as an internal error.
+    /// `kettle_run` tool builds its whole reply from those two. A command that
+    /// cannot be spawned exits 125, which is documented as an internal error.
+    /// Without the reason in the capture, an agent that mistyped a binary name
+    /// has nothing to act on.
     #[test]
     fn a_capturing_caller_is_told_why_the_command_never_started() {
         let missing = opts_for(vec!["kettle-no-such-binary-8f21c".into()], None);
@@ -3776,17 +3763,17 @@ mod tests {
     }
     use super::*;
 
-    /// `--strip-ansi` corrupted ordinary text, and MCP `kettle_run` strips by
-    /// default — so this was the output an agent CLI read.
+    /// `--strip-ansi` must not corrupt ordinary text. MCP `kettle_run` strips
+    /// by default, so this is the output an agent CLI reads.
     ///
     /// The C1 controls the stripper recognizes (`0x90` DCS, `0x98` SOS, `0x9b`
     /// CSI, `0x9d` OSC, `0x9e` PM, `0x9f` APC) all sit in UTF-8's
-    /// `0x80..=0xbf` continuation range. Honoring them anywhere ate the middle
-    /// of characters and emitted invalid UTF-8: `Ûh` became a lone `c3`.
+    /// `0x80..=0xbf` continuation range. Honoring them anywhere would eat the
+    /// middle of characters and emit invalid UTF-8, turning `Ûh` into a lone
+    /// `c3`.
     ///
-    /// The three cases below are not exotic. Box-drawing and smart quotes are
-    /// what a TUI — tmux, AstroNvim, any agent's status output — emits
-    /// constantly.
+    /// These cases are not exotic. Box-drawing and smart quotes are what a TUI
+    /// (tmux, AstroNvim, any agent's status output) emits constantly.
     #[test]
     fn stripping_ansi_does_not_eat_the_middle_of_a_utf8_character() {
         for (label, text) in [
@@ -3810,10 +3797,11 @@ mod tests {
 
     /// A UTF-8 character INSIDE a control string must not terminate it.
     ///
-    /// Tracking continuation bytes only in ground state left `0x9c` inside an
-    /// OSC reading as ST: `ESC ] 0 ; ✳ title BEL X` (`✳` is `e2 9c b3`) ended
-    /// the string at the `9c` and leaked `b3 title BEL X` into the output as
-    /// visible garbage. Titles are exactly where non-ASCII shows up.
+    /// Tracking continuation bytes only in ground state would let `0x9c`
+    /// inside an OSC read as ST. In `ESC ] 0 ; ✳ title BEL X` (`✳` is
+    /// `e2 9c b3`), the string would end at the `9c` and leak `b3 title BEL X`
+    /// into the output as visible garbage. Titles are exactly where non-ASCII
+    /// shows up.
     #[test]
     fn a_utf8_character_inside_a_control_string_does_not_terminate_it() {
         for (label, payload) in [
@@ -3839,10 +3827,10 @@ mod tests {
 
     /// A malformed lead byte must not shield the bytes after it.
     ///
-    /// Counting N continuations unconditionally swallowed whatever followed,
-    /// so a real control could be missed and a lead-followed-by-lead
-    /// desynchronized the parser. A byte that is not `0x80..=0xbf` ends the
-    /// shield immediately and is interpreted on its own terms.
+    /// Counting N continuations unconditionally would swallow whatever
+    /// follows, so a real control could be missed and a lead followed by a
+    /// lead would desynchronize the parser. A byte that is not `0x80..=0xbf`
+    /// ends the shield immediately and is interpreted on its own terms.
     #[test]
     fn a_malformed_lead_byte_does_not_swallow_what_follows() {
         // `e2` promises two continuations; `9b` is one, but `31` is not — so
@@ -3941,21 +3929,20 @@ mod tests {
         assert_eq!(sink.len(), OUTPUT_SLICE_MESSAGES + 1);
     }
 
-    /// An empty channel and a finished PTY are different facts, and the
-    /// lifecycle loop used to act on the first while meaning the second.
+    /// An empty channel and a finished PTY are different facts.
     ///
     /// The reader thread owns the only sender, so "disconnected" proves it has
     /// ended; the separately published reader status distinguishes orderly EOF
     /// from an unexpected failure. "Empty" proves neither and is equally
-    /// consistent with the reader simply not having run yet — routine on a
-    /// loaded machine. Conflating them lost the child's output: for a command
-    /// that writes a little and exits at once, the exit could be seen and the
-    /// settle window elapse while the bytes were still in flight.
+    /// consistent with the reader simply not having run yet, which is routine
+    /// on a loaded machine. Conflating them loses the child's output. For a
+    /// command that writes a little and exits at once, the exit can be seen
+    /// and the settle window elapse while the bytes are still in flight.
     ///
-    /// Two macOS intermittents that looked unrelated were this one bug, because
-    /// a single gate feeds both stdout and the recorder:
-    /// `exec_streams_stdout_and_exits_zero` seeing empty stdout, and
-    /// `exec_record_writes_replayable_asciicast` writing a header-only trace.
+    /// A single gate feeds both stdout and the recorder, so on macOS this
+    /// would show up intermittently as `exec_streams_stdout_and_exits_zero`
+    /// seeing empty stdout and `exec_record_writes_replayable_asciicast`
+    /// writing a header-only trace.
     #[test]
     fn a_quiet_channel_is_not_a_finished_pty() {
         let mut recorder = None;
@@ -3999,10 +3986,11 @@ mod tests {
         );
     }
 
-    /// The old lifecycle used the ConPTY fallback on every platform. At 810ms
-    /// a loaded Unix reader that had not run yet therefore looked complete,
-    /// even though its sole sender was still alive and the child's bytes were
-    /// in flight. That produced exit 0 with empty stdout and header-only casts.
+    /// On Unix, 810ms of quiet (the ConPTY fallback window) must not count as
+    /// completion. A loaded reader that has not run yet would look complete,
+    /// even though its sole sender is still alive and the child's bytes are
+    /// in flight. That would produce exit 0 with empty stdout and header-only
+    /// casts.
     #[test]
     fn unix_elapsed_time_never_turns_missing_eof_into_success() {
         let old_cross_platform_fallback = SETTLE + CONPTY_DRAIN_GRACE;
@@ -4935,8 +4923,7 @@ mod tests {
     /// event. Some pairs deliberately do not terminate: BEL is data in a
     /// DCS/APC-style string, while BEL and raw ST are parameter/intermediate
     /// bytes in CSI and ESC-intermediate states. The expected-state matrix
-    /// pins those distinctions instead of making the test name promise more
-    /// than it proves.
+    /// pins those distinctions.
     #[test]
     fn ansi_stripper_control_events_cover_every_state_cross_product() {
         #[derive(Clone, Copy)]
@@ -5123,19 +5110,16 @@ mod tests {
     /// resynchronization that ends an over-long control string.
     ///
     /// The stripper shields UTF-8 continuation bytes so a `0x9c` inside a
-    /// character is not mistaken for the 8-bit ST. That shield outlived the
-    /// string: when the resynchronization bound fell on a multi-byte lead, the
-    /// lead was consumed as the string's last byte while the debt survived into
-    /// ground state, so the continuation bytes were emitted with nothing in
-    /// front of them. Anything decoding stdout saw invalid UTF-8 from there on.
+    /// character is not mistaken for the 8-bit ST. When the resynchronization
+    /// bound falls on a multi-byte lead, the lead is swallowed as the string's
+    /// last byte, so its continuation bytes must be swallowed with it. Emitted
+    /// alone in ground state, they would leave invalid UTF-8 on stdout.
     ///
     /// The boundary is swept because the payload length that lands a lead byte
     /// exactly on it depends on how the state machine counts.
     ///
-    /// All THREE bounded states are swept. Fixing only the control-string one
-    /// left the identical hole in `Csi` and `EscapeIntermediate`, which have the
-    /// same 64-KiB bound — a review found both still emitting invalid UTF-8
-    /// after the first fix shipped.
+    /// All three bounded states are swept, since the control string, `Csi`,
+    /// and `EscapeIntermediate` share the same 64-KiB bound.
     #[test]
     fn ansi_stripper_never_emits_orphaned_utf8_continuations_at_the_resync_bound() {
         // Each opener enters a different bounded state, with a filler byte that
@@ -5199,13 +5183,8 @@ mod tests {
     }
 
     /// The capture sink must keep the last `cap` bytes, and must not do
-    /// quadratic work to keep them.
-    ///
-    /// It trimmed to exactly `cap` on every write, so once full a small chunk
-    /// shifted the whole buffer down by that chunk's size. A build emitting 100
-    /// MiB moved roughly 25 GiB of memory to retain the last 1 MiB — on the
-    /// thread draining the PTY. Compaction is amortized now; the answer must be
-    /// unchanged.
+    /// quadratic work to keep them. Its lazy compaction must return the same
+    /// tail as trimming to exactly `cap` on every write.
     #[test]
     fn the_capture_sink_keeps_the_tail_without_quadratic_shifting() {
         use std::io::Write as _;
@@ -5270,7 +5249,7 @@ mod tests {
         // Small codes pass through on every platform.
         assert_eq!(clamp_code(3), 3);
         // Unix masks to the low 8 bits (process::exit + signal folding);
-        // Windows passes the full 32-bit code through (saturating into i32).
+        // Windows passes the full 32-bit code through (reinterpreted as i32).
         #[cfg(unix)]
         {
             assert_eq!(clamp_code(256), 0);
@@ -5279,10 +5258,9 @@ mod tests {
         #[cfg(windows)]
         {
             assert_eq!(clamp_code(256), 256);
-            // 0xC0000005 (STATUS_ACCESS_VIOLATION) must survive as itself. This
-            // previously asserted `i32::MAX`, pinning the saturation that threw
-            // the diagnostic away — the crash code an agent or CI script reads
-            // to tell an access violation from any other failure.
+            // 0xC0000005 (STATUS_ACCESS_VIOLATION) must survive as itself, not
+            // saturate to `i32::MAX`. An agent or CI script reads this crash
+            // code to tell an access violation from any other failure.
             assert_eq!(clamp_code(0xC000_0005), 0xC000_0005u32 as i32);
             assert_eq!(clamp_code(0xC000_0005) as u32, 0xC000_0005);
             // Every crash-class NTSTATUS round-trips, not just that one.
@@ -5930,7 +5908,7 @@ wait
 
     /// Keep creating session members until teardown freezes this process. A
     /// stable collection of sleepers cannot prove the stop acknowledgement:
-    /// the bug was specifically a member forking after the final procfs scan.
+    /// the race is a member forking after the final procfs scan.
     #[cfg(target_os = "linux")]
     #[test]
     #[allow(clippy::zombie_processes)] // teardown deliberately kills the whole fixture session
@@ -6071,12 +6049,11 @@ wait
     /// grandchild, announce it, then block until Kettle's timeout ends the job.
     ///
     /// This test binary is its own fixture because re-executing it costs
-    /// milliseconds. The fixture this replaced launched `powershell.exe`, whose
-    /// cold start on a loaded hosted runner regularly outlasted the very
-    /// timeout under test — so the parent fired before the fixture could name
-    /// its descendant, and the test failed having proven nothing. Raising the
-    /// timeout had already been tried; it moves the race rather than removing
-    /// it, because the fixture's setup and the deadline share one budget.
+    /// milliseconds. A slow-starting fixture such as `powershell.exe` can
+    /// outlast the timeout under test on a loaded hosted runner, so the parent
+    /// fires before the fixture names its descendant and the test proves
+    /// nothing. A longer timeout only moves that race, because the fixture's
+    /// setup and the deadline share one budget.
     #[cfg(windows)]
     #[test]
     fn windows_descendant_job_helper() {
@@ -6229,7 +6206,6 @@ wait
 
     #[test]
     fn json_start_event_is_emitted() {
-        // Without a PTY (None probe, empty-ish), exercise the Outputter start.
         let mut o = Outputter::new(OutputMode::Json);
         let mut sink = Vec::new();
         o.start(&mut sink, 80, 24).unwrap();

@@ -1,7 +1,7 @@
-//! The MCP tool registry (agent-first A3).
+//! The MCP tool registry.
 //!
-//! `kettle_run` runs a command headlessly via the A1 exec engine in-process.
-//! The other tools drive a running kettle via the A2 control client; when no
+//! `kettle_run` runs a command headlessly via the exec engine in-process.
+//! The other tools drive a running kettle via the control client; when no
 //! server is discoverable they return an `isError` result with actionable text
 //! (start `kettle --agent-server full`).
 
@@ -278,7 +278,7 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
-/// Dispatch a `tools/call`. `params` is `{name, params|arguments}`. Returns an
+/// Dispatch a `tools/call`. `params` is `{name, arguments}`. Returns an
 /// MCP tool result (`{content: [...], isError?}`).
 pub fn call_tool(params: &Value) -> Value {
     call_tool_inner(params, None)
@@ -388,7 +388,6 @@ fn call_tool_inner(params: &Value, cancelled: Option<&std::sync::atomic::AtomicB
                 cancelled,
             )
         }
-        // v2.20.0 (agent plane).
         "kettle_send_keys" => {
             let Some(keys) = args.get("keys").and_then(|k| k.as_array()) else {
                 return error_result("kettle_send_keys requires a 'keys' string array");
@@ -514,10 +513,10 @@ fn tool_kettle_run(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBoo
             .get("cwd")
             .and_then(|c| c.as_str())
             .map(std::path::PathBuf::from),
-        // Always bound the run: the MCP server is single-threaded, so a child
-        // that never exits (interactive prompt, daemon) would wedge it forever.
-        // Default 30s, capped 0.1–600s (mirrors run_command). On expiry the
-        // child is killed and exec reports 124.
+        // Always bound the run. A child that never exits (interactive prompt,
+        // daemon) would otherwise tie up one of the MCP server's tool workers
+        // forever. Default 30s, capped 0.1-600s (mirrors run_command). On
+        // expiry the child is killed and exec reports 124.
         timeout: Some(std::time::Duration::from_secs_f64(
             args.get("timeout_s")
                 .and_then(|t| t.as_f64())
@@ -544,8 +543,8 @@ fn tool_kettle_run(args: &Value, cancelled: Option<&std::sync::atomic::AtomicBoo
     })
 }
 
-/// Call a control-server method via the A2 client; render the result/ error as
-/// an MCP tool result.
+/// Call a control-server method and render the result or error as an MCP
+/// tool result.
 fn ctl_call(
     method: &str,
     params: Value,
@@ -753,7 +752,6 @@ mod tests {
                 "{name} schema and validator/ctl-forwarding keys drifted"
             );
         }
-        // kettle_run requires `command`.
         let run = specs
             .iter()
             .find(|s| s["name"] == "kettle_run")
@@ -861,9 +859,9 @@ mod tests {
         assert!(output.ends_with("tail"));
     }
 
-    /// v2.20.0: the new agent-plane tools validate their arguments BEFORE
-    /// touching the control client, so a malformed call gets a crisp message
-    /// even with no server running.
+    /// Agent-plane tools validate their arguments BEFORE touching the control
+    /// client, so a malformed call gets a crisp message even with no server
+    /// running.
     #[test]
     fn send_keys_and_wait_for_validate_args_first() {
         let r = call_tool(&json!({"name": "kettle_send_keys", "arguments": {}}));

@@ -2,12 +2,9 @@
 //! than the implementation, and deliberately kept in a separate integration
 //! test from the helper's own unit tests.
 //!
-//! The reason for the separation is the history. Three hand-rolled versions of
-//! this stripper preceded the shared one and two were unsound — one halted at a
-//! `}` inside a multiline string, another missed an indented `#[cfg(test)]` —
-//! and both passed the self-check written alongside them, because a check
-//! authored with an implementation tends to share its blind spots. These cases
-//! were written from the list of ways a source lexer can be fooled, then run
+//! A check written alongside an implementation tends to share its blind spots.
+//! These cases come instead from the ways a source lexer can be fooled, such as
+//! a `}` inside a multiline string or an indented `#[cfg(test)]`, and run
 //! against whatever implementation exists.
 //!
 //! Each case asserts in BOTH directions: production text survives, and test
@@ -241,10 +238,10 @@ fn cfg_evaluator_handles_adversarial_predicates() {
 
 #[test]
 fn a_stale_block_comment_terminator_does_not_delete_production_code() {
-    // A line that merely ENDS in `*/` was paired, by a backward `rfind("/*")`,
-    // with an already-closed doc comment further up — and everything between
-    // them was deleted. On this exact input the whole production half vanished,
-    // which a negative guard reads as a pass.
+    // A backward `rfind("/*")` pairs a line that merely ENDS in `*/` with an
+    // already-closed doc comment further up and deletes everything between
+    // them. On this input that is the whole production half, which a negative
+    // guard reads as a pass.
     assert_kept(
         "stale */ terminator",
         "/** docs for production */\nfn production() {}\n// */\n#[cfg(test)]\nfn test_only() {}\n",

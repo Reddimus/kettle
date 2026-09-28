@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# v2.40.0 (tear-off UX): live-desktop regression guard for the REAL
-# tear-off gesture — the part no ctl-driven smoke can reach, because
-# `maybe_tear_off`/re-dock are wired only into native winit pointer events
-# (see docs/TESTING.md). Drives xdotool (XTEST) against a real X11 session,
-# same precedent as scripts/menu-screenshot.sh, and asserts the failure
-# modes a session recording caught on GNOME/Mutter stay fixed:
+# Live-desktop regression guard for the REAL tear-off gesture. No ctl-driven
+# smoke can reach it, because `maybe_tear_off`/re-dock are wired only into
+# native winit pointer events (see docs/TESTING.md). Drives xdotool (XTEST)
+# against a real X11 session, same precedent as scripts/menu-screenshot.sh,
+# and asserts these GNOME/Mutter failure modes stay fixed:
 #   1. the torn window FOLLOWS the pointer (no mid-air freeze when the
 #      native handoff silently fails or the pointer leaves the source);
 #   2. dropping on a sibling's tab band MERGES the tab back (the dock
@@ -185,10 +184,9 @@ print(int(r["x"] + r["width"] / 2))
     exit 1
   fi
 
-  # --- Esc mid-drag over a latched band must ABANDON, not merge (the
-  # Esc-cancel regression an adversarial review caught: Esc moves the
-  # frame, never the pointer, so only physical button state can tell a
-  # cancel from a drop). The button stays held through Esc; the later
+  # --- Esc mid-drag over a latched band must ABANDON, not merge. Esc
+  # moves the frame, never the pointer, so only physical button state can
+  # tell a cancel from a drop. The button stays held through Esc; the later
   # release with tracking already cleared must also not merge. ---
   read -r wx wy <<<"$(client_xy "$wid")"
   band_cx=$((wx + seg2_cx))

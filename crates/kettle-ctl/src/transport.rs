@@ -55,12 +55,11 @@ pub struct WindowsStream {
     server_end: bool,
 }
 
-/// Shared client-connect retry policy, referenced by BOTH platform `connect`
-/// impls so the Unix socket and Windows named-pipe legs stay in lockstep. A
-/// *missing* endpoint (`NotFound`) is never retried (a dead server) — these
-/// bound only genuinely-transient failures (the server mid-accept or swapping
-/// instances): `CONNECT_RETRIES` attempts, `CONNECT_BACKOFF` between each, so
-/// the worst case is ~`CONNECT_RETRIES * CONNECT_BACKOFF` before giving up.
+/// Client-connect retry policy shared by both platform `connect` impls so they
+/// stay in lockstep. A missing endpoint (`NotFound`) means a dead server and is
+/// never retried. Transient failures (the server is mid-accept or swapping
+/// instances) get `CONNECT_RETRIES` attempts, `CONNECT_BACKOFF` apart, so the
+/// worst case is about `CONNECT_RETRIES * CONNECT_BACKOFF` before giving up.
 const CONNECT_RETRIES: u32 = 50;
 const CONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -311,18 +310,19 @@ impl CtlStream {
         }
     }
 
-    /// Verify that an accepted local transport peer has the same effective user
-    /// as this process. Filesystem permissions (Unix mode bits) / the pipe DACL
-    /// remain the first boundary; peer credentials close the race where a
-    /// socket path is inherited or passed to another local account, AND — on
-    /// Windows — the fact that the protected pipe DACL also admits the whole
-    /// Builtin-Administrators group for recovery, not only the process owner. Windows'
-    /// accepted-side check resolves the connected client's PID at the kernel
-    /// level and compares primary-token user SIDs. The client-side check reads
+    /// Verify that the local transport peer has the same effective user as this
+    /// process. Filesystem permissions (Unix mode bits) or the pipe DACL remain
+    /// the first boundary. Peer credentials close the race where a socket path is
+    /// inherited by or passed to another local account. They also close the gap
+    /// left by the protected Windows pipe DACL, which admits the whole
+    /// Builtin-Administrators group for recovery, not only the process owner.
+    ///
+    /// On Windows, the accepted side resolves the connected client's PID at the
+    /// kernel level and compares primary-token user SIDs. The client side reads
     /// the pipe object's owner SID before any protocol bytes are sent. Pipe
     /// instances are created with this process's exact token-user SID as owner,
-    /// including from an elevated process where Windows would otherwise use the
-    /// Administrators group as the default owner.
+    /// even from an elevated process, where Windows would otherwise default the
+    /// owner to the Administrators group.
     pub fn peer_is_same_user(&self) -> io::Result<bool> {
         match self {
             #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -392,14 +392,13 @@ impl CtlStream {
         }
     }
 
-    /// v2.20.0 (review fix): has the peer hung up? Non-destructive and
-    /// non-blocking (a zero-byte peek). Lets `wait_for`'s poll loop notice a
-    /// vanished client instead of pinning one of the MAX_CONNECTIONS slots —
-    /// and hammering the UI thread with probes — for up to the full timeout.
-    /// This does NOT violate the one-thread sequential read→write rule: the
-    /// caller IS the connection thread, with no other I/O outstanding on the
-    /// handle. Errs toward "alive" on anything ambiguous (a false `dead`
-    /// would cut short a legitimate wait).
+    /// Has the peer hung up? Non-destructive and non-blocking (a zero-byte
+    /// peek). Lets `wait_for`'s poll loop notice a vanished client instead of
+    /// pinning one of the MAX_CONNECTIONS slots, and hammering the UI thread
+    /// with probes, for up to the full timeout. This does NOT violate the
+    /// one-thread sequential read→write rule: the caller IS the connection
+    /// thread, with no other I/O outstanding on the handle. Errs toward "alive"
+    /// on anything ambiguous (a false `dead` would cut short a legitimate wait).
     pub fn peer_disconnected(&self) -> bool {
         match self {
             #[cfg(unix)]
@@ -1086,12 +1085,12 @@ mod imp {
         }
     }
 
-    /// Connect a client to `endpoint`. v2.27.0 (audit): retry briefly on a
-    /// transient `ConnectionRefused` (the server may be mid-accept or swapping
-    /// the socket) before giving up — mirroring the Windows named-pipe retry — so
-    /// a transient failure doesn't make `client::discover` permanently prune a
-    /// live server. `NotFound` (the socket file is gone) is definitive → bail at
-    /// once so a truly-dead entry is still pruned promptly.
+    /// Connect a client to `endpoint`. Retry briefly on a transient failure such
+    /// as `ConnectionRefused` (the server may be mid-accept or swapping the
+    /// socket), like the Windows named-pipe `connect`, so a transient failure
+    /// doesn't make `client::discover` give up on a live server. `NotFound` (the
+    /// socket file is gone) means a dead server, so bail at once instead of
+    /// spending the retry budget.
     pub fn connect(endpoint: &str) -> io::Result<CtlStream> {
         use std::os::unix::net::UnixStream;
         let mut last = None;
@@ -1132,14 +1131,14 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Create one overlapped named-pipe instance for `name`. Its exact owner is
-    /// the creator's token-user SID and a protected DACL grants full access to
+    /// Create one overlapped named-pipe instance for `name_w`. Its exact owner is
+    /// the creator's token-user SID, and a protected DACL grants full access to
     /// that owner, SYSTEM, and administrators. `first` adds
-    /// `FILE_FLAG_FIRST_PIPE_INSTANCE` so creating the FIRST
-    /// instance FAILS (ERROR_ACCESS_DENIED) if the name is already taken — this
-    /// is the squatting guard: a malicious local process that pre-created the
-    /// pipe to intercept the server's clients cannot, because `bind` refuses to
-    /// adopt an attacker-owned instance and surfaces the error instead.
+    /// `FILE_FLAG_FIRST_PIPE_INSTANCE`, so creating the first instance fails
+    /// (ERROR_ACCESS_DENIED) if the name is already taken. This is the squatting
+    /// guard. If a malicious local process pre-created the pipe to intercept the
+    /// server's clients, `bind` surfaces the error instead of adopting the
+    /// attacker-owned instance.
     fn create_instance(name_w: &[u16], first: bool) -> io::Result<HANDLE> {
         let open_mode = PIPE_ACCESS_DUPLEX
             | FILE_FLAG_OVERLAPPED
@@ -1530,8 +1529,8 @@ mod tests {
             conn.flush().ok();
         });
 
-        // Give the listener a beat to be ready (Unix bind is sync; Windows the
-        // first instance exists after bind()).
+        // No wait is needed. Unix bind is synchronous, and on Windows the first
+        // instance exists after bind().
         let mut client = connect(&ep).expect("connect");
         client.write_all(b"ping\n").expect("client write");
         client.flush().ok();
@@ -1572,9 +1571,8 @@ mod tests {
             Ok(_) => panic!("connecting to a missing endpoint must fail"),
         }
         // The full retry budget would be CONNECT_RETRIES * CONNECT_BACKOFF
-        // (~1s); the early-out should be near-instant. Allow generous slack for
-        // a loaded CI box but well below even a single backoff iteration's
-        // worth of the full budget.
+        // (~1s); the early-out should be near-instant. Half the budget leaves
+        // generous slack for a loaded CI box.
         let budget = CONNECT_RETRIES * CONNECT_BACKOFF;
         assert!(
             elapsed < budget / 2,
@@ -1585,9 +1583,9 @@ mod tests {
 
     /// The REAL server/client usage: each side splits its connection into a
     /// reader thread + a writer thread over `try_clone`d handles, with
-    /// concurrent read+write. This is what the control server does; it caught a
+    /// concurrent read+write, as the control server does. Guards against a
     /// Windows named-pipe ERROR_NO_DATA where writing on one split handle while
-    /// reading on the other closed the pipe. Pins the split pattern works.
+    /// reading on the other closes the pipe.
     #[test]
     fn split_handle_concurrent_read_write() {
         let pid = std::process::id();
@@ -1647,16 +1645,13 @@ mod tests {
         server.join().expect("server thread");
     }
 
-    /// Audit fix: on Windows `peer_is_same_user()` used to unconditionally
-    /// return `Ok(true)` — a no-op that never actually checked anything.
     /// Exercise the real kernel path (PID resolution + token SID compare on
-    /// Windows, `SO_PEERCRED`/`getpeereid` on Unix) end to end: a peer
-    /// connecting from THIS SAME PROCESS is, on every supported OS, the same
-    /// user, so both the server-accepted stream and the connecting client
-    /// stream must report `true`. This would not by itself have caught the
-    /// audited stub (an always-`Ok(true)` stub also passes this assertion),
-    /// but it does pin that the real implementation's kernel calls succeed
-    /// and resolve to the expected answer rather than erroring or panicking.
+    /// Windows, `SO_PEERCRED`/`getpeereid` on Unix) end to end. A peer
+    /// connecting from this same process is the same user on every supported
+    /// OS, so both the server-accepted stream and the connecting client stream
+    /// must report `true`. An always-`Ok(true)` stub would also pass; this pins
+    /// that the real kernel calls succeed and return the expected answer rather
+    /// than erroring or panicking.
     #[test]
     fn peer_is_same_user_reports_true_for_local_loopback() {
         let endpoint = test_endpoint("peer-same-user");
@@ -1718,9 +1713,9 @@ mod tests {
         );
     }
 
-    /// Exercise the exact arm implicated by the audit: an accepted server
-    /// handle writing more than the pipe/socket buffer to a client that never
-    /// reads. Both a deadline and cancellation must interrupt the pending I/O.
+    /// An accepted server handle writes more than the pipe/socket buffer to a
+    /// client that never reads. Both a deadline and cancellation must interrupt
+    /// the pending I/O.
     #[test]
     fn accepted_server_write_observes_deadline_and_cancellation() {
         fn run(

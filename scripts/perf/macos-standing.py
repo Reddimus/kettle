@@ -89,9 +89,8 @@ def write_flood(path: Path, size: int = FLOOD_BYTES) -> None:
     """Write `size` bytes of plain text that is the same on every run.
 
     Lines stay under the 120-column grid so no terminal has to wrap them. The
-    flood used to be Kettle's own Rust sources, which changed with every commit
-    and made two releases' flood-memory figures print different text; a
-    checkout without `crates/` also looped forever.
+    text is seeded, not read from the checkout, so every release's flood-memory
+    run prints the same bytes.
     """
     # Only `random()` is guaranteed to give the same sequence for a seed on
     # every Python version; `choice` and `randrange` are not, so every pick
