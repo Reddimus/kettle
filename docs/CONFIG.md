@@ -491,7 +491,9 @@ pane's argv + cwd into a new tab — `ssh prod` clones to a second
 `ssh prod`).
 
 **Splits**: `new_split:right` (also `split_right` / `split_vert`),
-`new_split:down` (also `split_down` / `split_horiz`), `split_auto`
+`new_split:down` (also `split_down` / `split_horiz`), `new_split:left`
+(also `split_left`) and `new_split:up` (also `split_up`), which put the
+new pane left of or above the focused one, `split_auto`
 (pick by aspect ratio), `close_pane` (also `close_surface` /
 `close_term`). New splits inherit the focused cwd; direct agent/editor
 launches split to a shell prompt there, while `duplicate_pane` clones the

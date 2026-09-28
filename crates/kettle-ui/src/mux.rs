@@ -1043,17 +1043,17 @@ impl Node {
     }
 
     /// Replace the leaf `id` with a split of itself and `new_id`.
+    #[cfg(test)]
     fn split_leaf(&mut self, id: u64, new_id: u64, dir: Dir) -> bool {
         self.split_leaf_ordered(id, new_id, dir, false)
     }
 
     /// Split leaf `id`, placing `new_id` first when `new_first`.
     ///
-    /// A plain split always appends, which is right when the user asked for
-    /// "split right" and the new pane belongs on the right. Moving a pane is
-    /// different: dropping it on the LEFT half of a target means it goes to the
-    /// left, and appending would silently put it on the other side of the pane
-    /// the user aimed at.
+    /// Split Right and Split Down append. Split Left and Split Up put the new
+    /// pane first, and so does dropping a moved pane on the LEFT half of a
+    /// target, where appending would put it on the other side of the pane the
+    /// user aimed at.
     fn split_leaf_ordered(&mut self, id: u64, new_id: u64, dir: Dir, new_first: bool) -> bool {
         match self {
             Node::Leaf(x) if *x == id => {
@@ -2356,15 +2356,19 @@ impl Mux {
     ) -> Result<()> {
         self.split_geometry(
             dir,
+            false,
             cfg,
             PtyGeometry::from_cell_size(cols, rows, cw, ch),
             waker,
         )
     }
 
+    /// Split the focused pane along `dir`. The new pane goes first (left or
+    /// above) when `new_first`, and second otherwise.
     pub fn split_geometry(
         &mut self,
         dir: Dir,
+        new_first: bool,
         cfg: &Config,
         geometry: PtyGeometry,
         waker: Waker,
@@ -2382,7 +2386,7 @@ impl Mux {
         let grafted = self
             .tabs
             .get_mut(a)
-            .map(|tab| insert_split(tab, new_id, dir))
+            .map(|tab| insert_split(tab, new_id, dir, new_first))
             .unwrap_or(false);
         if !grafted {
             // The graft failed (no active tab, or the tree had no leaf to
@@ -2414,6 +2418,7 @@ impl Mux {
     ) -> Result<()> {
         self.split_with_geometry(
             dir,
+            false,
             cfg,
             PtyGeometry::from_cell_size(cols, rows, cw, ch),
             waker,
@@ -2422,9 +2427,11 @@ impl Mux {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn split_with_geometry(
         &mut self,
         dir: Dir,
+        new_first: bool,
         cfg: &Config,
         geometry: PtyGeometry,
         waker: Waker,
@@ -2441,7 +2448,7 @@ impl Mux {
         let grafted = self
             .tabs
             .get_mut(a)
-            .map(|tab| insert_split(tab, new_id, dir))
+            .map(|tab| insert_split(tab, new_id, dir, new_first))
             .unwrap_or(false);
         if !grafted {
             // The graft failed (no active tab, or the tree had no leaf to
@@ -2473,23 +2480,26 @@ impl Mux {
             .unwrap_or(0)
     }
 
-    /// Rectangle the newly spawned second child will occupy after a 50/50 split
-    /// of the focused leaf. This intentionally ignores zoom (the split action
-    /// exits zoom) and mirrors `Node::layout` rounding exactly.
-    pub fn prospective_split_rect(&self, dir: Dir, area: Rect) -> Option<Rect> {
+    /// Rectangle a new pane will occupy after a 50/50 split of the focused
+    /// leaf: the first child when `new_first`, else the second. This
+    /// intentionally ignores zoom (the split action exits zoom) and mirrors
+    /// `Node::layout` rounding exactly.
+    pub fn prospective_split_rect(&self, dir: Dir, new_first: bool, area: Rect) -> Option<Rect> {
         let tab = self.tabs.get(self.active)?;
         let mut layout = Vec::new();
         tab.root.layout(area, &mut layout);
         let (_, (x, y, width, height)) = layout.into_iter().find(|(id, _)| *id == tab.focus)?;
-        Some(match dir {
-            Dir::Horizontal => {
+        Some(match (dir, new_first) {
+            (Dir::Horizontal, false) => {
                 let first_width = (width * 0.5).round();
                 (x + first_width, y, width - first_width, height)
             }
-            Dir::Vertical => {
+            (Dir::Horizontal, true) => (x, y, (width * 0.5).round(), height),
+            (Dir::Vertical, false) => {
                 let first_height = (height * 0.5).round();
                 (x, y + first_height, width, height - first_height)
             }
+            (Dir::Vertical, true) => (x, y, width, (height * 0.5).round()),
         })
     }
 
@@ -3240,7 +3250,7 @@ impl Mux {
         let grafted = self
             .tabs
             .get_mut(a)
-            .map(|tab| insert_split(tab, new_id, dir))
+            .map(|tab| insert_split(tab, new_id, dir, false))
             .unwrap_or(false);
         if !grafted {
             // The graft failed (no active tab, or the tree had no leaf to
@@ -4114,17 +4124,17 @@ fn rotate_tree(node: &mut Node, clockwise: bool) {
 }
 
 /// Apply the *post-spawn* tree mutation for a split: graft the new pane id
-/// next to the currently-focused leaf in direction `dir`, move focus to
-/// the new pane, and **exit zoom** if it was on.
+/// next to the currently-focused leaf in direction `dir` (first when
+/// `new_first`), move focus to the new pane, and **exit zoom** if it was on.
 ///
 /// Staying zoomed on the new pane would hide the half the user just split
 /// from (still alive, just hidden by `Mux::layout`'s zoom-collapse). Every
 /// modern terminal treats `split` as "show me both" (tmux's `display-panes`
 /// UX after `split-window`, WezTerm's `SplitHorizontal/Vertical`). Pure so
 /// the contract is unit-testable without a real spawn.
-fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
+fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir, new_first: bool) -> bool {
     let focus = tab.focus;
-    if tab.root.split_leaf(focus, new_id, dir) {
+    if tab.root.split_leaf_ordered(focus, new_id, dir, new_first) {
         tab.focus = new_id;
         tab.zoomed = false;
         return true;
@@ -4133,7 +4143,10 @@ fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
     // bug). Repair focus to a real leaf and retry; if even this fails, the
     // caller reaps the new pane instead of leaking its PTY + child.
     let repaired = tab.root.first_leaf();
-    if tab.root.split_leaf(repaired, new_id, dir) {
+    if tab
+        .root
+        .split_leaf_ordered(repaired, new_id, dir, new_first)
+    {
         tab.focus = new_id;
         tab.zoomed = false;
         return true;
@@ -4774,20 +4787,41 @@ mod node_tests {
         let mut mux = Mux::new();
         push_tab(&mut mux, Node::Leaf(7), 7);
         assert_eq!(
-            mux.prospective_split_rect(Dir::Horizontal, (0.0, 0.0, 101.0, 51.0)),
+            mux.prospective_split_rect(Dir::Horizontal, false, (0.0, 0.0, 101.0, 51.0)),
             Some((51.0, 0.0, 50.0, 51.0))
         );
         assert_eq!(
-            mux.prospective_split_rect(Dir::Vertical, (0.0, 0.0, 101.0, 51.0)),
+            mux.prospective_split_rect(Dir::Vertical, false, (0.0, 0.0, 101.0, 51.0)),
             Some((0.0, 26.0, 101.0, 25.0))
         );
 
         mux.tabs[0].zoomed = true;
         assert_eq!(
-            mux.prospective_split_rect(Dir::Horizontal, (0.0, 0.0, 101.0, 51.0)),
+            mux.prospective_split_rect(Dir::Horizontal, false, (0.0, 0.0, 101.0, 51.0)),
             Some((51.0, 0.0, 50.0, 51.0)),
             "splitting exits zoom, so initial geometry must use the unzoomed tree"
         );
+    }
+
+    /// Split Left and Split Up size the new pane from the first child, which
+    /// is where the graft puts it.
+    #[test]
+    fn prospective_split_rect_matches_the_graft_for_every_side() {
+        let area = (0.0, 0.0, 101.0, 51.0);
+        for dir in [Dir::Horizontal, Dir::Vertical] {
+            for new_first in [false, true] {
+                let mut mux = Mux::new();
+                push_tab(&mut mux, Node::Leaf(7), 7);
+                let predicted = mux.prospective_split_rect(dir, new_first, area);
+                assert!(super::insert_split(&mut mux.tabs[0], 8, dir, new_first));
+                let placed = mux
+                    .layout(0, area)
+                    .into_iter()
+                    .find(|(id, _)| *id == 8)
+                    .map(|(_, rect)| rect);
+                assert_eq!(predicted, placed, "{dir:?} new_first={new_first}");
+            }
+        }
     }
     fn hsplit(ratio: f32, a: Node, b: Node) -> Node {
         Node::Split {
@@ -5275,7 +5309,7 @@ mod node_tests {
         for (idx, _) in src.match_indices("self.inherit_split_group(cfg, new_id);") {
             let after = &src[idx..];
             let graft = after
-                .find("insert_split(tab, new_id, dir)")
+                .find("insert_split(tab, new_id, dir, new_first)")
                 .expect("each inheritance is followed by its graft");
             let next_call = after[1..]
                 .find("self.inherit_split_group(cfg, new_id);")
@@ -6598,7 +6632,7 @@ mod node_tests {
         type Open = fn(&mut Mux, &Config, PtyGeometry, Waker) -> Result<()>;
         let steps: [(&str, Open); 4] = [
             ("split", |m, c, g, w| {
-                m.split_geometry(Dir::Horizontal, c, g, w)
+                m.split_geometry(Dir::Horizontal, false, c, g, w)
             }),
             ("new tab", |m, c, g, w| m.new_tab_geometry(c, g, w)),
             ("duplicate tab", |m, c, g, w| {
@@ -6683,7 +6717,7 @@ mod node_tests {
         );
         mux.panes[&pane].term.set_native_cwd(seen);
 
-        mux.split_geometry(Dir::Horizontal, &cfg, geometry, waker)
+        mux.split_geometry(Dir::Horizontal, false, &cfg, geometry, waker)
             .expect("split");
         let opened = mux.active_focus().expect("the new pane is focused");
         assert_ne!(opened, pane, "the split opened no pane");
@@ -7658,7 +7692,7 @@ mod node_tests {
             bell: false,
             title_override: None,
         };
-        super::insert_split(&mut tab, 2, Dir::Horizontal);
+        super::insert_split(&mut tab, 2, Dir::Horizontal, false);
         assert_eq!(tab.focus, 2, "focus moves to the new pane");
         assert!(!tab.zoomed, "zoom is exited so both halves render");
         // Tree now contains both leaves.
@@ -7676,9 +7710,39 @@ mod node_tests {
             bell: false,
             title_override: None,
         };
-        super::insert_split(&mut tab, 2, Dir::Vertical);
+        super::insert_split(&mut tab, 2, Dir::Vertical, false);
         assert!(!tab.zoomed);
         assert_eq!(tab.focus, 2);
+    }
+
+    /// Split Left and Split Up put the new pane before the focused one, left
+    /// or above, and focus it. Split Right and Split Down put it after.
+    #[test]
+    fn insert_split_places_the_new_pane_on_the_requested_side() {
+        for (dir, new_first, order) in [
+            (Dir::Horizontal, false, [1, 2]),
+            (Dir::Horizontal, true, [2, 1]),
+            (Dir::Vertical, false, [1, 2]),
+            (Dir::Vertical, true, [2, 1]),
+        ] {
+            let mut tab = Tab {
+                root: Node::Leaf(1),
+                focus: 1,
+                zoomed: false,
+                last_output_at: None,
+                last_seen_at: None,
+                bell: false,
+                title_override: None,
+            };
+            assert!(super::insert_split(&mut tab, 2, dir, new_first));
+            assert_eq!(tab.focus, 2);
+            let mut rects = Vec::new();
+            tab.root.layout((0.0, 0.0, 100.0, 50.0), &mut rects);
+            let ids: Vec<u64> = rects.iter().map(|(id, _)| *id).collect();
+            assert_eq!(ids, order, "{dir:?} new_first={new_first}");
+            let (_, (x, y, _, _)) = rects[0];
+            assert_eq!((x, y), (0.0, 0.0), "the first leaf is the left or top one");
+        }
     }
 
     /// The stale-focus retry. When `tab.focus` points at a leaf NOT in the
@@ -7698,7 +7762,7 @@ mod node_tests {
             title_override: None,
         };
         assert!(
-            super::insert_split(&mut tab, 2, Dir::Horizontal),
+            super::insert_split(&mut tab, 2, Dir::Horizontal, false),
             "stale focus must be repaired + the split grafted (returns true)"
         );
         assert_eq!(tab.focus, 2, "focus moves to the newly-grafted pane");
@@ -7721,7 +7785,7 @@ mod node_tests {
         // Count production code only, since this test's own literals would
         // otherwise count as sites.
         let src = production_source();
-        let grafts = src.matches("insert_split(tab, new_id, dir)").count();
+        let grafts = src.matches("insert_split(tab, new_id, dir, ").count();
         let reaps = src.matches("self.panes.remove(&new_id)").count();
         assert!(grafts >= 3, "graft sites not found: {grafts}");
         assert_eq!(reaps, grafts, "every graft site needs its own reap");
