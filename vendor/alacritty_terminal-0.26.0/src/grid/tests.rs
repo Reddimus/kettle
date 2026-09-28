@@ -471,3 +471,143 @@ fn wrap_cell(c: char) -> Cell {
     cell.flags.insert(Flags::WRAPLINE);
     cell
 }
+
+/// `scroll_up` as it was before regions moved as one slice rotation.
+fn reference_scroll_up(grid: &mut Grid<usize>, region: &Range<Line>, positions: usize) {
+    if region.end - region.start <= positions && region.start != 0 {
+        for i in (region.start.0..region.end.0).map(Line::from) {
+            grid.raw[i].reset(&grid.cursor.template);
+        }
+        return;
+    }
+    if grid.display_offset != 0 {
+        grid.display_offset = min(grid.display_offset + positions, grid.max_scroll_limit);
+    }
+    if region.start == 0 {
+        let history_before = grid.history_size();
+        grid.increase_scroll_limit(positions);
+        let history_added = grid.history_size().saturating_sub(history_before);
+        let evicted = positions.saturating_sub(history_added);
+        grid.history_origin = grid.history_origin.saturating_add(evicted as u64);
+        for i in (0..region.start.0).rev().map(Line::from) {
+            grid.raw.swap(i, i + positions);
+        }
+        grid.raw.rotate(-(positions as isize));
+        let screen_lines = grid.screen_lines() as i32;
+        for i in (region.end.0..screen_lines).rev().map(Line::from) {
+            grid.raw.swap(i, i - positions);
+        }
+    } else {
+        for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {
+            grid.raw.swap(i, i + positions);
+        }
+    }
+    for i in (region.end.0 - positions as i32..region.end.0).map(Line::from) {
+        grid.raw[i].reset(&grid.cursor.template);
+    }
+}
+
+/// `scroll_down` as it was before regions moved as one slice rotation.
+fn reference_scroll_down(grid: &mut Grid<usize>, region: &Range<Line>, positions: usize) {
+    if region.end - region.start <= positions {
+        for i in (region.start.0..region.end.0).map(Line::from) {
+            grid.raw[i].reset(&grid.cursor.template);
+        }
+        return;
+    }
+    if grid.max_scroll_limit == 0 {
+        let screen_lines = grid.screen_lines() as i32;
+        for i in (region.end.0..screen_lines).map(Line::from) {
+            grid.raw.swap(i, i - positions as i32);
+        }
+        grid.raw.rotate_down(positions);
+        for i in (0..positions).map(Line::from) {
+            grid.raw[i].reset(&grid.cursor.template);
+        }
+        for i in (0..region.start.0).map(Line::from) {
+            grid.raw.swap(i, i + positions);
+        }
+    } else {
+        let range = (region.start + positions).0..region.end.0;
+        for line in range.rev().map(Line::from) {
+            grid.raw.swap(line, line - positions);
+        }
+        let range = region.start.0..(region.start + positions).0;
+        for line in range.rev().map(Line::from) {
+            grid.raw[line].reset(&grid.cursor.template);
+        }
+    }
+}
+
+/// Every retained row, top of history first, with its `occ`.
+fn snapshot(grid: &Grid<usize>) -> Vec<(usize, usize)> {
+    let top = -(grid.history_size() as i32);
+    (top..grid.screen_lines() as i32)
+        .map(|line| {
+            let row = &grid[Line(line)];
+            (row[Column(0)], row.occ)
+        })
+        .collect()
+}
+
+/// Scrolling a region moves its rows as one slice rotation when they sit
+/// contiguously in the ring buffer, and row by row when they wrap. Either way
+/// every line, history row, `occ`, and offset must match the row-by-row swap
+/// the grid used before, with and without scrollback.
+#[test]
+fn region_scrolls_match_the_row_by_row_swap() {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move |bound: usize| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as usize
+    };
+
+    let mut value = 1;
+    for _ in 0..4000 {
+        let lines = 3 + next(10);
+        let history = [0, 3, 7][next(3)];
+        let mut grid = Grid::<usize>::new(lines, 1, history);
+
+        // Scroll the full screen a random number of times, writing fresh rows,
+        // so the ring buffer starts at a random offset and regions often wrap.
+        for _ in 0..next(3 * (lines + history) + 1) {
+            for line in 0..lines {
+                grid[Line(line as i32)][Column(0)] = value;
+                value += 1;
+            }
+            grid.scroll_up::<usize>(&(Line(0)..Line(lines as i32)), 1 + next(2));
+        }
+        for line in 0..lines {
+            grid[Line(line as i32)][Column(0)] = value;
+            value += 1;
+        }
+        if history > 0 && next(4) == 0 {
+            grid.scroll_display(Scroll::Delta(1 + next(history) as i32));
+        }
+
+        let start = next(lines);
+        let end = start + 1 + next(lines - start);
+        let region = Line(start as i32)..Line(end as i32);
+        let positions = 1 + next(end - start);
+        let up = next(2) == 0;
+
+        let mut expected = grid.clone();
+        if up {
+            grid.scroll_up::<usize>(&region, positions);
+            reference_scroll_up(&mut expected, &region, positions);
+        } else {
+            grid.scroll_down::<usize>(&region, positions);
+            reference_scroll_down(&mut expected, &region, positions);
+        }
+
+        let case = format!(
+            "{} {region:?} by {positions}, {lines} lines, history {history}",
+            if up { "up" } else { "down" }
+        );
+        assert_eq!(snapshot(&grid), snapshot(&expected), "{case}");
+        assert_eq!(grid.display_offset, expected.display_offset, "{case}");
+        assert_eq!(grid.history_origin, expected.history_origin, "{case}");
+    }
+}
