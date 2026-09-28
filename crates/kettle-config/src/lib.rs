@@ -3363,6 +3363,8 @@ impl Config {
                 // runtime changes. The runtime still clamps; the warning just
                 // makes the change visible.
                 "font-size" => v.parse::<f32>().is_ok_and(|n| (5.0..=72.0).contains(&n)),
+                "font" => parse_font_description(v)
+                    .is_some_and(|(_, size)| size.is_none_or(|n| (5.0..=72.0).contains(&n))),
                 "background-opacity" => v.parse::<f32>().is_ok_and(|n| (0.0..=1.0).contains(&n)),
                 "unfocused-split-opacity" => {
                     v.parse::<f32>().is_ok_and(|n| (0.1..=1.0).contains(&n))
@@ -3934,6 +3936,14 @@ impl Config {
         let has_update_policy = entries
             .iter()
             .any(|entry| matches!(entry.key.as_str(), "update-policy" | "update_policy"));
+        // `font` fills only what an explicit `font-family` or `font-size` line
+        // does not set, wherever the lines sit in the file.
+        let has_font_family = entries
+            .iter()
+            .any(|entry| entry.key == "font-family" && !entry.value.trim().is_empty());
+        let has_font_size = entries.iter().any(|entry| {
+            entry.key == "font-size" && entry.value.parse::<f32>().is_ok_and(f32::is_finite)
+        });
         for e in entries {
             match e.key.as_str() {
                 // An empty `font-family =` would blank the family string and
@@ -3947,21 +3957,16 @@ impl Config {
                         cfg.font_family = e.value.clone();
                     }
                 }
-                // Terminator's `font = Mono 10` — a Pango font description
-                // carrying BOTH family and size, and the single most-set
-                // profile key. kettle only had `font-family` + `font-size`, so
-                // the whole line was an unrecognised key and both values were
-                // lost. Split the trailing size off the description; an
-                // explicit `font-family` / `font-size` still wins by
-                // precedence, since those arms assign unconditionally and this
-                // one only fills what the description carried.
+                // Terminator's `font = Mono 10`: a Pango font description
+                // carrying both family and size. An explicit `font-family` or
+                // `font-size` wins regardless of line order.
                 "font" => {
                     if let Some((family, size)) = parse_font_description(&e.value) {
-                        if !family.is_empty() {
+                        if !family.is_empty() && !has_font_family {
                             cfg.font_family = family;
                         }
-                        if let Some(size) = size {
-                            cfg.font_size = size;
+                        if let Some(size) = size.filter(|_| !has_font_size) {
+                            cfg.font_size = size.clamp(5.0, 72.0);
                         }
                     }
                 }
@@ -11275,6 +11280,28 @@ split_horiz = <Control><Shift>j
 #[cfg(test)]
 mod terminator_import_tests {
     use super::*;
+
+    /// An explicit `font-family` or `font-size` wins over `font` in either line
+    /// order, `font` still fills what they leave unset, and its size is clamped
+    /// like `font-size`.
+    #[test]
+    fn explicit_font_keys_win_over_font_in_any_order() {
+        for text in [
+            "font-family = Hack\nfont-size = 11\nfont = Mono 10\n",
+            "font = Mono 10\nfont-family = Hack\nfont-size = 11\n",
+        ] {
+            let cfg = Config::parse_text(text);
+            assert_eq!(cfg.font_family, "Hack", "{text:?}");
+            assert_eq!(cfg.font_size, 11.0, "{text:?}");
+        }
+        let family_only = Config::parse_text("font-family = Hack\nfont = Mono 10\n");
+        assert_eq!(family_only.font_family, "Hack");
+        assert_eq!(family_only.font_size, 10.0);
+        assert_eq!(Config::parse_text("font = Mono 500\n").font_size, 72.0);
+        let bad = Config::detect_malformed_values("font = Mono 500\nfont = Mono 10\n");
+        assert_eq!(bad.len(), 1, "only the out-of-range size: {bad:?}");
+        assert!(bad[0].contains("font"));
+    }
 
     /// A config copied from Terminator must actually import. Every line below
     /// is Terminator's own spelling — underscore keys, GTK accelerators, a

@@ -366,6 +366,54 @@ fn production_source() -> String {
 }
 
 #[cfg(test)]
+mod font_reload_tests {
+    use super::production_source;
+
+    /// A font-family reload must invalidate the quick-select hint cache too:
+    /// the same labels would otherwise keep glyphs shaped in the old family.
+    #[test]
+    fn a_font_reload_resets_the_hint_label_cache() {
+        let production = production_source();
+        let reload = production
+            .split_once("self.resize_overlay_text.clear();")
+            .expect("font reload invalidation")
+            .1
+            .split_once("// Ensure one text buffer per pane.")
+            .expect("end of font reload invalidation")
+            .0;
+        assert!(reload.contains("for label in &mut self.hint_texts"));
+    }
+}
+
+#[cfg(test)]
+mod dim_blend_tests {
+    use super::dim_blend;
+    use crate::color::contrast_ratio;
+    use kettle_config::Rgb;
+
+    #[test]
+    fn dimmed_text_keeps_45_percent_of_the_foreground() {
+        let white = Rgb::new(255, 255, 255);
+        let black = Rgb::new(0, 0, 0);
+        assert_eq!(dim_blend(white, black), Rgb::new(115, 115, 115));
+    }
+
+    /// Disabled rows and shortcut hints must stay readable. On TokyoNight
+    /// Night the old blend kept a sixth of the foreground: about 1.6:1.
+    #[test]
+    fn dimmed_text_stays_readable_on_a_dark_theme() {
+        let fg = Rgb::parse("#c0caf5").unwrap();
+        let bg = Rgb::parse("#1a1b26").unwrap();
+        let ratio = contrast_ratio(dim_blend(fg, bg), bg);
+        assert!(ratio >= 3.0, "{ratio:.2}:1");
+        assert!(
+            ratio < contrast_ratio(fg, bg),
+            "still dimmer than normal text"
+        );
+    }
+}
+
+#[cfg(test)]
 mod context_menu_row_width_tests {
     use super::{
         ContextMenu, ContextMenuRow, context_menu_clip_indicators, context_menu_panel_width, menu,
@@ -597,15 +645,11 @@ fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
         || overlay.update_available.is_some()
 }
 
-/// Disabled / secondary menu text: blend the foreground toward the panel
-/// background (~55% mute) without alpha-blending through to whatever lives
-/// under the panel.
+/// Disabled and secondary menu text: 45% foreground over the panel
+/// background, so it reads as about 55% transparent without alpha-blending
+/// through to whatever lives under the panel.
 fn dim_blend(fg: Rgb, bg: Rgb) -> Rgb {
-    Rgb::new(
-        ((fg.r as u16 + bg.r as u16 * 5) / 6) as u8,
-        ((fg.g as u16 + bg.g as u16 * 5) / 6) as u8,
-        ((fg.b as u16 + bg.b as u16 * 5) / 6) as u8,
-    )
+    solid_blend(fg, bg, 45)
 }
 
 /// Opaque color mixture used for UI surfaces that must remain legible over a
@@ -4522,6 +4566,51 @@ fn live_surface_dimensions(width: u32, height: u32, max_dimension: u32) -> (u32,
     (width.clamp(1, max), height.clamp(1, max))
 }
 
+/// The starfield shader's clock. `background-animation = off` freezes it on
+/// its first frame, as the image path shows frame 0. Otherwise it runs, and a
+/// repaint while animation is paused for focus shows the time-correct frame.
+fn starfield_time(
+    animation: kettle_config::BackgroundAnimation,
+    elapsed: std::time::Duration,
+) -> f32 {
+    if animation == kettle_config::BackgroundAnimation::Off {
+        0.0
+    } else {
+        elapsed.as_secs_f32()
+    }
+}
+
+#[cfg(test)]
+mod starfield_time_tests {
+    use super::{production_source, starfield_time};
+    use kettle_config::BackgroundAnimation;
+    use std::time::Duration;
+
+    #[test]
+    fn animation_off_freezes_the_starfield() {
+        let later = Duration::from_secs(90);
+        assert_eq!(starfield_time(BackgroundAnimation::Off, later), 0.0);
+        assert_eq!(starfield_time(BackgroundAnimation::Always, later), 90.0);
+        assert_eq!(
+            starfield_time(BackgroundAnimation::WhenFocused, later),
+            90.0
+        );
+    }
+
+    #[test]
+    fn the_starfield_uniform_takes_its_time_from_starfield_time() {
+        let production = production_source();
+        let upload = production
+            .split_once("self.starfield.upload(")
+            .expect("starfield upload")
+            .1
+            .split_once(");")
+            .expect("end of upload")
+            .0;
+        assert!(upload.contains("starfield_time(cfg.background_animation"));
+    }
+}
+
 impl Renderer {
     /// Compatibility constructor for embedders that only provide a window.
     ///
@@ -5598,15 +5687,15 @@ impl Renderer {
                 self.new_tab_arrow_text.clear();
                 self.status_bar_text.clear();
                 self.resize_overlay_text.clear();
-                // v2.38.2 P1b: the context-menu/settings/search-family caches
-                // added alongside the equality gates below have the exact
-                // same font-staleness hazard — unlike `hint_texts` (whose
-                // pool truncates to 0 whenever `hint_labels` empties, so it
-                // self-invalidates on next open), these overlays' buffer
-                // pools are only touched while the overlay is OPEN, so a
-                // font-family reload that lands while one is closed (or that
-                // doesn't change the label text) would otherwise leave a
-                // stale cache pointing at glyphs shaped in the old family.
+                // The overlay text caches are touched only while their overlay
+                // is open, so a font-family reload that lands while one is
+                // closed, or that keeps the same labels, would leave glyphs
+                // shaped in the old family.
+                // Quick-select hint buffers stay allocated; an empty label
+                // forces each one to reshape on its next fill.
+                for label in &mut self.hint_texts {
+                    label.clear();
+                }
                 self.context_menu_texts.clear();
                 self.context_menu_hint_texts.clear();
                 self.settings_texts.clear();
@@ -8403,9 +8492,8 @@ impl Renderer {
                     row_y += sep_h;
                     continue;
                 }
-                // Disabled rows blend toward the panel bg so a greyed
-                // Copy reads as ~55% transparent without alpha-blending
-                // through to whatever lives under the panel.
+                // Disabled rows blend toward the panel background (see
+                // `dim_blend`).
                 let fg = if row.enabled {
                     theme.foreground
                 } else {
@@ -8798,7 +8886,7 @@ impl Renderer {
             self.starfield.upload(
                 &self.gpu.queue,
                 [sw, sh],
-                self.starfield_started.elapsed().as_secs_f32(),
+                starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
             );
         }
         self.imgs

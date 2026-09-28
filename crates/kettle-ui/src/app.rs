@@ -4262,7 +4262,12 @@ fn compile_triggers(
 ) -> Vec<(regex::Regex, kettle_config::TriggerAction)> {
     let mut out = Vec::with_capacity(triggers.len());
     for t in triggers {
-        match regex::Regex::new(&t.pattern) {
+        // Multi-line: the snapshot joins viewport rows with '\n', and `^` / `$`
+        // should anchor to each row.
+        match regex::RegexBuilder::new(&t.pattern)
+            .multi_line(true)
+            .build()
+        {
             Ok(re) => out.push((re, t.action.clone())),
             Err(e) => {
                 log::warn!("trigger pattern {:?} failed to compile: {e}", t.pattern);
@@ -13176,17 +13181,8 @@ impl App {
             kettle_config::StatusBarMode::Bottom => surface_h - self.search_bar_h(ws) - h,
             kettle_config::StatusBarMode::Off => 0.0,
         };
-        // Compose text: HH:MM:SS · theme · focused pane title.
-        // SystemTime → seconds since UNIX → HH:MM:SS via div/mod, no
-        // dep on chrono. The displayed time is UTC by design (a
-        // future change could honor $TZ — std::time has no built-in
-        // local-tz conversion, would need chrono or time crate).
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let day = secs % 86400;
-        let (hh, mm, ss) = (day / 3600, (day % 3600) / 60, day % 60);
+        // Compose text: local HH:MM:SS · theme · focused pane title.
+        let (hh, mm, ss) = crate::wall_clock::now_local();
         let title = ws
             .mux
             .focused()
@@ -13200,7 +13196,7 @@ impl App {
         // so we can drift-guard it in tests.
         let title_capped = cap_title_for_status_bar(&title, 60);
         let text = format!(
-            "{hh:02}:{mm:02}:{ss:02} UTC  ·  {}  ·  {title_capped}",
+            "{hh:02}:{mm:02}:{ss:02}  ·  {}  ·  {title_capped}",
             self.cfg.theme_name
         );
         kettle_render::StatusBar { height: h, y, text }
@@ -15436,14 +15432,23 @@ impl App {
                 }
             }
             Action::Paste => self.paste_clipboard(ws),
-            Action::IncreaseFontSize | Action::DecreaseFontSize | Action::ResetFontSize => {
+            // The font size is window-wide, so zooming all panes is the same
+            // as zooming one.
+            Action::IncreaseFontSize
+            | Action::DecreaseFontSize
+            | Action::ResetFontSize
+            | Action::ZoomInAll
+            | Action::ZoomOutAll
+            | Action::ZoomNormalAll => {
                 if let Some(r) = ws.renderer.as_mut() {
                     // Step the logical font size directly. Back-deriving it
                     // from `r.cell_h` (physical px) would double-apply the
                     // scale factor on HiDPI.
                     let new = match action {
-                        Action::IncreaseFontSize => r.font_size() + 1.0,
-                        Action::DecreaseFontSize => (r.font_size() - 1.0).max(6.0),
+                        Action::IncreaseFontSize | Action::ZoomInAll => r.font_size() + 1.0,
+                        Action::DecreaseFontSize | Action::ZoomOutAll => {
+                            (r.font_size() - 1.0).max(6.0)
+                        }
                         _ => self.cfg.font_size,
                     };
                     r.set_font_size(new);
@@ -16351,28 +16356,6 @@ impl App {
                     w.request_redraw();
                 }
             }
-            // Broadcast zoom. kettle's font-size is
-            // window-wide (not per-pane like VTE's per-terminal
-            // scale), so zoom-all has the same effect as the
-            // existing single-pane zoom. Compose by reusing the
-            // IncreaseFontSize / DecreaseFontSize / ResetFontSize
-            // arm — same shape as ResetAndClear.
-            Action::ZoomInAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    // Step logical size (see IncreaseFontSize).
-                    r.set_font_size(r.font_size() + 1.0);
-                }
-            }
-            Action::ZoomOutAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.set_font_size((r.font_size() - 1.0).max(6.0));
-                }
-            }
-            Action::ZoomNormalAll => {
-                if let Some(r) = ws.renderer.as_mut() {
-                    r.set_font_size(self.cfg.font_size);
-                }
-            }
             // Insert pane index. Pane index is 1-based
             // (matches Terminator's GotoTab + every user-facing
             // numbering). InsertPanePadded uses 2-digit zero-padded
@@ -16795,18 +16778,15 @@ impl App {
         let Some(schedule) = self.cfg.theme_schedule else {
             return;
         };
-        // Compute now in local-ish HH:MM (UTC for v1 — same as the
-        // status-bar clock; a follow-up could pick up
-        // `$TZ` but no extra dep yet).
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let day_secs = secs % 86_400;
-        let h = (day_secs / 3600) as u8;
-        let m = ((day_secs % 3600) / 60) as u8;
         let is_dark = match schedule {
+            // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
+                let (h, m, _) = crate::wall_clock::now_local();
                 kettle_config::schedule_decision_clock((h, m), schedule)
             }
             kettle_config::ThemeSchedule::SunriseSunset { lat, long } => {
@@ -34272,6 +34252,26 @@ mod tests {
         );
     }
 
+    /// Zoom-all changes the window-wide font size like Ctrl+Plus, so it must
+    /// also drop a stale scaled-zoom baseline. Otherwise leaving scaled zoom
+    /// restores the size from before the zoom-all.
+    #[test]
+    fn zoom_all_shares_the_font_size_arm() {
+        let src = production_source();
+        let arm = src
+            .split_once("| Action::ZoomNormalAll => {")
+            .expect("zoom-all joins the font-size arm")
+            .1
+            .split_once("Action::StartSearch =>")
+            .expect("end of the font-size arm")
+            .0;
+        assert!(arm.contains("ws.scaled_zoom_prev_font_size = None;"));
+        assert!(
+            !src.contains("Action::ZoomInAll => {"),
+            "no separate zoom-all arm"
+        );
+    }
+
     /// PTY rows, columns, and CSI 14 t pixels must be recomputed from the font
     /// metrics selected by the zoom transition, not the metrics that preceded
     /// it. A live renderer is too heavyweight for this unit suite, so pin the
@@ -39055,11 +39055,8 @@ mod tests {
 
     #[test]
     fn match_triggers_finds_pattern_anywhere_in_text() {
-        // Drift guard. The matching engine should fire on
-        // the first regex hit, return its action, and silently no-op
-        // when nothing matches. Anchors (`^` / `$`) work too because
-        // we scan multi-line viewport snapshots; the trigger uses
-        // `regex::Regex::is_match` which doesn't auto-anchor.
+        // The matching engine fires on the first regex hit, returns its
+        // action, and no-ops when nothing matches. Patterns are unanchored.
         use super::{compile_triggers, match_triggers};
         use kettle_config::{OutputTrigger, TriggerAction};
         let cfg = vec![
@@ -39106,6 +39103,21 @@ mod tests {
             "invalid regex should be dropped at compile time"
         );
         assert!(match_triggers("here is the valid_pattern token", &compiled_mixed).is_some());
+    }
+
+    /// Viewport snapshots join rows with '\n', so `^` and `$` must anchor to a
+    /// row, not to the whole snapshot.
+    #[test]
+    fn trigger_anchors_match_each_row() {
+        use super::{compile_triggers, match_triggers};
+        use kettle_config::{OutputTrigger, TriggerAction};
+        let compiled = compile_triggers(&[OutputTrigger {
+            pattern: r"^Build failed: (.+)$".into(),
+            action: TriggerAction::Urgency,
+        }]);
+        let snapshot = "$ make\nBuild failed: missing header\n$ \n";
+        assert!(match_triggers(snapshot, &compiled).is_some());
+        assert!(match_triggers("$ make\nok: Build failed: no\n", &compiled).is_none());
     }
 
     /// Terminator `run_cmd_on_match.py` parity: a trigger's capture groups

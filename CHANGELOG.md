@@ -8,6 +8,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- `theme-schedule` clock times and the status-bar clock use local time. Both
+  used to run on UTC, so `19:00 dark` switched at 12:00 in California.
+- An explicit `font-family` or `font-size` wins over Terminator-style
+  `font = Mono 10` wherever the lines sit, and the `font` size is clamped to
+  5 to 72 points like `font-size`. `--check-config` now flags an out-of-range
+  `font` size.
+- A `trigger` pattern's `^` and `$` anchor to each row of output, so a
+  pattern like `^Build failed: (.+)$` can match. They used to anchor only to
+  the start and end of the whole visible screen.
+- `background-animation = off` freezes the starfield. It used to jump forward
+  on every repaint from typing or output.
+- Quick-select hint labels use the new font after a font-family change. They
+  could keep the old font until the labels themselves changed.
+- Zooming all panes after a scaled zoom keeps the new size when you leave the
+  scaled zoom. It used to snap back to the size from before.
+- A mistyped `--profile` is reported with `--gpu-info` and `--config-path`
+  even when `--check-update` is also given. The combination used to show the
+  default config instead.
+- Disabled menu items and shortcut hints are readable: they keep 45% of the
+  text color instead of a sixth, about 3:1 contrast on TokyoNight instead of
+  1.6:1.
 - `scripts/gen-starfield.py` writes a 1280×720 loop that fits Kettle's 128 MiB
   animation cap, so all 32 frames play. At 1920×1080 only 16 loaded and the
   loop jumped halfway. The BACKGROUNDS example `ffmpeg` command fits the cap
