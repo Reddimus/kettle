@@ -82,6 +82,38 @@ script requires Xcode 26.x. The macOS 26 CI icon job covers it.
 Events to this session's host process (-1743); granting it Automation
 permission was out of scope. Dock icon capture remains unavailable.
 
+## 4.7.0 cut - 2026-09-28
+
+macOS 26.6.2 (25G83), M5 Max. Release build of the cut commit `54f883fb`.
+
+Window chrome, material and icon sources are unchanged since 4.5.0, so the
+4.5.0 visual results still apply. The visible changes were captured from the
+cut's release build with `kettle ctl screenshot`:
+
+- A confirm bar draws its destructive button bold: "Close" is bold beside a
+  regular "Cancel", and the brackets stay aligned.
+- A disabled Settings row is readable. With `cursor-blink = false`, "Stop
+  blinking after 10s" is dimmed but legible.
+- The status-bar clock shows local time, with no "UTC".
+- `window-width = 100` and `window-height = 24` open a 100x24 grid exactly.
+
+The cursor-blink change (#378) and the earlier first shell (#379) were
+measured live; their pull requests have the numbers.
+
+`just gauntlet-strict` passed on the cut, and so did 16 of the 17 macOS native
+gates: `icons-check-required`, `package-templates`, `update-manifest-test`,
+`release-assets-test`, `package-manifest-test`, `online-installer-test`,
+`gpu-render-smoke`, `cli-smoke`, `touchpad-scroll-smoke`,
+`split-exit-resize-smoke`, `text-presentation-smoke`,
+`line-edit-chords-smoke`, `dock-menu-smoke`, `macos-compare-score-self-test`,
+`macos-standing-self-test` and `agent-cli-smoke`. `dock-menu-smoke` ran this
+time; at the 4.6.0 cut macOS denied it Apple Events. `just macos-update-smoke`
+passed against published v4.6.0; since then `kettle-update` has changed only
+in comments.
+
+`icns-smoke` was skipped again: this host has Xcode 27, and the release icon
+script requires Xcode 26.x. The macOS 26 CI icon job covers it.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
