@@ -1970,8 +1970,12 @@ fn ignores_profile(cli: &Cli) -> bool {
     // in source order runs. Otherwise `--profile typo --list-profiles
     // --list-ssh-hosts` would skip validation, run `--list-ssh-hosts` first,
     // and silently print defaults.
-    let reads_profile =
-        cli.list_keybinds || cli.list_layouts || cli.list_ssh_hosts || cli.check_config;
+    let reads_profile = cli.list_keybinds
+        || cli.list_layouts
+        || cli.list_ssh_hosts
+        || cli.check_config
+        || cli.gpu_info
+        || cli.config_path;
     let ignores_profile = cli.print_default_config
         || cli.write_default_config
         || cli.list_themes
@@ -2846,6 +2850,22 @@ mod tests {
                 "typo",
                 "--list-themes",
                 "--list-keybinds",
+            ],
+            // --gpu-info and --config-path run before --check-update and both
+            // resolve the profile.
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--check-update",
+                "--gpu-info",
+            ],
+            vec![
+                "kettle",
+                "--profile",
+                "typo",
+                "--check-update",
+                "--config-path",
             ],
         ] {
             let cli = Cli::parse_from(&args);
@@ -3812,7 +3832,13 @@ mod tests {
         cfg.background_image = "/tmp/wp.jpg".into();
         cfg.borderless = true;
         cfg.status_bar = kettle_config::StatusBarMode::Bottom;
-        for line in extra_check_config_lines(&cfg) {
+        cfg.inert_keys = vec!["example-inert-key".into()];
+        let lines = extra_check_config_lines(&cfg);
+        assert!(
+            lines.iter().any(|line| line.starts_with("inert:")),
+            "the inert-key echo must be exercised too: {lines:?}"
+        );
+        for line in lines {
             let lower = line.to_ascii_lowercase();
             for needle in ["cycle ", "cycle-"] {
                 if let Some(pos) = lower.find(needle)

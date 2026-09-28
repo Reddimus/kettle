@@ -21,11 +21,10 @@ pub enum MouseTracking {
 
 /// Whether a pointer-motion event produces a report under `track`.
 ///
-/// Stated per mode rather than as a negated special case, because the negated
-/// form ("not 1003, and no button held") let 1000 report drags whenever a
-/// button happened to be down — a mode that is defined as press-and-release
-/// only. `vim` with `ttymouse=xterm` enables 1000 alone and reached exactly
-/// that.
+/// Stated per mode rather than as a negated special case. The negated form
+/// ("not 1003, and no button held") would let 1000 report drags while a button
+/// is down, but 1000 is press-and-release only. `vim` with `ttymouse=xterm`
+/// enables 1000 alone and would hit exactly that.
 pub fn motion_is_reported(track: MouseTracking, button_held: bool) -> bool {
     match track {
         // 1003 — all motion, button or not.
@@ -63,8 +62,8 @@ pub fn mouse_tracking(mode: TermMode) -> (MouseTracking, bool) {
 const LINES_PER_NOTCH: f32 = 3.0;
 
 /// Physical pixels per detent for backends that report `PixelDelta` (macOS
-/// trackpads, Wayland/libinput). 60 px ÷ 3 lines reproduces the historical
-/// `p.y / 20.0` lines-per-pixel ratio exactly, so scroll feel is unchanged.
+/// trackpads, Wayland/libinput). At 3 lines per detent, that is one scrollback
+/// line per 20 px at `scroll-multiplier = 1.0`.
 const PIXELS_PER_NOTCH: f32 = 60.0;
 
 /// Ceiling on retained residue. A device streaming deltas faster than they are
@@ -106,10 +105,9 @@ impl WheelSteps {
 /// `LineDelta` (never `PixelDelta`), so one touchpad gesture arrives as a
 /// stream of ~0.07–0.3 notch events.
 ///
-/// Rounding each event in isolation — the pre-v2.41.0 behavior — rounded every
-/// one of them to zero, so touchpad scrolling did not merely feel slow, it was
-/// *completely dead*. The same dead-zone killed the mouse wheel outright at
-/// `scroll-multiplier = 0.1` and swallowed slow macOS/Wayland trackpad motion.
+/// Rounding each event in isolation rounds every one of them to zero, which
+/// kills touchpad scrolling outright, kills the mouse wheel at
+/// `scroll-multiplier = 0.1`, and swallows slow macOS/Wayland trackpad motion.
 /// Carrying the fraction forward is what makes sub-detent input work at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WheelAccum {
@@ -187,10 +185,9 @@ fn drain_residual(residual: &mut f32) -> i32 {
 /// they opt into mouse reports.
 ///
 /// Gated on `ALTERNATE_SCROLL` as well as `ALT_SCREEN`, matching upstream
-/// Alacritty and xterm. The flag is *set by default*, so the common case is
-/// unchanged — but an app that opts out with `CSI ?1007 l` (because it wants
-/// the wheel to reach kettle's own scrollback, or handles scrolling some other
-/// way) is now honored instead of being force-fed synthetic arrow keys.
+/// Alacritty and xterm. The flag is *set by default*. An app that opts out
+/// with `CSI ?1007 l` (to let the wheel reach kettle's own scrollback, or to
+/// handle scrolling some other way) gets no synthetic arrow keys.
 pub fn alternate_scroll_key(lines: i32, mode: TermMode) -> Option<Vec<u8>> {
     if lines == 0
         || !mode.contains(TermMode::ALT_SCREEN)
@@ -225,12 +222,10 @@ pub fn mouse_encode(
     let x = col + 1;
     let y = row + 1;
     // Build the modifier/motion bitfield onto a per-mode button base. SGR
-    // always reports the real button (and signals press/release with the M/m
-    // final byte), so its base is `btn`. Legacy X10 has no separate release
-    // final byte: a release is encoded by substituting the "button-release"
-    // sentinel `3` for the button code on the `!pressed` event. Wheel/extended
-    // buttons (`btn >= 64`) are press-only motion notches with no release at
-    // all, so they keep their real code.
+    // always reports the real button and marks press/release with the M/m
+    // final byte. Legacy X10 has no release final byte, so a release replaces
+    // the button code with the sentinel `3`. Wheel/extended buttons
+    // (`btn >= 64`) have no release, so they keep their real code.
     let base = |sentinel: bool| -> u32 {
         if sentinel && !pressed && btn < 64 {
             3
@@ -366,14 +361,13 @@ fn level_one_encodes_ascii(c: char, mods: ModifiersState) -> bool {
 /// doesn't apply (mode off, not a numpad key, or an unsupported modifier is
 /// held).
 ///
-/// `TermMode::APP_KEYPAD` is set/cleared by DECKPAM (`ESC =`)
-/// / DECKPNM (`ESC >`) in the engine, but the key encoder only ever consulted
-/// `APP_CURSOR` — so under application-keypad mode the numpad still sent plain
-/// ASCII instead of the xterm SS3 keypad sequences (`ESC O p`..`ESC O y` for
-/// 0–9, `ESC O M` for keypad-Enter, `k`/`m`/`j`/`o`/`n`/`X` for `+ - * / . =`).
-/// curses apps, gnuplot, BBS/serial clients, and TUI calculators rely on these.
-/// `event.location` is what distinguishes the numpad from the main number row;
-/// the main encoder is location-agnostic, so this runs first.
+/// The engine sets `TermMode::APP_KEYPAD` on DECKPAM (`ESC =`) and clears it
+/// on DECKPNM (`ESC >`). In that mode the numpad sends the xterm SS3 keypad
+/// sequences instead of plain ASCII (`ESC O p`..`ESC O y` for 0-9, `ESC O M`
+/// for keypad-Enter, `k`/`m`/`j`/`o`/`n`/`X` for `+ - * / . =`). curses apps,
+/// gnuplot, BBS/serial clients, and TUI calculators rely on these. Only
+/// `event.location` tells the numpad from the main number row, and the main
+/// encoder ignores location, so this runs first.
 pub fn encode_app_keypad(
     key: &Key,
     location: KeyLocation,
@@ -512,8 +506,6 @@ pub fn encode(
                 //     convention; users coming from VS Code / browsers
                 //     expect this to be "delete word back," and bash can
                 //     be told so with `bind '"\C-h":backward-kill-word'`.
-                //     Without distinguishing it, Ctrl+Backspace was a
-                //     plain Backspace, breaking the muscle memory.
                 return Some(match (ctrl, alt) {
                     (true, true) => vec![0x1b, 0x08],
                     (true, false) => vec![0x08],
@@ -549,13 +541,11 @@ pub fn encode(
                 }
                 return Some(if alt { vec![0x1b, 0x1b] } else { vec![0x1b] });
             }
-            // The space bar arrives as NamedKey::Space, which
-            // returned a literal space BEFORE any modifier was inspected — so
-            // Ctrl+Space emitted 0x20 instead of NUL (0x00), silently breaking
-            // emacs/readline set-mark and tmux/vim C-SPC bindings. (The
-            // `' ' => 0x00` entry in the Ctrl table below is in the
-            // Key::Character arm, which the space key never reaches.) xterm
-            // emits NUL for Ctrl+Space and ESC+space for Alt+Space.
+            // The space bar arrives as NamedKey::Space, so it never reaches
+            // the Key::Character arm, where `legacy_control_code` maps `' '`
+            // to NUL. This arm applies modifiers itself. As in xterm,
+            // Ctrl+Space sends NUL (0x00) for emacs/readline set-mark and
+            // tmux/vim C-SPC bindings, and Alt+Space sends ESC+space.
             NamedKey::Space => {
                 let level_one_encodes = alt;
                 if let Some(sequence) =
@@ -2025,11 +2015,10 @@ mod tests {
 
     #[test]
     fn paste_bracketed_preserves_newlines() {
-        // P0 data-corruption regression: a multi-line bracketed paste must reach
-        // the application (vim/IPython/node) with `\n` between lines — NOT `\r`.
-        // The old code ran `.replace('\n', "\r")` unconditionally, garbling every
-        // multi-line paste into an editor. The CR normalization belongs to the
-        // non-bracketed path only.
+        // A multi-line bracketed paste must reach the application
+        // (vim/IPython/node) with `\n` between lines, NOT `\r`. Rewriting `\n`
+        // to CR here garbles every multi-line paste into an editor. The CR
+        // normalization belongs to the non-bracketed path only.
         let p = paste_payload("line1\nline2\nline3", true);
         assert_eq!(p, b"\x1b[200~line1\nline2\nline3\x1b[201~");
         // CRLF input is collapsed to LF (consistency), never to CR.
@@ -2056,11 +2045,11 @@ mod tests {
 
     #[test]
     fn paste_strips_overlap_reconstructed_marker() {
-        // A single left-to-right `.replace` pass
-        // leaves a marker that re-forms across the splice seam.
+        // A single left-to-right `.replace` pass leaves a marker that re-forms
+        // across the splice seam.
         // `\x1b[20\x1b[201~1~` -> (strip inner `\x1b[201~`) -> `\x1b[201~`. The
-        // sanitizer must leave exactly ONE closer (the wrapper's). The old
-        // single-pass code left two (the reconstructed one auto-runs the tail).
+        // sanitizer must leave exactly ONE closer (the wrapper's), because the
+        // reconstructed one auto-runs the tail.
         let p = paste_payload("a\x1b[20\x1b[201~1~b", true);
         assert_eq!(
             p.windows(6).filter(|w| *w == b"\x1b[201~").count(),
@@ -2151,12 +2140,11 @@ mod tests {
         );
     }
 
-    /// The four Alt fixes above each pin only the unnegotiated case, which is
-    /// the mode the bug was reported in — but `modifyOtherKeys` is where these
-    /// keys change shape entirely, and an implementation that silently fell
-    /// back to the legacy bytes at level 1 or 2 would keep every exact test
-    /// green and satisfy the sweep (the fallback still starts with ESC).
-    /// Pin the negotiated forms as their own contract.
+    /// The four Alt tests below each pin only the unnegotiated case, but
+    /// `modifyOtherKeys` changes these keys' shape entirely. An implementation
+    /// that silently fell back to the legacy bytes at level 1 or 2 would keep
+    /// every exact test green and satisfy the sweep (the fallback still starts
+    /// with ESC). Pin the negotiated forms as their own contract.
     #[test]
     fn the_alt_chords_keep_their_modify_other_keys_forms_at_every_level() {
         let alt = ModifiersState::ALT;
@@ -2333,8 +2321,7 @@ mod tests {
         assert_eq!(enc("a"), Some(vec![0x01]));
         assert_eq!(enc("m"), Some(vec![0x0D]));
         assert_eq!(enc("z"), Some(vec![0x1A]));
-        // Punctuation row — each one was either already mapped (`[`, `\\`,
-        // `]`, ` `) or newly added (`@`, `^`, `_`, `/`).
+        // Punctuation row.
         assert_eq!(enc("@"), Some(vec![0x00]), "Ctrl+@ = NUL");
         assert_eq!(enc("["), Some(vec![0x1B]), "Ctrl+[ = ESC");
         assert_eq!(enc("\\"), Some(vec![0x1C]), "Ctrl+\\ = FS / SIGQUIT");
@@ -2443,11 +2430,10 @@ mod tests {
 
     /// `Ctrl+Alt+<char>` is xterm's Meta+Control form: ESC then the C0 code.
     ///
-    /// It used to be special-cased for `C-M-v` alone, so every other chord
-    /// fell through to the printable-Meta path and lost Control — and for the
-    /// four characters whose C0 codes are sequence introducers it wrote a bare
-    /// CSI / OSC / APC / DCS opener into the PTY, after which the terminal
-    /// consumed whatever the user typed next as parameters.
+    /// If Control were dropped, the chord would send ESC plus the literal
+    /// character, which for four characters is a bare CSI / OSC / APC / DCS
+    /// opener, and the terminal would consume whatever the user typed next as
+    /// parameters.
     #[test]
     fn ctrl_alt_characters_keep_control_and_never_emit_a_bare_introducer() {
         use winit::keyboard::Key;
@@ -2465,7 +2451,7 @@ mod tests {
             ('b', 0x02),
             ('k', 0x0b),
             ('v', 0x16),
-            // The four that used to escape as introducers.
+            // The four where ESC plus the literal character opens a sequence.
             ('[', 0x1b), // CSI
             (']', 0x1d), // OSC
             ('_', 0x1f), // APC
@@ -2486,8 +2472,7 @@ mod tests {
             );
         }
 
-        // The specific regression: never the literal character, which is what
-        // turned these four into sequence openers.
+        // Never ESC plus the literal character, which would open a sequence.
         for introducer in ['[', ']', '_'] {
             assert_ne!(
                 encode_char(introducer, ctrl_alt),
@@ -2510,11 +2495,10 @@ mod tests {
 
         // The AltGr substitute. winit only neutralizes AltGr for the RIGHT
         // Alt, but Windows documents left-Ctrl + left-Alt as a substitute, so
-        // a German `Ctrl+Alt+Q` — how you type `@` — reaches this branch as
+        // a German `Ctrl+Alt+Q` (how you type `@`) reaches this branch as
         // plain CONTROL|ALT with `@` as the committed text. The C0 table must
-        // not claim it: `q` is in the table, and answering DC1/XON to a
-        // request for `@` would be worse than the wrong character the old
-        // code gave.
+        // not claim it. `q` is in the table, and the user asked for `@`, not
+        // DC1/XON.
         let composed = encode(
             &Key::Character("q".to_string().into()),
             Some("@"),
@@ -2529,8 +2513,8 @@ mod tests {
              encoded as that key's control code"
         );
 
-        // And a chord that committed no printable text still takes the table,
-        // which is what keeps the fix above from disabling itself.
+        // A chord that committed no printable text still takes the table, so
+        // the composition check does not switch the table off.
         assert_eq!(
             encode(
                 &Key::Character("a".to_string().into()),
@@ -3188,11 +3172,10 @@ mod tests {
 
     /// Each DEC mouse mode reports exactly the motion it is defined to report.
     ///
-    /// Driven through the real classifier and the real rule, one row per mode,
-    /// with the button held and not held — so a mode that silently behaves
-    /// like its neighbour shows up as a row that disagrees. Two did: 1003
-    /// reported nothing without a button (its whole purpose), and 1000
-    /// reported drags whenever one happened to be down.
+    /// Runs the real classifier and the real rule, one row per mode, with the
+    /// button held and not held. A mode that behaves like its neighbour shows
+    /// up as a disagreeing row, such as 1003 reporting nothing without a button
+    /// (its whole purpose) or 1000 reporting drags while one is down.
     #[test]
     fn each_mouse_mode_reports_exactly_the_motion_it_promises() {
         use kettle_core::TermMode;
@@ -3312,9 +3295,8 @@ mod tests {
         use winit::event::MouseScrollDelta;
 
         // A Windows Precision Touchpad gesture: WM_MOUSEWHEEL deltas well under
-        // WHEEL_DELTA(120), which winit hands us as fractional LineDelta. Before
-        // v2.41.0 each of these rounded to zero independently and the terminal
-        // never scrolled at all.
+        // WHEEL_DELTA(120), which winit hands us as fractional LineDelta. If
+        // each rounded to zero on its own, the terminal would never scroll.
         let mut accum = WheelAccum::default();
         let mut lines = 0;
         let mut notches = 0;
@@ -3333,9 +3315,8 @@ mod tests {
             "sub-notch deltas must accumulate into whole detents, got {notches}"
         );
 
-        // Pin the defect itself: the pre-fix formula (`y.round() * 3.0 * mult`,
-        // rounded) yields exactly nothing for this identical input, which is why
-        // touchpad scrolling was dead rather than merely slow.
+        // Per-event rounding (`y.round() * 3.0 * mult`, rounded) yields nothing
+        // for this same input, so it would drop the gesture rather than slow it.
         let old_formula_total: i32 = (0..20).map(|_| (0.1f32.round() * 3.0) as i32).sum();
         assert_eq!(
             old_formula_total, 0,
@@ -3360,7 +3341,7 @@ mod tests {
                 .lines,
             -6
         );
-        // PixelDelta parity with the historical `p.y / 20.0`: 60 px = 3 lines.
+        // A 60 px PixelDelta scrolls 3 lines.
         assert_eq!(
             WheelAccum::default()
                 .feed(
@@ -3502,10 +3483,9 @@ mod tests {
     fn mouse_encode_legacy_release_uses_sentinel() {
         // Legacy X10/normal mode has no separate release final byte (it always
         // sends `ESC [ M`), so a button release must encode the "button-release"
-        // sentinel `3` instead of the pressed button's code. The old code
-        // re-encoded the original button on release, so an app could never tell
-        // which button (if any) came up — and a left release looked identical to
-        // a left press, breaking drag-select / click-up handling in legacy apps.
+        // sentinel `3` instead of the pressed button's code. Otherwise a left
+        // release looks identical to a left press, breaking drag-select /
+        // click-up handling in legacy apps.
         let none = ModifiersState::empty();
         // Left (btn 0) release at grid (0,0): ESC [ M (32+3) (32+1) (32+1).
         assert_eq!(

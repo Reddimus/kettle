@@ -11,9 +11,8 @@
 # spread across runs is visible at a glance. Pipe to a file or
 # /tmp/bench.txt for a snapshot to attach to a PR.
 #
-# Requires `time` (GNU coreutils — on macOS install via
-# `brew install coreutils` and call as `gtime`). Inherits the
-# repo-root `target/release/kettle` if present; otherwise builds it
+# Requires GNU `time` (on macOS, `brew install gnu-time` provides `gtime`).
+# Uses the repo-root `target/release/kettle` if present; otherwise builds it
 # via `cargo build --release -p kettle`.
 
 set -euo pipefail
@@ -21,14 +20,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Pick the right `time` binary. macOS / BSD `time` doesn't support
-# the `-v` / `-f` flags we need.
+# the `-f` flag we need.
 TIME_BIN=""
 if command -v /usr/bin/time >/dev/null 2>&1 && /usr/bin/time -f '%e' true >/dev/null 2>&1; then
   TIME_BIN="/usr/bin/time"
 elif command -v gtime >/dev/null 2>&1; then
   TIME_BIN="gtime"
 else
-  echo "bench.sh: need GNU 'time' (Linux /usr/bin/time or macOS 'gtime' from coreutils)." >&2
+  echo "bench.sh: need GNU 'time' (Linux /usr/bin/time, or 'gtime' from 'brew install gnu-time' on macOS)." >&2
   exit 1
 fi
 

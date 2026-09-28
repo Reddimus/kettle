@@ -2,22 +2,22 @@
 # Repro harness for the Terminator-style right-click
 # context menu.
 #
-# Launches a real kettle window, drives xdotool to right-click near
-# the screen center, waits a beat for the menu to paint, then captures
-# the whole screen via scrot. The resulting PNG lands in
-# target/menu-shots/ for diffing against prior runs as further
-# context-menu work lands.
+# Launches a real kettle window, drives xdotool to right-click 320px
+# in and 240px down from its top-left corner, waits a beat for the menu
+# to paint, then captures the focused window via scrot. The resulting
+# PNG lands in target/menu-shots/ for diffing against prior runs as
+# further context-menu work lands.
 #
-# Why interactive rather than --screenshot:
-#   kettle's --screenshot flag captures the surface at a single point
-#   in time but doesn't drive UI state — there's no flag to open the
-#   context menu before the snapshot fires. xdotool + scrot lets us
-#   exercise the actual mouse path the user takes.
+# Why interactive rather than --screenshot-menu:
+#   kettle's --screenshot-menu flag renders a synthetic context menu at
+#   a fixed position for a deterministic PNG; it doesn't drive real UI
+#   state. xdotool + scrot let us exercise the actual mouse path the
+#   user takes.
 #
-# Skipped automatically when:
-#   - $DISPLAY is unset (CI / headless)
-#   - scrot or xdotool aren't on PATH
-#   - the kettle binary isn't built yet (gives a hint to run `just build`)
+# Exits early when:
+#   - neither $DISPLAY nor $WAYLAND_DISPLAY is set (skips on CI / headless)
+#   - scrot or xdotool aren't on PATH (fails with an install hint)
+#   - the kettle binary isn't built yet (fails with a `cargo build` hint)
 #
 # Usage:
 #   ./scripts/menu-screenshot.sh                       # captures default
@@ -98,7 +98,6 @@ if [ -z "$WID" ]; then
     exit 1
 fi
 
-# Raise + focus + right-click near the center.
 xdotool windowactivate --sync "$WID"
 xdotool windowsize --sync "$WID" 1280 720 2>/dev/null || true
 

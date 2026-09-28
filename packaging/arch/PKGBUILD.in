@@ -79,8 +79,7 @@ package() {
     done
 
     # Docs ship in /usr/share/doc/kettle so an offline user can
-    # read the README / CHANGELOG / SECURITY policy without
-    # network access.
+    # read the README / CHANGELOG / NOTICE without network access.
     install -Dm644 LICENSE   "${pkgdir}/usr/share/licenses/kettle/LICENSE"
     install -Dm644 NOTICE    "${pkgdir}/usr/share/doc/kettle/NOTICE"
     install -Dm644 README.md "${pkgdir}/usr/share/doc/kettle/README.md"

@@ -20,8 +20,8 @@ nix run "github:reddimus/kettle?ref=vX.Y.Z"
 
 Builds the binary in a Nix sandbox, runs it, and leaves the result
 in the Nix store (gc'd when not referenced). Great for trying
-kettle on a NixOS box without committing to an install. Replace
-The tag reference requires the release's `v` prefix.
+kettle on a NixOS box without committing to an install. The tag
+reference requires the release's `v` prefix.
 
 Nix packages can provide the Vulkan/OpenGL loaders but cannot bundle a host's
 vendor-specific GPU driver. NixOS users should keep normal graphics support
@@ -36,7 +36,7 @@ nix profile install github:reddimus/kettle
 ```
 
 Persists across nix gc; uninstall with `nix profile remove kettle`
-(or remove its profile index/store path). The wrapped binary lives
+(or remove its profile index/store path). The binary lives
 at `~/.nix-profile/bin/kettle`, on the default `$PATH` for both NixOS
 and home-manager users. Linux outputs also install Kettle's Desktop Entry,
 SVG and seven raster hicolor icons, man page, and bash/zsh/fish/PowerShell
@@ -83,10 +83,10 @@ with `nix flake update`, review the input revisions, then run `nix flake check`
 and `nix build`.
 
 The `cargoLock.lockFile` auto-resolves crate sources from the
-in-tree `Cargo.lock`, so no separate `cargoSha256` to maintain (the
-`cargoHash`/`cargoVendorDir`/`cargoLock` triad confused enough
-contributors that picking `cargoLock.lockFile` lets `Cargo.lock`
-be the single source of truth for Rust dependencies).
+in-tree `Cargo.lock`, so there is no separate `cargoSha256` to
+maintain. Of the `cargoHash`/`cargoVendorDir`/`cargoLock` options,
+`cargoLock.lockFile` makes `Cargo.lock` the single source of truth
+for Rust dependencies.
 
 ## What the flake does that's kettle-specific
 
@@ -143,11 +143,11 @@ before a release can describe them as Nix-tested.
 
 ## Why this lives in the main repo
 
-Same rationale as `packaging/{homebrew,arch}/` — the flake version
+Same rationale as `packaging/{homebrew,arch}/`. The flake version
 field tracks the release, so it bumps in the same PR as
 `Cargo.toml`. The repo serves as the canonical source of *every*
-distribution channel, and flakes are uniquely flake-native (no
-separate tap / AUR repo to push to).
+distribution channel, and a flake needs no separate tap or AUR repo
+to push to.
 
 ## Sources
 

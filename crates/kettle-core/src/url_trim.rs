@@ -1,15 +1,13 @@
 //! Trim trailing punctuation that follows URLs in prose but isn't actually
 //! part of them (`.`, `,`, `;`, `:`, `'`, `"`), plus *bracket-balance-aware*
 //! handling of `)`, `]`, `}`. Shared by the OSC 8 / autodetect link path
-//! (`links.rs`) and the quick-select hint mode (`hints.rs`) — both used to
-//! have their own private `trim_trailing` doing the same too-aggressive
-//! strip.
+//! (`links.rs`) and the quick-select hint mode (`hints.rs`).
 //!
 //! Why this needs to be careful: many legitimate URLs end in a closing
 //! bracket — `https://en.wikipedia.org/wiki/Foo_(bar)` is the canonical
 //! example, but the same shape shows up in Apple docs, MDN reference URLs,
 //! some markdown link targets, and any forum post that ends a URL with
-//! `(blah)` for disambiguation. Always stripping the trailing `)` broke
+//! `(blah)` for disambiguation. Always stripping the trailing `)` turns
 //! those URLs into 404s (the `(bar` half is a real path component).
 //!
 //! At the same time, the autodetect regex starts at `https?://` / `www.` /
@@ -80,9 +78,8 @@ mod tests {
 
     #[test]
     fn keeps_balanced_closing_brackets() {
-        // The Wikipedia case. Pre-fix, the trailing `)` was
-        // always stripped, turning the URL into a 404 (`Foo_(bar` is a
-        // real, different path).
+        // The Wikipedia case. Stripping the `)` would turn the URL into a 404
+        // (`Foo_(bar` is a real, different path).
         assert_eq!(
             trim_trailing("https://en.wikipedia.org/wiki/Foo_(bar)"),
             "https://en.wikipedia.org/wiki/Foo_(bar)"
@@ -140,10 +137,9 @@ mod tests {
 
     #[test]
     fn multibyte_in_url_is_untouched() {
-        // Non-ASCII chars (an IRI-ish URL with a Japanese path) are never
-        // stripped — the byte-level filter only matches ASCII punctuation
-        // and the pair-counting only counts ASCII parens, so multi-byte
-        // chars are passed through verbatim.
+        // Non-ASCII chars (an IRI-ish URL with a CJK path) are never
+        // stripped. The byte-level filter and pair counts match only ASCII
+        // punctuation, so multi-byte chars pass through verbatim.
         let url = "https://例.test/路径";
         assert_eq!(trim_trailing(url), url);
         // Trailing prose `.` after a multi-byte char still strips.

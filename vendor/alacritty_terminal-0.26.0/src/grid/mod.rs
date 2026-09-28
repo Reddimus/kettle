@@ -261,9 +261,12 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
         } else {
             // Subregion rotation.
-            let range = (region.start + positions).0..region.end.0;
-            for line in range.rev().map(Line::from) {
-                self.raw.swap(line, line - positions);
+            self.raw.unwrap_lines(region);
+            if !self.raw.rotate_lines(region.clone(), positions, false) {
+                let range = (region.start + positions).0..region.end.0;
+                for line in range.rev().map(Line::from) {
+                    self.raw.swap(line, line - positions);
+                }
             }
 
             let range = region.start.0..(region.start + positions).0;
@@ -321,13 +324,19 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
             // Swap the fixed lines at the bottom back into position.
             let screen_lines = self.screen_lines() as i32;
-            for i in (region.end.0..screen_lines).rev().map(Line::from) {
-                self.raw.swap(i, i - positions);
+            let fixed = region.end - positions..Line(screen_lines);
+            if region.end.0 < screen_lines && !self.raw.rotate_lines(fixed, positions, false) {
+                for i in (region.end.0..screen_lines).rev().map(Line::from) {
+                    self.raw.swap(i, i - positions);
+                }
             }
         } else {
             // Rotate lines without moving anything into history.
-            for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {
-                self.raw.swap(i, i + positions);
+            self.raw.unwrap_lines(region);
+            if !self.raw.rotate_lines(region.clone(), positions, true) {
+                for i in (region.start.0..region.end.0 - positions as i32).map(Line::from) {
+                    self.raw.swap(i, i + positions);
+                }
             }
         }
 

@@ -41,21 +41,21 @@ Reports that fit any of these are welcome:
   attacker-controlled payload (e.g. a sixel/kitty/iTerm2 image, OSC 52
   payload, scrollback line). Existing size caps already gate the
   obvious cases; a resource-cap chain bounds the kitty graphics
-  protocol (PNG/JPEG/GIF decompression-bomb cap at 8192² / 256 MiB,
-  `ImageData::new` `checked_mul` overflow guard, 384 MiB
-  per-chunk-stream cap, 32-slot in-flight cap, 256 frames-per-image
-  cap, 64-slot caps on `store` / `anim` / `virtual_placements` /
-  `rel` / `frames`); the 64 MiB cap in `extract.rs` bounds any single
-  APC/OSC payload. New bypasses are in scope.
+  protocol (PNG/JPEG/GIF decompression-bomb cap at 8192² / 64 MiB,
+  `ImageData::new` `checked_mul` overflow guard, 96 MiB
+  per-chunk-stream cap, 8-slot / 128 MiB in-flight cap, 128-frame
+  total animation cap, 256-slot caps on `store` / `anim` / `frames`
+  and on `virtual_placements` + `rel` combined); the 16 MiB sequence
+  cap in `extract.rs` bounds any single APC/OSC payload. New bypasses
+  are in scope.
 - **Session/config tampering** — a config file or `session.json` that
   causes RCE, file-write outside the documented config/session paths,
-  or persistent privilege escalation across launches. Note: a
-  read-size sweep adds defense-in-depth size caps on every user-file
-  read (1 MiB config, 16 MiB session.json, 4 MiB init.lua, plus the
-  bg-image 8192² / 256 MiB cap) so a swap-attack with filesystem
-  access can't OOM kettle on launch via these paths — but tampering
-  that bypasses the cap (config that parses cleanly but escalates)
-  remains in scope.
+  or persistent privilege escalation across launches. Note: every
+  user-file read has a defense-in-depth size cap (1 MiB config, 16 MiB
+  session.json, 4 MiB init.lua, plus the bg-image 8192² / 64 MiB cap)
+  so a swap-attack with filesystem access can't OOM kettle on launch
+  via these paths. Tampering that bypasses the cap (config that parses
+  cleanly but escalates) remains in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

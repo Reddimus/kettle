@@ -107,17 +107,17 @@ jobs:
         run: ./scripts/check-lru-scope.sh
       - name: Install cargo-audit enforcement CLI
         run: cargo install cargo-audit --version 0.22.1 --locked
-      # Official RustSec action. Vendors `cargo-audit`, runs against the
-      # advisory DB, posts a Checks-API annotation per finding, and on
-      # `push` to `main` syncs a per-advisory tracking issue. The token
+      # Official RustSec action. It reuses the `cargo-audit` installed above,
+      # runs against the advisory DB, posts a Checks-API report on `push`, and
+      # on the daily `schedule` syncs a per-advisory tracking issue. The token
       # is the standard GITHUB_TOKEN; permissions come from the
       # trusted job-level `permissions:` block above. It is passed only to
       # these action steps and is never persisted by checkout.
       #
       # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains only through
       # upstream text-rendering stacks (`glyphon → cosmic-text → fontdb`).
-      # The avoidable `winit → sctk-adwaita → ab_glyph` route stays removed:
-      # v2.34.0 uses winit's `wayland-csd-adwaita-notitle` feature (GNOME
+      # The avoidable `winit → sctk-adwaita → ab_glyph` route stays removed.
+      # Kettle uses winit's `wayland-csd-adwaita-notitle` feature (GNOME
       # Wayland titlebar decorations, sctk-adwaita WITHOUT a text renderer),
       # which adds no ttf-parser edge — the scope guard above proves it on
       # every run. Remove this ignore once glyphon publishes a compatible

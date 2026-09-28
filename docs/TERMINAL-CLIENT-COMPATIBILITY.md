@@ -170,20 +170,19 @@ target pane cannot encode rather than silently dropping the modifier.
 
 A keybinding is therefore the only way to give a Super chord meaning in a
 legacy pane, and macOS ships one: `Cmd+Backspace` is bound to `text:\x15`,
-the `^U` that deletes to the start of the line. A binding is deliberate here
-rather than an encoder fallback — it fires whatever the client negotiated,
-where a fallback would defer to the Kitty protocol and so go dead in exactly
-the TUIs that negotiate it. `keybind = cmd+backspace=unbind` gives the chord
-back to the application.
+the `^U` that deletes to the start of the line. Kettle uses a binding here
+rather than an encoder fallback because a binding fires whatever the client
+negotiated. A fallback would defer to the Kitty protocol, so it would go dead
+in exactly the TUIs that negotiate it. `keybind = cmd+backspace=unbind` gives
+the chord back to the application.
 
-Option is a separate question from Super, and `macos-option-as-alt` decides
-only half of it. The policy exists so `⌥e` can compose `´` instead of sending
-`ESC e`, which is a question about keys that produce text. Keys that compose
-no character — Backspace, Delete, the arrows, Home/End, Page Up/Down, Insert
-and the F-keys — always carry Alt to the encoder, on every setting and from
-either Option key, because there is no composition to protect: `⌥⌫` is
-`ESC DEL` and `⌥←`/`⌥→` are `CSI 1;3D`/`CSI 1;3C`. kitty draws the same line,
-and for the same reason.
+Option is separate from Super, and `macos-option-as-alt` covers only keys that
+produce text. The policy exists so `⌥e` can compose `´` instead of sending
+`ESC e`. Keys that compose no character (Backspace, Delete, the arrows,
+Home/End, Page Up/Down, Insert and the F-keys) always carry Alt to the
+encoder, on every setting and from either Option key, because there is no
+composition to protect. `⌥⌫` is `ESC DEL` and `⌥←`/`⌥→` are
+`CSI 1;3D`/`CSI 1;3C`. kitty draws the same line for the same reason.
 
 What the application does with `ESC DEL` is then its own business, and one
 client is worth naming. Neovim leaves `<M-BS>` unmapped, so `⌥⌫` does not

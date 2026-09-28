@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI-free checks for macos-standing.py's parsing and statistics."""
+"""GUI-free checks for macos-standing.py's parsing, statistics, and vtebench fix."""
 
 from __future__ import annotations
 
@@ -174,8 +174,8 @@ class VtebenchCheckout(unittest.TestCase):
         self.assertFalse(standing.checkout_vtebench(self.checkout, str(self.upstream), self.first))
 
     def test_a_pin_that_names_no_commit_fails_with_its_value(self) -> None:
-        # The first pin shipped with a correct 7-character prefix and a wrong
-        # remainder, which only failed when a full run reached vtebench.
+        # A correct 7-character prefix with a wrong remainder must fail here,
+        # not when a full run reaches vtebench.
         bogus = self.first[:7] + "0" * 33
         with self.assertRaises(SystemExit) as raised:
             standing.checkout_vtebench(self.checkout, str(self.upstream), bogus)
@@ -195,7 +195,7 @@ class VtebenchCheckout(unittest.TestCase):
 
     def test_the_workspace_excludes_the_checkout(self) -> None:
         # Cargo refuses to build a package inside a workspace root that does
-        # not list it, so a run from a Kettle checkout failed at the build.
+        # not list it.
         import tomllib
 
         manifest = tomllib.loads((standing.REPO / "Cargo.toml").read_text())
@@ -203,6 +203,95 @@ class VtebenchCheckout(unittest.TestCase):
         self.assertIn(
             checkout.relative_to(standing.REPO).as_posix(),
             manifest["workspace"]["exclude"],
+        )
+
+
+# The size lookup exactly as the pinned vtebench scripts spell it.
+UPSTREAM_SIZE_SCRIPT = """#!/bin/sh
+tty="/dev/$(ps -o tty= -p $$)"
+columns=$(tput cols < $tty)
+lines=$(tput lines < $tty)
+printf "%s %s" "$columns" "$lines"
+"""
+
+
+def run_like_vtebench(script: Path, cols: int, rows: int) -> str:
+    """Run `script` the way vtebench runs a benchmark script.
+
+    It gets a pty of `cols` x `rows` as its controlling terminal, with stdin
+    on /dev/null and stdout and stderr on pipes. The terminal keeps the tty
+    open, as it would under vtebench; with no open descriptor macOS drops it.
+    """
+    import fcntl
+    import os
+    import pty
+    import struct
+    import termios
+
+    out_r, out_w = os.pipe()
+    pid, master = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        os.dup2(0, 3, inheritable=True)
+        null = os.open("/dev/null", os.O_RDONLY)
+        os.dup2(null, 0)
+        os.dup2(out_w, 1)
+        os.dup2(out_w, 2)
+        os.execv(str(script), [str(script)])
+    os.close(out_w)
+    chunks = []
+    while chunk := os.read(out_r, 65536):
+        chunks.append(chunk)
+    os.waitpid(pid, 0)
+    os.close(master)
+    return b"".join(chunks).decode()
+
+
+class VtebenchSizeFix(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.source = Path(self.tmp.name) / "benchmarks"
+        (self.source / "probe").mkdir(parents=True)
+        (self.source / "probe" / "benchmark").write_text(UPSTREAM_SIZE_SCRIPT)
+        (self.source / "probe" / "benchmark").chmod(0o755)
+        (self.source / "top_region").mkdir()
+        (self.source / "top_region" / "setup").write_text(
+            '#!/bin/sh\n\nprintf "\\e[?1049h\\e[2;$(tput lines)r"\n'
+        )
+        (self.source / "top_region" / "setup").chmod(0o755)
+        (self.source / "top_region" / "benchmark").symlink_to("../probe/benchmark")
+
+    def test_the_patched_scripts_see_the_real_window_size(self) -> None:
+        benchmarks = standing.prepare_benchmarks(self.source, Path(self.tmp.name) / "patched")
+        self.assertEqual(run_like_vtebench(benchmarks / "probe" / "benchmark", 50, 20), "50 20")
+        self.assertEqual(
+            run_like_vtebench(benchmarks / "top_region" / "setup", 50, 20), "\x1b[?1049h\x1b[2;20r"
+        )
+        # A symlinked script is copied so it can be patched on its own.
+        self.assertFalse((benchmarks / "top_region" / "benchmark").is_symlink())
+        self.assertEqual(run_like_vtebench(benchmarks / "top_region" / "benchmark", 50, 20), "50 20")
+
+    @unittest.skipUnless(sys.platform == "darwin", "the padded `ps` output is macOS behavior")
+    def test_the_unpatched_lookup_finds_no_size_on_macos(self) -> None:
+        # Why the copy exists: upstream's lookup reads nothing here, so the
+        # scripts that need a size print nothing or the wrong escapes.
+        size = run_like_vtebench(self.source / "probe" / "benchmark", 50, 20)
+        self.assertNotEqual(size, "50 20")
+
+    def test_a_size_lookup_the_fix_does_not_cover_is_refused(self) -> None:
+        (self.source / "probe" / "benchmark").write_text("#!/bin/sh\nprintf %s $(tput cols)\n")
+        with self.assertRaises(SystemExit) as raised:
+            standing.prepare_benchmarks(self.source, Path(self.tmp.name) / "patched")
+        self.assertIn("probe/benchmark", str(raised.exception))
+
+    def test_a_benchmark_vtebench_dropped_is_reported(self) -> None:
+        benchmarks = standing.prepare_benchmarks(self.source, Path(self.tmp.name) / "patched")
+        self.assertEqual(standing.missing_benchmarks(benchmarks, {"probe": 7.0}), ["top_region"])
+        self.assertEqual(
+            standing.missing_benchmarks(benchmarks, {"probe": 7.0, "top_region": 9.0}), []
         )
 
 

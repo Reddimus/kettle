@@ -18,17 +18,36 @@ comparator in the next section. The standing tool:
   frontmost, because Kettle, Ghostty and kitty blink only when focused. Kettle
   stops blinking after 10 s without activity and kitty after 15 s, so of the
   three only Ghostty is still blinking when sampled;
-- runs vtebench at a pinned revision. Its `cursor_motion` and `light_cells`
-  benchmarks produced no samples in any terminal, so the tables and geometric
-  means cover the other 10.
+- runs vtebench at a pinned revision, from a copy of its scripts with their
+  window-size lookup fixed for macOS (#374).
+
+**Corrected 2026-09-27.** The first version of this section ran vtebench's
+scripts unchanged. On macOS they cannot read the window size: `ps` pads the tty
+name and `tput` reads the size from a pipe. So in every terminal, 8 of the 12
+benchmarks ran on the wrong input:
+- `cursor_motion` and `light_cells` printed nothing and were dropped;
+- `dense_cells` became 26 cursor-home escapes repeated to 1 MiB;
+- `scrolling_fullscreen` printed 26 bytes;
+- the four region benchmarks set no scroll region, or one fixed to end at
+  row 24.
+
+That version reported Kettle tied 1st on the geometric mean and a `dense_cells`
+gap of 9 to 5 ms. Neither holds. The vtebench figures below are a rerun of the
+same build with the fix, all 12 benchmarks over 5 rounds. The fix mirrors
+upstream's unmerged
+[alacritty/vtebench#46](https://github.com/alacritty/vtebench/pull/46).
+
+The same correction fixes the cause given for flood memory under Reading the
+losses: Kettle was still inside its launch blink window when sampled, whether
+or not output counts as activity. The other figures are unchanged.
 
 Host: **Apple M5 Max, 18 cores, 48 GB, macOS 26.6.2 (25G83)**. Kettle is a
 release build of `88894429`, which has every 4.6.0 change. Every terminal runs
 its default configuration from a 120x36 request, with Kettle's agent server,
 session restore and update check off and kitty and Ghostty set to quit with
 their last window. Every terminal inherits the file-descriptor limit of 256
-that the Dock gives GUI apps. 5 rounds per workload, 2 for vtebench, with the
-starting terminal rotated each round.
+that the Dock gives GUI apps. 5 rounds per workload, with the starting terminal
+rotated each round.
 
 | terminal | version |
 |---|---|
@@ -44,28 +63,30 @@ starting terminal rotated each round.
 | idle memory | **35.7 MiB** | **1 / 5** | **Kettle**, Alacritty 36.7, WezTerm 45.2, kitty 58.4, Ghostty 231.7 |
 | idle CPU | **0.003 %** | **1 / 5** | **Kettle**, WezTerm 0.01, kitty 0.02, Alacritty 0.04, Ghostty 0.55 |
 | idle wakeups | 1.3 /s | 3 / 5 | Alacritty 0.5, kitty 0.6, **Kettle 1.3**, WezTerm 1.6, Ghostty 88.7 |
-| vtebench geometric mean | **13.7 ms** | tied 1st | **Kettle 13.7**, Alacritty 13.9, Ghostty 16.1, kitty 26.0, WezTerm 43.2 |
+| vtebench geometric mean | 15.3 ms | 2 / 5 | Alacritty 14.8, **Kettle 15.3**, Ghostty 17.0, kitty 22.1, WezTerm 44.8 |
 | memory 3 s after a 32 MiB flood | 365.6 MiB | 5 / 5 | Alacritty 77.5, WezTerm 78.2, Ghostty 242.5, kitty 278.8, **Kettle** |
 
 The three fastest windows appear within 1.4 ms of each other, less than any of
-the three moved between rounds. The two vtebench geometric means sit 1.3 %
-apart, about as far as Kettle's own two vtebench rounds moved (13.6 and
-13.8 ms). Both are ties rather than wins.
+the three moved between rounds, so that is a tie rather than a win. On
+vtebench, Alacritty's geometric mean was lower than Kettle's in all 5 rounds,
+by 2 to 6 %.
 
 vtebench, median milliseconds per sample (lower is better):
 
 | benchmark | Kettle | Alacritty | Ghostty | kitty | WezTerm |
 |---|---:|---:|---:|---:|---:|
-| dense_cells | 9.0 | **5.0** | 9.0 | 9.5 | 9.0 |
-| medium_cells | 8.5 | **7.0** | 12.0 | 8.0 | 36.5 |
-| scrolling | **15.5** | 37.0 | 20.0 | 67.5 | 63.5 |
-| scrolling_bottom_region | 15.0 | **12.0** | 21.0 | 31.0 | 56.5 |
-| scrolling_bottom_small_region | 15.0 | **12.0** | 21.5 | 39.5 | 55.5 |
-| scrolling_fullscreen | **23.0** | 56.0 | 28.0 | 156.5 | 78.5 |
-| scrolling_top_region | 34.5 | 31.0 | **21.5** | 34.0 | 73.5 |
-| scrolling_top_small_region | 15.0 | **11.5** | 21.0 | 40.0 | 56.5 |
-| sync_medium_cells | **9.0** | 10.0 | 13.5 | 15.0 | 49.5 |
-| unicode | 8.0 | **7.0** | **7.0** | **7.0** | 21.2 |
+| cursor_motion | 16.0 | **12.0** | 18.0 | 16.0 | 20.0 |
+| dense_cells | 23.0 | **21.0** | 33.0 | 24.0 | 30.0 |
+| light_cells | **7.0** | **7.0** | 10.0 | 9.0 | 29.0 |
+| medium_cells | **8.0** | **8.0** | 13.0 | 9.0 | 38.0 |
+| scrolling | **16.0** | 40.0 | 21.0 | 95.0 | 68.0 |
+| scrolling_bottom_region | 16.0 | **13.0** | 26.0 | 42.0 | 75.5 |
+| scrolling_bottom_small_region | 31.5 | 30.0 | **25.0** | 33.0 | 83.0 |
+| scrolling_fullscreen | 7.0 | **6.0** | 10.0 | 22.0 | 31.0 |
+| scrolling_top_region | 44.0 | 43.0 | **24.0** | 36.5 | 74.0 |
+| scrolling_top_small_region | 31.0 | 27.0 | **23.0** | 33.0 | 82.0 |
+| sync_medium_cells | **10.0** | **10.0** | 14.0 | 16.0 | 52.0 |
+| unicode | 10.0 | **7.0** | **7.0** | 8.0 | 24.0 |
 
 ### 4.5.2 against 4.6.0 on the same machine
 
@@ -104,23 +125,27 @@ Three changes produced this:
 
 ### Reading the losses
 
-- **Kettle leads 3 of the 10 vtebench benchmarks and trails the leader in the
-  other 7.** The widest gap by ratio is `dense_cells`: Alacritty reads one
-  sample, 26 full grids with new colors and attributes in every cell, in 5 ms
-  to Kettle's 9. The widest in milliseconds is `scrolling_top_region`, where
-  Kettle is 4th of 5 at 34.5 ms against Ghostty's 21.5. In the other five,
-  Kettle trails the leader by 1 to 3.5 ms.
+- **Kettle leads 1 of the 12 vtebench benchmarks, ties for the lead in 3, and
+  trails in 8.** It leads `scrolling`, at 16 ms to Ghostty's 21, and ties
+  Alacritty on `light_cells`, `medium_cells` and `sync_medium_cells`. The
+  widest gaps are the scroll-region benchmarks, which Ghostty leads:
+  `scrolling_top_region` takes 44 ms to Ghostty's 24, and the two small-region
+  benchmarks 31 and 31.5 ms to 23 and 25. `unicode` takes 10 ms to 7, and
+  `cursor_motion` 16 to Alacritty's 12. In `dense_cells`, 26 full grids with
+  new colors and attributes in every cell, Kettle is 2nd at 23 ms to
+  Alacritty's 21.
 - **Time to shell trails WezTerm.** Kettle's shell starts in 256.0 ms to
   WezTerm's 226.2, although the two windows appear within 1.4 ms of each other.
 - **Idle wakeups trail Alacritty and kitty.** A frontmost idle Kettle window
   wakes 1.3 times a second, against Alacritty's 0.5 and kitty's 0.6.
-- **Memory right after a flood is the cost of counting output as activity.**
-  3 s after the flood Kettle is still blinking and still holds the Metal
-  memory. In a separate probe of the same flood, sampled past the timeout,
-  Kettle settled at 57 and 70 MiB 13 s after the output ended and at 53 and
-  64 MiB after 25 s, in two runs, below Alacritty's and WezTerm's figures at
-  3 s. Alacritty and WezTerm do not blink by default, so they had released it
-  by the 3 s sample.
+- **Memory right after a flood is the cost of the blinking cursor.** The
+  sample comes 3 s after the flood ends, about 3.5 s after launch, which is
+  inside the 10 s blink window that starts when the window takes focus. So
+  Kettle is still blinking and still holds the Metal memory. In a separate
+  probe of the same flood, sampled past the timeout, Kettle settled at 57 and
+  70 MiB 13 s after the output ended and at 53 and 64 MiB after 25 s, in two
+  runs, below Alacritty's and WezTerm's figures at 3 s. Alacritty and WezTerm
+  do not blink by default, so they had released it by the 3 s sample.
 
 ### What this measurement does NOT say
 
@@ -139,7 +164,8 @@ Three changes produced this:
   round and one Ghostty round also ended behind another app; their medians
   above use the frontmost rounds.
 - **One machine, not idle.** The load average was 3.2 at the start of the
-  standing and 5.1 at the start of the A/B. Absolute startup times also shift
+  standing, 3.3 at the start of the vtebench rerun, and 5.1 at the start of the
+  A/B. Absolute startup times also shift
   between runs in ways load does not explain: the same build took 161.3 ms in
   the standing and about 192 ms in the later descriptor-limit runs, which
   launched only Kettle and started at a lower load (2.6 and 2.8 where
@@ -1164,8 +1190,8 @@ cargo build --release -p kettle
 ./scripts/bench.sh
 ```
 
-`scripts/bench.sh` requires `time` (GNU coreutils — on macOS use
-`gtime` from `brew install coreutils`). Output goes to stdout; pipe
+`scripts/bench.sh` requires GNU `time` (on macOS, `gtime` from
+`brew install gnu-time`). Output goes to stdout; pipe
 to a file or markdown table as you like.
 
 ### Historical Windows 11 reproduction
