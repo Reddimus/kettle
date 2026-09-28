@@ -2715,6 +2715,22 @@ fn confirmed_paste_target(mux: &Mux) -> Option<u64> {
     }
 }
 
+/// Apply a terminal control, such as Reset's RIS or Clear Scrollback's
+/// CSI 3 J, to each target pane's terminal.
+///
+/// Nothing is written to the child, so read-only panes are included. This is
+/// VTE's model, which Terminator's Reset uses: `vte_terminal_reset` changes the
+/// terminal and ignores `input-enabled`.
+fn apply_terminal_control(mux: &Mux, targets: &[u64], bytes: &[u8]) {
+    for id in targets {
+        if let Some(pane) = mux.panes.get(id)
+            && !pane.term.apply_local_output(bytes)
+        {
+            log::debug!("pane {id}: terminal control dropped; its reader is busy or stopped");
+        }
+    }
+}
+
 /// Deliver a confirmed non-broadcast text paste to the pane named when the
 /// prompt opened. Mode lookup and delivery use the same stable id.
 fn paste_text_into_target(
@@ -15794,22 +15810,22 @@ impl App {
                 // CSI 3 J (ED 3) clears scrollback only and keeps the visible
                 // screen and grid state, unlike Reset (`\e c`, RIS), which
                 // wipes everything. kitty / iTerm2 / WezTerm all expose this as
-                // "Clear Scrollback" or similar. Honors broadcast (the
-                // broadcast-write invariant): with group input on, clear every
-                // pane the user is typing into, not just the focused one. Both
-                // branches let a read-only pane drop the clear (the broadcast
-                // branch via the broadcast-write gate, the focused branch via
-                // feed_input).
+                // "Clear Scrollback" or similar. With group input on, clear
+                // every pane the user is typing into, in every window the
+                // broadcast scope reaches, not just the focused one.
+                const CLEAR_SCROLLBACK: &[u8] = b"\x1b[3J";
                 if ws.mux.is_broadcast_on() {
-                    let result =
-                        self.broadcast_input(ws, b"\x1b[3J", false, std::time::Instant::now());
-                    self.report_input_result(result);
-                } else if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let result = p.feed_input(b"\x1b[3J");
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+                    let targets = ws.mux.broadcast_target_ids();
+                    apply_terminal_control(&ws.mux, &targets, CLEAR_SCROLLBACK);
+                    if crate::mux::Mux::scope_crosses_windows(&ws.mux.broadcast) {
+                        let scope = ws.mux.broadcast.clone();
+                        for other in self.windows.values() {
+                            let targets = other.mux.foreign_target_ids(&scope);
+                            apply_terminal_control(&other.mux, &targets, CLEAR_SCROLLBACK);
+                        }
+                    }
+                } else if let Some(pane_id) = ws.mux.active_focus() {
+                    apply_terminal_control(&ws.mux, &[pane_id], CLEAR_SCROLLBACK);
                 }
                 if let Some(w) = &ws.window {
                     w.request_redraw();
@@ -15822,17 +15838,9 @@ impl App {
                 // Kettle also owns UI state OUTSIDE the engine (selection,
                 // scrollback display-offset, and the search, command palette,
                 // hint mode and SSH launcher overlays), so sweep that too, or a
-                // stale highlight or open modal survives the reset. Matches
-                // Alacritty's `Reset` action.
-                // Use feed_input, since injecting ESC c into a read-only pane's
-                // child (e.g. a locked agent TUI, where ESC is the interrupt
-                // key) is exactly what the toggle prevents.
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    let result = p.feed_input(b"\x1bc");
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+                // stale highlight or open modal survives the reset.
+                if let Some(pane_id) = ws.mux.active_focus() {
+                    apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc");
                 }
                 self.clear_selection_on_input(ws);
                 self.close_all_modals(ws);
@@ -16634,18 +16642,16 @@ impl App {
             }
             Action::ResetAndClear => {
                 // Terminator parity (key_reset_clear): Reset (RIS, \ec) and
-                // ClearHistory (CSI 3 J) in one keybind. The engine handles the
-                // bytes as it does for the separate actions, and feed_input
-                // applies the same read-only rule.
-                if let Some(pane_id) = ws.mux.active_focus()
-                    && let Some(p) = ws.mux.panes.get(&pane_id)
-                {
-                    // One queue message prevents a saturated channel from
-                    // accepting RIS but rejecting the paired history clear.
-                    let result = p.feed_input(b"\x1bc\x1b[3J");
-                    self.report_input_result(result);
-                    Self::dismiss_media_paste_receipt_after_input(ws, pane_id, result);
+                // ClearHistory (CSI 3 J) in one keybind, with Reset's sweep of
+                // Kettle's own UI state.
+                if let Some(pane_id) = ws.mux.active_focus() {
+                    // One request, so a full queue cannot accept RIS but reject
+                    // the paired history clear.
+                    apply_terminal_control(&ws.mux, &[pane_id], b"\x1bc\x1b[3J");
                 }
+                self.clear_selection_on_input(ws);
+                self.close_all_modals(ws);
+                self.reset_blink_phase(ws);
             }
         }
         // If focus moved as a result of the action,
@@ -29598,6 +29604,61 @@ mod tests {
         (mux, panes)
     }
 
+    #[cfg(unix)]
+    fn wait_for_pane_screen(mux: &Mux, pane: u64, done: impl Fn(&str, usize) -> bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if let Some(screen) = mux.panes[&pane].term.screen_text(0)
+                && done(&screen.text, screen.history_size)
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Reset and Clear Scrollback change Kettle's terminal. They used to type
+    /// `ESC c` and `CSI 3 J` into the child, where zsh and bash read `ESC c` as
+    /// capitalize-word. Read-only still resets, as Terminator's Reset calls
+    /// `vte_terminal_reset`, which ignores `input-enabled`.
+    #[cfg(unix)]
+    #[test]
+    fn reset_and_clear_scrollback_change_the_terminal_not_the_child() {
+        let (mut mux, target, _sibling) = title_test_split_mux();
+        mux.panes.get_mut(&target).unwrap().read_only = true;
+
+        let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
+        mux.panes[&target].term.write(lines.as_bytes());
+        assert!(wait_for_pane_screen(&mux, target, |text, history| {
+            text.contains("line 39") && history > 0
+        }));
+
+        super::apply_terminal_control(&mux, &[target], b"\x1b[3J");
+        assert!(
+            wait_for_pane_screen(&mux, target, |text, history| {
+                history == 0 && text.contains("line 39")
+            }),
+            "Clear Scrollback must drop the history and keep the screen"
+        );
+
+        super::apply_terminal_control(&mux, &[target], b"\x1bc");
+        assert!(
+            wait_for_pane_screen(&mux, target, |text, _| !text.contains("line 39")),
+            "Reset must clear the terminal"
+        );
+
+        // `cat`'s line discipline echoes any byte the child received, so the
+        // controls would appear as `^[` before this marker.
+        mux.panes[&target].term.write(b"after\n");
+        assert!(wait_for_pane_screen(&mux, target, |text, _| text.contains("after")));
+        let text = mux.panes[&target].term.screen_text(0).unwrap().text;
+        assert!(
+            !text.contains("^["),
+            "a control reached the child: {text:?}"
+        );
+    }
+
     #[test]
     fn pane_title_edit_never_follows_focus_to_a_sibling() {
         let (mut mux, target, sibling) = title_test_split_mux();
@@ -30804,7 +30865,7 @@ mod tests {
             .and_then(|body| body.split("Action::Reset =>").next())
             .expect("ClearHistory arm");
         assert!(
-            clear_history.contains("self.broadcast_input("),
+            clear_history.contains("other.mux.foreign_target_ids(&scope)"),
             "broadcast-aware terminal actions must not stop at the source mux"
         );
     }

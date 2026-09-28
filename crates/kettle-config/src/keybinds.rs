@@ -374,6 +374,8 @@ pub enum Action {
     /// actually per-tab.
     ToggleBroadcastWindow,
     ToggleFullscreen,
+    /// Full terminal reset (RIS, `\e c`) of the focused pane's terminal.
+    /// Nothing is sent to the program running in it.
     Reset,
     /// Clear scrollback only, NOT the visible screen — `CSI 3 J`
     /// (ANSI `ED 3`). Distinct from `Reset` (RIS, `\e c`) which

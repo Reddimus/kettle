@@ -3575,7 +3575,7 @@ impl Mux {
     /// broadcast given the current `self.broadcast` scope. Returns
     /// an empty Vec when scope is Off. Used by every local broadcast write,
     /// key-encode, and paste path.
-    fn broadcast_target_ids(&self) -> Vec<u64> {
+    pub(crate) fn broadcast_target_ids(&self) -> Vec<u64> {
         if matches!(self.broadcast, BroadcastScope::Off) {
             return Vec::new();
         }
@@ -3736,7 +3736,7 @@ impl Mux {
     }
 
     /// Panes in THIS window that a scope owned by another window selects.
-    fn foreign_target_ids(&self, scope: &BroadcastScope) -> Vec<u64> {
+    pub(crate) fn foreign_target_ids(&self, scope: &BroadcastScope) -> Vec<u64> {
         let BroadcastScope::Group(name) = scope else {
             return Vec::new();
         };
