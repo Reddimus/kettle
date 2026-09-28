@@ -693,6 +693,11 @@ pub(crate) struct WindowState {
     /// from this window, and struct fields drop in declaration order — the
     /// surface must go before the `Arc<Window>` it borrows from.
     pub(crate) renderer: Option<Renderer>,
+    /// Cell and surface size, in physical pixels, measured before the
+    /// renderer exists, so the first pane can start while the GPU
+    /// initializes. The renderer's own metrics win once it exists.
+    pub(crate) startup_cell: Option<(f32, f32)>,
+    pub(crate) startup_surface: Option<(u32, u32)>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
     /// Native accessibility bridge. Constructed while the window is still
@@ -1086,6 +1091,8 @@ impl WindowState {
         Self {
             seq,
             renderer: None,
+            startup_cell: None,
+            startup_surface: None,
             window: None,
             native_material: None,
             accessibility: None,

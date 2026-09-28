@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- The first shell starts before the window and GPU are set up, about 45 ms
+  sooner. The font is measured first, and the renderer reuses it instead of
+  loading the system fonts a second time.
+- `window-width` and `window-height` open a window at exactly that grid. A
+  120x36 request used to open at 123x35. The default window keeps its size.
+
 ## [4.6.0] — 2026-09-27
 
 ### Added
