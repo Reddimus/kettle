@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Launch the Linux ARM test guest under QEMU with HVF.
 #
-# This replaces the Parallels `Ubuntu 26.04` VM retired on 2026-08-23. The disk
-# is that guest's own filesystem converted to qcow2, not a fresh install, so it
-# keeps the toolchain, desktop session, and configuration the old one had.
+# The disk is the former Parallels `Ubuntu 26.04` guest's filesystem converted
+# to qcow2, not a fresh install, so it keeps that guest's toolchain, desktop
+# session, and configuration.
 #
 #   run-ubuntu-arm.sh            headless; SSH on localhost:2222
 #   run-ubuntu-arm.sh gui        virtio framebuffer + Cocoa window for live UI
 #
-# Drive it over SSH rather than a guest-agent exec channel. The old setup ran
-# every command as root against a uid-1000-owned tree and left 67,466 root-owned
-# files under ~/.rustup and ~/.cargo; SSH runs as the real user and cannot.
+# Drive it over SSH rather than a guest-agent exec channel. Guest-agent exec
+# runs commands as root and leaves root-owned files in the uid-1000 user's
+# ~/.rustup and ~/.cargo. SSH runs as the real user.
 set -euo pipefail
 umask 077
 

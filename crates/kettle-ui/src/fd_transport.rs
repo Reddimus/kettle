@@ -31,11 +31,9 @@ use std::io;
 use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixStream;
 
-// Use `libc::SCM_RIGHTS` directly rather than a hand-rolled
-// `0x01`. The literal was only `#[cfg]`'d for linux/macos/freebsd, so on
-// NetBSD/OpenBSD/DragonFly/illumos/Android the const was undefined and the
-// Unix-only module failed to compile. `libc::SCM_RIGHTS` is correct for
-// every Unix target (matching the `libc::SOL_SOCKET` already used beside it).
+// Use `libc::SCM_RIGHTS` (like the `libc::SOL_SOCKET` beside it) rather than
+// a hand-rolled `0x01`. libc defines the correct value for every Unix target,
+// including NetBSD, OpenBSD, DragonFly, illumos, and Android.
 use libc::SCM_RIGHTS;
 
 /// Send `fds` over the Unix socket along with `payload`. The
@@ -60,11 +58,9 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     }
     if fds.is_empty() {
         // No fds → fall through to normal write. Saves a cmsg.
-        // `write` can short-write (return < payload.len()),
-        // and the caller (the detachable-tabs IPC layer) closes the SOURCE tab
-        // on a "successful" send — so a partial write silently lost the tail of
-        // the serialized tab and the tab vanished. `write_all` loops until the
-        // whole payload is delivered (or errors).
+        // `write` can short-write, dropping the tail of the serialized tab, and
+        // the caller closes the SOURCE tab once the send succeeds. `write_all`
+        // loops until the whole payload is delivered (or errors).
         use std::io::Write;
         let mut s = socket;
         s.write_all(payload)?;
@@ -72,8 +68,8 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     }
     // Build ancillary cmsg buffer carrying the SCM_RIGHTS payload.
     let fd_bytes = std::mem::size_of_val(fds);
-    // CMSG_SPACE rounds up to alignment + adds cmsghdr; use a
-    // generous bound + fixed cmsghdr size to keep this dep-free.
+    // CMSG_SPACE (the buffer size) adds the cmsghdr and rounds up to
+    // alignment; CMSG_LEN is the unpadded length for `cmsg_len`.
     let cmsg_len = unsafe { libc::CMSG_LEN(fd_bytes as u32) } as usize;
     let cmsg_space = unsafe { libc::CMSG_SPACE(fd_bytes as u32) } as usize;
     let mut cmsg_buf: Vec<u8> = vec![0u8; cmsg_space];
@@ -102,14 +98,13 @@ pub fn send_fds(socket: &UnixStream, payload: &[u8], fds: &[RawFd]) -> io::Resul
     if sent < 0 {
         return Err(io::Error::last_os_error());
     }
-    // sendmsg can SHORT-write on a stream socket. The fds
-    // (ancillary SCM_RIGHTS data) ride with the first delivered byte and must
-    // NOT be resent (re-sending the cmsg would duplicate the fds in the
-    // receiver). So flush any remaining payload bytes with a plain write_all —
-    // the cmsg is already delivered. Without this, a partial send dropped the
-    // tail of the serialized tab and the caller, treating the send as complete,
-    // closed the source tab → silent tab loss. (payload is non-empty and the
-    // socket is blocking, so `sent >= 1` here and the fds were delivered.)
+    // sendmsg can SHORT-write on a stream socket. The fds (ancillary
+    // SCM_RIGHTS data) ride with the first delivered byte and must NOT be
+    // resent, or the receiver gets duplicates. Flush the rest of the payload
+    // with a plain write_all. Otherwise the tail of the serialized tab is lost
+    // while the caller, treating the send as complete, closes the source tab.
+    // (payload is non-empty and the socket is blocking, so `sent >= 1` here
+    // and the fds were delivered.)
     let sent = sent as usize;
     if sent < payload.len() {
         use std::io::Write;
@@ -238,9 +233,7 @@ mod tests {
     /// the source tab on a "successful" send → silent tab loss. Behavioral
     /// test: a tiny SO_SNDBUF + a payload far larger than it forces the
     /// `write_all` loop across many writes; a concurrent reader drains the
-    /// socket so the blocking writer makes progress. (Replaces a
-    /// source-scan guard that self-matched its own banned-literal and failed
-    /// on the unix CI leg where this module actually compiles.)
+    /// socket so the blocking writer makes progress.
     #[test]
     fn send_fds_delivers_whole_payload_under_buffer_pressure() {
         use std::io::Read;

@@ -1,23 +1,18 @@
-//! Lua scripting foundation (WezTerm parity).
+//! Lua scripting (WezTerm parity).
 //!
 //! Exposes a `kettle` namespace inside a Lua VM so the user's
 //! `--lua-script PATH` (or the auto-discovered `<config-dir>/init.lua`) can read
-//! kettle's runtime state. The foundation ships read-only
-//! introspection; side-effect APIs build on top of it:
+//! kettle's runtime state and act on it:
 //!
-//!   kettle.version() / config_path() / theme()  -- read-only foundation
+//!   kettle.version() / config_path() / theme()  -- read-only introspection
 //!   kettle.send_text(s), kettle.exec_action(name)
 //!   kettle.notify(title, body), kettle.set_theme(name)
-//!   kettle.on(event, callback) event hooks       -- foundation; see
-//!                                                    docs/TERMINATOR-PLUGIN-DESIGN.md
-//!                                                    for the full roadmap
+//!   kettle.add_menu_item(label, cb), kettle.add_url_handler(name, pattern, cb)
+//!   kettle.on(event, callback) event hooks
 //!
-//! Why read-only first: hooking Lua into the live App requires
-//! threading an Arc<Mutex<...>> handle through, which is the kind
-//! of plumbing that's easier to verify in isolation. The foundation
-//! ships the dep + the VM + the namespace + a drift guard;
-//! the side-effect APIs add incrementally without re-touching
-//! the wiring.
+//! Lua can't mutate App state directly, so `send_text`, `exec_action`,
+//! `notify` and `set_theme` queue a [`LuaCommand`] that the App drains after
+//! the Lua call returns. See docs/TERMINATOR-PLUGIN-DESIGN.md for the design.
 
 use anyhow::{Context, Result};
 use mlua::Lua;
@@ -31,7 +26,8 @@ use std::sync::{Arc, Mutex};
 /// in `new_inner`) could still queue gigabytes of PTY-bound text via
 /// `for i=1,10000 do kettle.send_text(string.rep("X", 1<<20)) end`.
 /// 1 MiB per call covers any realistic multi-line snippet paste
-/// with massive headroom and stops the bomb shape early.
+/// with massive headroom. That loop sends exactly 1 MiB per call,
+/// so the queue caps below are what stop it.
 const MAX_LUA_SEND_TEXT_BYTES: usize = 1 << 20;
 
 /// Aggregate cap (bytes) on the SUM of every currently-queued
@@ -72,13 +68,12 @@ const MAX_LUA_THEME_NAME_BYTES: usize = 256;
 /// pushes return `false` with a `log::warn`.
 const MAX_PENDING_COMMANDS: usize = 1024;
 
-/// Per-registry caps on Lua-registered callbacks. The
-/// command queue above is bounded against a hostile `init.lua`, but the
-/// callback registries (`kettle.on`, `add_menu_item`, `add_url_handler`) were
-/// not — a runaway `for i=1,1e9 do kettle.on('output', f) end` grew the
-/// registry unbounded AND made every event fire walk a giant list. Sized far
-/// above any legitimate plugin (a busy config wires up a few dozen). Past the
-/// cap, registration returns `false` with a single `log::warn` (the flags below
+/// Per-registry caps on Lua-registered callbacks (`kettle.on`,
+/// `add_menu_item`, `add_url_handler`). Without them, a runaway
+/// `for i=1,1e9 do kettle.on('output', f) end` grows the registry without
+/// bound and makes every event fire walk a giant list. Sized far above any
+/// legitimate plugin (a busy config wires up a few dozen). Past the cap,
+/// registration returns `false` with a single `log::warn` (the flags below
 /// keep a pathological loop from spamming the log).
 const MAX_LUA_CALLBACKS_PER_EVENT: usize = 256;
 const MAX_LUA_MENU_ITEMS: usize = 256;
@@ -100,13 +95,10 @@ static LUA_MENU_WARNED: AtomicBool = AtomicBool::new(false);
 static LUA_URL_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Backing store for the Lua side-effect command queue. Holds the
-/// command list plus a running total of bytes queued via `SendText`
-/// specifically, so `bounded_push` can enforce `MAX_LUA_PENDING_SEND_BYTES`
-/// (an aggregate cap) alongside `MAX_PENDING_COMMANDS` (an entry-count cap)
-/// without a second lock or a separate atomic that could drift out of sync
-/// with the actual queue contents. Both fields live behind the same
-/// `Mutex`, so a push that updates one always sees a consistent view of
-/// the other.
+/// commands and a running total of `SendText` bytes behind one `Mutex`,
+/// so `bounded_push` enforces `MAX_PENDING_COMMANDS` (entry count) and
+/// `MAX_LUA_PENDING_SEND_BYTES` (aggregate bytes) together, with no
+/// separate counter that could drift out of sync with the queue.
 #[derive(Default)]
 struct PendingQueue {
     commands: Vec<LuaCommand>,
@@ -183,9 +175,8 @@ pub enum LuaCommand {
 }
 
 /// Terminator plugin parity (design doc:
-/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. The foundation
-/// ships the registry + dispatch surface; wiring each variant to
-/// its actual emission site in App follows incrementally.
+/// docs/TERMINATOR-PLUGIN-DESIGN.md): event hooks. The App fires each
+/// variant to the callbacks registered with `kettle.on`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LuaEvent {
     /// Emitted once after kettle's first window + first pane are
@@ -206,12 +197,10 @@ pub enum LuaEvent {
     /// `kettle.on('pane_close', function(pane_id) … end)`.
     PaneClose(u64),
     /// Terminator plugin parity (phase 3 of
-    /// docs/TERMINATOR-PLUGIN-DESIGN.md): emitted on each batch of
-    /// PTY output drained from a pane.
-    /// Payload: pane id + bytes since last emission. Throttled
-    /// at the dispatch site (App level) — Lua callbacks see a
-    /// coalesced byte chunk, not every individual chunk from a
-    /// busy build.
+    /// docs/TERMINATOR-PLUGIN-DESIGN.md): emitted once per chunk of
+    /// PTY output drained from a pane. Payload: pane id + the chunk's
+    /// bytes. The per-pane output queue is bounded, so a plugin that
+    /// falls behind may miss chunks.
     Output(u64, Vec<u8>),
     /// Terminator plugin parity (focus event hook).
     /// Emitted when keyboard focus moves
@@ -296,8 +285,7 @@ const DEFAULT_MAX_HOOK_FIRES: u64 = 128;
 /// What the registered Lua URL handlers decided about a URL.
 ///
 /// Spelled out as three cases rather than a bool because a handler can also
-/// REWRITE the URL — the shape every handler in `docs/examples/init.lua` uses,
-/// and the one a bool silently threw away.
+/// REWRITE the URL, the shape every handler in `docs/examples/init.lua` uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UrlHandlerOutcome {
     /// Open this URL instead of the matched text.
@@ -323,8 +311,7 @@ pub struct LuaEngine {
     /// top-level Lua invocation began (reset by `arm_budget`); when it exceeds
     /// the cap captured in the hook closure, the hook returns an error,
     /// aborting a runaway script. Without this, a plugin's `while true do end`
-    /// (or an infinite `output` callback) froze the UI thread permanently —
-    /// there was no CPU budget.
+    /// (or an infinite `output` callback) would freeze the UI thread forever.
     hook_fires: Arc<AtomicU64>,
     /// Set by the watchdog when it aborts a call, cleared by `arm_budget`.
     /// Separate from the raised error because user Lua can `pcall` around its
@@ -333,16 +320,15 @@ pub struct LuaEngine {
 }
 
 impl LuaEngine {
-    /// Construct a fresh Lua VM with the read-only
-    /// `kettle` namespace installed:
+    /// Construct a fresh Lua VM at the `Safe` sandbox level with the
+    /// `kettle` namespace installed. Its read-only calls:
     ///
     ///   kettle.version()      → string  e.g. "1.7.8"
     ///   kettle.config_path()  → string|nil  the resolved config path
     ///   kettle.theme()        → string  e.g. "TokyoNight Night"
     ///
     /// Fails if the Lua VM can't initialize (resource exhaustion,
-    /// not normally seen). Adding entries to the namespace is the
-    /// happy path for future additions — extend this function.
+    /// not normally seen). New namespace entries go in `new_inner`.
     pub fn new(theme_name: &str) -> Result<Self> {
         Self::new_with_sandbox(theme_name, kettle_config::LuaSandbox::Safe)
     }
@@ -407,23 +393,23 @@ impl LuaEngine {
                     "tmpname",
                     "setlocale",
                 ] {
-                    let _ = os_tbl.set(k, mlua::Value::Nil);
+                    os_tbl.set(k, mlua::Value::Nil)?;
                 }
             }
             if let Ok(io_tbl) = globals.get::<mlua::Table>("io") {
                 for k in [
                     "open", "popen", "lines", "input", "output", "stdin", "stdout", "stderr",
                 ] {
-                    let _ = io_tbl.set(k, mlua::Value::Nil);
+                    io_tbl.set(k, mlua::Value::Nil)?;
                 }
             }
             // loadfile / dofile read arbitrary files; deny.
-            let _ = globals.set("loadfile", mlua::Value::Nil);
-            let _ = globals.set("dofile", mlua::Value::Nil);
+            globals.set("loadfile", mlua::Value::Nil)?;
+            globals.set("dofile", mlua::Value::Nil)?;
             // package.loadlib loads native shared libraries → can
             // execute arbitrary code. Always nil in safe mode.
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
-                let _ = pkg.set("loadlib", mlua::Value::Nil);
+                pkg.set("loadlib", mlua::Value::Nil)?;
             }
             // NOTE on `debug.*`: mlua's `Lua::new()`
             // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`
@@ -433,8 +419,8 @@ impl LuaEngine {
             // `debug.set{metatable,local,upvalue}` (break opaque
             // userdata) — are already unreachable from kettle's Lua
             // VM. No explicit nil-sweep needed here. The
-            // `safe_sandbox_pins_mlua_default_excludes_debug` drift
-            // guard pins this so a future refactor that switches to
+            // `lua_default_globals_exclude_debug_library` drift guard
+            // pins this so a future refactor that switches to
             // `Lua::unsafe_new()` (or explicitly loads `StdLib::DEBUG`)
             // fails the gauntlet rather than silently widening the
             // surface.
@@ -448,7 +434,7 @@ impl LuaEngine {
         lua.set_memory_limit(256 << 20)?;
         // Install the instruction-budget watchdog. The hook
         // fires every `HOOK_INSTRUCTION_INTERVAL` VM instructions; when a single
-        // top-level invocation exceeds `max_hook_fires` fires it errors out,
+        // top-level invocation exceeds `max_fires` fires it errors out,
         // unwinding the runaway script. User Lua can't disable it — mlua's
         // `StdLib::ALL_SAFE` excludes the `debug` library (so `debug.sethook`
         // is unreachable), and the hook is set from the Rust side here.
@@ -515,16 +501,12 @@ impl LuaEngine {
                 })?,
             )
             .context("set kettle.theme")?;
-        // Side-effect API. `kettle.send_text(s)` queues
-        // a SendText command for the App to drain + write to the
-        // focused pane's PTY. Lua-side it looks synchronous, but
-        // the actual PTY write happens once the script returns —
-        // a kettle script can't observe its own typing.
-        // Per-call cap on `s` (MAX_LUA_SEND_TEXT_BYTES), global cap
-        // on the queue length (MAX_PENDING_COMMANDS), AND an aggregate
-        // cap on the SUM of every queued SendText's bytes
-        // (MAX_LUA_PENDING_SEND_BYTES, enforced inside bounded_push)
-        // — see the constants above for the threat-model rationale.
+        // Side-effect API. `kettle.send_text(s)` queues a SendText command
+        // that the App drains and writes to the focused pane's PTY once the
+        // script returns, so a script can't observe its own typing. Three
+        // caps apply: MAX_LUA_SEND_TEXT_BYTES per call, MAX_PENDING_COMMANDS
+        // on queue length, and MAX_LUA_PENDING_SEND_BYTES on total queued
+        // bytes (in bounded_push). The constants explain the threat model.
         let pending_for_send = Arc::clone(&pending);
         kettle_tbl
             .set(
@@ -667,9 +649,8 @@ impl LuaEngine {
                         }
                         return Ok(false);
                     }
-                    // Match the former `String` argument's UTF-8 contract,
-                    // but retain Lua's existing string in the registry
-                    // rather than allocating a Rust copy.
+                    // Reject non-UTF-8 labels, but store Lua's own string
+                    // in the registry rather than allocating a Rust copy.
                     let _ = label.to_str()?;
 
                     let items: mlua::Table = lua.named_registry_value("kettle_menu_items")?;
@@ -697,9 +678,8 @@ impl LuaEngine {
         // open-in-browser path. Use case: route Launchpad/GitHub PR
         // URLs to a custom CLI tool instead of the system browser.
         //
-        // Storage: same `kettle_events` registry table used by
-        // kettle.on; just a different key (`url_handlers`) that
-        // holds a list of {name, pattern, callback} tables.
+        // Storage: kettle_url_handlers registry table; each entry is
+        // a {name, pattern, callback} table.
         let url_handlers_tbl = lua
             .create_table()
             .context("create kettle_url_handlers table")?;
@@ -730,7 +710,7 @@ impl LuaEngine {
                             }
                             return Ok(false);
                         }
-                        // Preserve the old UTF-8-only API without copying either
+                        // Reject non-UTF-8 values without copying either
                         // field into a Rust allocation before registry admission.
                         let _ = name.to_str()?;
                         let _ = pattern.to_str()?;
@@ -757,16 +737,12 @@ impl LuaEngine {
                 )?,
             )
             .context("set kettle.add_url_handler")?;
-        // Terminator plugin parity foundation:
+        // Terminator plugin parity (docs/TERMINATOR-PLUGIN-DESIGN.md):
         // `kettle.on(event_name, callback)` registers a Lua function to
         // fire when the named event occurs. Stored as a registry-table
         // entry keyed by one of the nine LuaEvent names; callbacks accumulate
         // in a list (multiple subscribers per event). Unknown names return
         // false instead of creating permanent registry keys.
-        //
-        // Today's wiring: registry installed + drift-guarded. App-side
-        // emission per LuaEvent variant lands incrementally
-        // (see docs/TERMINATOR-PLUGIN-DESIGN.md phase 3+).
         let event_table = lua.create_table().context("create event-hooks table")?;
         lua.set_named_registry_value("kettle_events", event_table)
             .context("register kettle_events table")?;
@@ -925,9 +901,8 @@ impl LuaEngine {
                     .get("match")?;
                 // A bad pattern is this handler's problem and nobody else's.
                 // `string.match` raises on malformed patterns (an unclosed
-                // `[`, say), and propagating that error abandoned the whole
-                // loop — so registering one broken pattern disabled every
-                // handler after it, and the user saw only a log line.
+                // `[`, say), and propagating that error would abandon the
+                // whole loop, disabling every handler after it.
                 // Registration checks length and UTF-8 but cannot check the
                 // pattern, since Lua patterns are only validated on use.
                 let m: mlua::Value = match s.call((url, pattern.as_str())) {
@@ -971,9 +946,7 @@ impl LuaEngine {
     }
 
     /// Fire a named event to every Lua callback registered
-    /// for it. Args are converted from `&str` for simplicity (every
-    /// current event payload fits as a single string; future events
-    /// can extend with a richer arg type).
+    /// for it, passing the event's payload as the callback's arguments.
     ///
     /// Errors from individual callbacks log::warn but DON'T abort
     /// kettle — one broken plugin can't take down the terminal.
@@ -1588,9 +1561,9 @@ mod tests {
     #[test]
     fn set_theme_queues_set_theme_command() {
         // `kettle.set_theme(name)` must queue
-        // a `LuaCommand::SetTheme` with the name; the
-        // `drain_lua_hook_commands` helper resolves it via
-        // `kettle_config::Theme::find_name` at drain time.
+        // a `LuaCommand::SetTheme` with the name; the App later
+        // resolves it via `kettle_config::Theme::find_name` in
+        // `poll_pending_lua_commands`.
         let eng = LuaEngine::new("Default").expect("init");
         eng.eval_str("kettle.set_theme('TokyoNight Night')")
             .expect("eval");
@@ -1920,12 +1893,10 @@ mod tests {
 
     #[test]
     fn url_handler_matches_pattern_and_short_circuits() {
-        // `kettle.add_url_handler(name,
-        // pattern, cb)` registers a handler;
-        // `try_url_handler(url)` returns true + invokes the cb when
-        // the Lua-pattern matches, false otherwise. Used by the
-        // url-open path to let plugins claim URLs before the system
-        // browser sees them.
+        // `kettle.add_url_handler(name, pattern, cb)` registers a
+        // handler; `try_url_handler(url)` invokes the cb only when the
+        // Lua pattern matches. Used by the url-open path to let plugins
+        // claim URLs before the system browser sees them.
         let eng = LuaEngine::new("Default").expect("init");
         eng.eval_str(
             "github_hits = 0
@@ -1953,13 +1924,10 @@ mod tests {
 
     /// A handler must never be the reason a link stops opening.
     ///
-    /// A matching handler used to claim the URL no matter what happened
-    /// inside it — the callback's result was discarded as `mlua::Result<()>`
-    /// and an error was logged and ignored. So a plugin with a typo in it
-    /// made every URL matching its pattern silently unopenable: the click did
-    /// nothing, and the only trace was a log line. Both an error and an
-    /// explicit decline now fall through to the next handler, and finally to
-    /// kettle's own open.
+    /// Both an error and an explicit decline fall through to the next
+    /// handler, and finally to kettle's own open. Otherwise a plugin with a
+    /// typo in it would make every URL matching its pattern silently
+    /// unopenable.
     #[test]
     fn a_broken_or_declining_url_handler_leaves_the_link_working() {
         let eng = LuaEngine::new("Default").expect("init");
@@ -1999,11 +1967,9 @@ mod tests {
     /// The shape every handler in `docs/examples/init.lua` uses: match some
     /// text, return a REWRITTEN URL, and kettle opens that instead.
     ///
-    /// The returned string used to be discarded — the result was typed
-    /// `mlua::Result<()>` — while the handler still claimed the URL. So every
-    /// example we ship (`LP: #12345` → Launchpad, `lp:branch` → code.launchpad,
-    /// `apt://gimp`) matched, ran, produced the right URL, and then opened
-    /// nothing at all. Copying the documented file gave you dead links.
+    /// Every example we ship (`LP: #12345` → Launchpad, `lp:branch` →
+    /// code.launchpad, `apt://gimp`) relies on this. If the returned string
+    /// were discarded, copying the documented file would give dead links.
     #[test]
     fn a_handler_that_rewrites_the_url_gets_that_url_opened() {
         let eng = LuaEngine::new("Default").expect("init");
@@ -2052,8 +2018,7 @@ mod tests {
     ///
     /// Lua patterns are validated on use, not at registration, so
     /// `string.match` raises on something like an unclosed `[`. That error
-    /// used to propagate out of the loop, so one bad pattern silently
-    /// disabled every later handler — and the only trace was a log line.
+    /// must not escape the loop and silently disable every later handler.
     #[test]
     fn an_unusable_pattern_does_not_disable_the_handlers_after_it() {
         let eng = LuaEngine::new("Default").expect("init");
@@ -2187,9 +2152,10 @@ mod tests {
     }
 
     /// `lua-sandbox = safe` nils `os.execute` and `io.popen`, which reads like
-    /// "a safe-mode plugin cannot run programs". It cannot: `kettle.send_text`
-    /// types into the focused shell, and a newline in that text runs what it
-    /// typed — the shipped example plugin clears the screen exactly that way.
+    /// "a safe-mode plugin cannot run programs". It still can.
+    /// `kettle.send_text` types into the focused shell, and a newline in that
+    /// text runs what it typed; the shipped example plugin clears the screen
+    /// exactly that way.
     /// Safe mode is a guard against a careless plugin, not a container for a
     /// hostile one, and `restricted` is the level that actually holds: the two
     /// APIs that drive the terminal refuse, and everything else still works.
@@ -2261,15 +2227,11 @@ mod tests {
 
     #[test]
     fn safe_sandbox_nils_dangerous_stdlib_apis() {
-        // The safe-mode sandbox (default
-        // `lua-sandbox = safe`) nils the Lua stdlib APIs that can
-        // execute external processes, open arbitrary files, or load
-        // native shared libraries. A future refactor removing one of
-        // these nils silently degrades the security posture documented
-        // in SECURITY.md's "Lua plugin sandbox escape" in-scope entry.
-        //
-        // Assert every member of the nil-list is `nil` after sandbox
-        // construction. The list mirrors the in-code nil sweep.
+        // The default `lua-sandbox = safe` nils the Lua stdlib APIs that can
+        // execute external processes, open arbitrary files, or load native
+        // shared libraries. Removing one of these nils silently weakens the
+        // security posture documented in SECURITY.md's "Lua plugin sandbox
+        // escape" in-scope entry. The list mirrors the in-code nil sweep.
         let eng = LuaEngine::new("Default").expect("init (safe sandbox)");
         // os.* — process control + filesystem mutation.
         for api in [
@@ -2345,9 +2307,7 @@ mod tests {
         // uses mlua's safe VM, which leaves package.loadlib as a refusal stub.
         let eng = LuaEngine::new_with_sandbox("Default", kettle_config::LuaSandbox::Trusted)
             .expect("init (trusted sandbox)");
-        // os.execute exists in trusted mode (still a function).
         assert_eq!(eng.eval_str("return type(os.execute)").unwrap(), "function");
-        // io.open exists in trusted mode.
         assert_eq!(eng.eval_str("return type(io.open)").unwrap(), "function");
         // The symbol exists for Lua compatibility, but native modules remain
         // unavailable at every trust level.
@@ -2361,15 +2321,13 @@ mod tests {
         );
     }
 
-    /// Pin that mlua's `Lua::new()` default
-    /// excludes the entire `debug` library (per its `StdLib::ALL_SAFE`
-    /// load list). If a future refactor switches to `Lua::unsafe_new()`
-    /// or explicitly loads `StdLib::DEBUG`, the dangerous methods
-    /// (`debug.getregistry` reaches into mlua's reference table,
-    /// `debug.sethook` is an instruction-level DoS hook, `debug.set*`
-    /// breaks opaque-userdata encapsulation) would silently become
-    /// reachable from user scripts. This test catches that at every
-    /// trust level — none of them is meant to expose the debug surface.
+    /// Pins that mlua's `Lua::new()` default excludes the whole `debug` library
+    /// (its `StdLib::ALL_SAFE` load list omits it). If a refactor switches to
+    /// `Lua::unsafe_new()` or loads `StdLib::DEBUG`, user scripts could
+    /// silently call `debug.getregistry` (which reaches into mlua's reference
+    /// table), `debug.sethook` (an instruction-level DoS hook), and `debug.set*`
+    /// (which breaks opaque-userdata encapsulation). The test checks every
+    /// trust level, since none may expose the debug surface.
     #[test]
     fn lua_default_globals_exclude_debug_library() {
         for sandbox in [
@@ -2389,13 +2347,11 @@ mod tests {
         }
     }
 
-    /// `kettle.send_text(s)` must drop
-    /// strings larger than `MAX_LUA_SEND_TEXT_BYTES`. Pre-cap, a
-    /// hostile script (or even a buggy legitimate one that runs
-    /// away on a loop) could queue gigabytes of PTY-bound text and
-    /// OOM kettle at the App's drain step. Verifies the rejection
-    /// behavior: the call returns false without raising a Lua error
-    /// and the queue stays empty.
+    /// `kettle.send_text(s)` must drop strings larger than
+    /// `MAX_LUA_SEND_TEXT_BYTES`. Without the cap, a hostile or runaway script
+    /// could queue gigabytes of PTY-bound text and OOM kettle at the App's drain
+    /// step. The rejected call returns false without raising a Lua error and
+    /// queues nothing.
     #[test]
     fn send_text_reports_oversized_payload_rejection() {
         let eng = LuaEngine::new("Default").expect("init");
@@ -2537,11 +2493,9 @@ mod tests {
     /// The aggregate SUM of queued `SendText` bytes must cap at
     /// `MAX_LUA_PENDING_SEND_BYTES`, independent of the per-call cap
     /// (`MAX_LUA_SEND_TEXT_BYTES`) and the per-entry-count cap
-    /// (`MAX_PENDING_COMMANDS`). Reproduces the audit scenario almost
-    /// verbatim: a script that queues many commands each individually
-    /// under the per-call cap, and far fewer than the entry-count cap,
-    /// but whose combined payload would otherwise be huge once
-    /// concatenated at the App's PTY-write step.
+    /// (`MAX_PENDING_COMMANDS`). The script queues far fewer sends than the
+    /// entry-count cap, each within the per-call cap. Their combined payload
+    /// would otherwise be huge once concatenated at the App's PTY-write step.
     #[test]
     fn send_text_queue_caps_aggregate_bytes() {
         let eng = LuaEngine::new("Default").expect("init");

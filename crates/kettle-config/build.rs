@@ -35,13 +35,11 @@ fn main() {
             }
         }
     }
-    // Case-insensitive primary sort, case-sensitive tiebreak so the
-    // final order is deterministic across runs. A raw `String::cmp`
-    // sorts ASCII-bytewise, putting all uppercase-starting themes ahead of all
-    // lowercase-starting themes (`CGA` before `branch` because
-    // 'C' < 'b' in ASCII). Users skimming `kettle --list-themes`
-    // expect mixed-case alphabetical ("all the C-ish themes
-    // together"), matching what GNU `sort` does in a UTF-8 locale.
+    // Case-insensitive primary sort, case-sensitive tiebreak so the order is
+    // deterministic across runs. A raw `String::cmp` sorts bytewise and puts
+    // every uppercase-starting name before every lowercase-starting one
+    // (`CGA` before `branch`). `kettle --list-themes` should list mixed-case
+    // names alphabetically, as GNU `sort` does in a UTF-8 locale.
     entries.sort_by(|a, b| {
         a.0.to_lowercase()
             .cmp(&b.0.to_lowercase())

@@ -34,12 +34,9 @@ a separate display-name secret can drift from the PKCS#12 and is deliberately
 not used. Do not store Apple-ID passwords or app-specific passwords;
 notarization uses the API key.
 
-The `Reddimus/kettle` environment is provisioned. A native arm64 rehearsal with
-the same certificate and API-key contract was notarized successfully, stapled,
-archived with `ditto`, extracted, accepted by Gatekeeper, and launched. The
-first official tag must still repeat those checks against the workflow's
-universal artifact; a local single-architecture rehearsal does not certify that
-package.
+The `Reddimus/kettle` environment is provisioned, and official tags publish
+notarized, stapled universal builds that pass Gatekeeper assessment. A local
+single-architecture rehearsal does not certify the universal package.
 
 Before saving the secrets, prove the local export contains the private key:
 

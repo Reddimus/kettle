@@ -46,12 +46,9 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
     if name.starts_with('.') {
         return false;
     }
-    // Emacs autosave / lock-file prefix patterns. An
-    // unsaved-buffer autosave is `#name#` (sandwiched between two
-    // literal `#`), an in-progress lock is `.#name` (already caught
-    // by the dotfile branch). Bundled theme names never legitimately
-    // start with `#`. iTerm2 / Vim / nvim swap files also live as
-    // `.name.swp`, again caught by the dotfile branch.
+    // Emacs autosave files are `#name#`. Emacs `.#name` lock files and
+    // iTerm2 / Vim / nvim `.name.swp` swap files are already caught by the
+    // dotfile branch. Bundled theme names never legitimately start with `#`.
     if name.starts_with('#') {
         return false;
     }
@@ -65,16 +62,12 @@ pub(crate) fn is_bundled_theme_filename(name: &str) -> bool {
         return false;
     }
     // OS / desktop-environment metadata that doesn't start with a dot.
-    // `Icon\r` is the macOS Finder "custom folder icon" file — the `\r`
-    // (0x0D) at the end is part of the literal name. Not a duplicate of
-    // `Icon\u{d}`; that *was* the duplicate, removed for clippy.
+    // `Icon\r` is the macOS Finder "custom folder icon" file; the `\r`
+    // (0x0D) at the end is part of the literal name.
     //
-    // Case-insensitive: NTFS is case-preserving but
-    // case-insensitive, so a Windows checkout / copy / Git Bash session
-    // might store `THUMBS.DB` or `Desktop.ini` — same junk content,
-    // different bytes. The editor-suffix check below is already
-    // case-insensitive; this match brings the desktop-metadata case
-    // into line.
+    // Case-insensitive: NTFS is case-preserving but case-insensitive, so a
+    // Windows checkout / copy / Git Bash session might store `THUMBS.DB` or
+    // `Desktop.ini`, the same junk under different bytes.
     let lower = name.to_ascii_lowercase();
     if matches!(lower.as_str(), "thumbs.db" | "desktop.ini" | "icon\r") {
         return false;

@@ -11,11 +11,9 @@ pub struct Entry {
     /// rewritten to `-`.
     ///
     /// Terminator writes every key with underscores (`scroll_on_keystroke`),
-    /// kettle's arms are hyphenated, and the parser matched the raw string. It
-    /// compensated by hand-listing ~60 underscore aliases — and missed several,
-    /// so `scroll_on_keystroke`, `scroll_on_output`, `scrollback_lines` and
-    /// friends were reported as unknown keys and silently did nothing. Folding
-    /// once here closes the whole class instead of one alias at a time.
+    /// while kettle's match arms are hyphenated. Folding once here accepts
+    /// every underscore spelling. Hand-listing an alias per key misses some,
+    /// and a missed key is reported as unknown and silently does nothing.
     ///
     /// Safe because no config key exists in underscore form only: every
     /// underscore spelling the parser matches has a hyphen sibling, which
@@ -30,19 +28,18 @@ pub struct Entry {
 
 /// Strip ONE matched pair of surrounding quotes from a value.
 ///
-/// Terminator's own manual writes quoted values — `background_color =
-/// "#000000"`, `scrollback_lines = '500'` — and kettle's value parsers see the
+/// Terminator's own manual writes quoted values (`background_color =
+/// "#000000"`, `scrollback_lines = '500'`), and kettle's value parsers see the
 /// quote as part of the text. `Rgb::parse` rejects a leading `"` at its
-/// hex-digit gate and `usize::parse` rejects it too, so the key was recognised,
-/// the value discarded, and the default silently used. Handling it once here
-/// fixes every key at the same time rather than teaching each parser about
-/// quotes.
+/// hex-digit gate and `usize::parse` rejects it too, so the key would be
+/// recognised but its value discarded and the default silently used. Handling
+/// it once here fixes every key rather than teaching each parser about quotes.
 ///
 /// Deliberately conservative:
 ///   * both ends must be the SAME quote character, so `"a'` is left alone;
-///   * only the outermost pair is removed, so `""` (an intentionally empty
-///     value) survives as `""` → `` and inner quotes are preserved verbatim
-///     for values that legitimately contain them, such as a shell command.
+///   * only the outermost pair is removed, so `""` becomes an intentionally
+///     empty value, and inner quotes survive verbatim in values that need
+///     them, such as a shell command.
 fn unquote(value: &str) -> &str {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
@@ -58,8 +55,8 @@ fn unquote(value: &str) -> &str {
 /// `[[[child1]]]`. Returns `(depth, name)`, where depth is the bracket nesting
 /// Terminator uses to express hierarchy.
 ///
-/// kettle's own config format has no sections, so a file without any behaves
-/// exactly as it did before — every line applies.
+/// kettle's own config format has no sections, so in a file without any,
+/// every line applies.
 pub(crate) fn section_header(line: &str) -> Option<(usize, &str)> {
     if !line.starts_with('[') || !line.ends_with(']') {
         return None;
@@ -91,13 +88,12 @@ pub(crate) fn section_header(line: &str) -> Option<(usize, &str)> {
 ///     [[[child1]]]
 /// ```
 ///
-/// Reading every line regardless of section meant the LAST profile in the file
-/// won: a user's `[[default]]` colours were silently replaced by whichever
-/// other profile happened to be written last, and layout internals leaked in
-/// as config keys. kettle applies the global config, the keybindings, and the
-/// DEFAULT profile. Other profiles and `[layouts]` are Terminator structures
-/// with no kettle equivalent, and reading them would mean applying settings
-/// the user did not select.
+/// kettle applies the global config, the keybindings, and the DEFAULT profile.
+/// Reading every line regardless of section would let whichever profile is
+/// written last silently replace the user's `[[default]]` colours, and would
+/// leak layout internals in as config keys. Other profiles and `[layouts]` are
+/// Terminator structures with no kettle equivalent, and reading them would
+/// apply settings the user did not select.
 #[derive(Default)]
 struct Section {
     /// `None` until the first header — a file with no sections at all is
@@ -119,10 +115,10 @@ impl Section {
             return;
         };
         // A depth must be one deeper than where we are, or shallower. Jumping
-        // levels means a level was skipped or mistyped, and collapsing it
-        // silently promoted the section: `[profiles]` then `[[[default]]]`
-        // resolved to the DEFAULT PROFILE and imported a malformed third-level
-        // section as the user's settings.
+        // levels means a level was skipped or mistyped. Collapsing the jump
+        // would silently promote the section, so `[profiles]` then
+        // `[[[default]]]` would resolve to the DEFAULT PROFILE and import a
+        // malformed third-level section as the user's settings.
         if depth > path.len() + 1 {
             self.unknown = true;
             path.clear();
@@ -169,12 +165,12 @@ const MAX_REPORTED_IGNORED_SECTIONS: usize = 16;
 
 /// Sections that swallowed settings, for `--check-config` to report.
 ///
-/// [`parse`] answers "what applies", and everything else it walks past
-/// silently. That silence is right at load time and wrong in a diagnostic: a
-/// header with one character out of place makes every line beneath it do
-/// nothing, and `--check-config` used to answer "OK — no issues" because no
-/// individual key was unknown or malformed. The keys are fine. They are in a
-/// section nobody reads.
+/// [`parse`] answers "what applies" and walks past everything else silently.
+/// That is right at load time but wrong in a diagnostic. A header with one
+/// character out of place makes every line beneath it do nothing, yet no
+/// individual key is unknown or malformed, so without this report
+/// `--check-config` would answer "OK — no issues". The keys are fine. They are
+/// in a section nobody reads.
 ///
 /// Only sections that actually swallowed an assignment are reported. An empty
 /// `[layouts]` is not a problem worth a line of output.
@@ -223,11 +219,10 @@ pub fn ignored_sections(input: &str) -> Vec<IgnoredSection> {
 
 pub fn parse(input: &str) -> Vec<Entry> {
     let mut out = Vec::new();
-    // Strip the UTF-8 byte-order mark if Notepad / certain Windows
-    // editors saved the file with one. Without this, the BOM bytes
-    // were prepended to the first key — so `\u{feff}theme` showed up
-    // as "unknown key: ﻿theme" in --check-config and the theme silently
-    // didn't apply.
+    // Strip the UTF-8 byte-order mark that Notepad and some Windows editors
+    // save. Otherwise it is prepended to the first key, so `theme` parses as
+    // `\u{feff}theme`, --check-config reports it as unknown, and the theme
+    // silently doesn't apply.
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let mut section = Section::default();
     for raw in input.lines() {
@@ -237,11 +232,10 @@ pub fn parse(input: &str) -> Vec<Entry> {
         }
         if line.starts_with('[') {
             // A line that OPENS like a header is structure, well-formed or
-            // not. A malformed one used to fall through as an assignment and,
-            // worse, leave the previous section in force — so a typo'd
-            // `[[work]` meant the work profile's settings kept applying as the
-            // default profile's. An unreadable header means we no longer know
-            // where we are, and the safe answer to that is to apply nothing
+            // not. Treating a malformed one as an assignment would leave the
+            // previous section in force, so a typo'd `[[work]` would apply the
+            // work profile's settings as the default profile's. An unreadable
+            // header means we no longer know where we are, so nothing applies
             // until the next header we can read.
             section.enter(section_header(line));
             continue;
@@ -362,7 +356,7 @@ mod tests {
     fn a_mistyped_section_header_is_reported_with_what_it_swallowed() {
         // The footgun: one character wrong in a header and every line under it
         // does nothing, while every key in it is individually valid, so
-        // --check-config had nothing to complain about and answered "OK".
+        // --check-config would otherwise find nothing wrong and answer "OK".
         let text = "[globl_config]\ntheme = TokyoNight Night\nfont-size = 14\n";
         assert_eq!(
             super::ignored_sections(text),

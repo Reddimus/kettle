@@ -1,23 +1,11 @@
 //! kettle-remote — SSH / Docker / Podman / kubectl session detection.
 //!
-//! Phase 2 of
-//! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md):
-//! crate skeleton + `RemoteContext` type + `detect_remote` stub.
-//!
-//! Implementation history (closed):
-//!
-//! - Phase 3 — SSH detector
-//!   (`detect_ssh` covering 11 argv shapes; see `tests` module).
-//! - Phase 4 — Container detector
-//!   (`detect_container` for Docker / Podman / kubectl / lxc;
-//!   11 argv shapes).
-//! - Phase 5 — process-tree BFS via sysinfo
-//!   (`detect_remote_with(child_pid, &mut System)`).
-//! - Phase 7 — `clone_session_command` +
-//!   `clone_session_label` (Clone Session menu item).
-//! - (2026-05-23): re-wrote the original
-//!   "the SSH detector *will* ship" forward-looking comments now that
-//!   the phases above had all landed.
+//! [`detect_ssh`] and [`detect_container`] read one process's argv,
+//! [`detect_remote_with`] and [`RemoteScanner`] walk a pane's process tree for
+//! them, and [`clone_session_command`] / [`clone_session_label`] build the
+//! menu item that reconnects to a detected session. See
+//! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)
+//! for the design.
 
 // Unsafe code is confined to the macOS libproc walk in `macos.rs`, which
 // allows it for that module alone.
@@ -27,10 +15,9 @@
 #[allow(unsafe_code)]
 mod macos;
 
-/// Re-export `sysinfo::System` so kettle-ui can own one
-/// (and pass it to `detect_remote_with`) without pulling sysinfo
-/// in as a direct dep. Keeps sysinfo a transitive-only dep that
-/// kettle-ui doesn't need to track its version of.
+/// Re-export `sysinfo::System` so a caller can own one (and pass it to
+/// `detect_remote_with`) without a direct sysinfo dependency whose version it
+/// must track.
 pub use sysinfo::System as SysinfoSystem;
 
 /// A detected remote-session context.
@@ -143,26 +130,18 @@ pub enum ContainerRuntime {
 
 /// Process-tree abstraction so the BFS body of
 /// [`detect_remote_with`] is testable against a synthetic fixture
-/// instead of needing real OS processes.
-///
-/// Previously, the BFS read `sysinfo::System` directly; the only test
-/// that could exist was the `detect_remote_returns_none_for_invalid_pids`
-/// smoke (`detect_remote(0).is_none()`). Two-hop ssh, depth-3
-/// container, closer-wins-on-tie — none of those could be unit-
-/// tested without spawning real ssh / docker processes from CI,
-/// which is flagged as too fragile in the comment on that test.
+/// (two-hop ssh, depth-3 container, closer-wins-on-tie) instead of needing
+/// real ssh / docker processes in CI.
 ///
 /// Implementations:
-/// - [`sysinfo::System`](https://docs.rs/sysinfo) — built-in via
-///   the impl below; used by [`detect_remote_with`].
-/// - `tests::MockProcessTree` — test-configuration-only fixture in the
-///   test module; powers the 8 BFS tests below.
+/// - [`sysinfo::System`](https://docs.rs/sysinfo), the cross-platform
+///   snapshot used by [`detect_remote_with`].
+/// - `LinuxProcessTree` and `macos::MacProcessTree`, the bounded pane-rooted
+///   walks behind [`RemoteScanner::refresh_roots`].
+/// - `tests::MockProcessTree`, the test fixture.
 ///
 /// The trait is intentionally minimal: four read-only methods +
 /// one `refresh`, all `u32`-pid typed (no `sysinfo::Pid` leak).
-/// External implementations are unusual but supported — a future
-/// e.g. `/proc`-only or seccomp-restricted impl would slot in
-/// here without changing kettle-remote's API.
 pub trait ProcessTree {
     /// Refresh the snapshot. The BFS calls this once at the top of
     /// each detection pass so a single-threaded poll loop sees a
@@ -173,10 +152,9 @@ pub trait ProcessTree {
     /// parent recorded (top-level / scheduler).
     fn parent_of(&self, pid: u32) -> Option<u32>;
     /// Argv of `pid` as lossy UTF-8 strings, or `None` if the
-    /// process is gone or never existed. Lossy conversion mirrors
-    /// the original `to_string_lossy` behavior — non-UTF8 argv is
-    /// exotic and the detectors only care about `argv[0]` + flags
-    /// which are always ASCII in practice.
+    /// process is gone or never existed. Lossy is enough because non-UTF-8
+    /// argv is exotic and the detectors only read `argv[0]` and flags, which
+    /// are ASCII in practice.
     fn argv_of(&self, pid: u32) -> Option<Vec<String>>;
     /// The working directory of `pid` (lossy UTF-8), or `None` if
     /// unknown. Default `None` so an external impl that can't report a cwd
@@ -191,21 +169,20 @@ pub trait ProcessTree {
     fn all_pids(&self) -> Vec<u32>;
 }
 
-/// The production `ProcessTree` impl. Wraps sysinfo's
-/// cmd-refresh + `processes()` map behind the trait's u32-pid API.
+/// The cross-platform `ProcessTree` impl. Wraps sysinfo's
+/// process refresh + `processes()` map behind the trait's u32-pid API.
 ///
-/// The refresh strategy matches the original in-line code: cmd-only
-/// refresh (not memory / disk / network), all PIDs, full refresh
-/// of any that disappeared. sysinfo's internal cache makes this
+/// Refreshes only argv and cwd (not memory / disk / network) for all PIDs
+/// and drops processes that exited. sysinfo's internal cache makes this
 /// cheap on the second + later calls (~hundreds of µs on a typical
 /// 200-process machine).
 impl ProcessTree for sysinfo::System {
     fn refresh(&mut self) {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-        // v2.29.0: also request cwd so `cwd_of` is populated — powers the
-        // native cwd fallback for tab/window labels when a shell emits no
-        // OSC 7/9;9 (stock Windows pwsh/cmd). On Windows sysinfo reads it from
-        // the process PEB; it degrades to None for elevated/cross-arch targets.
+        // Request cwd too so `cwd_of` works. It backs the native cwd fallback
+        // for tab/window labels when a shell emits no OSC 7/9;9 (stock Windows
+        // pwsh/cmd). On Windows sysinfo reads it from the process PEB; it
+        // degrades to None for elevated/cross-arch targets.
         let refresh_kind = ProcessRefreshKind::new()
             .with_cmd(sysinfo::UpdateKind::Always)
             .with_cwd(sysinfo::UpdateKind::Always);
@@ -242,40 +219,30 @@ impl ProcessTree for sysinfo::System {
     }
 }
 
-/// Phase 5 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): detect a remote-
-/// session context for the pane rooted at `child_pid`.
+/// Detect the remote-session context for the pane rooted at `child_pid`.
+/// See [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md).
 ///
-/// Walks the process tree starting from `child_pid` (the shell
-/// kettle spawned), looks at each descendant's argv, and returns
-/// the first match from `detect_ssh` / `detect_container` (closest
-/// descendant of `child_pid` wins on tie).
+/// Walks the process tree breadth-first from `child_pid` (the process
+/// kettle spawned, itself included) and returns the first
+/// `detect_ssh` / `detect_container` match, so the closest process wins.
 ///
 /// Returns `None` when:
-///   - no descendant matches a known remote-client argv
+///   - no process in the tree matches a known remote-client argv
 ///   - `child_pid` itself is gone (process exited)
 ///   - sysinfo can't enumerate processes (rare; permission denied
 ///     on hardened systems)
 ///
-/// Allocates a fresh `sysinfo::System` per call. For app-loop use
-/// (~10 Hz poll), prefer [`detect_remote_with`] which takes a
-/// caller-owned `System` so the refreshes amortize.
+/// Allocates a fresh `sysinfo::System` per call. For repeated polling,
+/// prefer [`detect_remote_with`] or [`RemoteScanner`], which reuse their
+/// process snapshot across calls.
 pub fn detect_remote(child_pid: u32) -> Option<RemoteContext> {
     let mut sys = sysinfo::System::new();
     detect_remote_with(child_pid, &mut sys)
 }
 
 /// Same as [`detect_remote`] but reuses a caller-owned
-/// `sysinfo::System`. The App's poll loop will own one of these
-/// across ticks so the process-list refresh amortizes (sysinfo's
-/// internal cache survives between calls).
-///
-/// Now a thin wrapper around the generic
-/// `detect_in_tree` helper (private — see the doc on
-/// `ProcessTree` for why the BFS body got extracted) so the
-/// detection logic is testable. Signature preserved —
-/// `kettle-ui::App` still passes `&mut self.remote_sysinfo` (a
-/// `SysinfoSystem`) and gets back the same `Option<RemoteContext>`.
+/// `sysinfo::System`, so repeated calls amortize the process-list refresh
+/// (sysinfo's internal cache survives between calls).
 pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<RemoteContext> {
     detect_in_tree(child_pid, sys)
 }
@@ -283,11 +250,12 @@ pub fn detect_remote_with(child_pid: u32, sys: &mut sysinfo::System) -> Option<R
 /// A shared process snapshot for multi-pane polling.
 ///
 /// `detect_remote_with` refreshes the OS-wide process list **and** rebuilds the
-/// parent→children index on every call. The app's poll loop calls it once per
-/// pane, so an N-pane window did N full process walks + N map builds every
-/// 200 ms tick. `RemoteScanner` splits that: [`refresh`](Self::refresh) does the
-/// one OS walk + one index build per tick, then [`detect_root`](Self::detect_root)
-/// answers each pane from the shared index (a cheap BFS + cache-hit argv reads).
+/// parent→children index on every call, so calling it once per pane in an
+/// N-pane window costs N process walks + N map builds every 200 ms tick.
+/// `RemoteScanner` does one refresh ([`refresh`](Self::refresh) or
+/// [`refresh_roots`](Self::refresh_roots)) and one index build per tick, then
+/// [`detect_root`](Self::detect_root) answers each pane from the shared index
+/// (a cheap BFS + cache-hit argv reads).
 ///
 /// `detect_remote` / `detect_remote_with` are kept for one-shot callers and
 /// existing tests.
@@ -544,7 +512,7 @@ impl RemoteScanWorker {
                         for target in targets {
                             // The app keeps a pane's previous state when the
                             // snapshot has no probe for it, so one pane running
-                            // a command with an enormous argv no longer freezes
+                            // a command with an enormous argv does not freeze
                             // every other pane's labels.
                             if scanner.root_is_partial(target.pid) {
                                 continue;
@@ -642,16 +610,15 @@ const MAX_PROC_SCAN_DURATION: std::time::Duration = std::time::Duration::from_mi
 const MAX_PROC_ARGS_PER_PROCESS: usize = 256;
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 const MAX_PROC_ARG_DECODED_BYTES: usize = 64 * 1024;
-/// Audit (robustness): aggregate ceiling, in bytes, on ALL `cmdline` +
-/// `children` file content read across a single [`LinuxProcessTree::refresh_from`]
-/// walk, and on the argv bytes of a macOS walk. `MAX_PROC_FILE_BYTES` only
-/// bounds a SINGLE file's or argument area's size; without an
-/// aggregate cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each near
-/// that 1 MiB per-file ceiling could retain multiple GiB in `self.entries`
-/// and cost multiple GiB of file I/O on one `refresh_roots` tick. Four MiB is
-/// generous next to legitimate shell argv/child-list totals while keeping a
-/// hostile pane's background scan bounded. The app consumes these snapshots
-/// asynchronously; it never performs this walk on the event-loop thread.
+/// Aggregate ceiling, in bytes, on ALL `cmdline` + `children` content read
+/// across one [`LinuxProcessTree::refresh_from`] walk, and on the argv bytes of
+/// a macOS walk. `MAX_PROC_FILE_BYTES` bounds only a SINGLE file or argument
+/// area; without this cap, up to `MAX_PROC_TREE_NODES` (4096) descendants each
+/// near that 1 MiB ceiling could retain multiple GiB in `self.entries` and cost
+/// multiple GiB of file I/O on one `refresh_roots` tick. Four MiB is generous
+/// next to legitimate shell argv/child-list totals and keeps a hostile pane's
+/// background scan bounded. The app consumes these snapshots asynchronously;
+/// it never performs this walk on the event-loop thread.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_PROC_TREE_TOTAL_BYTES: u64 = 4 * MAX_PROC_FILE_BYTES;
 
@@ -929,20 +896,16 @@ impl LinuxProcessTree {
         self.refresh_from(std::path::Path::new("/proc"), roots)
     }
 
-    /// Audit (robustness): synchronous procfs walk backing `refresh_roots`,
-    /// which kettle-ui's remote scanner worker calls at most once per
-    /// coalesced request. `MAX_PROC_TREE_NODES` bounds node COUNT and
-    /// `MAX_PROC_FILE_BYTES` bounds a single file's size, but neither bounds
-    /// the SUM of every node's argv/children bytes — see
-    /// `MAX_PROC_TREE_TOTAL_BYTES`, which this walk now also enforces:
-    /// once the running total reaches that ceiling, further `cmdline`/
-    /// `children` reads are skipped for the rest of the walk (the node
-    /// itself and its already-known parent are still recorded — only the
-    /// potentially-large file payloads are dropped). Cwd is read on demand
-    /// for the selected foreground process instead of being retained for
-    /// every entry, so a pathological or hostile descendant subtree can no
-    /// longer balloon this to multiple GiB of retained memory or synchronous
-    /// I/O.
+    /// Synchronous procfs walk backing `refresh_roots`, which the remote scan
+    /// worker calls at most once per coalesced request. `MAX_PROC_TREE_NODES`
+    /// bounds node COUNT and `MAX_PROC_FILE_BYTES` a single file's size, but
+    /// neither bounds the SUM of every node's argv/children bytes, so this walk
+    /// also enforces `MAX_PROC_TREE_TOTAL_BYTES`. Once the running total reaches
+    /// that ceiling, later `cmdline`/`children` reads are skipped; the node and
+    /// its already-known parent are still recorded. Cwd is read on demand for
+    /// the selected foreground process instead of being kept for every entry.
+    /// Together these stop a pathological or hostile descendant subtree from
+    /// costing multiple GiB of retained memory or synchronous I/O.
     fn refresh_from(&mut self, proc_root: &std::path::Path, roots: &[u32]) -> bool {
         use std::collections::{HashSet, VecDeque};
 
@@ -1183,9 +1146,7 @@ impl ProcessTree for LinuxProcessTree {
 ///
 /// Private — the public entry points ([`detect_remote`] /
 /// [`detect_remote_with`]) wrap it with a sysinfo `&mut System`.
-/// External impls of `ProcessTree` can still call it (the trait is
-/// `pub`), but routing through the sysinfo wrapper is the documented
-/// path. Tests use this directly with `MockProcessTree`.
+/// Tests call it directly with `MockProcessTree`.
 fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Option<RemoteContext> {
     tree.refresh();
     let children_by_parent = build_children_index(tree);
@@ -1193,12 +1154,9 @@ fn detect_in_tree<T: ProcessTree + ?Sized>(child_pid: u32, tree: &mut T) -> Opti
 }
 
 /// Group every PID by its parent, so a BFS over descendants is O(N) to build
-/// the index plus O(D) to walk. The original sysinfo BFS used `sysinfo::Pid`
-/// keys; the trait abstraction is `u32` so the same map works for both
-/// `sysinfo::System` and `MockProcessTree`.
-///
-/// Extracted so a multi-pane poll can build this **once**
-/// per tick (via [`RemoteScanner`]) instead of once per pane.
+/// the index plus O(D) to walk. Keys are `u32`, so the same map works for every
+/// [`ProcessTree`]. [`RemoteScanner`] builds it **once** per tick instead of
+/// once per pane.
 fn build_children_index<T: ProcessTree + ?Sized>(
     tree: &T,
 ) -> std::collections::HashMap<u32, Vec<u32>> {
@@ -1210,10 +1168,10 @@ fn build_children_index<T: ProcessTree + ?Sized>(
             children_by_parent.entry(parent).or_default().push(*pid);
         }
     }
-    // all_pids() comes from sysinfo's HashMap, so
-    // sibling order is non-deterministic. BFS over it made equal-depth tie-breaks
-    // (which shell a Split clones; which remote client the pane title shows) flap
-    // run-to-run. Sort each sibling list so the lowest PID deterministically wins.
+    // all_pids() comes from a HashMap, so sibling order is non-deterministic
+    // and equal-depth tie-breaks (which shell a Split clones; which remote
+    // client the pane title shows) would flap run-to-run. Sort each sibling
+    // list so the lowest PID deterministically wins.
     for kids in children_by_parent.values_mut() {
         kids.sort_unstable();
     }
@@ -1226,12 +1184,10 @@ fn build_children_index<T: ProcessTree + ?Sized>(
 /// per pane against a shared index. `argv_of` lookups still go
 /// to `tree`, but those hit sysinfo's already-refreshed cache (no OS walk).
 ///
-/// v2.32.0 (audit, low): the BFS now seeds at depth 0 with `child_pid` ITSELF, so
-/// a pane that launched a remote client DIRECTLY (`command = ssh box`, no
-/// intervening shell) is detected. The pre-fix walk only enqueued `child_pid`'s
-/// children, so a directly-launched `ssh`/`docker` pane got no [`RemoteContext`]
-/// (no Reconnect menu, no remote pane title). Existing trees that root at a plain
-/// shell are unaffected — a shell argv matches neither detector.
+/// The BFS seeds with `child_pid` itself, so a pane that launched a remote
+/// client directly (`command = ssh box`, no shell in between) still gets a
+/// [`RemoteContext`] (Reconnect menu, remote pane title). A shell root matches
+/// neither detector.
 fn detect_root_in_index<T: ProcessTree + ?Sized>(
     child_pid: u32,
     tree: &T,
@@ -1418,14 +1374,13 @@ fn shell_flag_carries_a_command(arg: &str) -> bool {
 /// Whether a POSIX shell invocation runs something and exits rather than being
 /// one a person is typing into.
 ///
-/// Two shapes do that, and only the first used to be recognized. `-c` and its
-/// spellings carry the command inline. A plain operand is a *script file*:
-/// `bash /tmp/hook.sh` runs the file and exits. Agents, git hooks, and
-/// installers spawn helpers in exactly that shape, often deleting the script
-/// straight after. Treating one as the pane's interactive shell means a split
-/// clones it, and the new pane runs a command that has already finished or a
-/// script that is already gone. It dies on arrival, which is what "the split
-/// never loaded" looks like from the outside.
+/// Two shapes do that. `-c` and its spellings carry the command inline. A
+/// plain operand is a *script file*: `bash /tmp/hook.sh` runs the file and
+/// exits. Agents, git hooks, and installers spawn helpers in exactly that
+/// shape, often deleting the script straight after. Treating one as the pane's
+/// interactive shell means a split clones it, and the new pane runs a command
+/// that has already finished or a script that is already gone. It dies on
+/// arrival, which is what "the split never loaded" looks like from the outside.
 ///
 /// Erring toward "runs and exits" is the safe direction. The split then starts
 /// the configured shell, which is somewhere to work. The opposite error is a
@@ -1486,9 +1441,8 @@ fn is_noninteractive_shell(argv: &[String]) -> bool {
             rest.iter().any(|arg| shell_flag_carries_a_command(arg))
         }
         // PowerShell: -Command / -c, -File, or -EncodedCommand / -e (each
-        // prefix-abbreviated, case-insensitive) all run and exit — UNLESS
-        // -NoExit keeps the session open. -EncodedCommand support was added
-        // (`pwsh -e <base64>` is how tools spawn one-shots).
+        // prefix-abbreviated, case-insensitive) run and exit unless -NoExit
+        // keeps the session open. Tools spawn one-shots as `pwsh -e <base64>`.
         "pwsh" | "powershell" => {
             let norm = |a: &String| {
                 a.strip_prefix('-')
@@ -1758,21 +1712,20 @@ fn find_foreground_shell<T: ProcessTree + ?Sized>(
 /// names: drop any `/`- or `\`-separated path, a trailing (case-insensitive)
 /// `.exe`, and lowercase the rest.
 ///
-/// The detectors used to split only on `/` and keep `.exe`, so on
-/// Windows `argv[0]` is a backslash path with extension
-/// (`C:\Windows\System32\OpenSSH\ssh.exe`) — `split('/')` returned the whole
-/// path, and even a bare `ssh.exe` failed the `== "ssh"` check. The entire
-/// Terminator-parity remote feature (pane-title `ssh box`, right-click
-/// Reconnect / Re-attach) was silently dead on Windows 11, a primary target.
+/// On Windows `argv[0]` is a backslash path with an extension
+/// (`C:\Windows\System32\OpenSSH\ssh.exe`). Splitting only on `/`, or keeping
+/// `.exe`, would fail every `== "ssh"` check and disable remote detection
+/// (pane-title `ssh box`, right-click Reconnect / Re-attach) on Windows 11, a
+/// primary target.
 fn argv0_basename(prog: &str) -> String {
     let base = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
     let lower = base.to_ascii_lowercase();
     lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
 }
 
-/// v2.32.0 (audit H1, SECURITY): does `s` contain a control character (newline,
-/// carriage return, NUL, tab, ESC, …)? A control char in an argv-derived
-/// host/user/container token is the highest-severity case: a newline would split
+/// SECURITY: does `s` contain a control character (newline, carriage return,
+/// NUL, tab, ESC, …)? A control char in an argv-derived host/user/container
+/// token is the highest-severity case: a newline would split
 /// [`clone_session_command`]'s output into extra shell lines that the caller
 /// auto-executes. Such a token must NEVER become a [`RemoteContext`] (rejected at
 /// parse time) and, defensively, must never be emitted (rejected at build time).
@@ -1780,21 +1733,22 @@ fn has_control_char(s: &str) -> bool {
     s.chars().any(|c| c.is_control())
 }
 
-/// v2.32.0 (audit H1, SECURITY): parse-time validation of a dynamic field
-/// (ssh host, ssh user, container name) that was extracted from a descendant
-/// process's argv and will later be interpolated into an auto-executed shell
-/// command by [`clone_session_command`]. Rejects (returns `false`) any token
-/// that is empty, carries a control char, or contains a character outside a
-/// conservative per-field allowlist — so a malformed/hostile token never becomes
-/// a [`RemoteContext`] in the first place (layer 1 of the defense; the build-time
-/// single-quoting in [`clone_session_command`] is layer 2).
+/// SECURITY: parse-time validation of a field extracted from a descendant
+/// process's argv (ssh host, user, or option value; container name or option
+/// value) that [`clone_session_command`] later interpolates into an
+/// auto-executed shell command. Rejects (returns `false`) any token that is
+/// empty, longer than [`MAX_FIELD_LEN`], or holds a character (control chars
+/// included) outside a conservative per-field allowlist, so a malformed/hostile
+/// token never becomes a [`RemoteContext`] in the first place (layer 1 of the
+/// defense; the build-time single-quoting in [`clone_session_command`] is
+/// layer 2).
 ///
 /// `extra` is the field-specific set of punctuation permitted on top of the
-/// common `[A-Za-z0-9]`. These sets are deliberately tight: real SSH hosts
-/// (DNS names, IPv4/IPv6, `%`-zone, `[bracketed]` literals), usernames, and
-/// container names/ids never need shell metacharacters (`;`, `$`, backticks,
-/// quotes, `&`, `|`, `<`, `>`, `(`, `)`, spaces, …), so excluding them costs
-/// nothing and closes the injection surface.
+/// common `[A-Za-z0-9]`. Real SSH hosts (DNS names, IPv4/IPv6, `%`-zone,
+/// `[bracketed]` literals) and container names/ids never need shell
+/// metacharacters (`;`, `$`, backticks, quotes, `&`, `|`, `<`, `>`, `(`, `)`,
+/// spaces, …), so their sets exclude them, which costs nothing and closes the
+/// injection surface.
 fn field_is_safe(s: &str, extra: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_FIELD_LEN
@@ -1828,8 +1782,7 @@ const SSH_JUMP_EXTRA: &str = ".-_:%[]@,";
 /// (including `'` itself, which [`shell_single_quote`] closes/escapes/reopens
 /// with the canonical `'\''` idiom), so the set is as wide as real paths need:
 /// `C:\Program Files (x86)\…` is the ordinary shape of a Windows install path,
-/// and a set without `(`/`)` silently removed the whole Reconnect entry for it
-/// rather than reproducing it.
+/// and a set without `(`/`)` would drop the Reconnect entry for it.
 ///
 /// Still excluded — and the reason this is an allowlist at all — is everything
 /// that would matter if the quoting layer were ever wrong: `$`, backtick, `"`,
@@ -1882,9 +1835,9 @@ struct ShortOption<'a> {
     /// two tokens instead of one.
     consumed_next: bool,
     /// The boolean letters in front of [`flag`](Self::flag) — the whole bundle
-    /// when it has no value-taking letter at all. A boolean is not always
-    /// nothing: `podman -r` selects the remote service, so a caller that read
-    /// only the value-taking letter reconnected to the local socket.
+    /// when it has no value-taking letter at all. A boolean can still select the
+    /// endpoint. `podman -r` selects the remote service, so a caller that read
+    /// only the value-taking letter would reconnect to the local socket.
     booleans: &'a str,
 }
 
@@ -1894,9 +1847,9 @@ struct ShortOption<'a> {
 /// closes the bundle by taking the rest of the token as its value or, failing
 /// that, the next argv element.
 ///
-/// Treating a bundle as one opaque token is what let `ssh -vp 2222 box` read
-/// `2222` as the destination and `kubectl exec -itc sidecar pod` read
-/// `sidecar` as the pod.
+/// Treating a bundle as one opaque token would read `2222` as the destination
+/// of `ssh -vp 2222 box` and `sidecar` as the pod in
+/// `kubectl exec -itc sidecar pod`.
 fn parse_short_bundle<'a>(
     bundle: &'a str,
     next: Option<&'a str>,
@@ -1935,8 +1888,8 @@ fn parse_short_bundle<'a>(
     }
 }
 
-/// v2.32.0 (audit H1, SECURITY): POSIX single-quote a dynamic field so it is
-/// inert when interpolated into a shell command — every character between the
+/// SECURITY: POSIX single-quote a dynamic field so it is inert when
+/// interpolated into a shell command — every character between the
 /// quotes is literal, and an embedded single-quote is closed/escaped/reopened
 /// via the canonical `'\''` idiom. Belt-and-suspenders with the parse-time
 /// [`field_is_safe`] check: even a value that somehow slipped through cannot
@@ -1955,11 +1908,10 @@ fn shell_single_quote(s: &str) -> String {
     out
 }
 
-/// Phase 3 of [`TERMINATOR-REMOTE-DESIGN.md`](
-/// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): SSH-session
-/// detector. Takes a process's argv (as the sysinfo walk in
-/// phase 5 will supply it) and returns `Some(Ssh { host, user })`
-/// if the argv shape matches an `ssh` invocation, else `None`.
+/// SSH-session detector. Takes a process's argv (as the process-tree walk
+/// supplies it) and returns `Some(Ssh { host, user, options })` if the argv
+/// shape matches an `ssh` invocation, else `None`. See
+/// [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md).
 ///
 /// Recognized `argv[0]` values: `ssh`, `sshpass`. (`autossh` is a
 /// reasonable extension; deferred to follow-up.)
@@ -1988,16 +1940,11 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     }
     // sshpass wraps ssh — find the `ssh` inside its argv.
     //
-    // Audit (correctness): this used to be a bare
-    // `argv.iter().position(|a| argv0_basename(a) == "ssh")` — an unanchored
-    // scan of the WHOLE argv, including sshpass's own flag VALUES. If any
-    // earlier token (e.g. the `-p`/`-f` value) happened to basename to
-    // "ssh" (a password or password-file path literally named "ssh"), that
-    // token was mistaken for the real ssh invocation and everything after
-    // it (the actual target) was silently discarded. Instead, walk
-    // sshpass's OWN known flags from argv[1] (mirroring the disciplined
-    // flag-skipping loop ssh's own options get below) and take the first
-    // remaining non-flag token as the wrapped command's argv[0].
+    // Walk sshpass's OWN known flags from argv[1] and take the first
+    // remaining non-flag token as the wrapped command's argv[0]. Scanning the
+    // whole argv for a token that basenames to "ssh" would also match a flag
+    // VALUE (a password or password-file path literally named "ssh") and
+    // discard the real target after it.
     //
     // sshpass(1) short options: `-p password` / `-f filename` / `-d fd` /
     // `-P prompt` each consume exactly one separate value; `-e` (password
@@ -2027,9 +1974,9 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     };
     let mut i = inner_start;
     let mut target: Option<&str> = None;
-    // H2 (audit v2.32.0): capture `-l user` so Reconnect / the remote title keep
-    // the login user. OpenSSH keeps the first command-line value obtained, so
-    // an earlier `-l` also wins over a later target's `user@` component.
+    // Capture `-l user` so Reconnect / the remote title keep the login user.
+    // OpenSSH keeps the first command-line value obtained, so an earlier `-l`
+    // also wins over a later target's `user@` component.
     let mut flag_user: Option<&str> = None;
     // The remaining endpoint-selecting options travel with the host: `box` on
     // its own is not a service, and a Reconnect that dropped `-p`/`-J`/`-i`
@@ -2123,7 +2070,7 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
     if host.is_empty() {
         return None;
     }
-    // H1 (audit v2.32.0, SECURITY): reject any host/user that carries a control
+    // SECURITY: reject any host/user that carries a control
     // char or escapes the conservative per-field charset, so a token that could
     // break out of the auto-executed Reconnect command never becomes a
     // RemoteContext. (clone_session_command additionally single-quotes — layer 2.)
@@ -2147,8 +2094,8 @@ pub fn detect_ssh(argv: &[String]) -> Option<RemoteContext> {
 /// `-vp 2222` is `-v` followed by `-p 2222`.
 ///
 /// Getting this set wrong misreads the destination in both directions: a
-/// missing letter leaves an option VALUE looking like the host (this is how
-/// `-J jump` used to reconnect to the bastion), while a spurious one eats the
+/// missing letter leaves an option VALUE looking like the host (`-J jump`
+/// would reconnect to the bastion), while a spurious one eats the
 /// host as a value. `P` is `-P tag`, not the long-removed boolean.
 const SSH_VALUE_OPTIONS: &str = "BbcDEeFIiJLlmOoPpQRSWw";
 
@@ -2176,8 +2123,8 @@ fn ssh_option_selects_endpoint(option: &str) -> bool {
     // ssh accepts both `-o Keyword=value` and the quoted `-o "Keyword value"`,
     // and OpenSSH's own config reader (`process_config_line`) skips leading
     // whitespace before the keyword — so `-o " ProxyJump=bastion"` is honoured
-    // by ssh and must be honoured here too. Splitting without the trim yielded
-    // an empty keyword, which matched nothing and let the bastion be dropped.
+    // by ssh and must be honoured here too. Without the trim, the keyword is
+    // empty, matches nothing, and lets the bastion be dropped.
     let keyword = option
         .trim_start_matches([' ', '\t'])
         .split(['=', ' ', '\t'])
@@ -2235,24 +2182,14 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     let mut parse = ContainerParse::default();
     let mut i = 1; // skip argv[0] (the exe)
     if runtime != ContainerRuntime::Lxc {
-        // Find the `exec` subcommand, allowing GLOBAL options
-        // before it (`kubectl -n ns exec …`, `docker --context foo exec …`)
-        // rather than pinning it at argv[1] (which silently returned None for
-        // those).
-        //
-        // Audit (correctness): this used to be
-        // `argv.iter().skip(1).position(|a| a == "exec")` — an UNANCHORED
-        // scan of the ENTIRE argv. Any later positional argument that
-        // happened to literally be "exec" (a build tag, an npm/script arg, a
-        // k8s object literally named `exec`, …) was mistaken for the
-        // subcommand boundary, and the argv element right after IT got
-        // parsed as the container name — even for commands that aren't an
-        // `exec` invocation at all (e.g. `docker build -t exec .`).
-        // Anchor instead: walk only recognized GLOBAL option flags (and
-        // their values) from argv[1], and require the FIRST non-flag
-        // token to be exactly "exec" — any other subcommand there
-        // (`build`, `ps`, `run`, `inspect`, …) correctly yields `None`
-        // instead of being scanned past.
+        // Find the `exec` subcommand, allowing GLOBAL options before it
+        // (`kubectl -n ns exec ...`, `docker --context foo exec ...`). Skip
+        // those options (and the values of recognized ones) from argv[1], then
+        // require the FIRST non-flag token to be exactly "exec". Any other
+        // subcommand (`build`, `ps`, `run`, `inspect`, ...) yields `None`, so a
+        // later positional that happens to be "exec" (`docker build -t exec .`)
+        // is never taken for the subcommand, and the token after it never
+        // becomes a container.
         loop {
             let a = argv.get(i)?;
             if let Some(flag) = a.strip_prefix("--") {
@@ -2305,8 +2242,8 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
             //   positional preceded the `--` it takes EVERYTHING after it as
             //   the command and the pod from `-f`/stdin instead. `kubectl exec
             //   -f pod.yaml -- sh` runs `sh` in the manifest's pod; reading
-            //   past the `--` made the COMMAND the pod, so the menu offered to
-            //   re-attach to a container called `sh`.
+            //   past the `--` would make the COMMAND the pod, so the menu would
+            //   offer to re-attach to a container called `sh`.
             // - either CLI once the container is known, or once a flag has
             //   said the name lives outside the argv: the rest is the command
             //   the session was running, never an option this walk should read.
@@ -2364,10 +2301,10 @@ pub fn detect_container(argv: &[String]) -> Option<RemoteContext> {
     if parse.implicit_name {
         return None;
     }
-    // H1 (audit v2.32.0, SECURITY): reject a container token that carries a
-    // control char or escapes the conservative charset, so it can never
-    // become a RemoteContext whose Reconnect command the caller auto-execs.
-    // (clone_session_command additionally single-quotes — layer 2.)
+    // SECURITY: reject a container token that carries a control char or
+    // escapes the conservative charset, so it can never become a RemoteContext
+    // whose Reconnect command the caller auto-execs. clone_session_command
+    // also single-quotes it as a second layer.
     let container = parse.container?;
     if !field_is_safe(&container, CONTAINER_EXTRA) {
         return None;
@@ -2447,8 +2384,8 @@ fn container_global_option(
         (Runtime::Docker, "config") => (Slot::Config, true),
         // `--remote`, and its documented `-r` alias, switch Podman to its
         // default remote service and carry no value, so there is nothing to
-        // re-emit. Recognizing only the long spelling left `podman -r exec web`
-        // reconnecting to the LOCAL socket.
+        // re-emit. Recognizing only the long spelling would leave
+        // `podman -r exec web` reconnecting to the LOCAL socket.
         (Runtime::Podman, "remote" | "r") => (Slot::Unreproducible, false),
         // kubectl: the cluster, the namespace, and the file that resolves both.
         (Runtime::Kubectl, "context") => (Slot::Context, true),
@@ -2459,16 +2396,16 @@ fn container_global_option(
         // one-flag equivalent, and a token or password must never be written
         // back out into a command line.
         (Runtime::Kubectl, "cluster" | "token" | "password") => (Slot::Unreproducible, true),
-        // Identity and credential selectors: these decide WHO the client
+        // Identity and credential selectors decide WHO the client
         // authenticates as, and therefore which cluster/daemon the same name
-        // resolves against. Consuming them silently — which is what `Ignored`
-        // did — meant `kubectl --user prod-admin exec api-0` came back as a
-        // plain `kubectl exec api-0`, run against the DEFAULT kubeconfig user,
-        // and `docker --tlscacert … -H tcp://host:2376 exec web` came back
-        // without any of the TLS material the endpoint needs. None of them is
-        // re-emittable (a secret must never be echoed into a command line, and
-        // the rest have no single-flag equivalent that resolves the same way),
-        // so they suppress the Reconnect entry the way `--token` already did.
+        // resolves against. Consuming them silently would turn
+        // `kubectl --user prod-admin exec api-0` into a plain
+        // `kubectl exec api-0` run as the DEFAULT kubeconfig user, and would
+        // strip `docker --tlscacert ... -H tcp://host:2376 exec web` of the TLS
+        // material the endpoint needs. None of them is re-emittable (a secret
+        // must never be echoed into a command line, and the rest have no
+        // single-flag equivalent that resolves the same way), so they suppress
+        // the Reconnect entry, as `--token` does.
         //
         // NB: this is the GLOBAL `--user` — the kubeconfig user. The `--user`
         // AFTER `exec` is a uid inside the container and stays ignorable.
@@ -2526,8 +2463,8 @@ fn container_exec_option(
         // `-g`/`--gid` are its own, and `-o`/`--logfile` + `-l`/`--logpriority`
         // come from the option set every lxc-* tool shares. A name missing
         // here is read as a boolean, which leaves its VALUE looking like a
-        // positional — `lxc-attach --uid 1000 -n web` reported the container as
-        // `1000` and offered to re-attach to it.
+        // positional, so `lxc-attach --uid 1000 -n web` would report the
+        // container as `1000` and offer to re-attach to it.
         (Runtime::Lxc, "uid" | "gid" | "u" | "g" | "logfile" | "o" | "logpriority" | "l") => {
             (Slot::Ignored, true)
         }
@@ -2547,8 +2484,8 @@ fn container_exec_option(
         (Runtime::Kubectl, "kubeconfig") => (Slot::Config, true),
         (Runtime::Kubectl, "server" | "s") => (Slot::Endpoint, true),
         // Value-taking options that name something INSIDE the container — a
-        // uid, an env file, a working directory. Consumed, never captured: a
-        // missing entry here is what made `docker exec --env-file vars web`
+        // uid, an env file, a working directory. Consumed, never captured. A
+        // missing entry here would make `docker exec --env-file vars web`
         // report `vars` as the container.
         (
             _,
@@ -2637,7 +2574,7 @@ fn apply_container_option(slot: ContainerOptionSlot, value: &str, parse: &mut Co
 /// Apply one recognized option that carries NO value. Most are inert, but two
 /// slots mean something on their own: an endpoint switch with nothing to
 /// re-emit (`podman --remote`/`-r`) and an implicit container name (`podman
-/// exec --latest`/`-l`). Reading only value-taking letters dropped both.
+/// exec --latest`/`-l`).
 fn apply_boolean_container_option(slot: ContainerOptionSlot, parse: &mut ContainerParse) {
     match slot {
         ContainerOptionSlot::Unreproducible => parse.options.unreproducible = true,
@@ -2691,10 +2628,9 @@ fn apply_short_option(
         lookup(flag.encode_utf8(&mut probe)).is_some_and(|(_, takes_value)| takes_value)
     });
     let mut found = [0_u8; 4];
-    // The letters BEFORE the value-taking one are not all inert: `podman -r`
+    // The letters BEFORE the value-taking one are not all inert. `podman -r`
     // and `podman exec -l` each say something about the endpoint with no value
-    // attached, and both were silently skipped while only their long spellings
-    // worked.
+    // attached.
     for flag in short.booleans.chars() {
         if let Some((slot, false)) = lookup(flag.encode_utf8(&mut found)) {
             apply_boolean_container_option(slot, parse);
@@ -2806,11 +2742,11 @@ pub fn clone_session_command(ctx: &RemoteContext) -> Option<String> {
     }
 }
 
-/// Append ` FLAG 'VALUE'` to a command line being built, or `None` when the
-/// value carries a control char — the caller propagates that with `?`, dropping
-/// the whole Reconnect entry rather than emitting a line that a newline could
-/// split into extra auto-executed commands (same contract as the host/user/
-/// container fields in [`clone_session_command`]).
+/// Append ` FLAG 'VALUE'` to a command line being built, or return `None` when
+/// the value carries a control char. The caller propagates that with `?` and
+/// drops the whole Reconnect entry, so a newline can never split the line into
+/// extra auto-executed commands. The host/user/container fields in
+/// [`clone_session_command`] follow the same contract.
 fn push_quoted_option(cmd: &mut String, flag: &str, value: &str) -> Option<()> {
     if has_control_char(value) {
         return None;
@@ -2854,8 +2790,7 @@ pub fn clone_session_label(ctx: &RemoteContext) -> String {
 ///   - `Container { runtime: Docker, container: c }` → `"docker: c"`
 ///   - `Container { runtime: Kubectl, container: c }` → `"kubectl: c"`
 ///
-/// Pure — no `&self` parameter (the enum is the input + the format
-/// is the output). Unit-testable without disk.
+/// Pure and unit-testable without disk.
 pub fn format_remote_title(ctx: &RemoteContext) -> String {
     match ctx {
         RemoteContext::Ssh { host, user, .. } => match user {
@@ -3283,17 +3218,16 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Audit (robustness): `refresh_from` used to bound only a SINGLE
-    /// file's size (`MAX_PROC_FILE_BYTES`), not the sum across the whole
-    /// walk — a wide subtree of large-argv descendants could retain
-    /// multiple GiB in `entries`. Build ~40 descendants each with a
-    /// near-1-MiB `cmdline` (comfortably over `MAX_PROC_TREE_TOTAL_BYTES`
-    /// in aggregate, even though each individually passes the per-file
-    /// cap) and assert the walk stops accumulating argv bytes well before
-    /// the naive `N * per-file-cap` total, while still recording every
+    /// `refresh_from` must bound the total bytes read across the whole walk,
+    /// not just a SINGLE file's size (`MAX_PROC_FILE_BYTES`), or a wide subtree
+    /// of large-argv descendants could retain multiple GiB in `entries`. Build
+    /// ~40 descendants, each with a near-1-MiB `cmdline` (over
+    /// `MAX_PROC_TREE_TOTAL_BYTES` in aggregate, though each passes the
+    /// per-file cap), and assert the walk stops accumulating argv bytes well
+    /// before the naive `N * per-file-cap` total while still recording every
     /// descendant's parent (structure survives the budget; only the large
-    /// payloads are dropped). Cwd remains available through its on-demand
-    /// procfs read.
+    /// payloads are dropped). Cwd stays available through its on-demand procfs
+    /// read.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_proc_scanner_caps_aggregate_argv_bytes_across_the_whole_walk() {
@@ -3403,11 +3337,11 @@ mod tests {
 
     /// Drift guard. `clone_session_command` is the pure
     /// formatter for the right-click "Reconnect to …" menu entry's
-    /// dispatched command (phase 7 of the remote-session design).
+    /// dispatched command.
     #[test]
     fn clone_session_command_for_all_shapes() {
-        // v2.32.0 (audit H1): dynamic fields are POSIX single-quoted and the
-        // return is `Option` (None only for an unsafe/control-char field).
+        // Dynamic fields are POSIX single-quoted, and the return is `Option`
+        // (None for an unsafe/control-char field).
         // SSH without user.
         assert_eq!(
             clone_session_command(&ssh_ctx("box", None)),
@@ -3440,13 +3374,13 @@ mod tests {
         );
     }
 
-    /// H1 (audit v2.32.0, SECURITY): the host/user/container fields are
-    /// argv-derived and the caller AUTO-EXECUTES `clone_session_command`'s output
-    /// by writing it to the PTY with a trailing newline. A hostile token must
-    /// either (a) never become a RemoteContext (parse-time rejection in
-    /// detect_ssh/detect_container) or (b) be rendered inert by single-quoting,
-    /// and a control char (esp. newline) must yield None — never a multi-line
-    /// command. This test exercises BOTH layers.
+    /// SECURITY: the host/user/container fields are argv-derived and the caller
+    /// AUTO-EXECUTES `clone_session_command`'s output by writing it to the PTY
+    /// with a trailing newline. A hostile token must either (a) never become a
+    /// RemoteContext (parse-time rejection in detect_ssh/detect_container) or
+    /// (b) be rendered inert by single-quoting, and a control char (esp.
+    /// newline) must yield None, never a multi-line command. This test
+    /// exercises BOTH layers.
     #[test]
     fn clone_session_command_neutralizes_shell_injection() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3517,11 +3451,10 @@ mod tests {
     }
 
     /// Test helper: is there a shell metacharacter OUTSIDE single quotes in
-    /// `cmd`? Used to assert the dynamic fields are fully quoted. Tracks a simple
-    /// in/out-of-`'…'` state (kettle's quoting never nests quotes — a literal
-    /// quote is rendered as the `'\''` break-out idiom, which this still reads
-    /// correctly because the inner `\'` is itself outside quotes but is a
-    /// backslash-escape, not one of the metachars we flag).
+    /// `cmd`? Used to assert the dynamic fields are fully quoted. Tracks a
+    /// simple in/out-of-`'...'` state, since kettle never nests quotes. A
+    /// literal quote becomes the `'\''` idiom, whose `\'` sits outside quotes
+    /// but is a backslash-escape, not a flagged metachar.
     fn has_unquoted_metachar(cmd: &str) -> bool {
         let mut in_quote = false;
         for c in cmd.chars() {
@@ -3534,9 +3467,9 @@ mod tests {
         false
     }
 
-    /// H2 (audit v2.32.0): `ssh -l bob h` must reproduce the login user end to
-    /// end — both the remote title and the Reconnect command render `bob@h`.
-    /// OpenSSH keeps that first user even if the later target spells another.
+    /// `ssh -l bob h` must reproduce the login user end to end. Both the remote
+    /// title and the Reconnect command render `bob@h`. OpenSSH keeps that first
+    /// user even if the later target spells another.
     #[test]
     fn ssh_dash_l_user_reaches_title_and_reconnect() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3577,13 +3510,11 @@ mod tests {
         );
     }
 
-    /// Drift guard: `detect_remote` returns None for
-    /// pids that aren't real (or have no descendants matching a
-    /// remote-client argv). Real-process testing isn't feasible
-    /// here — we'd need to actually spawn ssh, which adds CI
-    /// fragility. The argv-side detectors (detect_ssh +
-    /// detect_container) get exhaustive coverage above; this
-    /// test just locks the no-op no-match contract.
+    /// Drift guard: `detect_remote` returns None for pids that aren't real (or
+    /// have no descendants matching a remote-client argv). Spawning a real ssh
+    /// here would make CI fragile, and the argv-side detectors (detect_ssh +
+    /// detect_container) have their own tests, so this only locks the
+    /// no-match contract.
     #[test]
     fn detect_remote_returns_none_for_invalid_pids() {
         // PID 0 is the kernel scheduler on Linux — never has the
@@ -3681,9 +3612,8 @@ mod tests {
             detect_ssh(&argv(&["ssh", "-o", "StrictHostKeyChecking=no", "h"])),
             Some(ssh_ctx("h", None))
         );
-        // ssh -l user host — H2 (audit v2.32.0): `-l bob` now populates the user
-        // so Reconnect / the remote title reproduce `ssh bob@h` (previously the
-        // login user was silently dropped).
+        // ssh -l user host. `-l bob` populates the user so Reconnect and the
+        // remote title reproduce `ssh bob@h`.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-l", "bob", "h"])),
             Some(ssh_ctx("h", Some("bob")))
@@ -3711,10 +3641,9 @@ mod tests {
         assert!(detect_ssh(&argv(&["ssh", "-V"])).is_none());
     }
 
-    /// Drift guard: argv[0] in the Windows shape — a
-    /// backslash path WITH a `.exe` extension — must still be recognized. The
-    /// detectors split only on `/` and kept `.exe`, so the whole remote feature
-    /// was silently dead on Windows 11.
+    /// Drift guard: argv[0] in the Windows shape (a backslash path WITH a
+    /// `.exe` extension) must still be recognized. Splitting only on `/` and
+    /// keeping `.exe` would leave the whole remote feature dead on Windows 11.
     #[test]
     fn detect_recognizes_windows_argv0_shape() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3754,12 +3683,12 @@ mod tests {
         );
     }
 
-    /// Each of these argv shapes used to drive the WRONG
-    /// reconnect target/command.
+    /// Argv shapes that a naive parse turns into the WRONG reconnect
+    /// target/command.
     #[test]
     fn detect_handles_proxyjump_bool_flags_and_global_flags() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        // (a) ssh -J jump host → host (was: 'jump', the bastion), with the
+        // (a) ssh -J jump host → host (not 'jump', the bastion), with the
         // bastion carried so the reconnect still tunnels through it.
         assert_eq!(
             detect_ssh(&argv(&["ssh", "-J", "jump.example", "me@host"])),
@@ -3784,7 +3713,7 @@ mod tests {
                 },
             })
         );
-        // (b) docker exec --privileged <c> sh → c (was: 'sh').
+        // (b) docker exec --privileged <c> sh → c (not 'sh').
         assert_eq!(
             detect_container(&argv(&["docker", "exec", "--privileged", "alpine", "sh"])),
             Some(container_ctx(ContainerRuntime::Docker, "alpine"))
@@ -3882,13 +3811,11 @@ mod tests {
         );
     }
 
-    /// Audit (correctness): `detect_container` used to locate the `exec`
-    /// subcommand with an unanchored `.position()` scan of the WHOLE argv,
-    /// so a later positional value that happened to literally be "exec"
-    /// (a build tag, a k8s object name, …) was mistaken for the subcommand
-    /// boundary and the argv element right after it became a phantom
-    /// container. The subcommand must now be exactly the first non-flag
-    /// token (after skipping only recognized global option flags).
+    /// `detect_container` takes the `exec` subcommand only from the first
+    /// non-flag token (after global options), never from a scan of the WHOLE
+    /// argv. Otherwise a later positional that happens to be "exec" (a build
+    /// tag, a k8s object name, ...) passes for the subcommand, and the token
+    /// after it becomes a phantom container.
     #[test]
     fn detect_container_does_not_scan_past_the_subcommand_for_a_coincidental_exec() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3916,10 +3843,10 @@ mod tests {
         );
     }
 
-    /// The options that decide WHICH host `ssh` reached were parsed past and
-    /// dropped, so Reconnect offered plain `ssh host` — a different service on
-    /// a different port, reached without the bastion and authenticated by a
-    /// different key. They now travel with the host and come back out.
+    /// The options that decide WHICH host `ssh` reached travel with the host
+    /// and come back out. Dropping them would make Reconnect offer plain
+    /// `ssh host`, a different service on a different port, reached without
+    /// the bastion and authenticated by a different key.
     #[test]
     fn ssh_endpoint_options_are_reproduced_by_the_reconnect_command() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -3997,8 +3924,8 @@ mod tests {
 
     /// ssh parses `-abc` the way getopt does, so a boolean letter in front of
     /// a value-taking one leaves the value in the same token or the next argv
-    /// element. Reading the bundle as one opaque token made `ssh -vp 2222 box`
-    /// report the PORT as the host.
+    /// element. Reading the bundle as one opaque token would make
+    /// `ssh -vp 2222 box` report the PORT as the host.
     #[test]
     fn ssh_short_option_bundles_do_not_swallow_the_destination() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4087,13 +4014,13 @@ mod tests {
 
     /// `-o` is the whole ssh_config grammar on the command line, so the gate
     /// that decides whether a keyword moves the endpoint has to read keywords
-    /// the way OpenSSH does. It missed the `-o` spellings of choices this crate
-    /// already treats as endpoint-defining — `IdentityFile` is `-i` under
+    /// the way OpenSSH does. It must catch the `-o` spellings of choices this
+    /// crate already treats as endpoint-defining (`IdentityFile` is `-i` under
     /// another name, and `CanonicalizeHostname` rewrites the destination before
-    /// it is looked up — and it read the keyword without skipping the leading
-    /// whitespace `process_config_line` skips, so `-o " ProxyJump=bastion"`
-    /// yielded an EMPTY keyword, matched nothing, and offered a reconnect that
-    /// bypassed the bastion.
+    /// it is looked up). It must also skip the leading whitespace that
+    /// `process_config_line` skips, or `-o " ProxyJump=bastion"` yields an
+    /// EMPTY keyword, matches nothing, and offers a reconnect that bypasses
+    /// the bastion.
     #[test]
     fn ssh_dash_o_keywords_are_read_the_way_openssh_reads_them() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4137,9 +4064,9 @@ mod tests {
 
     /// A Windows install path is `C:\Program Files (x86)\…` and a POSIX home
     /// can hold an apostrophe. Both are ordinary paths, and both are inert in
-    /// the POSIX single quotes the value is emitted in — `'` via the `'\''`
-    /// idiom — so rejecting them at parse time deleted a Reconnect entry that
-    /// used to work and bought nothing.
+    /// the POSIX single quotes the value is emitted in (`'` via the `'\''`
+    /// idiom), so rejecting them at parse time would drop a working Reconnect
+    /// entry for no gain.
     #[test]
     fn ordinary_windows_and_posix_paths_keep_the_reconnect_entry() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4204,9 +4131,9 @@ mod tests {
 
     /// The Reconnect line is typed into a live PTY, and its values come from a
     /// descendant process's argv rather than from anything the user typed
-    /// here. So a value is bounded, and `-i` — the one endpoint option OpenSSH
-    /// accepts more than once, trying each key in order — is not reproduced by
-    /// keeping the last of several: the key that authenticated may not be the
+    /// here. So a value is bounded. And `-i`, the one endpoint option OpenSSH
+    /// accepts more than once (trying each key in order), is not reproduced by
+    /// keeping the last of several. The key that authenticated may not be the
     /// key re-emitted, which is a different account on the same host.
     #[test]
     fn oversized_and_repeated_option_values_suppress_the_reconnect() {
@@ -4238,9 +4165,10 @@ mod tests {
     }
 
     /// `docker --context remote exec web` runs on another machine entirely;
-    /// dropping the context reconnected against the LOCAL daemon, to whatever
-    /// container happened to share the name. Same for podman's connection,
-    /// an explicit daemon address, and kubectl's namespace + in-pod container.
+    /// dropping the context would reconnect against the LOCAL daemon, to
+    /// whatever container happens to share the name. Same for podman's
+    /// connection, an explicit daemon address, and kubectl's namespace +
+    /// in-pod container.
     #[test]
     fn container_client_context_is_reproduced_by_the_reconnect_command() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4367,10 +4295,9 @@ mod tests {
         );
     }
 
-    /// The post-subcommand option tables were incomplete, so an option VALUE
-    /// was reported as the container: `--container sidecar` named the pod,
-    /// `--env-file vars` named the container. Bundled shorts hid the same
-    /// bug (`-itc sidecar`).
+    /// An option VALUE after the subcommand must never pass for the container,
+    /// whether the option is long (`--container sidecar`, `--env-file vars`) or
+    /// sits inside a short bundle (`-itc sidecar`).
     #[test]
     fn container_option_values_are_never_read_as_the_container() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4423,9 +4350,9 @@ mod tests {
     }
 
     /// `lxc-attach` accepts `--name`, `--name=`, and the joined `-n` spelling
-    /// of the same option. Only the separated `-n NAME` form was recognized —
-    /// the long forms consumed the name as an anonymous flag value and the
-    /// pane got no remote context at all.
+    /// of the same option, not only `-n NAME`. An unrecognized long form would
+    /// consume the name as an anonymous flag value, leaving the pane with no
+    /// remote context.
     #[test]
     fn lxc_attach_name_option_forms_are_all_detected() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4503,11 +4430,10 @@ mod tests {
             );
         }
 
-        // An identity or credential selector decides WHICH account — and often
-        // which cluster — the same name resolves against. Consuming it and
-        // saying nothing produced a reconnect that runs as the DEFAULT
-        // kubeconfig user, or one that drops the TLS material the endpoint
-        // needs.
+        // An identity or credential selector decides WHICH account, and often
+        // which cluster, the same name resolves against. Dropping it silently
+        // would give a reconnect that runs as the DEFAULT kubeconfig user, or
+        // one without the TLS material the endpoint needs.
         for credentialed in [
             &[
                 "kubectl",
@@ -4641,9 +4567,9 @@ mod tests {
     /// positionals preceded it (cobra's `ArgsLenAtDash`) and, when none did,
     /// takes EVERYTHING after it as the command with the pod coming from
     /// `-f`/stdin; `podman exec --latest` moves the container out of the argv
-    /// the same way. Skipping the `--` and scanning on made the COMMAND the
-    /// endpoint: `kubectl exec -f pod.yaml -- sh` titled the pane `kubectl: sh`
-    /// and offered to re-attach to a container called `sh`.
+    /// the same way. Skipping the `--` and scanning on would make the COMMAND
+    /// the endpoint, so `kubectl exec -f pod.yaml -- sh` would title the pane
+    /// `kubectl: sh` and offer to re-attach to a container called `sh`.
     #[test]
     fn a_command_after_a_double_dash_is_never_read_as_the_container() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4699,9 +4625,9 @@ mod tests {
         }
     }
 
-    /// lxc-attach's own value-taking options were missing from the table, so
-    /// each one's VALUE was read as the container: `lxc-attach --uid 1000 -n
-    /// web` titled the pane `lxc: 1000` and offered `lxc-attach -n '1000'`.
+    /// lxc-attach's value-taking options must be in the option table, or each
+    /// one's VALUE is read as the container. `lxc-attach --uid 1000 -n web`
+    /// would then title the pane `lxc: 1000` and offer `lxc-attach -n '1000'`.
     /// `-o`/`--logfile` and `-l`/`--logpriority` come from the option set every
     /// lxc-* tool shares; `-u`/`--uid` and `-g`/`--gid` are lxc-attach's own.
     #[test]
@@ -4735,11 +4661,9 @@ mod tests {
     #[test]
     fn every_slot_a_runtime_can_capture_is_emitted_by_its_reconnect_command() {
         // The union of every option name either table recognizes, long and
-        // short. Written out so the guard reads as data, and checked against
-        // the tables themselves below — the list claimed to be complete "by
-        // construction" while being hand-maintained, so a table entry landing
-        // in a slot the emitter never writes could be added without any test
-        // noticing.
+        // short. Written out so the guard reads as data. The list is kept by
+        // hand, so it is checked against the tables below; otherwise a table
+        // entry landing in a slot the emitter never writes could go unnoticed.
         const NAMES: &[&str] = &[
             "context",
             "c",
@@ -4959,12 +4883,11 @@ mod tests {
         );
     }
 
-    /// Audit (correctness): for `sshpass`, the inner `ssh` used to be found
-    /// via `argv.iter().position(|a| argv0_basename(a) == "ssh")`, an
-    /// unanchored scan of the WHOLE argv — including sshpass's own flag
-    /// VALUES. A `-p`/`-f` value that happened to basename to "ssh" (a
-    /// password or password-file path literally named "ssh") was mistaken
-    /// for the real ssh invocation, silently discarding the real target.
+    /// For `sshpass`, the wrapped command is the first token after sshpass's
+    /// own flags and their VALUES. A `-p`/`-f` value that basenames to "ssh"
+    /// (a password or password-file path literally named "ssh") must not be
+    /// mistaken for the real ssh invocation, which would silently discard the
+    /// real target.
     #[test]
     fn detect_ssh_sshpass_does_not_match_a_flag_value_named_ssh() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -4988,13 +4911,9 @@ mod tests {
 
     // === ProcessTree fixture + mocked BFS tests =========
     //
-    // Previously the only `detect_remote_with` test was the
-    // `detect_remote_returns_none_for_invalid_pids` smoke (above)
-    // — it called the real sysinfo against pid 0 / u32::MAX. The
-    // BFS body (descendant walk, closer-wins-on-tie, refresh
-    // contract) was untested because spawning real ssh from CI
-    // is too fragile. Extracting [`ProcessTree`] made the
-    // BFS body testable with a synthetic process tree.
+    // These tests drive the BFS body (descendant walk, closer-wins-on-tie,
+    // refresh contract) through a synthetic [`ProcessTree`], because spawning
+    // real ssh from CI is too fragile.
 
     /// Fixture: a `ProcessTree` impl backed by a hashmap.
     /// `add(pid, parent, argv)` builds the tree; `ProcessTree` reads
@@ -5063,9 +4982,9 @@ mod tests {
         }
     }
 
-    /// Drift guard: `pwsh → wsl.exe` (the user's exact case — open
-    /// PowerShell, type `wsl`, split) resolves to the WSL shell + its dir, so a
-    /// split can clone WSL in the same directory instead of a fresh pwsh.
+    /// Drift guard: `pwsh → wsl.exe` (open PowerShell, type `wsl`, split)
+    /// resolves to the WSL shell + its dir, so a split can clone WSL in the
+    /// same directory instead of a fresh pwsh.
     #[test]
     fn find_foreground_shell_clones_typed_wsl_under_pwsh() {
         let mut tree = MockProcessTree::new();
@@ -5195,9 +5114,9 @@ mod tests {
         assert!(!accepts(&["python3"]));
     }
 
-    /// v2.32.0 (audit, medium): a fork means the tree cannot tell foreground
-    /// from background, so the walk stops there. A background job in another
-    /// branch must never set the pane's directory.
+    /// A fork means the tree cannot tell foreground from background, so the
+    /// walk stops there. A background job in another branch must never set the
+    /// pane's directory.
     #[test]
     fn shell_in_chain_stops_at_a_fork() {
         let mut tree = MockProcessTree::new();
@@ -5264,12 +5183,11 @@ mod tests {
         assert_eq!(find_foreground_shell(1, &mut tree), None);
     }
 
-    /// User-reported on native Ubuntu: a foreground agent/editor
-    /// (`claude`/`codex`/`nvim`) spawns transient `sh -c "…"` helpers. The
-    /// detector must NOT clone a one-shot helper into a split — doing so spawns a
-    /// shell that runs the command and exits immediately, leaving a blank/dead
-    /// pane ("new pane but no terminal would load"). With no INTERACTIVE shell
-    /// descendant, it returns None so the caller clones the pane's real shell.
+    /// A foreground agent/editor (`claude`/`codex`/`nvim`) spawns transient
+    /// `sh -c "…"` helpers. The detector must NOT clone a one-shot helper into
+    /// a split. A cloned helper runs the command and exits immediately, leaving
+    /// a blank/dead pane. With no INTERACTIVE shell descendant, it returns None
+    /// so the caller clones the pane's real shell.
     #[test]
     fn foreground_shell_ignores_agent_and_editor_spawned_oneshot_helpers() {
         let mut tree = MockProcessTree::new();
@@ -5439,12 +5357,7 @@ mod tests {
     /// hook or installer routinely spawns `bash /tmp/something.sh` and often
     /// deletes the script immediately. Cloning that argv gives a pane whose
     /// command has already finished, so it appears and is reaped, which is
-    /// what "the split never loaded" looks like. Only `-c` and its spellings
-    /// used to be recognized, so a script operand read as interactive.
-    ///
-    /// Confirmed against a live window before this test was written: with a
-    /// `bash <script>` helper in the foreground, `list_panes` reported the new
-    /// pane's argv as exactly that script.
+    /// what "the split never loaded" looks like.
     #[test]
     fn a_shell_running_a_script_file_is_not_interactive() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -5472,10 +5385,10 @@ mod tests {
         );
     }
 
-    /// v2.32.0 (audit, low): a pane that launches a remote client DIRECTLY
-    /// (`command = ssh box`, no intervening shell) — the pane root pid IS the
-    /// `ssh` process. The BFS must inspect the root itself (depth 0), not only its
-    /// children, or the pane gets no RemoteContext (no Reconnect, no remote title).
+    /// A pane that launches a remote client DIRECTLY (`command = ssh box`, no
+    /// intervening shell) has the `ssh` process as its root pid. The BFS must
+    /// inspect the root itself (depth 0), not only its children, or the pane
+    /// gets no RemoteContext (no Reconnect, no remote title).
     #[test]
     fn detect_in_tree_root_pid_is_ssh() {
         let mut tree = MockProcessTree::new();
@@ -5487,9 +5400,9 @@ mod tests {
         );
     }
 
-    /// v2.32.0 (audit, low): same root-pid detection through the shared-index
-    /// path that `RemoteScanner::detect_root` actually uses, with a directly-
-    /// launched `docker exec` pane root.
+    /// Same root-pid detection through the shared-index path that
+    /// `RemoteScanner::detect_root` uses, with a directly launched
+    /// `docker exec` pane root.
     #[test]
     fn detect_root_in_index_root_pid_is_container() {
         let mut tree = MockProcessTree::new();
@@ -5734,9 +5647,7 @@ mod tests {
         tree.add(100, None, &["bash"]);
         tree.add(150, Some(100), &["vim", "file.txt"]);
         tree.add(151, Some(100), &["python", "-c", "print('hi')"]);
-        // grep "ssh" is not an ssh client — argv[0] gates the
-        // detector. Previously this couldn't be tested without
-        // spawning a real grep.
+        // grep "ssh" is not an ssh client; argv[0] gates the detector.
         tree.add(200, Some(150), &["grep", "ssh", "log.txt"]);
         assert!(detect_in_tree(100, &mut tree).is_none());
     }

@@ -6,8 +6,7 @@
 //! that space, so `世界` reconstructs as `世 界` — and search, link/path
 //! detection, quick-select hints, and the agent screen-scrape never match across
 //! wide text. This single helper skips the spacer cells while keeping the
-//! byte→column map exact, and is shared by every consumer so the fix can't drift
-//! (audit, v2.26.0).
+//! byte→column map exact. Every consumer shares it, so they can't drift apart.
 
 use alacritty_terminal::grid::Grid;
 use alacritty_terminal::index::{Column, Line, Point};
@@ -27,9 +26,9 @@ pub(crate) fn is_spacer(flags: Flags) -> bool {
 /// A cell carrying combining (zero-width) marks — a decomposed `e` + U+0301, an
 /// emoji ZWJ sequence, a variation selector — contributes its base char *and*
 /// every `zerowidth()` mark, so search / link-detect / scrape see the full
-/// grapheme rather than a stripped `e` (audit v2.32.0). Each appended mark maps
-/// to the SAME originating grid column as its base cell in `col_of_byte`, so a
-/// match offset that lands on a mark still translates back to the base column.
+/// grapheme rather than a stripped `e`. Each appended mark maps to the SAME
+/// originating grid column as its base cell in `col_of_byte`, so a match offset
+/// that lands on a mark still translates back to the base column.
 pub fn row_text_into(
     grid: &Grid<Cell>,
     line: i32,
@@ -116,8 +115,7 @@ mod tests {
     fn preserves_combining_marks_and_maps_them_to_base_column() {
         // A decomposed "é": base 'e' in column 0 carrying the combining acute
         // accent U+0301 as a zero-width mark, then a plain 'x' in column 1.
-        // Before the v2.32.0 fix the accent was dropped and search/scrape saw
-        // a bare "ex".
+        // Search and scrape must keep the accent rather than see a bare "ex".
         let mut grid: Grid<Cell> = Grid::new(1, 4, 0);
         {
             let base = &mut grid[Point::new(Line(0), Column(0))];

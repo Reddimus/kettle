@@ -4,7 +4,7 @@
 use std::process::{Command, Stdio};
 
 /// Create the implicit config with the same owner-only file contract the
-/// production writer uses. Tower's `002` umask otherwise leaves a fixture at
+/// production writer uses. A `002` umask otherwise leaves a fixture at
 /// `0664`, so the trust gate correctly rejects the fixture before these tests
 /// reach the FIFO, size, or decoding behavior they are meant to exercise.
 fn create_config_file(path: &std::path::Path) -> std::fs::File {

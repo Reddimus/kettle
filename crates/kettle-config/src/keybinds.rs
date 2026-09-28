@@ -26,9 +26,8 @@ pub enum Key {
     End,
     Enter,
     Tab,
-    /// Edit keys. macOS binds `Cmd+Backspace` to delete-to-line-start by
-    /// default; before these existed the chord could not be written in a
-    /// config file at all, which is why `⌘⌫` did nothing.
+    /// Edit keys. They let a config bind `Cmd+Backspace`, which macOS uses
+    /// for delete-to-line-start.
     Backspace,
     Delete,
     F(u8),
@@ -61,16 +60,10 @@ impl Trigger {
             parts.push("Super".into());
         }
         parts.push(match self.key {
-            // Char punctuation that the parser accepts as a *named* token
-            // (`plus`/`minus`/`equal`, line 354-356) should round-trip
-            // through the label the same way — otherwise
-            // `kettle --list-keybinds` shows the default `Ctrl++` as
-            // literally `Ctrl++` (three `+` characters: separator + key)
-            // and the user can't tell whether the second `+` is the
-            // separator's repetition or the key itself, so we
-            // emit `Plus`/`Minus`/`Equal` so the row reads
-            // `Ctrl+Plus  IncreaseFontSize`, matching how the user
-            // would type the chord in their config file.
+            // Keys that `parse_key` accepts as named tokens
+            // (`plus`/`minus`/`equal`/`space`) use that name in the label, so
+            // `--list-keybinds` shows `Ctrl+Plus` instead of the ambiguous
+            // `Ctrl++`, matching how the user types the chord in a config.
             Key::Char('+') => "Plus".into(),
             Key::Char('-') => "Minus".into(),
             Key::Char('=') => "Equal".into(),
@@ -236,13 +229,10 @@ pub fn describe(bindings: &Bindings) -> Vec<String> {
         .collect();
     lines.sort();
     // Column width = longest trigger label, with a floor of 16 so the
-    // common shorter-default case still has breathing room. Without
-    // this, `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
-    // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) overflowed the
-    // hard-coded 16-char padding, so their action column landed one
-    // or three columns to the right of every other row in
-    // `--list-keybinds` — visually jarring even though every row
-    // had a trigger+action pair. Same shape as `format_ssh_hosts`.
+    // common shorter-default case still has breathing room. Sizing to the
+    // longest label keeps the action column aligned in `--list-keybinds`
+    // even for `Ctrl+Shift+PageDown` (19 chars). Same shape as
+    // `format_ssh_hosts`.
     let width = lines
         .iter()
         .map(|(t, _)| t.len())
@@ -295,9 +285,9 @@ pub enum Action {
     ResizeDown,
     ResizeLeft,
     ResizeRight,
-    /// v2.20.0 (Ghostty `equalize_splits` / Terminator parity): rebalance
-    /// every split in the focused tab so each leaf pane gets equal area —
-    /// each split node's ratio becomes `leaves(a) / (leaves(a)+leaves(b))`.
+    /// Ghostty `equalize_splits` / Terminator parity: rebalance every split
+    /// in the focused tab so each leaf pane gets equal area. Each split node's
+    /// ratio becomes `leaves(a) / (leaves(a)+leaves(b))`.
     EqualizeSplits,
     ToggleZoom,
     /// Terminator parity (`key_help`).
@@ -315,25 +305,19 @@ pub enum Action {
     /// `Session::list_layouts`). Type-to-filter; Enter spawns
     /// `kettle --layout NAME` as a new window. Same shape as
     /// the `CommandPalette` overlay; uses
-    /// `App::layout_picker_input: Option<(String, usize)>`.
-    /// Closes the last Bucket-D plugin gap
-    /// (`launcher.py` → layout overlay).
+    /// `WindowState::layout_picker_input: Option<(String, usize)>`.
     OpenLayoutPicker,
     /// Terminator parity (`key_send_newline`). Writes a literal `\n` to the focused
     /// pane's PTY. Mostly useful for inserting a newline into a
     /// shell line-editor that's otherwise consuming Enter
     /// (e.g. multi-line readline prompts that submit on Enter
-    /// but expect explicit `\n` for line continuation). Bucket E
-    /// rationale removed since shipping this 4-line dispatch
-    /// arm closes the row outright.
+    /// but expect explicit `\n` for line continuation).
     SendNewline,
     /// Terminator parity (`key_preferences` /
     /// `key_preferences_keybindings`). Terminator's GUI
     /// Preferences dialog is config-file-driven for kettle, so
     /// the preferences keybind opens the user's config file with
-    /// the OS-registered application. Closes the "preferences GUI is
-    /// a paradigm choice" Bucket E rationale by making the
-    /// equivalent UX one keystroke away.
+    /// the OS-registered application.
     EditConfig,
     /// Open the in-app **Settings overlay** — a keyboard-navigable
     /// panel of the most-used config keys (font size, theme, scrollbar, bell,
@@ -341,15 +325,11 @@ pub enum Action {
     /// `EditConfig` (which opens the raw config file with its default app for the long
     /// tail). This is the "settings menu for non-technical users" surface.
     OpenSettings,
-    /// Preferences submenu (C8): runtime-mutable
-    /// toggles that the Preferences ▸ right-click submenu wires
-    /// through `Config::persist_config_toggle` so a
-    /// click both updates `self.cfg` AND writes the change back
-    /// to `~/.config/kettle/config` atomically. Each variant
-    /// targets one specific value; the submenu builder emits
-    /// radio-style rows (one variant per option) for enum
-    /// settings and toggle rows (one variant for the boolean)
-    /// for bools.
+    /// Preferences submenu: runtime-mutable settings. A click in the
+    /// Preferences ▸ right-click submenu updates `self.cfg` AND writes the
+    /// change atomically to the active config file through
+    /// `persist_config_toggle`. Each variant targets one value: enum settings
+    /// get one radio row per option, bools one toggle row.
     SetScrollbarAlways,
     SetScrollbarAuto,
     SetScrollbarNever,
@@ -372,7 +352,7 @@ pub enum Action {
     /// scales the font proportionally so text fills the larger
     /// area. Kettle pairs `Mux::toggle_zoom` with a 1.5× font-size
     /// bump on enter / restore on exit (saved size lives in
-    /// `App::scaled_zoom_prev_font_size`).
+    /// `WindowState::scaled_zoom_prev_font_size`).
     ScaledZoom,
     IncreaseFontSize,
     DecreaseFontSize,
@@ -411,8 +391,7 @@ pub enum Action {
     /// Toggle vi-mode for the focused pane's scrollback (Alacritty
     /// parity). When on, kettle intercepts keyboard input for
     /// vi-style navigation (h/j/k/l + 0/$ + g/G + visual + yank).
-    /// This change ships the entry + visible block cursor +
-    /// Esc exit; movement + visual / yank come in a follow-up.
+    /// A block cursor shows the vi position; Esc exits.
     ToggleViMode,
     /// Terminator parity (terminatorlib/terminal.py:key_rotate_cw):
     /// rotate the split tree clockwise.
@@ -485,21 +464,19 @@ pub enum Action {
     /// Terminator parity (`plugins/logger.py`):
     /// toggle the focused pane's per-pane session log. When off,
     /// opens a new file at `<cache>/kettle/logs/kettle-<secs>-<pid>.log`
-    /// and starts tee-ing raw PTY bytes to it (no ANSI stripping —
-    /// the log preserves exact terminal output for later replay).
+    /// and starts tee-ing PTY bytes to it. The log is raw for exact replay
+    /// unless `log-strip-ansi` is set.
     /// When on, closes the file. Per-pane state (per-tab and
     /// per-window). No-op + warn when the cache dir can't be created.
     ToggleSessionLog,
     /// Terminator parity (`plugins/terminalshot.py`,
     /// phase 1 of [`TERMINATOR-TERMINALSHOT-DESIGN.md`](
     /// docs/TERMINATOR-TERMINALSHOT-DESIGN.md)): trigger a live-
-    /// window screenshot of the focused pane. Wired end-to-end: wgpu
-    /// surface readback + BGRA→RGBA conversion + row-padding strip +
-    /// image::ImageBuffer save, plus per-pane crop via focused-pane
-    /// rect and a toast notification via `fire_notify`. PNG lands at
-    /// `session_screenshot_path` (`<cache_dir>/<unix>-<pid>.png`,
-    /// with the angle-bracket placeholders inside a code span so
-    /// rustdoc doesn't read them as HTML tags).
+    /// window screenshot of the focused pane. wgpu surface readback +
+    /// BGRA→RGBA conversion + row-padding strip + image::ImageBuffer save,
+    /// plus per-pane crop via focused-pane rect and a toast notification via
+    /// `fire_notify`. PNG lands at `session_screenshot_path`
+    /// (`<cache_dir>/kettle/shots/kettle-<unix>-<pid>.png`).
     TakeScreenshot,
     /// Terminator parity (phase 1 of
     /// [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
@@ -533,11 +510,10 @@ pub enum Action {
     ///
     /// Distinct from [`Action::GroupWindow`], which prompts for a name — this
     /// one is Terminator's fixed-name bulk grouping and needs no input.
-    /// Distinct too from [`Action::ToggleBroadcastAll`], which is what the
-    /// importer used to map this to: grouping is not broadcasting. In
-    /// Terminator you group terminals and then choose to broadcast to the
-    /// group, so mapping `group_all` onto a broadcast toggle armed input
-    /// duplication the user never asked for.
+    /// Distinct too from [`Action::ToggleBroadcastAll`]: grouping is not
+    /// broadcasting. In Terminator you group terminals and then choose to
+    /// broadcast to the group, so mapping `group_all` onto a broadcast toggle
+    /// would arm input duplication the user never asked for.
     GroupAll,
     /// Terminator parity (`ungroup_all`, window.py:947): clear the group on
     /// every pane. The partner to [`Action::GroupAll`].
@@ -549,11 +525,10 @@ pub enum Action {
     /// in this tab under a generated `Tab N` name, or ungroup them if they
     /// already carry one.
     ///
-    /// Distinct from [`Action::GroupTab`], which prompts for a name — and
-    /// distinct in the type system for a second reason: two Terminator names
-    /// that both resolved to `GroupTab` made an imported `group_tab` line and
-    /// an imported `group_tab_toggle` line fight over the same action, so the
-    /// second silently unbound the first.
+    /// Distinct from [`Action::GroupTab`], which prompts for a name. It is also
+    /// a separate variant so imported `group_tab` and `group_tab_toggle` lines
+    /// bind different actions; sharing one would let the second line silently
+    /// unbind the first.
     ToggleGroupTab,
     /// Terminator parity (`group_win_toggle`, window.py:959): the same for
     /// every pane in the window, under a generated `Window group N`.
@@ -573,14 +548,13 @@ pub enum Action {
     /// equivalent for users who don't want to set up a global hotkey.
     ToggleWindowVisibility,
     /// Terminator parity, detachable-tabs: move the focused tab
-    /// to a new kettle window. With multi-window support (C5) this is a
-    /// LIVE in-process move — the tab's panes (PTYs, scrollback, running
-    /// programs) transfer untouched to the new window; nothing respawns.
-    /// Keyboard-driven equivalent of the drag tear-off (C6), and the only
-    /// route on Wayland (no global cursor tracking). No-op on a 1-tab
-    /// window.
+    /// to a new kettle window. This is a LIVE in-process move. The tab's
+    /// panes (PTYs, scrollback, running programs) transfer untouched to the
+    /// new window; nothing respawns. Keyboard-driven equivalent of the drag
+    /// tear-off, and the only route on Wayland (no global cursor tracking).
+    /// No-op on a 1-tab window.
     MoveTabToNewWindow,
-    /// Terminator parity, titlebar Bucket-D: open the edit overlay
+    /// Terminator parity (titlebar): open the edit overlay
     /// for the focused pane's broadcast group name. Same shape as
     /// EditPaneTitle but writes to pane.group_name. Enter empty
     /// input → clear the group.
@@ -592,17 +566,16 @@ pub enum Action {
     NextTheme,
     PrevTheme,
     /// Open the right-click context menu (Copy / Paste / Split Right /
-    /// Split Down / Close Pane / New Tab) anchored at the click point.
-    /// Bound to bare right-click — replacing the earlier silent no-op
-    /// that left first-time users confused. Shift+right-
-    /// click still extends the selection (xterm convention preserved).
+    /// Split Down / Close Pane / New Tab / ...) anchored at the click point.
+    /// Bound to bare right-click; Shift+right-click still extends the
+    /// selection (xterm convention).
     OpenContextMenu,
     /// Restore the most-recently-closed tab (WezTerm /
     /// browser convention). Pops the most recent entry from
     /// `Mux::closed_tabs` (bounded ring of 10) and re-spawns the same
     /// argv + OSC-7 cwd at the same tab index. No-op when the ring is
-    /// empty. Bound to `Ctrl+Shift+T` by default — same chord
-    /// WezTerm / Chrome / Firefox use for "reopen closed tab."
+    /// empty. Unbound by default; `Ctrl+Shift+T`, the WezTerm / Chrome /
+    /// Firefox chord for "reopen closed tab," is `NewTab` in kettle.
     UndoCloseTab,
     /// Clone the focused pane's argv + OSC-7 cwd into a
     /// new tab (iTerm2's "Duplicate Tab"). An `ssh box` tab clones to
@@ -648,8 +621,9 @@ pub enum Action {
 /// Every accepted action token, in the canonical form the user types in
 /// `keybind = …`. One name per row; alias rows are present too (so users
 /// who learned Terminator's `go_next` see it here alongside Ghostty's
-/// `focus_next`). Sorted for stable output. Followed by a one-line
-/// `goto_tab:N` blurb — the parametric form can't be enumerated.
+/// `focus_next`). Sorted for stable output. Parametric forms such as
+/// `goto_tab:N` and `text:BYTES` can't be enumerated, so `--list-actions`
+/// prints a one-line blurb for each after this list.
 ///
 /// Powers `kettle --list-actions`, the inverse of `Action::from_name`.
 /// A `--check-config` pass catches typos at validation time;
@@ -878,20 +852,16 @@ pub fn action_names() -> Vec<&'static str> {
         "about",
         "show_about",
         "show-about",
-        // These two bindable actions had `from_name` aliases + tests
-        // but were omitted from the discovery list, so `kettle --list-actions`
-        // silently hid them.
+        // Pane-name insertion and open-cwd-in-file-manager.
         "insert_name",
         "insert_pane_name",
         "insert_term_name",
         "open_cwd",
         "open_cwd_in_file_manager",
-        // Twenty-seven more aliases that `from_name` has always accepted while
-        // this list hid them, found once the reverse-coverage guard below
-        // stopped pinning two hand-written names and started deriving the set
-        // from `from_name` itself. Each shares an arm with a canonical name
-        // that was already listed, so users who learned the short spelling from
-        // Terminator saw `--list-actions` deny an action that works.
+        // Aliases that share an arm with a canonical name above. Users who
+        // learned these spellings from Terminator must find them in
+        // `--list-actions` too; `action_names_round_trip_through_from_name`
+        // derives the accepted set from `from_name` and fails on any omission.
         "bell_attention",
         "bell_both",
         "bell_off",
@@ -925,7 +895,7 @@ pub fn action_names() -> Vec<&'static str> {
 }
 
 impl Action {
-    /// Opened to `pub` so kettle-ui's Lua engine can
+    /// Public so kettle-ui's Lua engine can
     /// translate `kettle.exec_action(name)` strings into Action
     /// variants at drain time. The set of accepted names + their
     /// aliases is the same as the keybind grammar.
@@ -933,18 +903,14 @@ impl Action {
         use Action::*;
         // Lowercase before matching so `keybind =
         // ctrl+shift+c = Copy` resolves the same as `... = copy`.
-        // Before this fix the capitalized spelling was silently
-        // dropped — an earlier malformed-value check flagged it, but
-        // the runtime still didn't bind anything. Same pattern as
-        // `enum_keys_are_case_insensitive`.
+        // Same pattern as `enum_keys_are_case_insensitive`.
         //
         // Hyphens fold to underscores for the same reason the config
         // tokenizer folds them the other way: an action name reaches here in
         // whichever spelling its source uses, and hand-maintaining a dual
-        // alias per action does not hold. Several were missing, and the
-        // tokenizer's own folding turned Terminator's `new_tab` into
-        // `new-tab` — a spelling no arm listed — so every line in a copied
-        // `[keybindings]` section resolved to nothing. No action is spelled
+        // alias per action does not hold. The tokenizer itself turns
+        // Terminator's `new_tab` into `new-tab`, so without this fold a copied
+        // `[keybindings]` section would bind nothing. No action is spelled
         // with a hyphen and no underscore twin (pinned by
         // `every_action_name_resolves_in_both_spellings`), so folding this
         // direction cannot shadow one.
@@ -1054,20 +1020,18 @@ impl Action {
             "reset_font_size" | "zoom_normal" => ResetFontSize,
             "start_search" | "search" => StartSearch,
             // Terminator's `broadcast_all` is `set_groupsend('all')`
-            // (terminal.py:2193-2195) — EVERY terminal, not just the current
-            // tab's. It previously aliased to `ToggleBroadcastAll`, whose
-            // dispatch sets `BroadcastScope::Tab`, so a user who bound
-            // `broadcast_all` and typed a command believed it reached every
-            // pane while it reached only the focused tab's. Narrowing the
-            // blast radius silently is the dangerous direction for a broadcast
-            // feature. `ToggleBroadcastWindow` is the window-wide scope, which
-            // this crate's own docs already called "Terminator's true
-            // broadcast_all".
+            // (terminal.py:2193-2195), which reaches EVERY terminal, not just
+            // the current tab's. `ToggleBroadcastAll` turns on the
+            // `broadcast-default` scope, the focused tab by default, so mapping
+            // `broadcast_all` to it would let a user believe a command reached
+            // every pane when it reached only the focused tab's. Silently
+            // narrowing the blast radius is the dangerous direction for a
+            // broadcast feature. `ToggleBroadcastWindow` is the window-wide scope.
             "broadcast_all" => ToggleBroadcastWindow,
             // `group_all` GROUPS every terminal (window.py:933); it does not
             // arm broadcasting. `group_all_toggle` is Terminator's toggling
-            // partner and maps to the same bulk grouping here, since kettle
-            // treats re-grouping an already-grouped set as idempotent.
+            // partner. It ungroups every pane when the focused pane is already
+            // in `All`, and groups them otherwise.
             "group_all" => GroupAll,
             "group_all_toggle" => ToggleGroupAll,
             // Kept reachable under an honest name: this is the per-tab scope.
@@ -1085,11 +1049,8 @@ impl Action {
             | "toggle_broadcast_window"
             | "toggle-broadcast-window" => ToggleBroadcastWindow,
             // Terminator's `*_toggle` names toggle GROUPING (window.py:959,
-            // :987), not broadcasting. kettle's grouping actions prompt for the
-            // group name where Terminator generates one, so these bind the
-            // grouping half — a prompt the user did not expect, where the old
-            // broadcast mapping was a different feature entirely that silently
-            // duplicated every keystroke across every pane.
+            // :987), not broadcasting. Like Terminator, these generate the group
+            // name rather than prompting for one.
             "group_tab_toggle" => ToggleGroupTab,
             "group_win_toggle" => ToggleGroupWindow,
 
@@ -1266,17 +1227,15 @@ fn parse_key(s: &str) -> Option<Key> {
 /// Parse a Ghostty trigger such as `ctrl+shift+o`.
 /// Rewrite a GTK accelerator into kettle's `+`-separated trigger form.
 ///
-/// Terminator writes every binding as a GTK accelerator —
-/// `<Control><Shift>t`, `<Alt>1` — with angle-bracketed modifiers and no
-/// separator before the key. kettle splits on `+`, so such a string arrived as
-/// one unrecognised token and the binding was dropped. Every keybinding line in
-/// a real Terminator config therefore imported as nothing, which also made the
-/// ~79 Terminator action-name aliases unreachable from a copied file.
+/// Terminator writes every binding as a GTK accelerator (`<Control><Shift>t`,
+/// `<Alt>1`), with angle-bracketed modifiers and no separator before the key.
+/// kettle splits on `+`, so without this rewrite every keybinding line in a
+/// Terminator config would be one unrecognised token and bind nothing, and the
+/// ~79 Terminator action-name aliases would be unreachable from a copied file.
 ///
 /// Borrows the input back untouched when it carries no `<`, so kettle's own
-/// `ctrl+shift+t` spelling takes exactly the path it always did and costs
-/// nothing extra — this runs for every trigger in every config, and all but
-/// the imported ones are already in kettle's spelling.
+/// `ctrl+shift+t` spelling costs nothing extra. This runs for every trigger in
+/// every config, and all but imported ones are already in kettle's spelling.
 fn normalize_gtk_accelerator(s: &str) -> Option<std::borrow::Cow<'_, str>> {
     if !s.contains('<') {
         return Some(std::borrow::Cow::Borrowed(s));
@@ -1290,20 +1249,17 @@ fn normalize_gtk_accelerator(s: &str) -> Option<std::borrow::Cow<'_, str>> {
             break;
         }
         let Some(close) = rest.find('>') else {
-            // No closing `>`, so this is not a GTK accelerator at all — it is
-            // kettle's own grammar, where `<` is a perfectly ordinary key.
-            // `keybind = <=copy` binds it, and refusing here broke that.
-            // Whatever remains becomes the key; a genuine typo like `<Control`
-            // then fails at the key parser, which is where it should fail.
+            // No closing `>`, so this is kettle's own grammar, where `<` is an
+            // ordinary key (`keybind = <=copy`). Whatever remains becomes the
+            // key; a genuine typo like `<Control` then fails at the key parser.
             break;
         };
         let modifier = &rest[open + 1..close];
         if modifier.is_empty() {
-            // `<>t` is malformed. Dropping the empty group silently turned it
-            // into the bare key `t` — so a typo in a config quietly bound an
-            // ordinary letter, and typing that letter fired the action instead
-            // of reaching the shell. A malformed accelerator must bind
-            // NOTHING; the unknown-value diagnostic then names the line.
+            // `<>t` is malformed. Dropping the empty group would bind the bare
+            // key `t`, and typing that letter would fire the action instead of
+            // reaching the shell. A malformed accelerator must bind NOTHING;
+            // the unknown-value diagnostic then names the line.
             return None;
         }
         parts.push(modifier.to_string());
@@ -1363,16 +1319,11 @@ pub fn parse_trigger(s: &str) -> Option<Trigger> {
         };
         if !added_mod {
             // Strict-mode rejection: a non-modifier in any but the
-            // last `+`-separated slot is a typo. The earlier
-            // implementation `parse_key(other)`'d every non-modifier
-            // and overwrote `key` each loop iteration, so a typo'd
-            // modifier (`cttrl+t`, or `win+t` before the `win` alias
-            // was added) silently degraded to "plain key with no
-            // modifiers" — `keybind = win+t = new_tab` rebound plain
-            // `t` to new_tab and the user got new tabs while typing
-            // normally. Now the typo returns None and `--check-config`
-            // (which already gates triggers via `parse_trigger.is_some()`
-            // in `detect_malformed_values`) surfaces the bad line.
+            // last `+`-separated slot is a typo. Skipping it would turn
+            // `cttrl+t` into a plain `t` binding that fires while the user
+            // types normally. Returning None lets `--check-config` (which
+            // gates triggers via `parse_trigger(..).is_some()` in
+            // `detect_malformed_values`) surface the bad line.
             if i != last_idx {
                 return None;
             }
@@ -1393,10 +1344,8 @@ pub fn defaults() -> Bindings {
 /// called `bind()` on (including duplicates). The bindings map already
 /// has cardinality `<= bind_calls.len()` by HashMap semantics; the
 /// test `defaults_has_no_shadow_collisions` asserts equality so a
-/// future binding that silently shadows an earlier one (as once
-/// happened when Ctrl+Shift+Up/Down landed on top of the Resize
-/// quartet) fails CI instead of going unnoticed. Pure, allocates one extra Vec; not
-/// on the hot path.
+/// future binding that silently shadows an earlier one fails CI. Pure,
+/// allocates one extra Vec; not on the hot path.
 pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     use Action::*;
     use Key::*;
@@ -1461,14 +1410,11 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
             bind(mods, Right, FocusRight);
         }
     }
-    // Resize splits with Shift+Arrows only — `Ctrl+Shift+Up/Down` is
-    // taken for `ScrollLineUp/Down`, so binding
-    // `Ctrl+Shift+Left/Right` to Resize alone would have given an
-    // inconsistent four-direction map (Up/Down scroll, Left/Right
-    // resize). Drop the Ctrl+Shift+Arrows resize quartet entirely;
-    // Shift+Arrows is the canonical Terminator-default chord. The
-    // README and keybind table reflect this.
-    // Terminator-style Shift+Arrow split resize.
+    // Terminator-style Shift+Arrow split resize, the only resize chord.
+    // `Ctrl+Shift+Up/Down` is taken for `ScrollLineUp/Down`, so binding
+    // `Ctrl+Shift+Left/Right` to Resize alone would give an inconsistent
+    // four-direction map (Up/Down scroll, Left/Right resize). The README and
+    // keybind table reflect this.
     let sh = Mods::SHIFT;
     bind(sh, Up, ResizeUp);
     bind(sh, Down, ResizeDown);
@@ -1572,9 +1518,7 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
             bind(su, Char((b'0' + n) as char), GotoTab(n - 1));
         }
     }
-    // Ctrl+Shift+Space toggles vi-mode (Alacritty default). This change
-    // ships the entry + visible block cursor + Esc exit;
-    // h/j/k/l movement + visual selection + yank come in a follow-up.
+    // Ctrl+Shift+Space toggles vi-mode (Alacritty default).
     bind(cs, Char(' '), ToggleViMode);
     bind(Mods::SHIFT, PageUp, ScrollPageUp);
     bind(Mods::SHIFT, PageDown, ScrollPageDown);
@@ -1586,9 +1530,8 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(cs, Up, ScrollLineUp);
     bind(cs, Down, ScrollLineDown);
     // Shift+Home/End extend the text selection to the top / bottom of the buffer
-    // (the AskUbuntu "select all in terminator" gesture). Scroll-to-extremes moved
-    // to Ctrl+Home / Ctrl+End so both behaviors stay reachable. (These chords were
-    // already keybinds — never forwarded to the PTY — so apps lose nothing.)
+    // (the AskUbuntu "select all in terminator" gesture). Ctrl+Home / Ctrl+End
+    // scroll to the extremes, so both behaviors stay reachable.
     bind(Mods::SHIFT, Home, SelectToTop);
     bind(Mods::SHIFT, End, SelectToBottom);
     bind(c, Home, ScrollToTop);
@@ -1629,10 +1572,9 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
     }
     // Split on the LAST `=`, not the first. The trigger can
     // BE the `=` key (a shipped default binding), so `ctrl+==increase_font_size`
-    // must parse as trigger `ctrl+=` / action `increase_font_size`. Action names
-    // are `[a-z0-9_:-]` and never contain `=`, so the final `=` is unambiguously
-    // the separator. `split_once` cut at the first `=` → trigger `ctrl+` (a
-    // trailing-empty chord parse_trigger rejects), silently dropping the rebind.
+    // must parse as trigger `ctrl+=` / action `increase_font_size`. Action text
+    // never contains `=` (a `text:` payload spells it `\x3d`), so the final `=`
+    // is unambiguously the separator.
     let Some((trig, act)) = value.rsplit_once('=') else {
         return;
     };
@@ -1659,11 +1601,10 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
 /// per action, and writing one means "this is the key for this", not "here is
 /// another key for this".
 ///
-/// Treating an imported line as additive left kettle's stock chord live
+/// Treating an imported line as additive would leave kettle's stock chord live
 /// alongside the imported one. Someone rebinding `new_tab` precisely BECAUSE
-/// Ctrl+Shift+T collides with tmux, AstroNvim, or an agent CLI found the chord
-/// still captured after the import — the rebind looked like it worked and the
-/// collision it was meant to resolve was still there.
+/// Ctrl+Shift+T collides with tmux, AstroNvim, or an agent CLI would find the
+/// chord still captured after the import.
 pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
     let Some((trig, act)) = value.rsplit_once('=') else {
         return;
@@ -1690,9 +1631,9 @@ pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
 ///
 /// Terminator's `[keybindings]` grammar disables a shortcut by giving it an
 /// empty accelerator — its shipped defaults contain several, and its
-/// preferences UI writes one when a binding is cleared. Ignoring those lines
-/// left kettle's own default chord live, so a config that deliberately freed a
-/// chord (to hand it back to tmux, AstroNvim, or an agent CLI) did not free it.
+/// preferences UI writes one when a binding is cleared. Honoring those lines
+/// frees kettle's default chord too, so a config can hand it back to tmux,
+/// AstroNvim, or an agent CLI.
 pub fn unbind_action(map: &mut Bindings, action_name: &str) {
     let Some(a) = Action::from_name(action_name) else {
         return;
@@ -1787,17 +1728,12 @@ mod tests {
 
     #[test]
     fn trigger_label_uses_named_tokens_for_plus_minus_equal() {
-        // The parser accepts `ctrl+plus` / `ctrl+minus` /
-        // `ctrl+equal` as named tokens for the punctuation keys
-        // (line 354-356). `label()` should mirror that, otherwise
-        // `kettle --list-keybinds` shows the default `Ctrl++`
-        // binding (font zoom-in) as the literal string `Ctrl++`
-        // — two adjacent `+` make it ambiguous whether the second
-        // one is the separator's repetition or the key. Same for
-        // `Ctrl+-` (zoom out, looks like a trailing dash) and
-        // `Ctrl+=` (also zoom in, looks like an assignment).
-        // Both kitty and Ghostty render these as `Plus`/`Minus`/
-        // `Equal` in their printed keymaps for the same reason.
+        // `parse_key` accepts `plus` / `minus` / `equal` as named tokens
+        // for the punctuation keys, and `label()` mirrors that. Otherwise
+        // `kettle --list-keybinds` would print `Ctrl++` (which `+` is the
+        // key?), `Ctrl+-` (looks like a trailing dash) and `Ctrl+=` (looks
+        // like an assignment). kitty and Ghostty print `Plus`/`Minus`/`Equal`
+        // in their keymaps for the same reason.
         let c = Mods::CTRL;
         assert_eq!(Trigger::new(c, Key::Char('+')).label(), "Ctrl+Plus");
         assert_eq!(Trigger::new(c, Key::Char('-')).label(), "Ctrl+Minus");
@@ -1819,10 +1755,7 @@ mod tests {
         // The Super key has different names in different worlds —
         // `super` (X11), `cmd`/`command` (macOS), `win`/`windows`
         // (Windows), `meta` (historical X11 / Emacs), `logo` (Qt).
-        // All map to the same Mods::SUPER bit. Earlier,
-        // only `super`/`cmd`/`command` were recognized; anything
-        // else fell to `parse_key(other)` and silently degraded
-        // the chord to a plain-key binding.
+        // All map to the same Mods::SUPER bit.
         let s_t = Trigger::new(Mods::SUPER, Key::Char('t'));
         assert_eq!(parse_trigger("super+t"), Some(s_t));
         assert_eq!(parse_trigger("cmd+t"), Some(s_t));
@@ -1835,8 +1768,7 @@ mod tests {
         assert_eq!(parse_trigger("WIN+T"), Some(s_t));
         // GTK's portable spelling, which is what its own docs tell people to
         // write and what a Terminator config copied off a Linux desktop
-        // contains. It used to fall through to parse_key and silently degrade
-        // `<Primary>t` to a bare `t`.
+        // contains.
         let c_t = Trigger::new(Mods::CTRL, Key::Char('t'));
         assert_eq!(parse_trigger("primary+t"), Some(c_t));
         assert_eq!(parse_trigger("<Primary>t"), Some(c_t));
@@ -1855,12 +1787,9 @@ mod tests {
             Some(Trigger::new(Mods::SUPER | Mods::CTRL, Key::Char('t'))),
         );
         // Strict rejection: a typo'd modifier name in a non-final
-        // position used to silently degrade to plain `t` (the key
-        // slot got overwritten by the typo's `parse_key` attempt,
-        // then by the real key). Now the parse fails outright so
-        // `--check-config` flags the line as malformed instead of
-        // letting a "secret" plain-key binding stomp on normal
-        // typing.
+        // position fails the parse, so `--check-config` flags the line
+        // as malformed instead of a hidden plain-key binding stomping on
+        // normal typing.
         assert_eq!(parse_trigger("cttrl+t"), None);
         assert_eq!(parse_trigger("contorl+t"), None);
         assert_eq!(parse_trigger("supre+t"), None);
@@ -1874,12 +1803,9 @@ mod tests {
 
     #[test]
     fn action_from_name_is_case_insensitive() {
-        // Same pattern as `enum_keys_are_case_insensitive`. A user
-        // writing `keybind = ctrl+shift+c =
-        // Copy` (capitalized) used to silently drop the binding —
-        // `from_name` returned None on the unrecognized case
-        // variant, and apply_keybind's silent-skip path swallowed
-        // it. Now lowercased before matching.
+        // Same pattern as `enum_keys_are_case_insensitive`. A capitalized
+        // `keybind = ctrl+shift+c = Copy` must bind rather than fall
+        // through apply_keybind's silent-skip path.
         use Action::*;
         assert_eq!(Action::from_name("Copy"), Some(Copy));
         assert_eq!(Action::from_name("COPY"), Some(Copy));
@@ -1919,13 +1845,11 @@ mod tests {
 
     #[test]
     fn readme_documented_chords_are_actually_bound() {
-        // These 9 default bindings are documented in the README
-        // keybind table (SSH launcher, command palette, hint mode,
-        // jump-prompt, move-tab, zoom-pane, new-window, split-auto,
-        // goto-tab). The README is documentation, not source-of-
+        // These default bindings are documented in the README
+        // keybind table. The README is documentation, not source of
         // truth, but a user reading it deserves to find that chord
         // doing what the row claims. Pin each one so a future
-        // unbind / rebind catches the docs-drift here.
+        // unbind / rebind catches the docs drift here.
         use Action::*;
         let d = defaults();
         let c = Mods::CTRL;
@@ -2010,10 +1934,9 @@ mod tests {
     fn readme_still_documents_how_to_move_between_panes() {
         // `readme_documented_chords_are_actually_bound` checks the other
         // direction: that a chord the README names still does what the row
-        // claims. It cannot notice a row being *deleted*, and that is not
-        // hypothetical — a README rewrite dropped all three pane-focus rows
-        // and every test stayed green. Splits are the feature users ask about
-        // first, so the README has to keep saying how to move between them.
+        // claims. It cannot notice a row being *deleted*. Splits are the
+        // feature users ask about first, so the README has to keep saying how
+        // to move between them.
         //
         // Textual, like `man_page_documents_load_bearing_default_keybinds`: the
         // README writes chords as prose, not as `Action` names. Scoped to the
@@ -2064,17 +1987,13 @@ mod tests {
 
     #[test]
     fn defaults_has_no_shadow_collisions() {
-        // Systemic guard against shadow collisions. An earlier fix
-        // caught a single shadow collision (Ctrl+Shift+Up/Down both
-        // bound to Resize *and* ScrollLine — second one silently
-        // wins). The class of bug is
-        // easy to reintroduce because `bind()` is `HashMap::insert()`
-        // which doesn't warn on duplicates. `defaults_audit()` returns
-        // both the final map AND the ordered list of every trigger
-        // the builder bound; map.len() < triggers.len() iff some
-        // trigger appears twice. Pin equality so any future
-        // duplicate-bind shows up here, with a useful error naming
-        // the offender(s).
+        // Systemic guard against shadow collisions. They are easy to
+        // introduce because `bind()` is `HashMap::insert()`, which lets a
+        // second binding for a trigger silently win. `defaults_audit()`
+        // returns both the final map AND the ordered list of every trigger
+        // the builder bound; map.len() < triggers.len() iff some trigger
+        // appears twice. Pin equality so any future duplicate-bind shows up
+        // here, with a useful error naming the offender(s).
         let (m, triggers) = defaults_audit();
         if m.len() != triggers.len() {
             // Build the duplicate set so the failure message tells
@@ -2171,17 +2090,12 @@ mod tests {
 
     #[test]
     fn scroll_line_up_down_bound_to_ctrl_shift_arrows() {
-        // Alacritty / kitty / WezTerm all bind a
-        // chord for line-by-line scrollback navigation, but kettle
-        // shipped only PageUp/PageDown (Shift) and Top/Bottom (Shift
-        // Home/End). Ctrl+Shift+Up/Down fills the gap with the most
-        // commonly-used chord across modern terminals.
+        // Alacritty / kitty / WezTerm all bind a chord for line-by-line
+        // scrollback navigation; Ctrl+Shift+Up/Down is the most common one
+        // across modern terminals.
         //
-        // This binding collided with the previous Ctrl+Shift+Arrows
-        // → Resize quartet, so the Resize-via-Ctrl+Shift+Arrows
-        // defaults were dropped entirely as a regression guard.
-        // Shift+Arrows is now the canonical resize chord
-        // (the README and example config match).
+        // Ctrl+Shift+Arrows therefore do not resize by default; Shift+Arrows
+        // is the only resize chord (the README and example config match).
         let d = defaults();
         let cs = Mods::CTRL | Mods::SHIFT;
         assert_eq!(
@@ -2229,9 +2143,9 @@ mod tests {
 
     #[test]
     fn shift_home_end_select_and_scroll_moves_to_ctrl() {
-        // Keyboard text-selection feature: Shift+Home/End now extend the
-        // selection to the top / bottom of the buffer; scroll-to-extremes
-        // relocated to Ctrl+Home / Ctrl+End so both behaviors stay reachable.
+        // Shift+Home/End extend the selection to the top / bottom of the
+        // buffer, and Ctrl+Home/End scroll there, so both behaviors stay
+        // reachable.
         let d = defaults();
         assert_eq!(
             d.get(&Trigger::new(Mods::SHIFT, Key::Home)),
@@ -2382,11 +2296,9 @@ mod tests {
                 "action_names returned {n:?} but from_name rejects it"
             );
         }
-        // Reverse guard. This used to pin two hand-written names, which is a
-        // guard that cannot enforce what `docs/CONFIG.md` promises: that
-        // `--list-actions` prints *every* accepted alias. Deriving the set from
-        // `from_name`'s own arms is what makes that promise checkable — when it
-        // first ran it found twenty-seven aliases this list had been hiding.
+        // Reverse guard. `docs/CONFIG.md` promises that `--list-actions` prints
+        // *every* accepted alias. Deriving the set from `from_name`'s own arms,
+        // rather than a hand-written list, is what makes that promise checkable.
         let listed: std::collections::BTreeSet<String> =
             names.iter().map(|n| n.replace('-', "_")).collect();
         let body = from_name_body();
@@ -2432,8 +2344,8 @@ mod tests {
         );
         // The three parametric forms cannot be listed (N is unbounded), so
         // `--list-actions` prints each as a trailing note instead. Pin all
-        // three: `switch_to_tab_N` parsed but appeared in no output at all,
-        // which is what made the documented "complete set" claim false.
+        // three. Each one that parses needs its note, or the documented
+        // "complete set" claim is false.
         assert!(Action::from_name("goto_tab:1").is_some());
         assert!(Action::from_name("switch_to_tab_1").is_some());
         assert!(Action::from_name("new_tab_shell_1").is_some());
@@ -2488,11 +2400,10 @@ mod tests {
     #[test]
     fn describe_column_width_grows_to_fit_longest_trigger() {
         // `Ctrl+Shift+PageDown` (19 chars; move-tab-right) and
-        // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) used to overflow
-        // the hard-coded 16-char padding, so their action column landed
-        // one or three columns to the right of every other row — the
-        // alignment that's supposed to make `--list-keybinds` scannable
-        // was the one thing visibly wrong.
+        // `Ctrl+Shift+PageUp` (17 chars; move-tab-left) are longer than the
+        // 16-char floor. With a fixed 16-char pad their action column lands
+        // one or three columns right of every other row, breaking the
+        // alignment that makes `--list-keybinds` scannable.
         //
         // Locating the column from output bytes is tricky because a
         // short trigger like `Ctrl+C` (6 chars) gets padded with the
@@ -2638,10 +2549,9 @@ mod tests {
     #[test]
     fn apply_keybind_unbind_removes_default() {
         // Default map ships with Ctrl+Shift+C → Copy. A user whose shell
-        // wants Ctrl+Shift+C for itself (e.g. some readline kits) had no
-        // way to remove it — `apply_keybind` only ever *inserted*. Now
-        // `keybind = ctrl+shift+c = unbind` removes it; aliases are
-        // `none` / `null` / `false` / empty (all map to "no action").
+        // wants Ctrl+Shift+C for itself (e.g. some readline kits) removes it
+        // with `keybind = ctrl+shift+c = unbind`; aliases are `none` /
+        // `null` / `false` / empty (all map to "no action").
         let mut m = defaults();
         let trig = Trigger::new(Mods::CTRL | Mods::SHIFT, Key::Char('c'));
         assert_eq!(m.get(&trig), Some(&Action::Copy), "ships bound by default");
@@ -2731,17 +2641,8 @@ mod tests {
         }
     }
 
-    /// Every action name must resolve in BOTH spellings.
-    ///
-    /// The config tokenizer folds `_` to `-` so that Terminator's key
-    /// spellings match kettle's hyphenated arms. That fold also rewrites the
-    /// action names in a `[keybindings]` section — `new_tab` arrives here as
-    /// `new-tab` — and this table is written almost entirely in underscores,
-    /// so the section imported as nothing at all. The reverse fold in
-    /// `from_name` closes it; this walks the table to prove there is no name
-    /// that works in one spelling only, in either direction.
     /// `from_name`'s body, delimited by brace matching rather than by the next
-    /// `pub fn` — the loose bound runs past the end of the method and sweeps in
+    /// `pub fn`. The looser bound runs past the end of the method and sweeps in
     /// literals from the key-name parser (`ctrl`, `home`, `up`), which the
     /// reverse-coverage guard would then demand `--list-actions` publish as
     /// actions. Asserted below rather than assumed.
@@ -2775,6 +2676,15 @@ mod tests {
         body
     }
 
+    /// Every action name must resolve in BOTH spellings.
+    ///
+    /// The config tokenizer folds `_` to `-` so that Terminator's key
+    /// spellings match kettle's hyphenated arms. That fold also rewrites the
+    /// action names in a `[keybindings]` section (`new_tab` arrives here as
+    /// `new-tab`), while this table is written almost entirely in underscores.
+    /// Without the reverse fold in `from_name`, the section would import as
+    /// nothing at all. This walks the table to prove there is no name that
+    /// works in one spelling only, in either direction.
     #[test]
     fn every_action_name_resolves_in_both_spellings() {
         let body = from_name_body();
@@ -2919,14 +2829,13 @@ mod tests {
     /// Terminator's `*_toggle` names toggle GROUPING, not broadcasting.
     ///
     /// `window.py:940/959/987` each flip a group assignment; broadcasting to a
-    /// group is a separate, later choice. This test previously asserted the
-    /// broadcast mapping, so it pinned the wrong behavior in place: importing
-    /// a Terminator config bound a grouping key to a broadcast toggle, and one
-    /// press sent everything the user typed to every pane at once.
+    /// group is a separate, later choice. Mapping them to a broadcast toggle
+    /// would let one press of an imported grouping key send everything the
+    /// user types to every pane at once.
     ///
     /// Each toggle is its OWN action rather than an alias of the non-toggling
-    /// one. Two Terminator names resolving to a single kettle action made an
-    /// imported config containing both silently unbind the first, since an
+    /// one. If two Terminator names resolved to one kettle action, an imported
+    /// config containing both would silently unbind the first, since an
     /// imported binding is exclusive per action.
     #[test]
     fn from_name_accepts_terminator_group_toggle_aliases() {
@@ -3062,9 +2971,9 @@ mod tests {
         );
     }
 
-    /// `⌘⌫` was dead because the chord could not be written down: `Key` had no
-    /// Backspace variant, so `parse_trigger` returned `None` and every
-    /// `cmd+backspace` line in a config file was a malformed value.
+    /// `⌘⌫` is bindable only because `Key` has a Backspace variant. Without it,
+    /// `parse_trigger` returns `None` and every `cmd+backspace` line in a
+    /// config file is a malformed value.
     #[test]
     fn backspace_and_delete_are_bindable_triggers() {
         let sb = Trigger::new(Mods::SUPER, Key::Backspace);

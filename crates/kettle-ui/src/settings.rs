@@ -22,12 +22,11 @@ pub enum FieldKind {
         values: &'static [&'static str],
         labels: &'static [&'static str],
     },
-    /// v2.23.0: like [`FieldKind::Choice`] but the options are computed at
-    /// runtime (owned `Vec<String>`) rather than `&'static`. Used by the GPU
-    /// picker, whose options are the GPUs actually detected on this machine.
+    /// Like [`FieldKind::Choice`] but the options are computed at runtime
+    /// (owned `Vec<String>`) rather than `&'static`. Used by the GPU picker,
+    /// whose options are the GPUs actually detected on this machine.
     /// `values[i]` is the token persisted (and round-tripped through `read`);
-    /// `labels[i]` is shown. A scoped relaxation — the rest of the catalogue
-    /// stays `&'static` — so the dynamic-list need doesn't refactor everything.
+    /// `labels[i]` is shown. The rest of the catalogue stays `&'static`.
     ChoiceOwned {
         values: Vec<String>,
         labels: Vec<String>,
@@ -35,7 +34,7 @@ pub enum FieldKind {
     /// An integer in `[min, max]` stepped by `step`. Optional `suffix` for
     /// display (e.g. "%", "px"). Some keys store a different on-disk form than
     /// the displayed integer (e.g. opacity is a 0.0–1.0 float shown as a
-    /// percent) — that conversion lives in `read`/`write_value`.
+    /// percent); `read_number` and `write_number` convert it.
     Number {
         min: i64,
         max: i64,
@@ -50,7 +49,7 @@ pub enum FieldKind {
     /// don't persist via the key=value path; the editor appends a `keybind`
     /// line), so it carries the action name too.
     Keybind { action: &'static str },
-    /// v2.24.0: a free-text string value (e.g. the `background-image` path).
+    /// A free-text string value (e.g. the `background-image` path).
     /// ←/→ don't cycle it; activating (Enter / Space / click) opens an inline
     /// text prompt pre-filled with the current value, and the typed string is
     /// persisted on submit. The displayed value is the current string (or a
@@ -75,8 +74,9 @@ pub struct Category {
 }
 
 /// Live navigation state while the settings overlay is open
-/// (`App::settings_nav`). Indices into `categories()`; values are always read
-/// fresh from `Config`, so the overlay reflects external config reloads too.
+/// (`WindowState::settings_nav`). Indices into `categories()`; values are
+/// always read fresh from `Config`, so the overlay reflects external config
+/// reloads too.
 #[derive(Debug, Clone, Default)]
 pub struct SettingsNav {
     pub category: usize,
@@ -87,10 +87,10 @@ pub struct SettingsNav {
     pub capturing: bool,
 }
 
-/// v2.24.0: state for the inline text prompt opened by a [`FieldKind::Text`]
-/// row (the in-settings image-path entry). `key` is the config key to persist
-/// on submit; `buf` is the editable string (append / backspace only — cursor is
-/// always at the end, plenty for a path). Enter persists + reloads, Esc cancels.
+/// State for the inline text prompt opened by a [`FieldKind::Text`] row (the
+/// in-settings image-path entry). `key` is the config key to persist on submit;
+/// `buf` is the editable string (append / backspace only; the cursor is always
+/// at the end, plenty for a path). Enter persists + reloads, Esc cancels.
 #[derive(Debug, Clone)]
 pub struct SettingsTextEdit {
     pub key: &'static str,
@@ -118,7 +118,7 @@ fn choice(
     }
 }
 
-/// v2.23.0: a runtime-options Choice (see [`FieldKind::ChoiceOwned`]).
+/// A runtime-options Choice (see [`FieldKind::ChoiceOwned`]).
 fn choice_owned(
     label: &'static str,
     key: &'static str,
@@ -162,7 +162,7 @@ fn keybind(label: &'static str, action: &'static str) -> Field {
     }
 }
 
-/// v2.24.0: a free-text field (the in-settings image-path entry).
+/// A free-text field (the in-settings image-path entry).
 fn text(label: &'static str, key: &'static str, placeholder: &'static str) -> Field {
     Field {
         label,
@@ -172,7 +172,8 @@ fn text(label: &'static str, key: &'static str, placeholder: &'static str) -> Fi
 }
 
 /// The curated catalogue. Covers the settings a typical user actually reaches
-/// for; the overlay also offers an "open config file" row for the long tail.
+/// for; the long tail lives in the config file (right-click Preferences >
+/// Advanced...).
 ///
 /// `gpus` are the GPUs detected on this machine as `(token, label)` pairs (the
 /// token is what [`read_choice`] round-trips for the `gpu` key — `"auto"` or
@@ -231,10 +232,10 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 toggle("Show pane titlebars", "show-titlebar"),
             ],
         },
-        // v2.24.0: a dedicated Background page. `starfield` is a zero-config
-        // animated background; `image` takes a file path (edited inline here).
-        // Sub-options below the type are gated (dimmed + skipped) when they
-        // don't apply to the selected type — see `field_disabled`.
+        // The Background page. `starfield` is a zero-config animated
+        // background; `image` takes a file path (edited inline here).
+        // Sub-options below the type are dimmed and skipped when they don't
+        // apply to the selected type (see `field_disabled`).
         Category {
             name: "Background",
             fields: vec![
@@ -255,7 +256,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "(set a path — e.g. ~/wall.png)",
                 ),
                 choice(
-                    // Always-first to match the v2.24.0 default.
+                    // `always` is listed first because it is the default.
                     "Animation",
                     "background-animation",
                     &["always", "when-focused", "off"],
@@ -284,7 +285,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     &["auto", "off"],
                     &["automatic", "off"],
                 ),
-                // v2.28.0: width of the pronounced overlay scrollbar.
+                // Width of the pronounced overlay scrollbar.
                 number("Scrollbar width", "scrollbar-width", 2, 40, 2, "px"),
                 choice(
                     "Bell",
@@ -310,7 +311,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     1,
                     "h",
                 ),
-                // v2.20.0: hjkl navigation in menus/overlays (default ON).
+                // hjkl navigation in menus/overlays (default ON).
                 toggle("Vim menu navigation", "vim-menu-nav"),
                 choice(
                     "Focus mode",
@@ -333,10 +334,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                 toggle("Invert default direction", "invert-search"),
             ],
         },
-        // v2.28.0 (audit): a dedicated Tabs page surfacing the tab-bar keys that
-        // were previously config-file-only. `tab-bar-position` offers only
-        // top/bottom — left/right (vertical bars) parse but don't render yet, so
-        // we don't let a non-technical user pick a silently-inert option.
+        // `tab-bar-position` offers only top/bottom; left/right (vertical bars)
+        // stay config-only, as docs/SETTINGS.md says.
         Category {
             name: "Tabs",
             fields: vec![
@@ -403,7 +402,8 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
 
 /// Read a field's current value from `cfg`, formatted for display next to its
 /// label (e.g. `"14pt"`, `"auto"`, `"on"`). Returns a best-effort string; an
-/// unknown key (catalogue/Config drift) yields `"—"` rather than panicking.
+/// unknown key (catalogue/Config drift) yields a fallback such as `"off"`, `""`,
+/// or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field) -> String {
     match &field.kind {
         FieldKind::Toggle => {
@@ -444,9 +444,9 @@ pub fn read(cfg: &Config, field: &Field) -> String {
         }
         FieldKind::Number { suffix, .. } => {
             let value = read_number(cfg, field.key);
-            // Both scrollback rows have a zero sentinel. Rendering it as a
-            // quantity invited users to impose a finite cap without realising
-            // what they were leaving.
+            // Both scrollback rows have a zero sentinel. Showing it as a
+            // quantity invites users to impose a finite cap without realising
+            // what they give up.
             if field.key == "scrollback" && value == 0 {
                 "infinite".to_string()
             } else if field.key == "cursor-blink-timeout" && value == 0 {
@@ -526,10 +526,9 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
                 (dir as i64).saturating_mul(*step)
             };
             let stepped = cur.saturating_add(delta);
-            // The Settings catalogue intentionally exposes a convenient range,
-            // while the config grammar accepts wider values. Preserve those
-            // values and step in the requested direction; clamping an already
-            // out-of-range value snapped it to the catalogue boundary and could
+            // The catalogue exposes a convenient range, but the config grammar
+            // accepts wider values. An out-of-range value steps freely, because
+            // clamping would snap it to the catalogue boundary and could
             // destructively shrink live scrollback on the first keypress.
             let next = if (*min..=*max).contains(&cur) {
                 stepped.clamp(*min, *max)
@@ -562,16 +561,16 @@ pub fn keybind_action(field: &Field) -> Option<&'static str> {
     }
 }
 
-/// v2.24.0: is this a free-text field (the inline-prompt path entry)? The
-/// overlay handler routes Enter / Space / click into a text prompt for these.
+/// Is this a free-text field (the inline-prompt path entry)? The overlay
+/// handler routes Enter / Space / click into a text prompt for these.
 pub fn is_text(field: &Field) -> bool {
     matches!(field.kind, FieldKind::Text { .. })
 }
 
-/// v2.24.0: is `key`'s row inapplicable to the current `background-type`, so the
-/// overlay should DIM it and skip it during nav/click? Keeps the Background page
-/// honest — e.g. the image path only matters for `image`, and animation / chrome
-/// color only matter when there's a wallpaper (image or starfield).
+/// Is `key`'s row inapplicable to the current config, so the overlay should DIM
+/// it and skip it during nav/click? The image path only matters for `image`,
+/// animation and chrome color only matter with a wallpaper (image or
+/// starfield), and the blink timeout only matters while the cursor blinks.
 pub fn field_disabled(cfg: &Config, key: &str) -> bool {
     use kettle_config::BackgroundType as BT;
     let t = cfg.background_type;
@@ -583,8 +582,8 @@ pub fn field_disabled(cfg: &Config, key: &str) -> bool {
     }
 }
 
-/// v2.24.0: the next field index from `start` stepping by `step` (`+1`/`-1`) that
-/// is NOT [`field_disabled`], wrapping around. Lets keyboard nav skip dimmed
+/// The next field index from `start` stepping by `step` (`+1`/`-1`) that is
+/// NOT [`field_disabled`], wrapping around. Lets keyboard nav skip dimmed
 /// (inapplicable) rows. Returns `start` if every field is disabled (degenerate).
 pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i32) -> usize {
     let n = fields.len();
@@ -642,8 +641,8 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             BellMode::Both => "both",
         }
         .to_string(),
-        // Keyed on the canonical `cursor-style` to match
-        // the catalogue field + CONFIG.md (was the `cursor-shape` alias).
+        // Keyed on the canonical `cursor-style` (not the `cursor-shape` alias)
+        // to match the catalogue field + CONFIG.md.
         "cursor-style" => match cfg.cursor_style {
             CursorStyle::Block => "block",
             CursorStyle::Bar => "beam",
@@ -667,7 +666,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
             kettle_config::CompletionOverlayMode::Off => "off",
         }
         .to_string(),
-        // v2.23.0 background controls.
+        // Background controls.
         "background-type" => match cfg.background_type {
             kettle_config::BackgroundType::Solid => "solid",
             kettle_config::BackgroundType::Image => "image",
@@ -692,7 +691,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         // current theme isn't in the curated POPULAR list, `read`'s Choice arm
         // falls back to showing this raw name, and ←/→ cycles into the list.
         "theme" => cfg.theme_name.clone(),
-        // v2.23.0 Graphics.
+        // Graphics.
         "gpu-power-preference" => match cfg.gpu_power_preference {
             kettle_config::GpuPowerPreference::Low => "low",
             kettle_config::GpuPowerPreference::High => "high",
@@ -721,7 +720,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
                 "auto".to_string()
             }
         }
-        // v2.28.0: Tabs category.
+        // Tabs category.
         "tab-bar" => match cfg.tab_bar {
             kettle_config::TabBarMode::Off => "off",
             kettle_config::TabBarMode::Auto => "auto",
@@ -754,10 +753,8 @@ fn read_number(cfg: &Config, key: &str) -> i64 {
         "window-padding-x" => cfg.padding_x.round() as i64,
         // Report the SENTINEL, not the resolved line count. `scrollback` is
         // stored resolved, so infinite reads back as `INFINITE_SCROLLBACK`
-        // (10 M) — far above this row's 100 000 ceiling. The step then computed
-        // `(10_000_000 ± 1_000).clamp(0, 100_000)` = 100 000 and PERSISTED it,
-        // so a single arrow press on a user with infinite scrollback silently
-        // discarded their history limit. `0` is the config grammar's own
+        // (10 M), far above this row's 100 000 ceiling, and one arrow press
+        // would persist a finite limit. `0` is the config grammar's own
         // spelling of infinite, so round-tripping through it is lossless.
         "scrollback" => {
             if cfg.scrollback >= kettle_config::INFINITE_SCROLLBACK {
@@ -794,11 +791,10 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
 mod tests {
     use super::*;
 
-    /// The Scrollback row edits a value stored RESOLVED, so infinite read back
+    /// The Scrollback row edits a value stored RESOLVED, so infinite reads back
     /// as `INFINITE_SCROLLBACK` (10 M) against a row whose ceiling is 100 000.
-    /// A single ←/→ press computed `(10_000_000 ± 1_000).clamp(0, 100_000)` and
-    /// persisted 100 000 — silently discarding an unlimited history with no
-    /// prompt and no way to tell it had happened.
+    /// A single ←/→ press must not clamp that to 100 000 and persist it,
+    /// silently discarding an unlimited history.
     #[test]
     fn stepping_the_scrollback_row_cannot_silently_discard_infinite_history() {
         let mut cfg = Config::default();
@@ -819,8 +815,8 @@ mod tests {
         // Stepping DOWN from infinite must stay infinite rather than land on
         // the ceiling.
         assert_eq!(next_value(&cfg, &field, -1), "0");
-        // Stepping UP is a deliberate move to a finite limit, which is fine —
-        // it just must not be the 100 000 the clamp used to force.
+        // Stepping UP is a deliberate move to a finite limit, which is fine,
+        // but it must not jump to the 100 000 ceiling.
         assert_eq!(next_value(&cfg, &field, 1), "1000");
 
         // A finite value is unaffected.
@@ -867,8 +863,8 @@ mod tests {
 
     #[test]
     fn gpu_device_choice_round_trips_and_cycles() {
-        // v2.23.0. The GPU picker's token round-trips through read_choice and
-        // the ChoiceOwned cycle, and a pinned GPU shows its label.
+        // The GPU picker's token round-trips through read_choice and the
+        // ChoiceOwned cycle, and a pinned GPU shows its label.
         let gpus = [
             (
                 "10de:2191:NVIDIA GeForce GTX 1660 Ti".to_string(),
@@ -1069,12 +1065,10 @@ mod tests {
         assert_eq!(read(&cfg, &f), "auto");
     }
 
-    /// Drift guard: `keybind_action` extracts the
-    /// canonical action token the settings overlay routes into chord-capture
-    /// (Enter on a keybind row). A refactor that renamed `FieldKind::Keybind`'s
-    /// `action` field — or returned the token for the wrong variant — would
-    /// silently break keybind editing; only the interactive overlay exercised
-    /// it before. Pin Some(action) for keybind fields and None for every other
+    /// Drift guard: `keybind_action` extracts the canonical action token the
+    /// settings overlay routes into chord-capture (Enter on a keybind row).
+    /// Returning the token for the wrong variant would silently break keybind
+    /// editing. Pin Some(action) for keybind fields and None for every other
     /// field kind.
     #[test]
     fn keybind_action_extracts_token_for_keybind_fields_only() {
@@ -1112,10 +1106,10 @@ mod tests {
         assert_eq!(next, (!before).to_string());
     }
 
-    /// v2.20.0: the `catalogue_keys_are_all_readable` guard can't catch a
-    /// missing `read_bool` arm for a default-ON toggle (the `_ => false`
-    /// fallback shows a plausible "off"). Pin the row to its real default so
-    /// the arm can't silently go missing.
+    /// The `catalogue_keys_are_all_readable` guard can't catch a missing
+    /// `read_bool` arm for a default-ON toggle (the `_ => false` fallback shows
+    /// a plausible "off"). Pin the row to its real default so the arm can't
+    /// silently go missing.
     #[test]
     fn vim_menu_nav_row_reads_its_real_default() {
         let cfg = Config::default();

@@ -23,8 +23,8 @@ ImageMagick/icotool. One renderer also prevents the SVG and Pillow paths from
 producing different committed pixels. `scripts/gen-icons.sh` is retained as a
 compatibility wrapper around this script.
 
-All PNGs are 8-bit/color RGBA — GNOME Shell's loader silently fails on
-16-bit PNGs (the v2.1.1 Super-key blank-icon bug).
+All PNGs are 8-bit/color RGBA. GNOME Shell's loader silently fails on
+16-bit PNGs, leaving the Super-key search icon blank.
 
 Usage (from anywhere): python scripts/gen-icons.py
 """
@@ -537,11 +537,10 @@ def same_pixels(a: Path, b: Path) -> bool:
     """Compare image format, required metadata, and decoded pixel content.
 
     Pillow's PNG/ICO encoders are not byte-identical across versions or
-    platforms -- zlib settings and chunk ordering differ -- so a byte comparison
-    fails on CI while passing locally, for images that are pixel-for-pixel
-    identical. That is a gate that cries wolf, which trains people to ignore it.
-    Decoding both sides compares the image content while retaining the PNG mode
-    and bit depth constraints that prevent the GNOME blank-icon regression.
+    platforms (zlib settings and chunk ordering differ), so a byte comparison
+    can fail on CI for pixel-identical images. Decoding both sides compares the
+    image content and still checks the PNG mode and bit depth that prevent the
+    GNOME blank-icon regression.
 
     Pillow exposes ICO resolutions through `ico.sizes()` and `ico.getimage()`;
     `n_frames` only reports the default (largest) image.
@@ -586,12 +585,11 @@ def same_artifact(generated: Path, tracked: Path) -> bool:
 def check() -> int:
     """Fail if any tracked icon artifact has drifted from the generator.
 
-    The tracked artifacts once had no gate of any kind: `gen-icons.py` was run
-    by hand and dispatched by no recipe or CI job, so an edit to the geometry —
-    or a hand-touched SVG/PNG — could ship silently. The generator is
-    deterministic (pure Pillow, fixed supersampling), so regenerating into a
-    scratch tree and comparing vector bytes, decoded content, and required image
-    metadata is an exact check rather than a perceptual one.
+    Without this gate, a geometry edit or a hand-touched SVG/PNG could ship
+    silently. The generator is deterministic (pure Pillow, fixed supersampling),
+    so regenerating into a scratch tree and comparing vector bytes, decoded
+    content, and required image metadata is an exact check rather than a
+    perceptual one.
     """
     with tempfile.TemporaryDirectory(prefix="kettle-icons-") as tmp:
         root = Path(tmp)
@@ -641,10 +639,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if Image is None:
-        # Skipping locally is deliberate -- a contributor without Pillow should
-        # not be blocked -- but a skip that CI accepts is just a gate that never
-        # runs, which is the defect this check was added to close. CI passes
-        # --require-tooling, so the skip cannot become permanent there.
+        # Skip locally so a contributor without Pillow is not blocked. CI passes
+        # --require-tooling, because a skip that CI accepts is a gate that never
+        # runs.
         message = "Pillow is not installed (pip install Pillow)"
         if args.require_tooling:
             print(f"ERROR: {message}; --require-tooling makes this fatal")

@@ -57,8 +57,8 @@ fn pane_environment(config: &Config) -> Vec<(String, String)> {
 /// Keeping these states distinct is a correctness boundary: read-only is a
 /// user policy, backpressure is transient and retryable, oversize is a caller
 /// error, and a failed transport requires closing the pane. Conflating them
-/// previously made agent RPCs report every queue failure as `read_only` and
-/// let GUI input disappear without feedback.
+/// would make agent RPCs report every queue failure as `read_only` and let
+/// GUI input disappear without feedback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum PaneInputResult {
@@ -448,16 +448,13 @@ impl Drop for PtyInputQueue {
 }
 
 /// Initial pane title seeded from the launching argv before the program's
-/// first OSC 2. Plain shells use the placeholder "kettle" — the
-/// cwd-basename fallback fills in for those once OSC 7 arrives. SSH panes
-/// have no local cwd, so we surface the target inline (`ssh me@box`) so a
-/// tab full of them is distinguishable while connections are
-/// establishing. For any *other* explicit `-e PROG` (e.g. `kettle -e htop`,
-/// `kettle -e vim file`), the user has already told us what's running —
-/// surface that program's basename instead of the generic "kettle", since
-/// many TUIs (htop, top, less, vim's default, …) never emit OSC 2 and
-/// have no usable cwd to back-fill from. Pure so the argv → title decision
-/// is unit-tested.
+/// first OSC 2. Plain shells get the placeholder "kettle", and the
+/// cwd-basename fallback fills in for them once OSC 7 arrives. SSH panes have
+/// no local cwd, so they show the target (`ssh me@box`) to tell them apart
+/// while connecting. Any other `-e PROG` (e.g. `kettle -e htop`) shows the
+/// program's basename, since the user named it and many TUIs (htop, top,
+/// less, vim's default) never emit OSC 2 and have no usable cwd to fall back
+/// on. Pure so the argv-to-title decision is unit-tested.
 fn initial_pane_title(argv: &[String]) -> String {
     let Some(arg0) = argv.first().map(String::as_str) else {
         return "kettle".into();
@@ -581,9 +578,8 @@ pub(crate) enum PaneTitleOrigin {
     Remote,
     /// The user named this pane by hand.
     ///
-    /// Without this variant the edit was overwritten by the next OSC 0/2 the
-    /// shell emitted — which bash and zsh send on EVERY prompt — so naming a
-    /// pane `db-prod` lasted under a second. Terminator keeps the equivalent
+    /// Without this variant, the next OSC 0/2 would overwrite the name, and
+    /// bash and zsh send one on EVERY prompt. Terminator keeps the equivalent
     /// state as `titlebar.set_custom_string`, and its editable label no-ops
     /// while custom (editablelabel.py:60-64).
     Manual,
@@ -604,46 +600,40 @@ pub struct Pane {
     pub term: Terminal,
     pub rx: Receiver<TermEvent>,
     pty_input: PtyInputQueue,
-    /// Terminator plugin parity: optional output sidechannel. `Some` when the
-    /// LuaEngine subscribed at App startup; the App drains it each tick and
-    /// fires LuaEvent::Output(pane_id, bytes).
+    /// Terminator plugin parity: optional output sidechannel, `Some` when a
+    /// LuaEngine or the recorder needs PTY output. The App drains it each
+    /// tick, feeds any recorder, and fires LuaEvent::Output(pane_id, bytes).
     pub output_rx: Option<Receiver<Vec<u8>>>,
     pub title: String,
-    /// v2.29.0: whether `title` is still the generated seed (no genuine OSC 2
-    /// title has arrived). Tab/window/pane labels treat a placeholder title as
-    /// "show the cwd instead". Crucially this lets us IGNORE the bogus full-exe
-    /// path that conhost/ConPTY injects as the startup OSC 2 title for a native
-    /// Windows shell (it would otherwise outrank the cwd). Set `false` the
-    /// instant any real OSC 2 title is stored, so a program-set title is never
-    /// suppressed. Seeded `true` only for generic-shell panes (see `spawn_pane`).
+    /// Whether `title` is still the generated seed (no genuine OSC 2 title has
+    /// arrived). Tab/window/pane labels treat a placeholder title as "show the
+    /// cwd instead". This also lets us IGNORE the bogus full-exe path that
+    /// conhost/ConPTY injects as the startup OSC 2 title for a native Windows
+    /// shell (it would otherwise outrank the cwd). Set `false` the instant any
+    /// real OSC 2 title is stored, so a program-set title is never suppressed.
+    /// Seeded `true` only for generic-shell panes (see `spawn_pane`).
     pub title_is_placeholder: bool,
     pub(crate) title_origin: PaneTitleOrigin,
     pub(crate) title_before_remote: Option<(String, PaneTitleOrigin)>,
-    /// Terminator parity, named broadcast groups foundation: per-pane group
-    /// name. When set, the pane is part of a named broadcast group;
-    /// keyboard input to any member of the group broadcasts to every
-    /// member. None means the pane has no group (Terminator default).
+    /// Terminator parity: per-pane named broadcast group, or `None` for no
+    /// group (Terminator default). While `Mux::broadcast` is
+    /// `BroadcastScope::Group(name)`, input goes to every pane in that group.
     ///
-    /// Distinct from the per-tab broadcast (`BroadcastScope::Tab`, which is
-    /// scope=tab, no name): named groups can span multiple tabs +
-    /// be selectively enabled. Per-tab broadcast remains the
+    /// Unlike per-tab broadcast (`BroadcastScope::Tab`), a named group can
+    /// span tabs and be enabled selectively. Per-tab broadcast remains the
     /// quick-toggle path.
     pub group_name: Option<String>,
     /// Terminator parity (`icon_bell`): this pane rang its bell and the user
     /// has not looked at it since.
     ///
-    /// The tab bar has had its own bell latch for a while, but the per-PANE
-    /// one was missing entirely — the renderer's titlebar indicator read a
-    /// field the frame builder hard-coded to `false`, so `icon_bell` parsed,
-    /// validated, defaulted to on, was documented, and could never draw
-    /// anything. Latched like the tab's: set when the bell rings in a pane the
-    /// user is not looking at, cleared when they focus it.
+    /// Drives the titlebar bell indicator. Latched like the tab's: set when the
+    /// bell rings in a pane the user is not looking at, cleared when they focus
+    /// it.
     pub bell: bool,
     pub closed: bool,
-    /// `exit-action = hold` was silently broken — `reap()`
-    /// removed any pane whose child had exited regardless of intent. `held`
-    /// marks a pane deliberately KEPT on screen after its shell exited (Hold);
-    /// reap skips it until the user explicitly closes it (which sets `closed`).
+    /// Marks a pane deliberately KEPT on screen after its shell exited
+    /// (`exit-action = hold`). `reap()` skips it until the user explicitly
+    /// closes it (which sets `closed`).
     pub held: bool,
     /// A held pane keeps its grid but must not keep an exited direct child as a
     /// zombie. `false` means the ordered PTY exit arrived before `try_wait`
@@ -651,9 +641,9 @@ pub struct Pane {
     /// cadence.
     pub held_child_reaped: bool,
     /// The UI consumed the PTY's exit event after the reader drained preceding
-    /// output. Reaping from a direct process-status poll raced that event and
-    /// could drop a fast pane before its final bytes or `exit-action` policy
-    /// were applied.
+    /// output. Reaping from a direct process-status poll would race that event
+    /// and could drop a fast pane before its final bytes or `exit-action`
+    /// policy are applied.
     pub exit_observed: bool,
     /// Windows ConPTY close was started after the direct child exited but EOF
     /// did not arrive within the bounded drain window. Unix enforces the same
@@ -664,18 +654,16 @@ pub struct Pane {
     /// lock-free edge for tab activity and `scroll-on-output`; `None` keeps the
     /// first frame from treating pre-spawn output as new activity.
     pub last_output_generation: Option<u64>,
-    /// Launching argv ([] means the configured shell). Held so a
-    /// closed-tab snapshot can re-spawn the same program in
-    /// `Action::UndoCloseTab` — SSH tabs and `-e PROG`
-    /// tabs reopen as the same SSH connection / TUI, not a generic
-    /// shell. Doesn't track environment / cwd-after-launch — those
-    /// re-derive from the OSC-7 cwd that's already snapshotted.
+    /// Launching argv ([] means the configured shell). Kept so
+    /// `Action::UndoCloseTab` reopens SSH and `-e PROG` tabs as the same
+    /// connection or TUI, not a generic shell. It does not track environment
+    /// or later cwd changes; the closed-tab snapshot records the cwd itself.
     pub argv: Vec<String>,
     /// Terminator parity, `plugins/remote.py`, phase 6 of
     /// [`TERMINATOR-REMOTE-DESIGN.md`](
     /// ../../../docs/TERMINATOR-REMOTE-DESIGN.md): the most-recently
-    /// detected remote-session context for this pane. Updated by
-    /// the App's periodic poll (to be wired). `None`
+    /// detected remote-session context for this pane, updated by
+    /// the App's periodic process poll. `None`
     /// means either the pane's process tree has no SSH / container
     /// descendant, or the poll hasn't run yet. When non-None, the
     /// pane title shows `format_remote_title(...)` and the right-
@@ -827,8 +815,8 @@ impl Pane {
     /// Queue DEC focus reporting in the chronological user-input lane without
     /// classifying it as an editor mutation. `CSI I` / `CSI O` are generated by
     /// Kettle after an OS focus event, not typed text; treating them as text
-    /// consumed the first managed completion sync before PowerShell's initial
-    /// prompt had crossed ConPTY. Keep the user lane so a report cannot jump
+    /// would consume the first managed completion sync before PowerShell's
+    /// initial prompt crosses ConPTY. Keep the user lane so a report cannot jump
     /// ahead of already queued keystrokes.
     pub fn feed_focus_report(&self, focused: bool) -> PaneInputResult {
         if let Some(result) = pane_input_policy(self.pty_input.failed(), self.read_only) {
@@ -968,13 +956,10 @@ impl Node {
     /// `id`. Returns `None` if `id` isn't a leaf in this tree, or
     /// if the tree is a single Leaf (no sibling to promote).
     ///
-    /// User-reported bug: `close_focused` was setting
-    /// `tab.focus = tab.root.first_leaf()` after the close, which
-    /// always jumps to the LEFTMOST leaf of the whole tab — i.e.,
-    /// the first pane the user split from. Closing a deeply-nested
-    /// pane felt teleporting. `neighbor_of` walks to the closed
-    /// pane's split-mate instead, matching what every other
-    /// terminal multiplexer does (tmux, wezterm, kitty).
+    /// Moving focus to the closed pane's split-mate matches tmux, wezterm,
+    /// and kitty. Using `tab.root.first_leaf()` instead would jump to the
+    /// LEFTMOST leaf of the whole tab, which feels like teleporting after
+    /// closing a deeply nested pane.
     fn neighbor_of(&self, id: u64) -> Option<u64> {
         match self {
             Node::Leaf(_) => None,
@@ -1021,13 +1006,7 @@ impl Node {
         walk(self, target, &mut idx)
     }
 
-    /// All leaf ids in DFS-order. Used by `broadcast_write` to scope
-    /// broadcast input to one tab's panes rather than every pane in every
-    /// tab (`Action::ToggleBroadcastAll` was originally
-    /// "every pane in the whole mux", a footgun for users with several
-    /// tabs since typing one char would echo into every pane everywhere;
-    /// per-tab matches Terminator's `broadcast_all` and is what users
-    /// actually mean when they're paralleling SSH sessions).
+    /// All leaf ids in DFS order.
     pub fn leaf_ids(&self) -> Vec<u64> {
         fn walk(n: &Node, out: &mut Vec<u64>) {
             match n {
@@ -1278,13 +1257,12 @@ pub struct SplitSeam {
 
 /// Smallest extent, in pixels, either side of a split may be given.
 ///
-/// This replaces a fixed `[0.05, 0.95]` ratio band that used to be re-applied at
-/// every layout and mutation site. A fixed fraction cannot express a balanced
-/// chain of more than twenty panes on one axis, and it scales the wrong way: on
-/// a 1900px-wide window it reserved 95px for a pane the user was trying to drag
-/// out of the way, while on a narrow window it reserved almost nothing. A pixel
-/// floor binds only when a pane would actually become too small to read or to
-/// grab by its divider, and stays out of the way otherwise.
+/// A pixel floor binds only when a pane would actually become too small to read
+/// or to grab by its divider, and stays out of the way otherwise. A fixed ratio
+/// band such as `[0.05, 0.95]` cannot express a balanced chain of more than
+/// twenty panes on one axis, and it scales the wrong way. On a 1900px-wide
+/// window it reserves 95px for a pane the user is trying to drag out of the
+/// way, while on a narrow window it reserves almost nothing.
 ///
 /// Sized against what a pane needs to remain usable rather than pretty: roughly
 /// one cell of height or two of width at 96 DPI, and comfortably wider than the
@@ -1418,18 +1396,17 @@ pub struct Tab {
     /// Terminator parity, terminatorlib/notebook.py: an
     /// optional user-set title override. When `Some(s)`, the tab
     /// bar displays `s` instead of the focused pane's title.
-    /// Cleared automatically when the user opens a new tab —
-    /// sticky-override behavior matches Terminator.
+    /// The override is sticky, as in Terminator. An empty title edit
+    /// clears it, and a new tab starts without one.
     pub title_override: Option<String>,
     /// When true, only the focused pane is shown at full size.
     pub zoomed: bool,
-    /// Per-tab activity state for the tab-bar dot
-    /// indicator. `last_output_at` updates whenever any pane in this
-    /// tab produces output. `last_seen_at` updates when this tab
-    /// becomes active. The renderer compares the two to decide
-    /// whether to draw the "new output in inactive tab" dot. `bell`
-    /// latches a `TermEvent::Bell` from any pane in this tab until
-    /// the user activates the tab. Matches the Terminator "Activity
+    /// Per-tab activity state for the tab-bar dot indicator. While the tab
+    /// is inactive, `last_output_at` records output from any of its panes
+    /// and `bell` latches a `TermEvent::Bell` until the user activates the
+    /// tab. `last_seen_at` updates when this tab becomes active. The
+    /// renderer compares the two timestamps to decide whether to draw the
+    /// "new output in inactive tab" dot. Matches the Terminator "Activity
     /// Watcher" affordance.
     pub last_output_at: Option<std::time::Instant>,
     pub last_seen_at: Option<std::time::Instant>,
@@ -1507,11 +1484,10 @@ pub fn classify_tab_activity(
 }
 
 /// Snapshot of a tab captured at close time so `Action::UndoCloseTab`
-/// can re-spawn the same program in the same directory. WezTerm /
-/// browser-tab convention; closing a tab is no longer irreversible.
-/// Tree topology isn't preserved — undo re-creates as a single pane
-/// from the first leaf's argv+cwd (the user's complaint is "bring my
-/// tab back," not "reproduce my exact split layout from N closes ago").
+/// can re-spawn the same program in the same directory (WezTerm /
+/// browser-tab convention). Tree topology isn't preserved. Undo
+/// re-creates a single pane from the first leaf's argv+cwd, since the
+/// point is to bring the tab back, not to reproduce its split layout.
 #[derive(Clone)]
 pub struct ClosedTab {
     /// Tab index at the time of close. On undo we clamp to the
@@ -1531,24 +1507,14 @@ const CLOSED_TAB_RING_CAP: usize = 10;
 
 /// Phase 2 of [`TERMINATOR-NAMED-GROUPS-DESIGN.md`](
 /// ../../../docs/TERMINATOR-NAMED-GROUPS-DESIGN.md): the
-/// broadcast-scope enum the design proposes. The existing
-/// `mux.broadcast: bool` represents `Off | Tab`; a follow-up
-/// will migrate it to this richer enum so `Group(name)`
-/// (scope-by-name-across-tabs) becomes expressible.
-///
-/// Lands the type now so the `Action::GroupTab` etc.
-/// dispatch can be wired against the final shape ahead of the
-/// refactor.
-// 2026-05-23: removed stale `#[allow(dead_code)]`. The
-// All + Group variants are now consumed by the
-// GroupTab + GroupWindow + CreateGroup dispatch arms in app.rs.
+/// broadcast-scope enum the design proposes, held in
+/// `Mux::broadcast`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastScope {
     #[default]
     Off,
     /// Per-tab broadcast: every pane in the focused
-    /// tab receives input. Today's `mux.broadcast = true`
-    /// behavior.
+    /// tab receives input.
     Tab,
     /// Window-wide: every pane in every tab receives input.
     All,
@@ -1559,17 +1525,10 @@ pub enum BroadcastScope {
 }
 
 /// Pure helper that computes the set of pane IDs that
-/// should receive a broadcast for the given scope. Pure — takes
-/// `(scope, focused_pane_id, panes_in_focused_tab, all_panes_with_groups)`
-/// and returns the target list. Unit-testable.
+/// should receive a broadcast for the given scope.
 ///
-/// `all_panes_with_groups` is a slice of `(pane_id, Option<&str>
-/// group)` pairs covering every pane in every tab. The caller
-/// is responsible for assembling it (a one-liner over
-/// `self.panes.iter()`).
-// 2026-05-23: removed stale `#[allow(dead_code)]`.
-// `compute_broadcast_targets` is the impl behind the public
-// `Mux::broadcast_targets` (called from app.rs).
+/// `all_panes_with_groups` holds a `(pane_id, group)` pair for every pane in
+/// every tab; the caller builds it from `self.panes`.
 pub fn compute_broadcast_targets(
     scope: &BroadcastScope,
     focused_pane: u64,
@@ -1581,12 +1540,10 @@ pub fn compute_broadcast_targets(
         BroadcastScope::Tab => panes_in_focused_tab.to_vec(),
         BroadcastScope::All => all_panes_with_groups.iter().map(|(id, _)| *id).collect(),
         BroadcastScope::Group(name) => {
-            // Every pane tagged with this group, regardless of tab — plus the
-            // focused (on-screen) pane, so input is never routed AWAY from the
-            // pane the user is looking at with no cue. The focused pane may not
-            // be a group member (e.g. broadcasting from an ungrouped pane into a
-            // named group); union it in (deduped) so the on-screen pane always
-            // receives input, mirroring how Off/Tab/All already include it.
+            // Every pane tagged with this group, in any tab, plus the focused
+            // pane even when it is not a member (e.g. broadcasting from an
+            // ungrouped pane into a named group). Like Off/Tab/All, this never
+            // routes input away from the pane the user is looking at.
             let mut targets: Vec<u64> = all_panes_with_groups
                 .iter()
                 .filter(|(_, g)| g.as_deref() == Some(name.as_str()))
@@ -1600,16 +1557,16 @@ pub fn compute_broadcast_targets(
     }
 }
 
-/// C2 (multi-window): process-global pane-id allocator. Pane ids must be
-/// unique across EVERY window's Mux — the agent control API (`kettle ctl
-/// --pane N`), Lua hooks, and `pending_runs` all address panes by bare id,
-/// and a live tab move (C5) carries its panes' ids into another window's Mux.
-/// A per-Mux counter would collide the moment a second window spawned a pane.
-/// Starts at 1 (id 0 is never a valid pane, matching the old per-Mux seed).
+/// Process-global pane-id allocator. Pane ids must be unique across EVERY
+/// window's Mux, because the agent control API (`kettle ctl --pane N`), Lua
+/// hooks, and `pending_runs` all address panes by bare id, and a live tab move
+/// carries its panes' ids into another window's Mux. A per-Mux counter would
+/// collide the moment a second window spawned a pane. Starts at 1 (id 0 is
+/// never a valid pane).
 static NEXT_PANE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A tab lifted out of one Mux, panes and all, ready to be attached to
-/// another (the C5 live tab move — PTYs keep running, nothing respawns).
+/// another by a live tab move (PTYs keep running, nothing respawns).
 /// Pane ids stay valid across the move because they're process-global.
 pub struct DetachedTab {
     pub tab: Tab,
@@ -1620,14 +1577,11 @@ pub struct Mux {
     pub tabs: Vec<Tab>,
     pub panes: HashMap<u64, Pane>,
     pub active: usize,
-    /// Phase 3 of the named-groups design:
-    /// migrated from `bool` to `BroadcastScope`. The
-    /// per-tab broadcast = `BroadcastScope::Tab`; old "off" =
-    /// `Off`. New variants: `All` (window-wide), `Group(name)`
-    /// (cross-tab named group). Callers that just want a
-    /// yes/no should use `Mux::is_broadcast_on()`.
+    /// Broadcast scope, one of `Off`, `Tab` (the focused tab), `All`
+    /// (window-wide), or `Group(name)` (a cross-tab named group). Callers
+    /// that just want a yes/no should use `Mux::is_broadcast_on()`.
     pub broadcast: BroadcastScope,
-    /// Set when a LuaEngine subscribes at App startup.
+    /// Set when a LuaEngine or the recorder needs PTY output.
     /// Controls whether spawn_pane attaches the output sidechannel
     /// to new PTYs (zero-cost when false: no per-PTY-read alloc).
     pub lua_output_subscribed: bool,
@@ -1657,10 +1611,10 @@ pub struct Mux {
 ///
 /// `saved_active` indexes the saved vector; the live one has holes in it
 /// wherever a tab could not be rebuilt. Clamping the saved index against the
-/// shorter vector focused whichever tab happened to land there, so saved
-/// `[A,B,C,D]` with `C` active and `B` unbuildable restored `[A,C,D]` focused
-/// on `D`. Subtracting the tabs dropped *ahead* of it keeps focus where the
-/// user left it.
+/// shorter vector would focus whichever tab lands there, so saved `[A,B,C,D]`
+/// with `C` active and `B` unbuildable would restore `[A,C,D]` focused on `D`.
+/// Subtracting the tabs dropped *ahead* of it keeps focus where the user left
+/// it.
 fn restored_active_index(saved_active: usize, skipped_before_active: usize, live: usize) -> usize {
     saved_active
         .saturating_sub(skipped_before_active)
@@ -1669,13 +1623,12 @@ fn restored_active_index(saved_active: usize, skipped_before_active: usize, live
 
 /// What a session restore actually managed to rebuild.
 ///
-/// `skipped` used to be invisible outside a log line, which mattered because
-/// the next save rewrites `session.json` from the live mux. A tab whose command
-/// was missing from PATH, or whose pane could not fork under a process limit,
-/// was dropped on restore and then erased from the file seconds later, taking
-/// its argv, cwd, split tree and title with it. Both failures are transient by
-/// nature, so the tab would have come back on the next launch had anything kept
-/// it.
+/// Callers need `skipped` because the next save rewrites `session.json` from
+/// the live mux. A tab whose command is missing from PATH, or whose pane cannot
+/// fork under a process limit, is dropped on restore and would then be erased
+/// from the file, taking its argv, cwd, split tree and title with it. Both
+/// failures are transient, so keeping the original file lets the tab come back
+/// on the next launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreOutcome {
     /// Whether anything at all was rebuilt.
@@ -1743,8 +1696,8 @@ impl Mux {
 
     /// Find the tab containing `pane_id` and record output activity on
     /// it. Skipped for the currently-active tab (the user is looking at
-    /// it; surfacing a dot would be visual noise). Called from the
-    /// chrome layer on every pane redraw — see `App::drain_events`.
+    /// it; surfacing a dot would be visual noise). `App::redraw` calls it
+    /// for each pane whose output advanced since the last full redraw.
     pub fn touch_tab_output(&mut self, pane_id: u64) {
         let active = self.active;
         for (i, tab) in self.tabs.iter_mut().enumerate() {
@@ -1809,13 +1762,12 @@ impl Mux {
         let (tx, rx): (Sender<TermEvent>, Receiver<TermEvent>) =
             crossbeam_channel::bounded(TERM_EVENT_QUEUE_DEPTH);
         // Terminator plugin parity: optional output sidechannel for
-        // LuaEvent::Output emission.
-        // The Mux's output_tx is set when a LuaEngine subscribes
-        // (App configures it post-construction); None when no
-        // plugin is listening so the alloc-per-PTY-read is skipped.
-        // Recorder delivery is bounded and blocking. `PtyOutputSender::send`
-        // runs before the reader takes the terminal lock, so this applies PTY
-        // backpressure without the event-channel deadlock described above.
+        // LuaEvent::Output and the recorder. It is attached only when
+        // `lua_output_subscribed` is set, so the alloc-per-PTY-read is skipped
+        // when nothing is listening. Recorder delivery is bounded and blocking.
+        // `PtyOutputSender::send` runs before the reader takes the terminal
+        // lock, so this applies PTY backpressure without the event-channel
+        // deadlock described above.
         let (out_tx, out_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = if self.record_lossless {
             crossbeam_channel::bounded(LOSSLESS_OUTPUT_QUEUE_DEPTH)
         } else {
@@ -1922,8 +1874,8 @@ impl Mux {
                     .get(id)
                     .map(|p| p.term.argv.clone())
                     .unwrap_or_default(),
-                // C7 (audit v2.32.0): persist broadcast-group membership so a
-                // restored pane rejoins its group instead of silently losing it.
+                // Persist broadcast-group membership so a restored pane rejoins
+                // its group instead of silently losing it.
                 group: self.panes.get(id).and_then(|p| p.group_name.clone()),
             },
             Node::Split { dir, ratio, a, b } => SNode::Split {
@@ -1939,11 +1891,10 @@ impl Mux {
     /// serialize ONE tab (by index) to the same
     /// STab wire format that session.json uses. Returns None when
     /// the index is out-of-range.
-    // C5: its production callers were the serialize-and-respawn handoff
-    // senders, retired in favor of the live in-process tab move. Kept (tests
-    // pin the contract) — the deprecated `--tab-handoff` receive path still
-    // consumes the wire format for one release, and C7's per-window session
-    // serialization is the natural next consumer.
+    // No production callers since the live in-process tab move replaced the
+    // serialize-and-respawn handoff senders. Kept because tests pin the
+    // contract and the deprecated `--tab-handoff` receive path still consumes
+    // the wire format for one release.
     #[allow(dead_code)]
     pub fn serialize_tab(&self, idx: usize) -> Option<STab> {
         let t = self.tabs.get(idx)?;
@@ -1966,9 +1917,8 @@ impl Mux {
                     // DFS-order index of the focused leaf so restore can
                     // recreate the focus on the new tree (pane ids are
                     // reallocated across restores, so the id itself isn't
-                    // portable). `0` means "first leaf" — same as the
-                    // original behavior, which is what missing-field
-                    // restores fall back to via #[serde(default)].
+                    // portable). `0` means "first leaf", which is also what
+                    // a session missing this field gets via #[serde(default)].
                     focus: t.root.leaf_index_of(t.focus).unwrap_or(0),
                     title_override: t.title_override.clone(),
                     zoomed: t.zoomed,
@@ -1977,7 +1927,7 @@ impl Mux {
             active: self.active,
             // Filled in by App::save_session (it owns the active theme).
             theme: None,
-            // C7: snapshot() is the ONE-window serializer; App::save_session
+            // snapshot() is the ONE-window serializer; App::save_session
             // assembles the multi-window `windows` vec from per-window calls.
             windows: Vec::new(),
         }
@@ -1990,12 +1940,10 @@ impl Mux {
         cfg: &Config,
         geometries: &mut dyn Iterator<Item = PtyGeometry>,
         mk: &dyn Fn() -> Waker,
-        // Every pane id spawned while building this
-        // subtree is appended here so the caller can reap them if a LATER
-        // sibling fails. Without it, a split whose first child spawned but
-        // whose second child failed left the first child's PTY + child
-        // process orphaned in `self.panes` (attached to no tab) — a leaked
-        // process per partially-restored split.
+        // Every pane id spawned while building this subtree is appended here
+        // so the caller can reap them if a LATER sibling fails. Otherwise a
+        // split whose second child fails would leave the first child's PTY and
+        // process orphaned in `self.panes`, attached to no tab.
         spawned: &mut Vec<u64>,
     ) -> Result<Node> {
         match n {
@@ -2010,7 +1958,7 @@ impl Mux {
                     .unwrap_or_else(|| PtyGeometry::from_cell_size(80, 24, 8, 16));
                 let id = self.spawn_pane(cfg, geometry, mk(), cwd.as_deref(), &argv)?;
                 spawned.push(id);
-                // C7 (audit v2.32.0): rejoin the saved broadcast group.
+                // Rejoin the saved broadcast group.
                 if let Some(p) = self.panes.get_mut(&id) {
                     p.group_name = group.clone();
                 }
@@ -2120,8 +2068,7 @@ impl Mux {
                     self.tabs.push(Tab {
                         root,
                         focus,
-                        // C7 (audit v2.32.0): restore the saved tab title
-                        // override + zoom state (was hardcoded to defaults).
+                        // Restore the saved tab title override and zoom state.
                         title_override: st.title_override.clone(),
                         zoomed: st.zoomed,
                         last_output_at: None,
@@ -2138,14 +2085,11 @@ impl Mux {
                     for id in &tab_pane_ids {
                         self.panes.remove(id);
                     }
-                    // Don't fail the whole restore — a single broken
-                    // tab (e.g. saved cwd no longer exists, PTY
-                    // allocation under quota) shouldn't sink the
-                    // others. But surface it in the log so a user
-                    // wondering "where did my session go?" can see
-                    // the cause under `RUST_LOG=warn` (the default
-                    // filter). Pre-fix this was a silent skip — the
-                    // user just saw fewer tabs than they remembered.
+                    // Don't fail the whole restore, since a single broken tab
+                    // (e.g. saved cwd no longer exists, PTY allocation under
+                    // quota) shouldn't sink the others. Log it so a user
+                    // wondering "where did my session go?" can see the cause
+                    // under `RUST_LOG=warn` (the default filter).
                     log::warn!(
                         "session restore: tab {i} failed to rebuild and was skipped \
                          ({} orphaned pane(s) reaped): {e}",
@@ -2250,11 +2194,9 @@ impl Mux {
     }
 
     /// New tab running an explicit `argv` + cwd, with the same
-    /// WSL-aware `--cd` dir translation `split_with` applies. The new-tab ▾
-    /// dropdown's WSL entry routed through `new_tab_with` directly (a raw spawn),
-    /// so a WSL launcher's Linux cwd failed the Windows `is_dir` gate and the new
-    /// tab fell back to the home dir — the same class of regression fixed for
-    /// splits/duplicates by wiring them through `launch_cwd`.
+    /// WSL-aware `--cd` dir translation `split_with` applies. Without it, a WSL
+    /// launcher's Linux cwd (e.g. from the new-tab ▾ dropdown's WSL entry) fails
+    /// the Windows `is_dir` gate and the new tab opens in the home dir.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub fn new_tab_with_launch(
@@ -2339,15 +2281,14 @@ impl Mux {
     /// The `(argv, spawn-cwd)` that reproduces the focused pane
     /// in a new pane/tab — clones its launch command and inherits its cwd, so a
     /// pane launched as WSL / ssh / a specific shell duplicates into the same.
-    /// A default-shell pane's argv IS the configured shell, so the common case
-    /// is unchanged; an empty argv (legacy "≡ configured shell") falls back to
-    /// the shell.
+    /// A default-shell pane's argv is the configured shell, or empty when no
+    /// `shell` is set; an empty argv falls back to the shell.
     ///
     /// WSL-aware dir: WSL reports a Linux cwd (`/mnt/c/...` or a native path) a
     /// Windows spawn can't `cd` into, so for a `wsl` launcher the dir is carried
     /// via `wsl --cd <dir>` (which accepts both Windows and Linux paths) and the
-    /// Windows spawn cwd is left unset — otherwise the new pane would fall back
-    /// to the home dir (the bug the user hit: split a WSL pane → pwsh in ~).
+    /// Windows spawn cwd is left unset. Otherwise the new pane would open in the
+    /// home dir.
     fn clone_focused_launch(&self, cfg: &Config) -> (Vec<String>, Option<String>) {
         let (mut argv, raw_cwd) = match self.active_focus().and_then(|id| self.panes.get(&id)) {
             Some(pane) => (pane.argv.clone(), pane.term.current_dir_or_native()),
@@ -2431,9 +2372,9 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab_geometry(cfg, geometry, waker);
         }
-        // v2.33.1: clone shell-like launches, but keep direct
-        // agent/editor panes split-friendly by falling back to a shell in the
-        // focused cwd. See `split_focused_launch`.
+        // Clone shell-like launches, but keep direct agent/editor panes
+        // split-friendly by falling back to a shell in the focused cwd. See
+        // `split_focused_launch`.
         let (argv, cwd) = self.split_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         self.inherit_split_group(cfg, new_id);
@@ -2444,10 +2385,9 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // The graft failed (no active tab, or the
-            // tree had no leaf to attach to). Reap the just-spawned pane rather
-            // than leaking its PTY, and surface a real error — this path was a
-            // silent `Ok(())` that left an orphaned pane behind.
+            // The graft failed (no active tab, or the tree had no leaf to
+            // attach to). Reap the just-spawned pane rather than leaking its
+            // PTY, and surface a real error.
             self.panes.remove(&new_id);
             anyhow::bail!("split failed: no pane available to attach the new split");
         }
@@ -2504,10 +2444,9 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // The graft failed (no active tab, or the
-            // tree had no leaf to attach to). Reap the just-spawned pane rather
-            // than leaking its PTY, and surface a real error — this path was a
-            // silent `Ok(())` that left an orphaned pane behind.
+            // The graft failed (no active tab, or the tree had no leaf to
+            // attach to). Reap the just-spawned pane rather than leaking its
+            // PTY, and surface a real error.
             self.panes.remove(&new_id);
             anyhow::bail!("split failed: no pane available to attach the new split");
         }
@@ -2632,10 +2571,9 @@ impl Mux {
     /// Which pane's rect contains `(px, py)`, with that rect — the drop-target
     /// half of dragging a terminal.
     ///
-    /// Deliberately not [`Mux::focus_at`], which snaps to the nearest pane so a
-    /// click on a seam still focuses something. A drag has no such obligation:
-    /// a point outside every pane must read as "no target here" so the drop hint
-    /// disappears, rather than naming a pane the cursor is not over.
+    /// Unlike [`Mux::focus_at`], this only reads the layout. A point outside
+    /// every pane must read as "no target here" so the drop hint disappears,
+    /// rather than naming a pane the cursor is not over.
     pub fn pane_rect_at(&self, area: Rect, px: f32, py: f32) -> Option<(u64, Rect)> {
         self.layout(self.active, area)
             .into_iter()
@@ -2763,15 +2701,12 @@ impl Mux {
     /// pressed side AND overlap it on the perpendicular axis, pick the smallest
     /// primary-axis gap, tie-broken by perpendicular center proximity.
     ///
-    /// User-reported on native Ubuntu: the old rule ranked
-    /// candidates purely by Euclidean distance between pane **centers**, gated
-    /// only by "candidate center is on the requested side". In a nested layout a
-    /// **diagonal** pane whose center happened to be closer than a directly
-    /// bordering pane's center would win — focus "jumped to a diagonal pane" and
-    /// "skipped the adjacent one" (and a Right press could even select an
-    /// up-and-to-the-right pane whose center merely had a larger x). Comparing
-    /// pane **edges** with a required perpendicular overlap fixes both: a pane
-    /// that only shares a corner (zero overlap) is never a neighbor.
+    /// Ranking by distance between pane **centers** fails in a nested layout. A
+    /// **diagonal** pane whose center is closer can beat a directly bordering
+    /// one, and a Right press can pick an up-and-to-the-right pane whose center
+    /// merely has a larger x. Comparing pane **edges** with a required
+    /// perpendicular overlap rules both out. A pane that only shares a corner
+    /// (zero overlap) is never a neighbor.
     ///
     /// No-op when nothing borders the focused pane in that direction. Zoomed
     /// tabs no-op implicitly: `layout` returns only the focused pane while
@@ -2900,14 +2835,13 @@ impl Mux {
     /// [`Mux::nudge_active_tab`], which wraps. Returns `true` if the tab
     /// actually moved.
     ///
-    /// This used to `swap`, which is only the same thing when `|delta| == 1`:
-    /// for anything larger the tab sitting at the destination teleported back
-    /// to the dragged tab's original slot. Drag-to-reorder reaches larger
-    /// deltas routinely — the drag handler passes
+    /// A `swap` is only equivalent to this slide when `|delta| == 1`. For
+    /// anything larger it would send the tab at the destination back to the
+    /// dragged tab's original slot, reordering the others. Drag-to-reorder
+    /// reaches larger deltas routinely. The drag handler passes
     /// `tab_drag_target_index(cursor_x) - active`, Windows coalesces
     /// `WM_MOUSEMOVE` so one event can cross several narrow segments, and an
-    /// overshoot past the right edge clamps to the LAST segment. So dragging
-    /// one tab silently reordered the others.
+    /// overshoot past the right edge clamps to the LAST segment.
     pub fn move_active_tab(&mut self, delta: i32) -> bool {
         let n = self.tabs.len();
         if n < 2 || delta == 0 {
@@ -2967,9 +2901,7 @@ impl Mux {
     /// Close the focused pane. Returns true if no tabs remain.
     ///
     /// `Node::remove_leaf` returns three distinct shapes that need three
-    /// different responses; the previous `match Err(_)` arm conflated two
-    /// of them and closed the whole tab when only a sibling-promote was
-    /// needed:
+    /// different responses:
     ///
     /// - `Ok(n)` — the leaf was nested deep; tree was restructured around
     ///   it. Replace the root with `n` and keep the tab.
@@ -2983,25 +2915,20 @@ impl Mux {
         let a = self.active;
         if let Some(tab) = self.tabs.get_mut(a) {
             let focus = tab.focus;
-            // Pick the post-close focus BEFORE removing the leaf
-            // so we know which sibling subtree to promote. The old approach
-            // used `tab.root.first_leaf()` POST-remove, which always
-            // jumped to the leftmost leaf of the whole tab — a regression
-            // the user described as "closing a pane sets my cursor back
-            // to my first focused terminal" (the leftmost = first split).
-            // `neighbor_of` walks the tree and returns the first leaf of
-            // the closed pane's sibling subtree, matching tmux/wezterm/
-            // kitty's neighbor-promotion semantics.
+            // Pick the post-close focus BEFORE removing the leaf so we know
+            // which sibling subtree to promote. `neighbor_of` returns the first
+            // leaf of the closed pane's sibling subtree, matching tmux/wezterm/
+            // kitty's neighbor promotion; `first_leaf()` after the remove would
+            // jump to the leftmost leaf of the whole tab.
             let neighbor = tab.root.neighbor_of(focus);
             let root = std::mem::replace(&mut tab.root, Node::Leaf(0));
             match root.remove_leaf(focus) {
                 Ok(n) | Err(Some(n)) => {
                     tab.root = n;
-                    // Only repair focus when it's no
-                    // longer a leaf in the collapsed tree — the same guard
-                    // `reap_tabs` already has (mux.rs ~1809). close_focused always
-                    // removes the focused leaf so this normally fires; matching the
-                    // two close paths keeps focus on a valid leaf if that ever
+                    // Only repair focus when it's no longer a leaf in the
+                    // collapsed tree, the same guard `reap_tabs` has. Closing
+                    // always removes the focused leaf, so this normally fires;
+                    // sharing the guard keeps focus on a valid leaf if that ever
                     // changes. `neighbor` is None only on a single-Leaf tree
                     // (handled by Err(None) below), so first_leaf is the safe
                     // fallback against a stale focus pointer.
@@ -3083,29 +3010,15 @@ impl Mux {
             .position(|t| panes.iter().any(|id| t.root.contains(*id)))
     }
 
-    /// Terminator parity, detachable-tabs Bucket-D: extract a tab
-    /// from the tabs list WITHOUT
-    /// dropping its panes' PTYs. Used by the cross-process tab
-    /// handoff send path: the source process extracts
-    /// the tab → sends the serialized state + PTY fds via
-    /// SCM_RIGHTS to the target process → target reconstructs
-    /// the tab.
+    /// Terminator parity (detachable tabs): extract a tab from the tabs list
+    /// WITHOUT dropping its panes' PTYs. [`Mux::detach_tab`] builds on this to
+    /// move a live tab between windows.
     ///
-    /// Returns the extracted Tab struct + the focused pane id;
-    /// the Pane structs themselves stay in self.panes (extract
-    /// only touches tabs vec). The caller is responsible for
-    /// transferring or dropping those Pane refs.
+    /// Returns the extracted Tab (its `focus` included); the Pane structs
+    /// themselves stay in self.panes (extract only touches tabs vec). The
+    /// caller is responsible for transferring or dropping those Pane refs.
     ///
     /// Returns None for out-of-range idx.
-    ///
-    /// 2026-05-23: the `#[allow(dead_code)]` covered
-    /// the period before the SCM_RIGHTS IPC actually
-    /// landed. Today this is exercised by `mux::tests` round-trip
-    /// drift guards (extract→insert restores the tab state) — the
-    /// IPC integration ships under a feature gate the binary
-    /// activates via `--tab-handoff-fd`. Production consumes
-    /// `serialize_tab` directly; this helper stays available for
-    /// the upcoming live-PTY adoption work.
     #[allow(dead_code)]
     pub fn extract_tab(&mut self, idx: usize) -> Option<Tab> {
         if idx >= self.tabs.len() {
@@ -3127,9 +3040,8 @@ impl Mux {
     }
 
     /// Companion to extract_tab: insert a Tab into
-    /// the tabs vec at the given index. Used by the cross-process
-    /// receive path when an incoming handoff lands.
-    /// `at` clamps to [0, tabs.len()].
+    /// the tabs vec at the given index. [`Mux::attach_tab`] uses it to land a
+    /// tab moved from another window. `at` clamps to [0, tabs.len()].
     #[allow(dead_code)]
     pub fn insert_tab(&mut self, at: usize, tab: Tab) {
         let pos = at.min(self.tabs.len());
@@ -3139,9 +3051,9 @@ impl Mux {
         self.active = pos;
     }
 
-    /// C2 (multi-window): lift the tab at `idx` out of this Mux, LIVE —
+    /// Lift the tab at `idx` out of this Mux, LIVE —
     /// the Tab struct plus its `Pane`s (PTYs, reader threads, scrollback,
-    /// everything) leave together, untouched. The C5 in-process tab move
+    /// everything) leave together, untouched. The in-process tab move
     /// feeds the result straight into another window's `attach_tab`.
     ///
     /// Composition contract: `extract_tab` handles the tabs-vec removal and
@@ -3163,7 +3075,7 @@ impl Mux {
         Some(DetachedTab { tab, panes })
     }
 
-    /// C2 (multi-window): attach a detached tab (panes and all) to this Mux
+    /// Attach a detached tab (panes and all) to this Mux
     /// at `at` (clamped; `None` = append). The inserted tab becomes active —
     /// `insert_tab` semantics — and is marked seen. Returns the index it
     /// landed at. Pane ids can't collide: they're process-global
@@ -3199,10 +3111,8 @@ impl Mux {
 
     /// Close the entire window: drop every pane in every tab. The caller
     /// (the chrome layer) then exits the event loop because `tabs` is
-    /// empty. Distinct from `close_tab` which only closes the focused
-    /// tab — they were split apart so the keybinds (`close_tab`
-    /// vs `close_window`) finally do different things. Returns true
-    /// (kept for parity with `close_tab` / `close_tab_at`; the chrome
+    /// empty. Distinct from `close_tab`, which only closes the focused tab.
+    /// Returns true (for parity with `close_tab` / `close_tab_at`; the chrome
     /// callers use it as "exit now").
     pub fn close_window(&mut self) -> bool {
         self.panes.clear();
@@ -3248,10 +3158,8 @@ impl Mux {
     /// Open a new tab that duplicates the focused pane's argv + OSC-7
     /// cwd (iTerm2's "Duplicate Tab" affordance). Falls
     /// back to the configured shell when the focused pane has empty
-    /// argv (`new_tab_with` semantics — empty argv ≡ shell). Returns
-    /// `Ok(())` even if there's no focused tab to duplicate; the
-    /// chrome layer treats that as a no-op the same way it treats
-    /// `new_tab` on an empty mux.
+    /// argv (`new_tab_with` semantics — empty argv ≡ shell). With no
+    /// focused pane to duplicate, it opens a plain new tab instead.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub fn duplicate_focused_tab(
@@ -3291,9 +3199,9 @@ impl Mux {
 
     /// Split the focused pane and run the *same* program in the new
     /// half (iTerm2's "Duplicate Pane" affordance). Mirrors `split`
-    /// but reads the focused pane's argv instead of the configured
-    /// shell — so a `kettle -e vim file` pane duplicates into a
-    /// second vim instance in the same cwd.
+    /// but clones the focused pane's argv even for a direct agent/editor
+    /// launch (see `split_focused_launch`), so a `kettle -e vim file` pane
+    /// duplicates into a second vim instance in the same cwd.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub fn duplicate_focused_pane(
@@ -3324,8 +3232,8 @@ impl Mux {
         if self.tabs.is_empty() {
             return self.new_tab_geometry(cfg, geometry, waker);
         }
-        // Shares `clone_focused_launch` with `split` (now also a
-        // clone) — clones the focused pane's argv + cwd, WSL-aware.
+        // Clone the focused pane's argv + cwd, WSL-aware, as
+        // `duplicate_focused_tab` does.
         let (argv, cwd) = self.clone_focused_launch(cfg);
         let new_id = self.spawn_pane(cfg, geometry, waker, cwd.as_deref(), &argv)?;
         let a = self.active;
@@ -3335,10 +3243,9 @@ impl Mux {
             .map(|tab| insert_split(tab, new_id, dir))
             .unwrap_or(false);
         if !grafted {
-            // The graft failed (no active tab, or the
-            // tree had no leaf to attach to). Reap the just-spawned pane rather
-            // than leaking its PTY, and surface a real error — this path was a
-            // silent `Ok(())` that left an orphaned pane behind.
+            // The graft failed (no active tab, or the tree had no leaf to
+            // attach to). Reap the just-spawned pane rather than leaking its
+            // PTY, and surface a real error.
             self.panes.remove(&new_id);
             anyhow::bail!("split failed: no pane available to attach the new split");
         }
@@ -3441,17 +3348,10 @@ impl Mux {
         for id in dead_ids {
             let mut ti = 0;
             while ti < tabs.len() {
-                // Companion to `close_focused`'s neighbor-promotion
-                // fix. When a PTY exits and the dying leaf IS the
-                // focused one, capture the neighbor BEFORE the
-                // destructive `remove_leaf` so the post-rebuild
-                // focus can promote it instead of jumping to the
-                // leftmost leaf of the whole tab. Before this fix,
-                // typing `exit` in the rightmost pane of a 4-pane
-                // tab would jump focus to the leftmost pane —
-                // exactly the same user-described "first focused
-                // terminal" symptom that motivated the close_focused
-                // fix, just triggered by shell exit instead of `close-pane`.
+                // Same neighbor promotion as `close_focused`. When the dying
+                // leaf IS the focused one, capture the neighbor BEFORE the
+                // destructive `remove_leaf` so focus can move to it instead of
+                // jumping to the leftmost leaf of the whole tab.
                 let neighbor_if_focused = if tabs[ti].focus == *id {
                     tabs[ti].root.neighbor_of(*id)
                 } else {
@@ -3459,17 +3359,13 @@ impl Mux {
                 };
                 let root = std::mem::replace(&mut tabs[ti].root, Node::Leaf(0));
                 match root.remove_leaf(*id) {
-                    // Previously this match used
-                    // `Err(_) => tabs.remove(ti)` which conflated two
-                    // distinct outcomes. `Err(Some(n))` means the
-                    // dying leaf was a direct child of root and `n`
-                    // is the surviving sibling — the tab MUST stay
-                    // with `n` as the new root. Before this fix, any 2-pane
-                    // tab + `exit` in either pane deleted the whole
-                    // tab (the surviving sibling went with it).
-                    // Reachable in production after `Mux::reap` consumes the
-                    // pane's drained PTY exit event. Mirrors the same Ok(n)/Err(Some(n))/
-                    // Err(None) distinction already in `close_focused` below.
+                    // `Err(Some(n))` means the dying leaf was a direct child of
+                    // root and `n` is the surviving sibling. The tab MUST stay,
+                    // with `n` as the new root, or `exit` in either pane of a
+                    // 2-pane tab would delete the whole tab. Reachable in
+                    // production after `Mux::reap` consumes the pane's drained PTY
+                    // exit event. Same Ok(n)/Err(Some(n))/Err(None) distinction as
+                    // `close_focused`.
                     Ok(n) | Err(Some(n)) => {
                         tabs[ti].root = n;
                         if !tabs[ti].root.contains(tabs[ti].focus) {
@@ -3480,19 +3376,12 @@ impl Mux {
                     }
                     Err(None) => {
                         tabs.remove(ti);
-                        // Keep `active` pointing at the
-                        // same tab the user is focused on after the
-                        // shift, not the same numeric index. Removing
-                        // a tab at `ti < active` shifts every later
-                        // tab left by one, so subtract one from
-                        // active. `ti == active` (the user IS focused
-                        // on the tab being closed): leave active
-                        // alone so focus naturally falls on the tab
-                        // that takes its slot (the previous tab+1,
-                        // matching every modern terminal — close
-                        // current tab, focus moves to its right
-                        // neighbor; the trailing-clamp below catches
-                        // the case where active was the last tab).
+                        // Keep `active` on the same tab, not the same index.
+                        // Removing a tab at `ti < active` shifts every later tab
+                        // left by one, so decrement. At `ti == active`, leave it
+                        // so focus falls on the right neighbor that takes the
+                        // slot, like every modern terminal; the clamp below
+                        // catches a removed last tab.
                         if ti < *active {
                             *active -= 1;
                         }
@@ -3522,10 +3411,9 @@ impl Mux {
         scroll_to_bottom: bool,
         receipt_pane: Option<u64>,
     ) -> PaneInputDelivery {
-        // Respect the `BroadcastScope` enum (phase 3 of the named-groups
-        // design). Off short-circuits; Tab keeps the
-        // active-tab behavior; All targets every pane
-        // window-wide; Group(name) targets cross-tab matches.
+        // Respect the `BroadcastScope` enum. Off short-circuits; Tab keeps the
+        // active-tab behavior; All targets every pane window-wide; Group(name)
+        // targets cross-tab matches.
         let ids = self.broadcast_target_ids();
         let mut delivery = PaneInputDelivery::new();
         for id in ids {
@@ -3550,11 +3438,9 @@ impl Mux {
     ///
     /// A named group is a set the user declared, and `group_all` already spans
     /// every window (`window.py:933`, matching Terminator's process-wide
-    /// terminal collection). The broadcast did not: it stopped at whichever
-    /// window you happened to be typing in, so grouping panes across two
-    /// windows and then typing reached only half of them. Nothing announced the
-    /// boundary — the titlebars of the panes in the other window still showed
-    /// the group.
+    /// terminal collection). A broadcast that stopped at the window you type in
+    /// would reach only half of a group spread over two windows, with nothing on
+    /// screen to say so, since the other window's titlebars still show the group.
     ///
     /// Only `Group` crosses. `Tab` is defined by a focused tab, which exists in
     /// exactly one window; `All` is kettle's own window-wide scope and stays
@@ -3679,26 +3565,22 @@ impl Mux {
         }
     }
 
-    /// Is broadcast active in any scope (Tab/All/Group)?
-    /// Most callers just need a yes/no — this preserves the old
-    /// `bool` ergonomics post-migration.
+    /// Is broadcast active in any scope (Tab/All/Group)? For callers that
+    /// only need a yes/no.
     pub fn is_broadcast_on(&self) -> bool {
         !matches!(self.broadcast, BroadcastScope::Off)
     }
 
     /// Compute the pane IDs that should receive a
     /// broadcast given the current `self.broadcast` scope. Returns
-    /// an empty Vec when scope is Off. Used by `broadcast_write`
-    /// and `broadcast_paste_delivery`.
+    /// an empty Vec when scope is Off. Used by every local broadcast write,
+    /// key-encode, and paste path.
     fn broadcast_target_ids(&self) -> Vec<u64> {
         if matches!(self.broadcast, BroadcastScope::Off) {
             return Vec::new();
         }
-        // No active tab → no anchor pane and nothing to broadcast to.
-        // Previously the focused-pane id fell back to `0` (a sentinel that
-        // is never a real pane), which `compute_broadcast_targets` would
-        // hand back as a phantom target in `Off` scope; guarding here keeps
-        // an invalid id from ever entering the pipeline.
+        // No active tab → no anchor pane and nothing to broadcast to. Return
+        // rather than invent a focus id, which would become a phantom target.
         let Some(tab) = self.tabs.get(self.active) else {
             return Vec::new();
         };
@@ -3714,15 +3596,12 @@ impl Mux {
             &panes_in_focused_tab,
             &all_with_groups,
         );
-        // Self-heal an emptied named group: if the active scope is a named
-        // Group but no pane currently matches it (the last member was closed
-        // or ungrouped, or the focused pane was never in the group), the
-        // target set is empty — which would BLACK-HOLE every keystroke while
-        // the broadcast indicator stays lit (the user types and nothing
-        // happens, with no cue). Fall back to the focused pane so input is
-        // never silently swallowed. This single point covers ungroup /
-        // last-member-closed / focused-not-in-group; Off/Tab/All can't reach
-        // here empty (they always include the focused/tab panes).
+        // Self-heal an emptied named group. If no pane matches the active Group
+        // (last member closed or ungrouped, or the focused pane was never in
+        // it), an empty target set would BLACK-HOLE every keystroke while the
+        // broadcast indicator stays lit. Fall back to the focused pane so input
+        // is never silently swallowed. Off/Tab/All can't reach here empty (they
+        // always include the focused/tab panes).
         if targets.is_empty() && matches!(self.broadcast, BroadcastScope::Group(_)) {
             return vec![tab.focus];
         }
@@ -3748,25 +3627,21 @@ impl Mux {
         })
     }
 
-    /// Distribute a clipboard paste to every pane in the active tab's
-    /// broadcast set. Companion to `broadcast_write`: with broadcast on
-    /// (group-input mode, Ctrl+Shift+G), keystrokes go to every pane, and paste is
-    /// also user input so it should follow the same scoping. Each pane
-    /// gets its own `BRACKETED_PASTE` wrap decision read from its own
-    /// `Term::mode()` — panes can disagree on whether the running
-    /// program enabled bracketed paste (e.g. one is in vim and one is
-    /// at a shell prompt), and wrapping the wrong way would either
-    /// inject literal `\e[200~`/`\e[201~` markers into the shell's
-    /// command line or leave bytes vulnerable to the bracketed-paste
-    /// auto-execute attack inside vim. Pure modulo the writes; the
-    /// per-pane wrap is the only logic here.
+    /// Distribute a clipboard paste to every pane in the broadcast set.
+    /// Companion to `broadcast_write_delivery`. Paste is user input, so with
+    /// broadcast on (group-input mode, Ctrl+Shift+G on Windows) it follows the
+    /// same scoping as keystrokes. Each pane gets its own `BRACKETED_PASTE` wrap
+    /// decision read from its own `Term::mode()`. Panes can disagree on whether
+    /// the running program enabled bracketed paste (e.g. one is in vim and one
+    /// is at a shell prompt), and wrapping the wrong way would either inject
+    /// literal `\e[200~`/`\e[201~` markers into the shell's command line or
+    /// leave bytes vulnerable to the bracketed-paste auto-execute attack inside
+    /// vim. `paste_into` makes the per-pane wrap decision.
     pub(crate) fn broadcast_paste_delivery(
         &mut self,
         text: &str,
         receipt_pane: Option<u64>,
     ) -> PaneInputDelivery {
-        // Route through the scope-aware target computation
-        // (phase 3 of the named-groups design), same as broadcast_write.
         let ids = self.broadcast_target_ids();
         self.paste_into(ids, text, receipt_pane)
     }
@@ -3884,14 +3759,11 @@ impl Mux {
         if ids.is_empty() {
             return PaneInputDelivery::new();
         }
-        // Build the two possible payloads lazily — only when we hit the
-        // first pane that needs each variant. With a 4 MiB clipboard
-        // paste and 5 panes (or more, for shells-broadcast-on-CI
-        // patterns), the old code allocated 5 copies of the
-        // wrap (5 × 4 MiB = 20 MiB temporary). With caching, at most
-        // two copies regardless of pane count. `OnceCell`-style lazy
-        // via `Option`: skip even one allocation when the broadcast
-        // set is entirely one BRACKETED_PASTE state.
+        // Build each of the two possible payloads lazily, on the first pane
+        // that needs it, and share it across panes. At most two copies exist
+        // regardless of pane count, and only one when every target has the same
+        // BRACKETED_PASTE state. Without sharing, a 4 MiB paste to 5 panes would
+        // cost five copies (20 MiB).
         let mut raw: Option<Arc<[u8]>> = None;
         let mut wrapped: Option<Arc<[u8]>> = None;
         let mut delivery = PaneInputDelivery::new();
@@ -4019,7 +3891,7 @@ impl Mux {
             .collect()
     }
 
-    /// v2.26.0: like [`tab_titles`](Self::tab_titles) but also returns, for tabs
+    /// Like [`tab_titles`](Self::tab_titles) but also returns, for tabs
     /// whose label comes from the working directory, the home-abbreviated full
     /// path so the renderer can tier the label (full path → leaf dir name →
     /// truncated tail) to the available tab width.
@@ -4052,9 +3924,8 @@ impl Mux {
 /// (Action::EditTabTitle) wins; else the focused pane's title; else — while the
 /// title is still the `kettle` placeholder — the cwd basename; else `tab N`.
 ///
-/// The override branch was missing from `tab_titles`, so a
-/// custom tab title was stored but never shown (a silent no-op overwritten by
-/// the shell's next OSC 2 title). Pulled out as a pure fn so the precedence is
+/// Without the override branch, a custom tab title is stored but never shown
+/// (the shell's next OSC 2 title replaces it). A pure fn so the precedence is
 /// drift-tested without standing up a PTY.
 ///
 /// Most shells set the title quickly via OSC 2 on every prompt; until that
@@ -4071,13 +3942,14 @@ fn resolve_tab_title(
     resolve_tab_label(title_override, pane_title, placeholder, cwd, None, idx).text
 }
 
-/// v2.26.0: a resolved tab label. `text` is the compact display string (used by
+/// A resolved tab label. `text` is the compact display string (used by
 /// non-render consumers and as the fallback); `path` carries the home-abbreviated
 /// full working-directory path when the label is derived from the cwd, so the
 /// renderer can tier it (full path → leaf dir name → truncated tail) to the
 /// available tab width. `path` is `None` for explicit/override and shell-set
 /// (OSC 2) titles, which are shown verbatim (middle-ellipsized only if they
-/// overflow the segment).
+/// overflow the segment), unless the shell title just renders the cwd (see
+/// `cwd_label_for_shell_title`).
 pub(crate) struct TabLabel {
     pub(crate) text: String,
     pub(crate) path: Option<String>,
@@ -4103,12 +3975,11 @@ fn resolve_tab_label(
             path: None,
         };
     }
-    // v2.32.0 (audit): branch on the authoritative `Pane::title_is_placeholder`
-    // flag, NOT a string compare against the "kettle" seed. A real shell title
-    // that happens to equal the seed string ("kettle") is a genuine title and
-    // must be shown verbatim — the flag is the single source of truth (the
-    // instant any real OSC 2 title arrives the flag is cleared; consistent with
-    // app.rs's `p.title_is_placeholder` titlebar branch).
+    // Branch on the authoritative `Pane::title_is_placeholder` flag, NOT a
+    // string compare against the "kettle" seed. A real shell title that happens
+    // to equal the seed string ("kettle") is a genuine title and must be shown
+    // verbatim. The flag is cleared the instant any real OSC 2 title arrives,
+    // consistent with app.rs's `p.title_is_placeholder` titlebar branch.
     if placeholder || pane_title.is_empty() {
         if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             let full = abbreviate_home(cwd, home);
@@ -4186,7 +4057,7 @@ fn shell_title_matches_cwd(title: &str, cwd: &str, leaf: &str) -> bool {
     leaf.ends_with(suffix) || cwd.ends_with(suffix) || abbreviate_home(cwd, None).ends_with(suffix)
 }
 
-/// v2.26.0: collapse a leading `$HOME` in `path` to `~` (e.g.
+/// Collapse a leading `$HOME` in `path` to `~` (e.g.
 /// `C:\Users\me\Repos\kettle` → `~\Repos\kettle`), preserving the original
 /// separator style. Best-effort — a path whose prefix doesn't match `home`
 /// (different separator convention, MSYS `/c/...` vs `C:\...`, etc.) is returned
@@ -4221,9 +4092,8 @@ pub(crate) fn home_dir_string() -> Option<String> {
 /// clockwise sends the left pane of a side-by-side pair to the top (same order,
 /// same ratio) and the top pane of a stacked pair to the right (reversed order,
 /// mirrored ratio). Counter-clockwise is the mirror of that, which is what makes
-/// the two directions exact inverses and four turns the identity — a property
-/// the previous "flip the focused pane's parent, swap only when clockwise"
-/// version had neither of, and one the tests now pin.
+/// the two directions exact inverses and four turns the identity. The tests pin
+/// both properties.
 fn rotate_tree(node: &mut Node, clockwise: bool) {
     if let Node::Split { dir, ratio, a, b } = node {
         rotate_tree(a, clockwise);
@@ -4247,12 +4117,10 @@ fn rotate_tree(node: &mut Node, clockwise: bool) {
 /// next to the currently-focused leaf in direction `dir`, move focus to
 /// the new pane, and **exit zoom** if it was on.
 ///
-/// Splitting while zoomed used to leave the tab zoomed AND
-/// focused on the new pane, so the user only saw the new pane — the
-/// half they just split from disappeared from view (still alive, just
-/// hidden by `Mux::layout`'s zoom-collapse). Every modern terminal
-/// treats `split` as "show me both" — tmux's `display-panes` UX
-/// after `split-window`, WezTerm's `SplitHorizontal/Vertical`. Pure so
+/// Staying zoomed on the new pane would hide the half the user just split
+/// from (still alive, just hidden by `Mux::layout`'s zoom-collapse). Every
+/// modern terminal treats `split` as "show me both" (tmux's `display-panes`
+/// UX after `split-window`, WezTerm's `SplitHorizontal/Vertical`). Pure so
 /// the contract is unit-testable without a real spawn.
 fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
     let focus = tab.focus;
@@ -4261,11 +4129,9 @@ fn insert_split(tab: &mut Tab, new_id: u64, dir: Dir) -> bool {
         tab.zoomed = false;
         return true;
     }
-    // `tab.focus` was stale — not a leaf in this tree
-    // (a focus-desync class of bug). Previously `split_leaf` silently no-op'd
-    // and the freshly-spawned pane was orphaned (leaked PTY + child) while the
-    // split still reported success. Repair focus to a real leaf and retry; the
-    // caller reaps the pane if even this fails, instead of leaking it.
+    // `tab.focus` was stale (not a leaf in this tree, a focus-desync class of
+    // bug). Repair focus to a real leaf and retry; if even this fails, the
+    // caller reaps the new pane instead of leaking its PTY + child.
     let repaired = tab.root.first_leaf();
     if tab.root.split_leaf(repaired, new_id, dir) {
         tab.focus = new_id;
@@ -4312,9 +4178,9 @@ fn usable_cwd(dir: Option<String>) -> Option<String> {
 /// basename)? Used to route the cloned cwd through `wsl --cd` instead of the
 /// Windows spawn cwd. Mirrors `kettle_core`'s private `is_wsl_launcher`.
 ///
-/// v2.29.0: also consulted by the native-cwd poll — wsl.exe is a relay whose
-/// own Windows cwd is its launch dir and never tracks the in-distro `cd`, so the
-/// native read must be skipped for WSL (OSC 7 from inside the distro is the only
+/// The native-cwd poll also consults it. wsl.exe is a relay whose own Windows
+/// cwd is its launch dir and never tracks the in-distro `cd`, so the native
+/// read must be skipped for WSL (OSC 7 from inside the distro is the only
 /// correct source there).
 pub(crate) fn argv_is_wsl(argv: &[String]) -> bool {
     argv.first()
@@ -4336,15 +4202,13 @@ fn launch_cwd(mut argv: Vec<String>, raw_cwd: Option<String>) -> (Vec<String>, O
         if let Some(d) = raw_cwd.filter(|d| !d.is_empty())
             && !argv.iter().any(|a| a == "--cd")
         {
-            // Insert `--cd <dir>` immediately AFTER the
-            // launcher (index 1), in WSL's option section. Appending at the
-            // end was wrong whenever argv carried a command —
-            // `wsl -d Ubuntu -- bash -l` became
-            // `wsl -d Ubuntu -- bash -l --cd <dir>`, where `--cd <dir>` is
-            // passed to `bash`, not WSL, so the working dir was ignored.
-            // WSL parses all options (in any order) before the command, so
-            // placing `--cd` first is always valid and never lands past a
-            // `--` separator or a positional command token.
+            // Insert `--cd <dir>` immediately AFTER the launcher (index 1), in
+            // WSL's option section. Appended at the end, it would follow any
+            // command (`wsl -d Ubuntu -- bash -l --cd <dir>`) and go to `bash`,
+            // not WSL, so the working dir would be ignored. WSL parses all
+            // options (in any order) before the command, so placing `--cd` first
+            // is always valid and never lands past a `--` separator or a
+            // positional command token.
             argv.insert(1, d);
             argv.insert(1, "--cd".to_string());
         }
@@ -4542,8 +4406,6 @@ mod node_tests {
         assert_eq!(restored_active_index(5, 0, 0), 0);
     }
 
-    /// The production half of this file: everything above the test module.
-    ///
     /// The production source of this file, excluding test-only items.
     fn production_source() -> String {
         let production = kettle_test_support::production_source(include_str!("mux.rs"));
@@ -5149,16 +5011,15 @@ mod node_tests {
         }
     }
 
-    /// Drift guard. When a saved split-tree partially
-    /// rebuilds — the first child spawns, a later sibling fails (cwd gone,
-    /// fork under quota) — `build_node` returns `Err` and the whole tree is
-    /// discarded, but the panes already spawned for the first child stay in
-    /// `self.panes`, orphaned: a leaked PTY + child process each. The fix
-    /// threads a `spawned: &mut Vec<u64>` accumulator through `build_node`
-    /// and reaps those ids on the restore error path. A behavioral test
-    /// would need a real PTY + event-loop `Waker` (unavailable in unit
-    /// tests, like every other spawn path here), so the wiring is pinned at
-    /// the source level.
+    /// Drift guard. When a saved split tree rebuilds only partly (the first
+    /// child spawns, then a later sibling fails because its cwd is gone or fork
+    /// hits a quota), `build_node` returns `Err` and the tree is discarded. The
+    /// panes already spawned must not stay in `self.panes`, where each would
+    /// leak a PTY and child process, so `build_node` threads a
+    /// `spawned: &mut Vec<u64>` accumulator and the restore error path reaps
+    /// those ids. A behavioral test would need a real PTY and event-loop
+    /// `Waker` (unavailable in unit tests, like every other spawn path here),
+    /// so the wiring is pinned at the source level.
     #[test]
     fn build_node_reaps_orphan_panes_on_partial_restore_failure() {
         let src = production_source();
@@ -5269,16 +5130,15 @@ mod node_tests {
         node
     }
 
-    /// `equalize` used to clamp every ratio it computed into a fixed
-    /// `[0.05, 0.95]` band, so a chain needing `1/N < 0.05` could not be
-    /// represented: at 23 panes the widths came out 7,7,7,6,6,… and by 28 the
-    /// widest pane was 1.75x the narrowest. The band is gone; the only floor is
-    /// in pixels, and at these sizes it never binds.
+    /// A fixed `[0.05, 0.95]` ratio band cannot represent a chain that needs
+    /// `1/N < 0.05`. With that clamp, 23 panes get widths 7,7,7,6,6,… and at 28
+    /// the widest pane is 1.75x the narrowest. `equalize` applies no band. The
+    /// only floor is in pixels, and at these sizes it never binds.
     #[test]
     fn equalize_stays_exact_past_the_pane_count_a_ratio_band_could_hold() {
-        // Precondition: this test is only meaningful past the old band. A chain
-        // of 28 wants 1/28 at its outermost split, well under the old 0.05
-        // floor — if that stops being true the test has stopped testing.
+        // Precondition: a chain of 28 wants 1/28 at its outermost split, under
+        // the band's 0.05 floor. If that stops being true, the test stops
+        // testing.
         let panes = 28;
         assert!(
             1.0 / panes as f32 <= 0.05,
@@ -5339,9 +5199,9 @@ mod node_tests {
         assert_eq!(split_extent_px(1000.0, f32::NAN), 500.0);
     }
 
-    /// Keyboard resize used to clamp into the same `[0.05, 0.95]` band, which
-    /// meant that on a tab with many panes asking for a pane to get *smaller*
-    /// made it get bigger — the shrink landed below 0.05 and clamped back up.
+    /// Keyboard resize must not clamp into a `[0.05, 0.95]` band. On a tab with
+    /// many panes, a shrink below 0.05 would clamp back up and make the pane
+    /// bigger.
     #[test]
     fn shrinking_a_pane_below_the_old_band_actually_shrinks_it() {
         let mut root = chain(Dir::Horizontal, 28);
@@ -5352,8 +5212,8 @@ mod node_tests {
             out.iter().find(|(i, _)| *i == id).unwrap().1.2
         };
         let before = width_of(&root, 1);
-        // Precondition: pane 1's share is under the old floor, so the old code
-        // could not have narrowed it at all.
+        // Precondition: pane 1's share is under 0.05, so a band clamp could not
+        // narrow it at all.
         assert!(
             before / 1900.0 < 0.05,
             "pane 1 held {before}px of 1900 — not below the old band"
@@ -5429,11 +5289,10 @@ mod node_tests {
         }
     }
 
-    /// A named group is a set the user declared, and `group_all` already puts
-    /// panes in every window into one. The broadcast did not follow: it stopped
-    /// at whichever window was focused, so typing reached half a group with
-    /// nothing on screen to explain it — the other window's panes still wore
-    /// the group name in their titlebars.
+    /// A named group is a set the user declared, and `group_all` puts panes in
+    /// every window into one, so broadcast to it must reach every window.
+    /// Stopping at the focused window would type into half a group while the
+    /// other window's panes still wear the group name in their titlebars.
     #[test]
     fn only_a_named_group_reaches_panes_in_another_window() {
         // A window that is not the one being typed in receives under Group,
@@ -5734,8 +5593,8 @@ mod node_tests {
         );
     }
 
-    /// tab + window state to the set of target pane IDs.
-    /// Phase 2 of the named-groups design.
+    /// `compute_broadcast_targets` maps the scope plus tab and window state to
+    /// the set of target pane IDs.
     #[test]
     fn compute_broadcast_targets_matrix() {
         let in_tab = vec![1u64, 2, 3];
@@ -5775,8 +5634,7 @@ mod node_tests {
         );
         // Group("fleet") with the focused pane (4) NOT a member: the on-screen
         // pane is unioned in (appended, deduped) so input is never routed away
-        // from it. v2.32.0 (audit) — the Group arm now always includes the
-        // focused pane, mirroring Off/Tab/All.
+        // from it, mirroring Off/Tab/All.
         assert_eq!(
             compute_broadcast_targets(
                 &BroadcastScope::Group("fleet".to_string()),
@@ -5787,7 +5645,7 @@ mod node_tests {
             vec![1, 2, 5, 4]
         );
         // Group with no group matches still yields the focused pane (never an
-        // empty set that would black-hole input). v2.32.0 (audit).
+        // empty set that would black-hole input).
         assert_eq!(
             compute_broadcast_targets(
                 &BroadcastScope::Group("nonexistent".to_string()),
@@ -5802,9 +5660,8 @@ mod node_tests {
     }
 
     /// `broadcast_target_ids` must never emit a phantom pane id when there
-    /// is no active tab. A fresh `Mux` has no tabs/panes; in every scope
-    /// the target set is empty rather than the old `[0]` sentinel that the
-    /// `Off` arm would have produced from `unwrap_or(0)`.
+    /// is no active tab. A fresh `Mux` has no tabs/panes, so in every scope
+    /// the target set is empty, never a `[0]` from an `unwrap_or(0)` fallback.
     #[test]
     fn broadcast_target_ids_empty_when_no_active_tab() {
         let mut mux = Mux::new();
@@ -5822,12 +5679,12 @@ mod node_tests {
         }
     }
 
-    /// v2.32.0 (audit, HIGH): an emptied named broadcast Group must NEVER
-    /// black-hole input. When the active scope is a `Group` but no pane matches
-    /// it (last member closed / ungrouped / the focused pane was never in the
-    /// group), `broadcast_target_ids` self-heals to `[focus]` so typing still
-    /// reaches the on-screen pane instead of vanishing while the indicator stays
-    /// lit. Built without a PTY: the method only reads `tab.focus` and the group
+    /// An emptied named broadcast Group must NEVER black-hole input. When the
+    /// active scope is a `Group` but no pane matches it (last member closed /
+    /// ungrouped / the focused pane was never in the group),
+    /// `broadcast_target_ids` self-heals to `[focus]` so typing still reaches
+    /// the on-screen pane instead of vanishing while the indicator stays lit.
+    /// Built without a PTY: the method only reads `tab.focus` and the group
     /// names in `self.panes`, so an empty `panes` map with a `Group` scope
     /// exercises the empty-group path directly.
     #[test]
@@ -5851,9 +5708,9 @@ mod node_tests {
             vec![42],
             "an empty named group must heal to the focused pane, never black-hole input"
         );
-        // Sanity: the self-heal is Group-only — scope Off still short-circuits
+        // Sanity: the self-heal is Group-only. Scope Off still short-circuits
         // to an empty set (broadcast disabled, the caller writes to the focused
-        // pane directly), unchanged by this fix.
+        // pane directly).
         mux.broadcast = BroadcastScope::Off;
         assert!(mux.broadcast_target_ids().is_empty());
     }
@@ -5861,9 +5718,8 @@ mod node_tests {
     #[test]
     fn resolve_tab_title_precedence() {
         use super::resolve_tab_title;
-        // An explicit override wins over a real pane title
-        // AND over the cwd fallback — the bug was that it was ignored entirely.
-        // (The `bool` arg is `Pane::title_is_placeholder`.)
+        // An explicit override wins over a real pane title AND over the cwd
+        // fallback. (The `bool` arg is `Pane::title_is_placeholder`.)
         assert_eq!(
             resolve_tab_title(Some("deploy"), "bash", false, Some("/home/u/proj"), 0),
             "deploy"
@@ -5884,9 +5740,9 @@ mod node_tests {
             resolve_tab_title(None, "kettle", true, Some("/home/u/Repos/kettle"), 0),
             "kettle"
         );
-        // v2.32.0 (audit): a REAL shell title that happens to equal the seed
-        // string "kettle" (placeholder = false) is shown VERBATIM — it must NOT
-        // be re-derived as a placeholder via a string compare against the seed.
+        // A REAL shell title that happens to equal the seed string "kettle"
+        // (placeholder = false) is shown VERBATIM. It must NOT be re-derived as
+        // a placeholder via a string compare against the seed.
         assert_eq!(
             resolve_tab_title(None, "kettle", false, Some("/home/u/Repos/proj"), 0),
             "kettle"
@@ -5918,9 +5774,9 @@ mod node_tests {
         let l = resolve_tab_label(None, "kettle", true, Some("/srv/app"), Some("/home/u"), 0);
         assert_eq!(l.text, "app");
         assert_eq!(l.path.as_deref(), Some("/srv/app"));
-        // v2.32.0 (audit): a REAL title equal to the seed string "kettle"
-        // (placeholder = false) is shown verbatim and carries NO cwd path —
-        // the flag, not a string compare, decides placeholder-ness.
+        // A REAL title equal to the seed string "kettle" (placeholder = false)
+        // is shown verbatim and carries NO cwd path. The flag, not a string
+        // compare, decides placeholder-ness.
         let l = resolve_tab_label(
             None,
             "kettle",
@@ -6071,8 +5927,7 @@ mod node_tests {
     /// A rotation is a rotation of the *picture*, so the honest test is
     /// geometric: turn the tree, and every pane must be where turning the screen
     /// would have put it. Checking the tree shape instead would pass for a
-    /// version that flips axes without reordering children or mirroring ratios —
-    /// which is exactly what kettle used to do.
+    /// version that flips axes without reordering children or mirroring ratios.
     #[test]
     fn rotating_the_layout_moves_every_pane_where_turning_the_screen_would() {
         // Nested and lopsided on purpose: a shape-only check can't tell a real
@@ -6117,8 +5972,8 @@ mod node_tests {
         }
 
         // Clockwise then counter-clockwise is the identity, and so is four
-        // turns the same way. Neither held before: counter-clockwise used to be
-        // "flip the axis and don't swap", which is not the inverse of anything.
+        // turns the same way. Flipping the axis without swapping children is
+        // not the inverse of anything.
         let mut round_trip = tree();
         rotate_tree(&mut round_trip, true);
         rotate_tree(&mut round_trip, false);
@@ -6496,7 +6351,7 @@ mod node_tests {
         assert!(!direct_launch_splits_to_shell(&s(&["zsh", "-l"])));
         assert!(!direct_launch_splits_to_shell(&s(&["wsl.exe"])));
         assert!(!direct_launch_splits_to_shell(&s(&["ssh", "box"])));
-        // Ordinary explicit commands keep the pre-existing split clone behavior.
+        // Ordinary explicit commands are cloned on split.
         assert!(!direct_launch_splits_to_shell(&s(&["htop"])));
         assert!(!direct_launch_splits_to_shell(&s(&[
             "python3",
@@ -6535,9 +6390,8 @@ mod node_tests {
         );
         assert_eq!(cwd, None);
 
-        // WSL carrying a command after `--`. `--cd` MUST
-        // land before the `--` separator so it reaches WSL, not the command.
-        // Appending at the end (the old bug) put it after `bash -l`.
+        // WSL carrying a command after `--`. `--cd` MUST land before the `--`
+        // separator so it reaches WSL, not the command.
         let (argv, cwd) = launch_cwd(
             s(&["wsl.exe", "-d", "Ubuntu", "--", "bash", "-l"]),
             Some("/home/me/proj".into()),
@@ -6905,14 +6759,10 @@ mod node_tests {
 
     #[test]
     fn move_active_tab_relocates_and_clamps() {
-        // Build a 4-tab mux without spawning real terminals; use the leaf
-        // ids as a fingerprint so we can verify the WHOLE bar, not just the
-        // tab that moved.
-        //
-        // Asserting only the dragged tab is what let the `swap` bug ship:
-        // the old test checked the moved tab's new slot and never looked at
-        // the others, so it stayed green under both semantics. Every case
-        // below compares the entire order.
+        // Build a 4-tab mux without spawning real terminals. The leaf ids
+        // fingerprint each tab, so every case below compares the WHOLE bar.
+        // Checking only the moved tab's slot passes under both relocate and
+        // swap semantics.
         let mut m = Mux::new();
         for id in 1..=4u64 {
             m.tabs.push(Tab {
@@ -7128,8 +6978,8 @@ mod node_tests {
     /// The prompt can sit on screen indefinitely. In that time the target's own
     /// shell can exit, which promotes a sibling into focus — so "close the
     /// focused pane" no longer means what it meant when the prompt went up.
-    /// Confirming then closed the sibling, which can be a tmux or agent session
-    /// the user never selected.
+    /// Confirming would then close the sibling, which can be a tmux or agent
+    /// session the user never selected.
     #[test]
     fn a_confirmed_pane_close_acts_on_the_pane_it_was_raised_for() {
         let mut m = Mux::new();
@@ -7149,11 +6999,10 @@ mod node_tests {
         m.tabs[0].focus = 20;
         assert_eq!(m.active_focus(), Some(20));
 
-        // Re-focusing by id is what makes the confirmed close act on the
-        // original target rather than on whatever is focused now — and the
-        // close must then actually take pane 10, not its sibling. Asserting
-        // only the refocus let an implementation that refocused 10 and closed
-        // 20 pass.
+        // Re-focusing by id makes the confirmed close act on the original
+        // target, not on whatever is focused now. The close must then take
+        // pane 10, not its sibling. Asserting only the refocus would pass an
+        // implementation that refocused 10 and closed 20.
         assert!(m.focus_pane(10), "the target is still present");
         assert_eq!(m.active_focus(), Some(10));
         assert!(!m.close_focused(), "the tab survives its sibling");
@@ -7193,9 +7042,9 @@ mod node_tests {
         assert_eq!(m.tab_index_of_any_pane(&[20]), Some(0), "the sibling too");
         assert_eq!(m.tab_index_of_any_pane(&[30]), None, "a pane in no tab");
 
-        // The point of anchoring on the WHOLE tab: remove the first pane and
-        // the anchor must still find the tab. A resolver that only consulted
-        // `panes[0]` passed every assertion above and failed exactly here.
+        // Anchoring on the WHOLE tab lets the anchor find the tab after its
+        // first pane is removed. A resolver that only checks `panes[0]`
+        // passes every assertion above and fails here.
         let anchor = m.tab_anchor_panes(0);
         assert_eq!(anchor, vec![10, 20]);
         m.focus_pane(10);
@@ -7211,14 +7060,11 @@ mod node_tests {
 
     #[test]
     fn close_focused_promotes_sibling_in_two_pane_split() {
-        // Repro for the `Ctrl+Shift+E` then `Ctrl+Shift+W` regression:
-        // `match Err(_)` used to conflate two distinct `Node::remove_leaf`
-        // results — `Err(None)` (the focused leaf was the only one, close
-        // the tab) and `Err(Some(sibling))` (the focused leaf had a
-        // sibling, promote it). The wrong arm fired for the second case
-        // and closed the whole tab on what should have been a per-pane
-        // close. Pin the contract here so a future refactor that
-        // re-conflates them fails CI rather than re-introducing the bug.
+        // `Ctrl+Shift+E` then `Ctrl+Shift+W` must close one pane, not the tab.
+        // `Node::remove_leaf` returns `Err(None)` when the focused leaf was
+        // the only one (close the tab) and `Err(Some(sibling))` when it had a
+        // sibling (promote it). A `match Err(_)` that conflates them closes
+        // the whole tab. Pin the contract here.
         let mut m = Mux::new();
         let mut root = Node::Leaf(10);
         assert!(root.split_leaf(10, 20, Dir::Horizontal));
@@ -7250,12 +7096,10 @@ mod node_tests {
         assert!(m.tabs.is_empty());
     }
 
-    /// User-reported bug. When the user splits many times
-    /// and then closes a pane deep in the tree, focus jumps back to
-    /// the leftmost (first focused) pane instead of the deeper
-    /// neighbor of the closed pane.
+    /// Closing a pane deep in a nested split moves focus to its nearest
+    /// neighbor, not back to the leftmost (first focused) pane.
     ///
-    /// Repro: build tree
+    /// Tree:
     ///
     ///     Split{Horiz,
     ///         a: Leaf(10),
@@ -7265,16 +7109,14 @@ mod node_tests {
     ///                 a: Leaf(30),
     ///                 b: Leaf(40)}}}
     ///
-    /// User focuses Leaf(40) and closes it. Before the fix:
-    /// `tab.root.first_leaf()` returns 10 (the leftmost of the WHOLE
-    /// tree). Expected: focus moves to Leaf(30) — the immediate
-    /// neighbor that took 40's slot in the deepest split.
+    /// Closing the focused Leaf(40) must focus Leaf(30), the neighbor that
+    /// takes 40's slot in the deepest split, not `tab.root.first_leaf()` (10,
+    /// the leftmost of the WHOLE tree).
     #[test]
     fn close_focused_picks_nearest_neighbor_not_leftmost_root() {
         let mut m = Mux::new();
-        // Build the 4-leaf nested tree by hand (testing the Node logic
-        // directly; bypasses the Pane/PTY infra which split_leaf would
-        // touch in the full Mux::split flow).
+        // Build the 4-leaf nested tree by hand. The full `Mux::split` flow
+        // would spawn real panes and PTYs.
         let root = Node::Split {
             dir: Dir::Horizontal,
             ratio: 0.5,
@@ -7310,9 +7152,9 @@ mod node_tests {
         );
     }
 
-    /// `exit-action = hold` survival. Before the fix `reap` removed any
-    /// child-exited pane, so Hold behaved like Close. `is_reapable` now keeps a
-    /// held pane after its drained exit event until it is explicitly closed.
+    /// `exit-action = hold` survival. `is_reapable` keeps a held pane after its
+    /// drained exit event until it is explicitly closed, so Hold does not act
+    /// like Close.
     #[test]
     fn is_reapable_waits_for_the_drained_exit_event_and_honors_hold() {
         use super::is_reapable;
@@ -7320,7 +7162,7 @@ mod node_tests {
         assert!(!is_reapable(false, false, false));
         // Default (Close): drained exit observed, not held -> reaped.
         assert!(is_reapable(false, false, true));
-        // Hold: exit observed but held -> NOT reaped (the fix above).
+        // Hold: exit observed but held -> NOT reaped.
         assert!(!is_reapable(false, true, true));
         // Explicit close (ClosePane / Restart set `closed`) always reaps, even
         // a held pane — so the user can still dismiss a held dead shell.
@@ -7366,17 +7208,12 @@ mod node_tests {
         );
     }
 
-    /// Companion to the close_focused neighbor-promotion fix —
-    /// the PTY-died-while-focused path through `reap_tabs` had
-    /// the same `tab.root.first_leaf()` anti-pattern. When the
-    /// user runs `exit` in the focused pane (or its process
-    /// crashes), focus should land on the immediate neighbor,
-    /// not jump back to the leftmost leaf of the whole tab.
+    /// When the focused pane's PTY dies (`exit` or a crash), `reap_tabs` moves
+    /// focus to its immediate neighbor, not the leftmost leaf of the whole tab.
     ///
     /// Same 4-leaf tree as
-    /// `close_focused_picks_nearest_neighbor_not_leftmost_root`'s
-    /// test: focus = 40, reap dead leaf 40. Before the fix: focus = 10
-    /// (leftmost). Post-fix: focus = 30 (the immediate neighbor of 40).
+    /// `close_focused_picks_nearest_neighbor_not_leftmost_root`. Reaping the
+    /// focused leaf 40 must focus 30, not 10.
     #[test]
     fn reap_tabs_promotes_neighbor_when_focused_pane_dies() {
         let mut tabs = vec![Tab {
@@ -7415,18 +7252,14 @@ mod node_tests {
         );
     }
 
-    /// The EXISTING `reap_tabs` match arm
-    /// conflated `Err(None)` (tab is empty) with `Err(Some(sibling))`
-    /// (focused leaf was a direct child of root and the sibling
-    /// was promoted). For a 2-pane tab where one pane's PTY exits,
-    /// `remove_leaf` returns `Err(Some(surviving_sibling))` — and
-    /// the pre-fix `Err(_) => tabs.remove(ti)` arm then deleted
-    /// the WHOLE tab, losing the surviving sibling along with it.
+    /// When one pane of a 2-pane tab exits, `reap_tabs` keeps the tab with the
+    /// surviving pane as its root.
     ///
-    /// Latent bug surfaced by the broader audit of `reap_tabs`: any
-    /// 2-pane tab + `exit` in either pane = both panes vanish.
-    /// Reachable in production after `Mux::reap` consumes the pane's drained
-    /// PTY exit event.
+    /// `remove_leaf` returns `Err(Some(surviving_sibling))` here (the dying
+    /// leaf was a direct child of root), not `Err(None)` (the tab is empty).
+    /// An `Err(_) => tabs.remove(ti)` arm conflates them and deletes the WHOLE
+    /// tab, so `exit` in either pane loses both. Reachable in production after
+    /// `Mux::reap` consumes the pane's drained PTY exit event.
     #[test]
     fn reap_tabs_preserves_tab_when_2_pane_split_has_one_pane_exit() {
         let mut tabs = vec![Tab {
@@ -7444,9 +7277,8 @@ mod node_tests {
             title_override: None,
         }];
         let mut active = 0;
-        // Pane 20's PTY exits. Pre-fix: tab is removed — the
-        // surviving Leaf(10) goes with it. Post-fix: tab survives
-        // with root collapsed to Leaf(10).
+        // Pane 20's PTY exits. The tab survives with its root collapsed to
+        // Leaf(10).
         Mux::reap_tabs(&mut tabs, &mut active, &[20]);
         assert_eq!(
             tabs.len(),
@@ -7458,11 +7290,9 @@ mod node_tests {
         assert_eq!(tabs[0].focus, 10);
     }
 
-    /// Negative case: if the dying pane is NOT the
-    /// focused one, focus must stay put — the existing
-    /// `contains(focus)` guard already covers this, so this test
-    /// catches a regression where the neighbor-capture logic in
-    /// `reap_tabs` accidentally triggers for non-focused dyings.
+    /// Negative case: if the dying pane is NOT the focused one, focus stays
+    /// put. The `contains(focus)` guard covers this; the test catches neighbor
+    /// capture in `reap_tabs` firing for an unfocused pane.
     #[test]
     fn reap_tabs_keeps_focus_when_dying_pane_is_not_focused() {
         let mut tabs = vec![Tab {
@@ -7488,12 +7318,8 @@ mod node_tests {
         );
     }
 
-    /// Companion to the test above. The `neighbor_of`
-    /// helper drives the focus-restoration. Asserts the contract
-    /// directly so a future refactor of `close_focused` that
-    /// stops calling `neighbor_of` (or breaks the helper) fails
-    /// the gauntlet rather than re-introducing the user-reported
-    /// bug.
+    /// `neighbor_of` picks the pane that takes focus when `close_focused` or
+    /// `reap_tabs` removes the focused leaf. This pins its contract directly.
     #[test]
     fn node_neighbor_of_finds_sibling_subtree_first_leaf() {
         // Same shape as the close-focused repro above.
@@ -7718,14 +7544,10 @@ mod node_tests {
 
     #[test]
     fn reap_tabs_keeps_active_pointed_at_the_same_tab() {
-        // `reap` used to handle only the "active
-        // tab was the last one and the list shrunk" case via the
-        // trailing clamp, missing the much more common "a tab BEFORE
-        // active died" case which silently shifted what `active`
-        // pointed to. Each scenario builds a fresh `tabs` Vec where
-        // we can recognize each tab by its single leaf id, then
-        // calls `reap_tabs` with the dead set and asserts which
-        // leaf id `active` now indexes.
+        // `active` must keep pointing at the same tab when a tab BEFORE it
+        // dies, not only clamp when the last tab goes. Each scenario builds a
+        // fresh `tabs` Vec of single-leaf tabs, calls `reap_tabs` with the
+        // dead set, and asserts which leaf id `active` now indexes.
         fn tab(id: u64) -> Tab {
             Tab {
                 root: Node::Leaf(id),
@@ -7737,10 +7559,8 @@ mod node_tests {
                 bell: false,
             }
         }
-        // Scenario 1 (the active-index-drift bug described above): focused on the middle tab
-        // (B); the leftmost tab (A) dies. Pre-fix: active stayed 1
-        // and now indexed C — focus silently jumped past B. Post-
-        // fix: active decrements to 0 so it still points at B.
+        // Scenario 1: focused on the middle tab (B); the leftmost tab (A)
+        // dies. `active` decrements to 0 so it still points at B, not C.
         let mut tabs = vec![tab(1), tab(2), tab(3)];
         let mut active = 1; // B
         Mux::reap_tabs(&mut tabs, &mut active, &[1]); // A dies
@@ -7750,9 +7570,7 @@ mod node_tests {
             _ => panic!("expected leaf"),
         }
         // Scenario 2: focused on the rightmost (C); leftmost (A) dies.
-        // Pre-fix: trailing-clamp didn't fire (active was still in
-        // bounds), so active=2 became C's new neighbor — wrong.
-        // Post-fix: decrements 2→1, still C.
+        // `active` decrements 2 -> 1, still C.
         let mut tabs = vec![tab(1), tab(2), tab(3)];
         let mut active = 2;
         Mux::reap_tabs(&mut tabs, &mut active, &[1]);
@@ -7771,9 +7589,8 @@ mod node_tests {
             Node::Leaf(id) => assert_eq!(id, 3, "active falls on right neighbor"),
             _ => panic!("expected leaf"),
         }
-        // Scenario 4: active is the LAST tab and dies — trailing-clamp
-        // brings active back to the new last tab (the existing
-        // behavior; regression guard).
+        // Scenario 4: active is the LAST tab and dies. The trailing clamp
+        // brings active back to the new last tab.
         let mut tabs = vec![tab(1), tab(2), tab(3)];
         let mut active = 2;
         Mux::reap_tabs(&mut tabs, &mut active, &[3]);
@@ -7829,11 +7646,9 @@ mod node_tests {
 
     #[test]
     fn insert_split_exits_zoom_and_focuses_new_pane() {
-        // With a single-leaf tab zoomed (one pane
-        // visible), splitting should produce a 2-leaf tab, focus the
-        // new pane, and exit zoom so the user sees both halves —
-        // matching tmux / WezTerm. Before this fix, zoom stayed on and the
-        // old half silently hid.
+        // Splitting a zoomed single-leaf tab should produce a 2-leaf tab,
+        // focus the new pane, and exit zoom so the user sees both halves,
+        // matching tmux / WezTerm. Staying zoomed would hide the old half.
         let mut tab = Tab {
             root: Node::Leaf(1),
             focus: 1,
@@ -7866,12 +7681,11 @@ mod node_tests {
         assert_eq!(tab.focus, 2);
     }
 
-    /// The stale-focus retry. When `tab.focus`
-    /// points at a leaf NOT in the tree (a focus-desync), `split_leaf` no-ops on
-    /// the stale id; `insert_split` must repair focus to `first_leaf()`, retry,
-    /// graft the new pane, and return true — instead of the old silent no-op that
-    /// orphaned the just-spawned pane (a leaked PTY). The existing test always
-    /// has focus on a valid leaf, so it never exercised this branch.
+    /// The stale-focus retry. When `tab.focus` points at a leaf NOT in the
+    /// tree (a focus-desync), `split_leaf` no-ops on the stale id.
+    /// `insert_split` must repair focus to `first_leaf()`, retry, graft the new
+    /// pane, and return true. A silent no-op would orphan the just-spawned pane
+    /// and leak its PTY.
     #[test]
     fn insert_split_repairs_stale_focus_and_grafts() {
         let mut tab = Tab {
@@ -7904,7 +7718,8 @@ mod node_tests {
     /// the counts and fails this guard.
     #[test]
     fn split_callers_reap_orphaned_pane_on_graft_failure() {
-        // Counted over production only, so this test's own literals don't count.
+        // Count production code only, since this test's own literals would
+        // otherwise count as sites.
         let src = production_source();
         let grafts = src.matches("insert_split(tab, new_id, dir)").count();
         let reaps = src.matches("self.panes.remove(&new_id)").count();
@@ -7947,18 +7762,10 @@ mod node_tests {
 
     #[test]
     fn mux_new_starts_with_broadcast_off() {
-        // Drift guard. A fresh Mux MUST start with
-        // broadcast disabled. An earlier bug seeded broadcast=true
-        // from `broadcast_default = group` (the default), so every
-        // kettle window started broadcasting input across all panes
-        // in the active tab — users typing in one pane saw the
-        // input mirrored everywhere.
-        //
-        // The fix removed the bad seeding in App::new;
-        // this guard pins the Mux::new contract so a future App-
-        // side re-introduction of broadcast-on-startup gets caught
-        // by the App-side construction path being out of sync with
-        // this baseline.
+        // Drift guard. A fresh Mux MUST start with broadcast disabled.
+        // Seeding it from `broadcast_default = group` (the default) would make
+        // every window mirror input typed in one pane across all panes in the
+        // active tab.
         let m = Mux::new();
         assert!(
             !m.is_broadcast_on(),
@@ -8009,7 +7816,7 @@ mod node_tests {
 
     #[test]
     fn detach_attach_tab_moves_between_muxes() {
-        // C2 (multi-window) drift guard: detach_tab → attach_tab moves a tab
+        // Multi-window drift guard: detach_tab -> attach_tab moves a tab
         // from one Mux to another with the same index semantics as the
         // extract/insert pair it composes, does NOT snapshot to closed_tabs
         // (the tab is moving, not closing), and the source's active index
@@ -8030,8 +7837,8 @@ mod node_tests {
         src.active = 1; // detach the active tab itself
         let dt = src.detach_tab(1).expect("detach");
         assert_eq!(dt.tab.focus, 102);
-        // Panes vec is empty here (no real PTYs in this fixture) — the pane
-        // transfer itself is exercised by the C5 live-move e2e.
+        // Panes vec is empty here (no real PTYs in this fixture). The
+        // live-move e2e exercises the pane transfer itself.
         assert!(dt.panes.is_empty());
         assert_eq!(src.tabs.len(), 2);
         // Removing the active tab keeps focus position (right neighbor
@@ -8059,7 +7866,7 @@ mod node_tests {
 
     #[test]
     fn pane_id_allocator_is_process_global() {
-        // C2 drift guard: pane ids come from the shared NEXT_PANE_ID static
+        // Drift guard: pane ids come from the shared NEXT_PANE_ID static
         // (never a per-Mux counter), so ids stay unique across every window's
         // Mux — the agent API, Lua hooks, and pending_runs address panes by
         // bare id, and a live tab move carries ids into another Mux. If this
