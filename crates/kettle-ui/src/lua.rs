@@ -393,23 +393,23 @@ impl LuaEngine {
                     "tmpname",
                     "setlocale",
                 ] {
-                    let _ = os_tbl.set(k, mlua::Value::Nil);
+                    os_tbl.set(k, mlua::Value::Nil)?;
                 }
             }
             if let Ok(io_tbl) = globals.get::<mlua::Table>("io") {
                 for k in [
                     "open", "popen", "lines", "input", "output", "stdin", "stdout", "stderr",
                 ] {
-                    let _ = io_tbl.set(k, mlua::Value::Nil);
+                    io_tbl.set(k, mlua::Value::Nil)?;
                 }
             }
             // loadfile / dofile read arbitrary files; deny.
-            let _ = globals.set("loadfile", mlua::Value::Nil);
-            let _ = globals.set("dofile", mlua::Value::Nil);
+            globals.set("loadfile", mlua::Value::Nil)?;
+            globals.set("dofile", mlua::Value::Nil)?;
             // package.loadlib loads native shared libraries → can
             // execute arbitrary code. Always nil in safe mode.
             if let Ok(pkg) = globals.get::<mlua::Table>("package") {
-                let _ = pkg.set("loadlib", mlua::Value::Nil);
+                pkg.set("loadlib", mlua::Value::Nil)?;
             }
             // NOTE on `debug.*`: mlua's `Lua::new()`
             // loads `StdLib::ALL_SAFE`, which EXCLUDES the `debug`

@@ -1,7 +1,7 @@
 <!--
-Thanks for the PR! kettle ships one cycle per commit (see CONTRIBUTING.md).
-This template mirrors that shape — the goal is for any reader to reproduce
-your reasoning + verify the change without spelunking the diff.
+Thanks for the PR! kettle lands one bounded change at a time (see
+CONTRIBUTING.md). This template mirrors that shape so any reader can
+reproduce your reasoning and verify the change without spelunking the diff.
 -->
 
 ## Summary
@@ -12,8 +12,8 @@ your reasoning + verify the change without spelunking the diff.
 
 <!--
 The motivation. Link to the issue, the upstream spec, the reference
-terminal's behavior, or the cycle-style "user pain → why it was wrong → fix"
-that drives the rest of the repo.
+terminal's behavior, or the "user pain → why it was wrong → fix" story
+behind the change.
 -->
 
 ## Approach
@@ -38,8 +38,8 @@ catches.
 ## Cycle metadata
 
 <!--
-Optional but recommended — see CONTRIBUTING.md cycle pattern. Helps the
-maintainer assign a cycle number on merge.
+Optional but recommended. Helps the reviewer see the change's class and
+scope at a glance.
 -->
 
 - **Class:** <!-- bug | feature | conformance | ci | docs | refactor -->

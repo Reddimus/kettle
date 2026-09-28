@@ -10,11 +10,12 @@ built-in **Settings** panel for the common things.
   ```sh
   curl -fsSL https://raw.githubusercontent.com/Reddimus/kettle/main/scripts/install-online.sh | sh
   ```
-  This path needs a current `curl`, GNU `tar`, and OpenSSL 3.0 or newer;
-  it stops before extraction if the bounded signed-release checks cannot run.
+  This path needs a current `curl`, GNU `tar`, OpenSSL 3.0 or newer, and
+  Python 3. It stops before extraction if the bounded signed-release checks
+  cannot run.
   Then press **Super** and type **kettle**.
 - **macOS** — download `kettle-macos-universal.zip`, unzip, drag `kettle.app`
-  to Applications, right-click → Open the first time.
+  to Applications. It is notarized, so it opens normally the first time.
 
 See [INSTALL.md](INSTALL.md) for Nix, the generated-but-not-yet-published
 Homebrew/AUR metadata, and SHA-256 verification.
@@ -128,12 +129,11 @@ large or infinite scrollback responsive.
   or use `Ctrl + +` / `Ctrl + -`.
 - **Want the defaults back?** Delete your config file (its location is shown by
   `kettle --config-path`) and relaunch.
-- **Found a bug?** Linux crash logs are written to
+- **Found a bug?** On Linux and macOS, crash logs are written to
+  `$XDG_STATE_HOME/kettle/crash/` when set and otherwise
   `~/.local/state/kettle/crash/`. GPU device-loss records are written to
   `~/.cache/kettle/diagnostics/`; they contain adapter/recovery metadata and no
-  terminal contents. On macOS, crash logs use
-  `$XDG_STATE_HOME/kettle/crash/` when set and otherwise
-  `~/.local/state/kettle/crash/`. Attach the relevant file to an issue.
+  terminal contents. Attach the relevant file to an issue.
 
 Welcome aboard. For everything else, [CONFIG.md](CONFIG.md) is the full
 reference and [README.md](../README.md) has the feature tour.

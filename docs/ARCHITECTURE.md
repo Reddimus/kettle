@@ -328,7 +328,7 @@ Two roles split cleanly across the bin and the GUI:
   kettle), and `kettle mcp` (the Model Context Protocol bridge that exposes both
   as native agent tools).
 
-The surface is multi-window aware (v2.18.0): `get_state` reports
+The surface is multi-window aware: `get_state` reports
 `{windows, focused_window}`; `list_tabs` / `list_panes` enumerate every
 window and tag each entry with its `window`; `--pane N` resolves across
 windows (pane ids are process-global); and a live tab tear-off emits a
@@ -353,16 +353,15 @@ dispatches tool calls through a four-worker, 16-request bounded queue with
 JSON-RPC cancellation tracking. The blocking control client reads frames
 incrementally under method-aware deadlines, preserves events interleaved before
 a response, and treats malformed frames or mismatched response ids as terminal
-protocol errors. Terminal is literal: a request that ends without its response
-being read off the wire — a deadline, a cancellation, an event bound, malformed
-data, a partly written request — retires the connection, because the response
-still in flight would otherwise be correlated to the next call. Retiring closes
-the transport and releases what the abandoned exchange had buffered, so the
-server's connection slot is freed then rather than whenever the caller drops
-the client. A request that never put a byte on the wire is not one of these
-cases: the server never learned of it, so the connection stays in step. Callers
-reconnect; a cancelled mutation may still have executed, and nothing on that
-connection can report whether it did. Unix connections enter nonblocking mode
+protocol errors. A request that ends before its response is read (a deadline,
+a cancellation, an event bound, malformed data, a partly written request)
+retires the connection, because the in-flight response would otherwise be
+correlated to the next call. Retiring closes the transport and frees what the
+abandoned exchange had buffered, so the server's connection slot is released
+at once rather than when the caller drops the client. A request that never put
+a byte on the wire leaves the connection usable, since the server never saw
+it. Callers reconnect; a cancelled mutation may still have executed, and that
+connection cannot report whether it did. Unix connections enter nonblocking mode
 once, before cloning;
 the transport restores ordinary blocking `Read`/`Write` semantics with
 `poll(2)` and serializes complete deadline-aware writes through one
@@ -389,12 +388,12 @@ Registry and presence records name their owner by pid *and* by that process's
 OS-reported start time, so a pid the system later hands to an unrelated program
 cannot keep a dead server advertised or a dead window's accent claimed. A
 record without that token (an older build, an OS that cannot report one) keeps
-the historical bare-pid answer rather than being pruned on suspicion. Pruning
-runs the same rule in reverse: a record is named on disk by the pid it belongs
-to, so a delete re-reads the file first and does nothing unless it is still the
-record that was judged. Otherwise the recycled pid's *new* owner — which has
-already registered at that path — would lose an entry it can never rewrite,
-since a server registers once at startup and never heartbeats. On Linux the
+the historical bare-pid answer rather than being pruned on suspicion. Records
+are named on disk by their owner's pid, so pruning re-reads a file before
+deleting it and does nothing unless it is still the record that was judged.
+Otherwise the recycled pid's *new* owner, already registered at that path,
+would lose an entry it can never rewrite, since a server registers once at
+startup and never heartbeats. On Linux the
 token is boot-relative while the fallback base directory can outlive a reboot;
 that mismatch can only keep a leftover record, never delete a live one.
 
@@ -420,11 +419,11 @@ arms and the cursor icon) does not; both derive from one
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps
 the bar). The native winit arms and the `send_mouse` control arms consult the
-same helper. Because the grid is clickable, an open bar follows pane focus:
-`note_focus_change` calls `retarget_search_to_focus`, which carries the query
-and toggles to the newly focused pane, returns the old pane its remembered
-query and, with no result focused, its pre-search viewport, and scans the new
-pane afresh without toggling the lane. The right-click menu is the one modal
+same helper. Because the grid is clickable, an open bar follows pane focus.
+`note_focus_change` calls `retarget_search_to_focus`, which moves the query and
+its toggles to the newly focused pane and scans that pane afresh without
+toggling the lane. The old pane gets its remembered query and, with no result
+focused, its pre-search viewport back. The right-click menu is the one modal
 allowed to coexist with the bar; keys go to the menu while it is up because
 its arm precedes search in the key handler.
 
@@ -480,11 +479,11 @@ The 16 px raster uses a thicker optical-size version of the same two strokes.
 Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
 metadata, and a loose previous-release `.icns` for the macOS 11 deployment
 target. Finder, the closed and running Dock item, and the app switcher therefore
-resolve the same adaptive asset. This removes the old running-versus-closed split.
+resolve the same adaptive asset.
 The native visual result remains a release gate rather than something inferred
 from SVG source or a Linux generator test.
 
-Since v2.18.0 every kettle window lives in one process. `App` holds
+Every kettle window lives in one process. `App` holds
 `windows: BTreeMap<u64, WindowState>`
 (`crates/kettle-ui/src/window_state.rs`) — every per-window field (the
 winit window, its renderer, its `Mux` tab/split tree, input + overlay
@@ -517,9 +516,9 @@ every request carries a per-launch idempotency key: the primary remembers what
 it did for that key (bounded, expiring) and answers a retry from the record, so
 a response lost to a slow cold start cannot open a second window for one click.
 A retry that arrives while the first attempt is still in the handler waits for
-its outcome instead of racing it — for less than one frame deadline, since the
-requester is already reading under a deadline that started earlier and an
-answer produced after it would be written to nobody. A busy,
+its outcome instead of racing it. The wait is shorter than one frame deadline,
+because the requester's read deadline started earlier and an answer after that
+deadline would be written to nobody. A busy,
 incompatible, timed-out, or failed request falls back to a separate process so
 a launcher click is never discarded. Any explicit argument bypasses activation;
 `--new-process` provides a discoverable isolation escape hatch for an otherwise
@@ -847,13 +846,13 @@ fast when Kettle inherits a 1,048,576-descriptor limit from its launcher.
 Rendered stdout commands cross a second four-slot queue to a dedicated writer,
 keeping blocking OS writes off the lifecycle thread. The writer hands each
 rendered command to the sink in one `write_all`. The Unix sink is an unbuffered
-descriptor, so a `--json` event costs one syscall rather than the roughly 30 a
-`writeln!` of a `serde_json::Value` made, and a stop has one write to
-interrupt rather than 30. It can still cut a line whose write is blocked in
-the OS when `process::exit` runs. Events serialize from borrowed structs into a reused line
-buffer, and a chunk that is already valid UTF-8 is borrowed rather than copied.
-The structs declare their fields alphabetically, which keeps the sorted-key
-bytes the `Value` maps produced. The lifecycle counts
+descriptor, so a `--json` event costs one syscall rather than the roughly 30
+that `writeln!` of a `serde_json::Value` issues (one per formatter piece), and a
+stop has one write to interrupt. It can still cut a line whose write is blocked
+in the OS when `process::exit` runs. Events serialize from borrowed structs into
+a reused line buffer, and a chunk that is already valid UTF-8 is borrowed rather
+than copied. The structs declare their fields alphabetically, so each line keeps
+the sorted keys and exact bytes a `serde_json::Value` produces. The lifecycle counts
 admitted commands and polls their completion plus the final flush/join; timeout
 and cancellation therefore remain observable after child exit, while ordinary
 completion still drains losslessly. Between turns the lifecycle waits on the
@@ -1165,61 +1164,60 @@ flowchart LR
     menut --> curg["9. cursor_glyph_renderer.render<br/>focused block cursor's<br/>inverted glyph (on top)"]
 ```
 
-**Pass 3 (v2.25.0) — cell-locked pane text.** In the default `text-renderer =
-grid` mode pane cell text is drawn by `glyph_pipeline`
+**Pass 3: cell-locked pane text.** In the default `text-renderer = grid` mode,
+pane cell text is drawn by `glyph_pipeline`
 (`crates/kettle-render/src/glyphpipe.rs`), an instanced glyph renderer that pins
-every glyph to its grid cell (`pane_origin + col × cell_w`) — the
+every glyph to its grid cell (`pane_origin + col × cell_w`), the
 Alacritty / kitty / WezTerm / Ghostty model. `build_pane` still shapes each row
-with cosmic-text (the per-line shaping cache is unchanged), but instead of handing
+with cosmic-text and reuses the per-line shaping cache, but instead of handing
 the whole `Buffer` to glyphon, `emit_pane_glyphs` walks the laid-out glyphs and
 emits one pinned instance each, rasterized through cosmic-text's own `SwashCache`
 into a private mask+color atlas. The fragment shader replicates glyphon's exactly
-(mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas), so
-antialiasing, gamma and theme colors are identical — only the X position is
-substituted. This fixes glyph drift: previously a glyph whose advance differed from
-the cell width (fallback-font CJK / color emoji / some symbols, ligature clusters,
-a mismatched-width bold/italic face) shifted every following glyph off the
-`col × cell_w` grid that the selection highlight, cursor and mouse hit-testing all
-use. Emission runs on the same `need_prepare` damage gate as the glyphon prepares
-it replaces: a steady frame re-draws the retained instance buffer for free, and a
-frame that re-prepares for any reason (a pane row changed, a chrome label changed,
-or a cursor blink to a new glyph) re-emits the pane instances — the same cadence
-the old glyphon pane prepare ran at, so it is at parity, not a regression.
-`text-renderer = legacy` keeps the old continuous-glyphon pane path (pass 4) as a
-rollback escape hatch; pass 3 is then an empty no-op. Since v2.25.1 the grid pass
-has its own damage gate: pane text/style/geometry changes refresh glyph
-instances, while cursor blink updates only cursor quads and the cursor-glyph
-pass. A blink must never invalidate or stale-draw ordinary pane glyphs.
+(mask = `sRGB→linear(fg) · coverage`, color = straight sample of an sRGB atlas),
+so antialiasing, gamma and theme colors are identical. Only the X position
+differs. This prevents glyph drift. Without pinning, a glyph whose advance
+differs from the cell width (fallback-font CJK / color emoji / some symbols,
+ligature clusters, a mismatched-width bold/italic face) shifts every following
+glyph off the `col × cell_w` grid that the selection highlight, cursor and mouse
+hit-testing all use. The grid pass has its own damage gate. Pane
+text/style/geometry changes refresh glyph instances, while cursor blink updates
+only cursor quads and the cursor-glyph pass. A steady frame re-draws the
+retained instance buffer. A blink must never invalidate or stale-draw ordinary
+pane glyphs. `text-renderer = legacy` keeps the continuous-glyphon pane path
+(pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
-Pass 0 (v2.23.0) is the **background (wallpaper)** in its own pipeline, drawn at
-the very back so the cell/chrome quads (pass 1) composite *opaquely on top* of it
-— the standard kitty / WezTerm / Alacritty layering. The wallpaper lives in
-`bg_imgs` (a decoded image texture), separate from the **inline** sixel/kitty/
-iTerm2 images in `imgs` (pass 2, which sit over cell backgrounds). Before v2.23.0
-the wallpaper shared `imgs` and drew *after* the quads, which (a) hid every cell
-background under an opaque wallpaper and (b) bled the animation through the tab
-bar / status bar. The chrome strips now resolve an opaque fill via
-`chrome-background` (theme / auto-from-wallpaper / black / white).
+Pass 0 is the **background (wallpaper)** in its own pipeline, drawn at the very
+back so the cell/chrome quads (pass 1) composite *opaquely on top* of it, the
+standard kitty / WezTerm / Alacritty layering. The wallpaper lives in `bg_imgs`
+(a decoded image texture), separate from the **inline** sixel/kitty/iTerm2
+images in `imgs` (pass 2, which sit over cell backgrounds). Drawing the
+wallpaper after the quads would hide every cell background under an opaque
+wallpaper. The chrome strips resolve an opaque fill via `chrome-background`
+(theme / auto-from-wallpaper / black / white), so the animation cannot bleed
+through the tab bar / status bar.
 
-**v2.24.0 — procedural starfield.** When `background-type = starfield`, pass 0
-instead draws `starfield` (`crates/kettle-render/src/starfield.rs`): a fullscreen
-triangle whose WGSL fragment shader *generates* a slow forward-flight star field
-per-pixel from a tiny uniform `{resolution, time}`. It's a **fixed built-in
-example** (v2.24.1) — the look (speed `0.009`, `NSTARS = 55`, glow, and the
-fade-in: center stars fully invisible, cubic `prog³` proximity ramp) is baked
-into the shader as WGSL constants, not config-driven. No decoded frames → ~zero memory, true-color (no GIF banding), a
-perfect loop, and crisp at any resolution. It is mutually exclusive with `bg_imgs` and composites
-identically (chrome opaque on top). The animation tick reuses the GIF machinery
-via a **synthetic fps clock**: `bg_current_frame_index` / `bg_anim_interval_ms`
-quantize the continuous drift to a ~10 fps cap (`STARFIELD_FPS`) so the existing
-edge-trigger + wake-scheduling in `App::about_to_wait_inner` advance it at low
-idle cost, while the shader's `time` uniform stays continuous so each repaint
-shows the exact position. The animated background (starfield or image) now plays
-by default even when unfocused, but the event loop **freezes the wake when the
-window is minimized or occluded** (`window_occluded` + `is_minimized`), so a
-hidden window costs zero idle.
+**Procedural starfield.** When `background-type = starfield`, pass 0 instead
+draws `starfield` (`crates/kettle-render/src/starfield.rs`), a fullscreen
+triangle showing a slow forward-flight star field. Once per frame the CPU
+resolves each star's position, size, and brightness from a continuous clock and
+uploads them with the resolution in one uniform. The WGSL fragment shader only
+computes each pixel's distance and glow falloff. It is a **fixed built-in
+example**. The look (speed `0.009`, `NSTARS = 55`, glow, and the fade-in: center
+stars fully invisible, cubic `prog³` proximity ramp) is baked into constants in
+`starfield.rs`, not config-driven. With no decoded frames it needs ~zero memory,
+stays true-color (no GIF banding), loops perfectly, and is crisp at any
+resolution. It is mutually exclusive with `bg_imgs` and composites identically
+(chrome opaque on top). The animation tick reuses the GIF machinery via a
+**synthetic fps clock**: `bg_current_frame_index` / `bg_anim_interval_ms`
+quantize the continuous drift to a ~10 fps cap (`STARFIELD_FPS`), so the
+existing edge-trigger + wake-scheduling in `App::about_to_wait_inner` advance it
+at low idle cost. The clock that places the stars stays continuous, so each
+repaint shows the exact position. The animated background (starfield or image)
+plays by default even when unfocused, but the event loop **freezes the wake
+when the window is minimized or occluded** (`window_occluded` +
+`is_minimized`), so a hidden window costs zero idle.
 
-The **settings overlay is mouse-driven** (v2.24.0): `kettle_render::settings_hit_test`
+The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math
 the draw uses (single source of truth) and maps a cursor position to a category
 tab / field row / outside; `App::settings_mouse` dispatches that into the existing
@@ -1228,12 +1226,11 @@ adjust). The Background settings page edits the image path through an inline tex
 prompt (`SettingsTextEdit`) and gates inapplicable rows (`settings::field_disabled`).
 
 Steps 6 and 8 own the right-click context menu so its labels land **on
-top of** the panel background. Splitting them out fixed the v1.3.0 /
-v1.3.1 blank-menu bug — the menu's opaque panel quad used to live in
-step 5 (`overlay_quads`), painting over the menu text that had
-already been rendered.
+top of** the panel background. If the menu's opaque panel quad drew in
+step 5 (`overlay_quads`) after its labels were rendered, it would paint
+over them and leave the menu blank.
 
-Step 9 (v2.21.0) draws the inverted glyph **under a focused solid
+Step 9 draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad
 (step 1). Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
@@ -1312,10 +1309,10 @@ text, so its bitmap is already resident).
   the shaping stack consults `Emoji_Presentation`: cosmic-text takes the first
   family in its cascade whose cmap has the codepoint, and on macOS that is Apple
   Color Emoji for anything the text faces lack. So `⏺` U+23FA, which is one cell
-  wide and text by default, drew a square colour bitmap over a one-cell slot and
-  covered the next column. The row builder now adds a per-cell span requesting a
-  monochrome symbol face for those codepoints. Which codepoints those are is
-  read out of the width table rather than a vendored list: every
+  wide and text by default, would draw a square colour bitmap over a one-cell
+  slot and cover the next column. The row builder therefore adds a per-cell span
+  requesting a monochrome symbol face for those codepoints. Which codepoints
+  those are is read out of the width table rather than a vendored list: every
   `Emoji_Presentation=Yes` codepoint is East Asian Wide, and `unicode-width`
   also widens an emoji-capable codepoint when U+FE0F follows, so one column
   alone and two with U+FE0F means exactly `Emoji=Yes, Emoji_Presentation=No`.
@@ -1448,9 +1445,8 @@ text, so its bitmap is already resident).
   through its release; otherwise the UI-owned press suppresses that release.
   Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /
   `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
-- **Allocation hot-paths**: `App::drain_events`
-  has 5 `.clone()`/`format!()` operations; `App::redraw` has 7.
-  Each is load-bearing — `LuaEvent::Output(id, bytes)` copies the
+- **Allocation hot-paths**: the copies on the `App::drain_events` and
+  `App::redraw` paths are load-bearing. `LuaEvent::Output(id, bytes)` copies the
   byte slice into a fresh `Vec<u8>` for the Lua callback (no
   shared ownership because mlua's `IntoLuaMulti` consumes the
   argument); `ContextMenuRow.label` clones the visible row text
@@ -1467,10 +1463,12 @@ text, so its bitmap is already resident).
   adoption, and the macOS libproc/`sysctl` process walk in
   `kettle-remote/src/macos.rs`, the only module that crate allows unsafe code
   in) plus UTF-8 conversion after an explicit valid-prefix check. Each
-  site documents its ownership or validity contract. There is no `transmute`
-  and no custom `Send`/`Sync` implementation. Per-pane `Arc<Mutex<...>>` are contended only on PTY
-  read or App snapshot; lock-hold times are O(bytes) — designed to
-  stay well under one frame's budget per drain even on fast scrolling.
+  site documents its ownership or validity contract. There is no `transmute`,
+  and the only custom `Send`/`Sync` implementation is `Send` for the Windows
+  `CtlListener` in `kettle-ctl`, which solely owns its pipe `HANDLE`. Per-pane
+  `Arc<Mutex<...>>` are contended only on PTY read or App snapshot; lock-hold
+  times are O(bytes), designed to stay well under one frame's budget per drain
+  even on fast scrolling.
 
 ## Why the extractor sits *in front of* the VT engine
 
@@ -1565,7 +1563,7 @@ invalidation consistent with the grid.
 |---|---|---|
 | VT engine | `alacritty_terminal` + `vte` | Battle-tested vs vttest/vim/tmux; avoids re-deriving the xterm long tail. |
 | Images/OSC | in-house `Extractor` ahead of the engine | Adds Sixel/kitty/iTerm2 + OSC 7/133 without forking the engine. |
-| Text | `glyphon` (cosmic-text) + a cell-locked instanced glyph pass | Pure-Rust shaping + fallback + GPU atlas; ligatures + Nerd glyphs. Pane text (v2.25.0) is pinned to the cell grid via `glyphpipe.rs` using cosmic-text's `SwashCache`; glyphon still draws chrome / menus / the cursor glyph. |
+| Text | `glyphon` (cosmic-text) + a cell-locked instanced glyph pass | Pure-Rust shaping + fallback + GPU atlas; ligatures + Nerd glyphs. Pane text is pinned to the cell grid via `glyphpipe.rs` using cosmic-text's `SwashCache`; glyphon still draws chrome / menus / the cursor glyph. |
 | Window/GPU | `winit` + `wgpu` | One codebase for X11/Wayland/Win32/Cocoa; offscreen self-test in CI. |
 | PTY | `portable-pty` | Uniform Unix + Windows ConPTY. |
 | Config | Ghostty `key = value` | Ships the Ghostty theme set verbatim; familiar to users. |
@@ -1593,18 +1591,14 @@ therefore responsible for selecting which pane corners touch the surface.
 
 Four major subsystems modeled after GNOME Terminator. Each has its own
 design doc under `docs/TERMINATOR-*.md`; the architectural integration is
-summarized here. Subsequent v1.32+ releases hardened the plugin contract,
-extended drift guards, surfaced opt-in keys via `--check-config` echo
-lines, scrubbed internal cycle refs from every user-facing doc surface
-(including binary stdout), added an opt-in pre-commit hook
-(`.githooks/pre-commit`) that catches clippy / fmt / test / shellcheck /
-rustdoc regressions at commit time, and shipped the per-pane right-click
-context menu polish (hover-to-highlight, disabled-row hiding, scrollable
-submenus, mnemonics + typeahead, atomic config write-back via
-`persist_config_toggle`, and the **Preferences ▸** submenu wiring 13
-runtime toggles).
+summarized here. The per-pane right-click context menu supports
+hover-to-highlight, disabled-row hiding, scrollable submenus, mnemonics +
+typeahead, and atomic config write-back via `persist_config_toggle`; its
+**Preferences ▸** submenu wires 13 runtime toggles. `--check-config` echoes
+opt-in keys, and an opt-in pre-commit hook (`.githooks/pre-commit`) catches
+clippy / fmt / test / shellcheck / rustdoc regressions at commit time.
 
-The most recent additions:
+Other additions:
 
 - **kettle-remote crate** (SSH / Docker / Podman / kubectl / lxc
   detection) — drives per-pane title prefixes and the right-click "Clone
@@ -1682,8 +1676,8 @@ right-click ▸ **Settings…**. `crates/kettle-ui/src/settings.rs` is the *pure
 catalogue (categories → fields, free functions over `&Config`, unit-tested
 without a window); `app.rs` owns the live `SettingsNav` state + input routing +
 persistence; `kettle-render` draws it through the **same menu pipeline**
-(render-pass steps 5–6 above). Every value edit writes straight to the user's
-config via the atomic `persist_pref` → `persist_config_toggle` path and
+(render-pass steps 6 and 8 above). Every value edit writes straight to the
+user's config via the atomic `persist_pref` → `persist_config_toggle` path and
 live-reloads, so changes take effect without hand-editing the file. The
 **Keybinds** category is a full interactive rebinder: activating a row captures
 the next chord and appends a `keybind = <chord>=<action>` line via
@@ -1703,12 +1697,12 @@ stateDiagram-v2
     Closed --> [*]
 ```
 
-Categories are **Appearance · Behavior · Keybinds**; field kinds are **Toggle ·
-Choice · Number · Keybind**. Field values are always read fresh from `Config`,
-so an external edit / live-reload is reflected immediately, and an unknown
-catalogue key degrades to "—" rather than panicking (`settings::read`,
-guarded by the `catalogue_keys_are_all_readable` drift test). See
-[`docs/SETTINGS.md`](SETTINGS.md) for the per-field reference.
+Categories are **Appearance · Background · Behavior · Search · Tabs · Graphics ·
+Keybinds**; field kinds are **Toggle · Choice · Number · Keybind · Text**. Field
+values are always read fresh from `Config`, so an external edit / live-reload is
+reflected immediately, and an unknown catalogue key degrades to "—" rather than
+panicking (`settings::read`, guarded by the `catalogue_keys_are_all_readable`
+drift test). See [`docs/SETTINGS.md`](SETTINGS.md) for the per-field reference.
 
 ### Per-pane titlebar
 
@@ -1751,7 +1745,7 @@ See [`docs/TERMINATOR-BG-IMAGE-DESIGN.md`](TERMINATOR-BG-IMAGE-DESIGN.md).
 
 Tab tear-off is a live, in-process move: the tab's panes — PTYs,
 scrollback, running programs — transfer untouched into a new window in
-the same process. Since v2.19.0 the tear is the Chromium model: it
+the same process. The tear follows the Chromium model: it
 happens **mid-drag at a distance threshold**, the torn window appears
 instantly under the pointer, and the OS's native move loop carries it
 from there.
@@ -1768,8 +1762,8 @@ flowchart TD
     C -->|"Esc / focus loss<br/>before the tear"| F["cancel (tab stays put)"]
 ```
 
-Mechanics worth knowing (all verified against the vendored winit 0.30.13
-source and live):
+Mechanics worth knowing (all verified against the winit 0.30.13 source and
+live):
 
 - **Tear threshold** is pure Euclidean distance from the tab *band*
   (`tear_threshold_crossed`), so the hysteresis is uniform in every
@@ -1787,7 +1781,7 @@ source and live):
 - **Re-dock hit-testing** runs on the torn window's `Moved` stream
   (`WM_WINDOWPOSCHANGED` keeps firing inside the modal loop), preferring
   the live cursor over the frame+grab approximation everywhere a query
-  source exists — `GetCursorPos` on Windows and, since v2.40.0, x11rb
+  source exists — `GetCursorPos` on Windows and x11rb
   `QueryPointer` on X11. The approximation alone misses: the WM anchors
   its move grab at the *press* position while `grab` is computed at
   *tear* time, a drift a session recording measured at 55-86px under
@@ -1798,12 +1792,12 @@ source and live):
   compatible with the wgpu flip-model swapchain); a hidden single-tab
   `auto` bar **materializes** while hovered so the drop target is
   visible.
-- **Frozen-drag rescue (v2.40.0, X11)**: a native handoff the WM accepts
-  but never acts on (e.g. `_NET_WM_MOVERESIZE` racing a just-created,
-  unmapped window) used to leave the torn window frozen mid-air once the
-  pointer left the capture-holding source window's bounds. An
-  `about_to_wait` tick (`torn_drag_pointer_tick`, 16ms while active) now
-  polls the real pointer, demotes a stalled handoff on
+- **Frozen-drag rescue (X11)**: a native handoff the WM accepts but never
+  acts on (e.g. `_NET_WM_MOVERESIZE` racing a just-created, unmapped
+  window) would leave the torn window frozen mid-air once the pointer
+  leaves the capture-holding source window's bounds. An `about_to_wait`
+  tick (`torn_drag_pointer_tick`, 16ms while active) therefore polls the
+  real pointer, demotes a stalled handoff on
   travel-without-`Moved` evidence (a single incidental placement `Moved`
   is not proof of health), carries the torn window itself, and keeps the
   dock hit-test live. Commit-time revalidation distinguishes an
@@ -1812,7 +1806,7 @@ source and live):
   reads via `GetAsyncKeyState` — because position heuristics cannot: Esc
   moves the frame, never the pointer, and the WM's restore `Moved`
   re-syncs any frame-anchor estimate before the commit event arrives.
-- **Cursor + pre-tear affordance (v2.40.0)**: the OS cursor shows
+- **Cursor + pre-tear affordance**: the OS cursor shows
   `Grab`/`Grabbing` for the whole armed/dragging gesture (first in the
   `sync_cursor_icon` priority chain so it cannot flicker mid-drag), and
   the reorder ghost's shadow/opacity escalate with `TabBar::tear_lift`
@@ -1822,16 +1816,17 @@ source and live):
   with dock tracking, no detach) — Chromium semantics, and the way a
   torn-off window merges back.
 - **Wayland** can't position windows client-side and validates move
-  serials, so it keeps the v2.18.0 tear-at-release path (the FSM's
+  serials, so it keeps the tear-at-release path (the FSM's
   `DraggingOutside` + release). `xdg_toplevel_drag_v1` — the proper
   Wayland tab-drag protocol (KWin 6+/Mutter 48+) — is not exposed by
   winit 0.30; tracked as a follow-up.
 
 The keyboard `move_tab_to_new_window` action (alias `detach_tab`)
-performs the same live in-process move. The old cross-process handoff
-*senders* (Unix SCM_RIGHTS socketpair + the JSON-file fallback) are
-deleted — they respawned shells rather than moving live PTYs; the
-`--tab-handoff` receive parsing stays for one release, deprecated. See
+performs the same live in-process move. Kettle no longer sends cross-process
+handoffs (Unix SCM_RIGHTS socketpair + the JSON-file fallback), which
+respawned shells rather than moving live PTYs. The deprecated `--tab-handoff`
+and `--tab-handoff-fd` flags remain only to receive a handoff from an older
+Kettle. See
 [`docs/TERMINATOR-DETACHABLE-TABS-DESIGN.md`](TERMINATOR-DETACHABLE-TABS-DESIGN.md)
 for the historical multi-process design this replaced.
 
@@ -1840,7 +1835,7 @@ for the historical multi-process design this replaced.
 Per-pane working directory + tab/split tree are captured live as the
 user works and atomically written to `session.json`. A pane's working
 directory is the shell's last OSC 7 report, else the OS's read of the shell
-process. Labels, splits, new tabs, and ctl all use that one value. Since v2.18.0 the
+process. Labels, splits, new tabs, and ctl all use that one value. The
 session is **multi-window**: `Session` carries `windows: Vec<SWindow {
 tabs, active, geometry }>` and restore reopens *every* window at its
 (monitor-clamped) saved position. Replay on the next
@@ -1899,13 +1894,13 @@ Four notable invariants preserved by this flow:
 - **No replay of failed spawns** — if a saved cwd is gone (deleted /
   unmounted), the pane spawns in `$HOME` and logs a warning instead
   of aborting the whole restore.
-- **Two on-disk vintages** — `windows_normalized()` reads both the
-  v2.18.0 `windows` array and the legacy single-window top-level
-  fields, and save dual-writes window 1 into those legacy fields, so
-  an older kettle can still read a new `session.json`. (v2.18.0 also
-  repaired a latent gate bug: the `--layout` / `--restore` /
-  `--tab-handoff` loads were dead because `resumed()` `mem::take`'d
-  the whole CLI-options struct before the gates read it.)
+- **Two on-disk vintages** — `validated_restore_windows()` reads both the
+  `windows` array and the legacy single-window top-level fields, and
+  save dual-writes window 1 into those legacy fields, so an older
+  kettle can still read a new `session.json`. (`resumed_inner` takes only
+  the consumed-once CLI fields; a wholesale `mem::take` of the
+  CLI-options struct would silently disable the `--layout` /
+  `--restore` / `--tab-handoff` loads.)
 
 See the [version history](VERSION-HISTORY.md) for the shipped session-restore
 hardening ledger.

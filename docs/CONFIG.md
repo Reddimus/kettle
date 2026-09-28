@@ -76,7 +76,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |
 | `cell-width` / `cell-height` | float 0.5–3.0 | `1.0` | Multiplier applied to measured terminal cell width / height. Values are clamped at parse time and reload live with font metric changes |
-| `text-renderer` | enum | `grid` | `grid` \| `legacy` (v2.25.0). `grid` pins every glyph to its terminal cell (`col × cell_w`) so fallback-font glyphs, emoji, symbols, and ligatures cannot drift away from selection, cursor, or mouse hit testing. `legacy` restores the pre-2.25.0 continuous layout for diagnosing renderer regressions |
+| `text-renderer` | enum | `grid` | `grid` \| `legacy`. `grid` pins every glyph to its terminal cell (`col × cell_w`) so fallback-font glyphs, emoji, symbols, and ligatures cannot drift away from selection, cursor, or mouse hit testing. `legacy` restores the older continuous layout for diagnosing renderer regressions |
 | `background` / `foreground` | color | from theme | Hex/`#rgb`/`rgb:`/X11 name |
 | `cursor-color` | color | from theme | The block cursor color. `cursor-bg-color` and `cursor_bg_color` are aliases |
 | `cursor-fg-color` | color | from theme | The glyph color under a focused block cursor. The block is filled with `cursor-color` and its glyph is recolored to this value |
@@ -86,14 +86,14 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `scrollback` | int / `infinite` | `10000` | Line-count history cap; `0`, `infinite` or `unlimited` = effectively unbounded before the byte cap is applied |
 | `scrollback-bytes` (`scrollback-byte-limit`, `scrollback-memory`) | bytes with optional `K`/`M`/`G`, `KiB`/`MiB`/`GiB`, or `0` | `10000000` | Per-pane scrollback memory budget. Includes the active screen, protects visible rows, and trims oldest history by reducing the effective line cap. `0` disables the byte cap and uses `scrollback` only. The budget is an **estimate over the inline grid**: it does not walk each cell's optional heap storage (combining marks, underline color, hyperlink), because that would mean touching every cell on the PTY reader's path. Those are separately bounded — combining marks are capped per cell, and hyperlink text is shared across the cells of one link — so actual usage exceeds the configured value by a bounded factor rather than an unbounded one |
 | `window-padding-x` / `window-padding-y` | float | `8` | Inner padding (px) |
-| `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 150 columns at the default font) fitted to 90 % × 85 % of the monitor, which is about 144 columns on a 1366 px wide laptop: the width Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. Cells are converted with an 8×16 px baseline before font metrics exist, in logical pixels, so a HiDPI display gets the same grid. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. The old ~800×600 px window is `window-width = 98` / `window-height = 35` |
+| `window-width` / `window-height` | int cells | unset | Initial fresh-window terminal grid size. Width is clamped `[20, 400]`, height `[8, 200]`. Unset, a fresh window opens at a `160x45` baseline (about 150 columns at the default font) fitted to 90 % × 85 % of the monitor, which is about 144 columns on a 1366 px wide laptop: the width Claude Code's fullscreen diff panel needs to auto-open (see [TERMINAL-CLIENT-COMPATIBILITY.md](TERMINAL-CLIENT-COMPATIBILITY.md#claude-code-diff-panel)). If only one dimension is set, the other comes from that same `160x45` baseline, and an explicit value is honoured as typed rather than fitted. Cells are converted with an 8×16 px baseline before font metrics exist, in logical pixels, so a HiDPI display gets the same grid. Applied only as the startup seed; restored session geometry and explicit new-window geometry take precedence. For an ~800×600 px window, set `window-width = 98` / `window-height = 35` |
 | `window-position-x` / `window-position-y` | int px | unset | Initial fresh-window position in physical pixels. Negative coordinates are valid for monitors left/above the primary display. Applied only as the startup seed; restored sessions and explicit new-window placement take precedence |
 | `background-opacity` | float | `0.86` macOS/Windows; `0.99` elsewhere | 0..1. Solid backgrounds request an alpha surface below `1.0`; transparent backgrounds use `background-opacity × background-darkness`; image backgrounds always allow decoded image alpha; starfield stays opaque because its shader covers the surface. macOS and Windows default to visible native material; other targets stay at 99% whether compositor blur is available or not. Set this to `1.0` and `window-blur = false` for a fully opaque window. On macOS, the native titlebar stays opaque and follows Kettle's selected light or dark appearance rather than inheriting content alpha |
 | `window-blur` | bool | `true` | Ask the window system to blur content behind Kettle. macOS keeps material below an opaque native titlebar, follows the selected light or dark appearance, and becomes opaque when Reduce Transparency is enabled. Windows requests the system backdrop and palette-matches its DWM caption. Other targets default to 99% opacity. Linux enables blur only when the active Wayland compositor advertises KWin's blur protocol; X11 and unsupported Wayland sessions also apply a 99% live-opacity safety floor to explicit lower values. Screenshots and the saved opacity are unchanged. A newly opened window is required when changing from an opaque startup surface |
 | `cursor-style` | `block`\|`underline`\|`bar` (`beam`) | `block` | `beam` is an alias for `bar` |
 | `cursor-style-blink` (`cursor-blink`, `cursor_blink`) | bool | `true` | Cursor blinks while the window is focused. The short alias `cursor-blink` is the spelling the right-click Preferences submenu writes back |
 | `bell` | `off`\|`visual`\|`attention`\|`both` | `both` | Visual flash and/or window-attention (taskbar/dock urgency) on `BEL` |
-| `bell-flash-intensity` (`bell_flash_intensity`) | float 0–1 | `0.03` | Peak strength of the visual-bell flash as a step of CIE L\* lightness (a fraction of the 0–100 scale): `0.03` lifts a dark theme's background by 3 L\* and dips a light theme's by 3 L\* on the frame the bell rings, then eases out to nothing over 300 ms. Only the pane that rang flashes, under its text. Defined perceptually rather than as an alpha because the renderer blends in linear light, where one alpha reads very differently per theme (the old `0.10` alpha was a +22 L\* jump on TokyoNight). The most frequent bell in practice is an empty Tab completion, which does not warrant more than a barely-there cue; raise this (`0.06`–`0.10`) for a stronger flash, `1` paints the foreground solid, or set `0` to drop the flash while keeping window attention and the tab/titlebar bell marks. Full-pane flashes are also the part of a terminal most likely to affect a photosensitive user |
+| `bell-flash-intensity` (`bell_flash_intensity`) | float 0–1 | `0.03` | Peak strength of the visual-bell flash as a step of CIE L\* lightness (a fraction of the 0–100 scale): `0.03` lifts a dark theme's background by 3 L\* and dips a light theme's by 3 L\* on the frame the bell rings, then eases out to nothing over 300 ms. Only the pane that rang flashes, under its text. Defined perceptually rather than as an alpha because the renderer blends in linear light, where one alpha reads very differently per theme (a `0.10` alpha would be a +22 L\* jump on TokyoNight). The most frequent bell in practice is an empty Tab completion, which does not warrant more than a barely-there cue; raise this (`0.06`–`0.10`) for a stronger flash, `1` paints the foreground solid, or set `0` to drop the flash while keeping window attention and the tab/titlebar bell marks. Full-pane flashes are also the part of a terminal most likely to affect a photosensitive user |
 | `osc52` (`clipboard`) | `off`\|`copy`\|`paste`\|`both` | `copy` | OSC 52 clipboard policy. `copy` allows programs to set the clipboard but **not** read it (a remote read is a clipboard-exfiltration risk); `paste`/`both` enable read. Target `c` uses the regular clipboard; target `p`/`s` uses Linux PRIMARY without cross-target fallback (platforms without a separate selection use their one clipboard). DA1 advertises clipboard extension `52` only when writes are enabled and the platform clipboard is available; live reload updates that advertisement for existing panes |
 | `macos-option-as-alt` | `none`\|`left`\|`right`\|`both` | `none` | Selects which macOS Option key behaves as terminal Alt **for keys that produce text**. `none` preserves normal macOS composition on both sides, so Option-produced symbols and accented characters reach the PTY without a Meta/ESC prefix. Keys that compose no character — Backspace, Delete, the arrows, Home/End, Page Up/Down, Insert and the F-keys — always carry `Alt` to the PTY, on every setting and from either side, because there is no composition for the policy to protect: `⌥⌫` is `ESC DEL` (readline's `backward-kill-word`) and `⌥←`/`⌥→` are word-wise motions. kitty draws the same line. A selected side uses the unmodified key character and keeps `Alt` for keybinds, legacy xterm encoding, Kitty keyboard encoding, and modifier parameters. Ctrl+Option and Cmd+Option chords keep `Alt` in every mode, matching macOS's suppression of Option composition for those chords — they keep it for keybind matching and Kitty encoding; a Cmd-bearing chord has no legacy PTY encoding and is not written at all (see [`TERMINAL-CLIENT-COMPATIBILITY.md`](TERMINAL-CLIENT-COMPATIBILITY.md)). Applies to existing windows on live reload. The key remains parseable but is reported inert on non-macOS platforms so one shared config works everywhere |
 | `modify-other-keys` (`modify_other_keys`) | `auto`\|`always`\|`off` | `auto` | Controls only Kettle's modified-Enter fallback before an application queries or sets a keyboard protocol. `auto` recognizes Codex, Claude Code, Gemini, and OpenCode. On Unix/macOS it requires noncanonical input and a fresh foreground process-group match to either the direct launch identity or the background process snapshot. On Windows it requires a running command with one unambiguous shell-child branch containing a recognized composer, or a direct composer launch; helper forks below that composer are supported. Nested shells, readline/libedit programs, SSH/WSL transports, wrappers, and snapshots without a recognized composer receive plain Enter, preventing the literal `;2;13~` suffix an unsolicited xterm sequence can leave behind. Use `always` for an unrecognized or unobservable client, including one inside SSH/WSL; legacy `enter` is its alias. `off` removes the fallback. All modes still honor application-selected xterm levels and Kitty CSI-u, which take precedence. Reloads live, and GUI, control-plane `send_keys`, and broadcast input evaluate the policy separately for each target pane |
@@ -135,7 +135,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `update-policy` | `off`\|`notify`\|`auto` | `auto` | Stable-channel behavior after the first-launch privacy skip: no automatic request, a passive banner, or an authenticated background install used after the next restart. **`auto` is the default** (kettle keeps itself current, oh-my-zsh style); set `off` to opt out. Official installer ownership is required for installation. See [UPDATES.md](UPDATES.md) |
 | `update-check-interval-hours` | int hours | `24` | How often the background check may contact the release feed. Default 24 (daily); floored at 1. `update-policy = off` disables checking regardless |
 | `update-check` (`check-for-updates`) | bool | compatibility alias | Legacy setting mapped to `notify` (`true`) or `off` (`false`). `update-policy` wins regardless of line order. `kettle --check-update` always performs a one-shot check |
-| `restore-session` (`restore_session`) | bool | `false` | Reopen the previous session (tabs, splits, working dirs) on launch. **Off by default** — like every mainstream terminal, a new window/instance opens fresh (a single pane in the default cwd). The session is always *saved* on exit only when this is on (or `--restore` is passed), so a fresh window never clobbers a saved layout. `--restore` is the one-shot equivalent; `--layout NAME` restores a named workspace independently |
+| `restore-session` (`restore_session`) | bool | `false` | Reopen the previous session (tabs, splits, working dirs) on launch. **Off by default**, like every mainstream terminal, so a new window/instance opens fresh (a single pane in the default cwd). The session is *saved* on exit only when this is on (or `--restore` is passed), so a fresh window never clobbers a saved layout. `--restore` is the one-shot equivalent; `--layout NAME` restores a named workspace independently |
 | `agent-server` | `off`\|`read-only`\|`full` | `off` | The agent control server mode. **Off by default.** When enabled, kettle starts a local-IPC control server that an AI agent / `kettle ctl` / `kettle mcp` can use to read the screen and drive panes (`read-only` reads / lists / subscribes; `full` also sends text + runs commands). Security: local-only — a Unix domain socket (mode `0600`) or a Windows named pipe (current-user DACL); no TCP. `--agent-server <mode>` is the per-launch override. See [docs/AGENT.md](AGENT.md) |
 | `agent-badge` | string | `"[agent] "` | The per-pane titlebar prefix shown while an agent connection has the pane attached. Set to any glyph you like (`agent-badge = 🤖 `); empty disables it |
 | `scroll-on-keystroke` (`scroll-on-input`) | bool | `true` | Jump back to the bottom when the user types while scrolled back |
@@ -146,13 +146,13 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `command` / `shell` | string | `$SHELL` | Program to launch |
 | `ssh-host` | `name=user@host` | — | Repeatable; named target for the `Ctrl+Shift+S` SSH launcher |
 | `keybind` | `trigger=action` | built in map | Repeatable |
-| `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default since v2.18) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
-| `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | Show a thin strip at the configured edge with `HH:MM:SS UTC · theme · focused pane title`. Disabled by default. Aliases: `none` / `false` = off, `on` / `true` = bottom |
-| `trigger` | regex \[`:: cmd args`\] | — | Repeatable. A match against output in an unfocused pane requests attention. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
+| `accent-color` | `auto` \| `theme` \| color | **`auto`** | The UI-chrome accent — active-tab strip, focused-pane border, per-pane titlebars, drag ghost, settings/menu highlights. **`auto` (the default) is Peacock behavior, per *window***: each window claims a distinct hue from the theme's accent pool, seeded by the working directory (same project → same starting hue, stable across launches) and live-deduped against every other kettle window — including other kettle processes — so two open windows never share a hue while the pool has a free one. A theme switch keeps each window's pool slot. **`theme`** (also `off`/`none`) opts out: every window uses the theme's signature accent (the default TokyoNight Night's blue `#7aa2f7`, matching the app icon; Catppuccin Mocha instead uses its mauve `#cba6f7`; `palette[4]` for themes without an `accent`). A `#rrggbb`/`#rgb`/`0xRRGGBB`/X11 color pins one color for every window (skips the dedupe). CLI `--accent COLOR` wins over the config. `palette[3]` broadcast yellow and the cursor are not affected by design |
+| `status-bar` (`statusbar`) | `off\|top\|bottom` | `off` | Show a thin strip at the configured edge with `HH:MM:SS` in local time, the theme, and the focused pane title. Disabled by default. Aliases: `none` / `false` = off, `on` / `true` = bottom |
+| `trigger` | regex \[`:: cmd args`\] | — | Repeatable. A match against output in an unfocused pane requests attention. `^` and `$` anchor to each row of output. A 2 second throttle coalesces storms. With ` :: cmd args`, Kettle spawns the argv directly without a shell; `{0}` and `{1}` substitute capture values but cannot add arguments |
 | `resize-overlay` (`resize_overlay`) | `always`\|`never`\|`after-first` | `after-first` | Show a centered `cols×rows` chip while resizing. `after-first` skips the initial window placement; `never` disables it |
 | `theme-mode` (`theme_mode`) | `explicit`\|`light`\|`dark`\|`auto` (`system`/`follow-system`) | `explicit` | How the active theme is picked. `explicit` uses `theme`; `light`/`dark` force `light-theme`/`dark-theme`; `auto` follows the OS light/dark preference via winit when the platform reports one. If `theme-schedule` is set, the schedule owns the switch instead |
 | `light-theme` / `dark-theme` | string | — (falls back to `theme`) | The two themes `theme-mode` switches between. Any bundled theme name (`kettle --list-themes`) |
-| `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
+| `theme-schedule` | string | — | Scheduled light/dark switch for `theme-mode = auto`; when present, it takes precedence over OS appearance following. Either two `HH:MM <role>` entries in local time (`role` = `dark`/`light`), comma-separated — e.g. `19:00 dark,07:00 light` — or `auto` (aliases `sunrise/sunset`, `solar`) for sunrise/sunset (needs `theme-schedule-lat`/`-long`) |
 | `theme-schedule-lat` / `theme-schedule-long` | float | — | Latitude `[-90, 90]` / longitude `[-180, 180]` for `theme-schedule = auto` sunrise/sunset. Out-of-range values are discarded (the schedule stays unset) |
 | `allow-bold` | bool | `true` | When `false`, suppress the SGR bold attribute. Useful with fonts that have no bold face |
 | `bold-is-bright` | bool | `false` | When `true`, bold text using a palette 0–7 color is remapped to the bright 8–15 variant (xterm convention) |
@@ -208,13 +208,13 @@ work slice runs per event-loop turn and yields only between complete hard
 logical lines. Its continuation resumes on a later turn without showing
 Results limited.
 
-Existing chunk progress is preserved while a PTY keeps producing output;
-because rows can shift during that pass, a non-navigation scan is verified
-again from a fresh viewport anchor after output has been quiet for 500 ms
-before Kettle reports a definitive boundary or miss. If output interrupts an
-explicit Previous/Next operation, that operation stays **Results limited**
-until the user retries it; silently starting a default-direction quiet retry
-would verify a different navigation request.
+Chunk progress is kept while a PTY keeps producing output. Because rows can
+shift during that pass, Kettle verifies a non-navigation scan again from a fresh
+viewport anchor once output has been quiet for 500 ms, and only then reports a
+definitive boundary or miss. If output interrupts an explicit Previous/Next
+operation, that operation stays **Results limited** until the user retries it.
+Silently starting a quiet retry in the default direction would verify a
+different navigation request.
 
 Visible highlighting scans the viewport plus 100 physical lines on each side.
 One regex-engine invocation receives at most **64 KiB of UTF-8**. One aggregate
@@ -324,10 +324,10 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `title-transmit-bg-color` / `-fg-color` | color | `focused-split-color` → window accent / theme `cursor-text` | Focused-pane (broadcast-source) titlebar colors; unset values follow the active theme cascade |
 | `title-receive-bg-color` / `-fg-color` | color | window accent / theme `cursor-text` | Broadcast-group-member titlebar colors; unset values follow the active theme cascade |
 | `title-inactive-bg-color` / `-fg-color` | color | theme `palette[8]` / theme foreground | Idle-pane titlebar colors; unset values follow the active theme cascade |
-| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (v2.24.0 — a zero-config procedural GPU starfield; needs no `background-image`. A FIXED built-in example: its look is baked in, not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
+| `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (a zero-config procedural GPU starfield that needs no `background-image`; a fixed built-in example whose look is not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. No effect without a wallpaper |
-| `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the v2.24.0 default — animate even when unfocused; still freezes when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). Surfaced in Settings → Background |
+| `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the default; animate even when unfocused, but still freeze when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). Surfaced in Settings → Background |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
@@ -358,7 +358,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 The automatically discovered `<config-dir>/init.lua` uses the same trusted
 directory and leaf checks as the default config because even `safe` Lua can type
 commands into the shell. A dotfile-manager link remains supported only when the
-link itself has trusted ownership and one name and its resolved target passes
+link itself has trusted ownership and one name, and its resolved target passes
 the same checks. `--lua-script FILE` is the explicit-path escape hatch for
 project or shared scripts; it retains the 4 MiB bounded read and is a deliberate
 trust grant, just as `--config FILE` is for configuration.
@@ -412,9 +412,9 @@ moves a key into the main table without changing its parser arm.
 
 ## Editing the config from inside kettle (Preferences submenu)
 
-Most of the keys above can be toggled at runtime via right-click → **Preferences ▸**.
-The submenu surfaces five common toggles + an `Advanced…` row that opens the
-config file with the operating system's default app for everything else:
+Right-click → **Preferences ▸** changes six common settings at runtime. Its
+`Advanced…` row opens the config file with the operating system's default app
+for everything else:
 
 | Submenu row | Config key written |
 |---|---|
@@ -423,6 +423,7 @@ config file with the operating system's default app for everything else:
 | Copy on select (✓) | `copy-on-select` |
 | Bell (radio: off/visual/attention/both) | `bell` |
 | Mouse-hide while typing (✓) | `mouse-hide-while-typing` |
+| Confirm close (radio: always/multiple terminals/never) | `ask-before-closing` |
 | Font size + / − | (live-only; `font-size` not auto-persisted yet) |
 | Advanced… | opens `~/.config/kettle/config` with the default app |
 
@@ -505,12 +506,12 @@ in that direction),
 turning the screen would have put it, and the two
 directions undo each other).
 
-**Window**: `new_window` (opens another window **in this process** since
-v2.18 — tabs can move live between windows), `close_window`,
+**Window**: `new_window` (opens another window **in this process**, so
+tabs can move live between windows), `close_window`,
 `toggle_fullscreen`, `move_tab_to_new_window` (tear the focused tab out
 into its own window LIVE — running programs keep running; dragging a tab
-past the tab bar does the same with the mouse, Chromium-style since
-v2.19: the live window rides the pointer, and dropping it on another
+past the tab bar does the same with the mouse, Chromium-style: the live
+window rides the pointer, and dropping it on another
 kettle window's tab bar merges it there), `open_settings`
 (`settings` — the Ctrl+, overlay), `layout_picker`, `about` (also
 `show_about` — version, update status, GitHub link), `screenshot`
@@ -522,7 +523,7 @@ in the command palette, bindable, no default chord), `select_to_top`
 (`select_to_first_line`) and `select_to_bottom` (`select_to_last_line`) —
 extend the selection to the top / bottom of the buffer, bound by default to
 **Shift+Home** / **Shift+End** (Shift+click still extends to the click point).
-Scroll-to-extremes moved to **Ctrl+Home** / **Ctrl+End** as a result.
+**Ctrl+Home** / **Ctrl+End** scroll to the top / bottom instead.
 
 **Search + jump**: `start_search` (`search`), `prev_prompt`
 (`jump_to_prompt_prev`), `next_prompt` (`jump_to_prompt_next`).
@@ -572,7 +573,7 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 the clipboard, `Esc` exits. See `man kettle` for the full keymap.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state),
-`reload_config`, `detach_tab` (Unix-only cross-window tab tear-off),
+`reload_config`, `detach_tab` (alias of `move_tab_to_new_window`),
 `text:BYTES` (send literal text to the focused pane, as though typed — so
 while broadcast is on it reaches every pane in scope, exactly as typing the
 same bytes would).

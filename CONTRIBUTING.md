@@ -1,11 +1,11 @@
 # Contributing to kettle
 
-kettle is built one bounded change at a time — each change picks one bug
+kettle is built one bounded change at a time. Each change picks one bug
 or parity gap, fixes it with the smallest durable implementation, pins
 the contract with a test, and lands behind the full gate. This file
-explains how a change like that looks so a new contributor can land
-their first PR the same shape as the existing 440+ entries in
-[CHANGELOG.md](CHANGELOG.md).
+shows what such a change looks like, so your first PR can match the
+440+ entries in [CHANGELOG.md](CHANGELOG.md) and its older-release
+archives.
 
 Participation in this project — issues, PRs, discussions, code review —
 is governed by the project [Code of Conduct](CODE_OF_CONDUCT.md). For
@@ -115,12 +115,11 @@ Each change has the same shape:
    git config core.hooksPath .githooks
    ```
 
-   The hook exists because a doc-list overindentation regression
-   landed more than once without anyone running clippy — the
-   hook catches that class at commit time.
-   The hook header comment in `.githooks/pre-commit` enumerates
-   exactly which path categories trigger the gauntlet vs which
-   skip it; bypass per-commit with `git commit --no-verify`.
+   The hook catches lint regressions, such as clippy's doc-list
+   overindentation, at commit time instead of at the next manual
+   `just gauntlet` run. Its header comment in `.githooks/pre-commit`
+   lists which paths trigger the gauntlet and which skip it. Bypass
+   it for one commit with `git commit --no-verify`.
 6. **Update docs.** `CHANGELOG.md` gets a paragraph under
    `[Unreleased]` describing the bug shape and the fix. Keep
    `docs/ROADMAP.md` for unfinished work; shipped work belongs in the
@@ -221,9 +220,9 @@ Done.
 
 ## Where to start
 
-- **Read a few entries in CHANGELOG.md** to see the shape — each
-  paragraph names the user-visible effect, the root cause, and
-  the file:line of the fix.
+- **Read a few entries in CHANGELOG.md** to see the shape. Each
+  entry names the user-visible effect and, where it helps, the
+  cause.
 - **Pick a `_ => {}` arm in the codebase.** Trace what it ignores,
   identify whether the silent fallback is a real bug or
   intentional. If real, that's your change.
@@ -240,10 +239,11 @@ Done.
 - **Cite external behavior.** When compatibility depends on another
   implementation or protocol, name the exact source file or specification in
   the focused code comment.
-- **Tests live next to the code they test** (`#[cfg(test)] mod`),
-  not in `tests/`. Workspace-wide tests don't exist; each crate
-  is self-contained. A black-box test that needs a built binary or spans crate
-  boundaries may live under the owning binary crate's `tests/` directory.
+- **Tests live next to the code they test** (`#[cfg(test)] mod`)
+  by default. Workspace-wide tests don't exist; each crate
+  is self-contained. A black-box test that needs a built binary or its own
+  process, or that spans crate boundaries, may live under the owning
+  crate's `tests/` directory.
 
 ## Mass mechanical changes
 
@@ -264,26 +264,24 @@ needed there.
 Releases go through `scripts/release.sh` (version bump + single
 signed commit) and `scripts/tag-release.sh` (signed annotated tag,
 pushed from synchronized `main`), with a PR and required CI between
-them. Doing the steps by hand has tripped past releases: the
-CHANGELOG section got committed AFTER the tag, the release-pipeline
-CI guard correctly rejected the Linux job at pre-flight, and the
-macOS + Windows jobs uploaded a partial release. Always use the
-scripts — `release.sh` intentionally never pushes or tags `main`
-itself.
+them. Doing the steps by hand risks tagging before the CHANGELOG
+section lands, which the release workflow's consistency guard
+rejects. Always use the scripts. `release.sh` intentionally never
+pushes or tags `main` itself.
 
 Flow:
 
 1. Land your changes on `main` (via PR), including a
    `## [X.Y.Z] — YYYY-MM-DD` section in `CHANGELOG.md`
    describing what changed since the previous version.
-2. Run `just gauntlet-strict` to verify every CI workflow's
-   check (fmt / clippy / build / test / doc / cargo-deny /
-   cargo-machete) passes locally first. The plain `just
-   gauntlet` mirrors every-PR CI; the `-strict` variant adds
-   the supply-chain CI workflows that run on Cargo.lock
-   changes, so a release-cut catches stale-ignore / unused-dep
-   issues before tagging. `just gauntlet-full` is the closest
-   local match to every ci.yml step for a release cut.
+2. Run `just gauntlet-strict` to verify the fmt / clippy / build /
+   test / doc / cargo-deny / cargo-machete checks pass locally
+   first. The plain `just gauntlet` mirrors the core Rust gate
+   every PR runs; the `-strict` variant adds the supply-chain CI
+   workflows that run on Cargo.lock changes, so a release-cut
+   catches stale-ignore / unused-dep issues before tagging.
+   `just gauntlet-full` is the closest local match to every ci.yml
+   step for a release cut.
 3. From fresh `main`, create a release branch and run
    `scripts/release.sh X.Y.Z` on it. The script refuses to run on
    `main` or a dirty tree, and rejects a missing CHANGELOG section,

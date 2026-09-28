@@ -1604,6 +1604,7 @@ mod tests {
         // no pending ConnectNamedPipe yet) — the real-world timing a fast
         // `kettle ctl` hits, and the suspected ERROR_NO_DATA trigger.
         let stream = connect(&endpoint).expect("connect");
+        let endpoint_for_server = endpoint.clone();
         let server = std::thread::spawn(move || {
             let conn = listener.accept().expect("accept");
             // Mimic the real accept loop: a background thread blocks accepting
@@ -1629,9 +1630,10 @@ mod tests {
                 .expect("write resp");
             writer.flush().expect("flush resp");
             rh.join().ok();
-            // Don't join next_accept (it blocks forever waiting for conn #2);
-            // detach it — the listener drop will tear it down.
-            drop(next_accept);
+            // Release the blocked second accept with one more connection, so
+            // its thread ends and drops the listener, removing the socket.
+            let _release = connect(&endpoint_for_server).expect("connect to release accept");
+            next_accept.join().expect("second accept");
         });
 
         let read_half = stream.try_clone().expect("client clone");
@@ -1643,6 +1645,11 @@ mod tests {
         reader.read_line(&mut resp).expect("client read");
         assert_eq!(resp.trim_end(), "resp:req-1", "got: {resp:?}");
         server.join().expect("server thread");
+        #[cfg(unix)]
+        assert!(
+            !std::path::Path::new(&endpoint).exists(),
+            "the listener was dropped, so its socket file is gone"
+        );
     }
 
     /// Exercise the real kernel path (PID resolution + token SID compare on

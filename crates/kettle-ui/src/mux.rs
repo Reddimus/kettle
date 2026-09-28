@@ -7712,22 +7712,19 @@ mod node_tests {
         );
     }
 
-    /// Drift guard: every split caller that may graft a
-    /// freshly-spawned pane must REAP it (`self.panes.remove(&new_id)`) if the
-    /// graft fails, instead of leaking the PTY/child. There are three such
-    /// callers (`split`, `split_with`, `duplicate_focused_pane`); `>= 3` lets a
-    /// future fourth variant be added without silently skipping the reap (it
-    /// would have to add the reap to keep the count, or fail this guard).
+    /// Drift guard: every split caller that may graft a freshly spawned pane
+    /// must reap it (`self.panes.remove(&new_id)`) if the graft fails, instead
+    /// of leaking the PTY and child. A new graft site without a reap changes
+    /// the counts and fails this guard.
     #[test]
     fn split_callers_reap_orphaned_pane_on_graft_failure() {
-        // Count production code only, since this test's own literal would
-        // otherwise count as a site.
+        // Count production code only, since this test's own literals would
+        // otherwise count as sites.
         let src = production_source();
+        let grafts = src.matches("insert_split(tab, new_id, dir)").count();
         let reaps = src.matches("self.panes.remove(&new_id)").count();
-        assert!(
-            reaps >= 3,
-            "expected >= 3 orphan-reap sites (split / split_with / duplicate_focused_pane); found {reaps}"
-        );
+        assert!(grafts >= 3, "graft sites not found: {grafts}");
+        assert_eq!(reaps, grafts, "every graft site needs its own reap");
     }
 
     #[test]
