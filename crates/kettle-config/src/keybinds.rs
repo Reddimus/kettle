@@ -265,6 +265,10 @@ pub enum Action {
     SplitRight,
     SplitDown,
     SplitAuto,
+    /// Split with the new pane on the left, Ghostty's `new_split:left`.
+    SplitLeft,
+    /// Split with the new pane above, Ghostty's `new_split:up`.
+    SplitUp,
     /// Terminator parity: move the focused pane to sit beside its neighbour in
     /// that direction -- the keyboard route to the rearrangement Terminator
     /// offers by dragging a terminal.
@@ -660,6 +664,10 @@ pub fn action_names() -> Vec<&'static str> {
         "split_down",
         "split_horiz",
         "split_auto",
+        "new_split:left",
+        "split_left",
+        "new_split:up",
+        "split_up",
         "close_surface",
         "close_pane",
         "close_term",
@@ -951,6 +959,8 @@ impl Action {
             "new_split:right" | "split_right" | "split_vert" => SplitRight,
             "new_split:down" | "split_down" | "split_horiz" => SplitDown,
             "split_auto" => SplitAuto,
+            "new_split:left" | "split_left" => SplitLeft,
+            "new_split:up" | "split_up" => SplitUp,
             "close_surface" | "close_pane" | "close_term" => ClosePane,
             "close_window" => CloseWindow,
             // Terminator parity: `new_terminator` is

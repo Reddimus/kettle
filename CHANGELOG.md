@@ -6,6 +6,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- `split_left` and `split_up` (Ghostty's `new_split:left` and
+  `new_split:up`) put the new pane left of or above the focused one. They
+  have no default keys.
+- The right-click menu adds rows from Ghostty's menu: Split Left, Split Up,
+  Close Tab, New Window, Close Window, Set Tab Title…, Set Pane Title…, and
+  Reset Terminal.
+
 ### Changed
 
 - An idle window on macOS uses about 97 % less CPU and wakes about 30 %
