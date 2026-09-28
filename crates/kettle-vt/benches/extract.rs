@@ -1,8 +1,7 @@
-//! v2.20.0 P3: extractor front-stage throughput benches — the first criterion
-//! benches in the repo. The extractor sits between the 64KiB PTY reads and
-//! the alacritty VT parser, so its per-byte cost multiplies into every
-//! throughput number kettle posts. Three workloads mirror the cross-terminal
-//! harness payloads from the archived
+//! Extractor front-stage throughput benches. The extractor sits between the
+//! 64KiB PTY reads and the alacritty VT parser, so its per-byte cost
+//! multiplies into every throughput number kettle posts. Three of the four
+//! workloads mirror the cross-terminal harness payloads from the archived
 //! [`v3.3.0` generator](https://github.com/Reddimus/kettle/blob/v3.3.0/scripts/perf/gen-payloads.ps1):
 //!
 //! - `plain_flood`: pure ASCII text + newlines — the bulk-copy fast path.

@@ -180,9 +180,8 @@ impl SealVerifier for AppleSeal {
         if assessed.status {
             return Ok(());
         }
-        // The distinction this catches is real and quiet: re-signing a bundle
-        // changes its cdhash, which orphans the stapled ticket while leaving
-        // `codesign --verify` perfectly happy. Only this check notices.
+        // Re-signing a bundle changes its cdhash, which orphans the stapled
+        // ticket but leaves `codesign --verify` happy. Only this check notices.
         Err(UpdateError::UnsafeArchive(format!(
             "{} is not notarized: {}",
             bundle.display(),
@@ -337,8 +336,7 @@ fn remove_leftover(path: &Path, expected: &std::fs::Metadata) {
 /// displaced bundle. Nothing cheap can, and the same is true of the Linux path,
 /// which replaces `bin/kettle` while older processes keep their mapped inode. A
 /// pre-update window that later reads a resource it never opened may fail; the
-/// remedy is the same as it has always been, which is to restart after
-/// updating.
+/// remedy is to restart after updating.
 pub(crate) fn sweep_leftovers_beside(executable: &Path) {
     // Canonicalize first. The lock is keyed by the bundle path, and
     // `locate_bundle_install` keys it from a canonical one, so skipping this
@@ -832,13 +830,13 @@ fn stage_verified_bundle(
     verifier.notarized(&bundle)
 }
 
-/// Remove leftovers from an interrupted update.
+/// Remove leftovers from interrupted and finished updates.
 ///
-/// A crash between the swap and the cleanup leaves a `.kettle-update-previous-`
-/// bundle behind. That is by design: the running process still reads resources
-/// out of the bundle it launched from, so the displaced copy is kept until a
-/// later run can drop it safely. A crash before the swap leaves a
-/// `.kettle-update-staged-` bundle, which was never live and is simply dropped.
+/// A finished update leaves a `.kettle-update-previous-` bundle behind.
+/// That is by design: the running process still reads resources out of the
+/// bundle it launched from, so the displaced copy is kept until a later run can
+/// drop it safely. A crash before the swap leaves a `.kettle-update-staged-`
+/// bundle, which was never live and is simply dropped.
 pub(crate) fn sweep_interrupted_updates(parent: &Path) {
     let Ok(entries) = std::fs::read_dir(parent) else {
         return;
@@ -1166,9 +1164,8 @@ mod tests {
         let temp = kettle_test_support::private_tempdir("kettle-macos-identity-");
         let executable = seed_bundle(temp.path(), "kettle.app");
 
-        // A locally built app is ad-hoc signed and reports no real team.
-        // `codesign` reports an ad-hoc signature's team as the literal
-        // "not set", which is what a locally built app looks like.
+        // A locally built app is ad-hoc signed, and `codesign` reports its team
+        // as the literal "not set".
         for adhoc_team in ["-", "not set"] {
             let adhoc = StubSeal::signed_by("org.kettle.terminal", adhoc_team);
             let error = locate_bundle_install(&executable, &adhoc).unwrap_err();
@@ -1180,7 +1177,7 @@ mod tests {
             );
         }
 
-        // Right team, someone else's app.
+        // Someone else's app, signed by another team.
         let impostor = StubSeal::signed_by("com.example.other", "ZZZZZZZZZZ");
         let error = locate_bundle_install(&executable, &impostor).unwrap_err();
         let message = error.to_string();
@@ -1216,10 +1213,10 @@ mod tests {
 
     #[test]
     fn nothing_in_a_staged_bundle_is_writable_by_anyone_else() {
-        // Directory modes were the gap: file modes were normalized while
-        // `create_dir_all` left every directory at 0777 minus the umask. Under
-        // `umask 002` that is 0775, so any member of the group could replace a
-        // nominally 0644 file inside an installed bundle and break its seal.
+        // Staged directories must not be writable by group or other. Under
+        // `umask 002` a directory created 0777 ends up 0775, so a group member
+        // could replace a nominally 0644 file inside an installed bundle and
+        // break its seal.
         //
         // Proving that needs a umask set, and a umask is process-wide while
         // cargo runs tests as threads. A mutex would only cover this module,
@@ -1495,13 +1492,10 @@ mod tests {
 
     /// Serialize this module's tests.
     ///
-    /// Two of them change process-wide state: one points `XDG_STATE_HOME` at a
-    /// temporary root, and one sets the umask to prove the extractor does not
-    /// inherit it. Cargo runs tests as threads in one process, so either would
-    /// otherwise leak into whatever else happened to be creating files at that
-    /// moment. It cost an afternoon to see that, because the symptom was two
-    /// unrelated tests failing on permissions. The whole module runs in well
-    /// under a second, so serializing is free.
+    /// Several of them point `XDG_STATE_HOME` at a temporary root. Cargo runs
+    /// tests as threads in one process, so that change would otherwise leak
+    /// into whatever else is running at that moment. The whole module runs in
+    /// well under a second, so serializing is free.
     fn serialized() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|error| error.into_inner())
@@ -1532,13 +1526,11 @@ mod tests {
     #[test]
     fn an_install_in_a_group_writable_directory_can_still_update() {
         let _serial = serialized();
-        // The layout this exists for is the ordinary one. `/Applications` is
-        // `drwxrwxr-x root:admin`, and an earlier version kept the update lock
-        // beside the bundle, where the private-file helper refuses to create
-        // one because the parent is writable by an untrusted principal. So
-        // `kettle update` failed before staging anything, on the only install
-        // location the documentation tells people to use. Every test used a
-        // private 0700 temporary directory, and none of them noticed.
+        // `/Applications` is `drwxrwxr-x root:admin`, and the private-file
+        // helper refuses to create a lock in a directory an untrusted principal
+        // can write. A lock beside the bundle would make `kettle update` fail
+        // before staging anything, in the only install location the docs tell
+        // people to use. A private 0700 test directory cannot catch that.
         let temp = kettle_test_support::private_tempdir("kettle-macos-shared-");
         let applications = temp.path().join("Applications");
         std::fs::create_dir_all(&applications).unwrap();
@@ -1783,9 +1775,9 @@ mod tests {
     fn a_published_archive_extracts_verifies_and_swaps_for_real() {
         let _serial = serialized();
         let Ok(archive) = std::env::var("KETTLE_MACOS_ARCHIVE") else {
-            // Same convention as the mermaid gate: skipping is fine locally,
-            // but a run that claims to cover this must be able to fail. Without
-            // the escape hatch this test could quietly stop testing anything.
+            // Like the mermaid gate, a missing archive skips locally but
+            // fails when `KETTLE_MACOS_ARCHIVE_REQUIRED` is set, so a run that
+            // claims to cover this cannot quietly skip.
             assert!(
                 std::env::var("KETTLE_MACOS_ARCHIVE_REQUIRED").is_err(),
                 "KETTLE_MACOS_ARCHIVE_REQUIRED is set but KETTLE_MACOS_ARCHIVE is not; \

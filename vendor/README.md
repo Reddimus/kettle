@@ -10,7 +10,7 @@ The patched packages remain outside the product workspace, but
 dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
 target, doctest, and warnings-denied clippy target with `just vendor-check`.
-CI exercises the parser patches on Linux and the PTY patch on both Linux and
+CI exercises the parser patches on Linux and the PTY patch on Linux, macOS, and
 native Windows. Dependabot excludes this validation workspace and reads patched
 crate manifests only as resolution support files. Updating vendored manifests
 or this lock requires a reviewed vendor-source update that revalidates provenance
@@ -105,14 +105,14 @@ to route graphics controls around the text parser.
   the application directory, working directory, or `PATH` during pane creation.
   A second opt-in command-builder flag creates Windows automation children
   suspended, assigns them to a shared kill-on-close Job Object, and resumes only
-  after assignment succeeds. Rollback proves a failed assignment/resume really
-  terminated the suspended process; cloned killers retain the same Job handle
-  without a fallible duplication step. Job accounting exposes whether a live
-  descendant can still write before Kettle closes ConPTY, and process-handle
-  signalling disambiguates the valid exit code 259 from `STILL_ACTIVE`. This is performed inside
-  `CreateProcessW`'s owning backend because attaching from Kettle after spawn
-  leaves an unavoidable window in which immediate descendants do not inherit
-  the job.
+  after assignment succeeds. The assignment happens inside `CreateProcessW`'s
+  owning backend because attaching from Kettle after spawn leaves an
+  unavoidable window in which immediate descendants do not inherit the job.
+  Rollback proves a failed assignment/resume really terminated the suspended
+  process; cloned killers retain the same Job handle without a fallible
+  duplication step. Job accounting exposes whether a live descendant can still
+  write before Kettle closes ConPTY, and process-handle signalling
+  disambiguates the valid exit code 259 from `STILL_ACTIVE`.
   A third opt-in, `CommandBuilder::set_require_cwd`, hands the configured
   `cwd` to the OS unchanged. Upstream replaces a `cwd` that is not a directory
   at spawn time with the home directory, so a directory deleted after Kettle's

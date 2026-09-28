@@ -57,8 +57,8 @@ are within each upstream repo).
   the VT parser sees them, decodes to RGBA, and the renderer composites them
   as scroll-anchored GPU textures. kitty advanced ops implemented:
   `a=t` transmit-only (stored for later), `a=p` place-by-id, `a=d`
-  delete (all / by id), `z=` z-index ordering. Unicode placeholders,
-  animation and relative placements remain future work.
+  delete (all / by id), `z=` z-index ordering, Unicode placeholders,
+  animation, and relative placements.
 - **Config syntax + theme model** — Ghostty's `key = value` grammar
   (`ghostty/src/config/Config.zig`); themes are the iTerm2-Color-Schemes
   `ghostty/` set that Ghostty itself consumes (it is not vendored in-tree —
@@ -87,9 +87,4 @@ are within each upstream repo).
 
 ## Open questions / next experiments
 
-- Tiled multi-pane GPU rendering (per-pane viewport scissor) — designed,
-  landing next; current build cycles focus between panes full-window.
-- Hyperlink (OSC 8) click + URL autodetection overlay.
-- Shell integration (OSC 133 prompt marks) for prompt jumping.
 - SSH multiplexing / detachable session server (WezTerm-style).
-- Session restore (serialize the pane tree + cwd).

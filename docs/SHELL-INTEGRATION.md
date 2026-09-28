@@ -20,9 +20,9 @@ Kettle 4.0 and later do not publish Windows builds. This section records the
 automatic PowerShell behavior of releases through 3.3.0. The manual snippets
 below remain supported anywhere the named shell runs.
 
-Since v2.30.0, `shell-integration = on` is the default. Automatic injection is
-currently implemented only when Windows Kettle selects `pwsh` or
-`powershell` as its default shell:
+`shell-integration = on` is the default. Automatic injection is implemented
+only when Windows Kettle launches `pwsh` or `powershell` as its default shell
+or as a bare explicit `command`. It adds:
 
 - **OSC 7** (current working directory) — so the tab/title tracks `cd` and new
   tabs / splits inherit the directory.
@@ -39,7 +39,8 @@ Automatic injection does **not** currently cover:
 
 - native Linux or macOS bash, zsh, or fish;
 - a Linux shell launched through `command = wsl.exe ...`;
-- any explicit `command = ...`, including explicit PowerShell; or
+- any explicit `command = ...` other than a bare `pwsh[.exe]` or
+  `powershell[.exe]`; or
 - any shell when `shell-integration = off`.
 
 Those cases need the one-line install below. In particular, install the snippet
@@ -199,9 +200,9 @@ untouched.
 
 ## Marks
 
-The four `OSC 133` marks bracket one command. What kettle gets from them is a
-prompt boundary it can jump to, and — because `C` without a matching `D` means
-a command is still running — a reliable answer to "is this pane busy?".
+The four `OSC 133` marks bracket one command. They give kettle a prompt
+boundary to jump to and a reliable answer to "is this pane busy?". A `C`
+without a matching `D` means a command is still running.
 
 ```mermaid
 sequenceDiagram
@@ -234,7 +235,7 @@ busy and its close behaviour is unchanged.
   an **ssh session's remote cwd is never adopted locally**. Windows paths travel URL-form
   (`file://HOST/C:/Users/...`) and normalize back to drive-letter form.
 
-The OSC 133 marks also make close-confirmation prompt-aware: a pane idle at an
-integrated-shell prompt — marks seen, no command running — skips the
-`ask-before-closing` dialog; a shell without integration always counts
-as busy, so its behavior is unchanged.
+The OSC 133 marks also make close-confirmation prompt-aware. A pane idle at an
+integrated-shell prompt (marks seen, no command running) skips the
+`ask-before-closing` dialog. A shell without integration always counts as busy,
+so its behavior is unchanged.

@@ -38,31 +38,31 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | Area | kettle | Ghostty | kitty | WezTerm | Terminator | Alacritty |
 |---|---|---|---|---|---|---|
 | **Tabs** | ✅ tree of splits per tab | ✅ | ✅ | ✅ | ✅ | ⛔ (no tabs) |
-| Per-tab close `✕` | ✅ always-on chip + hover red + pointer cursor (v1.3.2) | 🟡 | ✅ | ✅ `show_close_tab_button_in_tabs` | ✅ notebook close btn | — |
+| Per-tab close `✕` | ✅ always-on chip + hover red + pointer cursor | 🟡 | ✅ | ✅ `show_close_tab_button_in_tabs` | ✅ notebook close btn | — |
 | New-tab `+` button | ✅ trailing segment | ✅ | ✅ | ✅ `show_new_tab_button_in_tab_bar` | ✅ | — |
-| **New-tab `▾` shell dropdown** | ✅ WT-order shells + WSL distros + VS 2022 dev shells + Git Bash, `Ctrl+Shift+1..9`, live keybind hints (v2.18.0) | ⛔ | ⛔ | 🟡 `ShowLauncher` | ⛔ | — |
-| Tab bar position | ✅ `tab-bar-position=top\|bottom` | ✅ | ✅ | ✅ `tab_bar_at_bottom` | ✅ `tab_position` | — |
-| Tab title eliding | ✅ `truncate()` | ✅ | ✅ | ✅ `tab_max_width` | ✅ | — |
-| **Drag-to-reorder tabs** | ✅ + ghost segment (v1.3.0 / v1.3.5) | ✅ | ✅ | ✅ | ✅ (GTK) | — |
-| **Tab tear-off → new window (drag)** | ✅ Chromium model (v2.19.0): tears AT the strip threshold into a live window riding the OS move loop (Snap Layouts mid-drag); inherits source size, pointer holds the tab; Esc-before-tear cancels; `move_tab_to_new_window` keybind variant; Wayland = at-release fallback | ⛔ | 🟡 (`detach_tab`, keyboard) | ⛔ | ⛔ | — |
-| **Tab re-dock (drag window→strip)** | ✅ (v2.19.0): drop a torn window on any kettle strip — dragged window goes translucent, accent insertion line marks the slot, lone-tab windows re-dock by their tab; live PTYs move both ways | ⛔ | ⛔ | ⛔ | ⛔ | — |
-| **Multi-window (one process)** | ✅ N OS windows, shared GPU device, per-window accent hue (v2.18.0) | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Activity / bell tab dots** | ✅ palette[6] / palette[3] (v1.3.0) | ⛔ | 🟡 | ✅ `tab_bar.bell` | ✅ (Activity / Urgent Watcher) | — |
-| **Silence-watcher dot** | ✅ palette[8] dim, `tab-silence-threshold-ms` (v1.3.3) | ⛔ | ⛔ | ⛔ | ✅ (Silence Watcher origin) | — |
-| **Undo-close tab** | ✅ ring-of-10, `undo_close_tab` (v1.3.0) | ⛔ | 🟡 | ✅ origin | ⛔ | — |
-| **Duplicate tab / pane** | ✅ clone argv + cwd (v1.3.0) | ⛔ | ⛔ | ✅ | ⛔ | — |
+| **New-tab `▾` shell dropdown** | ✅ WT-order shells + WSL distros + VS 2022 dev shells + Git Bash, `Ctrl+Shift+1..9`, live keybind hints | ⛔ | ⛔ | 🟡 `ShowLauncher` | ⛔ | — |
+| Tab bar position | ✅ `tab-bar-position=top\|bottom\|left\|right` | ✅ | ✅ | ✅ `tab_bar_at_bottom` | ✅ `tab_position` | — |
+| Tab title eliding | ✅ `fit_tab_segment_title()` | ✅ | ✅ | ✅ `tab_max_width` | ✅ | — |
+| **Drag-to-reorder tabs** | ✅ + ghost segment | ✅ | ✅ | ✅ | ✅ (GTK) | — |
+| **Tab tear-off → new window (drag)** | ✅ Chromium model: tears AT the strip threshold into a live window riding the OS move loop (Snap Layouts mid-drag); inherits source size, pointer holds the tab; Esc-before-tear cancels; `move_tab_to_new_window` keybind variant; Wayland = at-release fallback | ⛔ | 🟡 (`detach_tab`, keyboard) | ⛔ | ⛔ | — |
+| **Tab re-dock (drag window→strip)** | ✅ drop a torn window on any kettle strip — dragged window goes translucent, accent insertion line marks the slot, lone-tab windows re-dock by their tab; live PTYs move both ways | ⛔ | ⛔ | ⛔ | ⛔ | — |
+| **Multi-window (one process)** | ✅ N OS windows, shared GPU device, per-window accent hue | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Activity / bell tab dots** | ✅ palette[6] / palette[3] | ⛔ | 🟡 | ✅ `tab_bar.bell` | ✅ (Activity / Urgent Watcher) | — |
+| **Silence-watcher dot** | ✅ palette[8] dim, `tab-silence-threshold-ms` | ⛔ | ⛔ | ⛔ | ✅ (Silence Watcher origin) | — |
+| **Undo-close tab** | ✅ ring-of-10, `undo_close_tab` | ⛔ | 🟡 | ✅ origin | ⛔ | — |
+| **Duplicate tab / pane** | ✅ clone argv + cwd | ⛔ | ⛔ | ✅ | ⛔ | — |
 | **Splits/panes** | ✅ binary tree | ✅ | ✅ (layouts) | ✅ | ✅ | ⛔ |
 | Split keybinds | ✅ Terminator-exact | ✅ | ✅ | ✅ | ✅ (origin) | — |
 | macOS directional focus chord | ✅ `Cmd+Opt+Arrow` + `Ctrl+Cmd+Arrow` | ✅ `super+alt+arrow` | ⛔ none by default | 🟡 `Ctrl+Shift+Arrow` (portable, not macOS-native) | — (Linux only) | — |
 | Unfocused-pane dimming | ✅ `unfocused-split-opacity` 0.7 | ✅ (origin) | 🟡 | 🟡 | ⛔ | — |
 | Pane zoom/maximize | ✅ `Ctrl+Shift+X` | ✅ | ✅ | ✅ `is_zoomed` | ✅ | — |
 | Configurable divider color | ✅ `split-divider-color` | 🟡 | 🟡 | ✅ `split` color | 🟡 (GTK theme) | — |
-| Broadcast / group input | ✅ `Super+G` (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
-| **Right-click context menu** | ✅ floating panel, 8 entries (v1.3.0/v1.3.2) | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
+| Broadcast / group input | ✅ `Ctrl+Cmd+B` on macOS, `Ctrl+Shift+G` on Windows, `Super+G` elsewhere (tab bar + pane border tint warn) | ⛔ | ✅ `multi-input` | ✅ `ActivateKeyTable` | ✅ `broadcast_all` (origin) | ⛔ |
+| **Right-click context menu** | ✅ floating panel with copy/paste, split, pane, tab and group rows, Theme / Profile / Preferences submenus, and config and Lua items | ⛔ | ⛔ | 🟡 | ✅ origin | ⛔ |
 | **macOS Dock menu** | ✅ New Window + New Tab + open-window list | ✅ | ✅ New OS Window | ✅ | — | ⛔ (open since 2022) |
 | **Smart selection (regex double-click)** | ✅ URL / path / IPv4 / git SHA | ⛔ | ⛔ | 🟡 `pattern` | ⛔ | ⛔ (iTerm2 origin) |
-| **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 41 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
-| **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` (v1.0) | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
+| **Command palette** | ✅ `Ctrl+Shift+K`, fuzzy, 102 commands | ✅ origin | 🟡 (`kitten hints`) | 🟡 (Lua) | ⛔ | ⛔ |
+| **Quick-select / URL hints** | ✅ `Ctrl+Shift+H` | ⛔ | ✅ `kitten hints` origin | ✅ `QuickSelect` | ⛔ | ⛔ |
 | **Search overlay** | ✅ `Ctrl+Shift+F`; Terminator-style bottom bar that leaves the grid selectable and clickable; regex with a literal fallback for unparseable patterns; Smart/Match/Ignore; wrap/invert; signed history + bounded soft-wrap highlights; incremental scan + Results limited | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Shell integration (OSC 133)** | ✅ bundled `kettle --shell-integration <shell>` + `Ctrl+Up/Down` jump | ✅ | ✅ | ✅ | ⛔ | 🟡 |
 | **Kitty keyboard protocol** | ✅ progressive CSI-u negotiation + press/repeat/release encoder | ✅ | ✅ (origin) | ✅ | 🟡 (version/config dependent) | 🟡 |
@@ -74,7 +74,7 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 | **Triggers (regex → urgency)** | ✅ `trigger = REGEX` | ⛔ | ⛔ | 🟡 (Lua) | ⛔ | ⛔ (iTerm2 origin) |
 | **Named layout / profile** | ✅ `--layout NAME` + `--profile NAME` | 🟡 | 🟡 | 🟡 (workspace via Lua) | ✅ (origin) | ⛔ |
 | **Session restore (multi-window)** | ✅ opt-in; preflight-bounded windows/panes/surface pixels, geometry clamped before native creation | 🟡 | 🟡 (`--session` startup file) | 🟡 (Lua/plugin) | ✅ (layouts origin) | ⛔ |
-| **Peacock accent-color** | ✅ per-window auto hue, on by default (v2.18.0); pin with `accent-color`/`--accent`, opt out via `accent-color = theme` | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ (Peacock-for-VSC origin) |
+| **Peacock accent-color** | ✅ per-window auto hue, on by default; pin with `accent-color`/`--accent`, opt out via `accent-color = theme` | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ (Peacock-for-VSC origin) |
 | **Annotated screenshots** | ✅ `--annotate TEXT` (caption variant) | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ |
 | **Status bar widget** | ✅ `status-bar = top\|bottom` | ⛔ | ✅ origin | ✅ Lua | ⛔ | ⛔ |
 | **Cursor** | ✅ block/bar/underline | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -137,31 +137,31 @@ Legend: ✅ implemented · 🟡 partial · ⛔ not yet · — n/a.
 - **Pane zoom** — WezTerm `wezterm-gui/src/termwindow/mod.rs:264`
   `pub is_zoomed: bool`. kettle: `Tab.zoomed` + `Mux::toggle_zoom`,
   `Ctrl+Shift+X`.
-- **Tab title eliding** — WezTerm `tab_max_width`; kettle reuses its own
-  `truncate()` helper in `kettle-render/src/lib.rs` instead of exposing a
-  horizontal tab-width cap.
+- **Tab title eliding** — WezTerm `tab_max_width`; kettle uses its own
+  `fit_tab_segment_title()` helper in `kettle-render/src/lib.rs` instead of
+  exposing a horizontal tab-width cap.
 - **Broadcast / group input** — Terminator `terminatorlib/terminator.py`
   `broadcast_all` group action (origin of the "send keystrokes to every
-  pane in this tab" affordance); kitty `multi-input.py` extension. kettle's
-  variant: `Mux::broadcast_write_with_scroll` + `broadcast_paste`
-  scope to the active tab's leaves only (per-window-per-tab, not every
-  pane in every tab — matches Terminator's intent). Visual indicator
-  uses theme `palette[3]` (yellow) on both the active tab segment's
-  accent and the focused-pane border, so the user can see broadcast is
-  on regardless of `tab-bar` mode.
+  terminal" affordance); kitty `multi-input.py` extension. kettle's
+  variant: `Mux::broadcast_write_delivery` + `broadcast_paste_delivery`
+  follow the active broadcast scope. The default toggle covers the active
+  tab, `broadcast_window` (Terminator's `broadcast_all`) covers every pane
+  in the window, and a named group can span tabs and windows. Visual
+  indicator uses theme `palette[3]` (yellow) on both the active tab
+  segment's accent and the focused-pane border, so the user can see
+  broadcast is on regardless of `tab-bar` mode.
 - **Drag-and-drop file paths** — iTerm2 (long history; macOS-conventional);
   kitty `paste_from_drop` config; WezTerm `WindowEvent::DroppedFile` handler;
   GTK provides this builtin for Terminator. kettle's variant in
-  `kettle-ui/src/app.rs` `WindowEvent::DroppedFile`: shell-quote the path
-  via the pure helper `shell_quote_path` (POSIX single-quote escape,
-  `'\''` for embedded apostrophes — works on bash/zsh/fish/pwsh-7+),
-  append a trailing space so `cat ` + drop + Enter Just Works, then route
-  through `input::paste_payload(text, bracketed)` so vim / fzf / mc with
-  bracketed paste enabled get the bytes wrapped in `\e[200~ … \e[201~`
-  (no per-char normal-mode interpretation). Broadcast-aware: with group
-  input on, the path goes to every pane in the active tab using
-  `broadcast_paste`, which reads each pane's `BRACKETED_PASTE` mode
-  separately for the wrap (a broadcast set containing one shell + one
+  `kettle-ui/src/app.rs` `WindowEvent::DroppedFile` feeds the shared
+  path-paste flow. `mux::quote_path_for` quotes the path for the target
+  pane's shell (POSIX `'\''`, PowerShell `''`, cmd double quotes), WSL panes
+  get the translated Linux path, and a trailing space follows so `cat ` +
+  drop + Enter Just Works. `input::paste_payload(text, bracketed)` wraps the
+  bytes in `\e[200~ … \e[201~` for vim / fzf / mc with bracketed paste
+  enabled (no per-char normal-mode interpretation). Broadcast-aware: with
+  group input on, every pane in the broadcast scope gets its own quoting and
+  its own `BRACKETED_PASTE` check (a broadcast set containing one shell + one
   vim doesn't break either of them).
 
 ## Tab-bar hit regions
@@ -184,18 +184,18 @@ flowchart LR
     TabBar -. "content area below is excluded<br/>(mouse-reporting stays intact)" .-> Body["pane grid"]
 ```
 
-Resolution order on `MouseInput::Pressed` (left button): `✕` rect → `+`
-rect → tab body (→ set active). Middle button on any tab body → close that
-tab. Closing the last tab exits the app.
+Resolution order on `MouseInput::Pressed` (left button): `▾` rect → `+`
+rect → `‹`/`›` overflow arrows → tab segment (`✕` rect → close, body → set
+active). Middle button on any tab body → close that tab. Closing the last
+tab closes its window; the app exits when its last window closes.
 
-Since v2.18.0 the `+` is followed by the Windows-Terminal-style `▾` shell
-dropdown — always visible on every platform (it previously hid on
-single-shell Unix hosts) — listing the detected shells, then Settings… /
-Command palette / About kettle, each row with a right-aligned dimmed hint
-computed from the **live** keybind map (rebinds show the user's actual
-chord).
+On horizontal tab bars, the Windows-Terminal-style `▾` shell dropdown sits
+just left of the `+` on every platform. It lists the detected shells, then
+Settings… / Command palette / About kettle. Each row has a right-aligned
+dimmed hint computed from the **live** keybind map, so rebinds show the
+user's actual chord.
 
-Since v2.19.0 a left-drag that pulls a tab **1.5 bar-heights past the tab
+A left-drag that pulls a tab **1.5 bar-heights past the tab
 band** (any direction; pure-distance hysteresis, so dragging along the
 strip still reorders) **tears the tab off instantly** into a live window
 that inherits the source window's size and is positioned so the pointer
@@ -341,10 +341,10 @@ Future → Done since the v1.0 cut of this matrix"):
   tags use the protected signing environment to Developer ID sign, notarize,
   staple and Gatekeeper-assess the app, and fail closed if credentials are
   absent.
-- **Background blur / translucency on macOS / Windows** — kettle
-  already honors `background-opacity` on Linux;
-  the per-OS Vibrancy / DWM blur extension is desktop-shell-
-  specific and not yet wired through winit.
+- **Background blur beyond KWin** — `window-blur` already uses native
+  material on macOS and Windows and KWin's blur protocol on Wayland. On
+  Linux, X11 and other Wayland compositors get no blur and a 99%
+  live-opacity floor.
 - **Source-build AUR companion** (`kettle`, no `-bin` suffix) and
   upstream nixpkgs submission (so `nix-env -iA nixpkgs.kettle`
   works without the flake-input dance).
