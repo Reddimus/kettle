@@ -11,6 +11,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - An idle window wakes about 0.3 times a second instead of 1.3. The
   event-loop watchdog now sleeps while the loop is idle instead of checking
   every second.
+- A confirm bar draws its destructive button, such as Close or Delete, with a
+  bold label, so it stands apart from Cancel.
 
 ### Fixed
 

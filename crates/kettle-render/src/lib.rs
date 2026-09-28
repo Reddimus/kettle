@@ -1113,8 +1113,8 @@ pub struct ConfirmDialogOverlay {
     pub focus_idx: usize,
 }
 
-/// Paint-side button shape. `destructive: true` gets
-/// the red-accent treatment (Close / Delete buttons).
+/// Paint-side button shape. `destructive: true` draws the label in bold
+/// (Close / Delete buttons).
 #[derive(Debug, Clone)]
 pub struct ConfirmDialogButton {
     pub label: String,
@@ -7065,18 +7065,7 @@ impl Renderer {
             // the real ratio drifts with the scrollback and a valid custom theme
             // could land under the floor the helper advertises.
             menu_q.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[1], 1.0));
-            let mut buttons_label = String::new();
-            for (i, btn) in dlg.buttons.iter().enumerate() {
-                if !buttons_label.is_empty() {
-                    buttons_label.push_str("  ");
-                }
-                let marker = if i == dlg.focus_idx { "▶" } else { " " };
-                buttons_label.push('[');
-                buttons_label.push_str(marker);
-                buttons_label.push(' ');
-                buttons_label.push_str(&btn.label);
-                buttons_label.push(']');
-            }
+            let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);
             // The bar is `palette[1]`, not the chrome background, so the theme
             // foreground is not guaranteed to be readable on it. On the shipped
             // TokyoNight Night default it is light lavender (#c0caf5) on light
@@ -7105,19 +7094,43 @@ impl Renderer {
                 &buttons_label,
                 confirm_bar_columns(sw, cw),
             );
+            let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
             // Same equality gate as the other chrome buffers. Only one arm of
             // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
+            // enough (see `search_buffer_text`'s doc comment). The key marks
+            // the bold spans, so the same text with different weights still
+            // re-sets the buffer.
+            let key: String = spans
+                .iter()
+                .map(|&(text, bold)| {
+                    if bold {
+                        format!("\u{1}{text}\u{1}")
+                    } else {
+                        text.to_string()
+                    }
+                })
+                .collect();
+            if self.search_buffer_text != key {
+                let regular = Attrs::new().family(Family::Name(&family));
+                let bold = regular.clone().weight(Weight::BOLD);
+                self.search_buffer.set_rich_text(
+                    spans.iter().map(|&(text, is_bold)| {
+                        (
+                            text,
+                            if is_bold {
+                                bold.clone()
+                            } else {
+                                regular.clone()
+                            },
+                        )
+                    }),
+                    &regular,
                     Shaping::Advanced,
                     None,
                 );
-                self.search_buffer_text = label;
+                self.search_buffer_text = key;
             }
             self.search_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -12046,6 +12059,69 @@ fn compose_confirm_bar_label(
     };
     let gap = max_cols - buttons_cols - display_width(&left);
     format!("{left}{}{buttons_label}", " ".repeat(gap))
+}
+
+/// The confirm bar's button row, and the byte range of each destructive
+/// button's label within it.
+///
+/// Destructive labels (Close, Delete) are drawn bold. The whole bar is already
+/// `palette[1]`, so a red accent on one button would not show.
+fn confirm_bar_buttons(
+    buttons: &[ConfirmDialogButton],
+    focus_idx: usize,
+) -> (String, Vec<std::ops::Range<usize>>) {
+    let mut row = String::new();
+    let mut bold = Vec::new();
+    for (i, btn) in buttons.iter().enumerate() {
+        if !row.is_empty() {
+            row.push_str("  ");
+        }
+        row.push('[');
+        row.push_str(if i == focus_idx { "▶" } else { " " });
+        row.push(' ');
+        let start = row.len();
+        row.push_str(&btn.label);
+        if btn.destructive {
+            bold.push(start..row.len());
+        }
+        row.push(']');
+    }
+    (row, bold)
+}
+
+/// Split the fitted bar `label` into `(text, bold)` spans.
+///
+/// `compose_confirm_bar_label` keeps the button `row` intact and flush right,
+/// or returns an empty label, so the row's `bold` ranges shift by the row's
+/// offset in `label`.
+fn confirm_bar_spans<'a>(
+    label: &'a str,
+    row: &str,
+    bold: &[std::ops::Range<usize>],
+) -> Vec<(&'a str, bool)> {
+    if label.is_empty() {
+        return Vec::new();
+    }
+    if !label.ends_with(row) {
+        return vec![(label, false)];
+    }
+    let offset = label.len() - row.len();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in bold {
+        let (start, end) = (offset + range.start, offset + range.end);
+        if start > at {
+            spans.push((&label[at..start], false));
+        }
+        if end > start {
+            spans.push((&label[start..end], true));
+        }
+        at = end;
+    }
+    if at < label.len() {
+        spans.push((&label[at..], false));
+    }
+    spans
 }
 
 /// Columns in which the confirm bar is painted. The App uses this same budget
@@ -19191,11 +19267,80 @@ mod completion_panel_tests {
 #[cfg(test)]
 mod title_fit_tests {
     use super::{
-        CONFIRM_BAR_MIN_CONTRAST, color, compose_confirm_bar_label, confirm_bar_text_color,
-        display_width, fit_pane_titlebar_title, fit_single_line_label, fit_tab_path,
-        fit_tab_segment_title, fit_tab_title, middle_ellipsis, overlay_label_cols,
-        production_source,
+        CONFIRM_BAR_MIN_CONTRAST, ConfirmDialogButton, color, compose_confirm_bar_label,
+        confirm_bar_buttons, confirm_bar_spans, confirm_bar_text_color, display_width,
+        fit_pane_titlebar_title, fit_single_line_label, fit_tab_path, fit_tab_segment_title,
+        fit_tab_title, middle_ellipsis, overlay_label_cols, production_source,
     };
+
+    fn button(label: &str, destructive: bool) -> ConfirmDialogButton {
+        ConfirmDialogButton {
+            label: label.to_string(),
+            destructive,
+        }
+    }
+
+    /// Destructive buttons (Close, Delete) draw their label in bold. The whole
+    /// bar is already `palette[1]`, so a red accent on one button could not
+    /// show. Only the label is bold; the brackets and focus marker stay
+    /// regular, and every byte of the bar lands in exactly one span.
+    #[test]
+    fn confirm_bar_bolds_only_destructive_labels() {
+        let buttons = [button("Cancel", false), button("Close", true)];
+        let (row, bold) = confirm_bar_buttons(&buttons, 0);
+        assert_eq!(row, "[▶ Cancel]  [  Close]");
+
+        let label = compose_confirm_bar_label("  ⚠ Close this pane?", "  Tab", &row, 60);
+        let spans = confirm_bar_spans(&label, &row, &bold);
+        assert_eq!(
+            spans.iter().map(|(text, _)| *text).collect::<String>(),
+            label
+        );
+        let bold_text: Vec<&str> = spans
+            .iter()
+            .filter(|(_, bold)| *bold)
+            .map(|(text, _)| *text)
+            .collect();
+        assert_eq!(bold_text, ["Close"]);
+    }
+
+    /// A bar too narrow for its buttons paints nothing, and a dialog without a
+    /// destructive button stays regular weight.
+    #[test]
+    fn confirm_bar_spans_handle_narrow_bars_and_safe_dialogs() {
+        let (row, bold) = confirm_bar_buttons(&[button("Delete", true)], 0);
+        let empty = compose_confirm_bar_label("  ⚠ Delete it?", "", &row, 3);
+        assert!(confirm_bar_spans(&empty, &row, &bold).is_empty());
+
+        let (row, bold) = confirm_bar_buttons(&[button("OK", false)], 0);
+        let label = compose_confirm_bar_label("  ⚠ Apply?", "", &row, 40);
+        let spans = confirm_bar_spans(&label, &row, &bold);
+        assert!(!spans.is_empty());
+        assert!(spans.iter().all(|(_, bold)| !bold));
+
+        // No buttons at all still shows the prompt.
+        let (row, bold) = confirm_bar_buttons(&[], 0);
+        let label = compose_confirm_bar_label("  ⚠ Working...", "", &row, 40);
+        assert_eq!(
+            confirm_bar_spans(&label, &row, &bold),
+            [(label.as_str(), false)]
+        );
+    }
+
+    /// The span helpers prove nothing unless the bar is drawn from them.
+    #[test]
+    fn the_confirm_bar_draws_destructive_labels_bold() {
+        let src = production_source();
+        assert!(
+            src.contains("let (buttons_label, bold_labels) = confirm_bar_buttons(&dlg.buttons, dlg.focus_idx);"),
+            "the confirm bar must build its button row with confirm_bar_buttons"
+        );
+        assert!(
+            src.contains("let spans = confirm_bar_spans(&label, &buttons_label, &bold_labels);")
+                && src.contains("let bold = regular.clone().weight(Weight::BOLD);"),
+            "the confirm bar must draw its spans, with destructive labels bold"
+        );
+    }
 
     /// A destructive confirmation has to be readable in EVERY bundled theme.
     ///
