@@ -40,8 +40,8 @@
 # - All work happens in a temp directory that's removed on exit (via
 #   `trap`) regardless of success/failure.
 # - To uninstall later: run `<prefix>/share/kettle/install.sh --uninstall`
-#   (the script writes a prefix-local helper so the uninstall path doesn't
-#   depend on the original temp dir).
+#   (the bundled installer records a prefix-local helper, so uninstall
+#   doesn't depend on the original temp dir).
 
 # NOTE: this script is `#!/usr/bin/env sh` and is run via `curl … | sh`,
 # so it must stay POSIX. `set -o pipefail` is a bashism — under dash
@@ -69,17 +69,16 @@ fi
 ASSET="kettle-linux-x86_64.tar.gz"
 
 # --- Trust root for the signed release manifest ---------------------
-# Every release publishes an Ed25519-signed `kettle-update-manifest.json`
-# alongside the tarballs — the exact scheme `kettle-update` (crates/
-# kettle-update) already uses to authenticate self-updates from a trust
-# root that is independent of the download channel: the signing key lives
-# only in the release pipeline's secrets, never on whatever serves the
-# tarball. Verifying that signature here (see the "Cryptographic
-# verification" section below) closes the gap a same-origin `.sha256`
-# sidecar can't: an attacker able to substitute the tarball (a compromised
-# CI/release step, a compromised CDN edge, or a MITM scoped to release-
-# asset delivery) can regenerate a matching sidecar for their own payload,
-# but can't forge a signature without the release key.
+# Every release since v2.35.0 publishes an Ed25519-signed
+# `kettle-update-manifest.json` alongside the tarballs, the same scheme
+# `kettle-update` (crates/kettle-update) uses to authenticate self-updates.
+# Its trust root is independent of the download channel. The signing key
+# lives only in the release pipeline's secrets, never on whatever serves the
+# tarball. A same-origin `.sha256` sidecar lacks that independence. An
+# attacker able to substitute the tarball (a compromised CI/release step, a
+# compromised CDN edge, or a MITM scoped to release-asset delivery) can
+# regenerate a matching sidecar for their own payload, but can't forge a
+# signature without the release key. See "Cryptographic verification" below.
 #
 # This is the canonical `packaging/update-public.pem` trust root, whose DER
 # SubjectPublicKeyInfo (RFC 8410) contains the same 32 raw bytes as
@@ -151,10 +150,6 @@ case "$(uname -m)" in
     EXPECTED_TARGET="aarch64-unknown-linux-gnu"
     ;;
   *)
-    # Name the supported arches and give 32-bit users a
-    # real path instead of a dead end. wgpu/glyphon have no tier-1 support on
-    # armv7l/i686, so a source build there is experimental — say so, and point
-    # at the support-tier matrix + a zero-build Nix sandbox to try first.
     echo "kettle install-online.sh: no prebuilt binary for arch '$(uname -m)'." >&2
     echo "Prebuilt Linux binaries are x86_64 (amd64) and aarch64 (arm64) only." >&2
     echo "32-bit targets (armv7l / i686) are source-only and EXPERIMENTAL —" >&2
@@ -279,13 +274,11 @@ download_headers_limited() {
   return 0
 }
 
-# Detect the SHA-256 verifier UP FRONT, not after the
-# download. On a minimal container image (e.g. `docker run -it ubuntu`)
-# `sha256sum` lives in `coreutils` which may be missing; previously
-# the script would download the ~5 MB tarball, hit the verify step,
-# print "SHA-256 verification FAILED" and exit — making it look like
-# a corrupted download. Bail BEFORE download so the user fixes the
-# right problem (`apt-get install coreutils` etc).
+# Detect the SHA-256 verifier before the download. Minimal container images
+# (e.g. `docker run -it ubuntu`) may lack `coreutils`, which provides
+# `sha256sum`. Failing only at the verify step would look like a corrupted
+# download, so bail first and point the user at the right fix
+# (`apt-get install coreutils` etc).
 if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
   echo "kettle install-online.sh: missing 'sha256sum' (Linux) or 'shasum -a 256' (macOS)." >&2
   echo "Install it via your distro's package manager and re-run:" >&2
@@ -304,9 +297,8 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 # --- Resolve target version + URL ----------------------------------
 if [ "$VERSION" = "latest" ]; then
   # The /releases/latest endpoint redirects to /releases/tag/<tag>.
-  # `curl -sLI` follows redirects and dumps headers; grep the final
-  # `location:` line for the tag. Bare-bones (no jq) so the script
-  # has zero non-coreutils deps.
+  # `curl -sLI` follows redirects and dumps headers; awk and sed pull the
+  # tag from the final `location:` line, so jq isn't needed.
   LATEST_HEADERS="${TMP}/latest.headers"
   if ! download_headers_limited \
       "https://github.com/${REPO}/releases/latest" \
@@ -377,18 +369,17 @@ PACKAGE_MANIFEST_REQUIRED=$(awk -v value="$VERSION_NUMBER" '
   }
 ')
 
-# The comment above is right that a compromised release channel must not get to
-# choose the weaker trust policy. It could, because it chose the *version*.
-# With KETTLE_VERSION unset, VERSION comes from the unauthenticated
-# `releases/latest` redirect, and MANIFEST_REQUIRED is computed from it, so a
-# redirect naming v0.0.0 skipped the whole Ed25519 path and fell through to the
-# same-origin `.sha256` sidecar that the same party serves. That reached
-# `install.sh` from an unauthenticated tarball.
+# A compromised release channel must not choose the weaker trust policy by
+# choosing the *version*. With KETTLE_VERSION unset, VERSION comes from the
+# unauthenticated `releases/latest` redirect, and MANIFEST_REQUIRED is
+# computed from it. Without this floor, a redirect naming v0.0.0 would skip
+# the Ed25519 path, fall back to the same-origin `.sha256` sidecar that the
+# same party serves, and run `install.sh` from an unauthenticated tarball.
 #
 # The legacy path exists for releases that genuinely predate signed manifests,
 # so it stays open when a human names one. A version the channel picked has to
-# meet the floor. Checked here, before the archive is fetched, so a tag the
-# channel invented is never downloaded at all.
+# meet the floor. The check runs before the archive is fetched, so a tag the
+# channel invented is never downloaded.
 if [ "$VERSION_PINNED" -eq 0 ] && [ "$MANIFEST_REQUIRED" -eq 0 ]; then
   echo "kettle install-online.sh: the release channel resolved 'latest' to ${VERSION}, which predates signed manifests (${MANIFEST_MIN_VERSION})." >&2
   echo "A current channel does not answer 'latest' with a release that old, so this is a stale mirror or a downgrade attempt." >&2
@@ -620,19 +611,17 @@ fi
 # --- SHA-256 verification (fallback) --------------------------------
 # Only runs for a release that predates signed manifests. Modern releases
 # already failed closed above if the signature path was unavailable.
-# Releases since v1.3.4
-# ship a `<artifact>.sha256` sidecar generated on the same CI runner as
-# the artifact and served from the very same release-asset channel as
-# the tarball. That still catches what it can: transport corruption, a
-# truncated download, or a wrong/partial file landing at the expected
-# URL. It is NOT an independent trust root the way the signed manifest
-# above is — anyone able to substitute the tarball itself (a compromised
-# CI/release step, a compromised CDN edge, or a MITM scoped to release-
-# asset delivery) can regenerate a matching `.sha256` for their own
-# payload just as easily as the real CI runner did. Treat a pass here as
-# "not obviously corrupted or truncated", not as "verified authentic".
-# Older releases (≤ v1.3.3) did not publish a sidecar; the one-line installer
-# now refuses those rather than execute an unauthenticated archive.
+# Releases since v1.3.4 ship a `<artifact>.sha256` sidecar, generated on the
+# same CI runner as the artifact and served from the same release-asset
+# channel as the tarball. It catches transport corruption, a truncated
+# download, or a wrong/partial file at the expected URL. It is NOT an
+# independent trust root like the signed manifest above. Anyone able to
+# substitute the tarball (a compromised CI/release step, a compromised CDN
+# edge, or a MITM scoped to release-asset delivery) can regenerate a
+# matching `.sha256` for their own payload. Treat a pass here as "not
+# obviously corrupted or truncated", not as "verified authentic". Releases
+# up to v1.3.3 have no sidecar, so the installer refuses them rather than
+# execute an unauthenticated archive.
 if [ "$MANIFEST_VERIFIED" -ne 1 ]; then
   echo "kettle install-online.sh: signed-manifest verification unavailable for ${VERSION} — falling back to the weaker same-origin SHA-256 sidecar." >&2
   SHA_URL="${URL}.sha256"

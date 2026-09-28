@@ -109,9 +109,9 @@ Create `release/prep-vX.Y.Z` from synchronized `main`. Promote
 empty `## [Unreleased]` placeholder, and change only `CHANGELOG.md`. Merge that
 pull request before preparing the release commit.
 
-This ordering closes the tag-before-changelog race recorded in
-`scripts/release.sh`: the release workflow once reached its platform jobs before
-one job rejected the missing version heading.
+This ordering closes the tag-before-changelog race described in
+`scripts/release.sh`. The dated heading reaches `main` before any release
+commit or tag exists.
 
 ### Cutting the previous major into an archive
 
@@ -320,14 +320,12 @@ expected to fail.
 
 ## Known gaps
 
-- The protected `macos-signing` environment is provisioned, and a native arm64
-  rehearsal using its Developer ID certificate and App Store Connect API key
-  was accepted by Apple's notary service. Its stapled ticket survived the final
-  `ditto` archive/extract round trip, Gatekeeper accepted the extracted app, and
-  the executable launched. That proves the credentials and signing order, but
-  it is not a substitute for the release workflow's universal artifact. Before
-  calling the first signed release ready, run the native appearance and
-  Gatekeeper checks above against that official-tag archive.
+- Pre-merge checks never see the released macOS artifact. The appearance gate
+  runs a cut bundle that is not Developer ID signed, and
+  `just macos-update-smoke` checks the previous published archive. Only the
+  release workflow's macOS package job, in the protected `macos-signing`
+  environment, signs, notarizes, staples, and Gatekeeper-assesses the app it
+  publishes.
 - `scripts/verify-release-assets.py` intentionally accepts only draft-release
   API responses. It protects the publish transition in `release.yml`; after
   publication, use the sidecars and signed-manifest procedure above.

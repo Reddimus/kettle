@@ -365,8 +365,8 @@ pub struct RpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub v: u32,
-    /// Event kind: `output`, `command_finished`, `pane_open`, `pane_close`,
-    /// `pane_focus`, `title`, `agent_attached`, `lag`.
+    /// Event kind: `command_finished`, `protocol_notification`, `pane_focus`,
+    /// `title`, `agent_attached`, `tab_moved`, `lag`, or the keepalive `ping`.
     pub event: String,
     /// The pane this event concerns, when applicable.
     #[serde(default, skip_serializing_if = "Option::is_none")]

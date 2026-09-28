@@ -1,11 +1,11 @@
 //! Pane-rooted process tree for macOS, read through libproc and `sysctl`.
 //!
-//! The sysinfo refresh this replaces re-read the argv and cwd of every process
-//! on the machine each time the app polled. The app polls on redraw, so an idle
-//! window with a blinking cursor walked the whole process table about twice a
-//! second. This walk visits only the pane roots and their descendants: one
-//! `proc_listchildpids` and a sized `KERN_PROCARGS2` read per process, plus a
-//! cwd read for the shell a caller asks about.
+//! The app polls on redraw, and a blinking cursor redraws about twice a
+//! second, so reading the argv and cwd of every process on the machine would
+//! make an idle window walk the whole process table. This walk visits only the
+//! pane roots and their descendants: one `proc_listchildpids` and a sized
+//! `KERN_PROCARGS2` read per process, plus a cwd read for the shell a caller
+//! asks about.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;

@@ -6,14 +6,9 @@
 #   deny.yml       — licenses, sources, banned crates
 #   machete.yml    — actually-used (this one)
 #
-# Each one catches a class the others miss. cargo-machete in
-# particular finds dependencies declared in `Cargo.toml` but never
-# imported in source — a class an early run caught 11 of in one pass
-# (`log` in kettle-render + kettle-core, `serde` / `thiserror` /
-# `unicode-width` in kettle-core, `env_logger` / `kettle-vt` /
-# `raw-window-handle` / `toml` in kettle-ui). Adding the workflow
-# means the next contributor adding a dep "just in case" gets the
-# warning at PR time, not in a future grep.
+# Each one catches a class the others miss. cargo-machete finds
+# dependencies declared in `Cargo.toml` but never imported in source,
+# so a dep added "just in case" is flagged at PR time.
 name: cargo-machete
 
 on:
@@ -28,12 +23,9 @@ on:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
       - ".github/workflows/machete.yml"
-  # Weekly cron so the README cargo-machete badge always has a
-  # recent run to reflect. The push/PR triggers above are path-filtered to
-  # Cargo manifests, so a long run of non-manifest commits would otherwise
-  # leave the badge showing a stale state (or blank on a fresh branch) —
-  # unlike audit.yml (daily) and deny.yml (weekly), which already cron.
-  # Mirrors deny.yml's Sunday 06:00 UTC slot.
+  # Weekly cron. The push/PR triggers above are path-filtered to Cargo
+  # manifests, so a source-only change that drops a dependency's last use
+  # would otherwise go unchecked. Mirrors deny.yml's Sunday 06:00 UTC slot.
   schedule:
     - cron: "0 6 * * 0"
 

@@ -39,7 +39,7 @@ pub fn thumb_with_min(
 /// snapshot from the prior redraw is `prev`; `current` is the value now.
 /// `None` previous means we haven't seen a frame yet — never scroll
 /// (otherwise the very first paint would yank the cursor away from the
-/// origin). Pure, +tests so the rule lives outside the render path.
+/// origin).
 pub fn should_scroll_on_output(enabled: bool, prev: Option<usize>, current: usize) -> bool {
     enabled && prev.is_some_and(|p| current > p)
 }
@@ -127,8 +127,8 @@ mod tests {
         assert_eq!(target_offset(0.0, 400.0, 40, 160), 160);
         // Bottom of track → newest → offset 0.
         assert_eq!(target_offset(400.0, 400.0, 40, 160), 0);
-        // Mid track maps near the middle of history (the old top-edge helper
-        // uses a zero grab offset, so account for thumb travel).
+        // At mid track, `target_offset` puts the thumb's top edge at the click
+        // (zero grab offset), so the result reflects thumb travel.
         let mid = target_offset(200.0, 400.0, 40, 160);
         assert_eq!(mid, 60);
         // Out-of-range y is clamped, not panicking.

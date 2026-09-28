@@ -12,9 +12,6 @@ pub const MAX_IMAGE_DIM: u32 = 8192;
 /// Decompression-bomb defense: max total bytes the `image`
 /// crate may allocate while decoding. The independent axis cap still rejects
 /// pathological shapes; the byte cap limits any one retained image to 64 MiB.
-///
-/// `pub(crate)` so the kitty decoder can bound its zlib (`o=z`)
-/// inflate to this same envelope.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A decoded image plus placement metadata (kitty image/placement ids +
@@ -312,14 +309,13 @@ impl ImageData {
                 for k in 0..3 {
                     dst[d + k] = blend(src.rgba[s + k], dst[d + k]);
                 }
-                // The colour above divides by the exact `out_a` while the
-                // stored alpha is that value rounded to 8 bits, so the pixel
-                // can read up to ~0.2% bright against its own alpha tag. The
-                // alternative — dividing by the rounded alpha — trades that
-                // for a colour error of the same order, and both are inside
-                // one 8-bit step; the exact divisor is the one that keeps the
-                // opaque-destination case bit-identical to the pre-existing
-                // formula, so no stored output shifts.
+                // The colour above divides by the exact `out_a`, but the stored
+                // alpha is that value rounded to 8 bits, so the pixel can read
+                // up to ~0.2% bright against its own alpha. Dividing by the
+                // rounded alpha instead gives a colour error of the same order.
+                // Both stay inside one 8-bit step, and the exact divisor keeps
+                // an opaque destination bit-identical to the naive
+                // `(sc*sa + dc*(255-sa) + 127) / 255` blend.
                 dst[d + 3] = ((out_a + 127) / 255) as u8;
             }
         }
@@ -391,11 +387,10 @@ mod tests {
     }
 
     /// `ImageData::new` must not panic or wrap on adversarial
-    /// `width × height × 4` arithmetic. Tests `u32::MAX × u32::MAX × 4`
-    /// (which overflows `u64::MAX` ≈ 1.8 × 10¹⁹ on 64-bit) returns
-    /// cleanly — no panic in debug, no silent acceptance in release.
-    /// Without `checked_mul` this would panic on debug builds and
-    /// silently compare against a wrapped value on release.
+    /// `width × height × 4` arithmetic. `u32::MAX × u32::MAX × 4` overflows
+    /// `u64::MAX` ≈ 1.8 × 10¹⁹, and the call must still return `None` in debug
+    /// and release. The `MAX_IMAGE_DIM` cap rejects these dims before
+    /// `rgba_bytes` runs its checked math.
     #[test]
     fn new_rejects_overflowing_dimensions_without_panic() {
         // u32::MAX × u32::MAX × 4 = 7.4 × 10¹⁹ — overflows u64.
@@ -511,7 +506,7 @@ mod tests {
     /// Dropping either term darkens colour toward black in proportion to
     /// the transparency it is drawn over — and a kitty animation frame
     /// canvas starts out fully transparent, so that is the common case, not
-    /// the corner case. The opaque-destination test above cannot see this:
+    /// the corner case. The opaque-destination test below cannot see this:
     /// with `da = 255` both terms collapse to the naive form.
     #[test]
     fn compose_over_transparent_destination_preserves_color() {
@@ -530,10 +525,9 @@ mod tests {
     }
 
     /// The blend divides by `out_a = sa*255 + da*(255-sa)`, which is zero
-    /// only when `sa` is. That case is short-circuited before the divide —
-    /// a fully transparent source contributes nothing — and this pins the
-    /// invariant so a future edit to the early-out cannot quietly turn the
-    /// composite into a division by zero.
+    /// only when `sa` is. A fully transparent source contributes nothing, so
+    /// `compose` skips it before the divide. This test pins that early-out so
+    /// a future edit cannot quietly turn the composite into a division by zero.
     #[test]
     fn compose_skips_a_fully_transparent_source_pixel() {
         for da in [0u8, 128, 255] {

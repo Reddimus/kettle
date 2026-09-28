@@ -19,15 +19,14 @@ accesskit = "0.25.0"
 accesskit_winit = "0.34.0"
 anyhow.workspace = true
 # `image-data` is enabled for clipboard-bitmap PASTE (a screenshot puts a raw
-# bitmap on the clipboard with no file and no text behind it — see
-# src/paste_image.rs). An earlier comment here claimed the feature "pulls
-# `image` with default features (= every format incl. avif/rav1e)"; that was
-# wrong. arboard pins `default-features = false` on `image` for every target and
-# asks only for `png`+`bmp` on Windows, `png` on Linux, `tiff` on macOS — and
-# kettle-render already builds `image` with png/jpeg/webp/bmp/gif, so the
-# Windows and Linux graphs gain NO new crate. macOS adds `tiff` + `fax`.
-# Verified with `cargo tree --target x86_64-pc-windows-msvc`.
-# kettle still never WRITES an image to the clipboard; only reads one.
+# bitmap on the clipboard with no file and no text behind it; see
+# src/paste_image.rs). arboard pins `default-features = false` on `image` for
+# every target and asks only for `png`+`bmp` on Windows, `png` on Linux, and
+# `tiff` on macOS. kettle-render already builds `image` with
+# png/jpeg/webp/bmp/gif, so the Windows and Linux graphs gain NO new crate;
+# macOS adds `tiff` + `fax`. Verified with
+# `cargo tree --target x86_64-pc-windows-msvc`. kettle never WRITES an image
+# to the clipboard; it only reads one.
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 crossbeam-channel = "0.5.15"
 # Decode the embedded PNG app icon into a winit window icon so
@@ -58,7 +57,7 @@ kettle-update.workspace = true
 kettle-remote.workspace = true
 log.workspace = true
 # The `--lua-script PATH` flag runs a startup script with a `kettle`
-# introspection namespace. Future work adds text input and event hooks.
+# namespace for introspection, text input, and event hooks.
 mlua.workspace = true
 notify = "8.2.0"
 notify-rust.workspace = true
@@ -76,22 +75,22 @@ serde_json = "1.0.149"
 sha2 = "0.11"
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
-# v2.33.1 scoped RUSTSEC-2026-0192 by turning winit default features off,
-# which also (unacknowledged at the time) dropped `wayland-csd-adwaita` — so
-# GNOME/Wayland users got smithay-client-toolkit's FallbackFrame ("the
-# default ugly frame": flat gray bar, filled-square close button, no title).
-# Mutter implements no server-side decorations (xdg-decoration protocol,
-# GNOME/mutter#217), so on GNOME the frame winit draws IS the titlebar.
+# winit default features are off to scope RUSTSEC-2026-0192. That also drops
+# `wayland-csd-adwaita`, which would leave GNOME/Wayland users with
+# smithay-client-toolkit's FallbackFrame ("the default ugly frame": flat gray
+# bar, filled-square close button, no title). Mutter implements no
+# server-side decorations (xdg-decoration protocol, GNOME/mutter#217), so on
+# GNOME the frame winit draws IS the titlebar.
 #
-# v2.34.0 restores Adwaita-style decorations via `wayland-csd-adwaita-notitle`:
-# it enables `sctk-adwaita` WITHOUT a text renderer, so the ab_glyph →
-# owned_ttf_parser → ttf-parser route stays out of the graph (the RUSTSEC
-# scope guard `scripts/check-ttf-parser-scope.sh` keeps proving that) and the
-# aarch64 cross-build stays free of C font libs (the crossfont variant needs
-# FreeType). Trade-off: the CSD bar renders buttons but no title text — the
+# `wayland-csd-adwaita-notitle` restores Adwaita-style decorations. It enables
+# `sctk-adwaita` WITHOUT a text renderer, so the ab_glyph → owned_ttf_parser →
+# ttf-parser route stays out of the graph (the RUSTSEC scope guard
+# `scripts/check-ttf-parser-scope.sh` keeps proving that) and the aarch64
+# cross-build stays free of C font libs (the crossfont variant needs
+# FreeType). Trade-off: the CSD bar renders buttons but no title text. The
 # title still reaches the taskbar / Alt-Tab via xdg_toplevel set_title, and
 # kettle's own tab bar labels the window content. Do NOT switch this to
-# `wayland-csd-adwaita` (ab_glyph) while RUSTSEC-2026-0192 is open — the
+# `wayland-csd-adwaita` (ab_glyph) while RUSTSEC-2026-0192 is open; the
 # `winit_wayland_csd_stays_notitle` drift guard in src/app.rs pins it.
 winit = { version = "0.30.13", default-features = false, features = [
     "rwh_06",
@@ -110,7 +109,7 @@ winit = { version = "0.30.13", default-features = false, features = [
 errno = "0.3"
 libc = "0.2"
 
-# v2.40.0 (tear-off UX): live screen-pointer queries during torn-tab drags —
+# Live screen-pointer queries during torn-tab drags —
 # the X11 counterpart of the Windows GetCursorPos drift correction. The WM's
 # move-grab anchor drifts from the tear-time grab offset (measured 55-86px
 # under Mutter), so dock hit-testing and the frozen-drag rescue tick need the
@@ -136,7 +135,7 @@ wayland-client = "0.31"
 # `Win32_UI_WindowsAndMessaging` adds FlashWindowEx/FLASHWINFO/
 # FLASHW_STOP so `Taskbar::clear_attention` can reliably stop the Win11
 # taskbar flash on focus-gain (winit's request_user_attention(None) doesn't).
-# v2.19.0 (tear-off UX): `Win32_Graphics_Dwm` adds DwmGetWindowAttribute /
+# `Win32_Graphics_Dwm` adds DwmGetWindowAttribute /
 # DWMWA_CLOAKED so the re-dock hit-test's z-order walk can skip cloaked
 # windows (suspended UWP apps park full-screen cloaked windows in the
 # z-order that would otherwise read as "a foreign window covers the band").

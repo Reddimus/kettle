@@ -1,10 +1,10 @@
 # Background images & animated wallpapers
 
 kettle can paint a **procedural starfield**, a still image, **or an animated
-loop** behind your terminal — the native, GPU-friendly equivalent of the "video
-background" people set up in other terminals. For a file you supply, no terminal
-decodes actual video; kettle plays an **animated GIF / APNG / animated WebP**,
-advancing frames on the media's own timestamps. By default an animated
+loop** behind your terminal. It is the native, GPU-friendly equivalent of the
+"video background" people set up in other terminals. No terminal decodes actual
+video, so for a file you supply kettle plays an **animated GIF / APNG / animated
+WebP**, advancing frames on the media's own timestamps. By default an animated
 background **plays even when unfocused**, but it **freezes when the window is
 minimized or fully covered** (it can't be seen), so a hidden window costs nothing.
 
@@ -80,7 +80,7 @@ the way. The look people actually keep (and the reason the starfield was chosen)
 
 - **Dark + low-contrast.** A near-black image keeps light text readable on any
   theme. Bright, high-detail loops (nebulae, photos, accretion disks) wash out
-  text — avoid them, or pair them with `background-blur = true` and a low
+  text — avoid them, or pair them with `background-blur = true` and a high
   `background-darkness`.
 - **Slow + subtle.** Gentle motion reads as alive rather than distracting. A
   calm twinkle beats a fast clip.
@@ -97,9 +97,9 @@ window clear → wallpaper → cell backgrounds → chrome (tabs/status/titlebar
 ```
 
 So the tab bar, status bar, and any colored cell backgrounds (selections, syntax
-highlight panels, TUI app panels) stay crisp and readable — the animation no
-longer bleeds through them. Cells with the *default* background are transparent,
-so the wallpaper shows through your terminal text exactly as you'd want.
+highlight panels, TUI app panels) stay crisp and readable; the animation does not
+bleed through them. Cells with the *default* background let the wallpaper show
+through, tinted by `background-darkness`.
 
 ### Chrome color over a wallpaper — `chrome-background`
 
@@ -128,11 +128,11 @@ chrome-background = auto
 
 **Performance.** Frames decode once at load (bounded to 128 MiB / 128 frames; a
 larger file degrades gracefully to a shorter loop, never an OOM). Playback just
-swaps an already-uploaded GPU texture, and `when-focused` parks the animation
-clock entirely when you tab away — so an animated wallpaper adds **zero idle
-cost** when unfocused and a single texture swap per frame when focused. Prefer a
-gentle, slow loop (a drifting starfield, not a fast action clip) for the least
-distraction and the lowest wake rate.
+swaps an already-uploaded GPU texture. With `when-focused`, kettle stops
+scheduling animation redraws when you tab away, so an animated wallpaper adds
+**zero idle cost** when unfocused and a single texture swap per frame when
+focused. Prefer a gentle, slow loop (a drifting starfield, not a fast action
+clip) for the least distraction and the lowest wake rate.
 
 ## Where to get good, clearly-licensed wallpapers
 
@@ -160,8 +160,8 @@ aspect-agnostic. These let you make your own and are free / CC0:
 
 NASA imagery is public domain (see NASA's media-usage guidelines) — nebulae, the
 Sun, galaxies. It's **bright and busy**, so it fights text by default: pair it
-with `background-blur = true` + a low `background-darkness`, and `chrome-background
-= auto`, or it'll wash out your terminal.
+with `background-blur = true` + a high `background-darkness`, and
+`chrome-background = auto`, or it'll wash out your terminal.
 
 - **NASA SVS:** <https://svs.gsfc.nasa.gov/> · **Library:** <https://images.nasa.gov/>
   · **Hubble:** <https://esahubble.org/images/> (confirm each item's terms).

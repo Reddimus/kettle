@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Pick the right `time` binary. macOS / BSD `time` doesn't support
-# the `-v` / `-f` flags we need.
+# the `-f` flag we need.
 TIME_BIN=""
 if command -v /usr/bin/time >/dev/null 2>&1 && /usr/bin/time -f '%e' true >/dev/null 2>&1; then
   TIME_BIN="/usr/bin/time"

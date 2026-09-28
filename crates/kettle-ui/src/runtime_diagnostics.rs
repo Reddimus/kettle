@@ -166,12 +166,10 @@ fn write_incident(
 ) -> io::Result<PathBuf> {
     let dir = diagnostic_dir(shared.cache_dir.as_deref());
     // Repair the directory before writing into it. `create_private_file_new`
-    // below creates missing ancestors at 0700, but it returns early when the
-    // directory already exists — so a `<cache>/kettle` an earlier run left
-    // group-writable under a 002 umask is never narrowed, and the private-path
-    // verifier then refuses the write. Recognizing that directory as kettle's
-    // own was necessary but not sufficient; something has to ask for the
-    // repair, and this is the caller that needs it.
+    // below creates missing ancestors at 0700 but returns early when the
+    // directory already exists. A `<cache>/kettle` that an earlier run left
+    // group-writable under a 002 umask would never be narrowed, and the
+    // private-path verifier would refuse the write.
     //
     // Unix only. The Windows `create_private_dirs` is a plain `create_dir_all`,
     // while `create_private_file_new` builds each missing parent with
@@ -182,13 +180,12 @@ fn write_incident(
     // a downgrade wearing a repair's name; Windows has no umask and needs none
     // of this.
     //
-    // Never fatal. The repair exists to clear the way for the write, so if the
-    // write succeeds anyway the failure did not matter — and this is the crash
-    // path, where losing the incident is worse than every reason the repair can
-    // fail. Linux makes that concrete: the verifier holds directories with
-    // `O_PATH`, which needs no read permission, so a `0300` directory this
-    // cannot even open for inspection still accepts the write. Gating on `?`
-    // turned that into a lost diagnostic.
+    // Never fatal. The repair only clears the way for the write, so its failure
+    // does not matter if the write still succeeds. On this crash path, losing
+    // the incident is worse than any repair failure. On Linux, for example, the
+    // verifier holds directories with `O_PATH`, which needs no read permission,
+    // so a `0300` directory this cannot even open for inspection still accepts
+    // the write.
     #[cfg(unix)]
     if let Err(error) = kettle_state::create_private_dirs(&dir) {
         log::debug!(
@@ -316,13 +313,11 @@ mod tests {
     /// Run `body` in a re-executed child running this one test alone.
     ///
     /// The scratch root has to look like an XDG base, and `kettle_base_dirs`
-    /// reads the real environment. `set_var` in the shared harness process is a
-    /// data race against every other test's `getenv` — the harness runs tests on
-    /// a thread pool — and it leaks the variable into whatever runs afterwards,
-    /// pointing at a scratch directory that no longer exists. An earlier version
-    /// of this test did that behind a SAFETY note claiming a single thread it
-    /// never had. `kettle-ctl`'s permissive-umask tests already re-exec for the
-    /// same reason; this is that helper.
+    /// reads the real environment. The harness runs tests on a thread pool, so
+    /// `set_var` in the shared harness process is a data race against every
+    /// other test's `getenv`. It also leaks the variable into whatever runs
+    /// afterwards, pointing at a scratch directory that no longer exists.
+    /// `kettle-ctl`'s permissive-umask tests re-exec for the same reason.
     #[cfg(unix)]
     fn in_child(name: &str, body: impl FnOnce()) {
         if std::env::var_os(REPAIR_CHILD_ENV).is_none() {
@@ -337,10 +332,10 @@ mod tests {
         body();
     }
 
-    /// The state a machine that ran an older kettle under a 002 umask is
-    /// actually in: `<cache>/kettle` already exists and is group-writable.
+    /// A machine that ran an older kettle under a 002 umask already has a
+    /// group-writable `<cache>/kettle`.
     ///
-    /// Creating missing ancestors at 0700 does not help there — the directory
+    /// Creating missing ancestors at 0700 does not help, because the directory
     /// is not missing. Without an explicit repair the private-path verifier
     /// refuses the write, and a crash diagnostic is exactly the thing you want
     /// to survive that.

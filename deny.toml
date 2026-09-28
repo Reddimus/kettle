@@ -15,10 +15,7 @@
 targets = [
   { triple = "x86_64-unknown-linux-gnu" },
   # aarch64-linux is built by release.yml and checked by ci.yml, so the
-  # supply-chain graph must cover it too — the comment above promised "match
-  # what release.yml + ci.yml build for" but this triple had been omitted, so
-  # a Linux/ARM-only advisory or banned-dep pull-in could have slipped past
-  # `cargo deny`.
+  # supply-chain graph must cover it too.
   { triple = "aarch64-unknown-linux-gnu" },
   { triple = "x86_64-apple-darwin" },
   { triple = "aarch64-apple-darwin" },
@@ -41,8 +38,8 @@ yanked = "warn"
 ignore = [
   # RUSTSEC-2026-0192 (`ttf-parser` unmaintained) remains through
   # `glyphon → cosmic-text → fontdb`. The avoidable `winit →
-  # sctk-adwaita → ab_glyph` path stays disabled: v2.34.0 re-enables
-  # sctk-adwaita for GNOME Wayland titlebar decorations via winit's
+  # sctk-adwaita → ab_glyph` path stays disabled, because sctk-adwaita
+  # comes in for GNOME Wayland titlebar decorations only via winit's
   # `wayland-csd-adwaita-notitle` feature, which carries NO text
   # renderer and therefore no ab_glyph/ttf-parser edge
   # (scripts/check-ttf-parser-scope.sh verifies the graph). Remove
@@ -55,11 +52,6 @@ ignore = [
   # this exception when glyphon accepts lru >=0.18.2, then close #207.
   "RUSTSEC-2026-0253",
 ]
-# Note: RUSTSEC-2024-0436 (`paste` unmaintained) used to be ignored
-# here while it reached kettle via `image → rav1e → paste` (AVIF
-# decoder). Verified gone with `cargo tree -i paste` / `cargo tree
-# -i rav1e` (both return "did not match any packages"); the ignore
-# was made stale by the upstream resolution and was removed.
 
 [licenses]
 # SPDX expressions every workspace dep is allowed to carry. The
@@ -88,10 +80,10 @@ allow = [
   "0BSD",
   "Unlicense",
   # The OFL is for fonts — kettle bundles JetBrains Mono Nerd Font
-  # (`packaging/linux/`, embedded via include_bytes in
+  # (`assets/fonts/`, embedded via include_bytes in
   # `kettle-config/src/font.rs`).
   "OFL-1.1",
-  # MSWord-like "I have an internal license but it's permissive."
+  # Boost Software License (`clipboard-win` and `error-code`, via arboard).
   "BSL-1.0",
 ]
 # `confidence-threshold` rules out a fuzzy SPDX match; we want exact.
@@ -113,9 +105,7 @@ highlight = "all"
 deny = []
 
 [sources]
-# crates.io only — refuses git-based or path-based deps from
-# *outside* the workspace. Intra-workspace path deps are fine
-# because `cargo deny` treats workspace members specially.
+# crates.io only. Git deps and unknown registries are refused.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

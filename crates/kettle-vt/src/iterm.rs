@@ -9,12 +9,10 @@ use crate::image::ImageData;
 /// starting with `1337;File=`), returning the image **only** when it is meant
 /// to be displayed inline.
 ///
-/// The `File=` args are `;`-separated `key=value` pairs. iTerm2's `inline` key
-/// governs display: `inline=1` draws the payload in the terminal grid, while
-/// `inline=0` (or an absent `inline`) is a plain file *transfer* (a download),
-/// which must NOT be rendered as an image. We therefore parse the args and
-/// return `None` for any non-inline transfer — the bytes are simply consumed,
-/// matching iTerm2's default-to-download behavior.
+/// The `File=` args are `;`-separated `key=value` pairs. Only `inline=1`
+/// draws the payload in the terminal grid. `inline=0` or an absent `inline` is
+/// a plain file download, iTerm2's default, and must not render as an image.
+/// For any non-inline transfer this returns `None` and the bytes are consumed.
 pub fn decode(body: &str) -> Option<ImageData> {
     decode_with_budget(body, &GraphicsBudget::default())
 }
@@ -33,10 +31,9 @@ pub(crate) fn decode_with_budget(body: &str, budget: &GraphicsBudget) -> Option<
     if !inline {
         return None;
     }
-    // STANDARD base64 rejects embedded whitespace and `.trim()` only strips
-    // the ends, so a line-wrapped OSC-1337 body (raw newlines aren't ST, so
-    // they reach the decoder) silently failed. Strip all ASCII whitespace
-    // first.
+    // STANDARD base64 rejects embedded whitespace, and `.trim()` only strips
+    // the ends. A line-wrapped OSC-1337 body keeps its raw newlines because
+    // they aren't ST, so strip all ASCII whitespace first.
     let _cleaned_reservation = budget.reserve_transient_cpu(b64.len().max(1))?;
     let mut cleaned = Vec::new();
     cleaned.try_reserve_exact(b64.len()).ok()?;
@@ -62,11 +59,9 @@ mod tests {
     use base64::Engine;
 
     /// Decode with an ISOLATED graphics budget. The public `decode()` uses the
-    /// process-shared default budget, so under cargo's parallel test runner a
-    /// concurrent test's live transient-CPU reservation could starve this one's
-    /// `reserve_transient_cpu` and make a well-formed image decode to `None` —
-    /// an intermittent flake. An isolated per-call account removes the
-    /// contention while exercising the exact same decode logic.
+    /// process-shared default budget, so under cargo's parallel test runner
+    /// another test's live transient-CPU reservation could make a well-formed
+    /// image decode to `None`. The isolated account runs the same decode logic.
     fn decode(body: &str) -> Option<ImageData> {
         let budget =
             GraphicsBudget::isolated(GraphicsLimits::default()).expect("isolated graphics budget");

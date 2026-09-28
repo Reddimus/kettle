@@ -202,11 +202,11 @@ esac
     def _write_real_curl_proxy(self) -> None:
         """Route production curl arguments to the local TLS fixture.
 
-        The first transport tests modeled curl's classifier inside the fake,
-        which made them self-fulfilling: a fake that elects not to retry a 404
-        cannot prove the real invocation would do the same. This proxy changes
-        only the destination and CA; the installed curl parses and executes the
-        exact retry, failure, timeout, and size-limit flags from the installer.
+        Modeling curl's retry classifier inside the fake is self-fulfilling. A
+        fake that elects not to retry a 404 cannot prove the real invocation
+        would do the same. This proxy changes only the destination and CA; the
+        installed curl parses and executes the exact retry, failure, timeout,
+        and size-limit flags from the installer.
         """
         script = self.fake_bin / "curl"
         script.write_text(
@@ -403,10 +403,8 @@ raise SystemExit(result.returncode)
     def _write_fake_openssl(self, *, verification_succeeds: bool = True) -> None:
         """Stand-in for openssl.
 
-        `pkeyutl -verify` returns what `verification_succeeds` asks for. Every
-        test used to get an unconditional success, which meant the signed path
-        was exercised but the REFUSAL was not: removing the verification
-        entirely, or accepting a bad signature, failed nothing. The signature
+        `pkeyutl -verify` returns what `verification_succeeds` asks for, so
+        tests can cover the refusal as well as the signed path. The signature
         is the only thing standing between a user and an attacker-supplied
         hash, so the failing case needs a test at least as much as the passing
         one.
@@ -709,12 +707,11 @@ fi
     def test_the_release_channel_cannot_pick_the_weak_trust_policy(self):
         """A `latest` redirect naming a pre-manifest release must be refused.
 
-        With KETTLE_VERSION unset the version comes from the unauthenticated
+        With KETTLE_VERSION unset, the version comes from the unauthenticated
         `releases/latest` redirect, and the Ed25519 requirement is computed
-        from that version. Answering the redirect with an old enough tag
-        therefore switched the installer to the same-origin `.sha256` sidecar
-        that the same party serves, and then ran the tarball's install.sh.
-        Every existing case here pins KETTLE_VERSION, so nothing covered it.
+        from that version. An old enough tag in the redirect would otherwise
+        switch the installer to the same-origin `.sha256` sidecar that the same
+        party serves, and then run the tarball's install.sh.
         """
         archive = self._archive()
         result = self._run(
@@ -857,12 +854,11 @@ fi
     def test_a_manifest_that_fails_ed25519_verification_is_refused(self):
         """The signature must be load-bearing, not merely consulted.
 
-        Every other signed-path test ran against a stub whose
-        `pkeyutl -verify` always succeeded, so the whole verification block
-        could have been deleted — or made to accept a forged signature — and
-        nothing would have gone red. This is the case that gives the check its
-        meaning: the manifest is where the archive's hash comes from, so a
-        manifest kettle cannot authenticate must not be trusted for one.
+        Every other signed-path test uses a stub whose `pkeyutl -verify`
+        succeeds, so without this case, deleting the verification block or
+        accepting a forged signature would fail nothing. The manifest is where
+        the archive's hash comes from, so a manifest kettle cannot authenticate
+        must not be trusted for one.
         """
         result = self._run(
             self._archive(include_manifest=True),

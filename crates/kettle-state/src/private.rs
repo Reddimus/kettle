@@ -506,13 +506,11 @@ fn create_private_dirs_impl(directory: &Path) -> io::Result<()> {
     // so creating from there down names the mode for the whole kettle-owned
     // run in one call.
     //
-    // The walk starts at `directory` itself, not its parent: three call sites
-    // pass a kettle-named directory AS the target rather than as an ancestor —
-    // the config write-back and the update-check cache both hand over
-    // `~/.config/kettle` directly. Starting one level up left those with no
-    // owned directory at all, so the repair below never ran for the case it
-    // exists for, and a `~/.config/kettle` an earlier run left at 0775 stayed
-    // there.
+    // The walk starts at `directory` itself, not its parent, because some
+    // callers pass a kettle-named directory as the target. The config
+    // write-back and the update-check cache both pass `~/.config/kettle`
+    // directly. Starting one level up would find no owned directory and
+    // never repair a 0775 `~/.config/kettle`.
     let mut owned: Option<&Path> = None;
     let mut cursor = Some(directory);
     while let Some(path) = cursor {
@@ -585,7 +583,7 @@ fn repair_private_dir_mode(path: &Path) -> io::Result<()> {
         // ELOOP/ENOTDIR: the name is a symlink, or not a directory at all.
         // Leave it to the ownership checks at the call site rather than
         // chmod'ing a target somebody else chose. Matched on raw errno because
-        // the matching `ErrorKind`s are unstable on this MSRV.
+        // `ErrorKind::FilesystemLoop` is unstable.
         Err(error)
             if matches!(
                 error.raw_os_error(),
@@ -1658,10 +1656,9 @@ pub(crate) mod unix {
     ///
     /// `chmod 700` is right for `<base>/kettle`, which kettle created and which
     /// nothing else has business writing to. It is bad advice for a directory
-    /// that merely happens to sit on the path — running a live-UI scenario from
-    /// a checkout produced "restore it with `chmod 700 /home/user/Repos`",
-    /// telling the user to lock down every project they own so kettle could
-    /// write a screenshot. Refusing is still correct there; instructing is not.
+    /// that merely sits on the path, such as `~/Repos` above a checkout, where
+    /// it would tell the user to lock down every project they own. Refusing is
+    /// still correct there; instructing is not.
     pub(super) fn chmod_remedy(path: &Path) -> String {
         if super::is_kettle_owned_dir_name(path) {
             format!(" — restore it with `chmod 700 {}`", path.display())
@@ -1691,10 +1688,9 @@ pub(crate) mod unix {
                 current_user()
             )
         } else if !sticky {
-            // Name the remedy here too. This is the message the umask bug
-            // actually produced — a group-writable *ancestor* — while the
-            // remedy was first added only to the leaf-policy check below, so
-            // the case that motivated it was the one case that never showed it.
+            // Name the remedy here too. A permissive process umask can leave
+            // group-writable ancestors, and those fail here rather than in the
+            // leaf-policy check below.
             format!(
                 "parent {} has mode {:04o}; group/other write bits are unsafe (set an explicit directory mode instead of relying on the process umask){}",
                 parent_path.display(),
@@ -1949,10 +1945,9 @@ pub(crate) mod unix {
             // Operations are relative to the immediate parent capability. The
             // ancestor handles are not needed after construction: `verify`
             // reopens the complete chain and compares every identity before or
-            // after publication. Retaining all of them made each guard consume
-            // O(path depth) descriptors and pushed the parallel config suite
-            // past macOS's 256-FD soft limit; one held parent is sufficient and
-            // makes steady descriptor use O(1).
+            // after publication. Holding only the parent keeps descriptor use
+            // O(1) per guard instead of O(path depth), which matters under
+            // macOS's 256-FD soft limit when guards run in parallel.
             let directory = handles
                 .pop()
                 .expect("the verified chain always contains the root");
@@ -3704,7 +3699,7 @@ mod windows {
                 .last()
                 .expect("the verified chain always contains an existing parent");
             let child_path = stable_child_path(parent, name)?;
-            // SAFETY: the volume-GUID path is NUL-terminated below and the
+            // SAFETY: the stable child path is NUL-terminated below and the
             // descriptor storage remains alive for the call.
             let mut child_path_z = child_path;
             child_path_z.push(0);
@@ -4678,18 +4673,18 @@ mod windows {
         FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_ALL;
 
     /// Rights that let a principal PUT something in the directory. Checked only
-    /// on the directory kettle actually reads from, and deliberately not on its
-    /// ancestors: `C:\` grants Authenticated Users "create folders / append
-    /// data" on stock Windows, so applying these to the whole chain rejects
-    /// every path on a normal machine — and a directory created under `C:\`
-    /// reaches nothing of kettle's.
+    /// on the directory kettle actually reads from, not on its ancestors. Stock
+    /// Windows grants Authenticated Users "create folders / append data" on
+    /// `C:\`, so applying these to the whole chain rejects every path on a
+    /// normal machine, and a directory created under `C:\` reaches nothing of
+    /// kettle's.
     ///
     /// On the target directory it matters, because that is where kettle's
     /// sessions, layouts, and control-server registry live, and kettle
     /// enumerates and reads them back. `GENERIC_WRITE` is included because on a
     /// directory it maps to exactly `FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY`
-    /// plus attribute writes — so an ACE spelled with the generic bit granted
-    /// creation while passing a check that looked only for the specific ones.
+    /// plus attribute writes, so an ACE spelled with the generic bit grants
+    /// creation even without the specific bits.
     const DANGEROUS_CONTENT_RIGHTS: u32 = GENERIC_WRITE | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
 
     const DANGEROUS_FILE_RIGHTS: u32 = GENERIC_ALL
@@ -4712,7 +4707,7 @@ mod windows {
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
-        // SAFETY: the held directory handle has READ_CONTROL and every output
+        // SAFETY: the held object handle has READ_CONTROL and every output
         // pointer is valid. The returned owner/DACL are anchored in descriptor.
         let status = unsafe {
             GetSecurityInfo(
@@ -5185,8 +5180,8 @@ mod windows {
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
-        // SAFETY: output pointers are valid and the reopened handle has
-        // READ_CONTROL. Unrequested group/SACL outputs are null.
+        // SAFETY: output pointers are valid and the handle has READ_CONTROL.
+        // Unrequested group/SACL outputs are null.
         let status = unsafe {
             GetSecurityInfo(
                 handle,
@@ -5555,22 +5550,20 @@ mod windows {
 
         /// A directory anyone can ADD to is not private.
         ///
-        /// The trust check covered removal and re-permissioning —
-        /// `FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`,
-        /// `GENERIC_ALL` — and not creation. `FILE_ADD_FILE` and
+        /// `DANGEROUS_PATH_RIGHTS` covers removal and re-permissioning
+        /// (`FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`,
+        /// `GENERIC_ALL`), not creation. `FILE_ADD_FILE` and
         /// `FILE_ADD_SUBDIRECTORY` let an untrusted principal PUT a file where
         /// kettle keeps sessions, layouts, and the control-server registry,
         /// all of which it enumerates and reads back. `GENERIC_WRITE` on a
         /// directory maps to exactly those two, so an ACE spelled with the
-        /// generic bit walked through a check that looked only for the
-        /// specific ones.
+        /// generic bit must be refused as well.
         ///
         /// These rights are refused on the target directory ONLY. Applying
         /// them to the whole ancestor chain rejects every path on a stock
         /// Windows machine, because `C:\` grants Authenticated Users
-        /// "create folders / append data" — and a directory created under
-        /// `C:\` reaches nothing of kettle's. The first version of this fix
-        /// did exactly that and failed 14 of this crate's own tests.
+        /// "create folders / append data", and a directory created under
+        /// `C:\` reaches nothing of kettle's.
         #[test]
         fn creation_rights_are_dangerous_on_the_target_directory_and_normal_above_it() {
             // The path-redirecting rights apply everywhere.
@@ -5935,7 +5928,7 @@ mod tests {
         let before = file.metadata().unwrap();
 
         // Give a real metadata write a distinct timestamp. APFS records
-        // nanoseconds, so this stays cheap while discriminating the old
+        // nanoseconds, so this stays cheap while still detecting an
         // unconditional `acl_set_fd_np` call.
         std::thread::sleep(std::time::Duration::from_millis(20));
         restrict_private_file(&file).unwrap();
@@ -6061,9 +6054,9 @@ mod tests {
         }
     }
 
-    /// A source checkout is called `kettle` too, and matching on the name alone
-    /// meant `kettle --config ~/Repos/kettle/dev.config` set the whole checkout
-    /// to `0700`. Measured going `0775 -> 0700` before the parent check existed.
+    /// A source checkout is called `kettle` too. Matching on the name alone
+    /// would let `kettle --config ~/Repos/kettle/dev.config` narrow the whole
+    /// checkout from `0775` to `0700`.
     #[cfg(unix)]
     #[test]
     fn a_source_checkout_named_kettle_is_not_kettles_own_directory() {
@@ -6097,8 +6090,7 @@ mod tests {
     fn the_chmod_remedy_is_offered_only_for_directories_kettle_named() {
         use std::path::Path;
         // Derived from the real base list, not hardcoded: `/run/user/<uid>` is
-        // only a base when `XDG_RUNTIME_DIR` says so, which is untrue on macOS
-        // and was how the first version of this test failed.
+        // only a base when `XDG_RUNTIME_DIR` says so, which is untrue on macOS.
         for base in super::kettle_base_dirs() {
             for name in ["kettle", "kettle-1000"] {
                 let owned = base.join(name);
@@ -6110,9 +6102,8 @@ mod tests {
                 );
             }
         }
-        // The live-UI run produced exactly this: a screenshot under a checkout,
-        // refused because `~/Repos` is 0775, with the message telling the user
-        // to lock down every project they own.
+        // A screenshot under a checkout is refused when `~/Repos` is 0775. The
+        // message must not tell the user to lock down every project they own.
         for foreign in ["/home/user/Repos", "/home/user/.config", "/tmp"] {
             assert_eq!(
                 unix::chmod_remedy(Path::new(foreign)),
