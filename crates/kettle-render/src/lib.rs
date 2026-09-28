@@ -20813,8 +20813,9 @@ mod glyph_cell_lock_tests {
             1,
             "interior byte of '你' → col 1"
         );
-        // Defensive: a start before the first char clamps to column 0.
-        assert_eq!(glyph_grid_col(&starts, 0), 0);
+        // Defensive: a cluster that starts before the first char clamps to
+        // column 0 rather than underflowing.
+        assert_eq!(glyph_grid_col(&[2, 3], 0), 0);
     }
 
     /// The pen is pinned to the cell and snapped to an integer pixel; a
