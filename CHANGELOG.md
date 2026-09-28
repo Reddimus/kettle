@@ -6,6 +6,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Output no longer restarts the cursor blink after `cursor-blink-timeout`.
+  Only typing, pastes, focus, and settings changes do, as in kitty and
+  Alacritty, so a window whose program keeps printing stops redrawing for
+  the cursor.
+
 ## [4.6.0] — 2026-09-27
 
 ### Added
