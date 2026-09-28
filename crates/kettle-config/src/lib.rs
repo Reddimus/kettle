@@ -1716,9 +1716,9 @@ pub struct Config {
     pub accent_seed: u64,
     /// Cursor blink half-period in milliseconds.
     pub cursor_blink_interval: u64,
-    /// Seconds without typing or focused-pane output after which the cursor
-    /// stops blinking and stays visible. `0` blinks for as long as the window
-    /// is focused. Each blink repaints the window, so a cursor that blinks
+    /// Seconds without typing after which the cursor stops blinking and stays
+    /// visible. Output does not restart the blink, as in kitty and Alacritty.
+    /// `0` blinks for as long as the window is focused. Each blink repaints the window, so a cursor that blinks
     /// forever keeps an idle window drawing.
     pub cursor_blink_timeout: u64,
     /// An inactive tab whose unseen output went quiet for

@@ -942,8 +942,8 @@ pub(crate) struct WindowState {
     pub(crate) last_emitted_titles: std::collections::HashMap<u64, String>,
     pub(crate) blink_on: bool,
     pub(crate) last_blink: std::time::Instant,
-    /// The last keystroke, focus change, or focused-pane output. The cursor
-    /// stops blinking `cursor-blink-timeout` after it.
+    /// The last keystroke, paste, focus change, or settings change. The cursor
+    /// stops blinking `cursor-blink-timeout` after it. Output does not count.
     pub(crate) last_blink_activity: std::time::Instant,
     /// When each pane last rang the bell, for the per-pane visual flash.
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has

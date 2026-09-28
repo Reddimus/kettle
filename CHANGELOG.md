@@ -13,6 +13,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   every second.
 - A confirm bar draws its destructive button, such as Close or Delete, with a
   bold label, so it stands apart from Cancel.
+- Output no longer restarts the cursor blink after `cursor-blink-timeout`.
+  Only typing, pastes, focus, and settings changes do, as in kitty and
+  Alacritty, so a window whose program keeps printing stops redrawing for
+  the cursor.
 
 ### Fixed
 

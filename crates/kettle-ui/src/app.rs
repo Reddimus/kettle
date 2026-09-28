@@ -9541,6 +9541,8 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // A paste is user input even when it comes from the pointer.
+        self.reset_blink_phase(ws);
         // Broadcast owns a group scope, not one pane. It deliberately ignores
         // the optional single-pane target and retains its per-pane mode
         // encoding plus cross-window named-group fan-out.
@@ -9676,6 +9678,7 @@ impl App {
         // long enough to coalesce the separate DroppedFile events one OS drag
         // emits; every other outcome drops it here.
         let previous = Self::take_media_paste_state_on_input(ws);
+        self.reset_blink_phase(ws);
         if ws.mux.is_broadcast_on() {
             if let Some(recorder) = self.recorder.as_mut() {
                 recorder.record_marker(&format!("kettle:paste paths={}", paths.len()));
@@ -10208,7 +10211,6 @@ impl App {
         // ws.pending_pane_restarts after the iteration so the
         // post-drain handler can process them with a fresh borrow.
         let mut pending_restarts_local: Vec<u64> = Vec::new();
-        let blink_focus = ws.mux.active_focus();
         for (&pane_id, pane) in ws.mux.panes.iter_mut() {
             if pane.term.event_queue_overflowed() || pane.pty_input_failed() {
                 log::error!(
@@ -10357,18 +10359,11 @@ impl App {
                         // `Terminal::cursor_blinking()`, but reset the blink
                         // phase now so *blink-on* starts visible and
                         // *blink-off* makes the cursor solid right away, not on
-                        // whatever half-period we'd otherwise land in. This
-                        // `ws.mux.panes.iter_mut()` loop can't call
-                        // `self.reset_blink_phase()`, so the phase reset is
-                        // written here directly. Only the focused pane's cursor
-                        // blinks, so only its mode change counts as activity; a
-                        // background prompt redrawing its cursor shape must not
-                        // re-arm the idle timeout.
+                        // whatever half-period we'd otherwise land in. It is
+                        // program output, so it does not restart the blink
+                        // timeout; only typing, focus, and settings do.
                         ws.blink_on = true;
                         ws.last_blink = std::time::Instant::now();
-                        if Some(pane_id) == blink_focus {
-                            ws.last_blink_activity = ws.last_blink;
-                        }
                     }
                     // Terminator parity (terminatorlib/
                     // config.py:103 `force_no_bell`): silence every
@@ -12750,21 +12745,8 @@ impl App {
                 }
                 pane.last_output_generation = Some(generation);
             }
-            let focused_output = ws
-                .mux
-                .active_focus()
-                .is_some_and(|focus| output_panes.contains(&focus));
             for id in output_panes {
                 ws.mux.touch_tab_output(id);
-            }
-            if focused_output {
-                note_blink_output_activity(
-                    &mut ws.last_blink,
-                    &mut ws.last_blink_activity,
-                    ws.blink_on,
-                    self.cfg.cursor_blink_timeout(),
-                    std::time::Instant::now(),
-                );
             }
             // Auto-scroll while a selection stays at or beyond the focused
             // pane's top or bottom edge.
@@ -23136,26 +23118,6 @@ fn cursor_blink_timed_out(
     cursor_on && timeout.is_some_and(|timeout| idle >= timeout)
 }
 
-/// Record output in the focused pane as blink activity. A blink that had
-/// already stopped restarts a full half-period from its visible phase, so the
-/// cursor does not vanish in the same frame as the output that woke it.
-fn note_blink_output_activity(
-    last_blink: &mut std::time::Instant,
-    last_activity: &mut std::time::Instant,
-    cursor_on: bool,
-    timeout: Option<std::time::Duration>,
-    now: std::time::Instant,
-) {
-    if cursor_blink_timed_out(
-        now.saturating_duration_since(*last_activity),
-        timeout,
-        cursor_on,
-    ) {
-        *last_blink = now;
-    }
-    *last_activity = now;
-}
-
 fn next_cursor_blink_phase(
     active: bool,
     elapsed: std::time::Duration,
@@ -32865,36 +32827,30 @@ mod tests {
     }
 
     #[test]
-    fn output_restarts_a_stopped_blink_from_its_visible_phase() {
-        use std::time::{Duration, Instant};
-        let start = Instant::now();
-        let timeout = Some(Duration::from_secs(10));
-        let now = start + Duration::from_secs(30);
-
-        // Stopped: the phase restarts so the next toggle is a full half-period away.
-        let (mut last_blink, mut activity) = (start + Duration::from_secs(10), start);
-        super::note_blink_output_activity(&mut last_blink, &mut activity, true, timeout, now);
-        assert_eq!((last_blink, activity), (now, now));
-
-        // Still blinking, in either phase: output keeps it alive without
-        // shifting its rhythm.
-        for cursor_on in [true, false] {
-            let recent = now - Duration::from_secs(2);
-            let (mut last_blink, mut activity) = (now - Duration::from_millis(200), recent);
-            super::note_blink_output_activity(
-                &mut last_blink,
-                &mut activity,
-                cursor_on,
-                timeout,
-                now,
-            );
-            assert_eq!(last_blink, now - Duration::from_millis(200));
-            assert_eq!(activity, now);
-        }
-    }
-
-    #[test]
     fn the_blink_scheduler_honors_the_idle_timeout_and_every_activity_source() {
+        let production = super::production_source();
+        assert_eq!(
+            production.matches("last_blink_activity =").count(),
+            1,
+            "only reset_blink_phase may restart the blink timeout"
+        );
+        assert!(!production.contains("note_blink_output_activity"));
+        // Every paste channel (keys, menu, middle click, right click, file
+        // drop, broadcast) delivers through these two. A paste restarts the
+        // blink even with the pointer, and without a keystroke.
+        for delivery in ["fn paste_text_confirmed(", "fn paste_paths_confirmed("] {
+            let body = production
+                .split_once(delivery)
+                .expect("paste delivery")
+                .1
+                .split_once("\n    }\n")
+                .expect("end of paste delivery")
+                .0;
+            assert!(
+                body.contains("self.reset_blink_phase(ws);"),
+                "{delivery} must restart the blink"
+            );
+        }
         let src = include_str!("app.rs");
         let scheduler = src
             .split_once("let pane_blink = self.pane_cursor_blinking(ws, cached_menu_snapshots);")
@@ -32913,10 +32869,6 @@ mod tests {
             .expect("end of reset_blink_phase")
             .0;
         assert!(reset.contains("ws.last_blink_activity = now;"));
-        assert!(src.contains(
-            "if Some(pane_id) == blink_focus {\n                            ws.last_blink_activity = ws.last_blink;"
-        ));
-        assert!(src.contains("if focused_output {\n                note_blink_output_activity("));
         let toggle = src
             .split_once("Action::ToggleCursorBlink => {")
             .expect("blink toggle")
