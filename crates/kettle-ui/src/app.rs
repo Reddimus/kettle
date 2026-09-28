@@ -10857,6 +10857,7 @@ impl App {
             size.height.max(1),
             scale,
             &self.cfg,
+            None,
         )
         .map_err(|error| error.to_string())?;
 
@@ -10942,6 +10943,7 @@ impl App {
                 size.height.max(1),
                 scale,
                 &cfg,
+                None,
             )
             .map_err(|error| error.to_string())?;
             if let Some(snapshot) = snapshot.as_ref() {
@@ -24695,6 +24697,7 @@ impl App {
             size.height.max(1),
             scale,
             &self.cfg,
+            None,
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -25893,6 +25896,7 @@ impl App {
                 size.height.max(1),
                 scale,
                 &self.cfg,
+                None,
             ))
         };
         // Disarm the watchdog the moment init returns, on BOTH the success and
