@@ -648,8 +648,8 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
             // Every path below this needs to write the prefix too, starting
             // with the shared running lock. A user who cannot create the
             // recovery lock cannot take part in updates at all, so returning
-            // here is the whole correct response: propagating instead turned a
-            // launch into "Error: Permission denied" and no window.
+            // here is the whole correct response. Propagating the error would
+            // fail the launch with "Error: Permission denied" and no window.
             StartupRecovery::Unavailable => {
                 return Ok(ProcessStart::Ready {
                     guard: RunningInstallGuard { _lock: None },
@@ -757,17 +757,17 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
 
 /// Take the update lock for a best-effort startup recovery pass.
 ///
-/// `Ok(None)` means "carry on without it". Two cases produce that, and both are
-/// normal. Another process is already holding it, or this user cannot create it
-/// at all.
+/// `Busy` and `Unavailable` both mean "carry on without it", and both are
+/// normal. Another process is already holding the lock, or this user cannot
+/// create it at all.
 ///
 /// The second is not hypothetical. `docs/INSTALL.md` documents a system-wide
 /// install under `KETTLE_PREFIX=/usr/local`, which leaves the prefix owned by
 /// root at `0755`. The marker inside is world-readable, so a normal user's
 /// kettle recognizes the install and then cannot create a lock file next to it.
-/// Propagating that turned a launch into `Error: Permission denied (os error
-/// 13)` and no window, on every launch by every non-root user. From a desktop
-/// entry there was not even a message.
+/// Propagating that error would fail every launch by every non-root user with
+/// `Error: Permission denied (os error 13)` and no window. From a desktop entry
+/// there would not even be a message.
 ///
 /// Startup recovery belongs to whoever can write the prefix. If that is not us,
 /// skipping it is the whole correct response.
@@ -849,7 +849,7 @@ pub fn run_pending_update_helper() -> Result<(), UpdateError> {
 /// `scripts/install.ps1` both write when they cannot determine one. Anything
 /// else did not come from an installer of ours.
 ///
-/// Gated to match its only caller, `detect_managed_install_at`. macOS proves
+/// Gated to match its only caller, `locate_managed_install_at`. macOS proves
 /// ownership from the bundle signature instead of a marker file, so it never
 /// reads a recorded version and `-D warnings` would refuse this as dead code
 /// there. Neither a Windows nor a Linux check can see that.
@@ -1013,14 +1013,12 @@ fn read_linux_install_provenance(prefix: &Path) -> Result<UnixInstallProvenance,
             ))
         })?;
         let anchored = parent.destination(relative)?;
-        // Name the file. A bare `?` here surfaced as `No such file or directory
-        // (os error 2)` and nothing else — `UpdateError::Io` is transparent —
-        // so `kettle update` told the operator a file was missing without
-        // saying which one or what to do. That became reachable the moment
-        // provenance started carrying records forward: a file an old release
-        // installed and a new one no longer ships is now recorded, so deleting
-        // what looks like a leftover breaks every future update with an error
-        // that points nowhere.
+        // Name the file. `UpdateError::Io` is transparent, so with a bare `?`,
+        // `kettle update` would report only `No such file or directory
+        // (os error 2)`, without saying which file or what to do. Provenance
+        // carries records forward, so a file an old release installed and a
+        // new one no longer ships stays recorded, and deleting it as an
+        // apparent leftover breaks every future update.
         let metadata = fs::symlink_metadata(&anchored).map_err(|error| {
             UpdateError::UnmanagedInstall(format!(
                 "recorded Linux install file is missing: {} ({error}). Reinstall \
@@ -1171,28 +1169,25 @@ fn locate_managed_install_at(executable: &Path) -> Result<ManagedInstall, Update
         || marker.product != "kettle"
         || marker.managed_by != "kettle-installer"
         || marker.target != target
-        // Every field of this record was validated except the one a human
-        // reads. `install.json` is what support instructions, packaging
-        // scripts, and the user themselves consult to answer "what is installed
-        // here", so an unchecked string there is a claim kettle makes and never
-        // verifies.
+        // Validate the version too. Support instructions, packaging scripts,
+        // and users read `install.json` to answer "what is installed here", so
+        // an unchecked string there is a claim kettle makes and never verifies.
         //
-        // `unknown` is accepted because the installers write it. Refusing
-        // anything but a semver reported those installations as UNMANAGED and
-        // broke `kettle update` outright for them — `scripts/install-unix.py`
-        // explicitly permits `unknown` when it cannot determine a version, and
-        // `scripts/install.ps1` substitutes the same word rather than failing.
-        // A validator has to accept what the writers actually write.
+        // `unknown` is accepted because the installers write it.
+        // `scripts/install-unix.py` explicitly permits `unknown` when it cannot
+        // determine a version, and `scripts/install.ps1` substitutes the same
+        // word rather than failing. Rejecting it would report those installs
+        // as UNMANAGED and break `kettle update` for them.
         || !is_recorded_install_version(&marker.version)
     {
         return Err(UpdateError::UnmanagedInstall(
             "the installer marker does not match this kettle build".to_string(),
         ));
     }
-    // `local-dev-record` is a legacy channel from when recording was a
-    // compile-time feature; recording is now a runtime toggle in every build, so
-    // installers no longer write it. It is still recognized here so any such
-    // marker already on disk keeps refusing self-update (rebuild from source).
+    // `local-dev-record` is a legacy channel. Recording is a runtime toggle in
+    // every build, so installers no longer write it. It is still recognized so
+    // any such marker already on disk keeps refusing self-update (rebuild from
+    // source).
     if matches!(marker.channel.as_str(), "local-dev" | "local-dev-record") {
         return Err(UpdateError::UnmanagedInstall(
             "this is a local development install; rebuild and reinstall it from its source checkout"
@@ -1257,9 +1252,10 @@ pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateErro
 
 #[cfg(target_os = "macos")]
 pub fn prepare_managed_install_for_update() -> Result<ManagedInstall, UpdateError> {
-    // Unlike Windows and Linux there is no install-wide lock to take here: the
-    // macOS path locks beside the bundle once it knows which directory it will
-    // swap in, and holds it across download, staging, and exchange.
+    // Unlike Windows and Linux there is no install-wide lock to take here. The
+    // macOS path takes a per-bundle lock in the user's private state directory
+    // once it knows which bundle it will swap in, and holds it across download,
+    // staging, and exchange.
     detect_managed_install()
 }
 
@@ -1788,12 +1784,12 @@ fn spawn_pending_helper(prefix: &Path) -> Result<(), UpdateError> {
 }
 
 /// Bounds how long the helper waits for the update-transaction and
-/// running-instances locks before giving up. A holder that is merely stuck
-/// (not crashed) rather than exited normally — the GPU device-loss/TDR hangs
-/// this project has seen recur — would otherwise leave the helper blocked on
-/// an unbounded `ExclusiveFileLock::acquire` forever, with the staged,
-/// already-signature-and-hash-verified update never applied and no
-/// diagnostic left for the user.
+/// running-instances locks before giving up. Without it, a holder that hangs
+/// instead of exiting (like the GPU device-loss/TDR hangs this project keeps
+/// seeing) would block the helper forever in an unbounded
+/// `ExclusiveFileLock::acquire`. The staged, already signature- and
+/// hash-verified update would never apply, and the user would get no
+/// diagnostic.
 #[cfg(windows)]
 const PENDING_HELPER_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -2084,14 +2080,15 @@ fn record_pending_failure(
     record_pending_failure_locked(prefix, error);
 }
 
-/// Same write as [`record_pending_failure`], for the call site that times out
-/// acquiring the running lock itself and so can only prove it holds the
-/// update lock. Every pending-file writer in this module (`begin_pending_attempt`,
-/// `try_quarantine_pending`, this function's sibling) takes the update lock
-/// first, so holding it alone is sufficient to serialize this write against
-/// all of them; the running lock only additionally orders this against the
-/// live binary swap in `apply_staged_update`, which does not touch the
-/// pending record.
+/// Like [`record_pending_failure`], but also counts a handoff timeout once the
+/// grace period has passed. Used by the call site that times out acquiring the
+/// running lock and so can only prove it holds the update lock. Every
+/// pending-file writer in this module (`begin_pending_attempt`,
+/// `try_quarantine_pending`, `record_pending_failure`) takes the update lock
+/// first, so holding it alone serializes this write against all of them. The
+/// running lock only additionally orders this write against the live binary
+/// swap in `apply_verified_windows_update`, which does not touch the pending
+/// record.
 #[cfg(windows)]
 fn record_pending_handoff_timeout_before_running_lock(
     _update_lock: &kettle_state::ExclusiveFileLock,
@@ -2880,9 +2877,7 @@ fn apply_verified_linux_update(
     package.file(Path::new("kettle"))?;
     package.file(Path::new("install.sh"))?;
     // Provenance verification REQUIRES this file to be recorded, and the update
-    // replaces it like everything else, so it has to be installed here too. It
-    // was missing from the production map while the `cfg(test)` duplicate below
-    // carried it -- which is exactly why the tests stayed green.
+    // replaces it like everything else, so it has to be installed here too.
     package.file(Path::new("install-unix.py"))?;
     let previous_provenance = read_linux_install_provenance(&install.prefix)?;
     let map = linux_install_map(package.files.iter().map(|file| file.relative.as_path()))?;
@@ -2910,11 +2905,11 @@ fn apply_verified_linux_update(
     transaction.preflight_destinations(&destinations)?;
 
     // Every file this transaction writes must appear in the NEW provenance
-    // record. Not regenerating it left the OLD hashes describing the NEW files,
-    // so the very next verification reported the installation unmanaged:
-    // startup could not confirm or clean the committed transaction, and every
-    // later self-update refused to run. `install_unix_provenance` below merges
-    // these with what the previous release already owned.
+    // record. If the OLD hashes still describe the NEW files, the next
+    // verification reports the installation unmanaged. Startup then cannot
+    // confirm or clean the committed transaction, and every later self-update
+    // refuses to run. `install_unix_provenance` below merges these with what
+    // the previous release already owned.
     let mut provenance_files = Vec::with_capacity(destinations.len());
     for entry in map {
         let bytes = package.bytes(&entry.source)?;
@@ -2980,17 +2975,14 @@ fn apply_verified_linux_update(
 /// Write the Linux install provenance for a transaction that has just published
 /// its files, as its final journaled entry.
 ///
-/// Both Linux appliers end here so the record they produce cannot drift. That
-/// mattered: the two used to build it separately, and when the production one
-/// stopped installing `install-unix.py` the duplicate below kept recording it,
-/// so every test stayed green while real installs were rejected as unmanaged.
+/// Both Linux appliers end here so the record they produce cannot drift.
 ///
 /// `published` is what THIS transaction wrote; `previous` is the record it
-/// replaces. The two are merged rather than the new one replacing the old,
-/// because a file an earlier release installed and this archive no longer ships
-/// is still on disk — dropping its record leaves it unremovable, since uninstall
-/// deletes only what provenance lists. `install-unix.py` seeds from the old
-/// record for the same reason, and the two writers have to agree.
+/// replaces. The two are merged because a file an earlier release installed and
+/// this archive no longer ships is still on disk. Uninstall deletes only what
+/// provenance lists, so dropping its record would leave that file unremovable.
+/// `install-unix.py` seeds from the old record for the same reason, and the two
+/// writers have to agree.
 #[cfg(target_os = "linux")]
 fn install_unix_provenance(
     transaction: &mut Transaction,
@@ -3012,12 +3004,10 @@ fn install_unix_provenance(
     }
 
     // Carry the previous record's directories forward and add the ones this
-    // transaction actually created. Sampling `try_exists` before the writes
-    // instead asked the wrong question: a transaction that created a directory
-    // and then rolled back left it on disk unrecorded, so the retry saw it as
-    // pre-existing, omitted it, and uninstall left it behind for good. The
-    // transaction now reports what it created and removes those directories
-    // when it rolls back, so both answers come from the same authority.
+    // transaction actually created. Rollback removes that same set, so the
+    // record and the cleanup cannot disagree. Checking `try_exists` before the
+    // writes would treat a directory left by a rolled-back attempt as
+    // pre-existing and omit it, so uninstall would never remove it.
     //
     // This is called after every other publication and installs the record as
     // the transaction's last entry, so `created_directories` is complete: the
@@ -3034,11 +3024,9 @@ fn install_unix_provenance(
             .map(|(path, mode)| (path.clone(), *mode)),
     );
 
-    // Enforce the reader's bounds BEFORE writing: `read_linux_install_provenance`
-    // refuses a record past `MAX_ARCHIVE_ENTRIES`, so exceeding it here would
-    // produce provenance this installer can never read back — and since both
-    // upgrade and uninstall need a readable record, the install would be
-    // stranded by its own success.
+    // Enforce the reader's bounds BEFORE writing. `read_linux_install_provenance`
+    // refuses a record past `MAX_ARCHIVE_ENTRIES`, and upgrade and uninstall both
+    // need a readable record, so an oversized one would strand the install.
     if files.len() > MAX_ARCHIVE_ENTRIES || directories.len() > MAX_ARCHIVE_ENTRIES {
         return Err(UpdateError::UnmanagedInstall(format!(
             "refusing to record Linux install provenance with {} files and {} \
@@ -3055,16 +3043,14 @@ fn install_unix_provenance(
         product: "kettle".into(),
         managed_by: "kettle-installer".into(),
         prefix: prefix.into(),
-        // The uid that PUBLISHED these files — which is what verification then
-        // compares every recorded file against — rather than the prefix's
-        // owner. The two agree in every case that verifies: a root install into
-        // a root-owned prefix, or a user install into their own. They diverge
-        // only when a non-root user has ACL write access to a root-owned
-        // prefix, and `read_linux_install_provenance` already refuses that
-        // install because the record it just wrote is not owned by the prefix
-        // owner either. So this changes no reachable outcome; it stops the two
-        // writers disagreeing about what the field means. `install-unix.py`
-        // records `os.geteuid()`, and a record written by one has to be
+        // The uid that PUBLISHED these files, which verification compares every
+        // recorded file against, rather than the prefix's owner. The two agree
+        // in every case that verifies: a root install into a root-owned prefix,
+        // or a user install into their own. They differ only when a non-root
+        // user has ACL write access to a root-owned prefix, and
+        // `read_linux_install_provenance` refuses that install anyway because
+        // this record is not owned by the prefix owner either. `install-unix.py`
+        // also records `os.geteuid()`, and a record written by one has to be
         // readable by the other.
         owner_uid: unsafe { libc::geteuid() },
         files: files.into_values().collect(),
@@ -4685,7 +4671,7 @@ impl Transaction {
         // Record each missing parent durably BEFORE creating it, and record
         // what the walk actually created before propagating any error from it.
         //
-        // Persisting only after the walk returned left a process-kill window
+        // Persisting after the walk returns would leave a process-kill window
         // between `create_dir` and the journal write. A write-ahead intent is
         // safe to replay: if creation never happened there is nothing to
         // remove, and rollback removes a present directory only after file
@@ -4827,14 +4813,11 @@ impl Transaction {
         self.journal.phase = JournalPhase::RollingBack;
         let persisted = self.persist_journal();
         let restored = persisted.and_then(|()| self.restore_entries());
-        // Unconditionally, and before the `?`.
-        //
-        // Sequencing this after two fallible steps meant it never ran in the
-        // failure most likely to have caused the rollback: out of disk space
-        // fails the journal write and the restore, so both `?`s returned first
-        // and every directory this transaction created was left behind
-        // unowned — the exact end state the mechanism exists to prevent.
-        // Measured on an inode-capped filesystem: 8 recorded, 8 leaked.
+        // Run this unconditionally, before the `?`. Running out of disk space
+        // is the failure most likely to cause a rollback, and it fails both the
+        // journal write and the restore. If either error returned before this
+        // ran, every directory this transaction created would be left behind
+        // unowned.
         //
         // Removing empty directories is also the one rollback step that FREES
         // space and cannot itself fail for lack of it, so running it first can
@@ -4846,17 +4829,16 @@ impl Transaction {
 
     /// Undo the directory creations publishing performed, deepest first.
     ///
-    /// Restoring the files is only half of "leave the prefix as we found it":
-    /// their parents were created too. A left-behind directory is not just
-    /// litter — it is unowned, so the next attempt sees it as pre-existing,
-    /// omits it from provenance, and uninstall can never remove it.
+    /// Restoring the files is only half of leaving the prefix as we found it,
+    /// because their parents were created too. A left-behind directory is
+    /// unowned, so the next attempt sees it as pre-existing, omits it from
+    /// provenance, and uninstall can never remove it.
     ///
-    /// Best effort by construction. A directory that is not empty holds
-    /// something this transaction did not put there (or a backup still being
-    /// cleaned up), and removing it would destroy data rollback is supposed to
-    /// protect; `remove_dir` refuses that case for us. Any other failure leaves
-    /// the directory exactly as it is, which is the pre-existing behaviour.
-    ///
+    /// Best effort. A directory that is not empty holds something this
+    /// transaction did not put there (or a backup still being cleaned up), and
+    /// removing it would destroy data rollback is supposed to protect;
+    /// `remove_dir` refuses that case. Any other failure leaves the directory
+    /// as it is.
     fn remove_created_directories(&self) {
         // Keep the in-memory map as well as the on-disk journal complete. Windows
         // reopens and compares the journal before deleting it, so clearing only
@@ -6403,9 +6385,8 @@ mod tests {
                 b"#!/usr/bin/env python3\n".as_slice(),
                 0o755,
             ),
-            // Listed in `paths` below, so create it here too: leaving it to the
-            // caller makes this helper panic in `set_permissions` the first time
-            // it is reused by a test that does not already seed the file.
+            // Listed in `paths` below, so create it here too. Otherwise
+            // `set_permissions` panics for any caller that has not seeded it.
             ("share/kettle/install.json", b"{}\n".as_slice(), 0o644),
         ] {
             let path = prefix.join(relative);
@@ -6562,24 +6543,24 @@ mod tests {
             assert!(error.to_string().contains("rebuild and reinstall"));
         }
 
-        // `version` was the one field written and never checked, and it is the
-        // one a person reads: `install.json` is what support instructions and
-        // packaging scripts consult for "what is installed here". A marker
-        // carrying a version no kettle installer would write is not this
-        // build's marker.
+        // `version` is the field a person reads. Support instructions and
+        // packaging scripts consult `install.json` for "what is installed
+        // here". A marker carrying a version no kettle installer would write
+        // is not this build's marker.
         marker.channel = "stable".into();
         // `unknown` is what the installers write when they cannot determine a
-        // version, so it has to verify. Refusing it reported those
-        // installations as unmanaged and broke `kettle update` for them
-        // outright — see `scripts/install-unix.py`, which permits exactly this
-        // string, and `scripts/install.ps1`, which substitutes it.
+        // version, so it has to verify. Refusing it would report those
+        // installations as unmanaged and break `kettle update` for them. See
+        // `scripts/install-unix.py`, which permits exactly this string, and
+        // `scripts/install.ps1` (archived at the `v3.3.0` tag), which
+        // substitutes it.
         //
         // On Linux the marker is itself a provenance-recorded file, so
         // rewriting it invalidates the record that was seeded from its old
         // bytes; re-seed so this measures the version rule and not a stale
-        // hash. (The negative cases below did not need it — they were already
-        // expected to fail, which is how a positive assertion here catches
-        // what they could not.)
+        // hash. The negative cases below skip the re-seed because they already
+        // expect a failure. Only a positive assertion like this one catches a
+        // stale hash.
         marker.version = "unknown".into();
         fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
         #[cfg(target_os = "linux")]
@@ -6612,10 +6593,9 @@ mod tests {
         // And a real one is still accepted, so the check is not simply "no".
         marker.version = "2.35.0".into();
         fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
-        // Re-seed for the same reason as above: on Linux the marker is a
-        // provenance-recorded file, so rewriting it invalidates the record
-        // that was seeded from its previous bytes. Without this the assertion
-        // failed on Linux for a reason that had nothing to do with the version.
+        // Re-seed for the same reason as above. On Linux, rewriting the marker
+        // invalidates its provenance record, and the stale hash would fail this
+        // check for a reason unrelated to the version.
         #[cfg(target_os = "linux")]
         seed_linux_install_provenance(&prefix);
         if let Err(error) = detect_managed_install_at(&executable) {
@@ -6648,18 +6628,14 @@ mod tests {
         ));
     }
 
-    /// macOS used to answer `UnsupportedPlatform` here, because it had no
-    /// managed-install path at all. It has one now, so the meaningful assertion
-    /// is the narrower one: a bundle is required, and the test harness is not
-    /// running inside one.
     /// A prefix this user cannot write must not stop kettle from starting.
     ///
     /// `KETTLE_PREFIX=/usr/local` is a documented system-wide install. Run
     /// under sudo it leaves the prefix owned by root at 0755 with a
     /// world-readable marker, so a normal user's kettle recognizes the install
-    /// and then cannot create a lock beside it. That used to propagate all the
-    /// way out of `main`: `Error: Permission denied (os error 13)` and no
-    /// window, every launch, for every non-root user.
+    /// and then cannot create a lock beside it. If that error reached `main`,
+    /// every non-root user would get `Error: Permission denied (os error 13)`
+    /// and no window on every launch.
     #[cfg(target_os = "linux")]
     #[test]
     fn startup_recovery_skips_a_prefix_this_user_cannot_write() {
@@ -7578,8 +7554,7 @@ mod tests {
             ("install.sh", b"verified-installer".as_slice(), 0o755),
             // The real release archive ships this (release.yml installs
             // `scripts/install-unix.py` into `dist/kettle/`), and provenance
-            // verification requires it to be recorded. The fixture omitted it
-            // only because the production path used to omit it too.
+            // verification requires it to be recorded.
             ("install-unix.py", b"verified-unix-installer".as_slice(), 0o755),
             ("LICENSE", b"license".as_slice(), 0o644),
             ("NOTICE", b"notice".as_slice(), 0o644),
@@ -7799,16 +7774,13 @@ mod tests {
 
     /// A managed Linux update must leave the installation still managed.
     ///
-    /// The updater replaces provenance-covered files — `bin/kettle`,
-    /// `install.sh`, the desktop file, icons, the man page — and did not
-    /// regenerate `install-files.json`. The record therefore still held the
-    /// OLD hashes for the NEW files, so the very next verification reported
-    /// the installation unmanaged: startup could not confirm or clean the
-    /// committed transaction, and every later `kettle update` refused to run.
-    /// One official update was enough to strand an installation permanently.
-    ///
-    /// The previous version of this test seeded no provenance and asserted
-    /// only that two files had new bytes, so it passed throughout.
+    /// The updater replaces provenance-covered files (`bin/kettle`,
+    /// `install.sh`, the desktop file, icons, the man page), so it must also
+    /// regenerate `install-files.json`. A record that still holds the old
+    /// hashes makes the next verification report the installation unmanaged.
+    /// Startup then cannot confirm or clean the committed transaction, and
+    /// every later `kettle update` refuses to run. One official update would
+    /// strand the installation permanently.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_transaction_applies_bytes_from_verified_archive_memory() {
@@ -7821,7 +7793,8 @@ mod tests {
         fs::create_dir_all(prefix.join("bin")).unwrap();
         fs::write(prefix.join("bin/kettle"), b"old-binary").unwrap();
         // A real update always runs against an install that already verified,
-        // because `install_update` calls `detect_managed_install` first.
+        // because `install_update` first verifies provenance in
+        // `prepare_update_transaction`.
         seed_linux_install_provenance(&prefix);
         let install = ManagedInstall {
             prefix: prefix.clone(),
@@ -7883,8 +7856,8 @@ mod tests {
             "the provenance record must be rewritten by the update"
         );
 
-        // Every recorded hash must match what is actually on disk — this is
-        // precisely the check that failed after a real update.
+        // Every recorded hash must match what is actually on disk. A stale
+        // record fails exactly this check.
         for record in &after.files {
             let path = prefix.join(&record.path);
             let metadata = fs::metadata(&path).unwrap_or_else(|error| {
@@ -7919,14 +7892,10 @@ mod tests {
         // Every destination the applier's map names must have the ARCHIVE's
         // bytes on disk, not merely a record.
         //
-        // "It is recorded and the record matches disk" is satisfied by a file
-        // nobody touched — which is what carrying records forward made
-        // possible. Before that, dropping an entry from the production map
-        // produced a loud "provenance is missing share/kettle/install-unix.py";
-        // afterwards the old record was carried forward and the same drift was
-        // silent, so the helper would simply never update again. That is the
-        // exact bug this test was written for, and the carry-forward defanged
-        // it. Comparing bytes is what cannot be satisfied by not acting.
+        // Old records are carried forward, so a file nobody touched still
+        // passes "it is recorded and the record matches disk". If an entry
+        // drops out of the production map, that file silently never updates
+        // again. Only comparing bytes catches it.
         for (source, destination) in [
             ("kettle", "bin/kettle"),
             ("install.sh", "share/kettle/install.sh"),
@@ -8001,11 +7970,10 @@ mod tests {
 
     /// An update must not disown what the previous release installed.
     ///
-    /// Provenance is the only list uninstall consults. Regenerating it from the
-    /// archive alone meant a file an older release shipped and this one dropped
-    /// stayed on disk with no record of it — installed forever, removable by
-    /// nothing. `install-unix.py` seeds the new record from the old one, so
-    /// regenerating from scratch also made the two writers disagree.
+    /// Provenance is the only list uninstall consults. Rebuilt from the archive
+    /// alone, it would drop a file an older release shipped and this one does
+    /// not, leaving it on disk where nothing can remove it. `install-unix.py`
+    /// seeds the new record from the old one, and the two writers must agree.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_update_keeps_owning_files_the_new_archive_dropped() {
@@ -8068,11 +8036,10 @@ mod tests {
     /// Directory ownership must come from what the transaction actually
     /// created, and a rollback must undo those creations.
     ///
-    /// The plan used to sample `try_exists` before writing anything. A
-    /// transaction that created `share/man/man1`, failed, and rolled back
-    /// restored the files but left the directory; the retry then saw it as
-    /// pre-existing, left it out of provenance, and uninstall could never
-    /// remove it.
+    /// Sampling `try_exists` before writing is not enough. A transaction that
+    /// creates `share/man/man1`, fails, and rolls back would restore the files
+    /// but leave the directory. The retry would see it as pre-existing and
+    /// leave it out of provenance, so uninstall could never remove it.
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_update_owns_the_directories_it_creates_and_rollback_removes_them() {
@@ -8175,12 +8142,11 @@ mod tests {
         );
         // Every recorded directory, not just the leaves.
         //
-        // Asserting only the three leaf paths could not see the order: a leaf
-        // is removed last under either order, so reversing `keys().rev()` to
-        // `keys()` — which strands 12 parents, `share/doc` and `share/icons`
-        // and the rest, because `remove_dir` refuses a directory whose child
-        // has not gone yet — left this test green. Walking the whole tree is
-        // what makes deepest-first load-bearing.
+        // A leaf is removed under either order, so the three leaf paths alone
+        // cannot tell deepest-first from shallowest-first. Iterating `keys()`
+        // instead of `keys().rev()` strands 12 parents, such as `share/doc` and
+        // `share/icons`, because `remove_dir` refuses a directory that still
+        // has a child. Walking the whole tree catches that.
         let mut leaked = Vec::new();
         let mut walk = vec![prefix.clone()];
         while let Some(dir) = walk.pop() {
@@ -9340,12 +9306,10 @@ mod tests {
         assert!(persisted.last_error.is_none());
     }
 
-    /// Regression test: a stuck (not crashed) holder of the running-instances
-    /// lock must not wedge the pending-update helper forever. The helper
-    /// should give up once its bounded timeout elapses and leave an
-    /// actionable `last_error` behind for the next launch's
-    /// `inspect_pending_start` to surface, instead of blocking indefinitely
-    /// with no diagnostic and no escape hatch.
+    /// A stuck (not crashed) holder of the running-instances lock must not
+    /// wedge the pending-update helper forever. The helper gives up after its
+    /// bounded timeout and leaves an actionable `last_error` for the next
+    /// launch's `inspect_pending_start` to surface.
     #[cfg(windows)]
     #[test]
     fn pending_helper_gives_up_on_a_stuck_running_lock_instead_of_hanging_forever() {

@@ -1465,29 +1465,14 @@ fn apply_working_directory(
         None if cwd_policy == WorkingDirectoryPolicy::RejectInvalidExplicit => {}
         Some(d) if d.is_dir() => cmd.cwd(d),
         _ => {
-            // Recorded cwd is missing or no longer on disk (e.g.,
-            // user moved the repo between sessions, or the `-d` arg
-            // pointed at a since-deleted path). Fall back to the OS
-            // home directory. The previous version only checked
-            // `HOME`, which is unset on Windows by default — so
-            // Windows users with a stale recorded cwd silently
-            // ended up in whatever directory they happened to
-            // launch kettle from. `home_dir_fallback` probes
-            // `HOME` then `USERPROFILE` then `APPDATA`, in that
-            // order, so all three platforms (Linux/macOS/Windows)
-            // converge on the same "user-home" intent. Same shape
-            // as an earlier macOS universal2 packaging fix — Linux+macOS
-            // worked, Windows didn't, the env var probe order is
-            // the difference.
-            // Also gate the fallback on `is_dir`. The env
-            // var could be set to something that exists but isn't a
-            // directory (an exotic `HOME=/etc/passwd` misconfig, or
-            // a path that's a regular file / symlink to a file) —
-            // `cmd.cwd` would then hand the OS spawn an invalid
-            // target. Treating that the same as "no home" lets
-            // `portable_pty` inherit kettle's launch directory
-            // (the same recovery as when no env
-            // var was set or it was empty).
+            // The recorded cwd is missing or no longer on disk (e.g., the user
+            // moved the repo between sessions, or the `-d` path has since been
+            // deleted), so fall back to the OS home directory. `HOME` is unset
+            // on Windows by default, so `home_dir_fallback` probes `HOME`, then
+            // `USERPROFILE`, then `APPDATA`. A home that is not a directory
+            // (such as `HOME=/etc/passwd`) would hand the OS spawn an invalid
+            // target, so it counts as no home and `portable_pty` inherits
+            // kettle's launch directory.
             if let Some(home) = home_dir_fallback(|k| std::env::var_os(k))
                 && home.is_dir()
             {
@@ -1519,11 +1504,10 @@ impl PtyGeometry {
     /// `panic = "abort"`, so that takes down every pane in every window, and a
     /// CJK filename in `ls` output is enough to trigger it.
     ///
-    /// One column was reachable two ways. `kettle exec --cols 1` accepted it
-    /// directly, and a split narrow enough to leave a single cell after padding
-    /// asked for it from the GUI. Every construction path goes through here,
-    /// including the `(1, 1, 1, 1)` fallbacks used when a geometry cannot be
-    /// resolved, so this is the one place the invariant has to hold.
+    /// `kettle exec --cols 1`, a split narrow enough to leave one cell after
+    /// padding, and the `(1, 1, 1, 1)` fallbacks for an unresolved geometry all
+    /// ask for one column. Callers can bypass this constructor through the
+    /// public fields, so [`TermSize::new`] clamps again at the engine boundary.
     pub fn new(columns: usize, rows: usize, pixel_width: u16, pixel_height: u16) -> Self {
         Self {
             columns: columns.max(MIN_COLUMNS),
@@ -1769,11 +1753,11 @@ fn recompute_kitty_placements(placements: &mut Vec<Placement>, geometry: PtyGeom
     });
 }
 
-/// A `Write` sink that discards everything. On `Terminal`
-/// teardown the PTY writer (the child's stdin / conin) is swapped for this
-/// so dropping the real writer closes the input handle immediately — an EOF
-/// nudge for shells that exit on stdin close — without leaving the field
-/// holding a dangling handle. Zero-sized; never errors.
+/// A `Write` sink that discards everything. On `Terminal` teardown the PTY
+/// writer (the child's stdin / conin) is swapped for this, so the real writer
+/// drops at once and the field never holds a dangling handle. Closing the
+/// input is an EOF nudge for shells that exit when stdin closes, and it
+/// synthesizes no terminal input. Zero-sized; never errors.
 struct NullWrite;
 
 impl std::io::Write for NullWrite {
@@ -2381,10 +2365,10 @@ struct CompletionSlot {
     /// stays visible until this passes, so a Tab that re-publishes the same
     /// candidates does not blink the card off for the round-trip.
     ///
-    /// Deliberately no timer: the shell's reply lands well inside the window in
-    /// the normal case and clears the deadline, and the cursor-blink tick
-    /// already bounds how long a stale card can linger when a foreground
-    /// program swallows the Tab instead. Do not add one.
+    /// The shell's reply normally lands inside the window and clears the
+    /// deadline. If a foreground program swallows the Tab instead, the event
+    /// loop wakes at the deadline through [`Terminal::poll_completion_hide`]
+    /// and draws one erase frame.
     hide_after: Option<std::time::Instant>,
 }
 
@@ -3912,8 +3896,9 @@ fn advance_terminal_bytes_with_commit_hook(
     }
 }
 
-/// Force-apply a pending DEC 2026 update, prune image rows evicted by the
-/// buffered mutation, then publish exactly one redraw.
+/// Borrowed state for [`force_sync_update_flush`], which force-applies a
+/// pending DEC 2026 update, prunes image rows evicted by the buffered
+/// mutation, then publishes exactly one redraw.
 struct SyncFlushContext<'a> {
     term: &'a SharedTerm,
     images: &'a Images,
@@ -4060,8 +4045,8 @@ impl TermSize {
     /// The second guard on the one-column crash. [`PtyGeometry::new`] clamps
     /// too, but its fields are public and the type is re-exported, so a caller
     /// can build `PtyGeometry { columns: 1, .. }` and never pass through it.
-    /// This is the boundary the engine is on the other side of, so enforcing it
-    /// here does not depend on how the geometry was made.
+    /// The engine consumes this type directly, so clamping here holds however
+    /// the geometry was made.
     pub fn new(columns: usize, screen_lines: usize) -> Self {
         Self {
             columns: columns.max(MIN_COLUMNS),
@@ -4170,14 +4155,12 @@ pub type SharedTerm = Arc<Mutex<Term<EventProxy>>>;
 /// - `USERPROFILE` — the Windows-native home (`C:\Users\Bob`)
 /// - `APPDATA` — Windows last-ditch fallback (`...\AppData\Roaming`)
 ///
-/// An *empty* env var (e.g., `HOME=""` — possible in stripped-down CI
+/// An *empty* env var (e.g., `HOME=""`, possible in stripped-down CI
 /// containers or after a misconfigured shell `unset HOME` / `export
 /// HOME=`) is treated as unset and the probe continues to the next
-/// variable. Previously, `var_os("HOME")` would return
-/// `Some(OsString::new())` and this function returned `PathBuf::from("")`
-/// — `CommandBuilder::cwd("")` then fed an invalid empty path to the
-/// OS spawn call (which on Unix means "no cwd" but the intent here is
-/// to actively *pick* a home, so the silent fall-through was wrong).
+/// variable. Returning `PathBuf::from("")` would hand
+/// `CommandBuilder::cwd` an invalid empty path (on Unix that means
+/// "no cwd") instead of picking a home.
 ///
 /// Returns `None` only on a stripped-down environment where none of
 /// the three are set to a non-empty value; callers leave
@@ -4392,14 +4375,14 @@ pub struct Terminal {
     /// *authoritative* cwd — a shell that volunteers it (incl. an in-distro WSL
     /// shell) is always right.
     pub cwd: Arc<Mutex<Option<String>>>,
-    /// v2.29.0: the shell's working directory, read from the OS process table,
+    /// The shell's working directory, read from the OS process table,
     /// for shells that do NOT emit OSC 7/9;9, such as a stock Windows `cmd`.
     /// Kept SEPARATE from `cwd` so a stale/None native read can never clobber
     /// the authoritative escape-sequence cwd; consulted only as a fallback by
     /// `current_dir_or_native`. Never set for WSL/SSH panes (the relay's OS cwd
     /// is meaningless there).
     pub native_cwd: Arc<Mutex<Option<String>>>,
-    /// v2.29.1: set once the shell actually reported a cwd via OSC 7/9;9. Until
+    /// Set once the shell actually reported a cwd via OSC 7/9;9. Until
     /// then `cwd` holds only the pre-seeded launch directory, so
     /// [`current_dir_or_native`](Self::current_dir_or_native) prefers the live
     /// native poll; after a real report the reported cwd becomes authoritative.
@@ -4424,19 +4407,16 @@ pub struct Terminal {
     /// Default `false` preserves the raw-stream
     /// behavior (replayable via `cat <log>` in a terminal).
     pub log_strip_ansi: Arc<Mutex<bool>>,
-    /// v2.20.0 (`shell_idle`, review fix): true once this pane has seen at
-    /// least one OSC 133 OutputStart (C). An integration that emits A/B/D
-    /// but never C (a clobbered pwsh Enter handler, AcceptLine via other
-    /// chords) must never report "idle" — prompt marks alone don't prove
-    /// command tracking works, and a false idle skips the close-confirm
-    /// dialog over a running command.
+    /// True once this pane has seen at least one OSC 133 OutputStart (C). An
+    /// integration that emits A/B/D but never C (a clobbered pwsh Enter handler,
+    /// AcceptLine via other chords) must never make `shell_idle` report "idle".
+    /// Prompt marks alone don't prove command tracking works, and a false idle
+    /// skips the close-confirm dialog over a running command.
     output_start_seen: Arc<std::sync::atomic::AtomicBool>,
-    /// Mirrors an active session-log writer so the reader thread can skip its
-    /// per-read Mutex entirely when logging is off
-    /// (the overwhelmingly common case — the lock + Option check ran once
-    /// per 64KiB read). Toggled ONLY through [`Terminal::set_log_path`] or
-    /// [`Terminal::set_log_file`],
-    /// which keeps the pair in sync.
+    /// Mirrors an active session-log writer so the reader thread can skip the
+    /// Mutex and `Option` check on each 64KiB read when logging is off, the
+    /// common case. Toggled ONLY through [`Terminal::set_log_path`] or
+    /// [`Terminal::set_log_file`], which keeps the pair in sync.
     log_active: Arc<std::sync::atomic::AtomicBool>,
     /// Changes whenever the installed writer's logging session changes. The
     /// reader uses it to keep parser state from crossing session boundaries.
@@ -4469,12 +4449,12 @@ pub struct Terminal {
     /// Live OSC 52 write policy shared with the terminal event proxy. DA1
     /// extension 52 is emitted only while this is true.
     osc52_copy_allowed: Arc<AtomicBool>,
-    /// C4 (multi-window): bumped by the reader thread once per PTY read it
-    /// processed (right before the wakeup fires). Lets a UI hosting several
-    /// windows answer "did THIS pane produce output since I last painted?"
-    /// without draining anything — a fan-out wakeup repaints only the windows
-    /// whose panes' generations moved. Plain text emits no `TermEvent`, so
-    /// the event channel can't answer that question.
+    /// Bumped by the reader thread once per PTY read it processed (right
+    /// before the wakeup fires). Lets a UI hosting several windows answer "did
+    /// THIS pane produce output since I last painted?" without draining
+    /// anything, so a fan-out wakeup repaints only the windows whose panes'
+    /// generations moved. Plain text emits no `TermEvent`, so the event channel
+    /// can't answer that question.
     out_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -4746,10 +4726,10 @@ fn merge_windows_paths(
 
 /// Terminates a freshly spawned child unless terminal construction completes.
 ///
-/// Reader and writer setup now finishes before `spawn_command`, so a setup
-/// error cannot start a child at all. Dropping a `Box<dyn Child>` still does not
-/// terminate the process it represents, however, so the guard covers the final
-/// ownership handoff and protects an unwind while the value is assembled.
+/// Reader and writer setup finishes before `spawn_command`, so a setup error
+/// cannot start a child at all. Dropping a `Box<dyn Child>` does not terminate
+/// the process it represents, so the guard covers the final ownership handoff
+/// and protects an unwind while the value is assembled.
 ///
 /// `Terminal`'s own `Drop` takes over once construction succeeds, so the guard
 /// is disarmed immediately before the value is built — the covered window is
@@ -4799,12 +4779,11 @@ impl Drop for SpawnedChildGuard {
 /// Case-insensitive so `wsl`, `wsl.exe`, and `C:\…\wsl.exe` all match.
 ///
 /// Splits on BOTH `/` and `\` rather than using `std::path::Path::file_stem`,
-/// because `Path` only treats `\` as a separator on Windows targets — on a
+/// because `Path` only treats `\` as a separator on Windows targets. On a
 /// Linux/macOS build (incl. CI) `C:\Windows\System32\wsl.exe` would be one
 /// opaque component and the stem check would miss it. wsl.exe only runs on
 /// Windows, but a target-independent check keeps the function and its unit
-/// test correct everywhere (the cross-platform CI pretest caught the
-/// `Path`-based version).
+/// test correct everywhere.
 fn is_wsl_launcher(prog: &str) -> bool {
     let last = prog.rsplit(['/', '\\']).next().unwrap_or(prog);
     last.eq_ignore_ascii_case("wsl") || last.eq_ignore_ascii_case("wsl.exe")
@@ -4821,12 +4800,11 @@ const fn default_shell_accepts_login_flag() -> bool {
 
 /// Whether an EXPLICIT `command = <prog>` accepts the POSIX `-l` login switch.
 ///
-/// The `default_shell_accepts_login_flag` guard only covered the no-argv default-shell
-/// arm; the explicit-argv arm still injected `-l` for `wsl.exe` (where `-l`
-/// means "list distros") only via `!is_wsl_launcher`, leaving Windows-native
-/// shells (`pwsh`/`powershell`/`cmd`) to receive a `-l` they reject. Exclude
-/// both, matching on the case-insensitive basename sans `.exe`. POSIX shells
-/// (bash/zsh/fish/…) and anything else honor `-l`.
+/// The explicit-argv counterpart of `default_shell_accepts_login_flag`.
+/// Returns `false` for `wsl.exe`, where `-l` means "list distros", and for the
+/// Windows-native shells (`pwsh`/`powershell`/`cmd`), which don't treat `-l`
+/// as a login flag. Matches on the case-insensitive basename sans `.exe`.
+/// POSIX shells (bash/zsh/fish/…) and anything else honor `-l`.
 fn prog_accepts_login_flag(prog: &str) -> bool {
     if is_wsl_launcher(prog) {
         return false;
@@ -4942,9 +4920,9 @@ fn detect_shells_windows(
     git_bash: impl Fn() -> Option<std::path::PathBuf>,
 ) -> Vec<ShellChoice> {
     let mut out: Vec<ShellChoice> = Vec::new();
-    // Dropdown parity: Windows Terminal's order (and its "PowerShell"
-    // label for pwsh 7 — was "PowerShell 7"). The order matters beyond looks:
-    // `Ctrl+Shift+N` opens the Nth entry, matching WT's profile shortcuts.
+    // Dropdown parity: Windows Terminal's order and its "PowerShell" label
+    // for pwsh 7. The order matters beyond looks: `Ctrl+Shift+N` opens the
+    // Nth entry, matching WT's profile shortcuts.
     for (label, exe) in [
         ("PowerShell", "pwsh.exe"),
         ("Windows PowerShell", "powershell.exe"),
@@ -5267,9 +5245,10 @@ fn list_wsl_distros() -> Vec<String> {
     // freezes `wsl.exe` — would otherwise hang the whole window ("not
     // responding"). On timeout we abandon the call and report no distros; the
     // worker self-terminates if `wsl.exe` ever returns (its `send` no-ops once
-    // the receiver is gone). With the App-side cache (open_new_tab_menu), the
-    // worst case is one ~2 s wait on the first dropdown open. `-l -q` only reads
-    // the registry/service (it doesn't boot a distro), so 2 s is generous.
+    // the receiver is gone). The process-wide `detect_shells` cache, prewarmed
+    // at startup, runs this at most once, so the worst case is one ~2 s wait on
+    // the first dropdown open. `-l -q` only reads the registry/service (it
+    // doesn't boot a distro), so 2 s is generous.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(
@@ -5297,11 +5276,10 @@ fn list_wsl_distros() -> Vec<String> {
 /// One axis of a `PtySize`, computed without overflow. `cell` is the
 /// per-cell pixel extent (1 when computing the row/column count itself);
 /// `count` is the grid dimension in cells. The product is evaluated in
-/// `u32` and clamped into `u16`, the type `PtySize` requires. The old
-/// `cell_w * cols as u16` did the whole multiply in `u16` — a panic in
-/// debug and a silent wrap in release once the product passed 65535,
-/// reachable with a HiDPI cell on a very wide grid — and `cols as u16`
-/// truncated a pathological `usize` before the multiply.
+/// `u32` and clamped into `u16`, the type `PtySize` requires. A `u16`
+/// multiply panics in debug and wraps in release once the product passes
+/// 65535, which a HiDPI cell on a very wide grid can reach, and casting
+/// `count` to `u16` first would truncate a pathological `usize`.
 fn clamp_pty_dim(cell: u16, count: usize) -> u16 {
     let count = count.min(u16::MAX as usize) as u32;
     (cell as u32 * count).min(u16::MAX as u32) as u16
@@ -5359,7 +5337,7 @@ fn default_prog() -> CommandBuilder {
     CommandBuilder::new_default_prog()
 }
 
-/// v2.29.1: the default-shell `CommandBuilder`, optionally auto-injecting
+/// The default-shell `CommandBuilder`, optionally auto-injecting
 /// kettle's shell integration so the shell reports its working directory
 /// (OSC 7) + prompt marks (OSC 133) with zero `$PROFILE` setup. This is what
 /// lets the tab track `cd` for a stock PowerShell — whose `Set-Location` does
@@ -5426,23 +5404,23 @@ fn explicit_prog_with_integration(
     command
 }
 
-/// v2.29.1: the kettle PowerShell shell-integration body, embedded so the
-/// spawned pwsh can be launched already wired (no `$PROFILE` edit needed).
+/// The kettle PowerShell shell-integration body, embedded so the spawned
+/// pwsh can be launched already wired (no `$PROFILE` edit needed).
 #[cfg(any(windows, test))]
 const POWERSHELL_INTEGRATION: &str = include_str!("../../../shell-integration/kettle.ps1");
 
-/// v2.29.1: is `path` a PowerShell (pwsh / powershell) executable, by basename?
+/// Is `path` a PowerShell (pwsh / powershell) executable, by basename?
 #[cfg(windows)]
 fn is_powershell(path: &std::path::Path) -> bool {
     path.to_str().is_some_and(is_powershell_program)
 }
 
 /// Windows limits a process command line to 32,767 UTF-16 code units.
-/// `-EncodedCommand` base64-encodes UTF-16LE, so the integration crossed that
-/// limit when completion support was added. Encoding the source as UTF-8 and
-/// decoding it in a fixed ASCII bootstrap keeps the same quoting safety while
-/// using roughly half the command line. The compile-time cap leaves room for
-/// the executable path, quoting, and future arguments.
+/// `-EncodedCommand` base64-encodes UTF-16LE, which would put the integration
+/// over that limit. Encoding the source as UTF-8 and decoding it in a fixed
+/// ASCII bootstrap keeps the same quoting safety while using roughly half the
+/// command line. The compile-time cap leaves room for the executable path,
+/// quoting, and future arguments.
 #[cfg(windows)]
 fn powershell_integration_command(path: &std::path::Path) -> CommandBuilder {
     let mut c = CommandBuilder::new(path);
@@ -5579,8 +5557,8 @@ mod powershell_bootstrap_tests {
     }
 }
 
-/// Cap on the OSC 133 prompt-mark ring. A long-lived shell
-/// session emits one mark per prompt; without a cap the Vec grew unbounded.
+/// Cap on the OSC 133 prompt-mark ring. A long-lived shell session emits one
+/// mark per prompt, so without a cap the ring would grow without bound.
 const MAX_PROMPT_MARKS: usize = 2048;
 
 /// Convert a grid-relative line to a monotonic document-row id.
@@ -5595,9 +5573,8 @@ fn stable_grid_line_id(history_origin: u64, history_size: usize, line: i32) -> u
 
 /// Push a stable prompt-start row id into the bounded ring.
 /// Dedups against the most-recent mark (some shells emit OSC 133 `A` twice for a
-/// single prompt) and trims oldest-first with O(1) `pop_front` — the previous
-/// `Vec::drain(0..d)` shifted all ~2048 elements on every prompt once full, on
-/// the hot reader-thread path. Pure, so the ring discipline is unit-tested.
+/// single prompt) and trims oldest-first with O(1) `pop_front`, since this runs
+/// on the hot reader-thread path. Pure, so the ring discipline is unit-tested.
 fn push_prompt_mark(ring: &mut std::collections::VecDeque<u64>, row_id: u64) -> bool {
     if ring.back() == Some(&row_id) {
         return false;
@@ -5990,20 +5967,6 @@ mod kitty_delete_tests {
     }
 }
 
-/// Estimated retained bytes for one scrollback line.
-///
-/// This counts the inline grid representation only. A cell can also own heap
-/// storage — combining marks, an underline color, a hyperlink — which this
-/// deliberately does not walk: doing so would mean touching every cell of every
-/// line on each budget evaluation, on the PTY reader's path.
-///
-/// That is sound only because the dynamic part is separately bounded. Combining
-/// marks are capped per cell (`MAX_ZEROWIDTH_PER_CELL`); before that cap a
-/// single cell could grow with the entire input while this estimate stayed
-/// flat, which made the configured `scrollback-bytes` ceiling meaningless.
-/// Hyperlink storage is shared behind an `Arc` across the cells of one link.
-/// So the estimate understates by a bounded factor rather than an unbounded
-/// one — see `docs/CONFIG.md`, which says the same thing to users.
 /// The errno meaning "no such process", used to recognize a child that exited
 /// before the kill reached it.
 ///
@@ -6021,6 +5984,18 @@ const fn libc_esrch() -> i32 {
     }
 }
 
+/// Estimated retained bytes for one scrollback line.
+///
+/// This counts the inline grid representation only. A cell can also own heap
+/// storage (combining marks, an underline color, a hyperlink), which this
+/// does not walk: that would touch every cell of every line on each budget
+/// evaluation, on the PTY reader's path.
+///
+/// That is sound only because the dynamic part is separately bounded.
+/// Combining marks are capped per cell (`MAX_ZEROWIDTH_PER_CELL`), and
+/// hyperlink storage is shared behind an `Arc` across the cells of one link.
+/// So the estimate understates by a bounded factor, as `docs/CONFIG.md` tells
+/// users.
 fn scrollback_line_bytes(columns: usize) -> usize {
     const ROW_OVERHEAD_BYTES: usize = 64;
     let columns = columns.max(1);
@@ -6349,14 +6324,12 @@ impl Terminal {
             }
             None => {
                 let mut c = default_prog_with_integration(shell_integration);
-                // `-l` is the POSIX login-shell switch. On
-                // Windows `default_prog()` resolves to pwsh/powershell/cmd, none
-                // of which accept it (powershell.exe errors on an unknown arg,
-                // pwsh's `-Login` is reserved/no-op on Windows, cmd ignores it),
-                // so `login-shell = true` with no explicit `command` produced a
-                // broken/empty pane. The explicit-argv arm already guards the
-                // analogous `wsl.exe` footgun; guard the default-shell arm for
-                // Windows-native shells via `default_shell_accepts_login_flag`.
+                // `-l` is the POSIX login-shell switch. On Windows
+                // `default_prog()` resolves to pwsh/powershell/cmd, none of which
+                // accept it (powershell.exe errors on an unknown arg, pwsh's
+                // `-Login` is reserved/no-op on Windows, cmd ignores it), so
+                // `login-shell = true` with no explicit `command` would open a
+                // broken/empty pane.
                 if login_shell && default_shell_accepts_login_flag() {
                     c.arg("-l");
                 }
@@ -6399,16 +6372,14 @@ impl Terminal {
         // time so a bumped `kettle/Cargo.toml` flows through with no
         // separate version string to keep in sync.
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // Env vars set on the child's *Windows* process do
-        // NOT cross into a WSL distro unless listed in `WSLENV`. Without this,
-        // `COLORTERM` is silently dropped at the WSL boundary, so a program
-        // inside WSL (Ubuntu) that decides truecolor support from `$COLORTERM`
-        // — rather than force-enabling it — falls back to 256-color and
-        // renders washed-out, mis-mapped colors. Append our terminal-identity
-        // vars to WSLENV (preserving any the user already set) with the `/u`
-        // flag, i.e. "pass Windows→WSL only". `cmd.env` set them on the
-        // Windows side just above, so WSLENV can reference them. Harmless when
-        // the child isn't `wsl.exe` — it's just an extra, ignored env var.
+        // Env vars set on the child's *Windows* process do NOT cross into a
+        // WSL distro unless listed in `WSLENV`. Without this, `COLORTERM` is
+        // silently dropped at the WSL boundary, so a program inside WSL that
+        // detects truecolor from `$COLORTERM` falls back to 256-color with
+        // washed-out, mis-mapped colors. Append the pane and terminal-identity
+        // env vars set above to WSLENV with the `/u` flag ("pass Windows→WSL
+        // only"), preserving any the user already set. When the child isn't
+        // `wsl.exe`, WSLENV is just an extra, ignored env var.
         cmd.env(
             "WSLENV",
             child_wslenv(&std::env::var("WSLENV").unwrap_or_default(), extra_env),
@@ -6500,15 +6471,14 @@ impl Terminal {
         let cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(
             cwd.and_then(std::path::Path::to_str).map(str::to_owned),
         ));
-        // v2.29.0: OS-derived cwd fallback (populated by the App's process poll
-        // for native shells with no OSC 7/9;9). Starts empty.
+        // OS-derived cwd fallback, populated by the App's process poll for
+        // native shells with no OSC 7/9;9.
         let native_cwd_cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        // v2.29.1: set true once the shell actually REPORTS a cwd via OSC 7/9;9.
-        // `cwd_cell` is pre-seeded with the launch directory (above), so without
-        // this flag `current_dir_or_native` would always prefer that frozen seed
-        // and never fall through to the live native poll — leaving the tab stuck
-        // at the launch dir for a stock shell that emits no OSC 7. Only a real
-        // report flips this and makes the OSC cwd authoritative.
+        // Set once the shell actually REPORTS a cwd via OSC 7/9;9, which makes the
+        // OSC cwd authoritative. `cwd_cell` is pre-seeded with the launch directory
+        // (above), so without this flag `current_dir_or_native` would always prefer
+        // that frozen seed over the live native poll, leaving the tab stuck at the
+        // launch dir for a stock shell that emits no OSC 7.
         let osc_cwd_seen: Arc<std::sync::atomic::AtomicBool> =
             Arc::new(std::sync::atomic::AtomicBool::new(false));
         let osc_cwd_seen_for_struct = osc_cwd_seen.clone();
@@ -6541,8 +6511,7 @@ impl Terminal {
         let stop = Arc::new(AtomicBool::new(false));
         // Teardown drain flag (see the `drain_output` struct field).
         let drain_output = Arc::new(AtomicBool::new(false));
-        // C4 (multi-window): per-pane output-generation counter (see the
-        // `out_gen` struct field).
+        // Per-pane output-generation counter (see the `out_gen` struct field).
         let out_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let out_gen_reader = out_gen.clone();
         let pty_read_progress = Arc::new(PtyReadProgressState::new());
@@ -7474,11 +7443,10 @@ impl Terminal {
                                             if let Ok(mut t) = output_started_at.lock() {
                                                 *t = Some(std::time::Instant::now());
                                             }
-                                            // v2.20.0 (`shell_idle`): the pane has a
-                                            // REAL OutputStart source — prompt marks
-                                            // alone never authorize a close-confirm
-                                            // skip (an A/B/D-only integration would
-                                            // otherwise look permanently idle).
+                                            // `shell_idle` needs a REAL OutputStart source.
+                                            // Prompt marks alone never authorize a
+                                            // close-confirm skip, or an A/B/D-only
+                                            // integration would look permanently idle.
                                             output_start_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
@@ -7507,19 +7475,16 @@ impl Terminal {
                                                 });
                                             }
                                         }
-                                        // v2.20.0 (review fix): B = "end of prompt /
-                                        // input start" — emitted via PS1/prompt AFTER
-                                        // every PROMPT_COMMAND segment ran, so it
-                                        // definitively means the shell is back at a
-                                        // prompt. Clearing here un-sticks
-                                        // `output_started_at` when a user's
-                                        // pre-existing PROMPT_COMMAND echoes through
-                                        // the bash DEBUG trap (which fires a stray C
-                                        // after our D), which otherwise left the pane
-                                        // permanently "running" and made the
-                                        // prompt-aware close-confirm skip inert. No
-                                        // CommandFinished is pushed (B is not a
-                                        // command end).
+                                        // OSC 133 B marks "end of prompt / input start".
+                                        // PS1/prompt emits it AFTER every PROMPT_COMMAND
+                                        // segment runs, so it definitively means the shell
+                                        // is back at a prompt. Clearing here un-sticks
+                                        // `output_started_at` when a user's pre-existing
+                                        // PROMPT_COMMAND echoes through the bash DEBUG trap
+                                        // (which fires a stray C after our D). Otherwise
+                                        // the pane stays "running" and the prompt-aware
+                                        // close-confirm skip never applies. B is not a
+                                        // command end, so no CommandFinished is pushed.
                                         Chunk::Prompt(PromptKind::CommandStart) => {
                                             if let Ok(mut completion) = completion_cell.lock() {
                                                 hide_completion_view_slot(&mut completion);
@@ -7532,8 +7497,8 @@ impl Terminal {
                                             if let Ok(mut c) = cwd_cell.lock() {
                                                 *c = Some(path);
                                             }
-                                            // v2.29.1: a real shell-reported cwd —
-                                            // the OSC cwd now outranks the native poll.
+                                            // The shell reported a real cwd, so the OSC
+                                            // cwd now outranks the native poll.
                                             osc_cwd_seen
                                                 .store(true, std::sync::atomic::Ordering::Relaxed);
                                         }
@@ -7677,11 +7642,11 @@ impl Terminal {
         })
     }
 
-    /// C4 (multi-window): monotone counter of PTY reads this pane's reader
-    /// thread has processed. A UI that recorded the value at its last paint
-    /// can answer "any output since?" without draining the event channel
-    /// (plain text emits no `TermEvent`). Bumped with `Release` before the
-    /// wakeup fires; read with `Acquire`.
+    /// Monotone counter of PTY reads this pane's reader thread has processed.
+    /// A UI that recorded the value at its last paint can answer "any output
+    /// since?" without draining the event channel (plain text emits no
+    /// `TermEvent`). Bumped with `Release` before the wakeup fires; read with
+    /// `Acquire`.
     pub fn output_generation(&self) -> u64 {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -7769,11 +7734,11 @@ impl Terminal {
         classify_shell_activity(seen_prompts, tracks_commands, running)
     }
 
-    /// v2.20.0 (Ghostty `confirm-close-surface` parity): is this pane's
-    /// shell sitting IDLE at a prompt? True only when shell integration has
-    /// been observed (≥1 OSC 133 prompt mark) AND no command is currently
-    /// running (`output_started_at` is the OutputStart→CommandEnd window —
-    /// a full-screen app like vim counts as running until it exits).
+    /// Whether this pane's shell is sitting IDLE at a prompt (Ghostty
+    /// `confirm-close-surface` parity). True only when shell integration has
+    /// been observed (≥1 OSC 133 prompt mark and an OutputStart) AND no command
+    /// is currently running. `output_started_at` is the OutputStart→CommandEnd
+    /// window, so a full-screen app like vim counts as running until it exits.
     /// Without integration this is always `false`, so close-confirmation
     /// behavior is byte-identical for plain shells; a command whose
     /// CommandEnd never arrives stays "running", which errs toward asking.
@@ -7888,8 +7853,8 @@ impl Terminal {
         )
     }
 
-    /// v2.29.0: set the OS-derived native cwd fallback (the App's process poll
-    /// writes this for native shells lacking OSC 7/9;9). `None` clears it.
+    /// Set the OS-derived native cwd fallback, which the App's process poll
+    /// writes for native shells lacking OSC 7/9;9. `None` clears it.
     pub fn set_native_cwd(&self, dir: Option<String>) {
         if let Ok(mut c) = self.native_cwd.lock() {
             *c = dir;
@@ -7906,8 +7871,8 @@ impl Terminal {
     /// Otherwise the only value in `cwd` is the pre-seeded *launch* directory,
     /// which never tracks `cd`; prefer the live OS-derived `native_cwd` poll
     /// (which does), falling back to that launch seed until the first poll lands.
-    /// (v2.29.1 fix: previously this always preferred `cwd`, so the seeded launch
-    /// dir shadowed the native poll and a stock Windows shell's tab stayed frozen.)
+    /// Preferring `cwd` here would let the seeded launch dir shadow the native
+    /// poll and freeze a stock Windows shell's tab.
     pub fn current_dir_or_native(&self) -> Option<String> {
         if self.osc_cwd_seen.load(std::sync::atomic::Ordering::Relaxed) {
             return self.reported_or_launch_dir();
@@ -7926,14 +7891,13 @@ impl Terminal {
         self.progress.lock().ok().and_then(|g| *g)
     }
 
-    /// Terminator parity (phase 1 of
-    /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)):
     /// PTY child PID accessor. Returns the immutable OS pid captured when the
     /// pane was spawned. `None` means the platform does not expose a pid for
     /// this Child type (the Windows fallback path).
     ///
-    /// Used by the upcoming remote-session detector to root the
-    /// process-tree walk. Read-only — does not consume the Child.
+    /// The remote-session detector roots its process-tree walk here (see
+    /// [`TERMINATOR-REMOTE-DESIGN.md`](docs/TERMINATOR-REMOTE-DESIGN.md)).
+    /// Read-only; does not consume the Child.
     pub fn child_pid(&self) -> Option<u32> {
         self.child_pid
     }
@@ -8288,10 +8252,10 @@ impl Terminal {
     pub fn has_running_animation(&self) -> bool {
         self.anims
             .lock()
-            // Require a DISPLAYABLE frame, not
-            // just the running flag. With all-zero gaps current_frame never
-            // advances, yet a bare `running` check kept the UI scheduling a
-            // ~30fps redraw forever for an animation that can never change.
+            // Require a DISPLAYABLE frame, not just the running flag. With
+            // all-zero gaps current_frame never advances, so a bare `running`
+            // check would schedule a ~30fps redraw forever for an animation
+            // that can never change.
             .map(|am| {
                 am.values()
                     .any(|e| e.state.running && e.gaps.iter().any(|&g| g > 0))
@@ -8299,15 +8263,6 @@ impl Terminal {
             .unwrap_or(false)
     }
 
-    /// Per-cell image tiles for the kitty Unicode placeholders (`U+10EEEE`)
-    /// currently visible: decode each cell's `(image-id, row, column)` from
-    /// its foreground color + combining diacritics, apply the left-
-    /// inheritance rules over contiguous runs, and slice the referenced
-    /// virtual image into one `Placement` per cell. Recomputed per frame —
-    /// cheap: `ImageData` is `Arc`-backed and only the shown tiles are
-    /// cropped. The placement id is decoded from the cell's underline
-    /// color (used for run grouping / inheritance per the spec); a single
-    /// virtual placement is stored per image id, so it also selects it.
     /// Scan the visible grid for `U+10EEEE` placeholder cells and resolve
     /// each one (image id + in-image row/col after diacritic inheritance) to
     /// its absolute line and column. Shared by placeholder + relative tiles.
@@ -8400,9 +8355,9 @@ impl Terminal {
         }
         // A zero/omitted underline placement id selects any virtual placement
         // for the image; the smallest id is chosen so rendering and tests are
-        // deterministic. Resolving that per cell rescanned every virtual, which
-        // is O(cells x virtuals) — up to 256x256 scans in a single frame. One
-        // pass builds the answer for every image instead.
+        // deterministic. Resolving that per cell would rescan every virtual,
+        // O(cells x virtuals), up to 256x256 scans in a single frame. One pass
+        // builds the answer for every image instead.
         let mut smallest_for_image: HashMap<u32, u32> = HashMap::new();
         for (image_id, placement_id) in virtuals.keys() {
             smallest_for_image
@@ -8430,8 +8385,8 @@ impl Terminal {
         // Snapshotting first is also what makes the common case free. Every
         // visible pane calls this every frame, and almost none of them have a
         // kitty virtual placement; `placeholder_cells` walks the whole visible
-        // grid under the `term` lock, so testing `virtuals` afterwards paid for
-        // a full scan of every pane on every frame to reach an empty map.
+        // grid under the `term` lock, so testing `virtuals` afterwards would pay
+        // for a full scan of every pane on every frame to reach an empty map.
         let Some((virtuals, smallest_for_image)) = self.virtuals_snapshot() else {
             return Vec::new();
         };
@@ -8464,12 +8419,11 @@ impl Terminal {
         out
     }
 
-    /// Placements for kitty relative placements whose parent is a visible
-    /// Unicode-placeholder (virtual) image: the parent's origin is the
-    /// top-left of its placeholder cells, and the child image is drawn
-    /// `(h, v)` cells from there. Parents that aren't on screen this frame
-    /// are skipped (the relative is simply not shown). Non-placeholder /
-    /// chained parents are a later sub-item (see ROADMAP).
+    /// Placements for kitty relative placements, drawn `(h, v)` cells from
+    /// their parent's origin. That origin is the top-left of the parent's
+    /// visible placeholder cells or its regular placement, and chains of
+    /// relative parents resolve up to depth 8. A relative whose parent has no
+    /// origin this frame is skipped (simply not shown).
     pub fn relative_tiles(&self) -> Vec<Placement> {
         // Snapshot the relatives, then drop the lock before taking the
         // grid / images locks (keeps a single lock-acquisition order).
@@ -8602,12 +8556,12 @@ impl Terminal {
         }
     }
 
-    /// Agent-first (A1): a cloneable, `Send + Sync` handle to the
-    /// PTY's write side. `Terminal` itself is not `Sync` (it owns the
-    /// `Send`-only master), so a worker thread (e.g. `kettle exec`'s stdin
-    /// pump) can't share the whole engine — but it CAN hold a `PtyWriter` to
-    /// feed input. The handle keeps writing valid bytes even after the
-    /// `Terminal` is dropped (Drop swaps the writer for a discard sink).
+    /// A cloneable, `Send + Sync` handle to the PTY's write side. `Terminal`
+    /// itself is not `Sync` (it owns the `Send`-only master), so a worker
+    /// thread (e.g. `kettle exec`'s stdin pump) can't share the whole engine,
+    /// but it CAN hold a `PtyWriter` to feed input. The handle keeps writing
+    /// valid bytes even after the `Terminal` is dropped (Drop swaps the writer
+    /// for a discard sink).
     pub fn writer_handle(&self) -> PtyWriter {
         PtyWriter(self.writer.clone())
     }
@@ -8656,10 +8610,9 @@ impl Terminal {
     /// opposite: it is the user saying exactly that, so a decrease is honored
     /// here and only here.
     ///
-    /// Without this, the Settings overlay's two scrollback rows and any edit to
-    /// the config file wrote the new value, reloaded it, and changed nothing
-    /// visible — the budget was read once at spawn, so only panes opened
-    /// afterwards used it.
+    /// A config reload calls this, whether the edit came from the config file
+    /// or the Settings overlay's two scrollback rows, so running panes pick up
+    /// the new budget instead of keeping the one read at spawn.
     pub fn set_scrollback_limits(&mut self, lines: usize, bytes: usize) -> bool {
         if (self.scrollback_line_limit, self.scrollback_byte_limit) == (lines, bytes) {
             return false;
@@ -8726,25 +8679,13 @@ impl Terminal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grid_options = if grid_changed {
-            // The cap only ever RISES for the life of a pane.
-            //
-            // `effective_scrollback_lines` turns the byte budget into a line
-            // count by dividing it by a worst-case per-row cost at the current
-            // column count, so a wider pane yields a smaller cap. Assigning
-            // that unconditionally made every widen hand `Grid::update_history`
-            // a lower limit, and it trims from the oldest end — immediately and
-            // irreversibly. Four ordinary gestures reach it: dragging the
-            // window wider (each intermediate width applying its own cap),
-            // decrease-font, closing a sibling split, and un-zooming. Measured
-            // with the shipped defaults: 77 columns held 5202 lines, 241 held
-            // 1681, and dragging back to 77 did not restore one of them.
-            //
-            // Nothing about a resize means the user wants less history, so the
-            // budget must not be enforced by a resize. The ceiling still falls
-            // out of the same computation — it just cannot move down, which
-            // makes the worst case the budget measured at the width the
-            // history was accumulated at, bounded and paid only by a user who
-            // actually widened.
+            // The cap only ever RISES for the life of a pane. A wider pane
+            // yields a smaller byte-derived cap, and `Grid::update_history`
+            // enforces a lower limit by trimming the oldest rows, immediately
+            // and irreversibly. `scrollback_cap_after_resize` lists the gestures
+            // that widen a pane and why a resize never enforces the budget.
+            // The worst case is the budget measured at the width the history
+            // accumulated at. It is bounded, and only a user who widened pays it.
             self.term_config.scrolling_history = scrollback_cap_after_resize(
                 self.term_config.scrolling_history,
                 self.scrollback_line_limit,
@@ -8832,17 +8773,15 @@ impl Terminal {
             .is_some()
     }
 
-    /// Agent-first (A1): kill the child immediately.
+    /// Kill the child immediately.
     /// Used by `kettle exec --timeout` when the deadline fires. The reader
     /// thread sees EOF when the master closes on drop, so no extra teardown is
     /// needed here.
     ///
-    /// The outcome is returned rather than swallowed. A child that had already
-    /// exited counts as success — that is what the caller wanted — but a
-    /// genuine failure to terminate means the process is still running, and a
-    /// caller about to report a timeout should be able to say so. This was
-    /// unusable before the Windows path was corrected: it reported every
-    /// successful kill as an error and every real failure as success.
+    /// A child that had already exited counts as success, since that is what
+    /// the caller wanted. A real failure to terminate is returned, because the
+    /// process is still running and a caller about to report a timeout should
+    /// be able to say so.
     pub fn kill(&self) -> std::io::Result<()> {
         let outcome = match self.child.lock() {
             Ok(mut c) => c.kill(),
@@ -8865,19 +8804,18 @@ impl Terminal {
         }
     }
 
-    /// Agent-first (A1): the child's exit status, if it has exited
-    /// (non-blocking `try_wait`). `child_exited` discards the status; the
-    /// headless `kettle exec` path needs it to propagate the child's exit code
-    /// to its own process exit. `None` while the child is still running (or if
-    /// the child handle is poisoned).
+    /// The child's exit status, if it has exited (non-blocking `try_wait`).
+    /// `child_exited` discards the status; the headless `kettle exec` path
+    /// needs it to propagate the child's exit code to its own process exit.
+    /// `None` while the child is still running (or if the child handle is
+    /// poisoned).
     ///
     /// The vendored portable-pty decodes Unix signal death into the shell's
-    /// `128 + signo`, so SIGTERM is `143` and SIGKILL is `137`. It previously
-    /// collapsed every signal death to a generic `1`, which made a killed
-    /// command indistinguishable from one that merely failed — a distinction
-    /// agent automation driving `kettle exec` depends on. The numeric signal is
-    /// retained alongside its name if a caller needs to act on it directly.
-    /// Callers clamp to 0..=255 on Unix before `std::process::exit` regardless.
+    /// `128 + signo`, so SIGTERM is `143` and SIGKILL is `137`. Agent
+    /// automation driving `kettle exec` relies on this to tell a killed command
+    /// from one that merely failed. The numeric signal is retained alongside
+    /// its name if a caller needs to act on it directly. Callers clamp to
+    /// 0..=255 on Unix before `std::process::exit` regardless.
     pub fn child_exit_code(&self) -> Option<u32> {
         self.child
             .lock()
@@ -8886,15 +8824,15 @@ impl Terminal {
             .map(|st| st.exit_code())
     }
 
-    /// Agent-first (A1/A2): a plain-text snapshot of the grid.
+    /// A plain-text snapshot of the grid.
     /// Without extra scrollback, this is the visible viewport; with
-    /// `scrollback_lines`, it returns that many history rows (newest history
-    /// first in document order) followed by the active screen for command-output
+    /// `scrollback_lines`, it returns up to that many of the newest history
+    /// rows (oldest first) followed by the active screen for command-output
     /// capture. One lock acquisition; per-line trailing whitespace trimmed;
     /// `scrollback_lines` hard-capped at 10_000 so a hostile/buggy caller can't
-    /// ask for an unbounded join. Shared by the control server's `read_screen`,
-    /// `run_command` output slicing, and any future scripting surface — the
-    /// single sanctioned grid-scrape.
+    /// ask for an unbounded join. This is the single sanctioned grid scrape,
+    /// shared by the control server's `read_screen`, `run_command` output
+    /// slicing, and any future scripting surface.
     pub fn screen_text(&self, scrollback_lines: usize) -> Option<ScreenText> {
         let t = self.term.lock().ok()?;
         Some(screen_text_of(&t, scrollback_lines))
@@ -8917,7 +8855,7 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
     for r in -(take as i32)..rows as i32 {
         line.clear();
         // Spacer-aware so the agent screen-scrape doesn't inject a space after
-        // every wide (CJK/emoji) glyph (v2.26.0, shared helper).
+        // every wide (CJK/emoji) glyph.
         crate::grid_text::append_row_text(grid, r - display_adjust, cols, &mut line);
         text.push_str(line.trim_end());
         text.push('\n');
@@ -8930,17 +8868,17 @@ pub fn screen_text_of(t: &Term<EventProxy>, scrollback_lines: usize) -> ScreenTe
         history_size,
         display_offset,
         cursor: (cur.line.0.max(0) as usize, cur.column.0),
-        // v2.20.0 (agent plane): DEC ?25 visibility — vim/fzf/less hide the
-        // cursor; an agent placing keystrokes by cursor position needs to
-        // know when the reported point is meaningless.
+        // DEC ?25 visibility. vim/fzf/less hide the cursor, and an agent
+        // placing keystrokes by cursor position needs to know when the
+        // reported point is meaningless.
         cursor_visible: t
             .mode()
             .contains(alacritty_terminal::term::TermMode::SHOW_CURSOR),
     }
 }
 
-/// Agent-first: the result of [`Terminal::screen_text`] — the
-/// joined plain text plus the grid geometry an agent needs to interpret it.
+/// The result of [`Terminal::screen_text`], holding the joined plain text and
+/// the grid geometry an agent needs to interpret it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenText {
     /// History tail + active screen, newline-joined, per-line right-trimmed.
@@ -8953,7 +8891,7 @@ pub struct ScreenText {
     pub display_offset: usize,
     /// Cursor (row in the active screen, col).
     pub cursor: (usize, usize),
-    /// v2.20.0: whether the cursor is shown (DEC ?25; vim/fzf/less hide it).
+    /// Whether the cursor is shown (DEC ?25; vim/fzf/less hide it).
     pub cursor_visible: bool,
 }
 
@@ -8976,15 +8914,10 @@ impl Drop for Terminal {
     /// `Pane.term` (`Mux::close_focused` → `panes.remove`) — so blocking here
     /// freezes the whole window.
     ///
-    /// The previous body `join()`ed the reader thread while the master PTY was
-    /// still alive. The reader sits in a blocking `read()` on the ConPTY
-    /// conout pipe that only returns once the pseudoconsole is *closed* — but
-    /// the master (hence `ClosePseudoConsole`) wasn't dropped until after this
-    /// function returned, so the join could never complete and the UI thread
-    /// deadlocked. Windows then showed the window as "not responding", which
-    /// users reported as a crash. (Reproduced on build 26200: close-split left
-    /// the process alive with `Responding=false` for as long as it was sampled
-    /// — a hang, not a panic. See `target/pty-drop-repro.txt`.)
+    /// Drop must never `join()` the reader thread. The reader blocks in
+    /// `read()` on the ConPTY conout pipe until the pseudoconsole is *closed*,
+    /// so joining it before that close deadlocks the UI thread. Windows then
+    /// marks the window "not responding", which users see as a crash.
     ///
     /// Drop releases the input writer, then a detached reaper kills the child
     /// and closes the master (conout / pseudoconsole) while the output reader
@@ -9074,9 +9007,9 @@ impl EventProxy {
     }
 }
 
-/// Agent-first (A1): a cloneable, thread-safe handle to a PTY's write
-/// side, obtained from [`Terminal::writer_handle`]. Lets a worker thread feed
-/// input to the child without sharing the (non-`Sync`) `Terminal`.
+/// A cloneable, thread-safe handle to a PTY's write side, obtained from
+/// [`Terminal::writer_handle`]. Lets a worker thread feed input to the child
+/// without sharing the (non-`Sync`) `Terminal`.
 #[derive(Clone)]
 pub struct PtyWriter(Arc<Mutex<Box<dyn Write + Send>>>);
 
@@ -9750,11 +9683,9 @@ enum StripState {
     /// Inside a DCS/APC/PM/SOS control string (`ESC P`, `ESC _`, `ESC ^`,
     /// `ESC X`), scanning for ST.
     ///
-    /// These were previously treated as single-character escapes, so only the
-    /// two introducer bytes were removed and the entire BODY was written to
-    /// the session log as text — Sixel pixel data and Kitty graphics payloads,
-    /// which carry encoded file paths and shared-memory names. A log the user
-    /// enabled to keep a transcript was instead accumulating binary payloads.
+    /// The whole body is dropped. It can hold Sixel pixel data or Kitty
+    /// graphics payloads, which carry encoded file paths and shared-memory
+    /// names and must not reach the session log as text.
     String,
 }
 
@@ -9774,7 +9705,10 @@ const MAX_LOGGED_CONTROL_SEQUENCE_BYTES: usize = 64 * 1024;
 ///     where final is in `0x40..=0x7e`.
 ///   - OSC (Operating System Command): `ESC ] ... terminator`
 ///     where terminator is BEL (0x07) or ST (`ESC \\`).
-///   - Single-char ESC: `ESC X` for any other X.
+///   - DCS/SOS/PM/APC strings: `ESC P`, `ESC X`, `ESC ^`, or `ESC _`, with
+///     the body dropped up to ST.
+///   - Other escapes: `ESC`, any `0x20..=0x2f` intermediates, then one final
+///     byte.
 ///
 /// Unlike a stateless scan, `AnsiStripper` carries its FSM state across
 /// `strip` calls: a CSI/OSC sequence whose terminator lands in the *next*
@@ -9787,10 +9721,10 @@ pub struct AnsiStripper {
     state: StripState,
     /// UTF-8 continuation bytes still owed by the character being decoded.
     ///
-    /// `0x9c` is both the 8-bit ST and a UTF-8 continuation byte, so a payload
-    /// containing `末` (`e6 9c ab`) ended the control string at the middle of
-    /// that character and leaked the remainder into the log. The VT extractor
-    /// already draws this distinction; the log stripper has to as well.
+    /// `0x9c` is both the 8-bit ST and a UTF-8 continuation byte. Without this
+    /// count, a payload containing `末` (`e6 9c ab`) would end the control
+    /// string mid-character and leak the rest into the log. The VT extractor
+    /// draws the same distinction.
     utf8_continuation: u8,
     /// Whether the lead byte of the current UTF-8 scalar reached the log.
     /// Continuations follow their lead across parser-state transitions.
@@ -9873,10 +9807,10 @@ impl AnsiStripper {
                     if b == 0x1b {
                         self.state = StripState::EscSeen;
                     } else if b == 0x18 || b == 0x1a {
-                        // CAN/SUB cancel the sequence. Without this the next
-                        // ordinary character was consumed as the CSI final
-                        // byte: `ESC [ 31 CAN hello` logged `ello` while the
-                        // terminal rendered `hello`.
+                        // CAN/SUB cancel the sequence. Otherwise the next
+                        // ordinary character is eaten as the CSI final byte,
+                        // and `ESC [ 31 CAN hello` logs `ello` while the
+                        // terminal renders `hello`.
                         self.state = StripState::Plain;
                     } else if (0x40..=0x7e).contains(&b) {
                         self.state = StripState::Plain;
@@ -9885,10 +9819,10 @@ impl AnsiStripper {
                 }
                 StripState::Osc => {
                     if b == 0x07 || b == 0x9c {
-                        self.state = StripState::Plain; // BEL terminator
+                        self.state = StripState::Plain; // BEL or 8-bit ST
                     } else if b == 0x18 || b == 0x1a {
-                        // CAN/SUB cancel the string (DEC). Without this an
-                        // unterminated OSC swallowed the remainder of the log.
+                        // CAN/SUB cancel the string (DEC). Otherwise the text
+                        // after a cancelled OSC is dropped from the log.
                         self.state = StripState::Plain;
                     } else if b == 0x1b {
                         // ESC terminates OSC and begins a fresh escape. This is
@@ -10662,10 +10596,8 @@ mod placeholder_tile_placement_tests {
     }
 }
 
-/// End-to-end VT conformance: drives the *same* parser path the PTY reader
-/// uses (alacritty_terminal + vte) over a battery of escape sequences and
-/// asserts the resulting grid/cursor/mode. This is the automatable,
-/// regression-proof core of a `vttest` sweep.
+/// Tests for new-tab shell detection, covering WSL distros, the Windows and
+/// Unix dropdown builders, Visual Studio dev shells, and Git Bash.
 #[cfg(test)]
 mod detect_shells_tests {
 
@@ -10990,8 +10922,7 @@ mod home_dir_tests {
             ])),
             Some(PathBuf::from("/h")),
         );
-        // No HOME → USERPROFILE. This is the *Windows* branch — exactly
-        // the gap the previous `var_os("HOME")`-only fallback missed.
+        // No HOME → USERPROFILE. This is the *Windows* branch.
         assert_eq!(
             home_dir_fallback(from(&[("USERPROFILE", r"C:\u"), ("APPDATA", r"C:\a"),])),
             Some(PathBuf::from(r"C:\u")),
@@ -11008,13 +10939,11 @@ mod home_dir_tests {
 
     #[test]
     fn empty_env_var_value_falls_through_to_next() {
-        // `HOME=""` (a deliberately empty env var — happens
-        // in stripped-down CI containers and after a misconfigured
-        // `unset HOME` / `export HOME=` in a parent shell) used to
-        // return `Some(PathBuf::from(""))`. CommandBuilder::cwd("")
-        // then fed an invalid empty path to the OS spawn. Now empty
-        // values are filtered as if unset, so the probe continues to
-        // the next variable. Pinned at every level of the chain.
+        // `HOME=""` (a deliberately empty env var, seen in stripped-down CI
+        // containers and after a misconfigured `unset HOME` / `export HOME=`
+        // in a parent shell) is treated as unset, so the probe continues to
+        // the next variable instead of handing CommandBuilder::cwd("") an
+        // invalid empty path. Pinned at every level of the chain.
         //
         // HOME empty, USERPROFILE valid → USERPROFILE wins.
         assert_eq!(
@@ -11124,24 +11053,19 @@ mod home_dir_tests {
         }
     }
 
-    /// Regression test for the split-mid-sequence log-corruption bug: a
-    /// CSI/OSC sequence whose terminator lands in the *next* PTY-read chunk
-    /// must still be recognized (and fully removed) when the same
-    /// `AnsiStripper` instance is reused across calls — exactly how the
-    /// reader thread's per-pane log path uses it. Each case below splits a
     /// The log stripper must agree with the terminal about where a sequence
     /// ends, or the log and the screen disagree about what happened.
     ///
-    /// Three ways it did not:
-    ///   * CAN/SUB did not cancel a CSI, so the next ordinary character was
-    ///     eaten as the final byte — `ESC [ 31 CAN hello` logged `ello` while
-    ///     the terminal rendered `hello`.
-    ///   * A non-ST `ESC` inside a control string did not abort it, so
-    ///     `ESC ^ payload ESC c visible` left the stripper inside the string
-    ///     and swallowed everything after.
+    /// Three places they can diverge:
+    ///   * CAN/SUB cancel a CSI. Otherwise the next ordinary character is
+    ///     eaten as the final byte, and `ESC [ 31 CAN hello` logs `ello` while
+    ///     the terminal renders `hello`.
+    ///   * A non-ST `ESC` inside a control string aborts it. Otherwise
+    ///     `ESC ^ payload ESC c visible` leaves the stripper inside the string,
+    ///     swallowing everything after.
     ///   * `0x9c` is both the 8-bit ST and a UTF-8 continuation byte, so a
-    ///     payload containing `末` (`e6 9c ab`) terminated at the middle of
-    ///     that character and leaked its tail into the log.
+    ///     payload containing `末` (`e6 9c ab`) must not end at the middle of
+    ///     that character and leak its tail into the log.
     #[test]
     fn the_log_stripper_ends_sequences_where_the_terminal_does() {
         for (label, input, want) in [
@@ -11270,12 +11194,11 @@ mod home_dir_tests {
 
     /// A session log must not accumulate image payloads.
     ///
-    /// DCS (`ESC P`, Sixel) and APC (`ESC _`, Kitty graphics) were treated as
-    /// single-character escapes, so only the two introducer bytes were removed
-    /// and the entire BODY was written to the log as text. Kitty payloads carry
+    /// DCS (`ESC P`, Sixel) and APC (`ESC _`, Kitty graphics) bodies must be
+    /// dropped whole, not just their two introducer bytes. Kitty payloads carry
     /// encoded file paths and shared-memory names, and Sixel carries raw pixel
-    /// data — so a log the user enabled to keep a readable transcript was
-    /// instead accumulating binary and, worse, path-bearing payloads.
+    /// data, so logging the body would fill a readable transcript with binary
+    /// and path-bearing payloads.
     #[test]
     fn session_log_stripping_drops_image_payloads_not_just_their_introducers() {
         for (label, input, want) in [
@@ -11350,9 +11273,9 @@ mod home_dir_tests {
     /// A control string that never terminates must not silence the log.
     ///
     /// CAN, SUB and ST all end a sequence, and all three are the writer's
-    /// choice to send. A child that sends none of them held the stripper
-    /// mid-sequence forever, so every later line was dropped and the session
-    /// log ended without saying why.
+    /// choice to send. A child that sends none of them must not hold the
+    /// stripper mid-sequence forever, silently dropping every later line of
+    /// the session log.
     #[test]
     fn an_unterminated_control_string_stops_swallowing_the_log() {
         for intro in [&b"\x1b]0;"[..], &b"\x1bP"[..], &b"\x1b_"[..], &b"\x1b["[..]] {
@@ -11406,9 +11329,12 @@ mod home_dir_tests {
         );
     }
 
-    /// sequence at a different, deliberately awkward byte boundary; with the
-    /// old per-call-stateless `strip_ansi_bytes` the second chunk would have
-    /// leaked raw escape-sequence bytes into the log as literal text.
+    /// A CSI/OSC sequence whose terminator lands in the next PTY-read chunk
+    /// must still be recognized and fully removed when the same `AnsiStripper`
+    /// is reused across calls, as the reader thread's per-pane log path does.
+    /// Each case below splits a sequence at a different, deliberately awkward
+    /// byte boundary. A stateless stripper would leak the second chunk's raw
+    /// escape-sequence bytes into the log as literal text.
     #[test]
     fn ansi_stripper_persists_state_across_split_sequences() {
         use super::AnsiStripper;
@@ -11481,9 +11407,9 @@ mod conformance {
         (term, Processor::new(), rx)
     }
 
-    /// A one-column grid used to abort the whole process on any wide
-    /// character, and one was reachable from `kettle exec --cols 1`, from a
-    /// narrow enough split, and from the `(1, 1, 1, 1)` geometry fallbacks.
+    /// A one-column grid aborts the whole process on any wide character, and
+    /// `kettle exec --cols 1`, a narrow enough split, and the `(1, 1, 1, 1)`
+    /// geometry fallbacks can all request one.
     ///
     /// The engine declares `MIN_COLUMNS = 2` and then never enforces it. On a
     /// single-cell row the line-wrap path writes a leading spacer at column 0,
@@ -11491,7 +11417,7 @@ mod conformance {
     /// column 1 for the trailing spacer. `Row`'s `Index` is unchecked, so that
     /// panics on the PTY reader thread, and `panic = "abort"` in the release
     /// profile turns one bad cell into a dead application. A CJK filename in
-    /// `ls` output was enough.
+    /// `ls` output is enough.
     #[test]
     fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
         let geometry = PtyGeometry::new(1, 1, 1, 1);
@@ -11514,7 +11440,7 @@ mod conformance {
             MIN_COLUMNS
         );
 
-        // Drive the real thing: before the clamp this panicked here.
+        // Drive the real thing. Without the clamp, these writes panic.
         let (mut term, mut processor) = harness(geometry.columns, geometry.rows);
         feed(&mut term, &mut processor, "\u{754c}".as_bytes());
         feed(&mut term, &mut processor, "\u{1f680}".as_bytes());
@@ -11579,11 +11505,10 @@ mod conformance {
         p.advance(term, bytes);
     }
 
-    /// Feed bytes through the SAME two-stage path the PTY reader
-    /// thread uses — `Extractor::feed` then each `Chunk::Pass` →
-    /// `Processor::advance` — so a test exercises kettle's REAL pipeline (the
-    /// Extractor sits in front of the engine at runtime) instead of driving the
-    /// alacritty `Processor` in isolation.
+    /// Feed bytes through the PTY reader thread's two-stage path,
+    /// `Extractor::feed` then `Processor::advance` on each `Chunk::Pass`, so a
+    /// test exercises kettle's real pipeline instead of the alacritty
+    /// `Processor` alone.
     fn feed_ex(term: &mut Term<EventProxy>, p: &mut Processor, ex: &mut Extractor, bytes: &[u8]) {
         for chunk in ex.feed(bytes) {
             if let Chunk::Pass(b) = chunk {
@@ -11659,9 +11584,9 @@ mod conformance {
             "vi cursor must stay inside the bounded grid, got {vi_line}"
         );
 
-        // Advance beyond the entire history budget. The old custom UI
-        // coordinates could now point at a different row; the engine instead
-        // drops the selection when its anchor rotates out.
+        // Advance beyond the entire history budget. The engine drops the
+        // selection when its anchor rotates out instead of letting it point at
+        // a different row.
         for index in 0..8 {
             feed(
                 &mut term,
@@ -11723,9 +11648,10 @@ mod conformance {
         let (mut term, mut processor, rx) = kitty_keyboard_harness(20, 5);
 
         // The engine's maximum keyboard stack depth is 16. A seventeenth push
-        // used to remove index zero from the unrelated title stack, panicking
-        // when no title had ever been saved. Distinct modes also let us prove
-        // that the oldest keyboard entry, not the newest, was evicted.
+        // must evict from the keyboard stack, not remove index zero from the
+        // unrelated title stack, which panics when no title was ever saved.
+        // Distinct modes also let us prove that the oldest keyboard entry, not
+        // the newest, was evicted.
         for flags in 0..=16 {
             feed(
                 &mut term,
@@ -11781,14 +11707,13 @@ mod conformance {
         assert!(!term.mode().intersects(TermMode::KITTY_KEYBOARD_PROTOCOL));
     }
 
-    /// R1: a selection made while scrolled back must read the
-    /// VISIBLE (history) row, not the active-screen row at the same viewport
-    /// index. This guards alacritty's `Selection` coordinate contract — it
-    /// expects GRID-ABSOLUTE points (viewport − display_offset, via
-    /// `viewport_to_point`). kettle-ui previously stored the raw viewport line,
-    /// so copying while scrolled returned the wrong/empty text. The two branches
-    /// below show the bug (raw viewport) vs the fix (`viewport_to_point`) select
-    /// different rows — exactly why the conversion is required.
+    /// A selection made while scrolled back must read the VISIBLE (history)
+    /// row, not the active-screen row at the same viewport index. This guards
+    /// alacritty's `Selection` coordinate contract, which expects GRID-ABSOLUTE
+    /// points (viewport − display_offset, via `viewport_to_point`). If kettle-ui
+    /// stores the raw viewport line, copying while scrolled returns the wrong or
+    /// empty text. The two branches below show that the raw viewport line and
+    /// `viewport_to_point` select different rows.
     #[test]
     fn selection_while_scrolled_reads_visible_row_not_active_screen() {
         use alacritty_terminal::grid::Scroll;
@@ -11839,10 +11764,10 @@ mod conformance {
 
     /// The pointer's sub-cell `Side` (which half of a cell the cursor is in) must
     /// change which boundary cells a Simple drag includes. kettle's `px_to_cell`
-    /// now computes this side instead of hardcoding Left/Right; this pins the
-    /// alacritty `Selection::to_range` (`range_simple`) contract kettle relies on,
-    /// so a future alacritty bump that changed the trimming would fail loudly here
-    /// rather than silently re-introducing the "off by one letter" selection.
+    /// computes this side. This pins the alacritty `Selection::to_range`
+    /// (`range_simple`) contract kettle relies on, so an alacritty bump that
+    /// changes the trimming fails here instead of silently causing an "off by
+    /// one letter" selection.
     #[test]
     fn selection_side_trims_inclusive_range_per_alacritty() {
         use alacritty_terminal::index::Side;
@@ -11881,11 +11806,11 @@ mod conformance {
         );
     }
 
-    /// Agent-first (A1/A2): `screen_text_of` is the single sanctioned
-    /// grid scrape behind the control server's `read_screen` and `run_command`
-    /// output slicing. Pin: document order (history first, then active screen),
-    /// per-line right-trim, the scrollback request capped by available history,
-    /// and the reported geometry/cursor.
+    /// `screen_text_of` is the single sanctioned grid scrape behind the
+    /// control server's `read_screen` and `run_command` output slicing. Pin:
+    /// document order (history first, then active screen), per-line right-trim,
+    /// the scrollback request capped by available history, and the reported
+    /// geometry/cursor.
     #[test]
     fn screen_text_returns_history_then_screen_with_geometry() {
         use crate::term::screen_text_of;
@@ -11931,15 +11856,13 @@ mod conformance {
         );
     }
 
-    /// User-reported on native Ubuntu: hyperlink/URL detection
-    /// must scan the VISIBLE viewport, not the active screen, when scrolled back.
-    /// `links()` indexed `grid[Line(row)]` for `row in 0..screen_lines` — always
-    /// the active (bottom) screen regardless of `display_offset` — so scrolling
-    /// Claude Code up painted the active screen's link underlines over the
+    /// Hyperlink/URL detection must scan the VISIBLE viewport, not the active
+    /// screen, when scrolled back. `grid[Line(row)]` for `row in 0..screen_lines`
+    /// is always the active (bottom) screen regardless of `display_offset`, so
+    /// reading it would paint the active screen's link underlines over
     /// scrolled-back history ("leftover/ghost underlines from another scroll
-    /// position"). The fix reads `Line(row - display_offset)`, matching the
-    /// decoration/selection `display_offset` conversion. This is the sibling that fix
-    /// missed.
+    /// position"). `links()` reads `Line(row - display_offset)`, matching the
+    /// decoration/selection `display_offset` conversion.
     #[test]
     fn links_while_scrolled_read_visible_viewport_not_active_screen() {
         use alacritty_terminal::grid::Scroll;
@@ -11969,9 +11892,8 @@ mod conformance {
                 .any(|k| k.uri.contains("hist.test") && k.row == 0),
             "visible history link must be detected at viewport row 0: {scrolled:?}"
         );
-        // ...and the now-offscreen active-screen link is NOT reported (the ghost
-        // underline the user saw). Pre-fix this failed both ways: `links()` read
-        // the active screen and returned the active.test URL, never hist.test.
+        // ...and the now-offscreen active-screen link is NOT reported, so no
+        // ghost underline is drawn over history.
         assert!(
             !scrolled.iter().any(|k| k.uri.contains("active.test")),
             "offscreen active-screen URL must not be underlined over history: {scrolled:?}"
@@ -12013,10 +11935,10 @@ mod conformance {
         assert_eq!(web_links[0].uri, "https://example.test/a/b");
     }
 
-    /// R1: a real drag-select (Simple selection spanning rows) made
-    /// while scrolled to the top of history must copy the VISIBLE history rows,
-    /// not the active screen — the exact action a user does when copying an
-    /// earlier chunk of a long Claude Code / Codex conversation.
+    /// A real drag-select (Simple selection spanning rows) made while
+    /// scrolled to the top of history must copy the VISIBLE history rows, not
+    /// the active screen. Users do exactly this to copy an earlier chunk of a
+    /// long Claude Code / Codex conversation.
     #[test]
     fn simple_drag_selection_while_scrolled_copies_visible_rows() {
         use alacritty_terminal::grid::Scroll;
@@ -12085,12 +12007,12 @@ mod conformance {
         );
     }
 
-    /// Agent-first (A1): the full record→replay round trip through the
-    /// PROMOTED `kettle_core::record::Recorder` — the same recorder that backs
-    /// `kettle exec --record` and the GUI's `--record`. Record output via the
-    /// real Recorder to a `.cast`, parse it back, replay through the grid, and
-    /// assert it reconstructs. Pins that the recorder's on-disk format stays
-    /// replayable (sibling of `replays_asciicast_v2_output_into_grid`).
+    /// The full record→replay round trip through `kettle_core::record::Recorder`,
+    /// the recorder behind `kettle exec --record` and the GUI's `--record`.
+    /// Record output via the real Recorder to a `.cast`, parse it back, replay
+    /// through the grid, and assert it reconstructs. Pins that the recorder's
+    /// on-disk format stays replayable (sibling of
+    /// `replays_asciicast_v2_output_into_grid`).
     #[test]
     fn recorder_output_round_trips_through_replay() {
         use crate::record::Recorder;
@@ -12127,13 +12049,13 @@ mod conformance {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// R1 render completion: locks the contract kettle-render relies
-    /// on to position per-cell bg / underline / strikeout / selection quads. The
-    /// `display_iter` yields GRID-ABSOLUTE lines (negative when scrolled into
-    /// history), and `viewport_row = grid_line + display_offset` recovers the
-    /// 0-based viewport row. The render bug used the raw grid-absolute line as the
-    /// viewport Y, so decorations detached from text (and a scrolled-back
-    /// selection's highlight was dropped) while scrolled.
+    /// Locks the contract kettle-render relies on to position per-cell bg /
+    /// underline / strikeout / selection quads. `display_iter` yields
+    /// GRID-ABSOLUTE lines (negative when scrolled into history), and
+    /// `viewport_row = grid_line + display_offset` recovers the 0-based viewport
+    /// row. Using the raw grid-absolute line as the viewport Y detaches
+    /// decorations from text while scrolled and drops a scrolled-back
+    /// selection's highlight.
     #[test]
     fn display_iter_is_grid_absolute_so_render_adds_display_offset() {
         use alacritty_terminal::grid::Scroll;
@@ -12444,13 +12366,10 @@ mod conformance {
     /// Synchronized output (DEC private mode 2026 / BSU·ESU). While a
     /// sync block is open the engine MUST buffer mutations so a renderer that
     /// locks the grid never samples a half-drawn frame; the buffered changes
-    /// apply atomically on close. This is the property that lets well-behaved
-    /// TUIs avoid the transient mid-repaint tearing a terminal would otherwise
-    /// show. The bytes are fed through kettle's REAL pipeline (`feed_ex` →
+    /// apply atomically on close. This lets well-behaved TUIs repaint without
+    /// tearing. The bytes go through kettle's REAL pipeline (`feed_ex` →
     /// Extractor → Processor), so this also guards that a future `Extractor`
-    /// change cannot swallow the `?2026` toggles (this test previously
-    /// fed bytes straight to the Processor, bypassing the Extractor it claims to
-    /// guard).
+    /// change cannot swallow the `?2026` toggles.
     #[test]
     fn synchronized_update_defers_grid_mutation_until_close() {
         let (mut t, mut p) = harness(6, 2);
@@ -12698,10 +12617,10 @@ mod conformance {
         // OSC 10/11/12 SET should populate the engine's `Colors[256..=258]`
         // slots (default fg, default bg, cursor) so the renderer's
         // `resolve_query` reflects the override on the next frame. Without
-        // this round-trip, OSC 12 (set cursor color) was a silent drop in
-        // the render path. Confirms the
-        // pair: OSC 4 set is covered by `osc_color_set_query_reset_round_trip_through_engine`;
-        // OSC 10/11/12 are the close siblings that use the same Colors slots.
+        // this round-trip, the render path silently drops OSC 12 (set cursor
+        // color). `osc_color_set_query_reset_round_trip_through_engine` covers
+        // OSC 4 set; OSC 10/11/12 are the close siblings that use the same
+        // Colors slots.
         for (input, idx) in &[
             (b"\x1b]10;rgb:11/22/33\x07" as &[u8], 256usize),
             (b"\x1b]11;rgb:44/55/66\x07", 257),
@@ -12758,13 +12677,9 @@ mod conformance {
         // default fg/bg/cursor). They tell the engine to throw away any
         // override the user-program set so the renderer falls back to the
         // theme's defaults. Kettle's render path reads `t.colors()[256..=258]`
-        // each frame; if the engine didn't honor these resets, a program
-        // that did `\e]10;rgb:11/22/33\a` then `\e]110\a` to undo would
-        // leave the (red) override in place — a real bug class where the
-        // set path gets fixed but the reset path silently stays broken
-        // (this test pins the reset path so it can't regress in the other
-        // direction). Same loop covers all three indices in one
-        // declarative table.
+        // each frame, so if the engine ignored these resets, a program that
+        // sent `\e]10;rgb:11/22/33\a` then `\e]110\a` would keep the override.
+        // One table covers all three indices.
         for (idx, set, reset) in &[
             (
                 256usize,
@@ -13146,10 +13061,9 @@ mod conformance {
 
     #[test]
     fn sgr_individual_attribute_resets() {
-        // VT conformance gap. SGR `set` codes are well
-        // tested (`sgr_truecolor_bold_and_reset`,
-        // `sgr_underline_dim_strike`, …) but the individual
-        // attribute-*off* codes weren't:
+        // SGR `set` codes are tested elsewhere (`sgr_truecolor_bold_and_reset`,
+        // `sgr_underline_dim_strike`, …). This pins the individual
+        // attribute-*off* codes:
         //   * SGR 22 — normal intensity (clears bold *and* dim)
         //   * SGR 23 — not italic
         //   * SGR 24 — not underlined (clears all underline styles)
@@ -13404,9 +13318,6 @@ mod teardown_tests {
     /// The cap is derived by dividing the byte budget by a worst-case per-row
     /// cost at the current width, so it falls as a pane widens — and the grid
     /// enforces a lowered cap by discarding the oldest rows, permanently.
-    /// Walked across the exact widths that were measured losing history: 77
-    /// columns held 5202 lines, 241 held 1681, and dragging back to 77 restored
-    /// none of them.
     #[test]
     fn widening_a_pane_never_lowers_its_scrollback_cap() {
         const LINES: usize = 10_000;
@@ -13462,10 +13373,9 @@ mod teardown_tests {
 
     /// The other half of that rule. A resize must never lower the cap, but
     /// *editing the setting* is the user asking for exactly that, so the two
-    /// paths have to disagree — and the edit path has to reach panes that are
-    /// already open, which is what was missing: the budget was read once at
-    /// spawn, so the Settings overlay's two scrollback rows wrote a value,
-    /// reloaded it, and changed nothing you could see.
+    /// paths have to disagree. The edit path must also reach panes that are
+    /// already open, or the Settings overlay's two scrollback rows change
+    /// nothing visible.
     #[test]
     fn an_edited_scrollback_setting_may_lower_a_cap_a_resize_could_not() {
         const BYTES: usize = 10_000_000;
@@ -13542,9 +13452,9 @@ mod teardown_tests {
         );
     }
 
-    /// Agent-first (A1): `child_exit_code` must surface the child's
-    /// real exit status once it exits — `kettle exec` propagates it as its own
-    /// process exit code. Spawns a real PTY child that exits 3 and polls.
+    /// `child_exit_code` must surface the child's real exit status once it
+    /// exits, because `kettle exec` propagates it as its own process exit code.
+    /// Spawns a real PTY child that exits 3 and polls.
     #[test]
     fn child_exit_code_propagates_real_status() {
         // Each argv token is space-free so CommandBuilder quoting can't change
@@ -13588,7 +13498,7 @@ mod teardown_tests {
         // Without it the child can park forever under ConPTY: Windows'
         // pseudoconsole withholds the child's clean teardown until the terminal
         // answers its startup cursor-position probe (`ESC[6n`), so `try_wait`
-        // never reports an exit. This loop is the canonical A1 drain.
+        // never reports an exit.
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut saw_exit_event = false;
         let code = loop {
@@ -13757,11 +13667,11 @@ mod teardown_tests {
 
     /// Regression guard (runtime). Dropping a `Terminal` whose
     /// child is alive and whose PTY reader is parked in a blocking `read()`
-    /// must return PROMPTLY. The previous `Drop` `join()`ed the reader while the
-    /// master was still open; on Windows ConPTY that join could never
-    /// complete, so the UI thread (which owns the drop on a pane close)
-    /// deadlocked and the window went "not responding". We run the drop on a
-    /// worker thread and require it to finish far inside the old hang window.
+    /// must return PROMPTLY. On Windows ConPTY, joining the reader while the
+    /// master is still open never completes, so the UI thread (which owns the
+    /// drop on a pane close) deadlocks and the window goes "not responding".
+    /// This test runs the drop on a worker thread and requires it to finish
+    /// within 5 seconds.
     #[test]
     fn drop_is_prompt_with_blocked_reader() {
         // A child that stays alive and quiet, so the reader is parked in a
@@ -13914,13 +13824,12 @@ mod teardown_tests {
     /// and surrounding code can't skew the check.
     #[test]
     fn drop_detaches_reader_never_joins() {
-        // Normalize CRLF→LF first: the repo checks out with Windows line
-        // endings, so byte patterns must not assume bare `\n`.
+        // `production_source` normalizes CRLF to LF, so the patterns below
+        // can assume bare `\n`.
         let src = super::production_source();
-        // Anchor on the impl, not on the first `fn drop` in the file. There is
-        // more than one `Drop` in this module, and which one comes first is an
-        // accident of ordering — this test silently retargeted itself the
-        // moment another `Drop` was added above `Terminal`'s.
+        // Anchor on the impl, not on the first `fn drop` in the file. This
+        // module has more than one `Drop`, and one added above `Terminal`'s
+        // would silently retarget this test.
         let impl_start = src
             .find("impl Drop for Terminal {")
             .expect("Terminal::Drop present");
@@ -14332,10 +14241,6 @@ mod teardown_tests {
         assert_eq!(term.child_exit_code(), Some(0));
     }
 
-    /// Pin the construction order and the Unix ownership handoff that close the
-    /// short-child output race. Readiness alone is insufficient: a pump can be
-    /// descheduled immediately after sending it, so the parent slave must stay
-    /// alive until the pump owns it.
     /// A shell reports the hostname it started with. Without it, every OSC 7
     /// report after a macOS rename looks remote and is dropped.
     #[test]
@@ -14357,6 +14262,10 @@ mod teardown_tests {
         );
     }
 
+    /// Pin the construction order and the Unix ownership handoff that close the
+    /// short-child output race. Readiness alone is insufficient: a pump can be
+    /// descheduled immediately after sending it, so the parent slave must stay
+    /// alive until the pump owns it.
     #[test]
     fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         let src = super::production_source();
@@ -14483,7 +14392,7 @@ mod default_shell_tests {
     const PWSH: &str = r"C:\Program Files\PowerShell\7\pwsh.exe";
     const WPS: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
 
-    /// v2.29.1: the self-contained base64 encoder matches known vectors (RFC 4648).
+    /// The self-contained base64 encoder matches known vectors (RFC 4648).
     #[test]
     fn base64_standard_matches_known_vectors() {
         assert_eq!(base64_standard(b""), "");
@@ -14526,7 +14435,7 @@ mod default_shell_tests {
         assert_eq!(argv[3], OsStr::new(&bootstrap));
     }
 
-    /// v2.29.1: PowerShell executables are recognized by basename; cmd / bash are not.
+    /// PowerShell executables are recognized by basename; cmd / bash are not.
     #[test]
     fn is_powershell_recognizes_pwsh_and_powershell_only() {
         assert!(is_powershell(Path::new(PWSH)));
@@ -14661,11 +14570,11 @@ mod pty_dim_tests {
 
     #[test]
     fn overflowing_product_saturates_instead_of_wrapping() {
-        // 30px HiDPI cell × 5000 cols = 150_000 — overflows u16. The old
-        // `cell_w * cols as u16` panicked here in debug / wrapped to 18928
-        // in release; we clamp to u16::MAX instead.
+        // 30px HiDPI cell × 5000 cols = 150_000, which overflows u16. A bare
+        // `cell_w * cols as u16` panics in debug and wraps to 18928 in
+        // release; clamp_pty_dim saturates at u16::MAX instead.
         assert_eq!(clamp_pty_dim(30, 5000), u16::MAX);
-        // Pathological count that would truncate in the old `cols as u16`.
+        // Pathological count that a bare `cols as u16` would truncate.
         assert_eq!(clamp_pty_dim(1, usize::MAX), u16::MAX);
         assert_eq!(clamp_pty_dim(10, usize::MAX), u16::MAX);
     }
@@ -14726,7 +14635,7 @@ mod pty_dim_tests {
     #[test]
     fn image_placement_uses_exact_fractional_cell_geometry() {
         // 960 / 100 = 9.6 px per cell. Dividing by the rounded 10 px metric
-        // incorrectly assigned a 960 px image only 96 cells.
+        // would give a 960 px image only 96 cells.
         assert_eq!(image_cells_for_pixels(960, 100, 960), 100);
         assert_eq!(image_cells_for_pixels(96, 100, 960), 10);
         assert_eq!(image_cells_for_pixels(97, 100, 960), 11);
@@ -15831,19 +15740,15 @@ mod image_lifecycle_tests {
 
     /// Two synchronized graphics frames arriving in one PTY read.
     ///
-    /// `feed_with` hands the chunk handler a parser that is already mid
-    /// transition. `dispatch_escape_follower` flushes the pass-through bytes
-    /// and *then* sets `mode` and opens the control string, while the pending
-    /// chunks are drained afterwards. So the handler runs with `mode` already
-    /// `Apc`, and kettle-core's handler re-enters `feed_with` on the same
-    /// `Extractor` to replay a deferred frame. The inner call sees the open
-    /// string, cancels it, and returns with `mode == Pass`, so the outer loop
-    /// resumes in the wrong mode and paints the rest of the second frame onto
-    /// the grid as text.
+    /// kettle-core's chunk handler re-enters `feed_with` on the same
+    /// `Extractor` to replay a deferred frame. `dispatch_escape_follower` must
+    /// deliver the flushed pass-through bytes before it sets `mode` to `Apc`.
+    /// Otherwise the inner call sees an open string, cancels it, and returns
+    /// with `mode == Pass`, so the outer loop resumes in the wrong mode and
+    /// paints the rest of the second frame onto the grid as text.
     ///
-    /// The existing tests here all end their buffer at the ESU or feed it
-    /// separately, so the flush happens with `mode == Pass` and never enters
-    /// the window.
+    /// The other tests here end their buffer at the ESU or feed it separately,
+    /// so the flush happens with `mode == Pass` and never exercises this order.
     #[test]
     fn a_second_synchronized_frame_in_one_read_is_not_painted_onto_the_grid() {
         let mut harness = SyncGraphicsHarness::new();
@@ -16756,8 +16661,8 @@ mod image_lifecycle_tests {
 
         let images: Images = Arc::new(Mutex::new(vec![placement(0)]));
         let mut pruner = ImageHistoryPruner {
-            // Simulate the numerically-equal primary cache entry that used to
-            // suppress pruning after a screen transition.
+            // A primary-buffer cache entry with the same numeric origin must
+            // not suppress pruning after a screen transition.
             last_key: Some((false, origin)),
         };
         pruner.prune_if_changed(&term, &images);

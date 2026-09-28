@@ -1,8 +1,9 @@
 //! Quick-select "hint mode" core (kitty `kitten hints` / WezTerm
 //! `QuickSelect` style): scan the visible rows for interesting tokens —
 //! URLs, filesystem paths, git hashes, IPv4 addresses — and assign each a
-//! short, easy-to-type label. Pure and fully unit-tested; the overlay +
-//! keypress handling (a follow-up) consume [`detect`] and [`labels`].
+//! short, easy-to-type label. Pure and fully unit-tested; the UI hint overlay
+//! consumes [`detect_rows`] and [`labels`], and double-click selection uses
+//! [`detect`].
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -45,12 +46,11 @@ fn res() -> &'static [(Kind, Regex)] {
             ),
             (
                 Kind::Ip,
-                // Clamp each octet to 0..=255 (was
-                // `\d{1,3}`, which surfaced 999.999.999.999 and other out-of-range
-                // dotted numbers as IP quick-select targets). The `regex` crate
-                // has no lookaround, so a 5-group `1.2.3.4.5` can still match its
-                // first four octets — acceptable since the only Ip action is a
-                // clipboard copy (no network/open).
+                // Clamp each octet to 0..=255 so out-of-range dotted numbers such
+                // as 999.999.999.999 are not IP quick-select targets. The `regex`
+                // crate has no lookaround, so a 5-group `1.2.3.4.5` can still match
+                // its first four octets. That is acceptable because the only Ip
+                // action is a clipboard copy (no network/open).
                 Regex::new(
                     r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b",
                 )
@@ -67,9 +67,9 @@ fn res() -> &'static [(Kind, Regex)] {
 
 use crate::url_trim::trim_trailing;
 
-/// Detect hint targets across `rows` (one string per visible line). Earlier
-/// kinds win on overlap (a URL is not also matched as a path), and matches
-/// are returned in reading order (row, then column).
+/// Detect hint targets in one row's `line`, using `col_of_byte` to map byte
+/// offsets to columns. Earlier kinds win on overlap (a URL is not also matched
+/// as a path). Callers sort `out` into reading order (row, then column).
 fn detect_line(row: usize, line: &str, col_of_byte: &[usize], out: &mut Vec<HintSpan>) {
     let mut taken: Vec<(usize, usize)> = Vec::new();
     for (kind, re) in res() {
@@ -100,12 +100,11 @@ fn detect_line(row: usize, line: &str, col_of_byte: &[usize], out: &mut Vec<Hint
 pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
     let mut out = Vec::new();
     for (row, line) in rows.iter().enumerate() {
-        // Byte offset -> char column for this line. Push each char's
-        // column exactly `len_utf8()` times (matching
-        // links.rs/search.rs) so a multi-byte char's continuation bytes map to
-        // ITS column, not the next one — the old `while v.len() <= b` attributed a
-        // trailing non-ASCII char's bytes to the following column, so
-        // double-clicking a token ending in e.g. `é` over-selected by one cell.
+        // Byte offset -> char column for this line. Push each char's column
+        // exactly `len_utf8()` times (matching links.rs/search.rs) so a
+        // multi-byte char's continuation bytes map to ITS column, not the next
+        // one. Otherwise double-clicking a token ending in e.g. `é` would
+        // over-select by one cell.
         let col_of_byte: Vec<usize> = {
             let mut v = Vec::with_capacity(line.len() + 1);
             for (col, ch) in line.chars().enumerate() {

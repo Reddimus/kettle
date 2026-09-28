@@ -124,7 +124,7 @@ pub struct SearchBatch {
     pub cancelled: bool,
     /// True only when the iterator reached the requested bound.
     pub exhausted: bool,
-    /// True when the requested or hard match cap stopped the scan.
+    /// True when the requested or hard match cap, or an accuracy barrier, stopped the scan.
     pub truncated: bool,
     /// True when a pathological logical line exceeded a row/cell/byte materialization bound.
     /// Matches in the batch remain exact, but navigation order across the omitted boundary is
@@ -338,19 +338,15 @@ impl CompiledSearch {
         };
         let regex = match build(pattern) {
             Ok(regex) => regex,
-            // A query that does not parse is almost never someone writing
-            // broken regex on purpose. It is someone typing text they can see
-            // on screen: `call(x`, `arr[0`, `a{`, or a bare `(` all read as
-            // ordinary terminal output and all fail to compile. Retry escaped
-            // so the search finds what was asked for, instead of answering
-            // "invalid regular expression" to a person who had no way to know
-            // the field took a regex and has no toggle to turn it off.
+            // An unparseable query is usually text the user can see on
+            // screen, like `call(x`, `arr[0`, `a{`, or a bare `(`. The user
+            // cannot know the field takes a regex and has no toggle to turn
+            // that off, so retry it escaped as a literal search.
             //
-            // Only a fallback. A pattern that IS valid regex keeps regex
-            // meaning, so `a|b` and `^row` still work — which also means
-            // `call(x)` and `arr[0]` are still matched as a group and a
-            // character class, and still will not find that literal text.
-            // Closing that needs a literal/regex toggle, not a wider fallback.
+            // A valid pattern keeps its regex meaning, so `a|b` and `^row`
+            // work, but `call(x)` and `arr[0]` still match as a group and a
+            // character class, not literal text. Fixing that needs a
+            // literal/regex toggle, not a wider fallback.
             //
             // Size limits are not retried: escaping cannot make a pattern
             // cheaper in any way that matters, and "too complex" stays honest.
@@ -368,8 +364,8 @@ impl CompiledSearch {
         // Terminal highlights need at least one cell. Keep the regex engine's standard
         // leftmost-first ordering and discard zero-width results instead of re-running nullable
         // expressions at every byte (which can turn an interactive search into quadratic work).
-        // Consequently an earlier empty alternative can shadow a later consuming alternative at
-        // the same position, exactly as it does before the UI-level zero-width filter.
+        // So an earlier empty alternative still shadows a later consuming alternative at the same
+        // position; the filter only hides the empty match.
         self.regex
             .find_iter(input)
             .filter(|found| found.start() != found.end())
@@ -1107,12 +1103,11 @@ pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
 
 /// Search with an explicit case-sensitivity override.
 ///
-/// Bounded by [`MAX_SEARCH_MATCHES`] — the same hard ceiling the chunked [`CompiledSearch`]
-/// scanner enforces on every bounded call. Without it a pattern that matches pathologically often
-/// across a large scrollback (a single common character, or repetitive hostile program output)
-/// would allocate one [`Match`] per hit into an unbounded `Vec`, synchronously blocking the
-/// calling thread while it grows without limit; this legacy whole-buffer entry point is exactly
-/// as exposed to that failure mode as the bounded API and must honor the same ceiling.
+/// This legacy whole-buffer scan returns at most [`MAX_SEARCH_MATCHES`] matches, the same hard
+/// ceiling the chunked [`CompiledSearch`] scanner enforces. Without it, a pattern that matches
+/// pathologically often across a large scrollback (a single common character, or repetitive
+/// hostile program output) would push one [`Match`] per hit into an unbounded `Vec` and block the
+/// calling thread.
 pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
     let Some(re) = build_regex_with(pattern, mode) else {
         return Vec::new();
@@ -1131,8 +1126,8 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
     let mut text = String::with_capacity(cols);
     let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
     'lines: for line in top..=bottom {
-        // Reconstruct the line text (spacer-aware) + byte→column map via the
-        // shared helper, so the wide-char-spacer fix can't drift (v2.26.0).
+        // Build the spacer-aware line text and byte-to-column map with the
+        // shared helper, so its wide-char spacer handling can't drift.
         crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
         for m in re.find_iter(&text) {
             // Skip zero-width matches. A user pattern that can
@@ -1152,8 +1147,6 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
                 start_col,
                 end_col,
             });
-            // Ceiling reached: stop materializing more matches rather than continuing to grow an
-            // unbounded result vector. `usize::MAX`-style pathological inputs cannot outlast this.
             if matches.len() >= MAX_SEARCH_MATCHES {
                 break 'lines;
             }
@@ -1307,12 +1300,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // `(` used to be a hard InvalidRegex. It now compiles, as the literal
-        // `(` the user could see on their screen — see
-        // `an_unparseable_query_falls_back_to_a_literal_search`. InvalidRegex
-        // survives only for a pattern that cannot compile even when escaped,
-        // which the engine does not produce for ordinary text; the variant is
-        // kept because the escaped retry is still fallible.
+        // `(` compiles as the literal `(` the user sees on screen; see
+        // `an_unparseable_query_falls_back_to_a_literal_search`. The escaped
+        // retry is still fallible, so InvalidRegex remains for a pattern that
+        // fails even when escaped. Ordinary text never gets that error.
         assert!(
             matches!(
                 CompiledSearch::compile("(", CaseSensitivity::Smart),
@@ -2161,15 +2152,12 @@ mod tests {
 
     /// A query that is not valid regex falls back to matching it literally.
     ///
-    /// The reproduction: a pane showing `call(x) and arr[0]` answered "No match"
-    /// for `call(x)` (which is *valid* regex, and matches `callx`) and "invalid
-    /// regular expression" for a bare `(`. Someone searching for text they can
-    /// read on screen has no way to know the field takes a regex and no toggle
-    /// to turn it off, so an unparseable pattern is now treated as the literal
-    /// they almost certainly meant.
+    /// Someone searching for text they can read on screen has no way to know
+    /// the field takes a regex and no toggle to turn it off, so an unparseable
+    /// pattern such as a bare `(` is treated as the literal they meant. A valid
+    /// pattern such as `call(x)` keeps its regex meaning and matches `callx`.
     #[test]
     fn an_unparseable_query_falls_back_to_a_literal_search() {
-        // Bare metacharacters used to be a hard `InvalidRegex`.
         for pattern in ["(", "[", "a{", "*", "+", "?", "(unclosed"] {
             let compiled = CompiledSearch::compile(pattern, CaseSensitivity::Always);
             assert!(
@@ -2194,11 +2182,10 @@ mod tests {
             );
         }
 
-        // The limit of this fix, pinned so nobody mistakes it for more than it
-        // is: `call(x)` and `arr[0]` are *valid* regex — a group and a
-        // character class — so they never reach the fallback and still do not
-        // match the literal text on screen. Closing that gap needs a
-        // literal/regex toggle, which is deliberately not part of this change.
+        // This pins the fallback's limit. `call(x)` and `arr[0]` are *valid*
+        // regex (a group and a character class), so they never reach the
+        // fallback and still do not match the literal text on screen. Matching
+        // them literally needs a literal/regex toggle, not a wider fallback.
         for pattern in ["call(x)", "arr[0]"] {
             let mut search = CompiledSearch::compile(pattern, CaseSensitivity::Always)
                 .unwrap()
@@ -2211,9 +2198,8 @@ mod tests {
             );
         }
 
-        // A pattern that IS valid regex keeps regex semantics rather than
-        // being escaped: this must match `callx`-style alternation, not a
-        // literal `a|b`.
+        // A valid regex keeps regex semantics instead of being escaped, so
+        // `call|zzz` matches as an alternation, not as literal text.
         let mut alternation = CompiledSearch::compile("call|zzz", CaseSensitivity::Always)
             .unwrap()
             .unwrap();
@@ -2223,7 +2209,7 @@ mod tests {
             "alternation still behaves as regex"
         );
 
-        // The oversized-query error is unchanged and still distinct.
+        // An oversized query keeps its own distinct error.
         let oversized = "x".repeat(MAX_SEARCH_QUERY_BYTES + 1);
         assert!(matches!(
             CompiledSearch::compile(&oversized, CaseSensitivity::Always),
@@ -2261,9 +2247,8 @@ mod tests {
     /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<Match>`.
     #[test]
     fn search_with_stops_at_the_hard_match_ceiling() {
-        // Pick dimensions whose cell count comfortably exceeds `MAX_SEARCH_MATCHES` so a
-        // pattern matching every single cell would, without a cap, produce far more matches
-        // than the ceiling allows.
+        // Size the grid to hold more cells than `MAX_SEARCH_MATCHES`, so a pattern matching
+        // every cell would exceed the ceiling without a cap.
         let columns = 300;
         let lines = MAX_SEARCH_MATCHES / columns + 2;
         let mut term = empty_term(columns, lines);

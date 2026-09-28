@@ -55,6 +55,7 @@ mod settings;
 // `--check-update` path via the public `check_for_update_cli` wrapper below.
 mod update_check;
 mod video_preview;
+mod wall_clock;
 // OSC 9;4 taskbar progress (pwsh 7 / Windows Terminal parity).
 mod taskbar;
 

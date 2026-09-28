@@ -2332,7 +2332,7 @@ mod tests {
         // would still pass because the lost arms are at the end. Pin a name
         // from the last arm instead, which no early close can leave in view.
         assert!(
-            accepted.contains("toggle_pane_read_only"),
+            accepted.contains("show_about"),
             "the extracted from_name body is missing its final arms, so every \
              alias past the truncation point is invisible to this guard"
         );

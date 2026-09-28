@@ -113,11 +113,10 @@ fn private_temp_state_dir() -> PathBuf {
 pub fn registry_dir_from(get: impl Fn(&str) -> Option<String>) -> PathBuf {
     let env = |k: &str| get(k).filter(|s| !s.is_empty());
     let env_path = |k: &str| env(k).map(PathBuf::from).filter(|path| path.is_absolute());
-    // Fall back to an absolute temp location (uid-namespaced on Unix) — NOT the
-    // relative CWD ".", which would put the registry under whatever
-    // directory the process happened to start in, so a server and a client
-    // launched from different CWDs would never find each other (and writing
-    // there pollutes arbitrary dirs). temp_dir keeps both sides in agreement.
+    // Fall back to an absolute temp location (uid-namespaced on Unix), never
+    // the relative CWD. Under a CWD-relative registry, a server and a client
+    // started from different directories would never find each other, and
+    // writes would pollute arbitrary dirs.
     let base: PathBuf = if cfg!(windows) {
         env_path("LOCALAPPDATA").unwrap_or_else(std::env::temp_dir)
     } else {
@@ -230,10 +229,9 @@ fn read_registry_entry(path: &std::path::Path) -> Option<String> {
     }
     #[cfg(windows)]
     {
-        // Mirror the Unix uid check above: don't trust that a `<pid>.json`
-        // found in the registry dir is actually ours, only that its owning
-        // SID matches this process's — closing the same spoofing gap the
-        // Unix arm already closes via `uid()`.
+        // Like the Unix uid check above, trust a `<pid>.json` in the registry
+        // dir only if its owning SID matches this process's, so another user
+        // cannot spoof an entry.
         if !owned_by_current_user(path) {
             return None;
         }
@@ -311,8 +309,8 @@ pub fn list(dir: &std::path::Path) -> Vec<RegistryEntry> {
 ///
 /// `list` is kept pure (raw enumeration) for callers that want every entry
 /// regardless of liveness (e.g. diagnostics); this is the liveness-aware view.
-/// The client's `discover` runs the same `list_live_by` core with the same
-/// `owner_alive` predicate, differing only in that it can inject a stand-in —
+/// The client's `discover_in` runs the same `list_live_by` core with the same
+/// `owner_alive` predicate, differing only in that it can inject a stand-in,
 /// so what is pinned here is what discovery does. (Both are crate-private, so
 /// they are named rather than linked: rustdoc denies a public item linking to
 /// something the reader cannot follow.)
@@ -413,11 +411,10 @@ impl Drop for OwnedSid {
 }
 
 /// True if `path`'s Win32 security-descriptor owner SID matches the current
-/// process token's user SID. This is the Windows equivalent of the Unix
-/// `metadata.uid() == geteuid()` checks used throughout this file — without
-/// it, `private_dir_is_valid`/`read_registry_entry` on Windows previously
-/// trusted whatever ACL the directory or file happened to have, rather than
-/// verifying ownership.
+/// process token's user SID or default owner SID. This is the Windows
+/// equivalent of the Unix `metadata.uid() == geteuid()` check; without it,
+/// `private_dir_is_valid`/`read_registry_entry` on Windows would trust whatever
+/// ACL the directory or file has rather than verifying ownership.
 #[cfg(windows)]
 pub(crate) fn owned_by_current_user(path: &std::path::Path) -> bool {
     let Some(owner) = path_owner_sid(path) else {

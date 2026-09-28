@@ -635,12 +635,12 @@ macos-perf:
 # only). Same path the `install-online.sh` curl|sh wrapper
 # uses for online installs.
 #
-[unix]
+[linux]
 install:
     ./scripts/install.sh
 
 # Remove everything `just install` placed.
-[unix]
+[linux]
 uninstall:
     ./scripts/install.sh --uninstall
 
@@ -653,7 +653,7 @@ uninstall:
 #
 # `--skip-build` after the `release` dependency keeps local deployment from
 # compiling the same release binary twice.
-[unix]
+[linux]
 install-local: release
     ./scripts/install.sh --skip-build
     @echo "local install synced to the current release build"
@@ -662,7 +662,7 @@ install-local: release
 # directory (the desktop launcher gets KETTLE_RECORD_DIR wired in). Recording
 # now ships in every build, so this is a normal release build — equivalently,
 # set `record = on` + `record-dir` in the config file.
-[unix]
+[linux]
 install-recording RECORD_DIR=(env_var("HOME") / ".cache/kettle/records"):
     cargo build --release -p kettle
     ./scripts/install.sh --skip-build --record-dir={{quote(RECORD_DIR)}}
