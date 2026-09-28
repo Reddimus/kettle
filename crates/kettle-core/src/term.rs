@@ -4791,7 +4791,11 @@ mod local_output_tests {
             return;
         };
         terminal.write(b"before\n");
-        assert!(wait_for(&terminal, &events, |_, text| text.contains("before")));
+        // The line discipline echoes the line and `cat` prints it again. Wait
+        // for both, so neither arrives after the reset.
+        assert!(wait_for(&terminal, &events, |_, text| {
+            text.matches("before").count() == 2
+        }));
 
         assert!(terminal.apply_local_output(b"\x1bc"));
         assert!(
@@ -4841,8 +4845,13 @@ mod local_output_tests {
         let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
         terminal.write(lines.as_bytes());
         let history = |terminal: &Terminal| terminal.term.lock().unwrap().grid().history_size();
-        assert!(wait_for(&terminal, &events, |terminal, text| {
-            text.contains("line 39") && history(terminal) > 0
+        // Echo and `cat` print every line once each. Wait for both copies of
+        // the last one, so no output is still arriving when history is cleared.
+        assert!(wait_for(&terminal, &events, |terminal, _| {
+            terminal
+                .screen_text(100)
+                .is_some_and(|screen| screen.text.matches("line 39").count() == 2)
+                && history(terminal) > 0
         }));
 
         assert!(terminal.apply_local_output(b"\x1b[3J"));

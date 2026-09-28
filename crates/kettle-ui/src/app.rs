@@ -29698,9 +29698,21 @@ mod tests {
 
         let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
         mux.panes[&target].term.write(lines.as_bytes());
-        assert!(wait_for_pane_screen(&mux, target, |text, history| {
-            text.contains("line 39") && history > 0
-        }));
+        // The line discipline echoes each line at once and `cat` prints it
+        // again after reading it. Wait for both copies of the last line, so no
+        // output is still arriving when the scrollback is cleared.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !mux.panes[&target]
+            .term
+            .screen_text(100)
+            .is_some_and(|screen| screen.text.matches("line 39").count() == 2)
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cat did not print its input"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         super::apply_terminal_control(&mux, &[target], b"\x1b[3J");
         assert!(
