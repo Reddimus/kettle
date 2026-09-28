@@ -407,14 +407,21 @@ mod tests {
     /// Nothing can stall while the event loop is idle, so an idle watchdog has
     /// no reason to wake. A timer that fires anyway is a wakeup every second
     /// for the life of every idle window. After one quiet threshold it parks.
+    ///
+    /// Wakes are counted only once it has had time to park: before that a
+    /// timed wait can return a few milliseconds early on Windows and wait
+    /// again. One is allowed for a spurious condvar wake; the 1 s loop this
+    /// replaced wakes three times in the window.
     #[test]
     fn an_idle_watchdog_parks() {
         let stall = Duration::from_millis(200);
         let tracker = RuntimeTracker::start_with(None, "test".to_string(), stall, stall);
-        std::thread::sleep(Duration::from_millis(3500));
-        let loops = tracker.shared.loops.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(800));
+        let parked = tracker.shared.loops.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(3000));
+        let woke = tracker.shared.loops.load(Ordering::Relaxed) - parked;
         tracker.stop();
-        assert!(loops <= 2, "an idle watchdog woke {loops} times in 3.5 s");
+        assert!(woke <= 1, "a parked watchdog woke {woke} times in 3 s");
     }
 
     /// A busy event loop enters a phase on every turn. Only the first phase
