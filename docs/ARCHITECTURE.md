@@ -504,6 +504,20 @@ planner's fallback surface for a saved window without geometry is the same rule
 in physical pixels. Restored geometry and explicit new-window geometry are
 applied after these attributes and still win.
 
+Startup marks its phases in `startup_trace` (`kettle-ui`): `main`, `run_with`,
+the built event loop, the loaded config, the built `App`, the first pane's
+spawn, `Resumed`, the created window, the ready GPU, the reveal and the first
+frame. Each mark is one atomic store of the raw monotonic clock, the first time
+only: `CLOCK_UPTIME_RAW` on macOS, the clock the macOS standing harness uses,
+and `CLOCK_MONOTONIC` on Linux. The first frame is the first one the window
+startup created presents, not one that timed out or found the window occluded,
+and not a restored secondary window's. The stamps print once,
+in the order they happened, under the `kettle::startup` log target, so
+`RUST_LOG=warn,kettle::startup=info` shows them without turning on anything
+else. They print at that first frame; a window that starts hidden prints them
+at the end of its startup, without a first frame, and a startup that exits
+before any frame prints how far it got.
+
 A no-argument GUI launch first uses the private activation endpoint under the
 per-user runtime/state directory. One advisory lock elects a primary; the
 endpoint accepts only a versioned `open_window` request capped at 8 KiB and

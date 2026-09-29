@@ -800,6 +800,10 @@ Default
 .I warn
 surfaces session-restore failures, GPU init errors, and winit/Wayland protocol
 failures on stderr.
+.I warn,kettle::startup=info
+also prints how long each startup phase took, from the start of
+.B main
+to the first frame.
 .TP
 .B XDG_CONFIG_HOME
 Linux/Unix config root (default
