@@ -24,7 +24,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "4.7.0"
+version = "4.8.0"
 edition = "2024"
 # MSRV. The workspace uses let-chains (`if X && let Y = ... && Z`) in
 # kettle-vt / kettle-config / kettle-render / kettle, stable since Rust
@@ -67,16 +67,16 @@ categories = ["command-line-utilities"]
 # Declare every internal kettle-* crate as a workspace dep so
 # version + path stay in lockstep across every consumer manifest.
 # `release.sh` bumps these pins with the workspace version.
-kettle-config = { path = "crates/kettle-config", version = "4.7.0" }
-kettle-state = { path = "crates/kettle-state", version = "4.7.0" }
-kettle-test-support = { path = "crates/kettle-test-support", version = "4.7.0" }
-kettle-update = { path = "crates/kettle-update", version = "4.7.0" }
-kettle-core = { path = "crates/kettle-core", version = "4.7.0" }
-kettle-vt = { path = "crates/kettle-vt", version = "4.7.0" }
-kettle-render = { path = "crates/kettle-render", version = "4.7.0" }
-kettle-remote = { path = "crates/kettle-remote", version = "4.7.0" }
-kettle-ctl = { path = "crates/kettle-ctl", version = "4.7.0" }
-kettle-ui = { path = "crates/kettle-ui", version = "4.7.0" }
+kettle-config = { path = "crates/kettle-config", version = "4.8.0" }
+kettle-state = { path = "crates/kettle-state", version = "4.8.0" }
+kettle-test-support = { path = "crates/kettle-test-support", version = "4.8.0" }
+kettle-update = { path = "crates/kettle-update", version = "4.8.0" }
+kettle-core = { path = "crates/kettle-core", version = "4.8.0" }
+kettle-vt = { path = "crates/kettle-vt", version = "4.8.0" }
+kettle-render = { path = "crates/kettle-render", version = "4.8.0" }
+kettle-remote = { path = "crates/kettle-remote", version = "4.8.0" }
+kettle-ctl = { path = "crates/kettle-ctl", version = "4.8.0" }
+kettle-ui = { path = "crates/kettle-ui", version = "4.8.0" }
 
 anyhow = "1"
 thiserror = "2"
