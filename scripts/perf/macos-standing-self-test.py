@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json as _json
 import math
 import shutil
 import sys
@@ -12,6 +13,7 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+json_dumps = _json.dumps
 spec = importlib.util.spec_from_file_location("macos_standing", HERE / "macos-standing.py")
 standing = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -105,6 +107,18 @@ class Summary(unittest.TestCase):
         self.assertNotIn("| cols |", text, "the grid is not a metric")
         self.assertIn("Grid: kettle 123x35", text)
         self.assertIn("| **geometric mean** | 12.0 | 15.5 |", text)
+
+    def test_a_config_only_ab_summarizes_b_over_a(self) -> None:
+        # --kettle-b-config alone runs one binary twice: still an A/B.
+        self.assertTrue(standing.is_ab({"kettle-a": "/k", "kettle-b": "/k"}))
+        self.assertFalse(standing.is_ab({"kettle": "/k", "kettle-opaque": "/k"}))
+        self.assertFalse(standing.is_ab({"kettle": "/k", "kettle-b": "/k"}), "a variant named b is not an A/B")
+
+    def test_variant_names_cannot_collide_with_the_ab_sides(self) -> None:
+        self.assertEqual(standing.variant_name("opaque"), "kettle-opaque")
+        for reserved in ("a", "b", "", "A"):
+            with self.assertRaises(ValueError):
+                standing.variant_name(reserved)
 
     def test_ab_mode_reports_a_paired_ratio(self) -> None:
         results = {
@@ -728,6 +742,18 @@ class Preflight(unittest.TestCase):
                 keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
                 self.assertEqual(len(keys), len(set(keys)), f"duplicate keys in {keys}")
 
+    def test_a_diagnostic_footprint_session_never_counts(self) -> None:
+        self.assertFalse(standing.session_countable(
+            {"refusals": [], "bare": False, "complete": True, "footprint_detail": True}))
+        self.assertIn("footprint_detail", standing.SESSION_KEYS)
+
+    def test_config_text_stays_out_of_published_results(self) -> None:
+        public, local = standing.config_record({"kettle-a": "", "kettle-b": "background-image = /Users/me/secret.png"})
+        self.assertNotIn("/Users/me", json_dumps(public))
+        self.assertEqual(local["kettle-b"], "background-image = /Users/me/secret.png")
+        self.assertEqual(public["kettle-a"], "")
+        self.assertRegex(public["kettle-b"], r"^sha256:[0-9a-f]{64}$")
+
     def test_a_session_counts_only_when_clean_bundled_and_complete(self) -> None:
         self.assertTrue(standing.session_countable({"refusals": [], "bare": False, "complete": True}))
         self.assertFalse(standing.session_countable({"refusals": ["load 2.5"], "bare": False, "complete": True}))
@@ -884,6 +910,38 @@ class Combine(unittest.TestCase):
         self.assertTrue(combined["sessions"][0]["countable"])
         self.assertFalse(combined["rows"]["idle.cpu_percent"]["sessions"][0]["countable"])
 
+    def test_an_aa_calibrates_ab_sessions_with_other_round_counts_and_workloads(self) -> None:
+        # One A/A per harness version: a startup-only A/A at its own round
+        # count gates a later A/B that ran more workloads at other counts.
+        common = {"refusals": [], "bare": False, "complete": True, "mode": "ab", "warmup": 0,
+                  "hw_model": "Mac17,6", "configs": {"kettle-a": "", "kettle-b": ""}}
+        aa = write_session(self.root, "aa", dict(
+            common, date="2026-10-01", started="2026-10-01T00:00:00", label="aa",
+            rounds={"startup": 4, "idle": 5, "flood-memory": 5, "vtebench": 5},
+            tool_hashes={"stamp": "s", "memsample": "m", "launch": "l"},
+            identity={"kettle-a": {"sha256": "x"}, "kettle-b": {"sha256": "x"}}), {"startup": {
+                "kettle-a": [{"child_ms": 200.0 + i, "window_ms": 150.0} for i in range(4)],
+                "kettle-b": [{"child_ms": 200.0 + i, "window_ms": 150.0} for i in range(4)]}})
+        folders = [write_session(self.root, f"ab{day}", dict(
+            common, date=f"2026-10-0{day}", started=f"2026-10-0{day}T01:00:00", label=f"ab{day}",
+            rounds={"startup": 2, "idle": 2, "flood-memory": 2, "vtebench": 2},
+            tool_hashes={"stamp": "s", "memsample": "m", "launch": "l", "vtebench": "v"},
+            identity={"kettle-a": {"sha256": "x"}, "kettle-b": {"sha256": "y"}}), {"startup": {
+                "kettle-a": [{"child_ms": 200.0, "window_ms": 150.0}] * 2,
+                "kettle-b": [{"child_ms": 150.0, "window_ms": 150.0}] * 2}}) for day in (1, 2)]
+        combined = standing.combine(folders, aa)
+        self.assertEqual(combined["rows"]["startup.child_ms"]["verdict"]["verdict"], "lower")
+        # A tool both ran must still be the same binary.
+        aa2 = write_session(self.root, "aa2", dict(
+            common, date="2026-10-01", started="2026-10-01T00:00:00", label="aa2",
+            rounds={"startup": 4}, tool_hashes={"stamp": "other", "memsample": "m", "launch": "l"},
+            identity={"kettle-a": {"sha256": "x"}, "kettle-b": {"sha256": "x"}}), {"startup": {
+                "kettle-a": [{"child_ms": 200.0, "window_ms": 150.0}] * 4,
+                "kettle-b": [{"child_ms": 200.0, "window_ms": 150.0}] * 4}})
+        with self.assertRaises(SystemExit) as raised:
+            standing.combine(folders, aa2)
+        self.assertIn("tool_hashes", str(raised.exception))
+
     def test_an_aa_with_another_baseline_config_is_refused(self) -> None:
         base = {"started": "2026-10-01T00:00:00", "refusals": [], "bare": False, "complete": True, "mode": "ab",
                 "warmup": 0, "rounds": {"startup": 2},
@@ -1016,6 +1074,198 @@ class Combine(unittest.TestCase):
         row = combined["rows"]["startup.child_ms"]
         self.assertEqual(row["verdict"]["verdict"], "lower")
         self.assertIn("startup child_ms", combined["markdown"])
+
+
+class Payloads(unittest.TestCase):
+    def runner(self, work: Path):
+        probe = work / "probe.sh"
+        probe.write_text("#!/bin/sh\nexit 2\n")
+        probe.chmod(0o755)
+        return standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
+
+    def test_payload_script_is_reused_across_launches(self) -> None:
+        # macOS assesses a script the first time it runs (about 120 ms), so
+        # a fresh script per launch adds that to every terminal's shell time.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            runner = self.runner(work)
+            for dat in ("a.dat", "b.dat"):
+                runner.finish(runner.launch("kettle", 'exec true "$DAT"', 1, params={"DAT": dat}), 1)
+            payloads = sorted(work.glob("payload-*.sh"))
+            self.assertEqual(len(payloads), 1)
+            self.assertIn(". ", payloads[0].read_text())
+            self.assertEqual((work / "params").read_text(), "DAT=b.dat\n")
+
+    def test_params_are_shell_quoted(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            runner = self.runner(work)
+            runner.finish(runner.launch("kettle", "true", 1, params={"DAT": "/a b/it's.dat"}), 1)
+            self.assertEqual((work / "params").read_text(), "DAT='/a b/it'\"'\"'s.dat'\n")
+
+    def test_warmup_rows_are_excluded_from_statistics(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle": [{"child_ms": 900.0, "warmup": True}, {"child_ms": 100.0}, {"child_ms": 110.0}],
+            "alacritty": [{"child_ms": 950.0, "warmup": True}, {"child_ms": 120.0}, {"child_ms": 130.0}],
+        }}}
+        text = standing.summarize(results, ["kettle", "alacritty"], ab=False)
+        self.assertIn("| child_ms | 105.00 | 125.00 |", text)
+        self.assertIn("| child_ms | alacritty | 0.840 | ", text)
+
+    def test_per_kettle_configs_and_b_only_config(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            standing.write_configs(work, {"kettle-a": "", "kettle-b": "cursor-blink = false"})
+            self.assertNotIn("cursor-blink", (work / "kettle-a.config").read_text())
+            self.assertIn("cursor-blink = false\n", (work / "kettle-b.config").read_text())
+            self.assertIn("window-width = 120", (work / "kettle-b.config").read_text())
+            argv = standing.terminal_argv("kettle-b", work / "p.sh", work, {"kettle-a": "/k", "kettle-b": "/k"})
+            self.assertEqual(argv[:3], ["/k", "--config", str(work / "kettle-b.config")])
+
+    def test_variants_are_listed_but_never_ranked(self) -> None:
+        results = {"context": "t", "unranked": ["kettle-opaque"], "workloads": {"startup": {
+            "kettle": [{"window_ms": 200.0}], "kettle-opaque": [{"window_ms": 100.0}],
+            "alacritty": [{"window_ms": 150.0}]}}}
+        analysis = standing.analyze(results, ["kettle", "kettle-opaque", "alacritty"], ab=False)
+        entry = analysis["startup"]["metrics"]["window_ms"]
+        self.assertEqual((entry["best_other"], entry["rank"]), ("alacritty", 2))
+        self.assertIn("kettle-opaque", entry["terminals"])
+
+    def test_launch_metadata_is_not_a_metric(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle": [{"window_ms": 200.0, "started_ns": 12345678901234, "thermal_state": 1}]}}}
+        self.assertNotIn("started_ns", standing.summarize(results, ["kettle"], ab=False))
+        self.assertNotIn("thermal_state", standing.summarize(results, ["kettle"], ab=False))
+
+
+MIB = 2 ** 20
+
+
+def timeline(points):
+    """[(seconds after done, MiB)] as memsample (t_ns, footprint, max) tuples, done at t=100 s."""
+    return [(int((100 + t) * 1e9), int(mib * MIB), int(mib * MIB)) for t, mib in points]
+
+
+class FloodTimeline(unittest.TestCase):
+    DONE = int(100e9)
+
+    def test_flood_row_reports_peak_done3_done20(self) -> None:
+        # A blink plateau until 10 s after done, then the driver releases its
+        # pools about a second after the last frame.
+        points = [(-2, 200)] + [(t / 10, 360) for t in range(0, 110)] + [(11.2, 60)] + \
+                 [(t / 10, 58) for t in range(113, 225)]
+        row = standing.flood_row(timeline(points), self.DONE, (3, 20))
+        self.assertEqual(row["peak_mib"], 360)
+        self.assertEqual(row["done3_mib"], 360)
+        self.assertEqual(row["done20_mib"], 58)
+        self.assertAlmostEqual(row["release_s"], 11.2, places=3)
+        self.assertTrue(row["done_ok"])
+
+    def test_flood_offset_takes_first_sample_at_or_after_offset(self) -> None:
+        row = standing.flood_row(timeline([(2.95, 100), (3.05, 90), (19.9, 80), (20.0, 70)]), self.DONE, (3, 20))
+        self.assertEqual((row["done3_mib"], row["done20_mib"]), (90, 70))
+
+    def test_peak_includes_the_lifetime_maximum(self) -> None:
+        samples = [(int(100e9), 50 * MIB, 400 * MIB), (int(125e9), 40 * MIB, 400 * MIB)]
+        self.assertEqual(standing.flood_row(samples, self.DONE, (3, 20))["peak_mib"], 400)
+
+    def test_a_flood_that_never_finished_is_an_error(self) -> None:
+        self.assertEqual(standing.flood_row(timeline([(1, 50)]), None, (3, 20)),
+                         {"error": "the flood never finished"})
+
+    def test_a_timeline_that_ends_before_an_offset_is_an_error(self) -> None:
+        row = standing.flood_row(timeline([(0, 50), (5, 40)]), self.DONE, (3, 20))
+        self.assertEqual(row["error"], "no sample at done+20 s")
+
+    def test_every_terminal_gets_the_same_flood_columns(self) -> None:
+        rows = {name: [standing.flood_row(timeline([(0, mib), (3, mib), (20, mib)]), self.DONE, (3, 20))]
+                for name, mib in (("kettle", 300), ("alacritty", 70))}
+        text = standing.summarize({"context": "t", "workloads": {"flood-memory": rows}}, ["kettle", "alacritty"], False)
+        for column in ("peak_mib", "done3_mib", "done20_mib"):
+            self.assertRegex(text, rf"\| {column} \| [0-9.]+ \| [0-9.]+ \|")
+        self.assertNotIn("| release_s |", text.split("| metric | best other")[-1])
+
+    def test_flood_columns_follow_the_chosen_offsets(self) -> None:
+        self.assertEqual(standing.flood_metrics([3.0, 20.0]), ("peak_mib", "done3_mib", "done20_mib"))
+        self.assertEqual(standing.flood_metrics([5.0, 30.0]), ("peak_mib", "done5_mib", "done30_mib"))
+        rows = {"kettle": [standing.flood_row(timeline([(0, 300), (5, 300), (30, 60)]), self.DONE, (5, 30))]}
+        results = {"context": "t", "meta": {"flood_offsets": [5.0, 30.0]}, "workloads": {"flood-memory": rows}}
+        text = standing.summarize(results, ["kettle"], False)
+        self.assertIn("| done5_mib |", text)
+        self.assertIn("| done30_mib |", text)
+        meta = {"rounds": {"flood-memory": 1}, "flood_offsets": [5.0, 30.0]}
+        self.assertTrue(standing.rounds_complete(results, meta))
+
+    def test_a_done_stamp_is_read_only_once_written(self) -> None:
+        import tempfile
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            done = Path(tmp) / "done"
+            # Mid-write: the line so far, with no size fields yet.
+            done.write_text("1234")
+            threading.Timer(0.2, lambda: done.write_text("123456789 120 36\n")).start()
+            self.assertEqual(standing.read_stamp(done, timeout=2), 123456789)
+            empty = Path(tmp) / "never"
+            empty.write_text("")
+            self.assertIsNone(standing.read_stamp(empty, timeout=0.3))
+
+    def test_the_sampler_writes_a_file_and_stops_before_the_terminal(self) -> None:
+        import inspect
+
+        source = inspect.getsource(standing.Runner.flood_memory)
+        self.assertNotIn("subprocess.PIPE", source, "an undrained pipe stalls memsample")
+        self.assertLess(source.index("self.end_sampler(loop)\n        if not self.stop(process, 60)"),
+                        len(source), "the sampler must stop before the terminal is reaped")
+
+    def test_footprint_graphics_categories(self) -> None:
+        data = {"processes": [{"categories": {
+            "Owned physical footprint (unmapped) (graphics)": {"dirty": 38 * 8 * MIB, "regions": 38},
+            "IOAccelerator (graphics)": {"dirty": 4 * MIB, "regions": 12},
+            "__DATA /usr/lib/libSystem.B.dylib": {"dirty": MIB, "regions": 1}}}]}
+        self.assertEqual(standing.footprint_graphics(data), {
+            "Owned physical footprint (unmapped) (graphics)": {"dirty_mib": 304.0, "regions": 38},
+            "IOAccelerator (graphics)": {"dirty_mib": 4.0, "regions": 12}})
+
+
+class IdleFocus(unittest.TestCase):
+    def test_idle_round_needs_frontmost_at_every_check(self) -> None:
+        first = {"cpu_ns": 0, "wakeups": 0, "footprint": 30 * MIB, "rss": 90 * MIB}
+        second = {"cpu_ns": 30_000_000, "wakeups": 15, "footprint": 31 * MIB, "rss": 91 * MIB}
+        row = standing.idle_row(first, second, 30.0, [True, False, True])
+        self.assertFalse(row["frontmost"])
+        self.assertEqual(row["frontmost_checks"], [True, False, True])
+        self.assertAlmostEqual(row["cpu_percent"], 0.1)
+        self.assertAlmostEqual(row["wakeups_per_second"], 0.5)
+        self.assertTrue(standing.idle_row(first, second, 30.0, [True, True, True])["frontmost"])
+
+
+class MemsampleLoop(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_memsample_loop_mode_samples_own_process(self) -> None:
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "memsample"
+            subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "memsample.c")],
+                           check=True)
+            out = subprocess.run([str(binary), str(os.getpid()), "20", "3"], capture_output=True, text=True,
+                                 check=True).stdout
+            lines = [json.loads(line) for line in out.splitlines()]
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(lines[0]["t_ns"] < lines[1]["t_ns"] < lines[2]["t_ns"])
+            self.assertEqual(lines[0]["pid"], os.getpid())
+            one = json.loads(subprocess.run([str(binary), str(os.getpid())], capture_output=True, text=True).stdout)
+            self.assertNotIn("t_ns", one, "one-shot output keeps its old shape")
 
 
 FLOOD_4K_SHA256 = "8f18d84dad9b7ab935be1aa827e9ce0d0cc97b0c2e75f08afaede576a8b08f5d"
