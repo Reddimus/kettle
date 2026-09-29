@@ -976,6 +976,7 @@ fn queue_startup_update_recovery(warning: Option<&str>, queue: impl FnOnce(&str,
 }
 
 fn main() -> anyhow::Result<()> {
+    kettle_ui::startup_trace::mark(kettle_ui::startup_trace::Phase::Main);
     // Under the GUI subsystem (see the crate-root attribute), a
     // terminal launch must attach the parent console so CLI subcommands print;
     // an Explorer/Start-menu launch has no parent console and stays windowed

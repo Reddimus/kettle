@@ -6986,12 +6986,15 @@ impl App {
     }
 
     pub fn run_with(mut startup: crate::Options) -> Result<()> {
+        crate::startup_trace::mark(crate::startup_trace::Phase::RunWith);
+        let _trace = crate::startup_trace::FlushOnDrop;
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
         #[cfg(target_os = "macos")]
         disable_app_state_restoration();
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+        crate::startup_trace::mark(crate::startup_trace::Phase::EventLoopBuilt);
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
         // `build` is what registers and installs winit's application delegate,
@@ -7208,6 +7211,7 @@ impl App {
         // window's working directory, so `accent-color = auto` gives a window
         // in a different project a different (but per-project stable) accent.
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
+        crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);
         // Seed the ToggleFullscreen tracking flag from the
         // effective window-state (config `window-state = fullscreen` or `-f`).
         // Starting it `false` would make a fullscreen launch need TWO
@@ -7458,6 +7462,7 @@ impl App {
             last_session_sweep: None,
         };
         app.runtime_tracker.set_window_count(app.windows.len());
+        crate::startup_trace::mark(crate::startup_trace::Phase::AppBuilt);
         let result = event_loop.run_app(&mut app);
         app.runtime_tracker.set_phase("exiting");
         // Pasted screenshots are captured screen content, so they do not outlive
@@ -13361,10 +13366,22 @@ impl App {
                                 w.set_visible(true);
                             }
                             ws.window_shown = true;
+                            if ws.startup_window {
+                                crate::startup_trace::mark(
+                                    crate::startup_trace::Phase::WindowRevealed,
+                                );
+                            }
                             log::info!(
                                 "startup: window revealed at first paint, working set {:.1} MiB",
                                 process_working_set_mb()
                             );
+                        }
+                        // The first frame is the first one the startup window
+                        // presents: a frame that timed out or found the window
+                        // occluded is not.
+                        if ws.startup_window {
+                            crate::startup_trace::mark(crate::startup_trace::Phase::FirstFrame);
+                            crate::startup_trace::flush();
                         }
                         ws.last_paint = Some(std::time::Instant::now());
                         ws.output_pacer.presented();
@@ -26468,6 +26485,7 @@ impl App {
         if ws.window.is_some() {
             return;
         }
+        crate::startup_trace::mark(crate::startup_trace::Phase::Resumed);
         // Explicit command/cwd launches never restore a saved workspace.
         // Preserve the fields until the existing consumed-once spawn path
         // below, but decide and preflight the restore before native resources
@@ -26562,11 +26580,16 @@ impl App {
             event_loop.exit();
             return;
         }
+        if spawned_early {
+            crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
+            crate::startup_trace::note_path(crate::startup_trace::StartupPath::ResumedEarly);
+        }
 
         // Create the window hidden while renderer init runs on the event-loop
         // thread. The first successful paint reveals it; `window_state =
         // hidden` remains hidden.
         ws.window_shown = !should_reveal_after_renderer_init(self.cfg.window_state);
+        ws.startup_window = true;
         let mut attrs = self.window_attributes(self.cfg.window_state, monitor);
         if let Some((width, height)) = startup_surface {
             attrs = attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height));
@@ -26598,6 +26621,7 @@ impl App {
         ws.native_material = Some(crate::native_material::NativeMaterial::install(
             &window, &self.cfg,
         ));
+        crate::startup_trace::mark(crate::startup_trace::Phase::WindowCreated);
         // Measured AFTER apply_post_create because the gpu figure below is
         // derived by subtraction; stopping the clock earlier would charge that
         // setup to the GPU.
@@ -26632,6 +26656,7 @@ impl App {
         if early_reveal {
             window.set_visible(true);
             ws.window_shown = true;
+            crate::startup_trace::mark(crate::startup_trace::Phase::WindowRevealed);
         }
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
@@ -26665,6 +26690,9 @@ impl App {
                              `LIBGL_ALWAYS_SOFTWARE=1` or pick another backend via \
                              `WGPU_BACKEND=gl`. Exiting so kettle doesn't hang invisibly."
                         );
+                        // exit() skips destructors, so run_with's guard never
+                        // flushes this startup's trace.
+                        crate::startup_trace::flush();
                         std::process::exit(1);
                     }
                 });
@@ -26694,6 +26722,7 @@ impl App {
                 return;
             }
         };
+        crate::startup_trace::mark(crate::startup_trace::Phase::GpuReady);
         log::info!(
             "startup: working set after gpu init {:.1} MiB",
             process_working_set_mb()
@@ -26862,6 +26891,10 @@ impl App {
             event_loop.exit();
             return;
         }
+        if !spawned_early {
+            crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
+            crate::startup_trace::note_path(crate::startup_trace::StartupPath::AfterRenderer);
+        }
         self.resize_all(ws);
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
@@ -26950,12 +26983,19 @@ impl App {
                 w.set_visible(true);
             }
             ws.window_shown = true;
+            crate::startup_trace::mark(crate::startup_trace::Phase::WindowRevealed);
             log::info!(
                 "startup: window revealed before first macOS surface frame, working set {:.1} MiB",
                 process_working_set_mb()
             );
         }
         self.redraw(ws);
+        // A window that starts hidden presents nothing until it is shown, so
+        // its startup trace ends here, without a first frame. Any other
+        // window's trace is printed by the first frame it presents.
+        if !should_reveal_after_renderer_init(self.cfg.window_state) {
+            crate::startup_trace::flush();
+        }
         if let Some(w) = &ws.window {
             w.request_redraw();
         }

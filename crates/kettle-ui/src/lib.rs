@@ -27,6 +27,9 @@ pub(crate) fn test_tempdir() -> kettle_test_support::PrivateTempDir {
 
 mod activation_server;
 mod app;
+// Startup phase stamps, printed with RUST_LOG=kettle::startup=info. Public so
+// the binary can mark the first statement of `main`.
+pub mod startup_trace;
 // Per-window state container. `App` keeps only process-global state;
 // everything tied to one OS window lives here.
 mod window_state;

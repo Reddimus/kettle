@@ -673,7 +673,11 @@ pins the fresh-window rule on 1080p, 1366×768, ultrawide, a tiny monitor (no
 floor), a 2× HiDPI monitor (same grid as 1×), and that an explicit size is
 never monitor-fitted, and a source guard proves both window constructors use
 the shared rule as a `LogicalSize` and that the restore planner's fallback
-surface is the same rule in physical pixels. Input-queue regressions fill both the
+surface is the same rule in physical pixels. The startup phase stamps keep the first mark,
+leave unmarked phases out, print in time order, and match the fixture the
+macOS standing harness parses (`startup-phases.fixture`); a source guard
+proves every phase is marked, only the reveal and the spawn at more than one
+site, and in startup order. Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests

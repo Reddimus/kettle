@@ -999,6 +999,10 @@ pub(crate) struct WindowState {
     /// once the surface is configured; `window_state = hidden` keeps this true
     /// so fallback reveal paths do not show it.
     pub(crate) window_shown: bool,
+    /// Whether startup created this window. Only its reveal and its first
+    /// presented frame go into the startup trace: a restored secondary
+    /// window can present before the first window's pane has spawned.
+    pub(crate) startup_window: bool,
     /// The last native window-theme hint this window was given via
     /// `Window::set_theme` (`None` = never synced). The hint keeps the OS
     /// titlebar — Windows DWM caption, Wayland Adwaita CSD, macOS appearance —
@@ -1186,6 +1190,7 @@ impl WindowState {
             window_title_override: None,
             pending_pane_restarts: Vec::new(),
             window_shown: false,
+            startup_window: false,
             native_theme_synced: None,
             seen_output_gen: std::collections::HashMap::new(),
             pending_output_gen: std::collections::HashMap::new(),

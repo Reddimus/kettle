@@ -103,7 +103,7 @@ MIN_PAIRED_SHARE = 0.8
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
-                "footprint_detail")
+                "footprint_detail", "startup_phases")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -390,6 +390,9 @@ class Runner:
         self.probes = probes
         self.work = work
         self.kettle = kettle
+        # The Kettle entries whose rounds print their startup phase stamps
+        # (--startup-phases).
+        self.phases: set = set()
         # How long past its own timeout a launch probe may take to report.
         self.grace = 15.0
 
@@ -405,7 +408,7 @@ class Runner:
         return path
 
     def launch(self, name: str, body: str, timeout: float,
-               params: Optional[Dict[str, str]] = None) -> subprocess.Popen:
+               params: Optional[Dict[str, str]] = None, phases: bool = False) -> subprocess.Popen:
         """Start `name` running `body` after the stamp. Values that change per
         launch go in a params file the script sources, so the script stays the
         same file."""
@@ -418,12 +421,22 @@ class Runner:
         params_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in (params or {}).items()))
         payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{body}')
         argv = terminal_argv(name, payload, self.work, self.kettle)
+        # Every terminal runs with the log filter it ships with, whatever the
+        # harness's own shell sets. Kettle's phase stamps go to its stderr,
+        # and only a stamped entry's startup rounds get their filter.
+        stderr_path = self.work / "terminal.stderr"
+        stderr_path.unlink(missing_ok=True)
+        stamped = phases and name in self.phases
+        env = {key: value for key, value in os.environ.items() if key != "RUST_LOG"}
+        if stamped:
+            env["RUST_LOG"] = "warn,kettle::startup=info"
         # Its own session, so the probe leads a process group holding only it
         # and what it starts; stop() can clean that group up if it must.
-        return subprocess.Popen(
-            [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-        )
+        with (stderr_path.open("w") if stamped else open(os.devnull, "w")) as stderr:
+            return subprocess.Popen(
+                [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
+                stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True, env=env,
+            )
 
     def kill_group(self, process: subprocess.Popen) -> None:
         """Kill a launch probe that stopped responding, with everything it
@@ -445,6 +458,9 @@ class Runner:
         if returncode != 0 or not launched.exists():
             return {"error": f"launch probe exited {returncode} without a result"}
         result = json.loads(launched.read_text())
+        stderr_path = self.work / "terminal.stderr"
+        if stderr_path.exists():
+            result.update(parse_phases(stderr_path.read_text(errors="replace"), result.get("started_ns")))
         stamp = self.work / "stamp"
         if stamp.exists():
             fields = stamp.read_text().split()
@@ -537,7 +553,7 @@ class Runner:
     def startup(self, name: str) -> dict:
         # Hold the window for a second so terminals that spawn the child before
         # showing a window still reach the window server.
-        process = self.launch(name, "exec /bin/sleep 1", 20)
+        process = self.launch(name, "exec /bin/sleep 1", 20, phases=True)
         return self.finish(process, 20)
 
     def idle(self, name: str, settle: float, window: float, activate: bool) -> dict:
@@ -621,6 +637,40 @@ class Runner:
             raise SystemExit(f"vtebench in {name} produced no samples for {', '.join(missing)}")
         row["dat"] = dat.name
         return row
+
+
+PHASE_LINE = re.compile(r"startup phase=(\w+) t_ns=(\d+)")
+PATH_LINE = re.compile(r"startup path=(\w+)")
+
+
+def stamped_entries(sides: Optional[str], kettle: Dict[str, str]) -> set:
+    """The Kettle entries --startup-phases stamps: every one (`all`), or only
+    the B side of an A/B (`b`), which with one build on both sides is the
+    stamps-on against stamps-off control."""
+    if not sides:
+        return set()
+    if sides == "b":
+        if not is_ab(kettle):
+            raise ValueError("--startup-phases b needs an A/B (--kettle-b or --kettle-b-config)")
+        return {"kettle-b"}
+    return set(kettle)
+
+
+def parse_phases(text: str, started_ns: Optional[int]) -> dict:
+    """Kettle's startup phase stamps (RUST_LOG=kettle::startup=info), as
+    `phase_<name>_ms` since the launch probe spawned it, plus the pane's
+    startup path. The format is pinned by startup-phases.fixture, which
+    crates/kettle-ui/src/startup_trace.rs tests against too."""
+    if started_ns is None:
+        return {}
+    phases: dict = {}
+    for line in text.splitlines():
+        found = PHASE_LINE.search(line)
+        if found:
+            phases[f"phase_{found.group(1)}_ms"] = (int(found.group(2)) - started_ns) / 1e6
+        elif (found := PATH_LINE.search(line)):
+            phases["startup_path"] = found.group(1)
+    return phases
 
 
 def read_stamp(path: Path, timeout: float) -> Optional[int]:
@@ -800,6 +850,16 @@ def paired(a: List[Optional[float]], b: List[Optional[float]], seed: int = SEED)
             "wins": sum(1 for x, y in pairs if y < x), "n": len(ratios)}
 
 
+def paired_difference(a: List[Optional[float]], b: List[Optional[float]], seed: int = SEED) -> dict:
+    """Median of b - a round pairs, in the metric's own unit, with a bootstrap
+    95% interval: the absolute gain a ratio hides."""
+    diffs = [y - x for x, y in zip(a, b) if x is not None and y is not None]
+    if not diffs:
+        return {}
+    low, high = bootstrap(diffs, statistics.median, seed)
+    return {"diff": statistics.median(diffs), "low": low, "high": high, "n": len(diffs)}
+
+
 def ratio_of_rounds(base: List[Optional[float]], test: List[Optional[float]], seed: int = SEED) -> dict:
     """Mean of test/base round pairs with a bootstrap 95% interval over rounds,
     and the rounds in which test was lower. Rounds pair by index."""
@@ -942,6 +1002,16 @@ def workload_metrics(workload: str, rows: Dict[str, List[dict]],
         return values
     metrics = [key for key in metrics_for(workload, meta or {})
                if any(is_number(run.get(key)) for runs in rows.values() for run in runs)]
+    if workload == "startup":
+        # Kettle's phase stamps, when --startup-phases recorded them, in the
+        # order they happen: by median time, then by name.
+        phases: Dict[str, List[float]] = {}
+        for runs in rows.values():
+            for run in runs:
+                for key, value in run.items():
+                    if key.startswith("phase_") and is_number(value):
+                        phases.setdefault(key, []).append(value)
+        metrics += sorted(phases, key=lambda key: (statistics.median(phases[key]), key))
     return {metric: {name: [row_value(workload, run, metric) for run in runs] for name, runs in rows.items()}
             for metric in metrics}
 
@@ -972,6 +1042,8 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
             compare = ratio_of_rounds if mean_based else paired
             if ab and len(names) == 2:
                 entry["ab"] = compare(per_name.get(names[0], []), per_name.get(names[1], []))
+                if workload == "startup":
+                    entry["ab_diff"] = paired_difference(per_name.get(names[0], []), per_name.get(names[1], []))
             elif kettle in terminals:
                 ranked = {name: t for name, t in terminals.items() if name not in unranked}
                 others = {name: t for name, t in ranked.items() if name != kettle}
@@ -979,6 +1051,8 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
                     best = min(others, key=lambda name: others[name]["estimate"])
                     entry["best_other"] = best
                     entry["vs_best"] = compare(per_name[best], per_name[kettle])
+                    if workload == "startup":
+                        entry["vs_best_diff"] = paired_difference(per_name[best], per_name[kettle])
                     order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
                     entry["rank"] = order.index(kettle) + 1
             metrics[metric] = entry
@@ -1026,22 +1100,32 @@ def summarize(results: dict, names: List[str], ab: bool) -> str:
             for metric in ordered + (["geometric mean"] if "geometric mean" in metrics else []):
                 stats = metrics[metric].get("ab")
                 if stats:
+                    diff = metrics[metric].get("ab_diff")
+                    delta = (f"; B-A {diff['diff']:+.1f} ms, 95% CI {diff['low']:+.1f} to {diff['high']:+.1f}"
+                             if diff else "")
                     out.append(
                         f"{metric}: B/A {stats['ratio']:.3f} "
                         f"(95% CI {stats['low']:.3f}-{stats['high']:.3f}, n={stats['n']}, "
-                        f"B lower in {stats['wins']}/{stats['n']})"
+                        f"B lower in {stats['wins']}/{stats['n']}{delta})"
                     )
         else:
             compared = [m for m in ordered + (["geometric mean"] if "geometric mean" in metrics else [])
                         if metrics[m].get("vs_best")]
             if compared:
                 out.append("")
-                out.append(f"| {label} | best other | Kettle/other | 95% CI | Kettle lower in |")
-                out.append("|---|---|---:|---|---:|")
+                with_diff = workload == "startup"
+                out.append(f"| {label} | best other | Kettle/other | 95% CI | Kettle lower in |"
+                           + (" Kettle-other (95% CI) |" if with_diff else ""))
+                out.append("|---|---|---:|---|---:|" + ("---|" if with_diff else ""))
                 for metric in compared:
                     stats = metrics[metric]["vs_best"]
-                    out.append(f"| {metric} | {metrics[metric]['best_other']} | {stats['ratio']:.3f} | "
-                               f"{stats['low']:.3f}-{stats['high']:.3f} | {stats['wins']}/{stats['n']} |")
+                    row = (f"| {metric} | {metrics[metric]['best_other']} | {stats['ratio']:.3f} | "
+                           f"{stats['low']:.3f}-{stats['high']:.3f} | {stats['wins']}/{stats['n']} |")
+                    diff = metrics[metric].get("vs_best_diff")
+                    if with_diff:
+                        row += (f" {diff['diff']:+.1f} ms ({diff['low']:+.1f} to {diff['high']:+.1f}) |" if diff
+                                else " - |")
+                    out.append(row)
         out.append("")
     return "\n".join(out)
 
@@ -1051,10 +1135,11 @@ def summarize(results: dict, names: List[str], ab: bool) -> str:
 
 def session_countable(meta: dict) -> bool:
     """A session counts only if its preflight was clean, Kettle ran from an
-    app bundle, every requested round finished, and nothing walked the
-    terminals' memory mid-measurement (--footprint-detail)."""
+    app bundle, every requested round finished, and it was not a diagnostic
+    that changes what the terminals do: walking their memory mid-measurement
+    (--footprint-detail) or turning on Kettle's startup log (--startup-phases)."""
     return (not meta.get("refusals") and not meta.get("bare") and not meta.get("footprint_detail")
-            and meta.get("complete") is True)
+            and not meta.get("startup_phases") and meta.get("complete") is True)
 
 
 def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
@@ -1657,6 +1742,9 @@ def main() -> int:
                         help="the measured terminal hosting this shell, allowed to stay open (must be an ancestor)")
     parser.add_argument("--wait-quiet", type=float, default=30.0,
                         help="minutes to wait for load under the limit before the preflight decides")
+    parser.add_argument("--startup-phases", nargs="?", const="all", choices=("all", "b"),
+                        help="record Kettle's startup phase stamps in startup rounds, for every Kettle entry "
+                             "or only the A/B's B side (a diagnostic: the session never counts)")
     parser.add_argument("--warmup", type=int, default=1,
                         help="discarded launches per terminal before the startup rounds")
     parser.add_argument("--flood-offsets", default="3,20",
@@ -1720,6 +1808,10 @@ def main() -> int:
                 names.append(peer)
             else:
                 skipped[peer] = f"not installed at {APPS[peer]}"
+    try:
+        stamped = stamped_entries(args.startup_phases, kettle)
+    except ValueError as error:
+        parser.error(str(error))
     for workload in workloads:
         if rounds[workload] % len(names):
             print(f"note: {rounds[workload]} {workload} rounds do not balance a {len(names)}-entry rotation",
@@ -1805,6 +1897,7 @@ def main() -> int:
             "idle_settle": args.idle_settle, "idle_window": args.idle_window, "warmup": args.warmup,
             "flood_offsets": offsets, "activate": not args.no_activate,
             "footprint_detail": args.footprint_detail, "configs": config_record(kettle_configs)[0],
+            "startup_phases": args.startup_phases,
             "identity": {},
         },
         "workloads": {},
@@ -1824,6 +1917,7 @@ def main() -> int:
         work = Path(tmp)
         write_configs(work, kettle_configs)
         runner = Runner(probes, work, kettle)
+        runner.phases = stamped
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
             write_flood(flood)

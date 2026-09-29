@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- `RUST_LOG=warn,kettle::startup=info` prints how long each startup phase
+  took, from `main` to the first frame.
+
 ### Changed
 
 - A blinking cursor no longer re-uploads the window's shapes or re-prepares its
