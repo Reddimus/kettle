@@ -24,6 +24,8 @@ pub fn commands() -> Vec<(&'static str, Action)> {
         ("Split right (vertical divider)", SplitRight),
         ("Split down (horizontal divider)", SplitDown),
         ("Split automatically", SplitAuto),
+        ("Split left (new pane on the left)", SplitLeft),
+        ("Split up (new pane above)", SplitUp),
         ("Close pane", ClosePane),
         ("Equalize splits (equal pane areas)", EqualizeSplits),
         ("Zoom / unzoom pane", ToggleZoom),
@@ -232,6 +234,8 @@ mod tests {
             SplitRight,
             SplitDown,
             SplitAuto,
+            SplitLeft,
+            SplitUp,
             ClosePane,
             CloseWindow,
             NewWindow,
@@ -368,6 +372,8 @@ mod tests {
                 | SplitRight
                 | SplitDown
                 | SplitAuto
+                | SplitLeft
+                | SplitUp
                 | ClosePane
                 | CloseWindow
                 | NewWindow

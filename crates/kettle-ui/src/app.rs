@@ -1586,6 +1586,27 @@ fn set_visible_on_all_spaces(window: &winit::window::Window) {
     }
 }
 
+/// Turn off AppKit's persistent UI ("Resume") before the application
+/// launches. Kettle restores its own session, and AppKit cannot rebuild a
+/// winit window anyway. Left on, a bundled Kettle kept encoding its window
+/// state for the persistent-UI service while idle: 0.04 % CPU and 0.2 extra
+/// wakeups a second. `ApplePersistence` goes in the registration domain,
+/// which lives only in memory and loses to anything the user sets.
+#[cfg(target_os = "macos")]
+fn disable_app_state_restoration() {
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+
+    let key = NSString::from_str("ApplePersistence");
+    let off = Retained::into_super(Retained::into_super(Retained::into_super(
+        NSNumber::numberWithBool(false),
+    )));
+    let defaults = NSDictionary::from_vec(&[&*key], vec![off]);
+    // SAFETY: `registerDefaults:` copies a property-list dictionary of
+    // NSString keys, and this runs on the main thread before AppKit starts.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
 fn rect_contains(rect: kettle_render::Rect4, x: f32, y: f32) -> bool {
     x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
 }
@@ -6888,6 +6909,8 @@ impl App {
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
+        #[cfg(target_os = "macos")]
+        disable_app_state_restoration();
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
@@ -9076,9 +9099,17 @@ impl App {
         self.pty_geometry_for_grid(ws, columns, rows)
     }
 
-    fn prospective_split_geometry(&self, ws: &WindowState, dir: Dir) -> PtyGeometry {
+    fn prospective_split_geometry(
+        &self,
+        ws: &WindowState,
+        dir: Dir,
+        new_first: bool,
+    ) -> PtyGeometry {
         let area = self.area(ws);
-        let rect = ws.mux.prospective_split_rect(dir, area).unwrap_or(area);
+        let rect = ws
+            .mux
+            .prospective_split_rect(dir, new_first, area)
+            .unwrap_or(area);
         let titlebar_h = self.pane_titlebar_inset(ws, ws.mux.active_pane_count().saturating_add(1));
         self.pty_geometry_for_rect(ws, rect, titlebar_h)
     }
@@ -13750,14 +13781,25 @@ impl App {
                 action: Action::SplitAuto,
                 enabled: !zoomed,
             },
+            // Ghostty's four sides, in its order: Right, Left, Down, Up.
             ContextMenuItem::Item {
                 label: "Split Right",
                 action: Action::SplitRight,
                 enabled: !zoomed,
             },
             ContextMenuItem::Item {
+                label: "Split Left",
+                action: Action::SplitLeft,
+                enabled: !zoomed,
+            },
+            ContextMenuItem::Item {
                 label: "Split Down",
                 action: Action::SplitDown,
+                enabled: !zoomed,
+            },
+            ContextMenuItem::Item {
+                label: "Split Up",
+                action: Action::SplitUp,
                 enabled: !zoomed,
             },
             ContextMenuItem::DynamicItem {
@@ -13776,17 +13818,50 @@ impl App {
                 action: Action::NewTab,
                 enabled: true,
             },
+            // Ghostty's Tab and Window submenu rows, flattened.
+            ContextMenuItem::Item {
+                label: "Close Tab",
+                action: Action::CloseTab,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "New Window",
+                action: Action::NewWindow,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Close Window",
+                action: Action::CloseWindow,
+                enabled: true,
+            },
             // Terminator parity, terminal_popup_menu.py "Set Window Title".
             ContextMenuItem::Item {
                 label: "Set Window Title…",
                 action: Action::EditWindowTitle,
                 enabled: true,
             },
+            // The same editors as a double-click on a tab or a pane titlebar.
+            ContextMenuItem::Item {
+                label: "Set Tab Title…",
+                action: Action::EditTabTitle,
+                enabled: true,
+            },
+            ContextMenuItem::Item {
+                label: "Set Pane Title…",
+                action: Action::EditPaneTitle,
+                enabled: true,
+            },
+            ContextMenuItem::Separator,
+            // Ghostty's "Reset Terminal": RIS on this pane's terminal.
+            ContextMenuItem::Item {
+                label: "Reset Terminal",
+                action: Action::Reset,
+                enabled: true,
+            },
             // Terminator parity: per-pane read-only toggle. The
             // check marker mirrors the Preferences-submenu convention
             // ("✓ on / off"); dispatch goes through the same
             // `Action::TogglePaneReadOnly` the keybind uses.
-            ContextMenuItem::Separator,
             ContextMenuItem::DynamicItem {
                 label: format!("{}Read only", if read_only { "✓ " } else { "  " }),
                 action: Action::TogglePaneReadOnly,
@@ -15276,8 +15351,8 @@ impl App {
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
         let tab_geometry = self.pty_geometry_for_grid(ws, cols, rows);
-        let horizontal_split_geometry = self.prospective_split_geometry(ws, Dir::Horizontal);
-        let vertical_split_geometry = self.prospective_split_geometry(ws, Dir::Vertical);
+        let horizontal_split_geometry = self.prospective_split_geometry(ws, Dir::Horizontal, false);
+        let vertical_split_geometry = self.prospective_split_geometry(ws, Dir::Vertical, false);
         let waker = self.waker();
         // Snapshot the (tab, pane-leaf) the cursor lives in so we can detect
         // any focus change the action causes.
@@ -15309,7 +15384,15 @@ impl App {
                     }
                 }
             }
-            Action::SplitRight => {
+            Action::SplitRight | Action::SplitLeft => {
+                // Split Left puts the new pane first, as Ghostty's
+                // `new_split:left` does.
+                let new_first = action == Action::SplitLeft;
+                let geometry = if new_first {
+                    self.prospective_split_geometry(ws, Dir::Horizontal, true)
+                } else {
+                    horizontal_split_geometry
+                };
                 // If the focused pane has entered a shell it launched
                 // (e.g. typed `wsl` in pwsh), clone THAT shell + its dir; else
                 // clone the pane's own launch command.
@@ -15317,45 +15400,53 @@ impl App {
                 let res = match detected {
                     Some(s) => ws.mux.split_with_geometry(
                         Dir::Horizontal,
+                        new_first,
                         &self.cfg,
-                        horizontal_split_geometry,
+                        geometry,
                         waker,
                         s.argv,
                         s.cwd,
                     ),
                     None => ws.mux.split_geometry(
                         Dir::Horizontal,
+                        new_first,
                         &self.cfg,
-                        horizontal_split_geometry,
+                        geometry,
                         waker,
                     ),
                 };
                 if let Err(e) = res {
-                    report_split_failure("right", &e);
+                    report_split_failure(if new_first { "left" } else { "right" }, &e);
                 }
             }
-            Action::SplitDown | Action::SplitAuto => {
+            Action::SplitDown | Action::SplitUp | Action::SplitAuto => {
                 // `split_auto` cuts along the pane's LONGER axis, the way
-                // Terminator does; `split_down` is always vertical.
+                // Terminator does; `split_down` and `split_up` are always
+                // vertical, and Split Up puts the new pane first.
                 let dir = if action == Action::SplitAuto {
                     self.auto_split_dir(ws)
                 } else {
                     Dir::Vertical
                 };
-                let geometry = if dir == Dir::Horizontal {
+                let new_first = action == Action::SplitUp;
+                let geometry = if new_first {
+                    self.prospective_split_geometry(ws, Dir::Vertical, true)
+                } else if dir == Dir::Horizontal {
                     horizontal_split_geometry
                 } else {
                     vertical_split_geometry
                 };
                 let detected = self.focused_foreground_shell(ws);
                 let res = match detected {
-                    Some(s) => ws
+                    Some(s) => ws.mux.split_with_geometry(
+                        dir, new_first, &self.cfg, geometry, waker, s.argv, s.cwd,
+                    ),
+                    None => ws
                         .mux
-                        .split_with_geometry(dir, &self.cfg, geometry, waker, s.argv, s.cwd),
-                    None => ws.mux.split_geometry(dir, &self.cfg, geometry, waker),
+                        .split_geometry(dir, new_first, &self.cfg, geometry, waker),
                 };
                 if let Err(e) = res {
-                    report_split_failure("down", &e);
+                    report_split_failure(if new_first { "up" } else { "down" }, &e);
                 }
             }
             Action::ClosePane => {
@@ -29182,7 +29273,7 @@ mod modal_discipline_guard {
         let src = production_source();
 
         let arm = src
-            .split("Action::SplitDown | Action::SplitAuto => {")
+            .split("Action::SplitDown | Action::SplitUp | Action::SplitAuto => {")
             .nth(1)
             .expect("the split-down/auto arm must exist")
             .split("\n            Action::")
@@ -36892,7 +36983,7 @@ mod tests {
         );
     }
 
-    /// Terminator's right-click menu, row for row.
+    /// Terminator's right-click menu, row for row, plus the rows Ghostty adds.
     ///
     /// Set Window Title, Split Auto, and Zoom/Restore must be in the menu, not
     /// only on keybinds, because Terminator presents them there and users reach
@@ -36919,6 +37010,15 @@ mod tests {
             ("New Tab", "Action::NewTab"),
             ("Read only", "Action::TogglePaneReadOnly"),
             ("Set Group…", "Action::CreateGroup"),
+            // Rows Ghostty adds to Terminator's set.
+            ("Split Left", "Action::SplitLeft"),
+            ("Split Up", "Action::SplitUp"),
+            ("Close Tab", "Action::CloseTab"),
+            ("New Window", "Action::NewWindow"),
+            ("Close Window", "Action::CloseWindow"),
+            ("Set Tab Title…", "Action::EditTabTitle"),
+            ("Set Pane Title…", "Action::EditPaneTitle"),
+            ("Reset Terminal", "Action::Reset"),
         ] {
             // Checked as a PAIR, not as two independent tokens: "row present"
             // and "action present" both still hold if two rows swap actions,
@@ -36952,9 +37052,50 @@ mod tests {
         // `filter_disabled` drops the rows rather than greying them out.
         assert_eq!(
             body.matches("enabled: !zoomed,").count(),
-            3,
-            "all three split rows must be gated on the zoom state"
+            5,
+            "all five split rows must be gated on the zoom state"
         );
+    }
+
+    /// AppKit reads `ApplePersistence` when the application launches, and
+    /// building the event loop launches it. Registered any later, the
+    /// persistent-UI flush keeps running while idle.
+    #[test]
+    fn app_state_restoration_is_off_before_the_event_loop_exists() {
+        let src = production_source();
+        let run = src
+            .split("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .nth(1)
+            .expect("run_with");
+        let disable = run
+            .find("disable_app_state_restoration();")
+            .expect("run_with must turn off AppKit's persistent UI");
+        let build = run
+            .find("EventLoop::<UserEvent>::with_user_event().build()")
+            .expect("run_with builds the event loop");
+        assert!(
+            disable < build,
+            "ApplePersistence must be registered before the event loop exists"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_state_restoration_registers_apple_persistence_off() {
+        use objc2_foundation::{NSRegistrationDomain, NSString, NSUserDefaults};
+
+        super::disable_app_state_restoration();
+        // SAFETY: plain Foundation reads on this thread's defaults object.
+        let registered = unsafe {
+            NSUserDefaults::standardUserDefaults().volatileDomainForName(NSRegistrationDomain)
+        };
+        let value = registered
+            .get(&*NSString::from_str("ApplePersistence"))
+            .expect("ApplePersistence is registered");
+        // SAFETY: the registered value is the NSNumber this module created,
+        // and `boolValue` takes no arguments.
+        let on: bool = unsafe { objc2::msg_send![value, boolValue] };
+        assert!(!on, "persistent UI must be off");
     }
 
     #[test]

@@ -6774,6 +6774,26 @@ def visible_context_row(geometry: Dict[str, object], label: str) -> Dict[str, ob
     return rows[0]
 
 
+def reveal_context_row(live: "LiveKettle", label: str, attempts: int = 40) -> Dict[str, object]:
+    """Wheel an open context menu down until `label` is a visible row.
+
+    A menu taller than the window scrolls, one row per wheel notch, so a row
+    near the bottom is reached the way a user with a short window reaches it.
+    Returns the geometry in which the row is visible.
+    """
+    for _ in range(attempts):
+        geometry = live.json_ctl("ui_geometry")
+        menu = geometry.get("context_menu")
+        if isinstance(menu, dict) and any(
+            row.get("label") == label and row.get("dispatchable")
+            for row in menu.get("rows", [])  # type: ignore[union-attr]
+        ):
+            return geometry
+        live.ctl("send_mouse", params={"event": "wheel", "wheel_delta": -1.0})
+        time.sleep(0.05)
+    raise SystemExit(f"interaction smoke: {label!r} never scrolled into view in the context menu")
+
+
 def modal_open(geometry: Dict[str, object], name: str) -> bool:
     modals = geometry.get("modals", {})
     return isinstance(modals, dict) and bool(modals.get(name))
@@ -16324,7 +16344,9 @@ def run_interaction(kettle: str, root: Path) -> Path:
         menu = menu_geo.get("context_menu")
         if not menu:
             raise SystemExit("interaction smoke: right-click did not expose context_menu geometry")
-        settings_row = visible_context_row(menu_geo, "Settings…")
+        # The menu is taller than this 34-row window, so Settings… sits below
+        # the fold until the menu is scrolled.
+        settings_row = visible_context_row(reveal_context_row(live, "Settings…"), "Settings…")
         settings_x, settings_y = rect_center(settings_row["rect"])  # type: ignore[index]
         live.ctl("send_mouse", params={"event": "click", "x": settings_x, "y": settings_y, "button": "left"})
         time.sleep(0.3)
