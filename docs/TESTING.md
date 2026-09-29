@@ -731,6 +731,13 @@ idle blink to prove it stops on its visible phase within one half-period of
 `cursor-blink-timeout`, and normalize repeated empty IME preedit notifications
 to the same absent state. `check-live-render-smoke.sh` sets
 `cursor-blink-timeout = 0` so the blink keeps running for its whole capture.
+`kettle-render`'s headless tests render real panes from a real `Term` through
+the live frame path into the offscreen capture target, with no window. They
+prove a blink uploads the same quads in both phases and prepares no text, that
+the off phase is byte-identical to a cursor hidden with DECTCEM for the block,
+beam and underline shapes, and that a block over a wide glyph restores the
+glyph when it goes off; a source guard keeps the blink phase out of
+`build_pane`.
 
 ### kettle-remote (50+ tests)
 

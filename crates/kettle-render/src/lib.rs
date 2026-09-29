@@ -13,6 +13,8 @@ mod bg_image;
 mod color;
 mod cursor_policy;
 mod glyphpipe;
+#[cfg(test)]
+mod headless_tests;
 mod imgpipe;
 mod outline;
 mod present;
@@ -2467,7 +2469,9 @@ struct BgImageAnim {
 }
 
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// `None` only for the headless renderer tests build: it draws into the
+    /// offscreen capture target alone.
+    surface: Option<wgpu::Surface<'static>>,
     gpu: GpuContext,
     /// Shared CPU/GPU retained-resource scope for this renderer window.
     graphics_budget: kettle_core::GraphicsBudget,
@@ -2626,6 +2630,14 @@ pub struct Renderer {
     /// top of the frame, returned after the GPU upload; same high-water pooling
     /// as `span_scratch`.
     quad_scratch: Vec<QuadInstance>,
+    /// Where the focused pane's blinking cursor sits in the uploaded `quads`,
+    /// so the off phase can skip it at draw time. The cursor is always built
+    /// and uploaded; a blink edge changes only this draw. `None` when no
+    /// cursor can blink (none drawn, or vi mode, which never blinks).
+    cursor_quad_range: Option<std::ops::Range<u32>>,
+    /// Text prepares run so far (the pane, menu and cursor-glyph renderers).
+    /// Steady frames, blink edges included, should add none.
+    text_prepares: u64,
     /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
     /// for the title text drawn in the titlebar quad (see
     /// `pick_titlebar_bg`). Reused across redraws to amortize
@@ -3912,6 +3924,19 @@ mod live_screenshot_tests {
         wait_for_screenshot_submission_with,
     };
 
+    static SHARED_PERSISTENCE_POOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialize the tests that use the process-wide persistence pool: a test
+    /// that counts its permits must not overlap another test's capture in
+    /// flight. A capture holds this until its completion arrives, and the
+    /// worker releases the permit before sending that, so the pool is idle
+    /// whenever the guard is free.
+    pub(crate) fn shared_persistence_pool_guard() -> std::sync::MutexGuard<'static, ()> {
+        SHARED_PERSISTENCE_POOL_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn test_tempdir() -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir("kettle-render-test-")
     }
@@ -3940,13 +3965,13 @@ mod live_screenshot_tests {
             .find("self.create_screenshot_target(target_size)")
             .expect("live capture must allocate an independent offscreen target");
         let render = normalized
-            .find("self.encode_scene_pass(&capture.view")
+            .find("self.encode_scene_pass( &capture.view")
             .expect("live capture must render the scene into its target");
         let copy = normalized
             .find("self.prepare_texture_screenshot(")
             .expect("live capture must copy the rendered target");
         let acquire = normalized
-            .find("self.surface.get_current_texture()")
+            .find("self .surface .as_ref() .map(wgpu::Surface::get_current_texture)")
             .expect("live rendering must acquire the swapchain");
         let presentation = normalized
             .find(".presentation .ensure_target(")
@@ -3960,8 +3985,8 @@ mod live_screenshot_tests {
             acquire_tail
                 .matches("self.submit_offscreen_screenshot(encoder, prepared_screenshot)")
                 .count(),
-            6,
-            "Occluded, Timeout, Outdated, Lost, Validation, and presentation-allocation failure must all submit the offscreen capture"
+            7,
+            "a headless renderer, Occluded, Timeout, Outdated, Lost, Validation, and presentation-allocation failure must all submit the offscreen capture"
         );
         assert!(
             src.contains(
@@ -4226,6 +4251,7 @@ mod live_screenshot_tests {
 
     #[test]
     fn persistence_admission_is_process_wide_across_renderer_generations() {
+        let _pool = shared_persistence_pool_guard();
         let first_generation = ScreenshotPersistencePool::shared().unwrap();
         let replacement_generation = ScreenshotPersistencePool::shared().unwrap();
         assert!(std::sync::Arc::ptr_eq(
@@ -4860,21 +4886,88 @@ impl Renderer {
         cfg: &Config,
         fonts: Option<StartupFonts>,
     ) -> Result<Renderer> {
-        let GpuContext {
-            adapter,
-            device,
-            queue,
-            ..
-        } = gpu.clone();
-
-        let caps = surface.get_capabilities(&adapter);
+        let caps = surface.get_capabilities(&gpu.adapter);
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let alpha_mode = desired_alpha_mode(cfg, &caps.alpha_modes);
+        Self::with_gpu(
+            gpu,
+            Some(surface),
+            format,
+            caps.alpha_modes,
+            width,
+            height,
+            scale,
+            cfg,
+            fonts,
+        )
+    }
+
+    /// A renderer with no window, drawing only into the offscreen capture
+    /// target, so tests can render real panes through the live frame path.
+    /// `None` when the host has no GPU adapter.
+    #[cfg(test)]
+    pub(crate) fn headless_for_tests(
+        cfg: &Config,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<Renderer>> {
+        pollster::block_on(async {
+            let Ok((instance, adapter)) = resolve_headless_adapter(cfg, "headless-renderer").await
+            else {
+                return Ok(None);
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-headless-renderer"),
+                    required_limits: live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!("device: {e:?}"))?;
+            let gpu = GpuContext {
+                instance,
+                adapter,
+                device,
+                queue,
+                gpu_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                gpu_fault: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                recovery_wake: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            };
+            Self::with_gpu(
+                gpu,
+                None,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                vec![wgpu::CompositeAlphaMode::Opaque],
+                width,
+                height,
+                1.0,
+                cfg,
+                None,
+            )
+            .map(Some)
+        })
+    }
+
+    /// Shared tail of every constructor, once a GPU and (for a window) a
+    /// surface exist.
+    #[allow(clippy::too_many_arguments)]
+    fn with_gpu(
+        gpu: GpuContext,
+        surface: Option<wgpu::Surface<'static>>,
+        format: wgpu::TextureFormat,
+        supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        fonts: Option<StartupFonts>,
+    ) -> Result<Renderer> {
+        let GpuContext { device, queue, .. } = gpu.clone();
+        let alpha_mode = desired_alpha_mode(cfg, &supported_alpha_modes);
         let (width, height) =
             live_surface_dimensions(width, height, device.limits().max_texture_dimension_2d);
         let config = wgpu::SurfaceConfiguration {
@@ -4891,8 +4984,9 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &config);
-        let supported_alpha_modes = caps.alpha_modes;
+        if let Some(surface) = &surface {
+            surface.configure(&device, &config);
+        }
 
         // Fonts loaded before the window reach here already measured. Ones
         // measured for another scale or font are reloaded, not reused.
@@ -5037,6 +5131,8 @@ impl Renderer {
             pane_buffers: Vec::new(),
             span_scratch: Vec::new(),
             quad_scratch: Vec::new(),
+            cursor_quad_range: None,
+            text_prepares: 0,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
             pane_line_keys: Vec::new(),
@@ -5230,7 +5326,13 @@ impl Renderer {
         );
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.gpu.device, &self.config);
+        self.configure_surface();
+    }
+
+    fn configure_surface(&self) {
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.gpu.device, &self.config);
+        }
     }
 
     pub fn set_background_compositing(&mut self, cfg: &Config) {
@@ -5239,7 +5341,7 @@ impl Renderer {
             return;
         }
         self.config.alpha_mode = alpha_mode;
-        self.surface.configure(&self.gpu.device, &self.config);
+        self.configure_surface();
     }
 
     /// Glyph boundaries of the search query painted last frame, as (query
@@ -5884,6 +5986,7 @@ impl Renderer {
         // `quad_scratch` (cleared, capacity kept from the prior frame) and
         // returns to it after the GPU upload below.
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
+        self.cursor_quad_range = None;
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
         let mut pane_outlines: Vec<OutlineInstance> = Vec::with_capacity(panes.len());
@@ -6526,7 +6629,6 @@ impl Renderer {
                 cfg,
                 &family,
                 overlay.window_focused,
-                overlay.cursor_visible,
                 if pane_has_search {
                     &overlay.highlights
                 } else {
@@ -8894,6 +8996,7 @@ impl Renderer {
             self.text_prepare_dirty = true;
         }
         if need_prepare {
+            self.text_prepares += 1;
             // Buffer and damage caches above have already advanced to this
             // frame. Any `?` return leaves the retry latch set for the next
             // redraw.
@@ -8985,6 +9088,7 @@ impl Renderer {
                 default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
                 custom_glyphs: &[],
             };
+            self.text_prepares += 1;
             self.cursor_glyph_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -9100,9 +9204,14 @@ impl Renderer {
         let prepared_screenshot = if let Some(request) = screenshot_request {
             match self.create_screenshot_target(target_size) {
                 Ok(capture) => {
-                    if let Err(error) =
-                        self.encode_scene_pass(&capture.view, target_size, cfg, false, &mut encoder)
-                    {
+                    if let Err(error) = self.encode_scene_pass(
+                        &capture.view,
+                        target_size,
+                        cfg,
+                        false,
+                        overlay.cursor_visible,
+                        &mut encoder,
+                    ) {
                         Self::complete_screenshot_error(
                             request,
                             format!("screenshot render failed: {error}"),
@@ -9125,7 +9234,19 @@ impl Renderer {
             None
         };
 
-        let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
+        let Some(acquired) = self
+            .surface
+            .as_ref()
+            .map(wgpu::Surface::get_current_texture)
+        else {
+            // Headless (tests): the offscreen capture is the whole frame.
+            self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+            if need_prepare {
+                self.atlas.trim();
+            }
+            return Ok(FrameOutcome::Occluded);
+        };
+        let (frame, reconfigure_after_present) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(t) => (t, false),
             // The frame is usable, but no longer matches the underlying
             // surface. Present it once, then refresh the swapchain before the
@@ -9158,7 +9279,7 @@ impl Renderer {
             // surface, retain damage, and let the UI's bounded retry scheduler
             // decide when to acquire again.
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.gpu.device, &self.config);
+                self.configure_surface();
                 self.submit_offscreen_screenshot(encoder, prepared_screenshot);
                 if need_prepare {
                     self.atlas.trim();
@@ -9216,7 +9337,14 @@ impl Renderer {
         } else {
             &surface_view
         };
-        self.encode_scene_pass(scene_view, target_size, cfg, true, &mut encoder)?;
+        self.encode_scene_pass(
+            scene_view,
+            target_size,
+            cfg,
+            true,
+            overlay.cursor_visible,
+            &mut encoder,
+        )?;
         if needs_presentation {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-presentation-pass"),
@@ -9241,7 +9369,7 @@ impl Renderer {
         pre_present();
         self.gpu.queue.present(frame);
         if reconfigure_after_present {
-            self.surface.configure(&self.gpu.device, &self.config);
+            self.configure_surface();
         }
         // Only trim when we prepared this frame (see the `need_prepare` gate):
         // trimming clears the glyph in-use set, so a trim with no following
@@ -9294,6 +9422,7 @@ impl Renderer {
         target_size: [u32; 2],
         cfg: &Config,
         live_window: bool,
+        cursor_on: bool,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
         let clear = live_underlay_clear_color(
@@ -9338,7 +9467,14 @@ impl Renderer {
         } else {
             self.pane_bases.draw(&mut pass);
         }
-        self.quads.draw(&mut pass);
+        // The blink's off phase skips the cursor's quads; the same instances
+        // stay uploaded, and the blend order of everything else is unchanged.
+        let hidden_cursor = if cursor_on {
+            None
+        } else {
+            self.cursor_quad_range.clone()
+        };
+        self.quads.draw_hiding(&mut pass, hidden_cursor);
         self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
         // Cell-locked pane text sits above cell backgrounds + inline
@@ -9359,8 +9495,9 @@ impl Renderer {
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // The focused solid-block cursor's inverted glyph, drawn last so it
-        // sits on top of the block quad and normal glyph.
-        if self.pending_cursor_glyph.is_some() {
+        // sits on top of the block quad and normal glyph. The off phase shows
+        // the glyph beneath in its normal colour instead.
+        if cursor_on && self.pending_cursor_glyph.is_some() {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
@@ -9545,7 +9682,6 @@ impl Renderer {
         cfg: &Config,
         family: &str,
         window_focused: bool,
-        cursor_visible: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
@@ -9652,12 +9788,12 @@ impl Renderer {
             snap.cursor.shape
         };
         let cvrow = cp.line.0 + display_off;
+        // Built in its on phase whatever the blink phase: the off phase skips
+        // the cursor's quads at draw time (`cursor_quad_range`), so a blink
+        // changes no uploaded instance and no prepared text.
         let base_draw_cursor = cursor_focus_gate(
             window_focused,
-            shape != EShape::Hidden
-                && (0..screen_rows).contains(&cvrow)
-                && pv.focused
-                && (snap.vi_mode || cursor_visible),
+            shape != EShape::Hidden && (0..screen_rows).contains(&cvrow) && pv.focused,
         );
         // Codex's native-Windows cursor compatibility shim applies to the
         // application's writing cursor, never to the user-controlled vi
@@ -9907,6 +10043,7 @@ impl Renderer {
             } else {
                 color::cursor_block_color(theme, term_colors)
             };
+            let cursor_start = quads.len() as u32;
             // Hollow outline only when the running program requests
             // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
             // above, so losing focus does not mutate or substitute DEC state.
@@ -9945,6 +10082,11 @@ impl Renderer {
                         clip: pv.rect,
                     });
                 }
+            }
+            // vi mode's cursor never blinks, so only an application cursor
+            // gets a range the off phase can skip.
+            if !snap.vi_mode {
+                self.cursor_quad_range = Some(cursor_start..quads.len() as u32);
             }
         }
 
@@ -15149,7 +15291,7 @@ mod gpu_tests {
     ///
     /// A panicking GPU test must report its own failure — not turn every
     /// later GPU test into a poisoned-mutex error that buries it.
-    fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
         GPU_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -15163,7 +15305,7 @@ mod gpu_tests {
     /// and readback pixels successfully. Keep this scoped to these unit tests:
     /// the live renderer and the standalone smoke outside the affected Parallels
     /// guest retain hardware-first adapter selection.
-    fn gpu_test_config() -> Config {
+    pub(crate) fn gpu_test_config() -> Config {
         Config {
             gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
             ..Config::default()
@@ -18101,7 +18243,9 @@ mod pane_buffer_lifecycle_tests {
         let pane_bases = src
             .find("self.pane_bases.draw(&mut pass);")
             .expect("pane bases draw");
-        let quads = src.find("self.quads.draw(&mut pass);").expect("quads draw");
+        let quads = src
+            .find("self.quads.draw_hiding(&mut pass, hidden_cursor);")
+            .expect("quads draw");
         let inline = src.find("self.imgs.draw(&mut pass);").expect("imgs draw");
         assert!(
             bg < pane_bases && pane_bases < quads && quads < inline,
@@ -20151,12 +20295,13 @@ mod startup_fonts_tests {
     #[test]
     fn the_renderer_takes_over_matching_startup_fonts() {
         let src = production_source();
+        // Every constructor, windowed or headless, ends in `with_gpu`.
         let body = src
-            .split_once("fn with_gpu_and_surface(")
-            .expect("with_gpu_and_surface")
+            .split_once("fn with_gpu(")
+            .expect("with_gpu")
             .1
             .split_once("\n    }\n")
-            .expect("end of with_gpu_and_surface")
+            .expect("end of with_gpu")
             .0;
         assert!(body.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
         assert!(!body.contains("FontSystem::new()"));

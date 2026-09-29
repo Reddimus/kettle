@@ -255,19 +255,59 @@ impl QuadPipeline {
     }
 
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
+        self.draw_hiding(pass, None);
+    }
+
+    /// Draw every instance except `hidden`, in their uploaded order, so
+    /// what lies beneath the hidden ones blends exactly as without them.
+    pub fn draw_hiding(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        hidden: Option<std::ops::Range<u32>>,
+    ) {
         if self.count == 0 {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.instances.slice(..));
-        pass.draw(0..4, 0..self.count);
+        for range in visible_instance_ranges(self.count, hidden) {
+            if !range.is_empty() {
+                pass.draw(0..4, range);
+            }
+        }
+    }
+}
+
+/// The instance ranges left to draw out of `count` once `hidden` is skipped,
+/// in order. A hidden range that is empty or out of bounds hides nothing.
+pub(crate) fn visible_instance_ranges(
+    count: u32,
+    hidden: Option<std::ops::Range<u32>>,
+) -> [std::ops::Range<u32>; 2] {
+    match hidden {
+        Some(h) if h.start < h.end && h.end <= count => [0..h.start, h.end..count],
+        _ => [0..count, count..count],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The blink's off phase draws everything but the cursor, in the same
+    /// order, as two contiguous ranges around it.
+    #[test]
+    fn hiding_a_range_keeps_the_rest_in_order() {
+        assert_eq!(visible_instance_ranges(10, None), [0..10, 10..10]);
+        assert_eq!(visible_instance_ranges(10, Some(3..5)), [0..3, 5..10]);
+        assert_eq!(visible_instance_ranges(10, Some(0..2)), [0..0, 2..10]);
+        assert_eq!(visible_instance_ranges(10, Some(8..10)), [0..8, 10..10]);
+        // A range that is empty or past the end hides nothing.
+        assert_eq!(visible_instance_ranges(10, Some(4..4)), [0..10, 10..10]);
+        assert_eq!(visible_instance_ranges(10, Some(8..12)), [0..10, 10..10]);
+        assert_eq!(visible_instance_ranges(0, Some(0..1)), [0..0, 0..0]);
+    }
 
     #[test]
     fn grow_capacity_rounds_up_to_next_power_of_two() {
