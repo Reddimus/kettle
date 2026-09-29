@@ -2630,6 +2630,14 @@ pub struct Renderer {
     /// top of the frame, returned after the GPU upload; same high-water pooling
     /// as `span_scratch`.
     quad_scratch: Vec<QuadInstance>,
+    /// Where the focused pane's blinking cursor sits in the uploaded `quads`,
+    /// so the off phase can skip it at draw time. The cursor is always built
+    /// and uploaded; a blink edge changes only this draw. `None` when no
+    /// cursor can blink (none drawn, or vi mode, which never blinks).
+    cursor_quad_range: Option<std::ops::Range<u32>>,
+    /// Text prepares run so far (the pane, menu and cursor-glyph renderers).
+    /// Steady frames, blink edges included, should add none.
+    text_prepares: u64,
     /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
     /// for the title text drawn in the titlebar quad (see
     /// `pick_titlebar_bg`). Reused across redraws to amortize
@@ -3957,7 +3965,7 @@ mod live_screenshot_tests {
             .find("self.create_screenshot_target(target_size)")
             .expect("live capture must allocate an independent offscreen target");
         let render = normalized
-            .find("self.encode_scene_pass(&capture.view")
+            .find("self.encode_scene_pass( &capture.view")
             .expect("live capture must render the scene into its target");
         let copy = normalized
             .find("self.prepare_texture_screenshot(")
@@ -5123,6 +5131,8 @@ impl Renderer {
             pane_buffers: Vec::new(),
             span_scratch: Vec::new(),
             quad_scratch: Vec::new(),
+            cursor_quad_range: None,
+            text_prepares: 0,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
             pane_line_keys: Vec::new(),
@@ -5976,6 +5986,7 @@ impl Renderer {
         // `quad_scratch` (cleared, capacity kept from the prior frame) and
         // returns to it after the GPU upload below.
         let mut quads: Vec<QuadInstance> = std::mem::take(&mut self.quad_scratch);
+        self.cursor_quad_range = None;
         quads.clear();
         quads.reserve(panes.len() * 16 + 256);
         let mut pane_outlines: Vec<OutlineInstance> = Vec::with_capacity(panes.len());
@@ -6618,7 +6629,6 @@ impl Renderer {
                 cfg,
                 &family,
                 overlay.window_focused,
-                overlay.cursor_visible,
                 if pane_has_search {
                     &overlay.highlights
                 } else {
@@ -8986,6 +8996,7 @@ impl Renderer {
             self.text_prepare_dirty = true;
         }
         if need_prepare {
+            self.text_prepares += 1;
             // Buffer and damage caches above have already advanced to this
             // frame. Any `?` return leaves the retry latch set for the next
             // redraw.
@@ -9077,6 +9088,7 @@ impl Renderer {
                 default_color: GColor::rgb(gcolor.r, gcolor.g, gcolor.b),
                 custom_glyphs: &[],
             };
+            self.text_prepares += 1;
             self.cursor_glyph_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -9192,9 +9204,14 @@ impl Renderer {
         let prepared_screenshot = if let Some(request) = screenshot_request {
             match self.create_screenshot_target(target_size) {
                 Ok(capture) => {
-                    if let Err(error) =
-                        self.encode_scene_pass(&capture.view, target_size, cfg, false, &mut encoder)
-                    {
+                    if let Err(error) = self.encode_scene_pass(
+                        &capture.view,
+                        target_size,
+                        cfg,
+                        false,
+                        overlay.cursor_visible,
+                        &mut encoder,
+                    ) {
                         Self::complete_screenshot_error(
                             request,
                             format!("screenshot render failed: {error}"),
@@ -9320,7 +9337,14 @@ impl Renderer {
         } else {
             &surface_view
         };
-        self.encode_scene_pass(scene_view, target_size, cfg, true, &mut encoder)?;
+        self.encode_scene_pass(
+            scene_view,
+            target_size,
+            cfg,
+            true,
+            overlay.cursor_visible,
+            &mut encoder,
+        )?;
         if needs_presentation {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kettle-presentation-pass"),
@@ -9398,6 +9422,7 @@ impl Renderer {
         target_size: [u32; 2],
         cfg: &Config,
         live_window: bool,
+        cursor_on: bool,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
         let clear = live_underlay_clear_color(
@@ -9442,7 +9467,14 @@ impl Renderer {
         } else {
             self.pane_bases.draw(&mut pass);
         }
-        self.quads.draw(&mut pass);
+        // The blink's off phase skips the cursor's quads; the same instances
+        // stay uploaded, and the blend order of everything else is unchanged.
+        let hidden_cursor = if cursor_on {
+            None
+        } else {
+            self.cursor_quad_range.clone()
+        };
+        self.quads.draw_hiding(&mut pass, hidden_cursor);
         self.pane_outlines.draw(&mut pass);
         self.imgs.draw(&mut pass);
         // Cell-locked pane text sits above cell backgrounds + inline
@@ -9463,8 +9495,9 @@ impl Renderer {
         self.menu_text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // The focused solid-block cursor's inverted glyph, drawn last so it
-        // sits on top of the block quad and normal glyph.
-        if self.pending_cursor_glyph.is_some() {
+        // sits on top of the block quad and normal glyph. The off phase shows
+        // the glyph beneath in its normal colour instead.
+        if cursor_on && self.pending_cursor_glyph.is_some() {
             self.cursor_glyph_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)?;
         }
@@ -9649,7 +9682,6 @@ impl Renderer {
         cfg: &Config,
         family: &str,
         window_focused: bool,
-        cursor_visible: bool,
         search_highlights: &[HighlightRect],
         quads: &mut Vec<QuadInstance>,
         pane_bases: &mut Vec<QuadInstance>,
@@ -9756,12 +9788,12 @@ impl Renderer {
             snap.cursor.shape
         };
         let cvrow = cp.line.0 + display_off;
+        // Built in its on phase whatever the blink phase: the off phase skips
+        // the cursor's quads at draw time (`cursor_quad_range`), so a blink
+        // changes no uploaded instance and no prepared text.
         let base_draw_cursor = cursor_focus_gate(
             window_focused,
-            shape != EShape::Hidden
-                && (0..screen_rows).contains(&cvrow)
-                && pv.focused
-                && (snap.vi_mode || cursor_visible),
+            shape != EShape::Hidden && (0..screen_rows).contains(&cvrow) && pv.focused,
         );
         // Codex's native-Windows cursor compatibility shim applies to the
         // application's writing cursor, never to the user-controlled vi
@@ -10011,6 +10043,7 @@ impl Renderer {
             } else {
                 color::cursor_block_color(theme, term_colors)
             };
+            let cursor_start = quads.len() as u32;
             // Hollow outline only when the running program requests
             // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
             // above, so losing focus does not mutate or substitute DEC state.
@@ -10049,6 +10082,11 @@ impl Renderer {
                         clip: pv.rect,
                     });
                 }
+            }
+            // vi mode's cursor never blinks, so only an application cursor
+            // gets a range the off phase can skip.
+            if !snap.vi_mode {
+                self.cursor_quad_range = Some(cursor_start..quads.len() as u32);
             }
         }
 
@@ -18205,7 +18243,9 @@ mod pane_buffer_lifecycle_tests {
         let pane_bases = src
             .find("self.pane_bases.draw(&mut pass);")
             .expect("pane bases draw");
-        let quads = src.find("self.quads.draw(&mut pass);").expect("quads draw");
+        let quads = src
+            .find("self.quads.draw_hiding(&mut pass, hidden_cursor);")
+            .expect("quads draw");
         let inline = src.find("self.imgs.draw(&mut pass);").expect("imgs draw");
         assert!(
             bg < pane_bases && pane_bases < quads && quads < inline,

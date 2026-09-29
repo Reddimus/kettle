@@ -1182,10 +1182,11 @@ differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following
 glyph off the `col × cell_w` grid that the selection highlight, cursor and mouse
 hit-testing all use. The grid pass has its own damage gate. Pane
-text/style/geometry changes refresh glyph instances, while cursor blink updates
-only cursor quads and the cursor-glyph pass. A steady frame re-draws the
-retained instance buffer. A blink must never invalidate or stale-draw ordinary
-pane glyphs. `text-renderer = legacy` keeps the continuous-glyphon pane path
+text/style/geometry changes refresh glyph instances. A cursor blink changes
+only what is drawn: the cursor's quads are built and uploaded in both phases,
+and the off phase skips their instance range and the cursor-glyph pass at draw
+time. A steady frame re-draws the retained instance buffer. A blink must never
+invalidate or stale-draw ordinary pane glyphs. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
 Pass 0 is the **background (wallpaper)** in its own pipeline, drawn at the very
@@ -1236,7 +1237,9 @@ Step 9 draws the inverted glyph **under a focused solid
 block cursor** in its own 1-glyph renderer, on top of the block quad
 (step 1). Decoupling it from the pane text buffer — rather than
 recoloring the glyph in-place — means a cursor blink leaves the pane
-buffer byte-identical, so the **damage gate** can skip the expensive
+buffer byte-identical, and because the cursor glyph is prepared in both blink
+phases too, a blink edge prepares no text at all. The **damage gate** can skip
+the expensive
 whole-viewport `text_renderer.prepare` (which re-encodes every visible
 glyph's vertices) and its paired `atlas.trim`: `build_pane` reports
 whether any row reshaped, and `prepare` runs only when a pane row

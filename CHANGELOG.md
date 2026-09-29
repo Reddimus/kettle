@@ -6,6 +6,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- A blinking cursor no longer re-uploads the window's shapes or re-prepares its
+  text on each blink; the blink only changes what is drawn.
+
 ## [4.8.0] — 2026-09-28
 
 ### Added

@@ -161,3 +161,143 @@ fn a_headless_frame_draws_a_real_pane() {
             .expect("dump");
     }
 }
+
+/// The quad instance bytes the last frame uploaded.
+fn uploaded_quads(renderer: &Renderer) -> Vec<u8> {
+    bytemuck::cast_slice(&renderer.quad_scratch).to_vec()
+}
+
+/// A blink only changes what is drawn: the same quads are uploaded in both
+/// phases and no text is prepared again, so a blinking window does no upload
+/// or shaping work.
+#[test]
+fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, b"hello");
+    let panes = [pane(&snap, 320, 120)];
+    let on = capture(&mut renderer, &cfg, &panes, &focused(true));
+    let quads_on = uploaded_quads(&renderer);
+    let prepares = renderer.text_prepares;
+    let off = capture(&mut renderer, &cfg, &panes, &focused(false));
+    assert_eq!(
+        uploaded_quads(&renderer),
+        quads_on,
+        "a blink must not change the uploaded quads"
+    );
+    assert_eq!(
+        renderer.text_prepares, prepares,
+        "a blink must not prepare text"
+    );
+    assert!(
+        cursor_pixels(&on, &cfg, &snap) > cursor_pixels(&off, &cfg, &snap) + 100,
+        "the on phase shows the block and the off phase hides it"
+    );
+    let back_on = capture(&mut renderer, &cfg, &panes, &focused(true));
+    assert_eq!(back_on, on, "the next on phase is the first one again");
+    assert_eq!(renderer.text_prepares, prepares);
+}
+
+/// The off phase draws exactly what a cursor hidden with DECTCEM draws.
+#[test]
+fn the_off_phase_matches_a_hidden_cursor() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    for shape in ["", "\x1b[5 q", "\x1b[3 q"] {
+        let shown = snapshot_of(20, 4, format!("{shape}hello").as_bytes());
+        let hidden = snapshot_of(20, 4, format!("{shape}hello\x1b[?25l").as_bytes());
+        let off = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&shown, 320, 120)],
+            &focused(false),
+        );
+        let dectcem = capture(
+            &mut renderer,
+            &cfg,
+            &[pane(&hidden, 320, 120)],
+            &focused(true),
+        );
+        assert_eq!(off, dectcem, "cursor shape {shape:?}");
+    }
+}
+
+/// A wide glyph under the block keeps both cells covered in the on phase, and
+/// the off phase restores the glyph in its normal colour.
+#[test]
+fn a_blink_over_a_wide_glyph_restores_the_glyph() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    // Park the cursor on the wide glyph.
+    let snap = snapshot_of(20, 4, "漢字\x1b[1G".as_bytes());
+    let hidden = snapshot_of(20, 4, "漢字\x1b[1G\x1b[?25l".as_bytes());
+    let panes = [pane(&snap, 320, 120)];
+    let on = capture(&mut renderer, &cfg, &panes, &focused(true));
+    let off = capture(&mut renderer, &cfg, &panes, &focused(false));
+    let dectcem = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&hidden, 320, 120)],
+        &focused(true),
+    );
+    assert!(
+        cursor_pixels(&on, &cfg, &snap)
+            > cursor_pixels(
+                &capture(
+                    &mut renderer,
+                    &cfg,
+                    &[pane(&snapshot_of(20, 4, b"ab\x1b[1G"), 320, 120)],
+                    &focused(true)
+                ),
+                &cfg,
+                &snap
+            ),
+        "the block over a wide glyph covers two cells"
+    );
+    assert_eq!(off, dectcem);
+}
+
+/// The blink phase reaches the renderer only at draw time: `build_pane` never
+/// sees it, so it cannot change what is built or uploaded.
+#[test]
+fn the_blink_phase_reaches_only_the_draw() {
+    let src = crate::production_source();
+    let build_pane = src
+        .split_once("    fn build_pane(")
+        .expect("build_pane")
+        .1
+        .split_once("\n    fn ")
+        .expect("end of build_pane")
+        .0;
+    assert!(
+        !build_pane.contains("cursor_visible"),
+        "build_pane must not depend on the blink phase"
+    );
+    assert_eq!(
+        src.matches("overlay.cursor_visible").count(),
+        2,
+        "only the live and the capture scene passes read the phase"
+    );
+    let scene = src
+        .split_once("    fn encode_scene_pass(")
+        .expect("encode_scene_pass")
+        .1
+        .split_once("\n    fn ")
+        .expect("end of encode_scene_pass")
+        .0;
+    assert!(scene.contains("self.quads.draw_hiding(&mut pass, hidden_cursor);"));
+    assert!(
+        !scene.contains("self.quads.draw(&mut pass)"),
+        "the ordinary quads draw must honour the phase"
+    );
+    assert!(scene.contains("if cursor_on && self.pending_cursor_glyph.is_some()"));
+}
