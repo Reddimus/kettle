@@ -1586,6 +1586,27 @@ fn set_visible_on_all_spaces(window: &winit::window::Window) {
     }
 }
 
+/// Turn off AppKit's persistent UI ("Resume") before the application
+/// launches. Kettle restores its own session, and AppKit cannot rebuild a
+/// winit window anyway. Left on, a bundled Kettle kept encoding its window
+/// state for the persistent-UI service while idle: 0.04 % CPU and 0.2 extra
+/// wakeups a second. `ApplePersistence` goes in the registration domain,
+/// which lives only in memory and loses to anything the user sets.
+#[cfg(target_os = "macos")]
+fn disable_app_state_restoration() {
+    use objc2::rc::Retained;
+    use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+
+    let key = NSString::from_str("ApplePersistence");
+    let off = Retained::into_super(Retained::into_super(Retained::into_super(
+        NSNumber::numberWithBool(false),
+    )));
+    let defaults = NSDictionary::from_vec(&[&*key], vec![off]);
+    // SAFETY: `registerDefaults:` copies a property-list dictionary of
+    // NSString keys, and this runs on the main thread before AppKit starts.
+    unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
+}
+
 fn rect_contains(rect: kettle_render::Rect4, x: f32, y: f32) -> bool {
     x >= rect.0 && x < rect.0 + rect.2 && y >= rect.1 && y < rect.1 + rect.3
 }
@@ -6888,6 +6909,8 @@ impl App {
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
+        #[cfg(target_os = "macos")]
+        disable_app_state_restoration();
         let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
@@ -37032,6 +37055,47 @@ mod tests {
             5,
             "all five split rows must be gated on the zoom state"
         );
+    }
+
+    /// AppKit reads `ApplePersistence` when the application launches, and
+    /// building the event loop launches it. Registered any later, the
+    /// persistent-UI flush keeps running while idle.
+    #[test]
+    fn app_state_restoration_is_off_before_the_event_loop_exists() {
+        let src = production_source();
+        let run = src
+            .split("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .nth(1)
+            .expect("run_with");
+        let disable = run
+            .find("disable_app_state_restoration();")
+            .expect("run_with must turn off AppKit's persistent UI");
+        let build = run
+            .find("EventLoop::<UserEvent>::with_user_event().build()")
+            .expect("run_with builds the event loop");
+        assert!(
+            disable < build,
+            "ApplePersistence must be registered before the event loop exists"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn app_state_restoration_registers_apple_persistence_off() {
+        use objc2_foundation::{NSRegistrationDomain, NSString, NSUserDefaults};
+
+        super::disable_app_state_restoration();
+        // SAFETY: plain Foundation reads on this thread's defaults object.
+        let registered = unsafe {
+            NSUserDefaults::standardUserDefaults().volatileDomainForName(NSRegistrationDomain)
+        };
+        let value = registered
+            .get(&*NSString::from_str("ApplePersistence"))
+            .expect("ApplePersistence is registered");
+        // SAFETY: the registered value is the NSNumber this module created,
+        // and `boolValue` takes no arguments.
+        let on: bool = unsafe { objc2::msg_send![value, boolValue] };
+        assert!(!on, "persistent UI must be off");
     }
 
     #[test]

@@ -15,6 +15,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Close Tab, New Window, Close Window, Set Tab Title…, Set Pane Title…, and
   Reset Terminal.
 
+### Changed
+
+- An idle window on macOS uses about 97 % less CPU and wakes about 30 %
+  less often. Kettle turns off macOS window restoration ("Resume"), which
+  kept saving the app's state while nothing happened. macOS never
+  reopened Kettle's windows from that state, since they have no restoration
+  class; `restore-session` is the setting that reopens them.
+
 ### Fixed
 
 - Reset, Clear Scrollback, and Reset and Clear now act on the terminal.
