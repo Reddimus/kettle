@@ -18559,6 +18559,122 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) -> Path:
+    """A window whose content is not changing writes nothing to the GPU.
+
+    kettle-render keeps a copy of every buffer it has uploaded and writes only
+    what changed (upload.rs). On Apple GPUs a single buffer write per frame
+    keeps the driver's blit pool, about 112 MiB, resident, so a window that
+    is only blinking must write nothing. `ui_geometry.render_uploads` counts
+    what each window has written.
+
+    A: five screenshots of an unchanged window add no buffer or texture
+       writes and no text prepares;
+    B: a focused window blinking for 2 s adds frames, and still nothing else;
+    C: after about 2 MiB of output has settled, B holds again.
+
+    A blink runs only in a focused window. A window under Xvfb with no window
+    manager never gets focus, so CI passes --screenshots-only and runs only A;
+    anywhere else a window that never gets focus fails the smoke rather than
+    skipping what it came to check.
+    """
+    out = root / f"steady-uploads-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "restore-session = false",
+                "update-check = false",
+                "status-bar = off",
+                # A short interval gives phase B about ten blink edges.
+                "cursor-blink = true",
+                "cursor-blink-interval = 200",
+                "cursor-blink-timeout = 0",
+                "window-width = 100",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    keys = ("frames_presented", "buffer_writes", "buffer_bytes", "texture_writes", "text_prepares",
+            "skipped_writes")
+    quiet_keys = ("buffer_writes", "texture_writes", "text_prepares")
+
+    def uploads(live: LiveKettle) -> Dict[str, int]:
+        value = live.json_ctl("ui_geometry").get("render_uploads")
+        if not isinstance(value, dict):
+            raise SystemExit(f"steady-uploads smoke: ui_geometry has no render_uploads: {value!r}")
+        return {key: int(value[key]) for key in keys}
+
+    def settled(live: LiveKettle, label: str, quiet: float = 1.0, timeout: float = 30.0) -> Dict[str, int]:
+        """The counts once nothing has been written for `quiet` seconds."""
+        last = uploads(live)
+        since = time.monotonic()
+        deadline = since + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            now = uploads(live)
+            if any(now[key] != last[key] for key in quiet_keys):
+                last, since = now, time.monotonic()
+            elif time.monotonic() - since >= quiet:
+                return now
+        raise SystemExit(f"steady-uploads smoke: the window kept writing before {label}: {last}")
+
+    def unchanged(before: Dict[str, int], after: Dict[str, int], label: str) -> None:
+        moved = {key: (before[key], after[key]) for key in quiet_keys if after[key] != before[key]}
+        if moved:
+            raise SystemExit(f"steady-uploads smoke: {label} wrote to the GPU: {moved}")
+
+    def blinks(live: LiveKettle, label: str) -> Dict[str, object]:
+        before = settled(live, label)
+        time.sleep(2.0)
+        after = uploads(live)
+        frames = after["frames_presented"] - before["frames_presented"]
+        if frames < 4:
+            raise SystemExit(f"steady-uploads smoke: {label}: only {frames} frame(s) in 2 s; is the cursor blinking?")
+        unchanged(before, after, label)
+        return {"before": before, "after": after, "frames": frames}
+
+    analysis: Dict[str, object] = {}
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        before = settled(live, "phase A")
+        for index in range(5):
+            live.screenshot(out / f"a-{index}.png")
+        after = uploads(live)
+        unchanged(before, after, "five screenshots of an unchanged window")
+        analysis["a"] = {"before": before, "after": after}
+
+        if screenshots_only:
+            analysis["b"] = analysis["c"] = "not run: --screenshots-only"
+            print("steady-uploads smoke: phases B and C not run (--screenshots-only)")
+        else:
+            focus_live_kettle_window(live)
+            deadline = time.monotonic() + 10.0
+            while not live.json_ctl("ui_geometry").get("window_focused"):
+                if time.monotonic() > deadline:
+                    raise SystemExit(
+                        "steady-uploads smoke: the window never got focus, so its cursor cannot "
+                        "blink; pass --screenshots-only where no window can be focused"
+                    )
+                time.sleep(0.2)
+            analysis["b"] = blinks(live, "a blinking window")
+            mark = "KETTLE_STEADY_" + "DONE"
+            live.ctl(
+                "send_text",
+                params={"text": f"head -c 2000000 /dev/zero | tr '\\0' x | fold -w 99; echo {mark}\r"},
+            )
+            deadline = time.monotonic() + 60.0
+            while mark not in screen_text(live.json_ctl("read_screen")):
+                if time.monotonic() > deadline:
+                    raise SystemExit("steady-uploads smoke: the 2 MiB of output never finished")
+                time.sleep(0.2)
+            analysis["c"] = blinks(live, "a blinking window after 2 MiB of output")
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 PROGRAM_KEYS_RECORDER = r"""
 import os, sys, termios, tty
 
@@ -19275,6 +19391,7 @@ def main() -> int:
             "split-exit-resize",
             "program-keys",
             "color-scheme",
+            "steady-uploads",
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
@@ -19349,6 +19466,14 @@ def main() -> int:
             "runtime is copied into the disposable smoke sandbox"
         ),
     )
+    parser.add_argument(
+        "--screenshots-only",
+        action="store_true",
+        help=(
+            "steady-uploads: run only the screenshot phase, where no window can "
+            "be focused (Xvfb without a window manager)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.case == "self-test":
@@ -19409,6 +19534,9 @@ def main() -> int:
     if args.case in ("split-exit-resize", "all"):
         out = run_split_exit_resize(args.kettle, root)
         print(f"split-exit-resize smoke: OK artifacts={out}")
+    if args.case in ("steady-uploads", "all"):
+        out = run_steady_uploads(args.kettle, root, args.screenshots_only)
+        print(f"steady-uploads smoke: OK artifacts={out}")
     if args.case in ("program-keys", "all"):
         out = run_program_keys(args.kettle, root)
         print(f"program-keys smoke: OK artifacts={out}")
