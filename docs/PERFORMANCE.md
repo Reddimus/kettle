@@ -5,6 +5,108 @@ Windows-supported release, and the PowerShell benchmark suite is available in
 the [`v3.3.0` source tree](https://github.com/Reddimus/kettle/tree/v3.3.0/scripts/perf).
 Kettle 4.0 keeps the macOS and Linux comparators in the current checkout.
 
+## 4.7.0 — macOS standing
+
+Measured on 2026-09-28 with `scripts/perf/macos-standing.py`, using the same
+settings as the 4.6.0 standing below. Kettle is the shipped, notarized 4.7.0
+installed in `/Applications`. The load average was 1.2 at the start. The host
+and peer versions are unchanged from the 4.6.0 table.
+
+| metric | Kettle | rank | field |
+|---|---:|---|---|
+| time to window | 212.9 ms | 3 / 5 | WezTerm 173.1, Alacritty 180.6, **Kettle 212.9**, Ghostty 241.2, kitty 291.8 |
+| time to shell | 260.7 ms | 2 / 5 | WezTerm 230.0, **Kettle 260.7**, Alacritty 288.5, Ghostty 295.1, kitty 409.5 |
+| idle memory | **34.5 MiB** | **1 / 5** | **Kettle**, Alacritty 35.9, WezTerm 43.9, kitty 57.4, Ghostty 230.3 |
+| idle CPU | 0.033 % | 3 / 4 frontmost | kitty 0.025, Alacritty 0.030, **Kettle 0.033**, Ghostty 0.45; WezTerm 0.012, never frontmost |
+| idle wakeups | **0.5 /s** | **tied 1st** | **Kettle 0.5**, Alacritty 0.5, kitty 0.6, WezTerm 1.5, Ghostty 86.4 |
+| vtebench geometric mean | **12.8 ms** | **1 / 5** | **Kettle**, Alacritty 17.7, Ghostty 21.0, kitty 26.3, WezTerm 43.2 |
+| memory 3 s after a 32 MiB flood | 366.5 MiB | 5 / 5 | Alacritty 76.0, WezTerm 77.5, Ghostty 240.9, kitty 279.5, **Kettle** |
+
+Idle rows use the rounds where the window was frontmost: 4 of 5 for Kettle,
+kitty and Ghostty, and all 5 for Alacritty. WezTerm was never frontmost, so
+its row uses all 5 rounds and is left out of the CPU rank. Kettle's geometric
+mean was the lowest in all 5 rounds, at 12.7 to 13.3 ms against Alacritty's
+17.2 to 18.4.
+
+vtebench, median milliseconds per sample (lower is better):
+
+| benchmark | Kettle | Alacritty | Ghostty | kitty | WezTerm |
+|---|---:|---:|---:|---:|---:|
+| cursor_motion | **14.0** | **14.0** | 20.5 | 18.0 | 20.0 |
+| dense_cells | **21.0** | 24.0 | 38.0 | 28.0 | 31.0 |
+| light_cells | **7.0** | 8.0 | 13.0 | 10.0 | 29.0 |
+| medium_cells | **8.0** | 9.0 | 16.0 | 11.0 | 38.0 |
+| scrolling | **15.0** | 44.0 | 26.0 | 104.0 | 64.0 |
+| scrolling_bottom_region | **16.0** | 17.0 | 32.0 | 44.0 | 69.0 |
+| scrolling_bottom_small_region | **24.0** | 38.0 | 31.0 | 38.5 | 80.0 |
+| scrolling_fullscreen | **7.0** | **7.0** | 13.0 | 27.0 | 28.0 |
+| scrolling_top_region | **21.0** | 56.0 | 29.0 | 48.0 | 67.0 |
+| scrolling_top_small_region | **17.0** | 36.0 | 29.0 | 45.0 | 75.0 |
+| sync_medium_cells | **9.0** | 12.0 | 18.0 | 19.5 | 52.0 |
+| unicode | 9.0 | **8.0** | 9.0 | 10.0 | 24.0 |
+
+Compare terminals within this table, not with the 4.6.0 one. With the same
+peer binaries and the same harness, Alacritty's geometric mean was 14.8 ms in
+the 4.6.0 run and 17.7 ms here, and Ghostty's 17.0 and 21.0. Kettle's own
+change between the releases is the paired A/B below.
+
+### 4.6.0 against 4.7.0 on the same machine
+
+The notarized 4.6.0 app against the notarized 4.7.0 app, as a paired A/B
+(`--kettle-b`) at a soft limit of 256 descriptors: 30 launches, 8 idle
+rounds, 5 flood rounds and 10 vtebench rounds. Every idle sample was taken
+frontmost. Ratios are the median paired B/A with a 10,000-resample bootstrap
+95 % interval. The vtebench columns are the geometric mean of the
+per-benchmark medians, as in the table above; its ratio pairs each round's
+geometric mean.
+
+| metric | 4.6.0 | 4.7.0 | change (95 % CI) |
+|---|---:|---:|---|
+| time to window | 195.2 ms | 197.2 ms | +0.9 % (−0.5 to +3.0 %) |
+| time to shell | 272.1 ms | 233.6 ms | −13.6 % (−14.6 to −12.3 %) |
+| idle wakeups | 1.5 /s | 0.5 /s | −67 % |
+| idle CPU | 0.036 % | 0.034 % | −8 % (−23 to 0 %) |
+| idle memory | 34.9 MiB | 34.8 MiB | −0.3 % |
+| memory 3 s after a flood | 367.0 MiB | 366.9 MiB | −0.1 % (−0.9 to 0 %) |
+| vtebench geometric mean | 14.8 ms | 13.8 ms | −11.2 % (−15.0 to −6.6 %) |
+
+- **Time to shell** fell because the first shell now starts before the window
+  and the GPU are set up (#379). Time to window did not change.
+- **Idle wakeups** fell because the event-loop watchdog now sleeps while the
+  loop is idle (#377).
+- **vtebench** moved only on the scroll-region benchmarks, which now rotate a
+  region's rows in one step (#376): `scrolling_top_region` −51 %,
+  `scrolling_top_small_region` −40 % and `scrolling_bottom_small_region`
+  −21 %. The interval of every other benchmark includes no change.
+- **Memory after a flood** did not change. The sample falls inside the 10 s
+  blink window that starts at launch, so Kettle is still drawing and holds its
+  Metal memory. #378 stops output from restarting the blink, which helps a
+  window that keeps printing after that, not this sample.
+
+### The shipped app idles differently from a local build
+
+The 4.6.0 standing measured a local release build run as a bare executable.
+The shipped app runs from its bundle, and it differs from a local build in two
+figures.
+
+- **Idle CPU.** The same local build idled at 0.001 % CPU and 0.3 wakeups a
+  second as a bare executable, and at 0.036 % and 0.5 inside a copy of the
+  app bundle (8 rounds each). Only an app with a bundle identifier gets
+  AppKit's persistent UI ("Resume"), and it kept flushing the application's
+  restorable state while idle. Kettle does not use it, since it restores its
+  own session. #388 turns it off: inside the bundle, idle CPU fell from
+  0.036 % to 0.001 % (B/A 0.029, 95 % CI 0.025 to 0.031) and wakeups from 0.5
+  to 0.35 a second, near the bare executable's 0.3. That change is not in
+  4.7.0.
+- **Time to window.** The notarized release binary opened its window in
+  195.0 ms against a local build's 174.9 ms (B/A 1.107, 95 % CI 1.079 to
+  1.185, 8 launches). What costs the difference is not settled. The local
+  build inside the bundle opened in 189.6 ms against 185.1 bare (B/A 1.010,
+  0.945 to 1.084), but turning off persistent UI inside the bundle cut time to
+  window by 7 % (B/A 0.926, 0.872 to 0.986). These runs started at load
+  averages from 1.4 to 18, and the bare build alone measured 174.9 and
+  185.1 ms in two of them.
+
 ## Unreleased — macOS standing for 4.6.0
 
 Measured with `scripts/perf/macos-standing.py` (`just macos-standing`), not the
@@ -39,7 +141,27 @@ upstream's unmerged
 
 The same correction fixes the cause given for flood memory under Reading the
 losses: Kettle was still inside its launch blink window when sampled, whether
-or not output counts as activity. The other figures are unchanged.
+or not output counts as activity. The vtebench correction left the other
+figures unchanged.
+
+**Corrected 2026-09-28: idle CPU and startup.** Kettle in this section is a
+local release build run as a bare executable, not the shipped app. On macOS
+that changes two sets of figures:
+- **Idle CPU and wakeups.** The notarized 4.6.0 app idled at 0.036 % CPU and
+  1.5 wakeups a second, not 0.003 % and 1.3. AppKit's persistent UI runs only
+  for an app in a bundle, and it kept flushing the application's restorable
+  state while idle. See
+  [The shipped app idles differently from a local
+  build](#the-shipped-app-idles-differently-from-a-local-build). Kettle's 1st
+  place on idle CPU does not hold for the app people install.
+- **Startup.** Measured with 4.7.0 builds, the notarized release binary opens
+  its window about 20 ms (11 %) later than a local build and starts the shell
+  about 3.5 % later. The 161.3 and 256.0 ms here are a local build's.
+
+The A/B below compared the installed 4.5.2 app with the same bare build, so
+its 4.6.0 column has the same limits. Idle memory is the same either way
+(34.6 MiB bare, 34.8 MiB shipped, both 4.7.0); vtebench was not compared this
+way.
 
 Host: **Apple M5 Max, 18 cores, 48 GB, macOS 26.6.2 (25G83)**. Kettle is a
 release build of `88894429`, which has every 4.6.0 change. Every terminal runs
