@@ -190,10 +190,18 @@ actual pane.
 
 ### Vendored parser crates
 
-The three patched crates under `vendor/` are explicitly excluded from the
-product workspace, so the root gates exercise their public Kettle integration
-but do not run package-owned unit targets. A separate validation workspace and
-committed `vendor/Cargo.lock` pin the direct-test dependency graph.
+The patched crates under `vendor/` are explicitly excluded from the product
+workspace, so the root gates exercise their public Kettle integration but do
+not run package-owned unit targets. A separate validation workspace and
+committed `vendor/Cargo.lock` pin the direct-test dependency graph for `vte`,
+`alacritty_terminal`, and `portable-pty`.
+
+`cosmic-text` is the exception: it stays outside that workspace, because its
+optional editor features and `fontdb`'s `ttf-parser` would put unmaintained
+crates into a graph whose audit admits no exceptions. The product build compiles
+it, the product audit covers it under the scoped `ttf-parser` exception, and
+`kettle-render`'s `paragraph_separator_shaping_tests` exercise its patch on every
+CI platform. `vendor/README.md` records how its upstream unit tests were run.
 `just deny` checks licenses, sources, and banned crates in both lock graphs;
 the Audit workflow scans both for RustSec advisories. Run all retained unit
 targets, doctests, and warnings-denied clippy targets with:

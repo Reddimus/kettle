@@ -18,6 +18,7 @@ exclude = [
     # this entry cargo refuses to build a package inside this workspace root.
     "target/perf-tools/macos-standing/vtebench",
     "vendor/alacritty_terminal-0.26.0",
+    "vendor/cosmic-text-0.19.0",
     "vendor/portable-pty-0.9.0",
     "vendor/vte-0.15.0",
 ]
@@ -133,6 +134,12 @@ unimplemented = "deny"
 # source local until an upstream release carries every patch; `vendor/README.md`
 # records the exact scope.
 alacritty_terminal = { path = "vendor/alacritty_terminal-0.26.0" }
+# cosmic-text 0.19.0 asserts that every bidi paragraph in a line shares one
+# direction, and a paragraph separator (U+2029, NEL, FS) can end a line's first
+# paragraph early. Upstream dropped the assertion in pop-os/cosmic-text
+# 1e0074c8, which no release carries yet; the local copy backports that commit
+# alone. `vendor/README.md` records the scope.
+cosmic-text = { path = "vendor/cosmic-text-0.19.0" }
 # portable-pty's ConPTY writer uses a synchronous anonymous-pipe handle.
 # Kettle's bounded priority workers require partial/nonblocking progress so a
 # full child-input buffer cannot monopolize the worker ahead of protocol

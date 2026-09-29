@@ -5,7 +5,8 @@ here only when a released dependency has a correctness defect on Kettle's
 supported path and no fixed upstream release is available.
 
 The patched packages remain outside the product workspace, but
-`vendor/Cargo.toml` groups them into a validation-only workspace.
+`vendor/Cargo.toml` groups them, all but `cosmic-text` (see its section), into
+a validation-only workspace.
 `vendor/Cargo.lock` is committed so direct package tests never resolve a fresh
 dependency graph; package-local `Cargo.lock` files and `target/` directories
 remain generated noise and must not be committed. Run every retained unit
@@ -59,6 +60,44 @@ and local patches.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to an
 upstream release that contains all of these fixes.
+
+## `cosmic-text-0.19.0`
+
+- Source: crates.io `cosmic-text` 0.19.0.
+- Upstream revision recorded in the crate's `.cargo_vcs_info.json`.
+- License: MIT OR Apache-2.0; both upstream license files and the changelog are
+  retained. The README is not: it is a gallery of screenshots that are not
+  vendored, and its image links would not resolve.
+- Local change: backports pop-os/cosmic-text commit
+  `1e0074c83926041c16f9ee76afafe91819927013` ("fix: don't panic on lines with
+  mixed-direction paragraph separators", 2026-08-08), which no release carries
+  yet. `ShapeLine::build` asserted that every bidi paragraph in a line shares
+  the first one's direction. cosmic-text splits lines only on CR and LF, while
+  the bidi algorithm also ends a paragraph at U+2029, NEL and FS, so a line
+  holding those between left-to-right and right-to-left text failed the
+  assertion. The line is now laid out in its first paragraph's direction. The
+  change is `src/shape.rs` only, +6 -14, identical to upstream's.
+- Excluded: the registry marker, generated lockfile, upstream CI metadata and
+  helper scripts, the README and its screenshots, the bundled test fonts,
+  samples, the integration tests and benchmarks that read them, and
+  `deny.toml`. Their `[[test]]` and
+  `[[bench]]` stanzas, the benchmark-only development dependencies, and the
+  package's `[profile.test]` (ignored for a non-root package) are removed from
+  the local manifest.
+- Validation: unlike the crates below, this one is not a member of
+  `vendor/Cargo.toml`. As a member, its optional editor and `no_std` features
+  would pull `syntect` and friends into `vendor/Cargo.lock`, and its required
+  `fontdb` brings `ttf-parser`; the vendor audit deliberately admits no
+  exceptions, while the product audit already carries the scoped `ttf-parser`
+  one (`scripts/check-ttf-parser-scope.sh`). The product workspace compiles the
+  crate through `[patch.crates-io]`, and `kettle-render`'s
+  `paragraph_separator_shaping_tests` shape such lines through both `Buffer`
+  and `BufferLine`; they fail against the unpatched release. The retained
+  upstream unit tests and doctests (4 and 3) passed when this copy was made,
+  run from a scratch workspace member.
+
+Remove the `[patch.crates-io]` entry and this directory after upgrading to a
+cosmic-text release that contains `1e0074c8`.
 
 ## `vte-0.15.0`
 
