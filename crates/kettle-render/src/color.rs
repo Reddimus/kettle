@@ -183,6 +183,31 @@ fn srgb_to_linear(c: u8) -> f64 {
     }
 }
 
+fn linear_to_srgb(value: f64) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let c = if value <= 0.0031308 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0).round() as u8
+}
+
+/// `top` painted over `base` at opacity `alpha`. A GPU blending into an sRGB
+/// surface mixes in linear light (`linear`); any other surface mixes the
+/// stored values.
+pub(crate) fn over(base: Rgb, top: Rgb, alpha: f64, linear: bool) -> Rgb {
+    if !linear {
+        return blend(base, top, alpha);
+    }
+    let alpha = alpha.clamp(0.0, 1.0);
+    let mix = |base: u8, top: u8| {
+        let (base, top) = (srgb_to_linear(base), srgb_to_linear(top));
+        linear_to_srgb(base + (top - base) * alpha)
+    };
+    Rgb::new(mix(base.r, top.r), mix(base.g, top.g), mix(base.b, top.b))
+}
+
 /// WCAG 2.0 relative luminance for an sRGB color (0.0 black .. 1.0 white).
 pub fn relative_luminance(rgb: Rgb) -> f64 {
     0.2126 * srgb_to_linear(rgb.r) + 0.7152 * srgb_to_linear(rgb.g) + 0.0722 * srgb_to_linear(rgb.b)

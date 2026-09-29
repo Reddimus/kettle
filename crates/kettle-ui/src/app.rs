@@ -1776,6 +1776,16 @@ fn effective_search_status(
     }
 }
 
+/// The status the bar paints. Automation reads `effective_search_status`,
+/// which reports `Searching` at once; the bar waits until a scan is actually
+/// slow (see `SearchState::searching_label_at`).
+fn displayed_search_status(
+    search: &crate::search_input::SearchState,
+    now: std::time::Instant,
+) -> kettle_render::SearchStatus {
+    search.painted_status(effective_search_status(search), now)
+}
+
 fn should_start_nearby_search(search: &crate::search_input::SearchState) -> bool {
     search.typing_scanned_revision != Some(search.revision)
         && !search.quiet_retry_pending
@@ -1827,6 +1837,70 @@ fn search_viewport_anchor(
             last_column,
         ),
     }
+}
+
+/// Wrapping changes only where the next step goes, so the match on screen
+/// stays, and a step status that described the old setting (`End reached`,
+/// `Wrapped`) is cleared. With no match, search again, so turning wrap on
+/// after a typing `No match` finds one past the end.
+fn search_wrap_toggled(search: &mut crate::search_input::SearchState, now: std::time::Instant) {
+    // A step that has already wrapped past the end would land on a match the
+    // user just asked not to reach. Stop it at the edge instead, with the
+    // status the step would have ended on without wrap.
+    if !search.wrap
+        && let Some(job) = search
+            .background
+            .take_if(|job| job.navigation && job.wrapped)
+    {
+        let unwrapped = crate::search_input::BackgroundSearch {
+            wrapped: false,
+            ..job
+        };
+        let (status, retry_at) = finished_background_search(&unwrapped, now);
+        search.status = status;
+        search.unlimited_retry_at = retry_at;
+        return;
+    }
+    if search.focused.is_none() {
+        search.restart_navigation(now);
+    } else if matches!(
+        search.status,
+        kettle_render::SearchStatus::Start
+            | kettle_render::SearchStatus::End
+            | kettle_render::SearchStatus::Wrapped
+    ) {
+        search.status = kettle_render::SearchStatus::Match;
+    }
+}
+
+/// Where a search restarted by a toggle begins. The match on screen, from its
+/// start (its end when `invert`), so a search that still finds it keeps it.
+/// A match scrolled out of `viewport` (display offset, screen lines, last
+/// column) is not where the user is looking, so the search starts from the
+/// viewport's edge in the current direction instead.
+fn search_anchor_for(
+    focused: Option<kettle_core::SearchSpan>,
+    invert: bool,
+    viewport: Option<(usize, usize, usize)>,
+) -> Option<kettle_core::SearchPoint> {
+    let on_screen = |span: &kettle_core::SearchSpan| {
+        viewport.is_none_or(|(display_offset, screen_lines, _)| {
+            let top = -i32::try_from(display_offset).unwrap_or(i32::MAX);
+            let bottom = top.saturating_add(i32::try_from(screen_lines).unwrap_or(i32::MAX)) - 1;
+            span.end.line >= top && span.start.line <= bottom
+        })
+    };
+    if let Some(span) = focused.filter(on_screen) {
+        return Some(if invert { span.end } else { span.start });
+    }
+    let direction = if invert {
+        kettle_core::SearchDirection::Reverse
+    } else {
+        kettle_core::SearchDirection::Forward
+    };
+    viewport.map(|(display_offset, screen_lines, last_column)| {
+        search_viewport_anchor(display_offset, screen_lines, last_column, direction)
+    })
 }
 
 fn search_point_after(
@@ -1994,8 +2068,14 @@ fn activate_quiet_search_retry(search: &mut crate::search_input::SearchState) ->
     }
     search.quiet_retry_pending = false;
     search.typing_scanned_revision = None;
-    search.unlimited_retry_at = None;
-    search.status = kettle_render::SearchStatus::Searching;
+    // The nearby scan runs first. If it misses, the full scan follows on the
+    // next turn instead of leaving the search at `Searching` with nothing
+    // scheduled.
+    search.unlimited_retry_at = Some(std::time::Instant::now());
+    search.set_status_at(
+        kettle_render::SearchStatus::Searching,
+        std::time::Instant::now(),
+    );
     true
 }
 
@@ -8445,7 +8525,7 @@ impl App {
                 crate::modal_input::push_text(&mut state.input, accepted);
             }
         } else if ws.search.open {
-            self.search_key(ws, &key, Some(text));
+            self.search_key(ws, &key, None, Some(text));
         } else {
             ws.mods = latched_mods;
             self.write_terminal_input(ws, text.as_bytes());
@@ -11241,7 +11321,10 @@ impl App {
 
         let output_generation = pane.term.output_generation();
         let Ok(mut term) = pane.term.term.lock() else {
-            ws.search.status = kettle_render::SearchStatus::Searching;
+            ws.search.set_status_at(
+                kettle_render::SearchStatus::Searching,
+                std::time::Instant::now(),
+            );
             return;
         };
         use kettle_core::Dimensions as _;
@@ -11324,7 +11407,10 @@ impl App {
                     });
             }
             if !rejected && !ws.search.query().is_empty() {
-                ws.search.status = kettle_render::SearchStatus::Searching;
+                ws.search.set_status_at(
+                    kettle_render::SearchStatus::Searching,
+                    std::time::Instant::now(),
+                );
             }
         }
         ws.search.scan_token = Some(current_token);
@@ -11421,7 +11507,10 @@ impl App {
                     output_drifted: false,
                 });
                 nearby_yielded_this_turn = true;
-                ws.search.status = kettle_render::SearchStatus::Searching;
+                ws.search.set_status_at(
+                    kettle_render::SearchStatus::Searching,
+                    std::time::Instant::now(),
+                );
                 if let Some(window) = &ws.window {
                     window.request_redraw();
                 }
@@ -11433,13 +11522,19 @@ impl App {
                 };
                 if at_edge {
                     if ws.search.wrap {
-                        ws.search.status = kettle_render::SearchStatus::Searching;
+                        ws.search.set_status_at(
+                            kettle_render::SearchStatus::Searching,
+                            std::time::Instant::now(),
+                        );
                     } else {
                         ws.search.status = kettle_render::SearchStatus::NoMatch;
                         ws.search.unlimited_retry_at = None;
                     }
                 } else {
-                    ws.search.status = kettle_render::SearchStatus::Searching;
+                    ws.search.set_status_at(
+                        kettle_render::SearchStatus::Searching,
+                        std::time::Instant::now(),
+                    );
                 }
             }
         }
@@ -11535,7 +11630,10 @@ impl App {
                         false,
                     );
                     if ws.search.background.is_some() {
-                        ws.search.status = kettle_render::SearchStatus::Searching;
+                        ws.search.set_status_at(
+                            kettle_render::SearchStatus::Searching,
+                            std::time::Instant::now(),
+                        );
                     } else {
                         ws.search.status = kettle_render::SearchStatus::NoMatch;
                     }
@@ -11623,7 +11721,10 @@ impl App {
                 } else if let Some(continuation) = result.continuation {
                     job.cursor = continuation;
                     ws.search.background = Some(job);
-                    ws.search.status = kettle_render::SearchStatus::Searching;
+                    ws.search.set_status_at(
+                        kettle_render::SearchStatus::Searching,
+                        std::time::Instant::now(),
+                    );
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
@@ -11652,7 +11753,10 @@ impl App {
                             ws.search.status = kettle_render::SearchStatus::NoMatch;
                             ws.search.unlimited_retry_at = None;
                         } else {
-                            ws.search.status = kettle_render::SearchStatus::Searching;
+                            ws.search.set_status_at(
+                                kettle_render::SearchStatus::Searching,
+                                std::time::Instant::now(),
+                            );
                         }
                     }
                 } else if chunk_edge == job.edge {
@@ -11667,7 +11771,10 @@ impl App {
                             job.output_drifted,
                         );
                         if ws.search.background.is_some() {
-                            ws.search.status = kettle_render::SearchStatus::Searching;
+                            ws.search.set_status_at(
+                                kettle_render::SearchStatus::Searching,
+                                std::time::Instant::now(),
+                            );
                         } else {
                             let (status, retry_at) = finished_background_search(&job, now);
                             ws.search.status = status;
@@ -11707,7 +11814,10 @@ impl App {
                 ) {
                     job.cursor = next;
                     ws.search.background = Some(job);
-                    ws.search.status = kettle_render::SearchStatus::Searching;
+                    ws.search.set_status_at(
+                        kettle_render::SearchStatus::Searching,
+                        std::time::Instant::now(),
+                    );
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
@@ -11960,11 +12070,26 @@ impl App {
                 ws.search.editor.horizontal_scroll(),
                 columns.saturating_sub(2),
             );
-            let cursor_column = projected[..cursor_byte].width().saturating_sub(scroll);
+            let cursor_column = crate::search_input::display_width(&projected[..cursor_byte])
+                .saturating_sub(scroll);
             let left = geometry.editor.0 + cw;
             let right = (geometry.editor.0 + geometry.editor.2 - cw).max(left);
+            // The committed text before the composition is placed where it
+            // was painted, so a CJK fallback glyph wider or narrower than two
+            // cells does not drift the candidate window; the composition
+            // itself counts cells.
+            let stops = ws
+                .renderer
+                .as_ref()
+                .map_or(&[][..], |renderer| renderer.search_editor_stops());
+            let painted = stops
+                .binary_search_by_key(&replace.start, |stop| stop.0)
+                .ok()
+                .map(|index| stops[index].1 + preedit_before_focus.width() as f32 * cw);
             (
-                (geometry.editor.0 + (cursor_column + 1) as f32 * cw).clamp(left, right),
+                painted
+                    .unwrap_or(geometry.editor.0 + (cursor_column + 1) as f32 * cw)
+                    .clamp(left, right),
                 geometry.editor.1 + ((geometry.editor.3 - ch) * 0.5).max(0.0),
             )
         });
@@ -12697,8 +12822,10 @@ impl App {
                 wrap: s.wrap,
                 case_mode: map_search_case_mode(s.case_mode),
                 invert: s.invert,
-                status: effective_search_status(s),
+                status: displayed_search_status(s, std::time::Instant::now()),
                 focused: s.focused_control,
+                hovered: s.hovered_control,
+                pressed: s.pressed_control,
             }),
             search_query: None,
             search_count: 0,
@@ -13695,6 +13822,21 @@ impl App {
     /// `any_modal_open`, because search does own the keyboard.
     fn pointer_modal_open(&self, ws: &WindowState) -> bool {
         self.non_search_modal_open(ws)
+    }
+
+    /// Track the search control under the pointer for the hover fill, and
+    /// redraw only when it changes.
+    fn update_search_hover(&mut self, ws: &mut WindowState) {
+        let hovered = self
+            .search_geometry(ws)
+            .and_then(|geometry| geometry.hit_test(ws.cursor.x as f32, ws.cursor.y as f32))
+            .filter(|control| *control != kettle_render::SearchControl::Editor);
+        if ws.search.hovered_control != hovered {
+            ws.search.hovered_control = hovered;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
     }
 
     /// Whether the pointer is inside the open search bar's reserved lane.
@@ -19020,7 +19162,11 @@ impl App {
                 TextModal::LayoutPicker => self.layout_picker_key(ws, key, text),
                 TextModal::Ssh => self.ssh_key(ws, key, text),
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
-                TextModal::Search => self.search_key(ws, key, text),
+                TextModal::Search => {
+                    if !self.search_key(ws, key, None, text) {
+                        self.search_bar_shortcut(ws, key, None, event_loop);
+                    }
+                }
             }
             applied += 1;
             // Stop as soon as the modal this batch addressed is gone (Esc,
@@ -19303,7 +19449,10 @@ impl App {
         // sources keeps scrolling even though the latest pointer coordinate is
         // back over the pane.
         ws.selection_autoscroll_edge = 0;
-        if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+        // Like the media receipt below, the search lane's hover follows
+        // control input so automation can exercise it.
+        self.update_search_hover(ws);
+        if search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
             == SearchPointerRoute::Bar
         {
             self.search_mouse_drag(ws);
@@ -19477,10 +19626,11 @@ impl App {
 
     fn ctl_mouse_release(&mut self, ws: &mut WindowState, bcode: u8) -> bool {
         if bcode == 0
-            && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+            && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                 == SearchPointerRoute::Bar
         {
             ws.search.dragging_editor = false;
+            self.search_button_release(ws);
             return true;
         }
         let mut handled = false;
@@ -21085,38 +21235,103 @@ impl App {
         }
     }
 
-    fn search_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
-        let shortcut = if cfg!(target_os = "macos") {
-            ws.mods.super_key()
+    /// Keys for the open search bar. Returns whether the bar used the key.
+    ///
+    /// The bar claims the keys a native find field would: typing, caret and
+    /// word movement, deletion, the clipboard, undo, and its own Enter, Tab,
+    /// F3, `Cmd/Ctrl+G` and Escape. Anything else, such as a new tab, font
+    /// zoom or a split's resize, goes on to Kettle's shortcuts (see
+    /// `search_bar_shortcut`), as the menus of a native app keep working
+    /// while its find field has focus.
+    fn search_key(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        physical_key: Option<&PhysicalKey>,
+        text: Option<&str>,
+    ) -> bool {
+        let macos = cfg!(target_os = "macos");
+        let mods = ws.mods;
+        let shortcut = if macos {
+            mods.super_key()
         } else {
-            ws.mods.control_key()
+            mods.control_key()
         };
-        let word_modifier = if cfg!(target_os = "macos") {
+        // The shortcut key alone, with or without Shift.
+        let shortcut_only = shortcut
+            && !mods.alt_key()
+            && if macos {
+                !mods.control_key()
+            } else {
+                !mods.super_key()
+            };
+        // Linux leaves Ctrl+Shift chords to the terminal's own shortcuts
+        // (`Ctrl+Shift+A` splits, `Ctrl+Shift+X` zooms), apart from the copy
+        // and paste pair every Linux terminal uses.
+        let shifted_shortcut = !macos && mods.shift_key();
+        let word_modifier = if macos {
             option_physically_held(ws)
         } else {
-            ws.mods.control_key()
+            mods.control_key()
         };
-        let selecting = ws.mods.shift_key();
+        // Caret movement takes Shift and the word modifier; macOS adds Cmd
+        // for the line ends. `Cmd+Opt+Arrow` and Linux's `Alt+Arrow` move
+        // focus between splits instead.
+        let caret_chord = if macos {
+            !mods.control_key() && !(mods.super_key() && mods.alt_key())
+        } else {
+            !mods.alt_key() && !mods.super_key()
+        };
+        let no_chord = !mods.control_key() && !mods.super_key() && !mods.alt_key();
+        let selecting = mods.shift_key();
+        let editor = ws.search.focused_control == kettle_render::SearchControl::Editor;
+        // The find shortcut pressed again, with the bar already open, returns
+        // to the query and selects it. It is whatever `start_search` is bound
+        // to, so a rebound shortcut works too.
+        if matches!(
+            resolve_keybind_action(&self.cfg.keybinds, Some(key), None, mods),
+            Some((_, Action::StartSearch))
+        ) {
+            ws.search.focused_control = kettle_render::SearchControl::Editor;
+            ws.search.editor.select_all();
+            self.sync_search_editor_scroll(ws);
+            return true;
+        }
+        let bound =
+            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, mods).is_some();
+        let typed = search_bar_text(
+            crate::modal_input::accept_text(text, ws.mods),
+            mods,
+            bound,
+            cfg!(windows),
+        );
+        if !search_bar_claims(key, mods, macos, editor, self.cfg.vim_menu_nav) && typed.is_none() {
+            return false;
+        }
+        let letter = |s: &str, want: &str| s.eq_ignore_ascii_case(want);
+        let mut edited = false;
         match key {
             Key::Named(NamedKey::Escape) => {
                 self.close_search(ws);
             }
-            Key::Named(NamedKey::Enter) => {
-                if ws.search.focused_control == kettle_render::SearchControl::Editor {
-                    let go_back = ws.mods.shift_key() ^ ws.search.invert;
+            Key::Named(NamedKey::Enter) if no_chord => {
+                if editor {
+                    let go_back = mods.shift_key() ^ ws.search.invert;
                     self.search_step_match(ws, go_back);
                 } else {
                     self.activate_search_control(ws, ws.search.focused_control);
                 }
             }
-            Key::Named(NamedKey::F3) => self.search_step_match(ws, ws.mods.shift_key()),
-            Key::Named(NamedKey::Tab) => {
+            Key::Named(NamedKey::F3) if no_chord => {
+                self.search_step_match(ws, mods.shift_key());
+            }
+            Key::Named(NamedKey::Tab) if no_chord => {
                 let controls = kettle_render::SearchControl::ALL;
                 let current = controls
                     .iter()
                     .position(|control| *control == ws.search.focused_control)
                     .unwrap_or(0);
-                let next = if ws.mods.shift_key() {
+                let next = if mods.shift_key() {
                     (current + controls.len() - 1) % controls.len()
                 } else {
                     (current + 1) % controls.len()
@@ -21126,33 +21341,30 @@ impl App {
             }
             Key::Character(s)
                 if self.cfg.vim_menu_nav
-                    && ws.mods.control_key()
-                    && !ws.mods.alt_key()
+                    && mods.control_key()
+                    && !mods.alt_key()
                     && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
             {
                 self.search_step_match(ws, matches!(s.as_str(), "k" | "p"));
             }
-            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("a") => {
+            // Cmd/Ctrl+G steps like Enter, as in browsers and macOS text views.
+            Key::Character(s) if shortcut_only && letter(s, "g") => {
+                self.search_step_match(ws, mods.shift_key());
+            }
+            Key::Character(s) if shortcut_only && letter(s, "z") => {
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                edited = if mods.shift_key() {
+                    ws.search.editor.redo()
+                } else {
+                    ws.search.editor.undo()
+                };
+            }
+            Key::Character(s) if shortcut_only && !shifted_shortcut && letter(s, "a") => {
                 ws.search.focused_control = kettle_render::SearchControl::Editor;
                 ws.search.editor.select_all();
             }
-            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("c") => {
-                // A selection inside the editor wins; otherwise copy the grid
-                // selection the user dragged out under the bar. A grid press
-                // clears the editor selection, so a stale editor range cannot
-                // shadow a fresh drag (Terminator copies the terminal
-                // selection here).
-                if let Some(selected) = ws.search.editor.selected_text() {
-                    if let Some(clipboard) = self.clipboard.as_mut()
-                        && let Err(error) = clipboard.set_text(selected.to_string())
-                    {
-                        log::warn!("search copy: clipboard write failed: {error}");
-                    }
-                } else {
-                    self.copy_selection(ws);
-                }
-            }
-            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("x") => {
+            Key::Character(s) if shortcut_only && letter(s, "c") => self.search_copy(ws),
+            Key::Character(s) if shortcut_only && !shifted_shortcut && letter(s, "x") => {
                 ws.search.focused_control = kettle_render::SearchControl::Editor;
                 if let Some(selected) = ws.search.editor.selected_text().map(str::to_string) {
                     if let Some(clipboard) = self.clipboard.as_mut()
@@ -21160,89 +21372,87 @@ impl App {
                     {
                         log::warn!("search cut: clipboard write failed: {error}");
                     }
-                    let outcome = ws
+                    edited = ws
                         .search
                         .editor
-                        .insert("", kettle_core::MAX_SEARCH_QUERY_BYTES);
-                    if outcome.changed {
-                        ws.search.note_edit(std::time::Instant::now());
-                    }
+                        .insert("", kettle_core::MAX_SEARCH_QUERY_BYTES)
+                        .changed;
                 }
             }
-            Key::Character(s) if shortcut && s.eq_ignore_ascii_case("v") => {
-                ws.search.focused_control = kettle_render::SearchControl::Editor;
-                if let Some(clipboard) = self.clipboard.as_mut() {
-                    match clipboard.get_text() {
-                        Ok(paste) => {
-                            let outcome = ws
-                                .search
-                                .editor
-                                .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
-                            if outcome.changed {
-                                ws.search.note_edit(std::time::Instant::now());
-                            }
-                            if outcome.truncated {
-                                ws.search.status = kettle_render::SearchStatus::TooLong;
-                            }
-                        }
-                        Err(error) => log::warn!("search paste: clipboard read failed: {error}"),
-                    }
-                }
-            }
-            Key::Named(NamedKey::ArrowLeft)
-                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
+            Key::Character(s) if shortcut_only && letter(s, "v") => self.search_paste(ws),
+            // The text-field keys every macOS text field shares: Ctrl+A / E to
+            // the ends, Ctrl+B / F by a character, Ctrl+D / H delete forward and
+            // back, Ctrl+K deletes to the end.
+            Key::Character(s)
+                if macos
+                    && editor
+                    && mods.control_key()
+                    && !mods.super_key()
+                    && !mods.alt_key()
+                    && !mods.shift_key()
+                    && matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "a" | "e" | "b" | "f" | "d" | "h" | "k"
+                    ) =>
             {
-                if cfg!(target_os = "macos") && shortcut {
+                let search_editor = &mut ws.search.editor;
+                match s.to_ascii_lowercase().as_str() {
+                    "a" => search_editor.move_home(false),
+                    "e" => search_editor.move_end(false),
+                    "b" => search_editor.move_left(false, false),
+                    "f" => search_editor.move_right(false, false),
+                    "d" => edited = search_editor.delete(),
+                    "h" => edited = search_editor.backspace(),
+                    _ => edited = search_editor.delete_to_end(),
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) if editor && caret_chord => {
+                if macos && shortcut {
                     ws.search.editor.move_home(selecting);
                 } else {
                     ws.search.editor.move_left(selecting, word_modifier);
                 }
             }
-            Key::Named(NamedKey::ArrowRight)
-                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
-            {
-                if cfg!(target_os = "macos") && shortcut {
+            Key::Named(NamedKey::ArrowRight) if editor && caret_chord => {
+                if macos && shortcut {
                     ws.search.editor.move_end(selecting);
                 } else {
                     ws.search.editor.move_right(selecting, word_modifier);
                 }
             }
-            Key::Named(NamedKey::Home)
-                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
-            {
+            // `Ctrl+Home` / `Ctrl+End` scroll the terminal instead.
+            Key::Named(NamedKey::Home) if editor && no_chord => {
                 ws.search.editor.move_home(selecting);
             }
-            Key::Named(NamedKey::End)
-                if ws.search.focused_control == kettle_render::SearchControl::Editor =>
-            {
+            Key::Named(NamedKey::End) if editor && no_chord => {
                 ws.search.editor.move_end(selecting);
             }
             Key::Named(NamedKey::Backspace) => {
                 ws.search.focused_control = kettle_render::SearchControl::Editor;
-                let changed = if word_modifier {
+                edited = if macos && shortcut {
+                    ws.search.editor.delete_to_start()
+                } else if word_modifier {
                     ws.search.editor.delete_word_backward()
                 } else {
                     ws.search.editor.backspace()
                 };
-                if changed {
-                    ws.search.note_edit(std::time::Instant::now());
-                }
             }
             Key::Named(NamedKey::Delete) => {
                 ws.search.focused_control = kettle_render::SearchControl::Editor;
-                let changed = if word_modifier {
+                edited = if macos && shortcut {
+                    ws.search.editor.delete_to_end()
+                } else if word_modifier {
                     ws.search.editor.delete_word_forward()
                 } else {
                     ws.search.editor.delete()
                 };
-                if changed {
-                    ws.search.note_edit(std::time::Instant::now());
-                }
             }
-            Key::Character(s)
-                if s == " "
-                    && ws.search.focused_control != kettle_render::SearchControl::Editor =>
-            {
+            // winit reports the space bar as a named key; `dispatch_ui_key`
+            // sends it as a character. Either one presses a focused button.
+            Key::Named(NamedKey::Space) if !editor && no_chord => {
+                self.activate_search_control(ws, ws.search.focused_control);
+            }
+            Key::Character(s) if s == " " && !editor && no_chord => {
                 self.activate_search_control(ws, ws.search.focused_control);
             }
             _ => {
@@ -21250,23 +21460,105 @@ impl App {
                 // The explicit shortcut arms above claim ⌘A/⌘C/⌘X/⌘V; the
                 // helper rejects every other Command chord (so ⌘Q never types
                 // a `q`) and control characters.
-                if let Some(t) = crate::modal_input::accept_text(text, ws.mods) {
-                    ws.search.focused_control = kettle_render::SearchControl::Editor;
-                    let outcome = ws
-                        .search
-                        .editor
-                        .insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES);
-                    if outcome.changed {
-                        ws.search.note_edit(std::time::Instant::now());
-                    }
-                    if outcome.truncated {
-                        ws.search.status = kettle_render::SearchStatus::TooLong;
-                    }
+                let Some(t) = typed else {
+                    return false;
+                };
+                ws.search.focused_control = kettle_render::SearchControl::Editor;
+                let outcome = ws
+                    .search
+                    .editor
+                    .type_text(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES);
+                edited = outcome.changed;
+                if outcome.truncated {
+                    ws.search.status = kettle_render::SearchStatus::TooLong;
                 }
             }
         }
+        if edited {
+            ws.search.note_edit(std::time::Instant::now());
+        }
         if ws.search.open {
             self.sync_search_editor_scroll(ws);
+        }
+        true
+    }
+
+    /// Copy for the search bar: a selection inside the query wins; otherwise
+    /// the grid selection the user dragged out under the bar. A grid press
+    /// clears the query's selection, so a stale range cannot shadow a fresh
+    /// drag (Terminator copies the terminal selection here).
+    fn search_copy(&mut self, ws: &mut WindowState) {
+        if let Some(selected) = ws.search.editor.selected_text() {
+            if let Some(clipboard) = self.clipboard.as_mut()
+                && let Err(error) = clipboard.set_text(selected.to_string())
+            {
+                log::warn!("search copy: clipboard write failed: {error}");
+            }
+        } else {
+            self.copy_selection(ws);
+        }
+    }
+
+    /// Paste the clipboard into the query.
+    fn search_paste(&mut self, ws: &mut WindowState) {
+        ws.search.focused_control = kettle_render::SearchControl::Editor;
+        let Some(clipboard) = self.clipboard.as_mut() else {
+            return;
+        };
+        match clipboard.get_text() {
+            Ok(paste) => {
+                let outcome = ws
+                    .search
+                    .editor
+                    .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
+                if outcome.changed {
+                    ws.search.note_edit(std::time::Instant::now());
+                }
+                if outcome.truncated {
+                    ws.search.status = kettle_render::SearchStatus::TooLong;
+                }
+            }
+            Err(error) => log::warn!("search paste: clipboard read failed: {error}"),
+        }
+    }
+
+    /// Run the Kettle shortcut for a key the search bar did not use, as a
+    /// native app's menus keep working while its find field has focus. The
+    /// keyboard stays with the bar, so shortcuts that type into the terminal
+    /// do nothing, and Copy and Paste act on the query. Returns whether a
+    /// shortcut ran.
+    fn search_bar_shortcut(
+        &mut self,
+        ws: &mut WindowState,
+        key: &Key,
+        physical_key: Option<&PhysicalKey>,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let Some((trigger, action)) =
+            resolve_keybind_action(&self.cfg.keybinds, Some(key), physical_key, ws.mods)
+        else {
+            return false;
+        };
+        match search_bar_shortcut_kind(&action) {
+            SearchBarShortcut::Typing => false,
+            SearchBarShortcut::Copy => {
+                self.search_copy(ws);
+                true
+            }
+            SearchBarShortcut::Paste => {
+                self.search_paste(ws);
+                self.sync_search_editor_scroll(ws);
+                true
+            }
+            SearchBarShortcut::Run => {
+                // An adaptive focus chord with no split in that direction
+                // would go to the program, which does not have the keyboard.
+                if self.adaptive_focus_chord_falls_through(ws, trigger, &action) {
+                    return false;
+                }
+                self.handle_action(ws, action, event_loop);
+                true
+            }
         }
     }
 
@@ -21310,7 +21602,10 @@ impl App {
         };
         let output_generation = pane.term.output_generation();
         let Ok(term) = pane.term.term.lock() else {
-            ws.search.status = kettle_render::SearchStatus::Searching;
+            ws.search.set_status_at(
+                kettle_render::SearchStatus::Searching,
+                std::time::Instant::now(),
+            );
             return;
         };
         use kettle_core::Dimensions as _;
@@ -21387,7 +21682,10 @@ impl App {
             had_focus,
             output_drifted: false,
         });
-        ws.search.status = kettle_render::SearchStatus::Searching;
+        ws.search.set_status_at(
+            kettle_render::SearchStatus::Searching,
+            std::time::Instant::now(),
+        );
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
@@ -21411,7 +21709,7 @@ impl App {
                     "search-wrap",
                     if ws.search.wrap { "true" } else { "false" },
                 );
-                ws.search.restart_navigation(std::time::Instant::now());
+                search_wrap_toggled(&mut ws.search, std::time::Instant::now());
             }
             kettle_render::SearchControl::Case => {
                 ws.search.case_mode = match ws.search.case_mode {
@@ -21432,6 +21730,10 @@ impl App {
                     kettle_config::SearchCaseSensitivity::Never => "never",
                 };
                 self.persist_search_pref("search-case-sensitive", value);
+                // The match set changes, so search again, from the match or
+                // viewport the user is looking at rather than from where Search
+                // opened.
+                Self::anchor_search_to_viewport(ws);
                 ws.search.note_edit(std::time::Instant::now());
             }
             kettle_render::SearchControl::Invert => {
@@ -21441,26 +21743,36 @@ impl App {
                     "invert-search",
                     if ws.search.invert { "true" } else { "false" },
                 );
-                let direction = if ws.search.invert {
-                    kettle_core::SearchDirection::Reverse
-                } else {
-                    kettle_core::SearchDirection::Forward
-                };
-                if let Some(pane_id) = ws.search.target_pane
-                    && let Some(pane) = ws.mux.panes.get(&pane_id)
-                    && let Ok(term) = pane.term.term.lock()
-                {
-                    use kettle_core::Dimensions as _;
-                    ws.search.anchor = Some(search_viewport_anchor(
-                        term.grid().display_offset(),
-                        term.screen_lines(),
-                        term.last_column().0,
-                        direction,
-                    ));
+                // Invert only changes which way Enter steps. A later search
+                // starts from the matching edge of the viewport; the match on
+                // screen stays.
+                Self::anchor_search_to_viewport(ws);
+                if ws.search.focused.is_none() {
+                    ws.search.note_edit(std::time::Instant::now());
                 }
-                ws.search.note_edit(std::time::Instant::now());
             }
             kettle_render::SearchControl::Close => self.close_search(ws),
+        }
+    }
+
+    /// Point the next search at where the user is looking (see
+    /// `search_anchor_for`).
+    fn anchor_search_to_viewport(ws: &mut WindowState) {
+        let viewport = ws
+            .search
+            .target_pane
+            .and_then(|pane_id| ws.mux.panes.get(&pane_id))
+            .and_then(|pane| {
+                use kettle_core::Dimensions as _;
+                let term = pane.term.term.lock().ok()?;
+                Some((
+                    term.grid().display_offset(),
+                    term.screen_lines(),
+                    term.last_column().0,
+                ))
+            });
+        if let Some(anchor) = search_anchor_for(ws.search.focused, ws.search.invert, viewport) {
+            ws.search.anchor = Some(anchor);
         }
     }
 
@@ -21503,25 +21815,32 @@ impl App {
         let Some(control) = geometry.hit_test(x, y) else {
             return false;
         };
-        ws.search.focused_control = control;
+        // Control input can press without a move first; the press itself
+        // establishes what is under the pointer.
+        self.update_search_hover(ws);
         if control != kettle_render::SearchControl::Editor {
+            // A button activates on release over it, like a native button, so
+            // a press can be taken back by moving off before letting go. A
+            // pointer click also leaves keyboard focus where it was, as macOS
+            // buttons and VS Code's find widget do, so typing goes on in the
+            // query and the editor keeps its caret.
             ws.search.dragging_editor = false;
-            self.activate_search_control(ws, control);
+            ws.search.pressed_control = Some(control);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
             return true;
         }
+        ws.search.focused_control = control;
 
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
-        let relative = ((x - geometry.editor.0) / cell_width).floor() as isize;
-        let query_column = crate::search_input::pointer_query_column(
-            ws.search.editor.horizontal_scroll(),
-            relative,
-            ws.search.editor.cursor_column(),
-            ws.search.focused_control == kettle_render::SearchControl::Editor,
-        );
-        let clicks = self.click_count(ws, usize::MAX, query_column);
+        // The caret goes to the nearest boundary between characters; a word
+        // or line selection uses the character under the pointer.
+        let boundary = self.search_caret_point_at(ws, x, geometry);
+        let under = self.search_char_point_at(ws, x, geometry);
+        let clicks = self.click_count(ws, usize::MAX, under.click_key());
         match clicks {
             2 => {
-                ws.search.editor.select_word_at_column(query_column);
+                ws.search.editor.select_word_at(under);
                 ws.search.dragging_editor = false;
             }
             3 => {
@@ -21531,12 +21850,108 @@ impl App {
             _ => {
                 ws.search
                     .editor
-                    .set_cursor_column(query_column, ws.mods.shift_key());
+                    .set_cursor_at(boundary, ws.mods.shift_key());
                 ws.search.dragging_editor = true;
             }
         }
         self.sync_search_editor_scroll(ws);
         true
+    }
+
+    /// Where in the query a click at `x` puts the caret.
+    ///
+    /// Over the visible text it is the nearest glyph boundary the renderer
+    /// painted, as a query byte, so the caret lands where it is drawn even
+    /// when a fallback font gives CJK or emoji a width other than whole cells.
+    /// Past either edge of the editor it counts cells, so a drag there walks
+    /// a scrolled query. An IME composition paints text the editor does not
+    /// hold yet, so it counts cells too.
+    fn search_caret_point_at(
+        &self,
+        ws: &WindowState,
+        x: f32,
+        geometry: kettle_render::SearchBarGeometry,
+    ) -> crate::search_input::QueryPoint {
+        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let by_cells =
+            crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
+                ws.search.editor.horizontal_scroll(),
+                ((x - geometry.editor.0) / cell_width + 0.5).floor() as isize,
+            ));
+        if !Self::search_pointer_over_painted_query(ws, x, geometry) {
+            return by_cells;
+        }
+        let stops = ws
+            .renderer
+            .as_ref()
+            .map_or(&[][..], |renderer| renderer.search_editor_stops());
+        crate::search_input::nearest_stop_byte(stops, x)
+            .map_or(by_cells, crate::search_input::QueryPoint::Byte)
+    }
+
+    /// The character under `x`, for a word or line selection. Like the
+    /// caret, it follows the painted glyphs over the visible text and counts
+    /// cells elsewhere.
+    fn search_char_point_at(
+        &self,
+        ws: &WindowState,
+        x: f32,
+        geometry: kettle_render::SearchBarGeometry,
+    ) -> crate::search_input::QueryPoint {
+        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
+        let by_cells =
+            crate::search_input::QueryPoint::Column(crate::search_input::pointer_query_column(
+                ws.search.editor.horizontal_scroll(),
+                ((x - geometry.editor.0) / cell_width).floor() as isize,
+            ));
+        if !Self::search_pointer_over_painted_query(ws, x, geometry) {
+            return by_cells;
+        }
+        let clusters = ws
+            .renderer
+            .as_ref()
+            .map_or(&[][..], |renderer| renderer.search_editor_clusters());
+        crate::search_input::cluster_byte_at(clusters, x)
+            .map_or(by_cells, crate::search_input::QueryPoint::Byte)
+    }
+
+    /// Whether `x` is over the editor's text area and the painted query is
+    /// the editor's text. An IME composition paints text the editor does not
+    /// hold yet.
+    fn search_pointer_over_painted_query(
+        ws: &WindowState,
+        x: f32,
+        geometry: kettle_render::SearchBarGeometry,
+    ) -> bool {
+        if ws.ime_preedit.is_some() {
+            return false;
+        }
+        let Some(renderer) = ws.renderer.as_ref() else {
+            return false;
+        };
+        // A right-to-left query starts at its right end, so cells counted
+        // from the left edge would pick the wrong end; it always maps through
+        // the painted glyphs, the nearest of which is the right end to take.
+        renderer.search_editor_rtl()
+            || (x >= geometry.editor.0 + renderer.cell_w * 0.5
+                && x <= geometry.editor.0 + geometry.editor.2 - renderer.cell_w * 0.5)
+    }
+
+    /// End a button press: activate the button if the pointer is still over
+    /// it, otherwise drop the press.
+    fn search_button_release(&mut self, ws: &mut WindowState) {
+        let Some(pressed) = ws.search.pressed_control.take() else {
+            return;
+        };
+        let over = self
+            .search_geometry(ws)
+            .and_then(|geometry| geometry.hit_test(ws.cursor.x as f32, ws.cursor.y as f32));
+        if over == Some(pressed) {
+            self.activate_search_control(ws, pressed);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
     }
 
     fn search_mouse_drag(&mut self, ws: &mut WindowState) -> bool {
@@ -21546,15 +21961,8 @@ impl App {
         let Some(geometry) = self.search_geometry(ws) else {
             return true;
         };
-        let cell_width = ws.renderer.as_ref().map_or(8.0, |renderer| renderer.cell_w);
-        let relative = ((ws.cursor.x as f32 - geometry.editor.0) / cell_width).floor() as isize;
-        let query_column = crate::search_input::pointer_query_column(
-            ws.search.editor.horizontal_scroll(),
-            relative,
-            ws.search.editor.cursor_column(),
-            ws.search.focused_control == kettle_render::SearchControl::Editor,
-        );
-        ws.search.editor.set_cursor_column(query_column, true);
+        let point = self.search_caret_point_at(ws, ws.cursor.x as f32, geometry);
+        ws.search.editor.set_cursor_at(point, true);
         self.sync_search_editor_scroll(ws);
         if let Some(window) = &ws.window {
             window.request_redraw();
@@ -22947,6 +23355,162 @@ fn keybind_candidates(
         }
     }
     out
+}
+
+/// Whether the search bar uses a key chord itself, on macOS or elsewhere.
+/// Typed text is decided separately (`modal_input::accept_text`), and any
+/// other chord goes on to Kettle's shortcuts.
+///
+/// The bar keeps what a native find field keeps: Escape, Enter, Tab and F3
+/// without Ctrl, Cmd or Alt; Backspace and Delete, alone or with the word
+/// modifier (and Cmd on macOS); the caret keys with Shift
+/// and the word modifier (Option on macOS, Ctrl elsewhere), plus Cmd on macOS
+/// for the line ends; the shortcut key (Cmd on macOS, Ctrl elsewhere) with
+/// A, C, V, X, G and Z; and on macOS the Ctrl text-field keys. `Cmd+Opt+Arrow`
+/// and Linux's `Alt+Arrow` move focus between splits, `Ctrl+Home` / `Ctrl+End`
+/// scroll the terminal, and on Linux `Ctrl+Shift+A` and `Ctrl+Shift+X` keep
+/// their split and zoom meanings.
+fn search_bar_claims(
+    key: &Key,
+    mods: ModifiersState,
+    macos: bool,
+    editor_focused: bool,
+    vim_menu_nav: bool,
+) -> bool {
+    let (ctrl, alt, sup, shift) = (
+        mods.control_key(),
+        mods.alt_key(),
+        mods.super_key(),
+        mods.shift_key(),
+    );
+    let shortcut_only = if macos {
+        sup && !ctrl && !alt
+    } else {
+        ctrl && !sup && !alt
+    };
+    let no_chord = !ctrl && !sup && !alt;
+    let caret_chord = if macos {
+        !ctrl && !(sup && alt)
+    } else {
+        !alt && !sup
+    };
+    match key {
+        Key::Named(NamedKey::Escape) => true,
+        // Deletion takes the word modifier, and Cmd for the line ends on
+        // macOS; any other chord is left for a shortcut.
+        Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
+            if macos {
+                !ctrl
+            } else {
+                !alt && !sup
+            }
+        }
+        Key::Named(NamedKey::Enter | NamedKey::F3 | NamedKey::Tab) => no_chord,
+        Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => editor_focused && caret_chord,
+        Key::Named(NamedKey::Home | NamedKey::End) => editor_focused && no_chord,
+        Key::Named(NamedKey::Space) => !editor_focused && no_chord,
+        Key::Character(s) => {
+            let lower = s.to_ascii_lowercase();
+            let vim = vim_menu_nav && ctrl && !alt && matches!(s.as_str(), "j" | "k" | "n" | "p");
+            let shortcut = shortcut_only
+                && match lower.as_str() {
+                    "g" | "z" | "c" | "v" => true,
+                    "a" | "x" => macos || !shift,
+                    _ => false,
+                };
+            let text_field = macos
+                && editor_focused
+                && ctrl
+                && !sup
+                && !alt
+                && !shift
+                && matches!(lower.as_str(), "a" | "e" | "b" | "f" | "d" | "h" | "k");
+            let press = s == " " && !editor_focused && no_chord;
+            vim || shortcut || text_field || press
+        }
+        _ => false,
+    }
+}
+
+/// The text a key types into the query, from what the shared modal rule
+/// accepted (`accepted`). An Alt chord that is bound to a shortcut runs the
+/// shortcut instead: Linux's `Alt+1` switches to tab 1 rather than typing `1`.
+/// On Windows AltGr arrives as Ctrl+Alt (`altgr_is_ctrl_alt`), and it keeps
+/// typing the character it composes.
+fn search_bar_text(
+    accepted: Option<&str>,
+    mods: ModifiersState,
+    bound: bool,
+    altgr_is_ctrl_alt: bool,
+) -> Option<&str> {
+    let altgr = altgr_is_ctrl_alt && mods.control_key();
+    accepted.filter(|_| !(mods.alt_key() && !altgr && bound))
+}
+
+/// How a Kettle shortcut behaves while the search bar has the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchBarShortcut {
+    /// It types into the terminal, which does not have the keyboard.
+    Typing,
+    /// It copies from the query, or the grid selection under the bar.
+    Copy,
+    /// It pastes into the query.
+    Paste,
+    /// It runs as usual.
+    Run,
+}
+
+fn search_bar_shortcut_kind(action: &Action) -> SearchBarShortcut {
+    match action {
+        Action::SendText(_)
+        | Action::SendNewline
+        | Action::InsertPaneNumber
+        | Action::InsertPanePadded
+        | Action::InsertPaneName
+        | Action::PastePrimary => SearchBarShortcut::Typing,
+        Action::Copy => SearchBarShortcut::Copy,
+        Action::Paste => SearchBarShortcut::Paste,
+        _ => SearchBarShortcut::Run,
+    }
+}
+
+/// Whether a held key's repeat is dropped in the search bar. A focused
+/// toggle or Close acts once per press, as a native button does, so holding
+/// Space or Enter does not flip a setting (and rewrite the config) at the
+/// repeat rate. Previous and Next repeat, like Enter held in the query.
+fn search_button_ignores_repeat(focused: kettle_render::SearchControl, key: &Key) -> bool {
+    let activates = match key {
+        Key::Named(NamedKey::Space | NamedKey::Enter) => true,
+        Key::Character(text) => text == " ",
+        _ => false,
+    };
+    activates
+        && !matches!(
+            focused,
+            kettle_render::SearchControl::Editor
+                | kettle_render::SearchControl::Previous
+                | kettle_render::SearchControl::Next
+        )
+}
+
+/// Drop the repeats of the key that closed the search bar. They belong to
+/// the press the bar consumed, not to the terminal the bar uncovered; its
+/// release is already suppressed with that press. Returns whether to drop
+/// this event.
+fn drop_search_closing_repeat(
+    closing: &mut Option<PhysicalKey>,
+    physical_key: PhysicalKey,
+    state: ElementState,
+    repeat: bool,
+) -> bool {
+    if *closing != Some(physical_key) {
+        return false;
+    }
+    if state == ElementState::Pressed && repeat {
+        return true;
+    }
+    *closing = None;
+    false
 }
 
 fn resolve_keybind_action(
@@ -26942,6 +27506,7 @@ impl App {
                 ws.hovered_close_idx = None;
                 ws.hovered_new_tab = false;
                 ws.hovered_new_tab_menu = false;
+                ws.search.hovered_control = None;
                 if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }
@@ -26960,6 +27525,7 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 ws.cursor = position;
                 ws.selection_autoscroll_edge = 0;
+                self.update_search_hover(ws);
                 if ws.selecting {
                     note_selection_drag_motion(ws);
                 }
@@ -27046,7 +27612,7 @@ impl App {
                 // An editor drag that started inside the search bar keeps the
                 // motion; otherwise the grid above the bar stays live for
                 // hover, selection, and mouse reporting, matching the ctl path.
-                if search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                if search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                     == SearchPointerRoute::Bar
                 {
                     self.show_mouse_cursor(ws);
@@ -27783,10 +28349,11 @@ impl App {
                 // gesture it started (selection end, copy-on-select, mouse
                 // reporting), like the ctl path.
                 if bcode == 0
-                    && search_pointer_route(ws.search.open, None, ws.search.dragging_editor)
+                    && search_pointer_route(ws.search.open, None, ws.search.pointer_captured())
                         == SearchPointerRoute::Bar
                 {
                     ws.search.dragging_editor = false;
+                    self.search_button_release(ws);
                     return;
                 }
                 // Terminator parity: the release is where a titlebar press
@@ -28044,9 +28611,11 @@ impl App {
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
                     ws.terminal_owned_key_releases.clear();
+                    ws.search_closing_key = None;
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
+                    ws.search.pressed_control = None;
                     self.finish_selection_gesture(ws);
                     ws.scrollbar_drag_offset = None;
                     ws.scrollbar_hover = false;
@@ -28202,6 +28771,14 @@ impl App {
                     || ws.editing_title.is_some()
                     || ws.search.open
                     || ws.ime_preedit.is_some();
+                if drop_search_closing_repeat(
+                    &mut ws.search_closing_key,
+                    event.physical_key,
+                    event.state,
+                    event.repeat,
+                ) {
+                    return;
+                }
                 if track_consumed_key_release(
                     &mut ws.suppressed_key_releases,
                     &mut ws.terminal_owned_key_releases,
@@ -28397,7 +28974,25 @@ impl App {
                 }
 
                 if ws.search.open {
-                    self.search_key(ws, &event.logical_key, text);
+                    if event.repeat
+                        && search_button_ignores_repeat(
+                            ws.search.focused_control,
+                            &event.logical_key,
+                        )
+                    {
+                        return;
+                    }
+                    if !self.search_key(ws, &event.logical_key, Some(&event.physical_key), text) {
+                        self.search_bar_shortcut(
+                            ws,
+                            &event.logical_key,
+                            Some(&event.physical_key),
+                            event_loop,
+                        );
+                    }
+                    if !ws.search.open {
+                        ws.search_closing_key = Some(event.physical_key);
+                    }
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29002,6 +29597,18 @@ impl App {
         // job remains, schedule the next event-loop turn without polling at a
         // frame-rate forever (the job clears at a match or terminal edge).
         if ws.search.open {
+            // Repaint once when the bar should start saying `Searching…`.
+            if let Some(at) = ws.search.searching_label_at() {
+                if now < at {
+                    ws.search.searching_label_wake = Some(at);
+                    let next = at.saturating_duration_since(now);
+                    wait = Some(wait.map_or(next, |current| current.min(next)));
+                } else if ws.search.searching_label_wake.take().is_some()
+                    && let Some(window) = &ws.window
+                {
+                    window.request_redraw();
+                }
+            }
             if let Some(deadline) = ws.search.unlimited_retry_at {
                 let due = now >= deadline;
                 let next = if due {
@@ -32417,8 +33024,14 @@ mod tests {
         assert!(super::activate_quiet_search_retry(&mut search));
         assert!(!search.quiet_retry_pending);
         assert!(search.typing_scanned_revision.is_none());
-        assert!(search.unlimited_retry_at.is_none());
+        // The nearby scan goes first, and the full scan is already due behind
+        // it, so a nearby miss cannot leave the search stuck at `Searching`.
         assert!(super::should_start_nearby_search(&search));
+        assert!(
+            search
+                .unlimited_retry_at
+                .is_some_and(|deadline| deadline <= std::time::Instant::now())
+        );
 
         search.quiet_retry_pending = true;
         search.unlimited_retry_at = Some(std::time::Instant::now());
@@ -33786,6 +34399,449 @@ mod tests {
         assert!(!blocks(true, false, false, false));
     }
 
+    /// The bar shows the last result while a new search is only waiting for
+    /// the typing pause or has run briefly; a scan that is really slow says so.
+    #[test]
+    fn searching_is_shown_only_once_a_scan_is_actually_slow() {
+        use super::displayed_search_status;
+        use kettle_render::SearchStatus;
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let mut search = crate::search_input::SearchState {
+            editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+            status: SearchStatus::NoMatch,
+            ..Default::default()
+        };
+        search.note_edit(t0);
+        assert_eq!(
+            displayed_search_status(&search, t0 + ms(450)),
+            SearchStatus::NoMatch
+        );
+        // The full scan starts when the pause ends and clears its deadline,
+        // as `update_search` does. The grace runs 200 ms from there.
+        search.unlimited_retry_at = None;
+        assert_eq!(
+            displayed_search_status(&search, t0 + ms(650)),
+            SearchStatus::NoMatch
+        );
+        assert_eq!(
+            displayed_search_status(&search, t0 + ms(750)),
+            SearchStatus::Searching
+        );
+
+        // Finished searches are shown as automation sees them.
+        search.status = SearchStatus::Match;
+        search.visible_truncated = true;
+        assert_eq!(
+            displayed_search_status(&search, t0 + ms(10)),
+            SearchStatus::Limited
+        );
+    }
+
+    /// The bar keeps the keys a native find field keeps and hands every
+    /// other chord to Kettle's shortcuts, on both platforms.
+    #[test]
+    fn the_search_bar_keeps_editing_keys_and_passes_shortcuts_on() {
+        use winit::keyboard::{Key, ModifiersState as M, NamedKey};
+        let ch = |c: &str| Key::Character(c.into());
+        let named = Key::Named;
+        let claims = |key: &Key, mods: M, macos: bool| {
+            super::search_bar_claims(key, mods, macos, true, false)
+        };
+        let (cmd, ctrl, alt, shift) = (M::SUPER, M::CONTROL, M::ALT, M::SHIFT);
+        // macOS: the find field's own keys.
+        for (key, mods) in [
+            (named(NamedKey::Escape), M::empty()),
+            (named(NamedKey::Enter), shift),
+            (named(NamedKey::Tab), shift),
+            (named(NamedKey::Backspace), cmd),
+            (named(NamedKey::Backspace), alt),
+            (named(NamedKey::Delete), cmd),
+            (named(NamedKey::ArrowLeft), cmd | shift),
+            (named(NamedKey::ArrowRight), alt | shift),
+            (named(NamedKey::Home), shift),
+            (ch("a"), cmd),
+            (ch("c"), cmd),
+            (ch("x"), cmd),
+            (ch("v"), cmd),
+            (ch("z"), cmd | shift),
+            (ch("g"), cmd | shift),
+            (ch("e"), ctrl),
+            (ch("k"), ctrl),
+        ] {
+            assert!(claims(&key, mods, true), "macOS keeps {key:?} {mods:?}");
+        }
+        // macOS: Kettle's shortcuts.
+        for (key, mods) in [
+            (ch("t"), cmd),
+            (ch("w"), cmd),
+            (ch("="), cmd),
+            (ch("1"), cmd),
+            (ch("k"), cmd),
+            (ch("p"), cmd | shift),
+            (named(NamedKey::ArrowLeft), cmd | alt),
+            (named(NamedKey::ArrowLeft), ctrl | cmd),
+            (named(NamedKey::ArrowUp), cmd),
+            (named(NamedKey::ArrowUp), shift),
+            (named(NamedKey::PageUp), shift),
+            (named(NamedKey::Enter), cmd),
+            (named(NamedKey::F11), M::empty()),
+            (ch(","), ctrl),
+            (ch("k"), ctrl | shift),
+            (named(NamedKey::Backspace), ctrl),
+        ] {
+            assert!(
+                !claims(&key, mods, true),
+                "macOS passes on {key:?} {mods:?}"
+            );
+        }
+        // Linux: the find field's own keys.
+        for (key, mods) in [
+            (named(NamedKey::Backspace), ctrl),
+            (named(NamedKey::ArrowLeft), ctrl | shift),
+            (ch("a"), ctrl),
+            (ch("x"), ctrl),
+            (ch("c"), ctrl | shift),
+            (ch("v"), ctrl | shift),
+            (ch("g"), ctrl | shift),
+            (ch("z"), ctrl | shift),
+        ] {
+            assert!(claims(&key, mods, false), "Linux keeps {key:?} {mods:?}");
+        }
+        // Linux: Kettle's shortcuts, including the Ctrl+Shift chords that
+        // share a letter with an editing key.
+        for (key, mods) in [
+            (ch("a"), ctrl | shift),
+            (ch("x"), ctrl | shift),
+            (ch("t"), ctrl | shift),
+            (ch("k"), ctrl | shift),
+            (ch("e"), ctrl),
+            (named(NamedKey::ArrowLeft), alt),
+            (named(NamedKey::Home), ctrl),
+            (named(NamedKey::PageDown), ctrl),
+            (ch("1"), alt),
+            (named(NamedKey::Backspace), alt),
+            (named(NamedKey::Delete), alt),
+        ] {
+            assert!(
+                !claims(&key, mods, false),
+                "Linux passes on {key:?} {mods:?}"
+            );
+        }
+        // A focused button takes Space; the query types it.
+        assert!(super::search_bar_claims(
+            &named(NamedKey::Space),
+            M::empty(),
+            true,
+            false,
+            false
+        ));
+        assert!(!super::search_bar_claims(
+            &named(NamedKey::Space),
+            M::empty(),
+            true,
+            true,
+            false
+        ));
+        // Caret keys belong to the query, not to a focused button.
+        assert!(claims(&named(NamedKey::ArrowLeft), M::empty(), true));
+        assert!(!super::search_bar_claims(
+            &named(NamedKey::ArrowLeft),
+            M::empty(),
+            true,
+            false,
+            false
+        ));
+    }
+
+    /// An Alt chord bound to a shortcut runs it rather than typing: Linux's
+    /// Alt+1 goes to tab 1. AltGr (Ctrl+Alt) keeps composing characters, and
+    /// an unbound Alt chord still types what it produced.
+    #[test]
+    fn a_bound_alt_chord_runs_its_shortcut_instead_of_typing() {
+        use super::search_bar_text as text;
+        use winit::keyboard::ModifiersState as M;
+        assert_eq!(text(Some("1"), M::ALT, true, false), None);
+        assert_eq!(text(Some("1"), M::ALT, false, false), Some("1"));
+        // Windows AltGr composes; elsewhere Ctrl+Alt is a real chord.
+        assert_eq!(text(Some("@"), M::ALT | M::CONTROL, true, true), Some("@"));
+        assert_eq!(text(Some("t"), M::ALT | M::CONTROL, true, false), None);
+        assert_eq!(text(Some("a"), M::SHIFT, true, false), Some("a"));
+        assert_eq!(text(None, M::ALT, false, false), None);
+    }
+
+    /// Turning Wrap off while a step has already wrapped stops it at the edge
+    /// instead of landing on a match past it.
+    #[test]
+    fn turning_wrap_off_stops_a_step_that_already_wrapped() {
+        use kettle_core::{SearchDirection, SearchPoint};
+        let job = |direction, wrapped| crate::search_input::BackgroundSearch {
+            token: kettle_core::SearchScanToken {
+                query_revision: 1,
+                output_generation: 1,
+                layout: kettle_core::SearchLayout {
+                    columns: 80,
+                    screen_lines: 24,
+                    history_size: 10_000,
+                },
+            },
+            direction,
+            cursor: SearchPoint::new(0, 0),
+            edge: SearchPoint::new(10, 79),
+            wrap_anchor: SearchPoint::new(5, 0),
+            wrapped,
+            nearby: false,
+            navigation: true,
+            had_focus: true,
+            output_drifted: false,
+        };
+        let span = kettle_core::SearchSpan {
+            start: SearchPoint::new(1, 0),
+            end: SearchPoint::new(1, 1),
+        };
+        for (direction, status) in [
+            (SearchDirection::Forward, kettle_render::SearchStatus::End),
+            (SearchDirection::Reverse, kettle_render::SearchStatus::Start),
+        ] {
+            let mut search = crate::search_input::SearchState {
+                editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+                wrap: false,
+                focused: Some(span),
+                status: kettle_render::SearchStatus::Searching,
+                background: Some(job(direction, true)),
+                ..Default::default()
+            };
+            super::search_wrap_toggled(&mut search, std::time::Instant::now());
+            assert!(search.background.is_none());
+            assert_eq!(search.status, status);
+        }
+        // A step that never had a match reports no match, and one that output
+        // drifted under stays limited, as they would at the edge.
+        for (had_focus, output_drifted, status) in [
+            (false, false, kettle_render::SearchStatus::NoMatch),
+            (true, true, kettle_render::SearchStatus::Limited),
+        ] {
+            let mut search = crate::search_input::SearchState {
+                editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+                wrap: false,
+                status: kettle_render::SearchStatus::Searching,
+                background: Some(crate::search_input::BackgroundSearch {
+                    had_focus,
+                    output_drifted,
+                    ..job(SearchDirection::Forward, true)
+                }),
+                ..Default::default()
+            };
+            super::search_wrap_toggled(&mut search, std::time::Instant::now());
+            assert_eq!(
+                search.status, status,
+                "had_focus={had_focus} drifted={output_drifted}"
+            );
+        }
+        // A step that has not wrapped yet keeps going.
+        let mut search = crate::search_input::SearchState {
+            editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+            wrap: false,
+            focused: Some(span),
+            status: kettle_render::SearchStatus::Searching,
+            background: Some(job(SearchDirection::Forward, false)),
+            ..Default::default()
+        };
+        super::search_wrap_toggled(&mut search, std::time::Instant::now());
+        assert!(search.background.is_some());
+    }
+
+    /// Shortcuts that would type into the terminal do nothing while the bar
+    /// has the keyboard; Copy and Paste act on the query.
+    #[test]
+    fn shortcuts_that_type_into_the_terminal_do_nothing_while_searching() {
+        use super::{SearchBarShortcut as K, search_bar_shortcut_kind as kind};
+        use kettle_config::keybinds::Action;
+        assert_eq!(kind(&Action::SendText("\x15".into())), K::Typing);
+        assert_eq!(kind(&Action::SendNewline), K::Typing);
+        assert_eq!(kind(&Action::InsertPaneNumber), K::Typing);
+        assert_eq!(kind(&Action::PastePrimary), K::Typing);
+        assert_eq!(kind(&Action::Copy), K::Copy);
+        assert_eq!(kind(&Action::Paste), K::Paste);
+        for action in [
+            Action::NewTab,
+            Action::CloseTab,
+            Action::IncreaseFontSize,
+            Action::ScrollPageUp,
+            Action::FocusLeft,
+            Action::ToggleZoom,
+            Action::CommandPalette,
+            Action::GotoTab(0),
+        ] {
+            assert_eq!(kind(&action), K::Run, "{action:?}");
+        }
+    }
+
+    /// Both keyboard paths hand a key the bar did not use to the shortcuts.
+    #[test]
+    fn keys_the_search_bar_does_not_use_reach_the_shortcuts() {
+        let src = super::production_source();
+        let native = src
+            .split("if ws.search.open {\n                    if event.repeat")
+            .nth(1)
+            .and_then(|rest| rest.split("ws.search_closing_key = Some(").next())
+            .expect("native search key branch");
+        assert!(
+            native.contains(
+                "if !self.search_key(ws, &event.logical_key, Some(&event.physical_key), text)"
+            ) && native.contains("self.search_bar_shortcut("),
+            "a native key the bar does not use must reach the shortcuts"
+        );
+        let ctl = src
+            .split("TextModal::Search => {")
+            .nth(1)
+            .and_then(|rest| rest.split("}\n            }").next())
+            .expect("control-plane search key branch");
+        assert!(
+            ctl.contains("if !self.search_key(ws, key, None, text) {")
+                && ctl.contains("self.search_bar_shortcut(ws, key, None, event_loop);"),
+            "a dispatched key the bar does not use must reach the shortcuts"
+        );
+    }
+
+    /// A focused toggle or Close acts once per press; Previous, Next and
+    /// the query keep repeating.
+    #[test]
+    fn held_space_or_enter_presses_a_search_button_once() {
+        use kettle_render::SearchControl as C;
+        use winit::keyboard::{Key, NamedKey};
+        let space = Key::Named(NamedKey::Space);
+        let enter = Key::Named(NamedKey::Enter);
+        let typed_space = Key::Character(" ".into());
+        for control in [C::Wrap, C::Case, C::Invert, C::Close] {
+            for key in [&space, &enter, &typed_space] {
+                assert!(
+                    super::search_button_ignores_repeat(control, key),
+                    "{control:?} {key:?}"
+                );
+            }
+        }
+        for control in [C::Editor, C::Previous, C::Next] {
+            assert!(
+                !super::search_button_ignores_repeat(control, &enter),
+                "{control:?}"
+            );
+        }
+        assert!(!super::search_button_ignores_repeat(
+            C::Wrap,
+            &Key::Named(NamedKey::Backspace)
+        ));
+    }
+
+    /// Holding the key that closed the bar sends nothing to the terminal
+    /// until it is released; the next press is the terminal's.
+    #[test]
+    fn the_key_that_closed_search_does_not_repeat_into_the_terminal() {
+        use winit::event::ElementState;
+        use winit::keyboard::PhysicalKey;
+        let space = PhysicalKey::Code(winit::keyboard::KeyCode::Space);
+        let other = PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
+        let mut closing = Some(space);
+        let pressed = ElementState::Pressed;
+        assert!(super::drop_search_closing_repeat(
+            &mut closing,
+            space,
+            pressed,
+            true
+        ));
+        assert!(!super::drop_search_closing_repeat(
+            &mut closing,
+            other,
+            pressed,
+            true
+        ));
+        assert_eq!(closing, Some(space));
+        assert!(!super::drop_search_closing_repeat(
+            &mut closing,
+            space,
+            ElementState::Released,
+            false
+        ));
+        assert_eq!(closing, None);
+        assert!(!super::drop_search_closing_repeat(
+            &mut closing,
+            space,
+            pressed,
+            true
+        ));
+    }
+
+    /// Toggling Wrap with a match on screen keeps the match and clears a step
+    /// status that described the old setting.
+    #[test]
+    fn wrap_toggle_keeps_the_match_and_clears_the_old_step_status() {
+        use kettle_render::SearchStatus as S;
+        let span = kettle_core::SearchSpan {
+            start: kettle_core::SearchPoint::new(3, 0),
+            end: kettle_core::SearchPoint::new(3, 4),
+        };
+        for (before, after) in [
+            (S::End, S::Match),
+            (S::Start, S::Match),
+            (S::Wrapped, S::Match),
+            (S::Limited, S::Limited),
+        ] {
+            let mut search = crate::search_input::SearchState {
+                editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+                focused: Some(span),
+                status: before,
+                ..Default::default()
+            };
+            super::search_wrap_toggled(&mut search, std::time::Instant::now());
+            assert_eq!(search.focused, Some(span));
+            assert_eq!(search.status, after, "{before:?}");
+        }
+        let mut search = crate::search_input::SearchState {
+            editor: crate::search_input::SearchEditor::from_text("zz".into(), 64),
+            status: S::NoMatch,
+            ..Default::default()
+        };
+        super::search_wrap_toggled(&mut search, std::time::Instant::now());
+        assert_eq!(search.status, S::Searching, "no match: search again");
+    }
+
+    /// A toggle restarts the search from the match on screen, or from the
+    /// viewport when that match has been scrolled away.
+    #[test]
+    fn a_toggle_restarts_search_from_what_is_on_screen() {
+        use kettle_core::SearchPoint as P;
+        let span = kettle_core::SearchSpan {
+            start: P::new(-30, 2),
+            end: P::new(-30, 6),
+        };
+        // 24 lines scrolled back 40: lines -40 ..= -17 are on screen.
+        let viewport = Some((40, 24, 79));
+        assert_eq!(
+            super::search_anchor_for(Some(span), false, viewport),
+            Some(P::new(-30, 2))
+        );
+        assert_eq!(
+            super::search_anchor_for(Some(span), true, viewport),
+            Some(P::new(-30, 6))
+        );
+        // Back at the bottom, the match is off screen.
+        let bottom = Some((0, 24, 79));
+        assert_eq!(
+            super::search_anchor_for(Some(span), false, bottom),
+            Some(P::new(0, 0))
+        );
+        assert_eq!(
+            super::search_anchor_for(Some(span), true, bottom),
+            Some(P::new(23, 79))
+        );
+        // With no pane to read, the match is still the best guess.
+        assert_eq!(
+            super::search_anchor_for(Some(span), false, None),
+            Some(P::new(-30, 2))
+        );
+        assert_eq!(super::search_anchor_for(None, false, None), None);
+    }
+
     #[test]
     fn search_pointer_route_keeps_the_grid_live_under_the_bar() {
         use super::{SearchPointerRoute, search_pointer_route};
@@ -33884,9 +34940,9 @@ mod tests {
         ] {
             assert!(
                 body.contains(
-                    "search_pointer_route(ws.search.open, None, ws.search.dragging_editor)"
+                    "search_pointer_route(ws.search.open, None, ws.search.pointer_captured())"
                 ),
-                "{label} must route search-time motion/release by the live editor drag"
+                "{label} must route search-time motion/release by the live bar gesture"
             );
             assert!(
                 !body.contains("if ws.search.open {"),
@@ -34740,8 +35796,8 @@ mod tests {
              or an unclaimed Command chord types its letter into the query"
         );
         assert!(
-            arm.contains(".insert(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES)"),
-            "search_key must insert through the bounded editor"
+            arm.contains(".type_text(t, kettle_core::search::MAX_SEARCH_QUERY_BYTES)"),
+            "search_key must type through the bounded editor"
         );
         assert!(
             !arm.contains("!t.chars().any(|c| c.is_control())"),
@@ -34860,11 +35916,12 @@ mod tests {
             ("TextModal::TitleEdit", "self.title_edit_key("),
             ("TextModal::Search", "self.search_key("),
         ] {
+            // An arm runs to the next variant; the last one to the match's end.
             let arm = dispatch
                 .split(&format!("{variant} =>"))
                 .nth(1)
                 .unwrap_or_else(|| panic!("dispatch_ui_key has no arm for {variant}"))
-                .split('\n')
+                .split("TextModal::")
                 .next()
                 .unwrap_or_default();
             assert!(

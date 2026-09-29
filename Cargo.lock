@@ -1992,6 +1992,7 @@ dependencies = [
  "raw-window-handle",
  "serde_json",
  "tempfile",
+ "unicode-bidi",
  "unicode-segmentation",
  "unicode-width",
  "wgpu",

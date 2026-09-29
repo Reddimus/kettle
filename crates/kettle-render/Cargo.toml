@@ -24,6 +24,7 @@ kettle-state.workspace = true
 log.workspace = true
 pollster = "1.0.1"
 raw-window-handle = "0.6.2"
+unicode-bidi.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 wgpu = "30.0.0"

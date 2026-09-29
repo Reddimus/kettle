@@ -88,6 +88,8 @@ regex-automata = "0.4"
 getrandom = "0.4"
 unicode-width = "0.2"
 unicode-segmentation = "1.13.2"
+# The base direction of a line of text (Unicode bidi rule P2).
+unicode-bidi = "0.3.18"
 # Lua scripting.
 # `vendored` builds Lua 5.4 from bundled C source — no system
 # liblua dependency, deterministic across OSes. `send` makes the

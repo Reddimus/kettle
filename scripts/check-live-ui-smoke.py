@@ -14945,7 +14945,8 @@ def run_search_selection(kettle: str, root: Path) -> Path:
     text, the bar's controls still take clicks inside the lane, the bar's
     Copy shortcut copies the grid selection, a right-click opens the menu
     without closing the bar, and clicking another split makes the bar follow
-    focus. Esc closes the bar and leaves the selection alone.
+    focus. Kettle's shortcuts (font zoom, split focus) still work while the
+    bar is open. Esc closes the bar and leaves the selection alone.
     """
 
     out = root / f"search-selection-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -15114,18 +15115,49 @@ def run_search_selection(kettle: str, root: Path) -> Path:
         require_search(after_drag, "after the drag")
         states.append(capture_live_state(live, out, "selection-under-search"))
 
-        # 2. Clicks inside the lane still drive the bar's controls.
+        # 2. Clicks inside the lane still drive the bar's controls, and leave
+        #    keyboard focus in the query, as a native find bar does.
         wx, wy = rect_center(control_rect(search, "wrap"))
         live.ctl("send_mouse", params={"event": "click", "x": wx, "y": wy, "button": "left"})
         time.sleep(0.15)
         toggled = require_search(search_geometry(live, "wrap-click"), "after the Wrap click")
-        if toggled.get("wrap") is not False or focused_control(toggled) != "wrap":
+        if toggled.get("wrap") is not False or focused_control(toggled) != "editor":
             raise SystemExit(
                 f"search-selection smoke: Wrap click did not reach the bar: wrap={toggled.get('wrap')} "
                 f"focused={focused_control(toggled)}"
             )
         if selection_text(live, "selection-after-wrap-click") != target:
             raise SystemExit("search-selection smoke: a click inside the lane disturbed the grid selection")
+
+        #    A button acts on release over it; moving off before letting go
+        #    cancels the press.
+        cx, cy = rect_center(control_rect(search, "case"))
+        ex, ey = rect_center(control_rect(search, "editor"))
+        case_before = toggled.get("case")
+        live.ctl("send_mouse", params={"event": "press", "x": cx, "y": cy, "button": "left"})
+        time.sleep(0.1)
+        held = require_search(search_geometry(live, "case-held"), "with Case held")
+        if held.get("case") != case_before:
+            raise SystemExit(f"search-selection smoke: Case acted on press: {held.get('case')!r}")
+        live.ctl("send_mouse", params={"event": "move", "x": ex, "y": ey})
+        time.sleep(0.1)
+        live.ctl("send_mouse", params={"event": "release", "x": ex, "y": ey, "button": "left"})
+        time.sleep(0.15)
+        cancelled = require_search(search_geometry(live, "case-cancelled"), "after moving off Case")
+        if cancelled.get("case") != case_before:
+            raise SystemExit(
+                "search-selection smoke: Case acted although the pointer left it before the release: "
+                f"{case_before!r} -> {cancelled.get('case')!r}"
+            )
+        live.ctl("send_mouse", params={"event": "press", "x": cx, "y": cy, "button": "left"})
+        time.sleep(0.1)
+        live.ctl("send_mouse", params={"event": "release", "x": cx, "y": cy, "button": "left"})
+        time.sleep(0.15)
+        cycled = require_search(search_geometry(live, "case-released"), "after releasing on Case")
+        if cycled.get("case") == case_before:
+            raise SystemExit(f"search-selection smoke: Case did not act on release: {cycled.get('case')!r}")
+        if selection_text(live, "selection-after-case") != target:
+            raise SystemExit("search-selection smoke: pressing Case disturbed the grid selection")
 
         # 3. The bar's Copy shortcut copies the grid selection when the editor
         #    has none; paste it back into the shell to read the clipboard.
@@ -15226,7 +15258,39 @@ def run_search_selection(kettle: str, root: Path) -> Path:
                 f"focused={focused_pane(live)} target={back.get('target_pane')}"
             )
 
-        # 6. Esc closes the bar; the grid selection made under it survives.
+        # 6. Kettle's shortcuts still work while the bar has the keyboard.
+        #    Ctrl+= zooms the font and Ctrl+0 resets it with the bar left open,
+        #    and Ctrl+Shift+N moves focus to the other split, taking the bar.
+        cell_before = float(live.json_ctl("ui_geometry")["cell"]["width"])  # type: ignore[index]
+        live.json_ctl("dispatch_ui_key", {"keys": ["ctrl+equal"]})
+        time.sleep(0.3)
+        zoomed = search_geometry(live, "shortcut-zoom")
+        require_search(zoomed, "after Ctrl+=")
+        if float(zoomed["cell"]["width"]) <= cell_before:  # type: ignore[index]
+            raise SystemExit(
+                "search-selection smoke: Ctrl+= did not zoom while the search bar was open: "
+                f"cell width {cell_before} -> {zoomed['cell']['width']}"  # type: ignore[index]
+            )
+        live.json_ctl("dispatch_ui_key", {"keys": ["ctrl+0"]})
+        time.sleep(0.3)
+        reset = search_geometry(live, "shortcut-zoom-reset")
+        require_search(reset, "after Ctrl+0")
+        if abs(float(reset["cell"]["width"]) - cell_before) > 0.01:  # type: ignore[index]
+            raise SystemExit(
+                f"search-selection smoke: Ctrl+0 did not reset the font: {reset['cell']['width']}"  # type: ignore[index]
+            )
+        live.json_ctl("dispatch_ui_key", {"keys": ["ctrl+shift+n"]})
+        time.sleep(0.2)
+        moved = require_search(search_geometry(live, "shortcut-focus"), "after Ctrl+Shift+N")
+        if focused_pane(live) != first_pane or moved.get("target_pane") != first_pane:
+            raise SystemExit(
+                "search-selection smoke: Ctrl+Shift+N did not move focus and the bar: "
+                f"focused={focused_pane(live)} target={moved.get('target_pane')}"
+            )
+
+        # 7. Esc closes the bar; the grid selection made under it survives.
+        #    The zoom above reflowed the pane, so find the row again.
+        left_x, left_y = pane_text_point(live, first_pane, f"{row_marker}2")
         live.ctl("send_mouse", params={"event": "click", "x": left_x, "y": left_y, "button": "left"})
         time.sleep(0.15)
         lx1, ly1 = pane_text_point(live, first_pane, f"{row_marker}2", at_end=True)
