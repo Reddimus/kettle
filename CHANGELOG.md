@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.8.0] — 2026-09-28
+
 ### Added
 
 - `split_left` and `split_up` (Ghostty's `new_split:left` and
