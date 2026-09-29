@@ -753,7 +753,12 @@ prove a blink uploads the same quads in both phases and prepares no text, that
 the off phase is byte-identical to a cursor hidden with DECTCEM for the block,
 beam and underline shapes, and that a block over a wide glyph restores the
 glyph when it goes off; a source guard keeps the blink phase out of
-`build_pane`.
+`build_pane`. They also prove an unchanged frame and a blink edge write nothing
+to the GPU while a changed frame writes only its difference, and each pipeline
+skips an unchanged upload; a source guard fails on any `write_buffer` or
+`write_texture` outside `upload.rs`, and `just steady-uploads-smoke` checks the
+same through `ui_geometry.render_uploads` in a live window: unchanged
+screenshots, a blinking window, and a blinking window after 2 MiB of output.
 
 ### kettle-remote (50+ tests)
 
@@ -1950,7 +1955,7 @@ session run
 `just tabbar-click-smoke`,
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
-`just text-presentation-smoke`,
+`just steady-uploads-smoke`, `just text-presentation-smoke`,
 `just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
 `just color-scheme-smoke`,
 `just search-selection-smoke`, `just bell-flash-smoke`,
