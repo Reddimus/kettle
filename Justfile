@@ -310,8 +310,8 @@ vm-launcher-test:
 vm-launcher-test:
     python scripts/test-vm-launcher.py
 
-# GUI-free checks for macos-standing.py's vtebench parsing, statistics, and
-# summary tables.
+# GUI-free checks for macos-standing.py's vtebench parsing, statistics, claim
+# rule, preflight parsers, and summary tables.
 [unix]
 macos-standing-self-test:
     python3 scripts/perf/macos-standing-self-test.py
@@ -620,10 +620,17 @@ macos-perf:
 # Measure Kettle's standing against installed macOS terminals with exact
 # timing (no polling), Activity Monitor memory (phys_footprint), idle CPU and
 # wakeups, and vtebench. Pass `--kettle-b PATH` to compare two Kettle builds.
-# Writes target/perf-results/macos-standing/.
+# Each run writes a new directory under target/perf-results/macos-standing/.
 [macos]
 macos-standing *ARGS:
     python3 scripts/perf/macos-standing.py {{ARGS}}
+
+# One publication session against the installed app, with the publication
+# defaults, into a new target/perf-results/sessions/<date-time>-<LABEL>/.
+# Merge sessions with `just macos-standing --combine DIR...`.
+[macos]
+macos-standing-session LABEL *ARGS:
+    python3 scripts/perf/macos-standing.py --kettle /Applications/kettle.app/Contents/MacOS/kettle --no-build --label {{LABEL}} --out-dir target/perf-results/sessions/$(date +%F-%H%M%S)-{{LABEL}} {{ARGS}}
 
 [linux]
 macos-perf:

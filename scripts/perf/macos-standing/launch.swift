@@ -4,12 +4,20 @@
 // uses: when the window server first lists an on-screen window owned by the
 // spawned pid, when the child inside the terminal started (read from
 // STAMP_FILE), and when the terminal exited. The terminal's pid is written to
-// STAMP_FILE.pid for helpers that sample it while it runs. A terminal still
-// running at the timeout gets SIGTERM, then SIGKILL.
+// STAMP_FILE.pid for helpers that sample it while it runs, and removed as soon
+// as the terminal is reaped, since the pid may then be reused. SIGTERM to this
+// probe stops the terminal: only the probe can signal it safely, because it
+// has not reaped it yet. A terminal still running at the timeout, or 10 s
+// after a stop, gets SIGTERM, then SIGKILL.
 import CoreGraphics
 import Foundation
 
 func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
+
+// Set before the spawn so an early stop is never lost; the child resets it to
+// the default on exec.
+nonisolated(unsafe) var stopRequested: sig_atomic_t = 0
+signal(SIGTERM) { _ in stopRequested = 1 }
 
 let args = CommandLine.arguments
 guard args.count > 5, args[4] == "--", let timeout = Double(args[3]) else {
@@ -32,8 +40,14 @@ try? "\(pid)".write(toFile: stampPath + ".pid", atomically: true, encoding: .utf
 
 var windowAt: UInt64?, stampSeenAt: UInt64?, exitedAt: UInt64?
 var status: Int32 = 0
-let deadline = started + UInt64(timeout * 1e9)
+var deadline = started + UInt64(timeout * 1e9)
+var stopped = false
 while now() < deadline {
+    if stopRequested != 0 && !stopped {
+        stopped = true
+        kill(pid, SIGTERM)
+        deadline = min(deadline, now() + 10_000_000_000)
+    }
     if windowAt == nil,
        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
         for window in windows where (window[kCGWindowOwnerPID as String] as? Int32) == pid
@@ -49,6 +63,7 @@ while now() < deadline {
     if stampSeenAt == nil, FileManager.default.fileExists(atPath: stampPath) { stampSeenAt = now() }
     if waitpid(pid, &status, WNOHANG) == pid {
         exitedAt = now()
+        try? FileManager.default.removeItem(atPath: stampPath + ".pid")
         break
     }
     usleep(windowAt == nil ? 500 : 2_000)
@@ -59,6 +74,7 @@ if killed {
     usleep(1_000_000)
     kill(pid, SIGKILL)
     waitpid(pid, &status, 0)
+    try? FileManager.default.removeItem(atPath: stampPath + ".pid")
 }
 
 var childAt: UInt64?, cols = 0, rows = 0
@@ -73,7 +89,7 @@ if let text = try? String(contentsOfFile: stampPath, encoding: .utf8) {
 func milliseconds(_ at: UInt64?) -> Any { at.map { Double($0 - started) / 1e6 } ?? NSNull() }
 let result: [String: Any] = [
     "window_ms": milliseconds(windowAt), "child_ms": milliseconds(childAt),
-    "exit_ms": milliseconds(exitedAt), "killed": killed, "cols": cols, "rows": rows,
+    "exit_ms": milliseconds(exitedAt), "killed": killed, "stopped": stopped, "cols": cols, "rows": rows,
 ]
 let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
 FileManager.default.createFile(atPath: outPath, contents: data)
