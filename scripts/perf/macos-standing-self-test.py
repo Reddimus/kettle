@@ -13,6 +13,27 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+
+def gone_within(pid: int, timeout: float = 5.0) -> bool:
+    """Whether pid stops existing within timeout. A child orphaned when its
+    probe is SIGKILLed is reaped by launchd, not by the harness, so it can
+    linger as a zombie for a moment after the probe itself is reaped. The
+    timeout is far below the child's 60 s sleep, so this still proves the
+    kill reached it."""
+    import os
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+
+
 json_dumps = _json.dumps
 spec = importlib.util.spec_from_file_location("macos_standing", HERE / "macos-standing.py")
 standing = importlib.util.module_from_spec(spec)
@@ -499,13 +520,12 @@ class Safety(unittest.TestCase):
                 os.kill(child, 0)
 
     def test_a_probe_that_ignores_stop_is_killed_with_its_group_and_reported(self) -> None:
-        import os
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             probe = work / "stubborn.sh"
-            # Ignores SIGTERM and starts a child in its own process group.
+            # Ignores SIGTERM and starts a child in the probe's process group.
             probe.write_text("#!/bin/sh\ntrap '' TERM\n/bin/sleep 60 &\necho $! > \"$2.pid\"\nwait\n")
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
@@ -517,8 +537,7 @@ class Safety(unittest.TestCase):
             child = int(pid_file.read_text())
             self.assertFalse(runner.stop(process, 0.5))
             self.assertIsNotNone(process.returncode, "the probe is reaped")
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child, 0)
+            self.assertTrue(gone_within(child), "the probe's child is killed with its group")
 
     def test_a_terminal_the_probe_had_to_kill_is_not_a_clean_stop(self) -> None:
         import tempfile
@@ -552,9 +571,7 @@ class Safety(unittest.TestCase):
             child = int((work / "stamp.pid").read_text())
             self.assertIn("error", runner.finish(process, 0.2))
             self.assertIsNotNone(process.returncode)
-            import os
-            with self.assertRaises(ProcessLookupError):
-                os.kill(child, 0)
+            self.assertTrue(gone_within(child), "the probe's child is killed with its group")
 
     def test_the_runner_stops_terminals_through_the_probe(self) -> None:
         import inspect
