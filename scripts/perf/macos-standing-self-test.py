@@ -1285,6 +1285,148 @@ class MemsampleLoop(unittest.TestCase):
             self.assertNotIn("t_ns", one, "one-shot output keeps its old shape")
 
 
+class StartupPhases(unittest.TestCase):
+    FIXTURE = (HERE / "macos-standing" / "startup-phases.fixture").read_text()
+
+    def test_phase_lines_parse_relative_to_launch(self) -> None:
+        # The same fixture crates/kettle-ui/src/startup_trace.rs tests against.
+        phases = standing.parse_phases(self.FIXTURE, 900_000_000)
+        self.assertEqual(phases["phase_main_ms"], 100.0)
+        self.assertEqual(phases["phase_first_frame_ms"], 200.0)
+        self.assertEqual(phases["startup_path"], "resumed_early")
+        self.assertEqual(len([k for k in phases if k.startswith("phase_")]), 11)
+
+    def test_finish_reads_the_stamps_kettle_printed(self) -> None:
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "probe.sh"
+            probe.write_text("#!/bin/sh\nexit 0\n")
+            probe.chmod(0o755)
+            runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
+            (work / "launch.json").write_text(json.dumps({"window_ms": 150.0, "started_ns": 900_000_000}))
+            (work / "terminal.stderr").write_text(self.FIXTURE)
+            process = __import__("subprocess").Popen(["/usr/bin/true"])
+            result = runner.finish(process, 1)
+            self.assertEqual(result["phase_first_frame_ms"], 200.0)
+            self.assertEqual(result["startup_path"], "resumed_early")
+
+    def launched_env(self, stamped: set, name: str, startup: bool = True, ambient: str = "") -> str:
+        """RUST_LOG as the launch probe saw it for entry `name`, launched by
+        a startup round or by another workload, with `ambient` as the
+        harness's own RUST_LOG."""
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "probe.sh"
+            probe.write_text(f'#!/bin/sh\nprintf "%s" "${{RUST_LOG-unset}}" > "{work}/env"\nexit 2\n')
+            probe.chmod(0o755)
+            kettle = {"kettle-a": "/bin/true", "kettle-b": "/bin/true"}
+            runner = standing.Runner({"launch": probe, "stamp": probe}, work, kettle)
+            runner.phases = stamped
+            env = dict(os.environ, RUST_LOG=ambient) if ambient else dict(os.environ)
+            if not ambient:
+                env.pop("RUST_LOG", None)
+            with mock.patch.dict(os.environ, env, clear=True):
+                if startup:
+                    runner.startup(name)
+                else:
+                    runner.finish(runner.launch(name, "true", 1), 1)
+            return (work / "env").read_text()
+
+    def test_only_the_stamped_entries_get_the_filter(self) -> None:
+        self.assertEqual(self.launched_env({"kettle-b"}, "kettle-b"), "warn,kettle::startup=info")
+        self.assertNotIn("kettle::startup", self.launched_env({"kettle-b"}, "kettle-a"))
+        self.assertNotIn("kettle::startup", self.launched_env(set(), "kettle-b"))
+
+    def test_only_startup_rounds_are_stamped(self) -> None:
+        # Idle, flood and vtebench rounds of a stamped entry run as shipped.
+        self.assertEqual(self.launched_env({"kettle-b"}, "kettle-b", startup=False), "unset")
+
+    def test_the_harness_log_filter_never_reaches_a_terminal(self) -> None:
+        # With RUST_LOG=info in the shell, the stamps-off side would print
+        # stamps too, and every terminal would log more than it ships doing.
+        self.assertEqual(self.launched_env({"kettle-b"}, "kettle-a", ambient="info"), "unset")
+        self.assertEqual(self.launched_env(set(), "alacritty", ambient="debug"), "unset")
+        self.assertEqual(self.launched_env({"kettle-b"}, "kettle-b", ambient="debug"), "warn,kettle::startup=info")
+
+    def test_sides_select_which_kettle_entries_are_stamped(self) -> None:
+        ab = {"kettle-a": "/k", "kettle-b": "/k"}
+        standing_entries = {"kettle": "/k", "kettle-opaque": "/k"}
+        self.assertEqual(standing.stamped_entries("all", ab), {"kettle-a", "kettle-b"})
+        self.assertEqual(standing.stamped_entries("b", ab), {"kettle-b"})
+        self.assertEqual(standing.stamped_entries("all", standing_entries), {"kettle", "kettle-opaque"})
+        self.assertEqual(standing.stamped_entries(None, ab), set())
+        with self.assertRaises(ValueError):
+            standing.stamped_entries("b", standing_entries)
+
+    def test_a_stamped_session_never_counts(self) -> None:
+        # The filter and the log lines change what Kettle does at startup.
+        clean = {"refusals": [], "bare": False, "complete": True}
+        self.assertTrue(standing.session_countable({**clean, "startup_phases": None}))
+        for sides in ("all", "b"):
+            self.assertFalse(standing.session_countable({**clean, "startup_phases": sides}))
+        self.assertIn("startup_phases", standing.SESSION_KEYS)
+
+    def test_one_sided_phases_leave_the_ab_comparison_empty(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle-a": [{"window_ms": 200.0, "child_ms": 250.0}, {"window_ms": 201.0, "child_ms": 251.0}],
+            "kettle-b": [{"window_ms": 202.0, "child_ms": 252.0, "phase_resumed_ms": 40.0},
+                         {"window_ms": 203.0, "child_ms": 253.0, "phase_resumed_ms": 41.0}]}}}
+        metrics = standing.analyze(results, ["kettle-a", "kettle-b"], ab=True)["startup"]["metrics"]
+        self.assertEqual(metrics["phase_resumed_ms"]["ab_diff"], {})
+        self.assertTrue(metrics["child_ms"]["ab_diff"])
+        standing.summarize(results, ["kettle-a", "kettle-b"], ab=True)
+
+    def test_a_round_without_stamps_adds_no_phase_keys(self) -> None:
+        self.assertEqual(standing.parse_phases("some other log line\n", 1), {})
+        self.assertEqual(standing.parse_phases(self.FIXTURE, None), {})
+
+    def test_phase_times_are_startup_metrics(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle-a": [{"window_ms": 200.0, "child_ms": 250.0, "phase_resumed_ms": 60.0}],
+            "kettle-b": [{"window_ms": 190.0, "child_ms": 230.0, "phase_resumed_ms": 40.0}]}}}
+        text = standing.summarize(results, ["kettle-a", "kettle-b"], ab=True)
+        self.assertIn("| phase_resumed_ms | 60.00 | 40.00 |", text)
+        self.assertIn("phase_resumed_ms: B/A 0.667", text)
+
+    def test_phases_are_listed_in_the_order_they_happen(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {"kettle": [
+            {"window_ms": 190.0, "child_ms": 120.0, "phase_main_ms": 10.0, "phase_app_built_ms": 64.0,
+             "phase_first_frame_ms": 215.0, "phase_gpu_ready_ms": 158.0}]}}}
+        text = standing.summarize(results, ["kettle"], ab=False)
+        rows = [line.split("|")[1].strip() for line in text.splitlines() if line.startswith("| phase_")]
+        self.assertEqual(rows, ["phase_main_ms", "phase_app_built_ms", "phase_gpu_ready_ms", "phase_first_frame_ms"])
+
+    def test_paired_difference_is_the_median_round_difference(self) -> None:
+        stats = standing.paired_difference([200.0, 210.0, 205.0, 220.0], [180.0, 195.0, 185.0, 200.0])
+        self.assertEqual((stats["diff"], stats["n"]), (-20.0, 4))
+        self.assertLessEqual(stats["low"], -20.0)
+        self.assertGreaterEqual(stats["high"], -20.0)
+        self.assertEqual(stats, standing.paired_difference([200.0, 210.0, 205.0, 220.0], [180.0, 195.0, 185.0, 200.0]))
+
+    def test_ab_startup_lines_give_the_difference_in_ms(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle-a": [{"window_ms": 200.0, "child_ms": 250.0}, {"window_ms": 210.0, "child_ms": 260.0}],
+            "kettle-b": [{"window_ms": 200.0, "child_ms": 230.0}, {"window_ms": 210.0, "child_ms": 240.0}]}}}
+        text = standing.summarize(results, ["kettle-a", "kettle-b"], ab=True)
+        self.assertIn("child_ms: B/A 0.922", text)
+        self.assertIn("B-A -20.0 ms", text)
+
+    def test_standing_startup_rows_give_kettle_minus_the_best_peer(self) -> None:
+        results = {"context": "t", "workloads": {"startup": {
+            "kettle": [{"window_ms": 170.0, "child_ms": 200.0}, {"window_ms": 172.0, "child_ms": 204.0}],
+            "wezterm": [{"window_ms": 160.0, "child_ms": 230.0}, {"window_ms": 162.0, "child_ms": 232.0}]}}}
+        text = standing.summarize(results, ["kettle", "wezterm"], ab=False)
+        self.assertIn("| child_ms | wezterm | 0.874 |", text)
+        self.assertIn("-29.0 ms", text)
+
+
 FLOOD_4K_SHA256 = "8f18d84dad9b7ab935be1aa827e9ce0d0cc97b0c2e75f08afaede576a8b08f5d"
 
 

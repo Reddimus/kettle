@@ -76,6 +76,23 @@ pid before sampling, as a click would, and an idle round counts only if its
 window was frontmost when settling began, midway through sampling, and at the
 end. Each launch records the machine's thermal state and Low Power Mode.
 
+`--startup-phases` runs Kettle's startup rounds with
+`RUST_LOG=warn,kettle::startup=info` and records each phase Kettle stamps (from
+`main` through the built event loop, `Resumed`, the first pane's spawn, the
+window and the GPU to the first frame) as `phase_<name>_ms` since the launch
+probe spawned it, plus the pane's startup path. The format is pinned by
+`macos-standing/startup-phases.fixture`, which Kettle's own tests share. Other
+terminals launch unchanged, and only startup rounds are stamped.
+`--startup-phases b` stamps only the B side of an A/B, so one build on both
+sides measures what the stamps themselves cost. It is a diagnostic: the
+session never counts, so `--combine` never publishes from it. Every terminal
+launches without the harness's own `RUST_LOG`, so a filter set in the shell
+never changes what a terminal logs.
+
+Startup rows also report the paired difference in milliseconds, B-A in an A/B
+and Kettle minus the best other terminal in a standing, since a ratio alone
+hides the absolute gain.
+
 `--kettle-b-config LINE` gives the B side of an A/B extra config lines, with
 the same binary unless `--kettle-b` is also given. `--kettle-variant
 NAME=LINES` adds an unranked Kettle entry, for example
