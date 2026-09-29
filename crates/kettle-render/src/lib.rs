@@ -13,6 +13,8 @@ mod bg_image;
 mod color;
 mod cursor_policy;
 mod glyphpipe;
+#[cfg(test)]
+mod headless_tests;
 mod imgpipe;
 mod outline;
 mod present;
@@ -2467,7 +2469,9 @@ struct BgImageAnim {
 }
 
 pub struct Renderer {
-    surface: wgpu::Surface<'static>,
+    /// `None` only for the headless renderer tests build: it draws into the
+    /// offscreen capture target alone.
+    surface: Option<wgpu::Surface<'static>>,
     gpu: GpuContext,
     /// Shared CPU/GPU retained-resource scope for this renderer window.
     graphics_budget: kettle_core::GraphicsBudget,
@@ -3912,6 +3916,19 @@ mod live_screenshot_tests {
         wait_for_screenshot_submission_with,
     };
 
+    static SHARED_PERSISTENCE_POOL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Serialize the tests that use the process-wide persistence pool: a test
+    /// that counts its permits must not overlap another test's capture in
+    /// flight. A capture holds this until its completion arrives, and the
+    /// worker releases the permit before sending that, so the pool is idle
+    /// whenever the guard is free.
+    pub(crate) fn shared_persistence_pool_guard() -> std::sync::MutexGuard<'static, ()> {
+        SHARED_PERSISTENCE_POOL_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn test_tempdir() -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir("kettle-render-test-")
     }
@@ -3946,7 +3963,7 @@ mod live_screenshot_tests {
             .find("self.prepare_texture_screenshot(")
             .expect("live capture must copy the rendered target");
         let acquire = normalized
-            .find("self.surface.get_current_texture()")
+            .find("self .surface .as_ref() .map(wgpu::Surface::get_current_texture)")
             .expect("live rendering must acquire the swapchain");
         let presentation = normalized
             .find(".presentation .ensure_target(")
@@ -3960,8 +3977,8 @@ mod live_screenshot_tests {
             acquire_tail
                 .matches("self.submit_offscreen_screenshot(encoder, prepared_screenshot)")
                 .count(),
-            6,
-            "Occluded, Timeout, Outdated, Lost, Validation, and presentation-allocation failure must all submit the offscreen capture"
+            7,
+            "a headless renderer, Occluded, Timeout, Outdated, Lost, Validation, and presentation-allocation failure must all submit the offscreen capture"
         );
         assert!(
             src.contains(
@@ -4226,6 +4243,7 @@ mod live_screenshot_tests {
 
     #[test]
     fn persistence_admission_is_process_wide_across_renderer_generations() {
+        let _pool = shared_persistence_pool_guard();
         let first_generation = ScreenshotPersistencePool::shared().unwrap();
         let replacement_generation = ScreenshotPersistencePool::shared().unwrap();
         assert!(std::sync::Arc::ptr_eq(
@@ -4860,21 +4878,88 @@ impl Renderer {
         cfg: &Config,
         fonts: Option<StartupFonts>,
     ) -> Result<Renderer> {
-        let GpuContext {
-            adapter,
-            device,
-            queue,
-            ..
-        } = gpu.clone();
-
-        let caps = surface.get_capabilities(&adapter);
+        let caps = surface.get_capabilities(&gpu.adapter);
         let format = caps
             .formats
             .iter()
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let alpha_mode = desired_alpha_mode(cfg, &caps.alpha_modes);
+        Self::with_gpu(
+            gpu,
+            Some(surface),
+            format,
+            caps.alpha_modes,
+            width,
+            height,
+            scale,
+            cfg,
+            fonts,
+        )
+    }
+
+    /// A renderer with no window, drawing only into the offscreen capture
+    /// target, so tests can render real panes through the live frame path.
+    /// `None` when the host has no GPU adapter.
+    #[cfg(test)]
+    pub(crate) fn headless_for_tests(
+        cfg: &Config,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<Renderer>> {
+        pollster::block_on(async {
+            let Ok((instance, adapter)) = resolve_headless_adapter(cfg, "headless-renderer").await
+            else {
+                return Ok(None);
+            };
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kettle-headless-renderer"),
+                    required_limits: live_device_limits(adapter.limits()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| anyhow!("device: {e:?}"))?;
+            let gpu = GpuContext {
+                instance,
+                adapter,
+                device,
+                queue,
+                gpu_lost: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                gpu_fault: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                recovery_wake: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            };
+            Self::with_gpu(
+                gpu,
+                None,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                vec![wgpu::CompositeAlphaMode::Opaque],
+                width,
+                height,
+                1.0,
+                cfg,
+                None,
+            )
+            .map(Some)
+        })
+    }
+
+    /// Shared tail of every constructor, once a GPU and (for a window) a
+    /// surface exist.
+    #[allow(clippy::too_many_arguments)]
+    fn with_gpu(
+        gpu: GpuContext,
+        surface: Option<wgpu::Surface<'static>>,
+        format: wgpu::TextureFormat,
+        supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+        width: u32,
+        height: u32,
+        scale: f32,
+        cfg: &Config,
+        fonts: Option<StartupFonts>,
+    ) -> Result<Renderer> {
+        let GpuContext { device, queue, .. } = gpu.clone();
+        let alpha_mode = desired_alpha_mode(cfg, &supported_alpha_modes);
         let (width, height) =
             live_surface_dimensions(width, height, device.limits().max_texture_dimension_2d);
         let config = wgpu::SurfaceConfiguration {
@@ -4891,8 +4976,9 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &config);
-        let supported_alpha_modes = caps.alpha_modes;
+        if let Some(surface) = &surface {
+            surface.configure(&device, &config);
+        }
 
         // Fonts loaded before the window reach here already measured. Ones
         // measured for another scale or font are reloaded, not reused.
@@ -5230,7 +5316,13 @@ impl Renderer {
         );
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.gpu.device, &self.config);
+        self.configure_surface();
+    }
+
+    fn configure_surface(&self) {
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.gpu.device, &self.config);
+        }
     }
 
     pub fn set_background_compositing(&mut self, cfg: &Config) {
@@ -5239,7 +5331,7 @@ impl Renderer {
             return;
         }
         self.config.alpha_mode = alpha_mode;
-        self.surface.configure(&self.gpu.device, &self.config);
+        self.configure_surface();
     }
 
     /// Glyph boundaries of the search query painted last frame, as (query
@@ -9125,7 +9217,19 @@ impl Renderer {
             None
         };
 
-        let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
+        let Some(acquired) = self
+            .surface
+            .as_ref()
+            .map(wgpu::Surface::get_current_texture)
+        else {
+            // Headless (tests): the offscreen capture is the whole frame.
+            self.submit_offscreen_screenshot(encoder, prepared_screenshot);
+            if need_prepare {
+                self.atlas.trim();
+            }
+            return Ok(FrameOutcome::Occluded);
+        };
+        let (frame, reconfigure_after_present) = match acquired {
             wgpu::CurrentSurfaceTexture::Success(t) => (t, false),
             // The frame is usable, but no longer matches the underlying
             // surface. Present it once, then refresh the swapchain before the
@@ -9158,7 +9262,7 @@ impl Renderer {
             // surface, retain damage, and let the UI's bounded retry scheduler
             // decide when to acquire again.
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.gpu.device, &self.config);
+                self.configure_surface();
                 self.submit_offscreen_screenshot(encoder, prepared_screenshot);
                 if need_prepare {
                     self.atlas.trim();
@@ -9241,7 +9345,7 @@ impl Renderer {
         pre_present();
         self.gpu.queue.present(frame);
         if reconfigure_after_present {
-            self.surface.configure(&self.gpu.device, &self.config);
+            self.configure_surface();
         }
         // Only trim when we prepared this frame (see the `need_prepare` gate):
         // trimming clears the glyph in-use set, so a trim with no following
@@ -15149,7 +15253,7 @@ mod gpu_tests {
     ///
     /// A panicking GPU test must report its own failure — not turn every
     /// later GPU test into a poisoned-mutex error that buries it.
-    fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
         GPU_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -15163,7 +15267,7 @@ mod gpu_tests {
     /// and readback pixels successfully. Keep this scoped to these unit tests:
     /// the live renderer and the standalone smoke outside the affected Parallels
     /// guest retain hardware-first adapter selection.
-    fn gpu_test_config() -> Config {
+    pub(crate) fn gpu_test_config() -> Config {
         Config {
             gpu_force_software: cfg!(all(target_os = "windows", target_arch = "aarch64")),
             ..Config::default()
@@ -20151,12 +20255,13 @@ mod startup_fonts_tests {
     #[test]
     fn the_renderer_takes_over_matching_startup_fonts() {
         let src = production_source();
+        // Every constructor, windowed or headless, ends in `with_gpu`.
         let body = src
-            .split_once("fn with_gpu_and_surface(")
-            .expect("with_gpu_and_surface")
+            .split_once("fn with_gpu(")
+            .expect("with_gpu")
             .1
             .split_once("\n    }\n")
-            .expect("end of with_gpu_and_surface")
+            .expect("end of with_gpu")
             .0;
         assert!(body.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
         assert!(!body.contains("FontSystem::new()"));
