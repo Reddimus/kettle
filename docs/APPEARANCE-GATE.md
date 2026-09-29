@@ -114,6 +114,38 @@ in comments.
 `icns-smoke` was skipped again: this host has Xcode 27, and the release icon
 script requires Xcode 26.x. The macOS 26 CI icon job covers it.
 
+## 4.8.0 cut - 2026-09-28
+
+macOS 26.6.2 (25G83), M5 Max. Release build of the cut commit `829f51cb`.
+
+Window chrome, material and icon sources are unchanged since 4.5.0, so the
+4.5.0 visual results still apply. The visible changes were captured from the
+cut's release build with `kettle ctl screenshot`:
+
+- The search bar's labels sit centered in their buttons and the editor. With
+  Next focused, its dark label reads clearly on the accent, and the Wrap,
+  Case and Enter toggles keep their names in place. Every step of the search
+  bar was also recorded and measured at 40 to 200 columns and 10 to 18 pt, and
+  on Linux; #391 has the numbers.
+- The right-click menu shows Split Left and Split Up among the splits, and
+  Close Tab, New Window, Close Window and Set Window Title… after New Tab.
+- A grid line holding a paragraph separator between Latin and Hebrew renders,
+  and the window stays up.
+
+`just gauntlet-strict` passed on the cut, and so did 16 of the 17 macOS native
+gates: `icons-check-required`, `package-templates`, `update-manifest-test`,
+`release-assets-test`, `package-manifest-test`, `online-installer-test`,
+`gpu-render-smoke`, `cli-smoke`, `touchpad-scroll-smoke`,
+`split-exit-resize-smoke`, `text-presentation-smoke`,
+`line-edit-chords-smoke`, `dock-menu-smoke`, `macos-compare-score-self-test`,
+`macos-standing-self-test` and `agent-cli-smoke`. `just macos-update-smoke`
+passed against published v4.7.0.
+
+`icns-smoke` was skipped again: this host has Xcode 27, and the release icon
+script requires Xcode 26.x. The macOS 26 CI icon job covers it.
+`package-templates` skipped its release-asset check because v4.8.0 is not
+published yet; the post-release check runs it with `--require-release`.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
