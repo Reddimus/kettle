@@ -309,7 +309,9 @@ top-half gate. Its timings land on 100 ms polling steps and its memory figure
 is resident set size, so published standings and before/after numbers come
 from `just macos-standing`: exact launch timing, Activity Monitor memory,
 idle CPU and wakeups, and vtebench, or a paired A/B of two Kettle builds with
-`--kettle-b`. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
+`--kettle-b`. A published rank combines 3 countable sessions on 3 dates with
+`--combine`, and a session is countable only when its preflight found the
+machine quiet. See [scripts/perf/README.md](../scripts/perf/README.md). The Linux
 comparator remains a narrower diagnostic gate and requires the documented peer
 terminals and a real X11 or Wayland session.
 
