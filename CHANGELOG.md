@@ -32,6 +32,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Text shaping includes an unreleased upstream cosmic-text fix for lines that
+  hold several bidi paragraphs, such as right-to-left text after a paragraph
+  separator. Kettle carries the fix in a vendored copy until a release has it.
 - Kettle's shortcuts work while the search bar is open. A new tab, font zoom,
   tab switching, split focus and the rest did nothing until the bar closed.
   On Linux, `Ctrl+Shift+A` and `Ctrl+Shift+X` split and zoom again instead of
