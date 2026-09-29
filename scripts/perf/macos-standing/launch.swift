@@ -8,7 +8,9 @@
 // as the terminal is reaped, since the pid may then be reused. SIGTERM to this
 // probe stops the terminal: only the probe can signal it safely, because it
 // has not reaped it yet. A terminal still running at the timeout, or 10 s
-// after a stop, gets SIGTERM, then SIGKILL.
+// after a stop, gets SIGTERM, then SIGKILL. The result also carries the spawn
+// time itself (started_ns), so other stamps on the same clock can be placed
+// against it, and the machine's thermal state and Low Power Mode.
 import CoreGraphics
 import Foundation
 
@@ -90,6 +92,8 @@ func milliseconds(_ at: UInt64?) -> Any { at.map { Double($0 - started) / 1e6 } 
 let result: [String: Any] = [
     "window_ms": milliseconds(windowAt), "child_ms": milliseconds(childAt),
     "exit_ms": milliseconds(exitedAt), "killed": killed, "stopped": stopped, "cols": cols, "rows": rows,
+    "started_ns": started, "thermal_state": ProcessInfo.processInfo.thermalState.rawValue,
+    "low_power": ProcessInfo.processInfo.isLowPowerModeEnabled,
 ]
 let data = try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
 FileManager.default.createFile(atPath: outPath, contents: data)

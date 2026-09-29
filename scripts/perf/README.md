@@ -43,8 +43,14 @@ set size leaves out. Workloads:
 - `startup`: spawn to the first on-screen window, and to the child's first
   instruction
 - `idle`: CPU share, wakeups per second, and memory of a window left alone
-- `flood-memory`: memory after printing 32 MiB of seeded text that is the same
-  on every run, in lines narrower than the grid
+- `flood-memory`: memory while and after printing 32 MiB of seeded text that
+  is the same on every run, in lines narrower than the grid. A 100 ms
+  timeline runs from launch until 20 s after the text ends, and every
+  terminal gets the same columns: the peak, memory 3 s after the end, and
+  memory 20 s after it. 20 s falls after Kettle's 10 s and kitty's 15 s
+  blink timeouts plus the roughly 1 s the GPU driver takes to release its
+  pools, so it shows memory once blinking has stopped. A flood that never
+  finishes is an error.
 - `vtebench`: Alacritty's vtebench at a pinned revision. On macOS its
   scripts cannot read the window size, so they run from a copy with
   upstream's unmerged fix
@@ -60,17 +66,39 @@ under `macos-standing/` are compiled into `target/perf-tools/` on first use,
 which needs the Xcode command line tools, and vtebench is cloned and built
 there too.
 
+Each workload runs one script, reused for every launch; values that change
+per launch go in a file the script sources. macOS assesses a script the first
+time it runs, which cost every terminal about 120 ms of shell time when each
+launch had its own script, so shell times are not comparable with runs before
+this change. One discarded warm-up launch per terminal (`--warmup`) comes
+before the startup rounds. Idle and flood windows are brought to the front by
+pid before sampling, as a click would, and an idle round counts only if its
+window was frontmost when settling began, midway through sampling, and at the
+end. Each launch records the machine's thermal state and Low Power Mode.
+
+`--kettle-b-config LINE` gives the B side of an A/B extra config lines, with
+the same binary unless `--kettle-b` is also given. `--kettle-variant
+NAME=LINES` adds an unranked Kettle entry, for example
+`opaque=background-opacity = 1;window-blur = false`. `--footprint-detail`
+records the `footprint` tool's graphics categories at each flood offset; it
+walks the address space and can perturb the process, so a session that uses
+it never counts. Extra config lines are recorded in `results.json` only as a
+digest, since a line can carry a path or other private value; the text goes in
+the local manifest. `--flood-offsets` sets the flood columns (default `3,20`:
+done+3 and done+20), and sessions with different offsets never combine.
+
 ### Statistics
 
 Rounds rotate the terminal order. Startup (time to window and to shell), idle
-(CPU, wakeups, memory) and flood (memory) report medians, because launches
-have cold outliers; other numbers a round records are kept but never compared.
-vtebench reports each benchmark's mean sample per round, then the mean over
-rounds, and a geometric mean per round. Kettle is compared with the best other
-terminal round by round: the median (or, for vtebench, the mean) of the
-per-round ratios, a 10,000-resample bootstrap 95 % interval over rounds, and
-the number of rounds Kettle won. Idle rows count only rounds in which the
-terminal was frontmost, since blinking cursors run only in a focused window.
+(CPU, wakeups, memory) and flood (peak, done+3, done+20) report medians,
+because launches have cold outliers; other numbers a round records are kept
+but never compared. vtebench reports each benchmark's mean sample per round,
+then the mean over rounds, and a geometric mean per round. Kettle is compared
+with the best other terminal round by round: the median (or, for vtebench, the
+mean) of the per-round ratios, a 10,000-resample bootstrap 95 % interval over
+rounds, and the number of rounds Kettle won. Idle rows count only rounds in
+which the terminal was frontmost, since blinking cursors run only in a focused
+window.
 
 Publication defaults are 30 startup, 5 idle, 5 flood and 5 vtebench rounds,
 10 s per vtebench benchmark (upstream's default), a 30 s idle window and the
@@ -130,12 +158,14 @@ results, never into `results.json` or anything combined from it.
   when all 3 have the ratio's interval below 1 and Kettle lower in at least
   80 % of rounds; "tied 1st" when none has Kettle clearly behind; otherwise a
   rank of 2nd or lower, marked "(varies)" when sessions disagree;
-- for A/B sessions, a change counts when the first 2, on different dates,
-  both exclude 1 on the same side. `--aa DIR` adds each metric's gate from an
-  A/A session: the larger of 3 % and twice the A/A interval's half-width. The
-  A/A must itself be a countable session of one build and config against
-  itself, with the same setup and baseline config as the A/B sessions; an A/A whose interval excludes 1 invalidates that metric's verdict,
-  and a row the A/A did not measure gets no verdict.
+- for A/B sessions, a change counts when the first 2, on different dates, both
+  exclude 1 on the same side. `--aa DIR` adds each metric's gate from an A/A
+  session: the larger of 3 % and twice the A/A interval's half-width. The A/A
+  must itself be a countable session of one build and config against itself,
+  with the same setup and baseline config as the A/B sessions (its round
+  counts may differ, since fewer rounds only widen its gates); an A/A whose
+  interval excludes 1 invalidates that metric's verdict, and a row the A/A did
+  not measure gets no verdict.
 - a round with no value is dropped from its pair, but a zero is a value: two
   zeros tie, and anything over a zero is infinitely worse.
 

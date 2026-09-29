@@ -13,7 +13,9 @@ argument path. Workloads:
                 Monitor's Memory, which includes GPU driver memory) of a window
                 left alone, sampled over --idle-window seconds after
                 --idle-settle seconds
-  flood-memory  phys_footprint after printing 32 MiB of seeded text
+  flood-memory  a 100 ms phys_footprint timeline while printing 32 MiB of
+                seeded text and for 20 s after it, reported as the peak and
+                memory 3 s and 20 s after the text ends
   vtebench      Alacritty's vtebench at a pinned revision, built from a copy
                 that records microseconds instead of whole milliseconds, with
                 its scripts' window-size lookup fixed for macOS
@@ -25,10 +27,15 @@ with the best other terminal round by round, with a bootstrap 95% interval
 over rounds and a count of the rounds Kettle won. With --kettle-b the run
 compares two Kettle builds and reports B/A the same way.
 
+Each workload reuses one payload script (values that change per launch go in
+a sourced params file), since macOS assesses a new script the first time it
+runs, and one discarded warm-up launch per terminal precedes the startup
+rounds.
+
 Idle numbers depend on focus: Kettle, Ghostty, and kitty blink the cursor only
-in a focused window, and macOS gives a launched window focus only while the
-desktop is unlocked and nothing else holds it. Only rounds in which the
-terminal was frontmost count.
+in a focused window. Idle and flood windows are brought to the front by pid,
+and an idle round counts only if its window was frontmost when settling began,
+midway through sampling, and at the end.
 
 Every run starts with a preflight that refuses noisy conditions (battery, Low
 Power Mode, a locked screen, load, Time Machine, a build running, a measured
@@ -52,6 +59,7 @@ import plistlib
 import random
 import re
 import resource
+import shlex
 import shutil
 import signal
 import statistics
@@ -84,18 +92,18 @@ WORKLOADS = ("startup", "idle", "flood-memory", "vtebench")
 ROUNDS = {"startup": 30, "idle": 5, "flood-memory": 5, "vtebench": 5}
 # The metrics each workload reports; a round's other numbers (exit_ms, the
 # resident size) are kept in results.json but never compared or published.
-METRICS = {"startup": ("window_ms", "child_ms"), "idle": ("cpu_percent", "wakeups_per_second", "footprint_mib"),
-           "flood-memory": ("footprint_mib", "max_footprint_mib")}
+METRICS = {"startup": ("window_ms", "child_ms"), "idle": ("cpu_percent", "wakeups_per_second", "footprint_mib")}
+DEFAULT_FLOOD_OFFSETS = (3.0, 20.0)
 # The values a round must carry to count toward a complete session.
-REQUIRED = {"startup": ("window_ms", "child_ms"), "idle": ("cpu_percent", "wakeups_per_second", "footprint_mib"),
-            "flood-memory": ("footprint_mib",)}
+REQUIRED = {"startup": ("window_ms", "child_ms"), "idle": ("cpu_percent", "wakeups_per_second", "footprint_mib")}
 # A row's comparison in a session counts only with this share of its rounds
 # paired (an idle round that lost focus has no pair).
 MIN_PAIRED_SHARE = 0.8
 # Settings every session in a combined set must share; any change starts a
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
-                "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs")
+                "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
+                "footprint_detail")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -342,7 +350,7 @@ def missing_benchmarks(benchmarks: Path, dat: Dict[str, float]) -> List[str]:
 def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -> List[str]:
     """How each terminal runs `script` at the pinned grid with default settings."""
     if name in kettle:
-        return [kettle[name], "--config", str(work / "kettle.config"), "-e", str(script)]
+        return [kettle[name], "--config", str(work / f"{name}.config"), "-e", str(script)]
     if name == "alacritty":
         return [APPS[name], "--config-file", "/dev/null",
                 "-o", f"window.dimensions.columns={COLS}", "-o", f"window.dimensions.lines={ROWS}",
@@ -363,11 +371,13 @@ def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -
     raise ValueError(name)
 
 
-def write_configs(work: Path) -> None:
-    (work / "kettle.config").write_text(
-        "agent-server = off\nrestore-session = false\nupdate-check = false\n"
-        f"window-width = {COLS}\nwindow-height = {ROWS}\n"
-    )
+def write_configs(work: Path, kettle_configs: Optional[Dict[str, str]] = None) -> None:
+    """One config file per Kettle entry: the shared base plus that entry's
+    extra lines (an A/B's B side, or an unranked variant)."""
+    base = ("agent-server = off\nrestore-session = false\nupdate-check = false\n"
+            f"window-width = {COLS}\nwindow-height = {ROWS}\n")
+    for name, extra in (kettle_configs or {"kettle": ""}).items():
+        (work / f"{name}.config").write_text(base + (extra.strip() + "\n" if extra.strip() else ""))
     ghostty = work / "xdg" / "ghostty"
     ghostty.mkdir(parents=True, exist_ok=True)
     (ghostty / "config").write_text(
@@ -380,24 +390,33 @@ class Runner:
         self.probes = probes
         self.work = work
         self.kettle = kettle
-        self.counter = 0
         # How long past its own timeout a launch probe may take to report.
         self.grace = 15.0
 
     def script(self, body: str) -> Path:
-        self.counter += 1
-        path = self.work / f"payload-{self.counter}.sh"
-        path.write_text("#!/bin/sh\n" + body + "\n")
-        path.chmod(0o755)
+        """One script per distinct body, reused across launches. macOS assesses
+        a script the first time it runs, which costs about 120 ms, so a new
+        script per launch would add that to every shell time."""
+        text = "#!/bin/sh\n" + body + "\n"
+        path = self.work / f"payload-{hashlib.sha256(text.encode()).hexdigest()[:16]}.sh"
+        if not path.exists():
+            path.write_text(text)
+            path.chmod(0o755)
         return path
 
-    def launch(self, name: str, body: str, timeout: float) -> subprocess.Popen:
+    def launch(self, name: str, body: str, timeout: float,
+               params: Optional[Dict[str, str]] = None) -> subprocess.Popen:
+        """Start `name` running `body` after the stamp. Values that change per
+        launch go in a params file the script sources, so the script stays the
+        same file."""
         stamp = self.work / "stamp"
         # A failed launch writes no result, so nothing from the previous round
         # may be left to be read in its place.
         for stale in (stamp, Path(str(stamp) + ".pid"), self.work / "done", self.work / "launch.json"):
             stale.unlink(missing_ok=True)
-        payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n{body}')
+        params_file = self.work / "params"
+        params_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in (params or {}).items()))
+        payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{body}')
         argv = terminal_argv(name, payload, self.work, self.kettle)
         # Its own session, so the probe leads a process group holding only it
         # and what it starts; stop() can clean that group up if it must.
@@ -478,54 +497,117 @@ class Runner:
         digits = "".join(ch for ch in info.split("=")[-1] if ch.isdigit())
         return int(digits) if digits else None
 
+    def pid(self) -> Optional[int]:
+        pid_file = Path(str(self.work / "stamp") + ".pid")
+        try:
+            return int(pid_file.read_text())
+        except (OSError, ValueError):
+            return None
+
+    def frontmost(self) -> bool:
+        pid = self.pid()
+        return pid is not None and self.frontmost_pid() == pid
+
+    def activate(self) -> bool:
+        """Bring the launched terminal to the front by its pid, as a click
+        would: some terminals launched from a script stay behind the window
+        that launched them."""
+        pid = self.pid()
+        if pid is None:
+            return False
+        for _ in range(3):
+            if self.frontmost_pid() == pid:
+                return True
+            subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of '
+                            f"(first process whose unix id is {pid}) to true"], capture_output=True)
+            time.sleep(0.3)
+        return self.frontmost_pid() == pid
+
+    @staticmethod
+    def end_sampler(loop: subprocess.Popen) -> None:
+        """Stop a memsample loop this runner started, and reap it."""
+        if loop.poll() is None:
+            loop.terminate()
+        try:
+            loop.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            loop.kill()
+            loop.wait()
+
     def startup(self, name: str) -> dict:
         # Hold the window for a second so terminals that spawn the child before
         # showing a window still reach the window server.
         process = self.launch(name, "exec /bin/sleep 1", 20)
         return self.finish(process, 20)
 
-    def idle(self, name: str, settle: float, window: float) -> dict:
+    def idle(self, name: str, settle: float, window: float, activate: bool) -> dict:
         process = self.launch(name, f"exec /bin/sleep {settle + window + 5}", settle + window + 20)
         if not self.wait_for(self.work / "stamp", 20):
             self.stop(process, 30)
             return {"error": "the terminal never ran its payload"}
+        activated = self.activate() if activate else None
+        checks = [self.frontmost()]
         time.sleep(settle)
         first = self.sample()
-        time.sleep(window)
+        time.sleep(window / 2)
+        checks.append(self.frontmost())
+        time.sleep(window / 2)
         second = self.sample()
-        pid_file = Path(str(self.work / "stamp") + ".pid")
-        focused = pid_file.exists() and self.frontmost_pid() == int(pid_file.read_text())
+        checks.append(self.frontmost())
         if not self.stop(process, 30):
             return {"error": "the terminal did not stop"}
         if not first or not second:
             return {"error": "terminal exited before sampling"}
-        return {
-            "cpu_percent": (second["cpu_ns"] - first["cpu_ns"]) / (window * 1e9) * 100,
-            "wakeups_per_second": (second["wakeups"] - first["wakeups"]) / window,
-            "footprint_mib": second["footprint"] / 2**20,
-            "rss_mib": second["rss"] / 2**20,
-            "frontmost": focused,
-        }
+        return {**idle_row(first, second, window, checks), "activated": activated}
 
-    def flood_memory(self, name: str, flood: Path) -> dict:
+    def flood_memory(self, name: str, flood: Path, offsets: Sequence[float], activate: bool,
+                     footprint_detail: bool) -> dict:
         done = self.work / "done"
-        process = self.launch(name, f'cat "{flood}"\n: > "{done}"\nexec /bin/sleep 30', 120)
-        if not self.wait_for(done, 100):
-            self.stop(process, 60)
-            return {"error": "the flood never finished"}
-        time.sleep(3)
-        sample = self.sample()
+        hold = max(offsets) + 10
+        process = self.launch(name, f'cat "{flood}"\n"{self.probes["stamp"]}" "{done}"\nexec /bin/sleep {hold}',
+                              150)
+        pid = self.pid() if self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20) else None
+        if pid is None:
+            self.stop(process, 30)
+            return {"error": "the terminal never started"}
+        # A 100 ms timeline from launch to past the last offset, written to a
+        # file (a pipe left undrained would fill and stall the sampler).
+        timeline = self.work / "timeline.jsonl"
+        with timeline.open("w") as sink:
+            loop = subprocess.Popen([str(self.probes["memsample"]), str(pid), "100", str(int((150 + hold) * 10))],
+                                    stdout=sink, stderr=subprocess.DEVNULL)
+        if not self.wait_for(self.work / "stamp", 20):
+            self.end_sampler(loop)
+            self.stop(process, 30)
+            return {"error": "the terminal never ran its payload"}
+        activated = self.activate() if activate else None
+        done_ns = read_stamp(done, 100) if self.wait_for(done, 100) else None
+        frontmost = self.frontmost()
+        detail = {}
+        if done_ns is not None:
+            for offset in sorted(offsets):
+                delay = (done_ns + offset * 1e9 - time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)) / 1e9
+                if delay > 0:
+                    time.sleep(delay)
+                if footprint_detail:
+                    detail[f"{offset:g}"] = footprint_detail_at(pid, self.work)
+            time.sleep(0.3)
+        # The sampler goes first, while the launch probe still owns the
+        # terminal: once the terminal is reaped its pid can be reused.
+        self.end_sampler(loop)
         if not self.stop(process, 60):
             return {"error": "the terminal did not stop"}
-        if not sample:
-            return {"error": "terminal exited before sampling"}
-        return {"footprint_mib": sample["footprint"] / 2**20,
-                "max_footprint_mib": sample["max_footprint"] / 2**20,
-                "rss_mib": sample["rss"] / 2**20}
+        samples = [json.loads(line) for line in timeline.read_text().splitlines() if line.strip()]
+        row = flood_row([(s["t_ns"], s["footprint"], s["max_footprint"]) for s in samples], done_ns, offsets)
+        row.update({"frontmost": frontmost, "activated": activated})
+        if detail:
+            row["footprint_detail"] = detail
+        return row
 
     def vtebench(self, name: str, vtebench: Path, benchmarks: Path, dat: Path, seconds: int) -> dict:
         process = self.launch(
-            name, f'exec "{vtebench}" -s -b "{benchmarks}" --dat "{dat}" --max-secs {seconds}', 900
+            name, f'exec "{vtebench}" -s -b "{benchmarks}" --dat "$DAT" --max-secs {seconds}', 900,
+            params={"DAT": str(dat)},
         )
         if self.finish(process, 900).get("killed", True):
             return {"error": "vtebench did not finish in time"}
@@ -539,6 +621,84 @@ class Runner:
             raise SystemExit(f"vtebench in {name} produced no samples for {', '.join(missing)}")
         row["dat"] = dat.name
         return row
+
+
+def read_stamp(path: Path, timeout: float) -> Optional[int]:
+    """The time a `stamp` file records, once it is fully written: the file
+    appears when stamp opens it, before its buffered line lands."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fields = path.read_text().split()
+            if len(fields) == 3:
+                return int(fields[0])
+        except (OSError, ValueError):
+            pass
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.01)
+
+
+def idle_row(first: dict, second: dict, window: float, checks: List[bool]) -> dict:
+    """A round counts only if the window was frontmost at settle start, midway
+    through the sampling window and at its end: blinking cursors run only in
+    a focused window."""
+    return {
+        "cpu_percent": (second["cpu_ns"] - first["cpu_ns"]) / (window * 1e9) * 100,
+        "wakeups_per_second": (second["wakeups"] - first["wakeups"]) / window,
+        "footprint_mib": second["footprint"] / 2**20,
+        "rss_mib": second["rss"] / 2**20,
+        "frontmost": all(checks),
+        "frontmost_checks": checks,
+    }
+
+
+def flood_row(samples: List[tuple], done_ns: Optional[int], offsets: Sequence[float]) -> dict:
+    """Memory columns from a (t_ns, footprint, lifetime max) timeline.
+
+    peak: the highest footprint seen, including the kernel's lifetime maximum.
+    doneN: the first sample at or after N seconds past the flood's end; done+20
+    falls after Kettle's 10 s and kitty's 15 s blink timeouts plus the driver's
+    roughly 1 s release. release_s: when the footprint first came within one
+    8 MiB driver chunk of the last column. A flood that never finished, or a
+    timeline that ends early, is an error rather than a silent sample.
+    """
+    if done_ns is None:
+        return {"error": "the flood never finished"}
+    if not samples:
+        return {"error": "no memory samples"}
+    row: dict = {"done_ok": True,
+                 "peak_mib": max(max(fp, peak) for _, fp, peak in samples) / 2**20}
+    for offset in offsets:
+        target = done_ns + int(offset * 1e9)
+        after = [fp for t, fp, _ in samples if t >= target]
+        if not after:
+            return {"error": f"no sample at done+{offset:g} s"}
+        row[f"done{offset:g}_mib"] = after[0] / 2**20
+    settled = row[f"done{max(offsets):g}_mib"]
+    release = next((t for t, fp, _ in samples if t >= done_ns and fp / 2**20 <= settled + 8), None)
+    row["release_s"] = (release - done_ns) / 1e9 if release is not None else None
+    row["timeline"] = [[round((t - done_ns) / 1e6), round(fp / 2**20, 2)] for t, fp, _ in samples]
+    return row
+
+
+def footprint_graphics(data: dict) -> Dict[str, dict]:
+    """The (graphics) categories of `footprint -j` output, which hold the GPU
+    driver's pools. Their names carry no paths."""
+    categories = data.get("processes", [{}])[0].get("categories", {})
+    return {name: {"dirty_mib": value.get("dirty", 0) / 2**20, "regions": value.get("regions", 0)}
+            for name, value in categories.items() if name.endswith("(graphics)")}
+
+
+def footprint_detail_at(pid: int, work: Path) -> Dict[str, dict]:
+    """Diagnostic only: walking the address space can perturb the process."""
+    out = work / "footprint.json"
+    out.unlink(missing_ok=True)
+    subprocess.run(["footprint", "-v", "-w", "-j", str(out), str(pid)], capture_output=True)
+    try:
+        return footprint_graphics(json.loads(out.read_text()))
+    except (OSError, json.JSONDecodeError):
+        return {"error": "footprint produced no data"}
 
 
 # === Parsing and statistics ==========================================
@@ -753,7 +913,19 @@ def row_value(workload: str, row: dict, metric: str) -> Optional[float]:
     return float(value) if is_number(value) else None
 
 
-def workload_metrics(workload: str, rows: Dict[str, List[dict]]) -> Dict[str, Dict[str, List[Optional[float]]]]:
+def flood_metrics(offsets: Sequence[float]) -> tuple:
+    """The flood columns for a session's offsets: the peak, then one per offset."""
+    return ("peak_mib",) + tuple(f"done{offset:g}_mib" for offset in offsets)
+
+
+def metrics_for(workload: str, meta: dict) -> tuple:
+    if workload == "flood-memory":
+        return flood_metrics(meta.get("flood_offsets") or DEFAULT_FLOOD_OFFSETS)
+    return METRICS.get(workload, ())
+
+
+def workload_metrics(workload: str, rows: Dict[str, List[dict]],
+                     meta: Optional[dict] = None) -> Dict[str, Dict[str, List[Optional[float]]]]:
     """{metric: {terminal: [value per round]}} with rounds aligned by index."""
     if workload == "vtebench":
         benches = sorted({bench for runs in rows.values() for run in runs if "error" not in run
@@ -768,7 +940,7 @@ def workload_metrics(workload: str, rows: Dict[str, List[dict]]) -> Dict[str, Di
                 for run in runs
             ]
         return values
-    metrics = [key for key in METRICS.get(workload, ())
+    metrics = [key for key in metrics_for(workload, meta or {})
                if any(is_number(run.get(key)) for runs in rows.values() for run in runs)]
     return {metric: {name: [row_value(workload, run, metric) for run in runs] for name, runs in rows.items()}
             for metric in metrics}
@@ -778,10 +950,11 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     """Per-workload estimates, intervals and comparisons for one session."""
     analysis: Dict[str, dict] = {}
     kettle = names[0]
+    unranked = set(results.get("unranked", []))
     for workload, rows in results["workloads"].items():
         mean_based = workload == "vtebench"
         metrics: Dict[str, dict] = {}
-        for metric, per_name in workload_metrics(workload, rows).items():
+        for metric, per_name in workload_metrics(workload, rows, results.get("meta")).items():
             terminals = {}
             for name in names:
                 present = [v for v in per_name.get(name, []) if v is not None]
@@ -800,12 +973,13 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
             if ab and len(names) == 2:
                 entry["ab"] = compare(per_name.get(names[0], []), per_name.get(names[1], []))
             elif kettle in terminals:
-                others = {name: t for name, t in terminals.items() if name != kettle}
+                ranked = {name: t for name, t in terminals.items() if name not in unranked}
+                others = {name: t for name, t in ranked.items() if name != kettle}
                 if others:
                     best = min(others, key=lambda name: others[name]["estimate"])
                     entry["best_other"] = best
                     entry["vs_best"] = compare(per_name[best], per_name[kettle])
-                    order = sorted(terminals, key=lambda name: terminals[name]["estimate"])
+                    order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
                     entry["rank"] = order.index(kettle) + 1
             metrics[metric] = entry
         info: dict = {"metrics": metrics}
@@ -877,18 +1051,21 @@ def summarize(results: dict, names: List[str], ab: bool) -> str:
 
 def session_countable(meta: dict) -> bool:
     """A session counts only if its preflight was clean, Kettle ran from an
-    app bundle, and every requested round finished."""
-    return not meta.get("refusals") and not meta.get("bare") and meta.get("complete") is True
+    app bundle, every requested round finished, and nothing walked the
+    terminals' memory mid-measurement (--footprint-detail)."""
+    return (not meta.get("refusals") and not meta.get("bare") and not meta.get("footprint_detail")
+            and meta.get("complete") is True)
 
 
-def round_ok(workload: str, run: dict) -> bool:
+def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
     if run.get("warmup"):
         return True
     if "error" in run or run.get("killed"):
         return False
     if workload == "vtebench":
         return bool(run.get("means_ms"))
-    return all(is_number(run.get(key)) for key in REQUIRED.get(workload, ()))
+    required = metrics_for(workload, meta or {}) if workload == "flood-memory" else REQUIRED.get(workload, ())
+    return all(is_number(run.get(key)) for key in required)
 
 
 def rounds_complete(results: dict, meta: dict) -> bool:
@@ -898,7 +1075,7 @@ def rounds_complete(results: dict, meta: dict) -> bool:
     for workload, rows in results["workloads"].items():
         expected = rounds.get(workload, 0) + (meta.get("warmup", 0) if workload == "startup" else 0)
         for runs in rows.values():
-            if len(runs) != expected or not all(round_ok(workload, run) for run in runs):
+            if len(runs) != expected or not all(round_ok(workload, run, meta) for run in runs):
                 return False
     return True
 
@@ -963,10 +1140,15 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                 or control["configs"].get("kettle-a", "") != control["configs"].get("kettle-b", "")):
             raise SystemExit(f"--aa {Path(aa).name} does not run the same build and config on both sides")
         # The A/A calibrates the harness and the machine, not a build, so every
-        # setting but the binaries and configs under test must match.
+        # setting but the binaries and configs under test must match. Its round
+        # counts may differ (fewer rounds only widen its gates), and only the
+        # tools both ran are compared.
         reference = counted[0] if counted else sessions[0]
-        differs = sorted(key for key in control["setup"] if key not in ("identity", "configs")
+        differs = sorted(key for key in control["setup"] if key not in ("identity", "configs", "rounds", "tool_hashes")
                          and control["setup"][key] != reference["setup"][key])
+        tools_a, tools_b = control["setup"].get("tool_hashes") or {}, reference["setup"].get("tool_hashes") or {}
+        if any(tools_a[name] != tools_b[name] for name in tools_a.keys() & tools_b.keys()):
+            differs.append("tool_hashes")
         if differs:
             raise SystemExit(f"--aa {Path(aa).name} and {reference['label']} differ in {', '.join(differs)}")
         # Only what the A/B tests may differ: the B side's build or config.
@@ -1392,6 +1574,29 @@ class Recorder:
         os.replace(partial, self.path)
 
 
+def config_record(configs: Dict[str, str]) -> tuple:
+    """(public, local) records of each Kettle entry's extra config: a digest
+    for results.json, the text itself only in the local manifest, since a
+    config line can carry paths or other private values."""
+    public = {name: "sha256:" + hashlib.sha256(text.encode()).hexdigest() if text else ""
+              for name, text in configs.items()}
+    return public, dict(configs)
+
+
+def is_ab(kettle: Dict[str, str]) -> bool:
+    """A run is an A/B whenever it has a B side, even one that differs from
+    A only by config."""
+    return "kettle-a" in kettle and "kettle-b" in kettle and "kettle" not in kettle
+
+
+def variant_name(label: str) -> str:
+    """The entry name for --kettle-variant LABEL; the A/B sides' names are
+    reserved so a variant can never pass for one."""
+    if not label or label.lower() in ("a", "b"):
+        raise ValueError(f"--kettle-variant name {label!r} is reserved or empty")
+    return f"kettle-{label}"
+
+
 def default_out_dir(root: Path) -> Path:
     return root / datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
@@ -1452,6 +1657,18 @@ def main() -> int:
                         help="the measured terminal hosting this shell, allowed to stay open (must be an ancestor)")
     parser.add_argument("--wait-quiet", type=float, default=30.0,
                         help="minutes to wait for load under the limit before the preflight decides")
+    parser.add_argument("--warmup", type=int, default=1,
+                        help="discarded launches per terminal before the startup rounds")
+    parser.add_argument("--flood-offsets", default="3,20",
+                        help="seconds after the flood ends at which memory columns are read")
+    parser.add_argument("--no-activate", action="store_true",
+                        help="leave idle and flood windows unfocused instead of bringing each to the front")
+    parser.add_argument("--footprint-detail", action="store_true",
+                        help="record `footprint` graphics categories at each flood offset (diagnostic sessions only)")
+    parser.add_argument("--kettle-b-config", action="append", default=[], metavar="LINE",
+                        help="config line for kettle-b only; without --kettle-b, B is the same binary as A")
+    parser.add_argument("--kettle-variant", action="append", default=[], metavar="NAME=LINES",
+                        help="an unranked Kettle entry kettle-NAME with extra config lines (separate with ';')")
     parser.add_argument("--make-bundle", nargs=2, metavar=("BINARY", "APP"),
                         help="put a Kettle binary in an ad-hoc signed copy of the installed app and exit")
     parser.add_argument("--combine", nargs="+", metavar="DIR", help="merge session directories and exit")
@@ -1471,14 +1688,30 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown workloads: {', '.join(sorted(unknown))}")
     rounds = resolve_rounds(args)
+    offsets = [float(value) for value in args.flood_offsets.split(",") if value]
+    unranked: List[str] = []
 
-    if args.kettle_b:
-        kettle = {"kettle-a": args.kettle, "kettle-b": args.kettle_b}
+    if args.kettle_b or args.kettle_b_config:
+        kettle = {"kettle-a": args.kettle, "kettle-b": args.kettle_b or args.kettle}
         names = ["kettle-a", "kettle-b"]
+        kettle_configs = {"kettle-a": "", "kettle-b": "\n".join(args.kettle_b_config)}
         skipped = {}
     else:
         kettle = {"kettle": args.kettle}
         names = ["kettle"]
+        kettle_configs = {"kettle": ""}
+        for variant in args.kettle_variant:
+            label, _, lines = variant.partition("=")
+            if not lines:
+                parser.error(f"--kettle-variant needs NAME=LINES, got {variant!r}")
+            try:
+                name = variant_name(label)
+            except ValueError as error:
+                parser.error(str(error))
+            kettle[name] = args.kettle
+            kettle_configs[name] = "\n".join(line.strip() for line in lines.split(";"))
+            names.append(name)
+            unranked.append(name)
         skipped = {}
         for peer in [p for p in args.peers.split(",") if p]:
             if peer not in APPS:
@@ -1512,7 +1745,10 @@ def main() -> int:
         subprocess.run(["cargo", "build", "--locked", "--release", "-p", "kettle"], cwd=REPO, check=True)
     if not args.allow_bare and Path(args.kettle).resolve() == DEFAULT_KETTLE.resolve() and DEFAULT_KETTLE.exists():
         # The local build is measured the way users run it: inside an app.
-        kettle[names[0]] = str(bundle_kettle(DEFAULT_KETTLE, tools / "kettle-local.app", installed_template()))
+        local = str(bundle_kettle(DEFAULT_KETTLE, tools / "kettle-local.app", installed_template()))
+        for name, path in list(kettle.items()):
+            if path == args.kettle:
+                kettle[name] = local
     require_bundles(kettle, args.allow_bare)
     bare = [name for name, path in kettle.items() if not in_app_bundle(Path(path))]
 
@@ -1552,9 +1788,9 @@ def main() -> int:
                    + ", ".join(f"{w} {rounds[w]}" for w in workloads)
                    + f", {COLS}x{ROWS} grid, default configs, fd soft limit "
                    f"{resource.getrlimit(resource.RLIMIT_NOFILE)[0]}",
-        "terminals": names, "skipped": skipped,
+        "terminals": names, "skipped": skipped, "unranked": unranked,
         "meta": {
-            "label": args.label or out_dir.name, "mode": "ab" if args.kettle_b else "standing",
+            "label": args.label or out_dir.name, "mode": "ab" if is_ab(kettle) else "standing",
             "started": started.isoformat(timespec="seconds"), "date": started.date().isoformat(),
             # countable is final only once every round has run (see
             # session_countable); an interrupted session never counts.
@@ -1566,12 +1802,14 @@ def main() -> int:
             "tools": tools_running(state["procs"] or []), "host_terminal": host_terminal,
             "fd_limit": resource.getrlimit(resource.RLIMIT_NOFILE)[0], "rounds": rounds,
             "vtebench_seconds": args.vtebench_seconds, "vtebench_unit": "us",
-            "idle_settle": args.idle_settle, "idle_window": args.idle_window,
+            "idle_settle": args.idle_settle, "idle_window": args.idle_window, "warmup": args.warmup,
+            "flood_offsets": offsets, "activate": not args.no_activate,
+            "footprint_detail": args.footprint_detail, "configs": config_record(kettle_configs)[0],
             "identity": {},
         },
         "workloads": {},
     }
-    local_manifest = {}
+    local_manifest = {"configs": config_record(kettle_configs)[1]}
     for name in names:
         public, local = terminal_identity(kettle.get(name) or APPS[name])
         results["meta"]["identity"][name] = public
@@ -1584,7 +1822,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="kettle-standing-") as tmp:
         work = Path(tmp)
-        write_configs(work)
+        write_configs(work, kettle_configs)
         runner = Runner(probes, work, kettle)
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
@@ -1594,17 +1832,23 @@ def main() -> int:
         for workload in workloads:
             rows: Dict[str, List[dict]] = {name: [] for name in names}
             results["workloads"][workload] = rows
-            for round_index in range(rounds[workload]):
+            # Warm-up launches run first for every terminal, are flagged, and
+            # never enter a statistic; they absorb first-launch costs such as
+            # the payload script's one-time assessment.
+            warmups = args.warmup if workload == "startup" else 0
+            for round_index in range(warmups + rounds[workload]):
                 for name in rotated(names, round_index):
                     if workload == "startup":
                         row = runner.startup(name)
                     elif workload == "idle":
-                        row = runner.idle(name, args.idle_settle, args.idle_window)
+                        row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
                     elif workload == "flood-memory":
-                        row = runner.flood_memory(name, flood)
+                        row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
                     else:
                         row = runner.vtebench(name, vtebench, benchmarks,
                                               out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
+                    if round_index < warmups:
+                        row["warmup"] = True
                     row["at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
                     row["load"] = list(os.getloadavg()[:2])
                     rows[name].append(row)
@@ -1615,7 +1859,7 @@ def main() -> int:
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
     recorder.write()
-    summary = summarize(results, names, bool(args.kettle_b))
+    summary = summarize(results, names, is_ab(kettle))
     (out_dir / "summary.md").write_text(summary + "\n")
     print(summary)
     return 0
