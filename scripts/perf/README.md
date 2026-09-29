@@ -104,6 +104,73 @@ digest, since a line can carry a path or other private value; the text goes in
 the local manifest. `--flood-offsets` sets the flood columns (default `3,20`:
 done+3 and done+20), and sessions with different offsets never combine.
 
+### Keystroke to screen
+
+`--workloads latency` adds a keystroke-to-screen workload. It is never in the
+default list: it posts key presses, and it needs the machine to itself and two
+macOS grants for its probe. Run `--latency-check` once to build the probe, ask
+for the grants and check them. Pass `--latency-sign-identity` (for example
+`"Apple Development"`) to sign the probe with a certificate: macOS keys the
+grants to the probe's signature, so an ad hoc probe needs new grants after
+every rebuild. The probe rebuilds only when its source or identity changes. A
+rebuilt probe can also make macOS ask once more, on screen, to let it bypass
+the private window picker; the probe posts nothing while any window covers the
+measured block.
+
+- **The payload.** Every terminal runs the same `keyblock`, reading
+  `/dev/tty` in raw mode with the cursor hidden and steady. Each byte it
+  reads toggles a 16x4-cell reverse-video block in one `write()`, and a
+  32-byte record logs when it read and when it wrote.
+- **The probe.** `KettleLatencyProbe.app` (`latency-probe.swift`) runs through
+  `open` as an agent app, so it holds its own grants and never takes focus.
+  It calibrates the block from 6 guarded toggles, then streams just that
+  rectangle of the display through ScreenCaptureKit, so compositing,
+  translucency and blur are inside the measurement. It posts `j` at the HID
+  tap (`--latency-inject pid` posts to the terminal instead, for comparison).
+  A key's latency runs from its post to the display time of the first frame
+  with at least 95 % of the block flipped, censored at `--latency-censor-ms`
+  (500).
+- **Guards.** Before every key the measured window itself must be the
+  frontmost window (not just its app), with no window in front of its block,
+  and no other input may have arrived since the last key; if focus changes
+  during a key, the round stops. The key's time is taken after these checks,
+  just before it is posted. The probe posts nothing after a deadline the
+  harness sets and exits there, so it never outlives its round. A round that
+  fails is recorded with its reason, and so is one whose keys did not reach
+  the payload one byte each.
+- **Halves.** The payload's record for the same key splits it into an input
+  half (post to read) and an output half (write to display).
+- **What else runs.** A standing adds Kettle opaque and unblurred
+  (`kettle-opaque`, off with `--no-latency-kettle-opaque`) and bare-window
+  floors (`--latency-floors`, default `ca,metal-sync,metal-nosync`) that show
+  the pipeline's cost without a terminal. Both are reported beside the
+  terminals and never ranked. An A/B measures its two builds only.
+
+Defaults are 10 rounds, 20 discarded and 100 measured keys per round
+(`--latency-rounds`, `--latency-warmup`, `--latency-keys`). The row reports
+the mean with a two-stage bootstrap interval: rounds (launches), then keys
+within each drawn round, since one launch's keys share a window and a GPU
+state. Median, p95, p99 and the two halves come from every counted key of the
+session. Kettle is ranked on the mean against the fastest other terminal, with
+the ratio and the difference in ms from one bootstrap, and the claim rule
+applies as for every other row. A censored key counts at the censor bound, in
+every figure. A row with more than 1 % of its keys censored is unranked, and
+an entry that lost 3 or more of 10 rounds is not measured; the other entries
+still are. An A/B needs both sides ranked, and its gate is in ms: a change
+counts when both sessions' difference intervals exclude 0 on the same side
+and the smaller difference is at least the larger of 1 ms and twice the
+latency A/A's. A change not aimed at latency passes when every difference
+interval tops out at +1 ms or less.
+
+Latency counts on its own: a lost latency round never costs the session its
+other rows, nor a lost idle round the latency rows, and a refresh rate that
+changed mid-session voids latency. When a
+whole rotation of latency rounds fails in a row (an alert over the windows,
+lost grants), the rest of the workload is recorded as not run. Each round also
+records how long after ScreenCaptureKit delivered the frame it was displayed:
+about 13 ms on a 60 Hz display, since a frame is handed over before its
+scheduled display time.
+
 ### Statistics
 
 Rounds rotate the terminal order. Startup (time to window and to shell), idle
@@ -117,9 +184,10 @@ rounds, and the number of rounds Kettle won. Idle rows count only rounds in
 which the terminal was frontmost, since blinking cursors run only in a focused
 window.
 
-Publication defaults are 30 startup, 5 idle, 5 flood and 5 vtebench rounds,
-10 s per vtebench benchmark (upstream's default), a 30 s idle window and the
-256-descriptor limit the Dock gives apps. `--rounds` overrides every count.
+Publication defaults are 30 startup, 5 idle, 5 flood, 5 vtebench and 10
+latency rounds, 10 s per vtebench benchmark (upstream's default), a 30 s idle
+window and the 256-descriptor limit the Dock gives apps. `--rounds` overrides
+every count.
 
 ### Sessions, preflight and labels
 
