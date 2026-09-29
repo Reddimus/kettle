@@ -9,6 +9,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::upload::{RetainedBytes, UploadCounters, UploadCounts, write_buffer_if_changed};
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct OutlineInstance {
@@ -188,6 +190,9 @@ pub struct OutlinePipeline {
     instances: wgpu::Buffer,
     capacity: usize,
     count: u32,
+    screen_held: RetainedBytes,
+    instances_held: RetainedBytes,
+    counters: UploadCounters,
 }
 
 impl OutlinePipeline {
@@ -281,9 +286,18 @@ impl OutlinePipeline {
             instances,
             capacity,
             count: 0,
+            screen_held: RetainedBytes::default(),
+            instances_held: RetainedBytes::default(),
+            counters: UploadCounters::default(),
         }
     }
 
+    /// What this pipeline has written to the GPU so far.
+    pub(crate) fn upload_counts(&self) -> UploadCounts {
+        self.counters.snapshot()
+    }
+
+    /// Writes only what changed since the last upload (see `upload.rs`).
     pub fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -291,13 +305,15 @@ impl OutlinePipeline {
         screen: [f32; 2],
         data: &[OutlineInstance],
     ) {
-        queue.write_buffer(
+        write_buffer_if_changed(
+            queue,
             &self.screen_buf,
-            0,
+            &mut self.screen_held,
             bytemuck::bytes_of(&Screen {
                 size: screen,
                 _pad: [0.0; 2],
             }),
+            &self.counters,
         );
         if data.len() > self.capacity {
             let Some(capacity) = data.len().checked_next_power_of_two() else {
@@ -323,10 +339,15 @@ impl OutlinePipeline {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            self.instances_held.invalidate();
         }
-        if !data.is_empty() {
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(data));
-        }
+        write_buffer_if_changed(
+            queue,
+            &self.instances,
+            &mut self.instances_held,
+            bytemuck::cast_slice(data),
+            &self.counters,
+        );
         self.count = u32::try_from(data.len()).unwrap_or_else(|_| {
             log::warn!(
                 "pane outline instance count {} exceeds u32; skipping upload",
