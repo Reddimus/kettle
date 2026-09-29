@@ -19,6 +19,10 @@ argument path. Workloads:
   vtebench      Alacritty's vtebench at a pinned revision, built from a copy
                 that records microseconds instead of whole milliseconds, with
                 its scripts' window-size lookup fixed for macOS
+  latency       (opt in with --workloads; never a default) keystroke to
+                screen: KettleLatencyProbe posts the key j, and the time runs
+                to the display time of the first captured frame showing the
+                payload's block flipped (see latency-probe.swift)
 
 Rounds rotate the terminal order so no terminal always runs first. Startup,
 idle and flood rows report medians; vtebench reports the mean of each
@@ -63,12 +67,13 @@ import shlex
 import shutil
 import signal
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 PROBES = Path(__file__).resolve().parent / "macos-standing"
@@ -87,9 +92,12 @@ APPS = {
     "ghostty": "/Applications/Ghostty.app/Contents/MacOS/ghostty",
 }
 WORKLOADS = ("startup", "idle", "flood-memory", "vtebench")
+# Never in the default list: latency posts key presses, needs the probe's
+# Screen Recording and Accessibility grants, and needs the machine to itself.
+OPT_IN_WORKLOADS = ("latency",)
 # Publication defaults. Counts are multiples of five so a five-terminal
 # rotation is balanced.
-ROUNDS = {"startup": 30, "idle": 5, "flood-memory": 5, "vtebench": 5}
+ROUNDS = {"startup": 30, "idle": 5, "flood-memory": 5, "vtebench": 5, "latency": 10}
 # The metrics each workload reports; a round's other numbers (exit_ms, the
 # resident size) are kept in results.json but never compared or published.
 METRICS = {"startup": ("window_ms", "child_ms"), "idle": ("cpu_percent", "wakeups_per_second", "footprint_mib")}
@@ -103,9 +111,31 @@ MIN_PAIRED_SHARE = 0.8
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
-                "footprint_detail", "startup_phases")
+                "footprint_detail", "startup_phases", "latency")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
+
+# Latency: the probe's bundle id, which its TCC grants are keyed to with its
+# signature; the floors (bare windows, reported and never ranked); the keys
+# the probe's calibration posts before the measured ones (the payload's
+# sequence numbers count them too); the payload's 32-byte log record.
+LATENCY_PROBE_ID = "org.kettle.terminal.latency-probe"
+LATENCY_FLOORS = ("ca", "metal-sync", "metal-nosync", "metal-sync-2")
+LATENCY_CALIBRATION_KEYS = 6
+KEYBLOCK_RECORD = struct.Struct("<4Q")
+# A latency row with more of its keys censored than this, or with more of
+# them outside the display-after-arrival window, is left unranked.
+LATENCY_CENSOR_SHARE = 0.01
+# ScreenCaptureKit hands a frame over before it is displayed; a key whose
+# display time is more than this many refresh periods after the frame's
+# arrival, or before it, came from a frame the probe cannot trust.
+LATENCY_LEAD_PERIODS = 2
+# An entry that loses this share of its latency rounds (focus changed, a
+# window covered the block) is not measured in that session; the others still
+# are, and the session's other workloads still count.
+LATENCY_NOT_MEASURED_SHARE = 0.3
+# Kettle's default is ranked; this variant is published beside it, unranked.
+KETTLE_OPAQUE = "background-opacity = 1\nwindow-blur = false"
 
 BOOTSTRAP = 10_000
 SEED = 7
@@ -120,18 +150,108 @@ BUSY_TOOLS = ("cargo", "rustc", "clang", "swiftc", "swift-frontend", "ld", "xcod
 BUSY_CPU_PERCENT = 10.0
 
 
-def build_probes(tools: Path) -> Dict[str, Path]:
-    """Compile the probes once into `tools`; rebuild when a source is newer."""
+def build_probes(tools: Path, latency: bool = False, sign_identity: Optional[str] = None) -> Dict[str, Path]:
+    """Compile the probes once into `tools`; rebuild when a source is newer.
+    With `latency`, also the keyblock payload, the floor, and the signed
+    KettleLatencyProbe.app."""
     tools.mkdir(parents=True, exist_ok=True)
     built = {}
-    for name, compiler in (("stamp", "clang"), ("memsample", "clang"), ("launch", "swiftc")):
+    helpers = [("stamp", "clang"), ("memsample", "clang"), ("launch", "swiftc")]
+    if latency:
+        helpers += [("keyblock", "clang"), ("latency-floor", "swiftc")]
+    for name, compiler in helpers:
         source = PROBES / (f"{name}.swift" if compiler == "swiftc" else f"{name}.c")
         binary = tools / name
         if not binary.exists() or binary.stat().st_mtime < source.stat().st_mtime:
             command = [compiler, "-O", "-o", str(binary), str(source)]
             subprocess.run(command, check=True)
         built[name] = binary
+    if latency:
+        built["latency-probe"] = build_latency_probe(tools, sign_identity)
     return built
+
+
+def latency_probe_plist() -> bytes:
+    """Info.plist of KettleLatencyProbe.app: an agent app (no Dock icon, never
+    frontmost) whose bundle id carries its TCC grants."""
+    return plistlib.dumps({
+        "CFBundleIdentifier": LATENCY_PROBE_ID,
+        "CFBundleName": "KettleLatencyProbe",
+        "CFBundleExecutable": "latency-probe",
+        "CFBundlePackageType": "APPL",
+        "CFBundleShortVersionString": "1",
+        "CFBundleVersion": "1",
+        "LSMinimumSystemVersion": "14.0",
+        "LSUIElement": True,
+    })
+
+
+def build_latency_probe(tools: Path, identity: Optional[str]) -> Path:
+    """Build and sign KettleLatencyProbe.app, only when its source or signing
+    identity changed: macOS keys the probe's Screen Recording and
+    Accessibility grants to its signature. Signed ad hoc, every rebuild needs
+    new grants; signed with a certificate (--latency-sign-identity), the
+    grants survive rebuilds."""
+    app = tools / "KettleLatencyProbe.app"
+    contents = app / "Contents"
+    source = PROBES / "latency-probe.swift"
+    wanted = {"source": file_sha256(source), "identity": identity or "-"}
+    # Beside the bundle: a file added inside it after signing breaks the seal.
+    record = tools / "KettleLatencyProbe.build.json"
+    try:
+        if json.loads(record.read_text()) == wanted and (contents / "MacOS" / "latency-probe").exists():
+            return app
+    except (OSError, json.JSONDecodeError):
+        pass
+    record.unlink(missing_ok=True)
+    if app.exists():
+        shutil.rmtree(app)
+    (contents / "MacOS").mkdir(parents=True)
+    subprocess.run(["swiftc", "-O", "-o", str(contents / "MacOS" / "latency-probe"), str(source)], check=True)
+    (contents / "Info.plist").write_bytes(latency_probe_plist())
+    subprocess.run(["codesign", "--force", "--sign", identity or "-", "--identifier", LATENCY_PROBE_ID, str(app)],
+                   check=True, capture_output=True)
+    # Written last: an interrupted build is rebuilt next time.
+    record.write_text(json.dumps(wanted))
+    return app
+
+
+def wait_for_text(path: Path, marker: str, timeout: float) -> bool:
+    """Whether `marker` appears in `path` within `timeout` seconds."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if marker in path.read_text(errors="replace"):
+                return True
+        except OSError:
+            pass
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.1)
+
+
+def run_latency_probe(app: Path, args: List[str], work: Path, timeout: float) -> str:
+    """Run the probe as its own app through `open`, so macOS holds the probe,
+    not whatever launched this script, responsible for its grants, and it
+    never becomes frontmost. Returns its stdout. `open -W` drops the exit
+    status, and returns at once when the probe exits before `open` can
+    attach to it, so callers wait for the probe's output instead."""
+    stdout, stderr = work / "probe.stdout", work / "probe.stderr"
+    for path in (stdout, stderr):
+        path.write_text("")
+    subprocess.run(["open", "-g", "-n", "-W", "--stdout", str(stdout), "--stderr", str(stderr), str(app),
+                    "--args", *args], check=False, timeout=timeout)
+    return stdout.read_text(errors="replace")
+
+
+def latency_grants(app: Path, work: Path, request: bool = False) -> Dict[str, bool]:
+    """Whether the probe holds Screen Recording and event posting. Asking
+    (`request`) shows macOS's prompts; only --latency-check does that."""
+    run_latency_probe(app, ["--request" if request else "--check"], work, 120)
+    # Both verdicts print on one line, last.
+    wait_for_text(work / "probe.stdout", "post events:", 10)
+    out = (work / "probe.stdout").read_text(errors="replace")
+    return {"screen_recording": "screen recording: granted" in out, "post_events": "post events: granted" in out}
 
 
 FLOOD_WORDS = (
@@ -408,10 +528,12 @@ class Runner:
         return path
 
     def launch(self, name: str, body: str, timeout: float,
-               params: Optional[Dict[str, str]] = None, phases: bool = False) -> subprocess.Popen:
+               params: Optional[Dict[str, str]] = None, phases: bool = False,
+               argv: Optional[List[str]] = None) -> subprocess.Popen:
         """Start `name` running `body` after the stamp. Values that change per
         launch go in a params file the script sources, so the script stays the
-        same file."""
+        same file. `argv` replaces the terminal and its payload (the latency
+        floors, which are their own windows); nothing then writes the stamp."""
         stamp = self.work / "stamp"
         # A failed launch writes no result, so nothing from the previous round
         # may be left to be read in its place.
@@ -419,8 +541,9 @@ class Runner:
             stale.unlink(missing_ok=True)
         params_file = self.work / "params"
         params_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in (params or {}).items()))
-        payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{body}')
-        argv = terminal_argv(name, payload, self.work, self.kettle)
+        if argv is None:
+            payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{body}')
+            argv = terminal_argv(name, payload, self.work, self.kettle)
         # Every terminal runs with the log filter it ships with, whatever the
         # harness's own shell sets. Kettle's phase stamps go to its stderr,
         # and only a stamped entry's startup rounds get their filter.
@@ -437,6 +560,59 @@ class Runner:
                 [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
                 stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True, env=env,
             )
+
+    def latency(self, name: str, options: dict, seed: int, keep: Optional[Path] = None) -> dict:
+        """One keystroke-to-screen round. The terminal runs keyblock (a floor
+        is its own window), the probe measures its window, and the payload's
+        log splits every key into its input and output halves. The terminal
+        is stopped through its launch probe whatever the probe reports."""
+        log = self.work / "keyblock.log"
+        out = self.work / "latency.json"
+        for stale in (log, out):
+            stale.unlink(missing_ok=True)
+        if name.startswith("floor-"):
+            floor = [str(self.probes["latency-floor"]), name[len("floor-"):], str(log)]
+            process = self.launch(name, "", 600, argv=floor)
+            ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
+        else:
+            process = self.launch(name, f'exec "{self.probes["keyblock"]}" "{log}"', 600)
+            ready = self.wait_for(self.work / "stamp", 30)
+        pid = self.pid()
+        if not ready or pid is None:
+            self.stop(process, 30)
+            return {"error": "the terminal never ran its payload"}
+        time.sleep(1.0)
+        # The probe posts nothing after its deadline and exits there, and
+        # this waits longer than that, so no probe outlives its round.
+        budget = 120 + (LATENCY_CALIBRATION_KEYS + options["warmup"] + options["keys"]) * (
+            0.3 + options["censor_ms"] / 1000 + 0.2)
+        args = ["--pid", str(pid), "--out", str(out), "--keys", str(options["keys"]),
+                "--warmup", str(options["warmup"]), "--censor-ms", str(options["censor_ms"]),
+                "--seed", str(seed), "--inject", options["inject"], "--deadline-ms", str(int(budget * 1000))]
+        started = time.monotonic()
+        try:
+            run_latency_probe(self.probes["latency-probe"], args, self.work, budget + 15)
+        except subprocess.TimeoutExpired:
+            pass
+        # The probe writes its result last, even when it fails or its
+        # deadline passes, and atomically, so the file appears whole.
+        finished = wait_for_text(out, "}", max(1.0, budget + 15 - (time.monotonic() - started)))
+        clean = self.stop(process, 30)
+        if not finished:
+            return {"error": "the latency probe never finished"}
+        try:
+            probe = json.loads(out.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"error": "the latency probe wrote no result"}
+        if keep:
+            # Every sample, for checks results.json does not carry.
+            shutil.copyfile(out, keep)
+        if "error" in probe:
+            return {"error": f"latency probe: {probe['error']}"}
+        row = latency_row(probe, read_keyblock_log(log), options["censor_ms"])
+        if not clean:
+            row["killed"] = True
+        return row
 
     def kill_group(self, process: subprocess.Popen) -> None:
         """Kill a launch probe that stopped responding, with everything it
@@ -673,6 +849,80 @@ def parse_phases(text: str, started_ns: Optional[int]) -> dict:
     return phases
 
 
+def read_keyblock_log(path: Path) -> Dict[int, Tuple[int, int, int]]:
+    """keyblock's records, {seq: (bytes read, t_read, t_written)}. A torn last
+    record (the payload killed mid-write) is dropped."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {}
+    usable = len(data) - len(data) % KEYBLOCK_RECORD.size
+    return {seq: (nbytes, t_read, t_written)
+            for seq, nbytes, t_read, t_written in KEYBLOCK_RECORD.iter_unpack(data[:usable])}
+
+
+def lead_out_of_range(leads: List[float], probe: dict) -> int:
+    """Keys whose display time falls before their frame's arrival, or more
+    than LATENCY_LEAD_PERIODS refresh periods after it."""
+    period_ns = (probe.get("vsync") or {}).get("period_ns") or 0
+    refresh = (probe.get("display") or {}).get("refresh_hz") or 60
+    period_ms = period_ns / 1e6 if period_ns else 1000 / refresh
+    return sum(1 for lead in leads if not 0 <= lead <= LATENCY_LEAD_PERIODS * period_ms)
+
+
+def latency_row(probe: dict, records: Dict[int, Tuple[int, int, int]], censor_ms: float) -> dict:
+    """One latency round from the probe's samples and the payload's log.
+
+    A key's latency runs from the probe's post to the display time of the
+    first frame showing the flip. The payload's record for the same sequence
+    number splits it into an input half (post to the payload's read) and an
+    output half (the payload's write to that display time). Every key must
+    have reached the payload as exactly one byte; anything else is counted
+    as a sequence mismatch.
+    """
+    samples = probe.get("samples") or []
+    measured = [s for s in samples if not s.get("warmup")]
+    latencies: List[float] = []
+    inputs: List[float] = []
+    outputs: List[float] = []
+    leads: List[float] = []
+    censored = mixed = reverted = 0
+    for s in measured:
+        record = records.get(s["seq"])
+        if s.get("censored") or s.get("display") is None:
+            censored += 1
+            continue
+        latencies.append((s["display"] - s["t_post"]) / 1e6)
+        mixed += int(s.get("mixed") or 0)
+        reverted += bool(s.get("reverted"))
+        if s.get("arrival") is not None:
+            leads.append((s["display"] - s["arrival"]) / 1e6)
+        if record is not None and record[0] == 1:
+            inputs.append((record[1] - s["t_post"]) / 1e6)
+            outputs.append((s["display"] - record[2]) / 1e6)
+    posted = LATENCY_CALIBRATION_KEYS + len(samples)
+    # A posted key that never arrived as exactly one byte, or a read nobody
+    # posted.
+    mismatched = (sum(1 for seq in range(1, posted + 1) if records.get(seq, (0,))[0] != 1)
+                  + sum(1 for seq in records if seq > posted))
+    row: dict = {"samples_ms": latencies, "keys": len(measured), "censored": censored,
+                 "mixed_frames": mixed, "reverted": reverted, "seq_mismatch": mismatched,
+                 "inputs_ms": inputs, "outputs_ms": outputs,
+                 "input_ms": statistics.median(inputs) if inputs else None,
+                 "output_ms": statistics.median(outputs) if outputs else None,
+                 # ScreenCaptureKit delivers a frame before the time it is
+                 # displayed; every key's gap is kept and checked.
+                 "leads_ms": leads, "lead_out_of_range": lead_out_of_range(leads, probe),
+                 "activation": probe.get("activation"), "vsync": probe.get("vsync"),
+                 "refresh_hz": (probe.get("display") or {}).get("refresh_hz")}
+    # A censored key counts at the bound here too, as in every statistic.
+    keys = latencies + [float(censor_ms)] * censored
+    if keys:
+        row.update({"mean_ms": statistics.mean(keys), "median_ms": statistics.median(keys),
+                    "p95_ms": percentile(keys, 0.95), "p99_ms": percentile(keys, 0.99)})
+    return row
+
+
 def read_stamp(path: Path, timeout: float) -> Optional[int]:
     """The time a `stamp` file records, once it is fully written: the file
     appears when stamp opens it, before its buffered line lands."""
@@ -872,6 +1122,90 @@ def ratio_of_rounds(base: List[Optional[float]], test: List[Optional[float]], se
             "wins": sum(1 for x, y in pairs if y < x), "n": len(ratios)}
 
 
+def latency_keys(run: dict, censor_ms: float) -> Optional[List[float]]:
+    """A latency round's keys, with each censored key at the censor bound,
+    which can only make a terminal look slower; None if the round failed."""
+    if ("error" in run or run.get("warmup") or run.get("seq_mismatch")
+            or not isinstance(run.get("samples_ms"), list)):
+        return None
+    keys = list(run["samples_ms"]) + [float(censor_ms)] * int(run.get("censored") or 0)
+    return keys or None
+
+
+def pooled_mean(rounds: Sequence[Sequence[float]]) -> float:
+    return sum(sum(r) for r in rounds) / sum(len(r) for r in rounds)
+
+
+def cluster_mean_ci(rounds: List[Optional[List[float]]], seed: int = SEED) -> dict:
+    """Mean over every key of every round, with a 95% interval from a
+    two-stage bootstrap: rounds (launches) with replacement, then keys within
+    each drawn round. Keys of one launch share a window, a GPU state and a
+    compositor path, so they are not independent."""
+    present = [r for r in rounds if r]
+    if not present:
+        return {}
+    rng = random.Random(seed)
+    boots = []
+    for _ in range(BOOTSTRAP):
+        total = count = 0.0
+        for _ in range(len(present)):
+            keys = present[rng.randrange(len(present))]
+            total += sum(rng.choices(keys, k=len(keys)))
+            count += len(keys)
+        boots.append(total / count)
+    boots.sort()
+    return {"mean": pooled_mean(present), "low": boots[250], "high": boots[9_749], "n": len(present)}
+
+
+def cluster_compare(base: List[Optional[List[float]]], test: List[Optional[List[float]]],
+                    seed: int = SEED) -> dict:
+    """test against base on mean latency, rounds paired by index, with 95%
+    intervals from one two-stage bootstrap: each resample draws round
+    indices, then each drawn round's keys for each side. The ratio test/base
+    and the difference test-base share every resample, so the ratio's
+    interval excludes 1 exactly when the difference's excludes 0. A round is
+    won when test's round mean is lower."""
+    pairs = [(b, t) for b, t in zip(base, test) if b and t]
+    if not pairs:
+        return {}
+    rng = random.Random(seed)
+    ratios, diffs = [], []
+    for _ in range(BOOTSTRAP):
+        b_sum = b_count = t_sum = t_count = 0.0
+        for _ in range(len(pairs)):
+            b_keys, t_keys = pairs[rng.randrange(len(pairs))]
+            b_sum += sum(rng.choices(b_keys, k=len(b_keys)))
+            b_count += len(b_keys)
+            t_sum += sum(rng.choices(t_keys, k=len(t_keys)))
+            t_count += len(t_keys)
+        b_mean, t_mean = b_sum / b_count, t_sum / t_count
+        ratios.append(ratio(b_mean, t_mean))
+        diffs.append(t_mean - b_mean)
+    ratios.sort()
+    diffs.sort()
+    b_mean, t_mean = pooled_mean([b for b, _ in pairs]), pooled_mean([t for _, t in pairs])
+    return {"ratio": ratio(b_mean, t_mean), "low": ratios[250], "high": ratios[9_749],
+            "diff": t_mean - b_mean, "diff_low": diffs[250], "diff_high": diffs[9_749],
+            "wins": sum(1 for b, t in pairs if statistics.mean(t) < statistics.mean(b)), "n": len(pairs)}
+
+
+def latency_standing(runs: List[dict], censor_ms: float, planned: int) -> dict:
+    """Whether one entry's latency row may be ranked in its session: not
+    measured if it lost LATENCY_NOT_MEASURED_SHARE of its rounds, and
+    unranked if more than LATENCY_CENSOR_SHARE of its keys were censored."""
+    counted = [run for run in runs if not run.get("warmup")]
+    failed = sum(1 for run in counted if latency_keys(run, censor_ms) is None)
+    good = [run for run in counted if latency_keys(run, censor_ms) is not None]
+    keys = sum(int(run.get("keys") or 0) for run in good)
+    censored = sum(int(run.get("censored") or 0) for run in good)
+    out_of_range = sum(int(run.get("lead_out_of_range") or 0) for run in good)
+    measured = failed < LATENCY_NOT_MEASURED_SHARE * max(planned, len(counted))
+    return {"measured": measured, "failed": failed, "censored": censored, "keys": keys,
+            "lead_out_of_range": out_of_range,
+            "ranked": (measured and keys > 0 and censored <= LATENCY_CENSOR_SHARE * keys
+                       and out_of_range <= LATENCY_CENSOR_SHARE * keys)}
+
+
 def median_ci(values: Sequence[float], seed: int = SEED) -> dict:
     low, high = bootstrap(values, statistics.median, seed)
     return {"median": statistics.median(values), "low": low, "high": high, "n": len(values)}
@@ -956,6 +1290,35 @@ def aa_gate(stats: dict) -> dict:
             "gate": max(0.03, 2 * half)}
 
 
+def latency_aa_gate(stats: dict) -> dict:
+    """A latency A/A's difference interval must contain 0, and it sets the A/B
+    gate: an improvement of at least max(1 ms, 2 x the A/A's |difference|)."""
+    return {"contains_one": stats["diff_low"] <= 0 <= stats["diff_high"], "aa_diff_ms": stats["diff"],
+            "gate_ms": max(1.0, 2 * abs(stats["diff"]))}
+
+
+def latency_ab_verdict(sessions: List[dict], gate_ms: Optional[float] = None) -> dict:
+    """A latency change counts when the first 2 countable sessions, on
+    different dates, both exclude 0 on the same side and the smaller
+    difference clears the gate in ms. `no_regression` is the check for
+    changes that do not aim at latency: every difference interval tops out
+    at +1 ms or less."""
+    countable = first_per_date(sessions, 2)
+    # The no-regression check needs one session: a PR's own A/B.
+    no_regression = all(s["diff_high"] <= 1.0 for s in countable) if countable else None
+    if len(countable) < 2:
+        return {"verdict": "insufficient sessions", "no_regression": no_regression}
+    headline = min((s["diff"] for s in countable), key=abs)
+    clears = gate_ms is None or abs(headline) >= gate_ms
+    if all(s["diff_high"] < 0 for s in countable) and clears:
+        verdict = "lower"
+    elif all(s["diff_low"] > 0 for s in countable) and clears:
+        verdict = "higher"
+    else:
+        verdict = "no change"
+    return {"verdict": verdict, "headline_ms": headline, "gate_ms": gate_ms, "no_regression": no_regression}
+
+
 # === Analysis ========================================================
 
 
@@ -984,9 +1347,15 @@ def metrics_for(workload: str, meta: dict) -> tuple:
     return METRICS.get(workload, ())
 
 
+LATENCY_METRICS = ("mean_ms", "median_ms", "p95_ms", "p99_ms", "input_ms", "output_ms")
+
+
 def workload_metrics(workload: str, rows: Dict[str, List[dict]],
                      meta: Optional[dict] = None) -> Dict[str, Dict[str, List[Optional[float]]]]:
     """{metric: {terminal: [value per round]}} with rounds aligned by index."""
+    if workload == "latency":
+        return {metric: {name: [row_value(workload, run, metric) for run in runs] for name, runs in rows.items()}
+                for metric in LATENCY_METRICS}
     if workload == "vtebench":
         benches = sorted({bench for runs in rows.values() for run in runs if "error" not in run
                           for bench in vtebench_means(run)})
@@ -1022,6 +1391,9 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     kettle = names[0]
     unranked = set(results.get("unranked", []))
     for workload, rows in results["workloads"].items():
+        if workload == "latency":
+            analysis[workload] = analyze_latency(results, rows, names, ab)
+            continue
         mean_based = workload == "vtebench"
         metrics: Dict[str, dict] = {}
         for metric, per_name in workload_metrics(workload, rows, results.get("meta")).items():
@@ -1068,12 +1440,118 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     return analysis
 
 
+def latency_censor_ms(results: dict) -> float:
+    return float(((results.get("meta") or {}).get("latency") or {}).get("censor_ms", 500))
+
+
+def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str], ab: bool) -> dict:
+    """The latency workload: every entry that ran (the terminals, then the
+    unranked opaque variant and the floors), with mean latency from the
+    two-stage bootstrap. Kettle is compared with the fastest other ranked
+    terminal, or B with A, on every key of every paired round."""
+    censor_ms = latency_censor_ms(results)
+    planned = ((results.get("meta") or {}).get("rounds") or {}).get("latency", 0)
+    entries = [name for name in names if name in rows] + [name for name in rows if name not in names]
+    unranked = set(results.get("unranked", []))
+    keys = {name: [latency_keys(run, censor_ms) for run in rows[name]] for name in entries}
+    standing = {name: latency_standing(rows[name], censor_ms, planned) for name in entries}
+    metrics: Dict[str, dict] = {}
+    # Median, percentiles and halves come from every counted key of the
+    # session, never from per-round summaries.
+    pooled = {name: [k for r in keys[name] if r for k in r] for name in entries}
+    halves = {half: {name: [v for run in rows[name] if latency_keys(run, censor_ms) is not None
+                            for v in run.get(half) or []] for name in entries}
+              for half in ("inputs_ms", "outputs_ms")}
+    for metric, per_name in workload_metrics("latency", rows).items():
+        terminals = {}
+        for name in entries:
+            if not standing[name]["measured"]:
+                # Not measured in this session: nothing of it is published.
+                continue
+            if metric == "mean_ms":
+                ci = cluster_mean_ci(keys[name])
+                if ci:
+                    terminals[name] = {"estimate": ci["mean"], "low": ci["low"], "high": ci["high"], "n": ci["n"]}
+                continue
+            if metric in ("input_ms", "output_ms"):
+                values = halves["inputs_ms" if metric == "input_ms" else "outputs_ms"][name]
+                estimate = statistics.median(values) if values else None
+            elif pooled[name]:
+                estimate = {"median_ms": statistics.median, "p95_ms": lambda v: percentile(v, 0.95),
+                            "p99_ms": lambda v: percentile(v, 0.99)}[metric](pooled[name])
+            else:
+                estimate = None
+            if estimate is not None:
+                terminals[name] = {"estimate": estimate, "n": sum(1 for r in keys[name] if r)}
+        entry: dict = {"kind": "mean" if metric == "mean_ms" else "median", "terminals": terminals,
+                       "values": {name: per_name.get(name, []) for name in entries}}
+        if metric == "mean_ms":
+            if ab and len(names) == 2:
+                if standing[names[0]]["ranked"] and standing[names[1]]["ranked"]:
+                    entry["ab"] = cluster_compare(keys[names[0]], keys[names[1]])
+            elif names[0] in terminals and standing[names[0]]["ranked"]:
+                ranked = {name: terminals[name] for name in terminals
+                          if name not in unranked and standing[name]["ranked"]}
+                others = {name: t for name, t in ranked.items() if name != names[0]}
+                if others:
+                    best = min(others, key=lambda name: others[name]["estimate"])
+                    entry["best_other"] = best
+                    entry["vs_best"] = cluster_compare(keys[best], keys[names[0]])
+                    order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
+                    entry["rank"] = order.index(names[0]) + 1
+        metrics[metric] = entry
+    return {"metrics": metrics, "entries": entries, "standing": standing}
+
+
+def latency_markdown(info: dict, ab: bool, countable: Optional[bool] = None) -> List[str]:
+    metrics = info["metrics"]
+    out = ["| entry | mean (95% CI) | median | p95 | p99 | input half | output half | censored | rounds |",
+           "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
+
+    def cell(metric: str, name: str) -> str:
+        terminal = metrics[metric]["terminals"].get(name)
+        return f"{terminal['estimate']:.1f}" if terminal else "-"
+
+    for name in info["entries"]:
+        mean = metrics["mean_ms"]["terminals"].get(name)
+        standing = info["standing"][name]
+        mean_cell = f"{mean['estimate']:.1f} ({mean['low']:.1f}-{mean['high']:.1f})" if mean else "-"
+        if not standing["measured"]:
+            mean_cell += " not measured"
+        elif not standing["ranked"]:
+            mean_cell += " unranked"
+        out.append(f"| {name} | {mean_cell} | " + " | ".join(cell(m, name) for m in LATENCY_METRICS[1:])
+                   + f" | {standing['censored']}/{standing['keys']} | {mean['n'] if mean else 0} |")
+    entry = metrics["mean_ms"]
+    stats = entry.get("ab") if ab else entry.get("vs_best")
+    if stats:
+        out.append("")
+        who = "B/A" if ab else f"Kettle/{entry['best_other']}"
+        out.append(f"mean_ms: {who} {stats['ratio']:.3f} (95% CI {stats['low']:.3f}-{stats['high']:.3f}), "
+                   f"difference {stats['diff']:+.2f} ms ({stats['diff_low']:+.2f} to {stats['diff_high']:+.2f}), "
+                   f"lower in {stats['wins']}/{stats['n']} rounds" + ("" if ab else f", rank {entry['rank']}"))
+        if ab:
+            # A verdict only from a session that counts for latency.
+            out.append("no regression (difference interval tops out at +1 ms or less): "
+                       + (("yes" if stats["diff_high"] <= 1.0 else "NO") if countable
+                          else "not decided, since this session does not count for latency"))
+    elif ab:
+        out.append("")
+        out.append("mean_ms: no comparison (a side is not measured or not ranked)")
+    return out
+
+
 def summarize(results: dict, names: List[str], ab: bool) -> str:
     analysis = analyze(results, names, ab)
     out = ["# macOS standing", "", results["context"], ""]
     for workload, info in analysis.items():
         out.append(f"## {workload}")
         out.append("")
+        if workload == "latency":
+            countable = ((results.get("meta") or {}).get("workload_countable") or {}).get("latency")
+            out.extend(latency_markdown(info, ab, countable))
+            out.append("")
+            continue
         metrics = info["metrics"]
         mean_based = workload == "vtebench"
         if "grids" in info:
@@ -1149,20 +1627,55 @@ def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
         return False
     if workload == "vtebench":
         return bool(run.get("means_ms"))
+    if workload == "latency":
+        # A key read with another, or a read nobody posted, shifts the join
+        # of samples to records: the round is not trusted.
+        return (isinstance(run.get("samples_ms"), list) and not run.get("killed")
+                and not run.get("seq_mismatch"))
     required = metrics_for(workload, meta or {}) if workload == "flood-memory" else REQUIRED.get(workload, ())
     return all(is_number(run.get(key)) for key in required)
 
 
-def rounds_complete(results: dict, meta: dict) -> bool:
-    """Every requested round of every terminal is present, has no error and
-    carries its workload's values."""
+def workload_complete(results: dict, meta: dict, workload: str) -> bool:
+    """Every requested round of every entry is present, has no error and
+    carries its workload's values. For latency every round must have run and
+    at one refresh rate, but a lost round only counts against its entry: a
+    notification or a stray window can end a round without saying anything
+    about the terminal."""
     rounds = meta.get("rounds") or {}
-    for workload, rows in results["workloads"].items():
-        expected = rounds.get(workload, 0) + (meta.get("warmup", 0) if workload == "startup" else 0)
-        for runs in rows.values():
-            if len(runs) != expected or not all(round_ok(workload, run, meta) for run in runs):
-                return False
+    expected = rounds.get(workload, 0) + (meta.get("warmup", 0) if workload == "startup" else 0)
+    for runs in results["workloads"].get(workload, {}).values():
+        if len(runs) != expected:
+            return False
+        # A latency entry that lost rounds is judged on its own (see
+        # latency_standing); the other entries still count.
+        if workload != "latency" and not all(round_ok(workload, run, meta) for run in runs):
+            return False
+    if workload == "latency":
+        # A refresh rate that changed mid-session moves every sample.
+        rates = {run.get("refresh_hz") for runs in results["workloads"]["latency"].values() for run in runs
+                 if round_ok(workload, run, meta)}
+        return len(rates) <= 1
     return True
+
+
+def rounds_complete(results: dict, meta: dict) -> bool:
+    """Every workload but latency is complete (see workload_complete);
+    latency counts on its own, so a lost latency round never costs a
+    session its other rows."""
+    return all(workload_complete(results, meta, workload)
+               for workload in results["workloads"] if workload not in OPT_IN_WORKLOADS)
+
+
+def workload_countable(results: dict, meta: dict) -> Dict[str, bool]:
+    """Whether each workload's rows count. The default workloads count
+    together, as a complete session; latency counts on its own
+    completeness, so a lost latency round never costs the other rows, nor a
+    lost idle round the latency row."""
+    base = session_countable(meta)
+    defaults = base and rounds_complete(results, meta)
+    return {workload: (base and workload_complete(results, meta, workload)) if workload in OPT_IN_WORKLOADS
+            else defaults for workload in results["workloads"]}
 
 
 def load_session(folder: Path) -> dict:
@@ -1194,12 +1707,13 @@ def load_session(folder: Path) -> dict:
     else:
         meta = results["meta"]
         countable = session_countable(meta) and rounds_complete(results, meta)
+    per_workload = workload_countable(results, meta)
     setup = {key: meta.get(key) for key in SESSION_KEYS}
     setup["identity"] = {name: {k: v for k, v in (ident or {}).items() if k in ("sha256", "cdhash")}
                          for name, ident in (meta.get("identity") or {}).items()}
     return {"dir": folder.name, "schema": schema, "names": names, "results": results, "date": meta["date"],
             "started": meta.get("started") or meta["date"], "countable": countable,
-            "label": meta.get("label", folder.name), "ab": meta.get("mode") == "ab",
+            "workload_countable": per_workload, "label": meta.get("label", folder.name), "ab": meta.get("mode") == "ab",
             "rounds": meta.get("rounds") or {}, "setup": setup, "configs": meta.get("configs") or {}}
 
 
@@ -1209,7 +1723,9 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
     if len({s["ab"] for s in sessions}) > 1:
         raise SystemExit("--combine takes standing sessions or A/B sessions, not both")
     ab = sessions[0]["ab"]
-    counted = [s for s in sessions if s["countable"]]
+    # Every session any row counts from must share one setup; latency rows
+    # can count from a session whose other rows do not.
+    counted = [s for s in sessions if s["countable"] or any(s["workload_countable"].values())]
     for s in counted[1:]:
         differs = sorted(key for key in s["setup"] if s["setup"][key] != counted[0]["setup"][key])
         if differs:
@@ -1229,8 +1745,15 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
         # counts may differ (fewer rounds only widen its gates), and only the
         # tools both ran are compared.
         reference = counted[0] if counted else sessions[0]
-        differs = sorted(key for key in control["setup"] if key not in ("identity", "configs", "rounds", "tool_hashes")
+        differs = sorted(key for key in control["setup"]
+                         if key not in ("identity", "configs", "rounds", "tool_hashes", "latency")
                          and control["setup"][key] != reference["setup"][key])
+        # Latency's knobs must match when both ran it; its entries differ by
+        # design (a standing adds floors).
+        knobs = ("keys", "warmup", "censor_ms", "inject", "signed")
+        latency_a, latency_b = control["setup"].get("latency"), reference["setup"].get("latency")
+        if latency_a and latency_b and any(latency_a.get(k) != latency_b.get(k) for k in knobs):
+            differs.append("latency")
         tools_a, tools_b = control["setup"].get("tool_hashes") or {}, reference["setup"].get("tool_hashes") or {}
         if any(tools_a[name] != tools_b[name] for name in tools_a.keys() & tools_b.keys()):
             differs.append("tool_hashes")
@@ -1240,21 +1763,24 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
         if control["configs"].get("kettle-a", "") != reference["configs"].get("kettle-a", ""):
             raise SystemExit(f"--aa {Path(aa).name} and {reference['label']} differ in the baseline config")
         for workload, info in analyze(control["results"], control["names"], True).items():
+            if not control["workload_countable"].get(workload, control["countable"]):
+                continue
             planned = control["rounds"].get(workload)
             for metric, entry in info["metrics"].items():
                 stats = entry.get("ab")
                 if stats and (not planned or stats["n"] >= math.ceil(MIN_PAIRED_SHARE * planned)):
-                    gates[f"{workload}.{metric}"] = aa_gate(stats)
+                    gates[f"{workload}.{metric}"] = latency_aa_gate(stats) if workload == "latency" else aa_gate(stats)
     analyses = [analyze(s["results"], s["names"], s["ab"]) for s in sessions]
     rows: Dict[str, dict] = {}
     for session, analysis in zip(sessions, analyses):
         for workload, info in analysis.items():
+            counts = session["workload_countable"].get(workload, session["countable"])
             for metric, entry in info["metrics"].items():
                 row = rows.setdefault(f"{workload}.{metric}", {"terminals": {}, "sessions": [], "per_session": []})
                 estimates = {name: terminal["estimate"] for name, terminal in entry["terminals"].items()}
-                row["per_session"].append({"label": session["label"], "countable": session["countable"],
+                row["per_session"].append({"label": session["label"], "countable": counts,
                                            "estimates": estimates})
-                if session["countable"]:
+                if counts:
                     for name, value in estimates.items():
                         row["terminals"].setdefault(name, {"estimates": []})["estimates"].append(value)
                 # A comparison with too few paired rounds (idle rounds that lost
@@ -1263,7 +1789,7 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                 stats = entry.get("ab") if ab else entry.get("vs_best")
                 covered = not planned or (stats or {}).get("n", 0) >= math.ceil(MIN_PAIRED_SHARE * planned)
                 base = {"label": session["label"], "date": session["date"], "started": session["started"],
-                        "countable": session["countable"] and covered}
+                        "countable": counts and covered}
                 if ab and entry.get("ab"):
                     row["sessions"].append({**base, **entry["ab"]})
                 elif entry.get("vs_best"):
@@ -1282,6 +1808,8 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                 # The same build differed from itself: that A/A cannot
                 # calibrate anything.
                 row["verdict"] = {"verdict": "A/A failed"}
+            elif key.startswith("latency."):
+                row["verdict"] = latency_ab_verdict(row["sessions"], gate["gate_ms"] if gate else None)
             else:
                 row["verdict"] = ab_verdict(row["sessions"], gate["gate"] if gate else None)
             if gate:
@@ -1309,6 +1837,8 @@ def combined_markdown(combined: dict, ab: bool) -> str:
             b = row["terminals"].get("kettle-b", {}).get("published")
             per = "; ".join(f"{s['ratio']:.3f} ({s['low']:.3f}-{s['high']:.3f})" for s in row["sessions"])
             verdict = row.get("verdict", {}).get("verdict", "-")
+            if row.get("verdict", {}).get("no_regression") is not None:
+                verdict += "; no regression" if row["verdict"]["no_regression"] else "; REGRESSION over +1 ms"
             out.append(f"| {key.replace('.', ' ', 1)} | {a if a is None else f'{a:.2f}'} | "
                        f"{b if b is None else f'{b:.2f}'} | {per} | {verdict} |")
         return "\n".join(out) + "\n"
@@ -1698,9 +2228,34 @@ def claim_out_dir(path: Path) -> Path:
 
 def resolve_rounds(args: argparse.Namespace) -> Dict[str, int]:
     if args.rounds:
-        return {workload: args.rounds for workload in WORKLOADS}
+        return {workload: args.rounds for workload in WORKLOADS + OPT_IN_WORKLOADS}
     return {"startup": args.startup_rounds, "idle": args.idle_rounds, "flood-memory": args.flood_rounds,
-            "vtebench": args.vtebench_rounds}
+            "vtebench": args.vtebench_rounds, "latency": args.latency_rounds}
+
+
+def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str]) -> List[str]:
+    """The latency rotation: the session's terminals, then, in a standing
+    session, Kettle's opaque variant and the floors, which are published
+    beside them and never ranked. An A/B compares its two builds only."""
+    if ab:
+        return list(names)
+    return names + (["kettle-opaque"] if opaque else []) + [f"floor-{mode}" for mode in floors]
+
+
+def run_latency_check(tools: Path, identity: Optional[str]) -> int:
+    """--latency-check: build the probe, ask macOS for its grants, report."""
+    probes = build_probes(tools, latency=True, sign_identity=identity)
+    with tempfile.TemporaryDirectory(prefix="kettle-latency-check-") as tmp:
+        grants = latency_grants(probes["latency-probe"], Path(tmp), request=True)
+        grants = latency_grants(probes["latency-probe"], Path(tmp))
+    for grant, held in grants.items():
+        print(f"{grant.replace('_', ' ')}: {'granted' if held else 'missing'}")
+    if not all(grants.values()):
+        print(f"grant both to {probes['latency-probe']} in System Settings > Privacy & Security, "
+              "then run --latency-check again", file=sys.stderr)
+        return 3
+    self_test = subprocess.run([str(probes["latency-probe"] / "Contents" / "MacOS" / "latency-probe"), "--self-test"])
+    return self_test.returncode
 
 
 def run_combine(args: argparse.Namespace) -> int:
@@ -1725,6 +2280,21 @@ def main() -> int:
     parser.add_argument("--idle-rounds", type=int, default=ROUNDS["idle"])
     parser.add_argument("--flood-rounds", type=int, default=ROUNDS["flood-memory"])
     parser.add_argument("--vtebench-rounds", type=int, default=ROUNDS["vtebench"])
+    parser.add_argument("--latency-rounds", type=int, default=ROUNDS["latency"])
+    parser.add_argument("--latency-keys", type=int, default=100, help="measured keys per latency round")
+    parser.add_argument("--latency-warmup", type=int, default=20, help="discarded keys before them")
+    parser.add_argument("--latency-censor-ms", type=int, default=500,
+                        help="a key with no flipped frame by then counts at this bound")
+    parser.add_argument("--latency-floors", default="ca,metal-sync,metal-nosync",
+                        help=f"bare-window floors to report, of {','.join(LATENCY_FLOORS)} (empty for none)")
+    parser.add_argument("--latency-kettle-opaque", action=argparse.BooleanOptionalAction, default=True,
+                        help="also measure Kettle opaque and unblurred, unranked (standing sessions only)")
+    parser.add_argument("--latency-inject", choices=("hid", "pid"), default="hid",
+                        help="post keys at the HID tap (default) or to the terminal's pid (pilot comparison)")
+    parser.add_argument("--latency-sign-identity",
+                        help="codesign identity for KettleLatencyProbe.app, so its grants survive rebuilds")
+    parser.add_argument("--latency-check", action="store_true",
+                        help="build the latency probe, ask for its grants, report them and exit")
     parser.add_argument("--vtebench-seconds", type=int, default=10, help="seconds per benchmark (upstream's default)")
     parser.add_argument("--idle-settle", type=float, default=20.0)
     parser.add_argument("--idle-window", type=float, default=30.0)
@@ -1762,6 +2332,19 @@ def main() -> int:
     parser.add_argument("--combine", nargs="+", metavar="DIR", help="merge session directories and exit")
     parser.add_argument("--aa", metavar="DIR", help="with --combine: an A/A session whose intervals set the gates")
     args = parser.parse_args()
+    # Practical bounds, checked before anything runs: a run stays finite, and
+    # the probe's nanosecond arithmetic cannot overflow.
+    for flag, value, least, most in (("--latency-keys", args.latency_keys, 1, 1000),
+                                     ("--latency-rounds", args.latency_rounds, 1, 100),
+                                     ("--latency-censor-ms", args.latency_censor_ms, 1, 5000),
+                                     ("--latency-warmup", args.latency_warmup, 0, 200),
+                                     ("--rounds", args.rounds, 1, 1000)):
+        if value is None:
+            continue
+        if value < least:
+            parser.error(f"{flag} must be at least {least}")
+        if value > most:
+            parser.error(f"{flag} must be at most {most}")
 
     if args.combine:
         return run_combine(args)
@@ -1771,10 +2354,15 @@ def main() -> int:
     if sys.platform != "darwin":
         print("macos-standing.py: this benchmark requires macOS", file=sys.stderr)
         return 1
+    if args.latency_check:
+        return run_latency_check(REPO / "target" / "perf-tools" / "macos-standing", args.latency_sign_identity)
     workloads = [w for w in args.workloads.split(",") if w]
-    unknown = set(workloads) - set(WORKLOADS)
+    unknown = set(workloads) - set(WORKLOADS) - set(OPT_IN_WORKLOADS)
     if unknown:
         parser.error(f"unknown workloads: {', '.join(sorted(unknown))}")
+    floors = [f for f in args.latency_floors.split(",") if f]
+    if set(floors) - set(LATENCY_FLOORS):
+        parser.error(f"unknown latency floors: {', '.join(sorted(set(floors) - set(LATENCY_FLOORS)))}")
     rounds = resolve_rounds(args)
     offsets = [float(value) for value in args.flood_offsets.split(",") if value]
     unranked: List[str] = []
@@ -1812,6 +2400,12 @@ def main() -> int:
         stamped = stamped_entries(args.startup_phases, kettle)
     except ValueError as error:
         parser.error(str(error))
+    latency_names = latency_entries(names, is_ab(kettle), args.latency_kettle_opaque, floors)
+    if "latency" in workloads and "kettle-opaque" in latency_names:
+        kettle["kettle-opaque"] = kettle["kettle"]
+        kettle_configs["kettle-opaque"] = KETTLE_OPAQUE
+    if "latency" in workloads:
+        unranked.extend(name for name in latency_names if name not in names)
     for workload in workloads:
         if rounds[workload] % len(names):
             print(f"note: {rounds[workload]} {workload} rounds do not balance a {len(names)}-entry rotation",
@@ -1846,9 +2440,20 @@ def main() -> int:
 
     # Build every tool first: compiling right before measuring adds load and
     # heat, so the preflight that decides the session runs after it.
-    probes = build_probes(tools)
+    probes = build_probes(tools, latency="latency" in workloads, sign_identity=args.latency_sign_identity)
     vtebench = build_vtebench(tools) if "vtebench" in workloads else None
-    tool_hashes = {name: file_sha256(path) for name, path in probes.items()}
+    # The probe app's signature changes with every signing, so its source
+    # stands for it.
+    tool_hashes = {name: file_sha256(PROBES / "latency-probe.swift" if name == "latency-probe" else path)
+                   for name, path in probes.items()}
+    if "latency" in workloads:
+        with tempfile.TemporaryDirectory(prefix="kettle-latency-grants-") as tmp:
+            grants = latency_grants(probes["latency-probe"], Path(tmp))
+        if not all(grants.values()):
+            print("latency: KettleLatencyProbe lacks " + " and ".join(
+                g.replace("_", " ") for g, held in grants.items() if not held) + "; run --latency-check",
+                file=sys.stderr)
+            return 3
     if vtebench:
         tool_hashes["vtebench"] = file_sha256(vtebench)
     field = field_terminals()
@@ -1898,6 +2503,10 @@ def main() -> int:
             "flood_offsets": offsets, "activate": not args.no_activate,
             "footprint_detail": args.footprint_detail, "configs": config_record(kettle_configs)[0],
             "startup_phases": args.startup_phases,
+            "latency": {"keys": args.latency_keys, "warmup": args.latency_warmup,
+                        "censor_ms": args.latency_censor_ms, "inject": args.latency_inject,
+                        "entries": latency_names, "signed": "identity" if args.latency_sign_identity else "ad hoc",
+                        } if "latency" in workloads else None,
             "identity": {},
         },
         "workloads": {},
@@ -1923,21 +2532,37 @@ def main() -> int:
             write_flood(flood)
         if vtebench:
             benchmarks = prepare_benchmarks(vtebench.parents[2] / "benchmarks", work / "benchmarks")
+        latency_options = {"keys": args.latency_keys, "warmup": args.latency_warmup,
+                           "censor_ms": args.latency_censor_ms, "inject": args.latency_inject}
         for workload in workloads:
-            rows: Dict[str, List[dict]] = {name: [] for name in names}
+            entries = latency_names if workload == "latency" else names
+            rows: Dict[str, List[dict]] = {name: [] for name in entries}
             results["workloads"][workload] = rows
+            # A whole rotation of failed latency rounds in a row points at the
+            # machine (an alert over the windows, lost grants), not at a
+            # terminal: the rest of the workload is recorded as not run.
+            failures_in_a_row = 0
             # Warm-up launches run first for every terminal, are flagged, and
             # never enter a statistic; they absorb first-launch costs such as
             # the payload script's one-time assessment.
             warmups = args.warmup if workload == "startup" else 0
             for round_index in range(warmups + rounds[workload]):
-                for name in rotated(names, round_index):
+                for name in rotated(entries, round_index):
                     if workload == "startup":
                         row = runner.startup(name)
                     elif workload == "idle":
                         row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
                     elif workload == "flood-memory":
                         row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
+                    elif workload == "latency":
+                        if failures_in_a_row >= len(entries):
+                            row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
+                        else:
+                            # A new gap sequence every round, the same for
+                            # every entry in it.
+                            row = runner.latency(name, latency_options, SEED * 1000 + round_index,
+                                                 out_dir / f"latency-{name}-r{round_index}.json")
+                            failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
                     else:
                         row = runner.vtebench(name, vtebench, benchmarks,
                                               out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
@@ -1952,6 +2577,7 @@ def main() -> int:
 
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
+    results["meta"]["workload_countable"] = workload_countable(results, results["meta"])
     recorder.write()
     summary = summarize(results, names, is_ab(kettle))
     (out_dir / "summary.md").write_text(summary + "\n")

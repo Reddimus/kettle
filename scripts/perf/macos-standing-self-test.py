@@ -1427,6 +1427,412 @@ class StartupPhases(unittest.TestCase):
         self.assertIn("-29.0 ms", text)
 
 
+KEYBLOCK_SHA256 = "ff2c9a12acd3bd7512d01b30eb0349d4ac9e073bd1931d96718951b924cb9c43"
+
+
+def latency_run(samples, censored=0, refresh=60, keys=None, **extra):
+    """A latency round as Runner.latency records it."""
+    return {"samples_ms": list(samples), "censored": censored, "keys": keys if keys is not None else len(samples) + censored,
+            "mean_ms": sum(samples) / len(samples) if samples else None, "refresh_hz": refresh, **extra}
+
+
+def latency_meta(day, rounds=2, **extra):
+    return {"date": f"2026-10-0{day}", "started": f"2026-10-0{day}T01:00:00", "refusals": [], "bare": False,
+            "complete": True, "label": f"s{day}", "mode": "standing", "rounds": {"latency": rounds}, "warmup": 0,
+            "latency": {"keys": 4, "warmup": 1, "censor_ms": 500, "inject": "hid", "signed": "ad hoc"}, **extra}
+
+
+class Latency(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_the_default_workloads_never_post_keys(self) -> None:
+        self.assertEqual(standing.WORKLOADS, ("startup", "idle", "flood-memory", "vtebench"))
+        self.assertNotIn("latency", standing.WORKLOADS)
+        self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency",))
+        import inspect
+
+        source = inspect.getsource(standing.main)
+        self.assertIn('parser.add_argument("--workloads", default=",".join(WORKLOADS))', inspect.getsource(standing))
+        self.assertIn('build_probes(tools, latency="latency" in workloads', source)
+
+    def test_keyblock_is_pinned(self) -> None:
+        # Every terminal and every release runs these exact bytes.
+        digest = standing.file_sha256(HERE / "macos-standing" / "keyblock.c")
+        self.assertEqual(digest, KEYBLOCK_SHA256, "keyblock.c changed: re-pin it and start a new session set")
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_keyblock_toggles_on_each_byte_and_logs_in_order(self) -> None:
+        import os
+        import pty
+        import select
+        import subprocess
+        import time as clock
+
+        binary = self.root / "keyblock"
+        subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "keyblock.c")], check=True)
+        log = self.root / "log"
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(str(binary), [str(binary), str(log)])
+
+        def read_until(marker: bytes, timeout: float = 5.0) -> bytes:
+            data = b""
+            deadline = clock.monotonic() + timeout
+            while marker not in data and clock.monotonic() < deadline:
+                if select.select([fd], [], [], 0.1)[0]:
+                    data += os.read(fd, 4096)
+            return data
+
+        try:
+            init = read_until(b"\x1b[0m", 5)
+            self.assertIn(b"\x1b[?25l\x1b[2 q", init, "hides the cursor and makes it a steady block")
+            self.assertIn(b"\x1b[27m", init, "starts with the block off")
+            for expected in (b"\x1b[7m", b"\x1b[27m", b"\x1b[7m"):
+                os.write(fd, b"j")
+                frame = read_until(b"\x1b[0m")
+                self.assertIn(expected, frame)
+                self.assertEqual(frame.count(b"\x1b["), 9, "one write: 4 moves, 4 attributes, one reset")
+        finally:
+            os.close(fd)
+            os.waitpid(pid, 0)
+        records = standing.read_keyblock_log(log)
+        self.assertEqual(sorted(records), [1, 2, 3])
+        for seq in (1, 2, 3):
+            nbytes, t_read, t_written = records[seq]
+            self.assertEqual(nbytes, 1)
+            self.assertLessEqual(t_read, t_written)
+        self.assertLess(records[1][2], records[2][1])
+
+    def test_a_torn_log_record_is_dropped(self) -> None:
+        path = self.root / "log"
+        path.write_bytes(standing.KEYBLOCK_RECORD.pack(1, 1, 10, 20) + b"\x00" * 7)
+        self.assertEqual(standing.read_keyblock_log(path), {1: (1, 10, 20)})
+        self.assertEqual(standing.read_keyblock_log(self.root / "missing"), {})
+
+    def test_every_terminal_gets_the_same_payload(self) -> None:
+        bodies = {}
+
+        class Recorder(standing.Runner):
+            def launch(self, name, body, timeout, params=None, phases=False, argv=None):
+                bodies[name] = (body, argv)
+                return None
+
+            def wait_for(self, path, timeout):
+                return False
+
+            def stop(self, process, timeout):
+                return True
+
+        runner = Recorder({"keyblock": Path("/k"), "latency-floor": Path("/f")}, self.root, {"kettle": "/x"})
+        options = {"keys": 1, "warmup": 0, "censor_ms": 500, "inject": "hid"}
+        for name in ("kettle", "kettle-opaque", "alacritty", "floor-ca"):
+            self.assertIn("error", runner.latency(name, options, 7))
+        self.assertEqual(len({bodies[name] for name in ("kettle", "kettle-opaque", "alacritty")}), 1)
+        self.assertIsNone(bodies["kettle"][1])
+        self.assertEqual(bodies["floor-ca"][1][:2], ["/f", "ca"], "a floor is its own window")
+
+    def test_the_opaque_variant_and_floors_join_standing_sessions_only(self) -> None:
+        self.assertIn("background-opacity = 1", standing.KETTLE_OPAQUE)
+        self.assertIn("window-blur = false", standing.KETTLE_OPAQUE)
+        self.assertEqual(standing.latency_entries(["kettle", "alacritty"], False, True, ["ca", "metal-sync"]),
+                         ["kettle", "alacritty", "kettle-opaque", "floor-ca", "floor-metal-sync"])
+        self.assertEqual(standing.latency_entries(["kettle", "alacritty"], False, False, []), ["kettle", "alacritty"])
+        self.assertEqual(standing.latency_entries(["kettle-a", "kettle-b"], True, True, ["ca"]), ["kettle-a", "kettle-b"])
+
+    def test_the_probe_plist_is_an_agent_with_the_granted_bundle_id(self) -> None:
+        import plistlib
+
+        info = plistlib.loads(standing.latency_probe_plist())
+        self.assertEqual(info["CFBundleIdentifier"], "org.kettle.terminal.latency-probe")
+        self.assertIs(info["LSUIElement"], True)
+        self.assertEqual(info["CFBundleExecutable"], "latency-probe")
+
+    def test_a_row_splits_each_key_into_input_and_output_halves(self) -> None:
+        probe = {"samples": [
+            {"seq": 7, "warmup": True, "t_post": 0, "display": 30_000_000, "arrival": 20_000_000, "censored": False},
+            {"seq": 8, "warmup": False, "t_post": 100_000_000, "display": 130_000_000, "arrival": 119_000_000,
+             "censored": False, "mixed": 1, "reverted": False},
+            {"seq": 9, "warmup": False, "t_post": 200_000_000, "display": None, "arrival": None, "censored": True}],
+            "display": {"refresh_hz": 60}, "activation": "already"}
+        records = {seq: (1, 0, 0) for seq in range(1, 7)}
+        records.update({7: (1, 4_000_000, 5_000_000), 8: (1, 104_000_000, 105_000_000), 9: (1, 204_000_000, 205_000_000)})
+        row = standing.latency_row(probe, records, 500)
+        self.assertEqual(row["samples_ms"], [30.0])
+        self.assertEqual((row["censored"], row["keys"], row["mixed_frames"]), (1, 2, 1))
+        self.assertEqual((row["input_ms"], row["output_ms"]), (4.0, 25.0))
+        self.assertEqual((row["inputs_ms"], row["outputs_ms"]), ([4.0], [25.0]))
+        self.assertEqual(row["mean_ms"], 265.0, "the censored key counts at the bound")
+        self.assertEqual(row["p99_ms"], standing.percentile([30.0, 500.0], 0.99))
+        self.assertEqual((row["leads_ms"], row["lead_out_of_range"]), ([11.0], 0))
+        self.assertEqual((row["seq_mismatch"], row["refresh_hz"]), (0, 60))
+
+    def test_sequence_mismatches_are_flagged(self) -> None:
+        probe = {"samples": [{"seq": 7, "warmup": False, "t_post": 0, "display": 1_000_000, "censored": False}]}
+        records = {seq: (1, 0, 0) for seq in range(1, 7)}
+        records[7] = (2, 0, 0)  # two keys arrived in one read
+        self.assertEqual(standing.latency_row(probe, records, 500)["seq_mismatch"], 1)
+        records[7] = (1, 0, 0)
+        records[8] = (1, 0, 0)  # a read nobody posted
+        self.assertEqual(standing.latency_row(probe, records, 500)["seq_mismatch"], 1)
+        del records[3]  # a calibration key that never arrived
+        row = standing.latency_row(probe, records, 500)
+        self.assertEqual(row["seq_mismatch"], 2)
+        # The join of samples to records may be shifted: the round fails.
+        self.assertFalse(standing.round_ok("latency", row))
+        self.assertIsNone(standing.latency_keys(row, 500))
+
+    def test_the_cluster_bootstrap_is_deterministic_and_counts_rounds(self) -> None:
+        base = [[20.0 + (i + j) % 4 for j in range(30)] for i in range(6)]
+        test = [[15.0 + (i + j) % 4 for j in range(30)] for i in range(6)]
+        stats = standing.cluster_compare(base, test)
+        self.assertEqual(stats, standing.cluster_compare(base, test))
+        self.assertLess(stats["high"], 1.0)
+        self.assertLess(stats["diff_high"], 0.0)
+        self.assertAlmostEqual(stats["diff"], -5.0)
+        self.assertEqual((stats["wins"], stats["n"]), (6, 6))
+        # Two launches far apart: the keys look precise, the launches do not.
+        wide = standing.cluster_compare([[10.0] * 20, [30.0] * 20] * 3, [[11.0] * 20, [29.0] * 20] * 3)
+        self.assertLess(wide["low"], 1.0)
+        self.assertGreater(wide["high"], 1.0)
+        self.assertEqual(standing.cluster_compare([[1.0], None], [None, [2.0]]), {})
+
+    def test_censored_keys_count_at_the_bound(self) -> None:
+        self.assertEqual(standing.latency_keys(latency_run([10.0], censored=2), 500), [10.0, 500.0, 500.0])
+        self.assertIsNone(standing.latency_keys({"error": "focus changed"}, 500))
+
+    def test_ties_unranked_rows_and_floors(self) -> None:
+        rounds = 10
+        close = [latency_run([30.0 + (i + j) % 3 for j in range(20)]) for i in range(rounds)]
+        # The same keys in another order: a tie.
+        also_close = [latency_run([30.0 + (i + j + 1) % 3 for j in range(20)]) for i in range(rounds)]
+        censored = [latency_run([20.0] * 19, censored=1) for _ in range(rounds)]
+        floor = [latency_run([5.0] * 20) for _ in range(rounds)]
+        results = {"context": "t", "unranked": ["floor-ca"],
+                   "meta": {"rounds": {"latency": rounds}, "latency": {"censor_ms": 500}},
+                   "workloads": {"latency": {"kettle": close, "wezterm": also_close, "kitty": censored,
+                                             "floor-ca": floor}}}
+        info = standing.analyze(results, ["kettle", "wezterm", "kitty"], False)["latency"]
+        entry = info["metrics"]["mean_ms"]
+        self.assertEqual(entry["best_other"], "wezterm", "the floor and the 5%-censored row are never ranked")
+        self.assertEqual(entry["rank"], 1)
+        self.assertLess(entry["vs_best"]["diff_low"], 0.0)
+        self.assertGreater(entry["vs_best"]["diff_high"], 0.0, "within noise: a tie, not an order")
+        self.assertFalse(info["standing"]["kitty"]["ranked"])
+        self.assertEqual(info["entries"], ["kettle", "wezterm", "kitty", "floor-ca"])
+        text = standing.summarize(results, ["kettle", "wezterm", "kitty"], False)
+        self.assertIn("| floor-ca | 5.0 (5.0-5.0) |", text)
+        self.assertIn("| kitty | ", text)
+        self.assertIn(" unranked |", text)
+
+    def test_a_terminal_that_lost_three_of_ten_rounds_is_not_measured(self) -> None:
+        runs = [latency_run([30.0] * 5) for _ in range(7)] + [{"error": "latency probe: focus changed"}] * 3
+        standing_row = standing.latency_standing(runs, 500, 10)
+        self.assertFalse(standing_row["measured"])
+        self.assertTrue(standing.latency_standing(runs[:9], 500, 10)["measured"])
+
+    def test_latency_counts_on_its_own_and_per_entry(self) -> None:
+        def session(name, day, kettle_rows, startup_rows):
+            meta = latency_meta(day, rounds=10)
+            meta["rounds"] = {"latency": 10, "startup": 2}
+            workloads = {"startup": {"kettle": startup_rows, "wezterm": [{"window_ms": 170.0, "child_ms": 1.0}] * 2},
+                         "latency": {"kettle": kettle_rows, "wezterm": [latency_run([31.0] * 4)] * 10}}
+            return write_session(self.root, name, meta, workloads)
+
+        good = [{"window_ms": 150.0, "child_ms": 1.0}] * 2
+        lost = {"error": "latency probe: focus changed"}
+        two_lost = [latency_run([30.0] * 4)] * 8 + [lost] * 2
+        three_lost = [latency_run([30.0] * 4)] * 7 + [lost] * 3
+        folders = [session("a", 1, two_lost, good), session("b", 2, three_lost, good),
+                   session("c", 3, [latency_run([30.0] * 4)] * 10,
+                           [{"window_ms": 150.0, "child_ms": 1.0}, {"error": "no window"}])]
+        combined = standing.combine(folders)
+        self.assertEqual([s["countable"] for s in combined["sessions"]], [True, True, False],
+                         "a lost startup round costs the session its default rows only")
+        latency = combined["rows"]["latency.mean_ms"]
+        self.assertEqual([s["countable"] for s in latency["per_session"]], [True, True, True],
+                         "lost latency rounds never void the other entries")
+        self.assertEqual([s["label"] for s in latency["sessions"]], ["s1", "s3"],
+                         "Kettle is compared with 2 of 10 rounds lost, not with 3")
+        loaded = standing.load_session(folders[1])
+        info = standing.analyze(loaded["results"], loaded["names"], False)["latency"]
+        self.assertFalse(info["standing"]["kettle"]["measured"])
+        self.assertTrue(info["standing"]["wezterm"]["measured"])
+
+    def test_a_latency_ab_needs_both_sides_ranked(self) -> None:
+        clean = [latency_run([30.0] * 99, keys=99) for _ in range(5)]
+        censored = [latency_run([29.0] * 97, censored=2, keys=99) for _ in range(5)]
+        results = {"context": "t", "meta": {"rounds": {"latency": 5}, "latency": {"censor_ms": 500}},
+                   "workloads": {"latency": {"kettle-a": clean, "kettle-b": censored}}}
+        entry = standing.analyze(results, ["kettle-a", "kettle-b"], True)["latency"]["metrics"]["mean_ms"]
+        self.assertNotIn("ab", entry, "2 % censored on B: no verdict")
+        results["workloads"]["latency"]["kettle-b"] = [latency_run([29.0] * 99, keys=99) for _ in range(5)]
+        entry = standing.analyze(results, ["kettle-a", "kettle-b"], True)["latency"]["metrics"]["mean_ms"]
+        self.assertIn("ab", entry)
+
+    def test_the_latency_gate_is_in_ms(self) -> None:
+        gate = standing.latency_aa_gate({"diff": -0.16, "diff_low": -0.93, "diff_high": 0.60})
+        self.assertEqual((gate["contains_one"], gate["gate_ms"]), (True, 1.0))
+        self.assertAlmostEqual(standing.latency_aa_gate({"diff": 0.7, "diff_low": 0.1, "diff_high": 1.3})["gate_ms"], 1.4)
+
+        def sessions(diff, low, high):
+            return [{"label": f"s{d}", "date": f"2026-10-0{d}", "countable": True, "ratio": 0.98,
+                     "diff": diff, "diff_low": low, "diff_high": high} for d in (1, 2)]
+
+        # 0.6 ms, well resolved, is a 6 % ratio at 10 ms: the ratio gate would
+        # pass it; the ms gate does not.
+        self.assertEqual(standing.latency_ab_verdict(sessions(-0.6, -0.8, -0.4), 1.0)["verdict"], "no change")
+        self.assertEqual(standing.latency_ab_verdict(sessions(-1.5, -2.0, -1.0), 1.0)["verdict"], "lower")
+        self.assertEqual(standing.latency_ab_verdict(sessions(1.5, 1.0, 2.0), 1.0)["verdict"], "higher")
+        self.assertTrue(standing.latency_ab_verdict(sessions(0.2, -0.5, 0.9), 1.0)["no_regression"])
+        self.assertFalse(standing.latency_ab_verdict(sessions(0.6, 0.0, 1.2), 1.0)["no_regression"])
+
+    def test_session_percentiles_come_from_every_key(self) -> None:
+        # 3 of 200 keys censored: p99 is the bound. The median of per-round
+        # p99s would hide it.
+        rounds = [latency_run([20.0] * 98, censored=2), latency_run([20.0] * 99, censored=1)]
+        results = {"context": "t", "meta": {"rounds": {"latency": 2}, "latency": {"censor_ms": 500}},
+                   "workloads": {"latency": {"kettle": rounds}}}
+        metrics = standing.analyze(results, ["kettle"], False)["latency"]["metrics"]
+        self.assertEqual(metrics["p99_ms"]["terminals"]["kettle"]["estimate"], 500.0)
+        self.assertEqual(metrics["median_ms"]["terminals"]["kettle"]["estimate"], 20.0)
+
+    def test_the_harness_waits_past_the_probe_deadline(self) -> None:
+        import inspect
+
+        source = inspect.getsource(standing.Runner.latency)
+        self.assertIn('"--deadline-ms", str(int(budget * 1000))', source)
+        self.assertIn("budget + 15", source, "open is waited on longer than the probe may run")
+        probe = (HERE / "macos-standing" / "latency-probe.swift").read_text()
+        self.assertIn("let postNs = try guardedPost()", probe, "the post time is taken after the guards")
+        guarded = probe.split("func guardedPost() throws -> UInt64 {")[1].split("\n    }\n")[0]
+        order = [guarded.index(needle) for needle in (
+            "guard let events = keyEvents()", "mayPost(", "gate.withLock", "deadlineMs", "let postNs = nowNs()",
+            "post(events, options)")]
+        self.assertNotIn("compactMap", probe.split("func keyEvents()")[1].split("\n}\n")[0],
+                         "a key-down is never posted without its key-up")
+        self.assertEqual(order, sorted(order), "events built first; deadline checked and time taken under the gate")
+        self.assertEqual(probe.count("exit("), 4, "only finish() ends a run; the rest are the CLI modes")
+        self.assertIn("gate.lock()\n    write(object, to: path)\n    exit(code)", probe)
+
+    def test_keys_outside_the_arrival_window_unrank_a_row(self) -> None:
+        probe = {"vsync": {"period_ns": 16_666_667}, "display": {"refresh_hz": 60}}
+        self.assertEqual(standing.lead_out_of_range([13.0, -0.5, 40.0, 33.0], probe), 2)
+        rounds = [latency_run([30.0] * 100, lead_out_of_range=2) for _ in range(2)]
+        self.assertFalse(standing.latency_standing(rounds, 500, 2)["ranked"])
+        rounds = [latency_run([30.0] * 100, lead_out_of_range=1) for _ in range(2)]
+        self.assertTrue(standing.latency_standing(rounds, 500, 2)["ranked"])
+
+    def test_no_regression_needs_one_session_and_is_printed(self) -> None:
+        one = [{"label": "s1", "date": "2026-10-01", "countable": True, "ratio": 1.03,
+                "diff": 0.8, "diff_low": 0.4, "diff_high": 1.2}]
+        verdict = standing.latency_ab_verdict(one, 1.0)
+        self.assertEqual((verdict["verdict"], verdict["no_regression"]), ("insufficient sessions", False))
+        results = {"context": "t", "meta": {"rounds": {"latency": 5}, "latency": {"censor_ms": 500},
+                                            "workload_countable": {"latency": True}},
+                   "workloads": {"latency": {"kettle-a": [latency_run([30.0 + i % 3 for i in range(50)])] * 5,
+                                             "kettle-b": [latency_run([33.0 + i % 3 for i in range(50)])] * 5}}}
+        self.assertIn("no regression (difference interval tops out at +1 ms or less): NO",
+                      standing.summarize(results, ["kettle-a", "kettle-b"], True))
+        # A session that cannot count for latency decides nothing.
+        results["meta"]["workload_countable"]["latency"] = False
+        self.assertIn("not decided, since this session does not count for latency",
+                      standing.summarize(results, ["kettle-a", "kettle-b"], True))
+
+    def test_a_not_measured_entry_publishes_nothing(self) -> None:
+        runs = [latency_run([30.0] * 4)] * 7 + [{"error": "latency probe: focus changed"}] * 3
+        results = {"context": "t", "meta": {"rounds": {"latency": 10}, "latency": {"censor_ms": 500}},
+                   "workloads": {"latency": {"kettle": [latency_run([31.0] * 4)] * 10, "wezterm": runs}}}
+        metrics = standing.analyze(results, ["kettle", "wezterm"], False)["latency"]["metrics"]
+        for metric in standing.LATENCY_METRICS:
+            self.assertNotIn("wezterm", metrics[metric]["terminals"], metric)
+        self.assertNotIn("vs_best", metrics["mean_ms"])
+
+    def test_latency_flags_are_bounded(self) -> None:
+        import contextlib
+        import io
+        from unittest import mock
+
+        for flag, value, bound in (("--latency-keys", "0", "least"), ("--latency-censor-ms", "-5", "least"),
+                                   ("--latency-warmup", "-1", "least"), ("--latency-rounds", "0", "least"),
+                                   ("--latency-keys", "1001", "most"), ("--latency-censor-ms", "5001", "most"),
+                                   ("--latency-warmup", "201", "most"), ("--rounds", "0", "least"),
+                                   ("--rounds", "1001", "most")):
+            argv = ["macos-standing.py", "--workloads", "latency", flag, value]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err, \
+                    self.assertRaises(SystemExit):
+                standing.main()
+            self.assertIn(f"{flag} must be at {bound}", err.getvalue())
+        # Before any early path acts on them.
+        for early in (["--latency-check"], ["--combine", str(self.root / "none")], ["--preflight-only"]):
+            argv = ["macos-standing.py", *early, "--latency-keys", "0"]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err, \
+                    self.assertRaises(SystemExit):
+                standing.main()
+            self.assertIn("--latency-keys must be at least", err.getvalue(), early)
+
+    def test_a_session_counting_only_for_latency_must_share_the_setup(self) -> None:
+        good = latency_meta(1)
+        other = latency_meta(2)
+        other["latency"] = {**other["latency"], "keys": 50}
+        rows = {"latency": {"kettle": [latency_run([30.0] * 4)] * 2, "wezterm": [latency_run([31.0] * 4)] * 2},
+                "startup": {"kettle": [{"error": "no window"}], "wezterm": [{"window_ms": 1.0, "child_ms": 1.0}]}}
+        other["rounds"] = {"latency": 2, "startup": 1}
+        good["rounds"] = {"latency": 2, "startup": 1}
+        first = write_session(self.root, "a", good, {**rows, "startup": {
+            "kettle": [{"window_ms": 1.0, "child_ms": 1.0}], "wezterm": [{"window_ms": 1.0, "child_ms": 1.0}]}})
+        second = write_session(self.root, "b", other, rows)
+        with self.assertRaises(SystemExit):
+            standing.combine([first, second])
+
+    def test_a_refresh_rate_change_voids_latency(self) -> None:
+        meta = latency_meta(1)
+        results = {"workloads": {"latency": {"kettle": [latency_run([30.0]), latency_run([30.0], refresh=120)]}}}
+        self.assertFalse(standing.workload_complete(results, meta, "latency"))
+        results["workloads"]["latency"]["kettle"][1]["refresh_hz"] = 60
+        self.assertTrue(standing.workload_complete(results, meta, "latency"))
+
+    def test_an_aa_without_latency_still_calibrates_other_rows(self) -> None:
+        aa_meta = {"date": "2026-10-01", "started": "2026-10-01T01:00:00", "refusals": [], "bare": False,
+                   "complete": True, "label": "aa", "mode": "ab", "rounds": {"startup": 2}, "warmup": 0}
+        aa = write_session(self.root, "aa", aa_meta, {"startup": {
+            "kettle-a": [{"window_ms": 150.0, "child_ms": 1.0}] * 2, "kettle-b": [{"window_ms": 150.0, "child_ms": 1.0}] * 2}})
+        ab_meta = {**latency_meta(2), "mode": "ab", "label": "ab"}
+        ab_meta["rounds"] = {"latency": 2}
+        ab = write_session(self.root, "ab", ab_meta, {"latency": {
+            "kettle-a": [latency_run([30.0] * 4)] * 2, "kettle-b": [latency_run([29.0] * 4)] * 2}})
+        standing.combine([ab], aa)  # no refusal: the A/A never ran latency
+        other_meta = {**latency_meta(3), "mode": "ab", "label": "aa2"}
+        other_meta["latency"] = {**other_meta["latency"], "keys": 50}
+        other_meta["rounds"] = {"latency": 2}
+        aa2 = write_session(self.root, "aa2", other_meta, {"latency": {
+            "kettle-a": [latency_run([30.0] * 4)] * 2, "kettle-b": [latency_run([30.0] * 4)] * 2}})
+        with self.assertRaises(SystemExit):
+            standing.combine([ab], aa2)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "needs macOS and swiftc")
+    def test_the_probe_app_is_sealed_and_passes_its_self_test(self) -> None:
+        import subprocess
+
+        app = standing.build_latency_probe(self.root, None)
+        sealed = subprocess.run(["codesign", "--verify", "--strict", "--deep", str(app)], capture_output=True, text=True)
+        self.assertEqual(sealed.returncode, 0, "nothing may change inside the bundle after signing: " + sealed.stderr)
+        self.assertTrue((self.root / "KettleLatencyProbe.build.json").exists())
+        built = (app / "Contents" / "MacOS" / "latency-probe").stat().st_mtime_ns
+        standing.build_latency_probe(self.root, None)
+        self.assertEqual((app / "Contents" / "MacOS" / "latency-probe").stat().st_mtime_ns, built,
+                         "an unchanged source and identity reuse the signed probe")
+        done = subprocess.run([str(app / "Contents" / "MacOS" / "latency-probe"), "--self-test"],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        subprocess.run(["swiftc", "-typecheck", str(HERE / "macos-standing" / "latency-floor.swift")],
+                       check=True, capture_output=True)
+
+
 FLOOD_4K_SHA256 = "8f18d84dad9b7ab935be1aa827e9ce0d0cc97b0c2e75f08afaede576a8b08f5d"
 
 
