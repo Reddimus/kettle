@@ -182,11 +182,18 @@ fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
     let on = capture(&mut renderer, &cfg, &panes, &focused(true));
     let quads_on = uploaded_quads(&renderer);
     let prepares = renderer.text_prepares;
+    let uploads = renderer.render_uploads();
     let off = capture(&mut renderer, &cfg, &panes, &focused(false));
     assert_eq!(
         uploaded_quads(&renderer),
         quads_on,
         "a blink must not change the uploaded quads"
+    );
+    let after = renderer.render_uploads();
+    assert_eq!(
+        (after.buffer_writes, after.texture_writes),
+        (uploads.buffer_writes, uploads.texture_writes),
+        "a blink writes nothing to the GPU: one write keeps Apple's blit pool resident"
     );
     assert_eq!(
         renderer.text_prepares, prepares,
@@ -199,6 +206,136 @@ fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
     let back_on = capture(&mut renderer, &cfg, &panes, &focused(true));
     assert_eq!(back_on, on, "the next on phase is the first one again");
     assert_eq!(renderer.text_prepares, prepares);
+}
+
+/// A frame whose content did not change writes nothing to the GPU, and one
+/// whose content did writes only what changed.
+#[test]
+fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let snap = snapshot_of(20, 4, b"hello");
+    let panes = [pane(&snap, 320, 120)];
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    let first = renderer.render_uploads();
+    assert!(
+        first.buffer_writes > 0,
+        "the first frame uploads everything"
+    );
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    let steady = renderer.render_uploads();
+    assert_eq!(
+        (
+            steady.buffer_writes,
+            steady.buffer_bytes,
+            steady.texture_writes
+        ),
+        (
+            first.buffer_writes,
+            first.buffer_bytes,
+            first.texture_writes
+        ),
+        "an unchanged frame writes nothing"
+    );
+    assert!(steady.skipped_writes > first.skipped_writes);
+    assert_eq!(steady.text_prepares, first.text_prepares);
+
+    let changed = snapshot_of(20, 4, b"hellp");
+    let panes = [pane(&changed, 320, 120)];
+    capture(&mut renderer, &cfg, &panes, &focused(true));
+    let after = renderer.render_uploads();
+    assert!(
+        after.buffer_writes > steady.buffer_writes,
+        "changed text still reaches the GPU"
+    );
+    assert!(
+        after.buffer_bytes - steady.buffer_bytes < first.buffer_bytes,
+        "only the difference is written, not the whole first frame again"
+    );
+}
+
+/// Each pipeline, uploading the same data twice, writes nothing the second
+/// time; the glyph pipeline, whose instances the renderer uploads only when
+/// the grid changed, writes its instances but not its uniform.
+#[test]
+fn every_pipeline_skips_an_unchanged_upload() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some((device, queue)) = pollster::block_on(async {
+        let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "upload-test")
+            .await
+            .ok()?;
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .ok()
+    }) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let screen = [64.0, 32.0];
+    let writes = |counts: UploadCounts| counts.buffer_writes;
+
+    let mut quads = QuadPipeline::new(&device, format);
+    let quad = [QuadInstance {
+        pos: [1.0, 1.0],
+        size: [4.0, 4.0],
+        color: [1.0, 0.0, 0.0, 1.0],
+    }];
+    quads.upload(&device, &queue, screen, &quad);
+    let first = writes(quads.upload_counts());
+    quads.upload(&device, &queue, screen, &quad);
+    assert_eq!(writes(quads.upload_counts()), first, "quad");
+
+    let mut outlines = OutlinePipeline::new(&device, format);
+    let outline = [crate::outline::OutlineInstance {
+        pos: [0.0, 0.0],
+        size: [16.0, 8.0],
+        color: [1.0; 4],
+        border_width: 1.0,
+        corner_radius: 2.0,
+        corner_mask: 0b1100,
+        _pad: 0,
+    }];
+    outlines.upload(&device, &queue, screen, &outline);
+    let first = writes(outlines.upload_counts());
+    outlines.upload(&device, &queue, screen, &outline);
+    assert_eq!(writes(outlines.upload_counts()), first, "outline");
+
+    let mut images = imgpipe::ImagePipeline::new(&device, format).expect("image pipeline");
+    images.upload(&device, &queue, screen, &[]);
+    let first = writes(images.upload_counts());
+    images.upload(&device, &queue, screen, &[]);
+    assert_eq!(writes(images.upload_counts()), first, "image");
+
+    let mut stars = starfield::StarfieldPipeline::new(&device, format);
+    stars.upload(&queue, screen, 3.0);
+    let first = writes(stars.upload_counts());
+    stars.upload(&queue, screen, 3.0);
+    assert_eq!(writes(stars.upload_counts()), first, "a still starfield");
+    stars.upload(&queue, screen, 3.5);
+    assert_eq!(
+        writes(stars.upload_counts()),
+        first + 1,
+        "a moving starfield"
+    );
+
+    let mut glyphs =
+        GlyphPipeline::new_with_budget(&device, format, kettle_core::GraphicsBudget::default())
+            .expect("glyph pipeline");
+    let glyph = [<GlyphInstance as bytemuck::Zeroable>::zeroed()];
+    glyphs.upload(&device, &queue, screen, &glyph);
+    let first = writes(glyphs.upload_counts());
+    glyphs.upload(&device, &queue, screen, &glyph);
+    assert_eq!(
+        writes(glyphs.upload_counts()),
+        first + 1,
+        "the glyph instances are written, the unchanged uniform is not"
+    );
 }
 
 /// The off phase draws exactly what a cursor hidden with DECTCEM draws.

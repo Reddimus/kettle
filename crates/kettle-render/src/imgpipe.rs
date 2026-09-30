@@ -9,6 +9,10 @@ use kettle_core::{
     GraphicsBudget, GraphicsReservation, ImageData, ImageSourceCrop, ImageSourceRect,
 };
 
+use crate::upload::{
+    RetainedBytes, UploadCounters, UploadCounts, write_buffer_if_changed, write_texture_counted,
+};
+
 pub(crate) struct ImageItem {
     rect: [f32; 4],
     image: ImageData,
@@ -359,6 +363,9 @@ pub struct ImagePipeline {
     /// backlog clears (or on startup).
     last_dropped_warn: Option<usize>,
     retained_key: Option<u64>,
+    screen_held: RetainedBytes,
+    instances_held: RetainedBytes,
+    counters: UploadCounters,
 }
 
 impl ImagePipeline {
@@ -527,7 +534,15 @@ impl ImagePipeline {
             epoch: 0,
             last_dropped_warn: None,
             retained_key: None,
+            screen_held: RetainedBytes::default(),
+            instances_held: RetainedBytes::default(),
+            counters: UploadCounters::default(),
         })
+    }
+
+    /// What this pipeline has written to the GPU so far.
+    pub(crate) fn upload_counts(&self) -> UploadCounts {
+        self.counters.snapshot()
     }
 
     fn ensure_texture(
@@ -591,7 +606,8 @@ impl ImagePipeline {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
+        write_texture_counted(
+            queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &tex,
                 mip_level: 0,
@@ -609,6 +625,7 @@ impl ImagePipeline {
                 height: img.height,
                 depth_or_array_layers: 1,
             },
+            &self.counters,
         );
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         let make_bind_group = |label, sampler: &wgpu::Sampler| {
@@ -681,13 +698,15 @@ impl ImagePipeline {
         screen: [f32; 2],
         items: &[ImageItem],
     ) -> bool {
-        queue.write_buffer(
+        write_buffer_if_changed(
+            queue,
             &self.screen_buf,
-            0,
+            &mut self.screen_held,
             bytemuck::bytes_of(&Screen {
                 size: screen,
                 _pad: [0.0; 2],
             }),
+            &self.counters,
         );
         self.draws.clear();
         self.epoch = self.epoch.saturating_add(1);
@@ -733,6 +752,7 @@ impl ImagePipeline {
             self.instances = instances;
             self.instance_gpu = instance_gpu;
             self.cap = next_cap;
+            self.instances_held.invalidate();
         }
         let mut insts = Vec::with_capacity(item_count);
         let mut complete = true;
@@ -760,7 +780,13 @@ impl ImagePipeline {
                 complete = false;
             }
         }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&insts));
+        write_buffer_if_changed(
+            queue,
+            &self.instances,
+            &mut self.instances_held,
+            bytemuck::cast_slice(&insts),
+            &self.counters,
+        );
         complete
     }
 

@@ -18944,6 +18944,20 @@ impl App {
                     "segments": segments,
                 },
                 "pane_titlebars": pane_titlebars,
+                // What this window's renderer has sent to the GPU: counts
+                // only, never content. A window that only blinks should add
+                // frames here but no writes (see kettle-render's upload.rs).
+                "render_uploads": target.renderer.as_ref().map(|r| {
+                    let u = r.render_uploads();
+                    serde_json::json!({
+                        "frames_presented": u.frames_presented,
+                        "buffer_writes": u.buffer_writes,
+                        "buffer_bytes": u.buffer_bytes,
+                        "texture_writes": u.texture_writes,
+                        "text_prepares": u.text_prepares,
+                        "skipped_writes": u.skipped_writes,
+                    })
+                }),
             }),
         )
     }
@@ -33753,6 +33767,10 @@ mod tests {
             "\"visible_lines\":",
             "\"focused_rect\":",
             "\"accessibility\": accessibility",
+            "\"render_uploads\": target.renderer.as_ref().map(",
+            "\"frames_presented\": u.frames_presented",
+            "\"buffer_writes\": u.buffer_writes",
+            "\"text_prepares\": u.text_prepares",
         ] {
             assert!(body.contains(needle), "ui_geometry lost {needle:?}");
         }

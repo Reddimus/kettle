@@ -1200,7 +1200,20 @@ text/style/geometry changes refresh glyph instances. A cursor blink changes
 only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw
 time. A steady frame re-draws the retained instance buffer. A blink must never
-invalidate or stale-draw ordinary pane glyphs. `text-renderer = legacy` keeps the continuous-glyphon pane path
+invalidate or stale-draw ordinary pane glyphs.
+
+Every GPU upload goes through `upload.rs`, which holds the renderer's only
+`write_buffer` and `write_texture` calls. Each pipeline keeps an exact CPU copy
+of what its buffers hold and writes only the bytes that changed, so a frame
+whose content did not change, a blink edge included, writes nothing to the GPU.
+The grid's glyph instances keep no copy, since they are uploaded only behind
+the grid's own damage gate. This matters for memory on macOS: every buffer
+write copies through a staging buffer with a blit, and the Apple GPU driver
+keeps its blit pool (about 112 MiB, counted in the process's footprint)
+resident while frames keep blitting; one 16-byte write per frame is enough to
+hold it. The render pool (about 168 MiB) stays while any frame draws.
+`ui_geometry.render_uploads` counts what a window has written, and a source
+guard fails on any upload outside `upload.rs`. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
 Pass 0 is the **background (wallpaper)** in its own pipeline, drawn at the very

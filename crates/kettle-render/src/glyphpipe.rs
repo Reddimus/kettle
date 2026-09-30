@@ -31,6 +31,11 @@ use bytemuck::{Pod, Zeroable};
 use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
+use crate::upload::{
+    RetainedBytes, UploadCounters, UploadCounts, write_buffer_counted, write_buffer_if_changed,
+    write_texture_counted,
+};
+
 /// One pinned glyph quad. `kind` selects the atlas: 0 = color, 1 = mask.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -465,7 +470,17 @@ impl Atlas {
         true
     }
 
-    fn write(&self, queue: &wgpu::Queue, x: u32, y: u32, w: u32, h: u32, data: &[u8]) {
+    #[allow(clippy::too_many_arguments)]
+    fn write(
+        &self,
+        queue: &wgpu::Queue,
+        counters: &UploadCounters,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        data: &[u8],
+    ) {
         let Some(expected) = texture_bytes(w, h, self.bpp) else {
             return;
         };
@@ -473,7 +488,8 @@ impl Atlas {
             log::warn!("skipping malformed glyph bitmap: byte length mismatch");
             return;
         }
-        queue.write_texture(
+        write_texture_counted(
+            queue,
             wgpu::TexelCopyTextureInfo {
                 texture: &self.tex,
                 mip_level: 0,
@@ -491,6 +507,7 @@ impl Atlas {
                 height: h,
                 depth_or_array_layers: 1,
             },
+            counters,
         );
     }
 }
@@ -609,6 +626,10 @@ pub struct GlyphPipeline {
     instance_gpu: GraphicsReservation,
     budget: GraphicsBudget,
     count: u32,
+    /// Only the uniform keeps a copy: the renderer uploads instances only
+    /// when the grid's text or layout changed, and already holds them.
+    screen_held: RetainedBytes,
+    counters: UploadCounters,
 }
 
 impl GlyphPipeline {
@@ -778,7 +799,14 @@ impl GlyphPipeline {
             instance_gpu,
             budget,
             count: 0,
+            screen_held: RetainedBytes::default(),
+            counters: UploadCounters::default(),
         })
+    }
+
+    /// What this pipeline has written to the GPU so far.
+    pub(crate) fn upload_counts(&self) -> UploadCounts {
+        self.counters.snapshot()
     }
 
     fn make_bg(
@@ -1000,9 +1028,11 @@ impl GlyphPipeline {
             }
         };
         if kind == 0 {
-            self.color.write(queue, x, y, g.width, g.height, g.data);
+            self.color
+                .write(queue, &self.counters, x, y, g.width, g.height, g.data);
         } else {
-            self.mask.write(queue, x, y, g.width, g.height, g.data);
+            self.mask
+                .write(queue, &self.counters, x, y, g.width, g.height, g.data);
         }
         CacheOutcome::Slot(GlyphSlot {
             kind,
@@ -1040,13 +1070,15 @@ impl GlyphPipeline {
             );
             self.bg_dirty = false;
         }
-        queue.write_buffer(
+        write_buffer_if_changed(
+            queue,
             &self.screen_buf,
-            0,
+            &mut self.screen_held,
             bytemuck::bytes_of(&Screen {
                 size: screen,
                 _pad: [0.0; 2],
             }),
+            &self.counters,
         );
         if data.len() > self.capacity {
             let Some(capacity) = data.len().checked_next_power_of_two() else {
@@ -1072,9 +1104,12 @@ impl GlyphPipeline {
             self.capacity = capacity;
             self.instance_gpu = gpu;
         }
-        if !data.is_empty() {
-            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(data));
-        }
+        write_buffer_counted(
+            queue,
+            &self.instances,
+            bytemuck::cast_slice(data),
+            &self.counters,
+        );
         self.count = data.len() as u32;
     }
 

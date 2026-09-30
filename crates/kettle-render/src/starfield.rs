@@ -8,6 +8,8 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::upload::{RetainedBytes, UploadCounters, UploadCounts, write_buffer_if_changed};
+
 /// Star count. The starfield is a FIXED built-in example (not config-driven),
 /// so this lives here, not in `Config`. It is also the uniform array's
 /// compile-time bound, substituted into the WGSL for the broadest
@@ -249,6 +251,8 @@ pub struct StarfieldPipeline {
     uniform_buf: wgpu::Buffer,
     /// The fixed properties of every star, evaluated once.
     seeds: [StarSeed; NSTARS],
+    uniform_held: RetainedBytes,
+    counters: UploadCounters,
 }
 
 impl StarfieldPipeline {
@@ -327,6 +331,8 @@ impl StarfieldPipeline {
             bind_group,
             uniform_buf,
             seeds: StarSeed::all(),
+            uniform_held: RetainedBytes::default(),
+            counters: UploadCounters::default(),
         }
     }
 
@@ -335,7 +341,9 @@ impl StarfieldPipeline {
     ///
     /// This is where the model is evaluated, once per frame for 55 stars
     /// rather than once per star per pixel.
-    pub fn upload(&self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
+    /// An animated starfield changes every frame, so it writes every frame; a
+    /// still one (no animation) writes only when the size changes.
+    pub fn upload(&mut self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
         let mut u = Uniforms {
             resolution,
             count: 0,
@@ -343,7 +351,18 @@ impl StarfieldPipeline {
             stars: [Star::default(); NSTARS],
         };
         u.count = build_frame_stars(&self.seeds, resolution, time_secs, &mut u.stars);
-        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+        write_buffer_if_changed(
+            queue,
+            &self.uniform_buf,
+            &mut self.uniform_held,
+            bytemuck::bytes_of(&u),
+            &self.counters,
+        );
+    }
+
+    /// What this pipeline has written to the GPU so far.
+    pub(crate) fn upload_counts(&self) -> UploadCounts {
+        self.counters.snapshot()
     }
 
     /// The star positions this pipeline would upload for one frame, in pixels

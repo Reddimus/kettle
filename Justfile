@@ -854,6 +854,16 @@ text-presentation-smoke:
 split-exit-resize-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release split-exit-resize
 
+# A window whose content is not changing writes nothing to the GPU, read from
+# ui_geometry.render_uploads: five screenshots of an unchanged window, a
+# focused window blinking for 2 s, and the same after 2 MiB of output add no
+# buffer or texture writes and no text prepares (the blink adds frames only).
+# Without window focus (Xvfb) only the screenshot phase runs. Artifacts under
+# target/diagnostics/steady-uploads-*.
+[unix]
+steady-uploads-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release steady-uploads
+
 # Hunt for the intermittent "split never loads" report. On demand only: it is a
 # hunt, not a contract, so it is in no gate. The default fixture is a free
 # shell-churn process; `just split-repro --claude` drives a real Claude Code

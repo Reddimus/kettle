@@ -21,6 +21,9 @@ mod present;
 mod quad;
 mod snapshot;
 mod starfield;
+mod upload;
+
+pub use upload::{RenderUploads, UploadCounts};
 
 pub use bg_image::{
     BgFrame, BgImage, bg_current_frame, decode_bg_image, decode_bg_image_frames,
@@ -2635,9 +2638,12 @@ pub struct Renderer {
     /// and uploaded; a blink edge changes only this draw. `None` when no
     /// cursor can blink (none drawn, or vi mode, which never blinks).
     cursor_quad_range: Option<std::ops::Range<u32>>,
-    /// Text prepares run so far (the pane, menu and cursor-glyph renderers).
-    /// Steady frames, blink edges included, should add none.
+    /// Text prepares run so far, one per glyphon prepare call (the pane, menu
+    /// and cursor-glyph renderers). Steady frames, blink edges included,
+    /// should add none.
     text_prepares: u64,
+    /// Frames presented to the window so far.
+    frames_presented: u64,
     /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
     /// for the title text drawn in the titlebar quad (see
     /// `pick_titlebar_bg`). Reused across redraws to amortize
@@ -5133,6 +5139,7 @@ impl Renderer {
             quad_scratch: Vec::new(),
             cursor_quad_range: None,
             text_prepares: 0,
+            frames_presented: 0,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
             pane_line_keys: Vec::new(),
@@ -9013,6 +9020,7 @@ impl Renderer {
             // settings, completion, and other top-layer text). Empty
             // `menu_areas` is fine; glyphon's prepare handles a zero-area
             // batch as a no-op.
+            self.text_prepares += 1;
             self.menu_text_renderer.prepare(
                 &self.gpu.device,
                 &self.gpu.queue,
@@ -9378,7 +9386,36 @@ impl Renderer {
         if need_prepare {
             self.atlas.trim();
         }
+        self.frames_presented += 1;
         Ok(FrameOutcome::Presented)
+    }
+
+    /// Everything this renderer has sent to the GPU so far (see
+    /// `RenderUploads`), summed over its pipelines.
+    pub fn render_uploads(&self) -> RenderUploads {
+        let counts: UploadCounts = [
+            self.glyph_pipeline.upload_counts(),
+            self.pane_bases.upload_counts(),
+            self.live_pane_bases.upload_counts(),
+            self.quads.upload_counts(),
+            self.pane_outlines.upload_counts(),
+            self.overlay_quads.upload_counts(),
+            self.menu_quads.upload_counts(),
+            self.imgs.upload_counts(),
+            self.media_receipt_img.upload_counts(),
+            self.bg_imgs.upload_counts(),
+            self.starfield.upload_counts(),
+        ]
+        .into_iter()
+        .sum();
+        RenderUploads {
+            frames_presented: self.frames_presented,
+            buffer_writes: counts.buffer_writes,
+            buffer_bytes: counts.buffer_bytes,
+            texture_writes: counts.texture_writes,
+            text_prepares: self.text_prepares,
+            skipped_writes: counts.skipped_writes,
+        }
     }
 
     fn submit_offscreen_screenshot(
@@ -15582,7 +15619,7 @@ mod gpu_tests {
         let resolution = [side as f32, side as f32];
         let time = 40.0_f32;
 
-        let pipeline = starfield::StarfieldPipeline::new(&device, format);
+        let mut pipeline = starfield::StarfieldPipeline::new(&device, format);
         let expected = pipeline.frame_positions(resolution, time);
         pipeline.upload(&queue, resolution, time);
 
@@ -22210,6 +22247,22 @@ mod glyph_cell_lock_tests {
             !gate.contains("cursor_char_changed") && !gate.contains("cursor_visible"),
             "grid upload gate/block must not depend on cursor blink state"
         );
+        // Nor may any upload after it: a blink edge must write no GPU buffer.
+        let uploads = src
+            .split("let grid_upload_needed =")
+            .nth(1)
+            .and_then(|s| s.split("let target_size = [").next())
+            .expect("the frame's upload block");
+        assert!(
+            uploads.contains("self.menu_quads") && uploads.contains("self.starfield.upload("),
+            "the block runs through every pipeline's upload"
+        );
+        for blink in ["cursor_visible", "cursor_on", "blink"] {
+            assert!(
+                !uploads.contains(blink),
+                "the frame's uploads must not depend on the blink phase ({blink})"
+            );
+        }
     }
 
     /// The cell-locked emit loop must live in ONE free function,

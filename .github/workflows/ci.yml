@@ -545,6 +545,33 @@ jobs:
           path: target/diagnostics/live-ui-color-scheme
           if-no-files-found: warn
           retention-days: 7
+      - name: Live UI steady-uploads smoke (Linux, quarantined)
+        if: runner.os == 'Linux'
+        # A window whose content is not changing must write nothing to the
+        # GPU: the renderer keeps a copy of each buffer and writes only what
+        # changed. Under Xvfb the window never gets focus, so --screenshots-only
+        # runs just the first phase (screenshots of an unchanged window add no
+        # writes); the blinking phases run on a developer Mac.
+        # Quarantined like the other live-UI legs: creating a real window
+        # under Xvfb on a hosted runner is the flake source, not what the
+        # scenario asserts.
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python3 scripts/check-live-ui-smoke.py steady-uploads \
+            --screenshots-only \
+            --kettle ./target/release/kettle \
+            --out-dir target/diagnostics/live-ui-steady-uploads
+      - name: Upload live UI steady-uploads evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-ui-steady-uploads-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/diagnostics/live-ui-steady-uploads
+          if-no-files-found: warn
+          retention-days: 7
       - name: --gpu-info diagnostic smoke (Linux/macOS)
         # Pin that `--gpu-info` resolves an adapter and prints the expected
         # key:value layout, so an output-format change (e.g. to JSON) fails
