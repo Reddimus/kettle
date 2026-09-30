@@ -18991,6 +18991,59 @@ impl App {
         )
     }
 
+    /// The routing decision the real keyboard and `dispatch_keybind` share: a
+    /// matched chord goes to the terminal when it is an adaptive focus chord
+    /// with nowhere to go, or when a program that owns the keyboard also uses
+    /// it (see [`program_key_rule`]). The search bar keeps only the first
+    /// rule: while it has the keyboard, the program cannot get the key, so a
+    /// Kettle action is still better than nothing.
+    fn chord_falls_through(&self, ws: &WindowState, trigger: Trigger, action: &Action) -> bool {
+        self.adaptive_focus_chord_falls_through(ws, trigger, action)
+            || self.chord_goes_to_program(ws, trigger, action)
+    }
+
+    /// Whether a default chord that the focused pane's program also uses goes
+    /// to that program: only default (trigger, action) pairs with a
+    /// [`ProgramKeyRule`], only while `keybind-yield` is on, and only while a
+    /// program, not an idle shell prompt, owns the pane's keyboard. Reads the
+    /// pane's terminal only after the cheap pair match succeeds.
+    fn chord_goes_to_program(&self, ws: &WindowState, trigger: Trigger, action: &Action) -> bool {
+        let Some(rule) =
+            configured_program_key_rule(&self.cfg, trigger, action, cfg!(target_os = "macos"))
+        else {
+            return false;
+        };
+        // Broadcast writes the key to every target in that target's own
+        // keyboard mode, but only the focused pane is asked here, so a
+        // broadcast chord stays Kettle's.
+        if ws.mux.is_broadcast_on() {
+            return false;
+        }
+        let Some(pane) = ws.mux.active_focus().and_then(|id| ws.mux.panes.get(&id)) else {
+            return false;
+        };
+        // A pane that cannot take input would drop the key.
+        if pane.read_only || pane.pty_input_failed() {
+            return false;
+        }
+        let claims = pane.term.keyboard_claims();
+        if !claims.program_owns_keyboard() {
+            return false;
+        }
+        let kettle = KettleActionState {
+            tabs: ws.mux.tabs.len(),
+            current_tab: ws.mux.active,
+            selection_exists: matches!(action, Action::SelectToTop | Action::SelectToBottom)
+                && pane
+                    .term
+                    .term
+                    .lock()
+                    .ok()
+                    .is_some_and(|t| t.selection.is_some()),
+        };
+        program_gets_chord(rule, action, &claims, &kettle)
+    }
+
     /// `dispatch_keybind`: diagnostic route for app-level keybind matching.
     /// Unlike `send_keys`, this does not write PTY bytes; it exercises the same
     /// resolver as the real window keyboard path and dispatches the matched app
@@ -19056,7 +19109,7 @@ impl App {
         };
         let trigger_label = trigger.label();
         let action_name = kettle_config::keybinds::action_label(&action);
-        if self.adaptive_focus_chord_falls_through(ws, trigger, &action) {
+        if self.chord_falls_through(ws, trigger, &action) {
             return Response::ok(
                 req.id,
                 serde_json::json!({
@@ -22258,6 +22311,9 @@ impl App {
             .collect();
         self.cfg.keybinds.retain(|_, v| *v != act);
         self.cfg.keybinds.insert(trig, act);
+        // The saved line makes this the user's chord on the next reload; mark
+        // it now so `keybind-yield` treats it the same way this session.
+        self.cfg.keybinds_declared.insert(trig);
         // Persist: unbind the old chord(s), then bind the new one. This
         // also naturally covers stealing a chord from another action —
         // appending `trig=action_name` after any earlier `trig=<other>`
@@ -23592,6 +23648,158 @@ fn adaptive_alt_focus_falls_through(
     visible_neighbor_exists: bool,
 ) -> bool {
     !visible_neighbor_exists && adaptive_alt_focus_direction(trigger, action, enabled).is_some()
+}
+
+/// How a default chord shares its key with a program that owns the keyboard
+/// (see `chord_goes_to_program`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProgramKeyRule {
+    /// The program always gets it: Shift+Arrow split resize, which Codex
+    /// (Shift+Left answers a queued question), Claude Code, Neovim, fish and
+    /// every text field use too.
+    ProgramFirst,
+    /// The program gets it only when Kettle's action would do nothing (no
+    /// prompt to jump to, nothing to scroll, one tab, no selection to extend)
+    /// and the view is not scrolled into history. Copy has no rule: Codex
+    /// reads Ctrl+Shift+C as Ctrl+C, which would discard a draft.
+    WhenKettleIdle,
+}
+
+/// The rule for this chord under the user's config: none with
+/// `keybind-yield = off`, and none for a trigger the config binds itself, even
+/// to its default action, so a chord the user bound is always Kettle's.
+fn configured_program_key_rule(
+    cfg: &kettle_config::Config,
+    trigger: Trigger,
+    action: &Action,
+    macos: bool,
+) -> Option<ProgramKeyRule> {
+    if cfg.keybind_yield == kettle_config::KeybindYield::Off
+        || cfg.keybinds_declared.contains(&trigger)
+    {
+        return None;
+    }
+    program_key_rule(trigger, action, macos)
+}
+
+/// The default chords a program that owns the keyboard can have, matched as
+/// exact (trigger, action) pairs, as `adaptive_alt_focus_direction` does: a
+/// chord the user binds to anything, or an action the user moves to another
+/// chord, is always Kettle's.
+fn program_key_rule(trigger: Trigger, action: &Action, macos: bool) -> Option<ProgramKeyRule> {
+    use KKey::*;
+    use ProgramKeyRule::*;
+
+    let shift = Mods::SHIFT;
+    let ctrl = Mods::CTRL;
+    let ctrl_shift = Mods::CTRL | Mods::SHIFT;
+    let rule = match (trigger.mods, trigger.key, action) {
+        (m, Up, Action::ResizeUp)
+        | (m, Down, Action::ResizeDown)
+        | (m, Left, Action::ResizeLeft)
+        | (m, Right, Action::ResizeRight)
+            if m == shift =>
+        {
+            ProgramFirst
+        }
+        (m, Up, Action::JumpPrevPrompt) | (m, Down, Action::JumpNextPrompt)
+            if m == ctrl || (macos && m == Mods::SUPER) =>
+        {
+            WhenKettleIdle
+        }
+        (m, PageUp, Action::ScrollPageUp)
+        | (m, PageDown, Action::ScrollPageDown)
+        | (m, Home, Action::SelectToTop)
+        | (m, End, Action::SelectToBottom)
+            if m == shift =>
+        {
+            WhenKettleIdle
+        }
+        (m, Up, Action::ScrollLineUp)
+        | (m, Down, Action::ScrollLineDown)
+        | (m, PageDown, Action::MoveTabRight)
+        | (m, PageUp, Action::MoveTabLeft)
+            if m == ctrl_shift =>
+        {
+            WhenKettleIdle
+        }
+        (m, Home, Action::ScrollToTop)
+        | (m, End, Action::ScrollToBottom)
+        | (m, PageDown, Action::NextTab)
+        | (m, PageUp, Action::PrevTab)
+            if m == ctrl =>
+        {
+            WhenKettleIdle
+        }
+        // Alt+1-9 everywhere, and Cmd+1-9 on macOS.
+        (m, Char(digit @ '1'..='9'), Action::GotoTab(index))
+            if (m == Mods::ALT || (macos && m == Mods::SUPER))
+                && u32::from(*index) + 1 == digit.to_digit(10).unwrap_or(0) =>
+        {
+            WhenKettleIdle
+        }
+        _ => return None,
+    };
+    Some(rule)
+}
+
+/// The window state that decides whether a Kettle action would do anything.
+struct KettleActionState {
+    tabs: usize,
+    current_tab: usize,
+    /// The pane has a Kettle selection (even an empty one a click left), which
+    /// `Shift+Home/End` would extend.
+    selection_exists: bool,
+}
+
+/// Whether Kettle's action would change nothing if it ran now, with the view
+/// at the bottom (`program_gets_chord` never asks otherwise).
+fn kettle_action_is_idle(
+    action: &Action,
+    claims: &kettle_core::KeyboardClaims,
+    kettle: &KettleActionState,
+) -> bool {
+    let no_history = claims.alt_screen || claims.history_size == 0;
+    match action {
+        Action::JumpPrevPrompt => !claims.prompt_above,
+        Action::JumpNextPrompt => !claims.prompt_below,
+        Action::ScrollToTop | Action::ScrollPageUp | Action::ScrollLineUp => no_history,
+        Action::ScrollToBottom | Action::ScrollPageDown | Action::ScrollLineDown => true,
+        // With nothing selected, Kettle would start a selection at the
+        // program's cursor; a program that owns the keyboard wants the key.
+        Action::SelectToTop | Action::SelectToBottom => !kettle.selection_exists,
+        Action::NextTab | Action::PrevTab | Action::MoveTabLeft | Action::MoveTabRight => {
+            kettle.tabs < 2
+        }
+        Action::GotoTab(index) => {
+            let index = usize::from(*index);
+            index >= kettle.tabs || index == kettle.current_tab
+        }
+        _ => false,
+    }
+}
+
+/// Whether a program that owns the keyboard gets a chord with this rule.
+///
+/// A view scrolled into history keeps every `WhenKettleIdle` chord Kettle's:
+/// a key that reached the program would snap the view back to the bottom
+/// (`scroll-on-keystroke`), so the user reading scrollback would lose their
+/// place at its top, and a held key would bounce between the two.
+fn program_gets_chord(
+    rule: ProgramKeyRule,
+    action: &Action,
+    claims: &kettle_core::KeyboardClaims,
+    kettle: &KettleActionState,
+) -> bool {
+    if !claims.program_owns_keyboard() {
+        return false;
+    }
+    match rule {
+        ProgramKeyRule::ProgramFirst => true,
+        ProgramKeyRule::WhenKettleIdle => {
+            claims.display_offset == 0 && kettle_action_is_idle(action, claims, kettle)
+        }
+    }
 }
 
 fn parse_ctl_mods(
@@ -29044,20 +29252,17 @@ impl App {
                     Some(&event.logical_key),
                     Some(&event.physical_key),
                     ws.mods,
-                ) {
-                    let adaptive_focus_falls_through =
-                        self.adaptive_focus_chord_falls_through(ws, trigger, &act);
-                    if !adaptive_focus_falls_through {
-                        track_consumed_key_release(
-                            &mut ws.suppressed_key_releases,
-                            &mut ws.terminal_owned_key_releases,
-                            event.physical_key,
-                            event.state,
-                            true,
-                        );
-                        self.handle_action(ws, act, event_loop);
-                        return;
-                    }
+                ) && !self.chord_falls_through(ws, trigger, &act)
+                {
+                    track_consumed_key_release(
+                        &mut ws.suppressed_key_releases,
+                        &mut ws.terminal_owned_key_releases,
+                        event.physical_key,
+                        event.state,
+                        true,
+                    );
+                    self.handle_action(ws, act, event_loop);
+                    return;
                 }
 
                 track_terminal_key_press(
@@ -36590,13 +36795,13 @@ mod tests {
     fn adaptive_alt_focus_fallthrough_records_terminal_ownership_before_writing() {
         let src = production_source();
         let routing = src
-            .split("let adaptive_focus_falls_through =")
+            .split("&& !self.chord_falls_through(ws, trigger, &act)")
             .nth(1)
             .and_then(|rest| rest.split("WindowEvent::RedrawRequested").next())
-            .expect("adaptive keyboard routing block");
+            .expect("keyboard routing block");
         let fallthrough = routing
-            .find("if !adaptive_focus_falls_through")
-            .expect("adaptive focus must retain its application-owned branch");
+            .find("self.handle_action(ws, act, event_loop);")
+            .expect("a chord that stays Kettle's must still run its action");
         let terminal_ownership = routing
             .find("track_terminal_key_press(")
             .expect("fall-through input must record terminal key ownership");
@@ -36605,13 +36810,413 @@ mod tests {
             .expect("fall-through input must reach the terminal");
         assert!(
             fallthrough < terminal_ownership && terminal_ownership < terminal_write,
-            "adaptive focus must decide the UI branch first, then record PTY \
+            "the shared routing must decide the UI branch first, then record PTY \
              ownership before writing the fall-through press"
         );
         assert_eq!(
             routing.matches("track_terminal_key_press(").count(),
             1,
             "the keyboard fall-through path must have one shared ownership update"
+        );
+    }
+
+    fn claims(owns: bool) -> kettle_core::KeyboardClaims {
+        kettle_core::KeyboardClaims {
+            keyboard_protocol: owns,
+            ..kettle_core::KeyboardClaims::default()
+        }
+    }
+
+    fn one_tab() -> super::KettleActionState {
+        super::KettleActionState {
+            tabs: 1,
+            current_tab: 0,
+            selection_exists: false,
+        }
+    }
+
+    /// A chord the config binds itself is Kettle's even when the line
+    /// restates the default pair, `keybind-yield = off` turns every rule off,
+    /// and binding one chord leaves the others' rules alone.
+    #[test]
+    fn a_chord_the_user_binds_is_never_yielded() {
+        use super::{ProgramKeyRule::*, configured_program_key_rule};
+        use kettle_config::{Action, Config, Key as KKey, Mods, Trigger};
+        let shift_left = Trigger::new(Mods::SHIFT, KKey::Left);
+        let shift_right = Trigger::new(Mods::SHIFT, KKey::Right);
+        let rule = |cfg: &Config, trigger, action: &Action| {
+            configured_program_key_rule(cfg, trigger, action, false)
+        };
+
+        let stock = Config::parse_text("");
+        assert_eq!(
+            rule(&stock, shift_left, &Action::ResizeLeft),
+            Some(ProgramFirst)
+        );
+
+        let restated = Config::parse_text("keybind = shift+left=resize_left\n");
+        assert_eq!(
+            restated.keybinds.get(&shift_left),
+            Some(&Action::ResizeLeft)
+        );
+        assert_eq!(rule(&restated, shift_left, &Action::ResizeLeft), None);
+        assert_eq!(
+            rule(&restated, shift_right, &Action::ResizeRight),
+            Some(ProgramFirst),
+            "binding one chord leaves the other defaults' rules alone"
+        );
+
+        let imported = Config::parse_text("resize_left = <Shift>Left\n");
+        assert_eq!(
+            imported.keybinds.get(&shift_left),
+            Some(&Action::ResizeLeft)
+        );
+        assert_eq!(rule(&imported, shift_left, &Action::ResizeLeft), None);
+
+        let unbound_then_default = Config::parse_text("keybind = shift+left=unbind\n");
+        assert!(unbound_then_default.keybinds_declared.is_empty());
+
+        let off = Config::parse_text("keybind-yield = off\n");
+        assert_eq!(rule(&off, shift_left, &Action::ResizeLeft), None);
+    }
+
+    /// Only the shipped default (trigger, action) pairs yield: the same
+    /// chord bound to another action, or the action moved to another chord,
+    /// stays Kettle's, as `adaptive_alt_focus_direction` pins for Alt+Arrow.
+    #[test]
+    fn program_key_rules_match_only_exact_default_pairs() {
+        use super::{ProgramKeyRule::*, program_key_rule};
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+        let shift = Mods::SHIFT;
+        let ctrl = Mods::CTRL;
+        let cs = Mods::CTRL | Mods::SHIFT;
+        for (mods, key, action, rule) in [
+            (shift, KKey::Left, Action::ResizeLeft, ProgramFirst),
+            (shift, KKey::Right, Action::ResizeRight, ProgramFirst),
+            (shift, KKey::Up, Action::ResizeUp, ProgramFirst),
+            (shift, KKey::Down, Action::ResizeDown, ProgramFirst),
+            (ctrl, KKey::Up, Action::JumpPrevPrompt, WhenKettleIdle),
+            (ctrl, KKey::Down, Action::JumpNextPrompt, WhenKettleIdle),
+            (shift, KKey::PageUp, Action::ScrollPageUp, WhenKettleIdle),
+            (
+                shift,
+                KKey::PageDown,
+                Action::ScrollPageDown,
+                WhenKettleIdle,
+            ),
+            (cs, KKey::Up, Action::ScrollLineUp, WhenKettleIdle),
+            (cs, KKey::Down, Action::ScrollLineDown, WhenKettleIdle),
+            (ctrl, KKey::Home, Action::ScrollToTop, WhenKettleIdle),
+            (ctrl, KKey::End, Action::ScrollToBottom, WhenKettleIdle),
+            (shift, KKey::Home, Action::SelectToTop, WhenKettleIdle),
+            (shift, KKey::End, Action::SelectToBottom, WhenKettleIdle),
+            (ctrl, KKey::PageDown, Action::NextTab, WhenKettleIdle),
+            (ctrl, KKey::PageUp, Action::PrevTab, WhenKettleIdle),
+            (cs, KKey::PageDown, Action::MoveTabRight, WhenKettleIdle),
+            (cs, KKey::PageUp, Action::MoveTabLeft, WhenKettleIdle),
+            (
+                Mods::ALT,
+                KKey::Char('3'),
+                Action::GotoTab(2),
+                WhenKettleIdle,
+            ),
+        ] {
+            for macos in [false, true] {
+                assert_eq!(
+                    program_key_rule(Trigger::new(mods, key), &action, macos),
+                    Some(rule),
+                    "{mods:?}+{key:?} -> {action:?}"
+                );
+            }
+        }
+        // Other actions on the same chords, and the same actions elsewhere.
+        for (mods, key, action) in [
+            (shift, KKey::Left, Action::FocusLeft),
+            (cs, KKey::Left, Action::ResizeLeft),
+            (Mods::ALT, KKey::Left, Action::ResizeLeft),
+            (ctrl, KKey::Up, Action::ScrollLineUp),
+            (ctrl, KKey::Char('c'), Action::Copy),
+            (cs, KKey::Char('c'), Action::Copy),
+            (Mods::SUPER, KKey::Char('c'), Action::Copy),
+            (shift, KKey::Home, Action::ScrollToTop),
+            (ctrl, KKey::Char('-'), Action::DecreaseFontSize),
+            (cs, KKey::Char('e'), Action::SplitRight),
+        ] {
+            for macos in [false, true] {
+                assert_eq!(
+                    program_key_rule(Trigger::new(mods, key), &action, macos),
+                    None
+                );
+            }
+        }
+        // Platform chords: Cmd on macOS, Alt digits elsewhere, digits that
+        // match their tab only.
+        let cmd = Mods::SUPER;
+        assert_eq!(
+            program_key_rule(Trigger::new(cmd, KKey::Up), &Action::JumpPrevPrompt, true),
+            Some(WhenKettleIdle)
+        );
+        assert_eq!(
+            program_key_rule(Trigger::new(cmd, KKey::Up), &Action::JumpPrevPrompt, false),
+            None
+        );
+        assert_eq!(
+            program_key_rule(
+                Trigger::new(cmd, KKey::Char('3')),
+                &Action::GotoTab(2),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            program_key_rule(
+                Trigger::new(cmd, KKey::Char('3')),
+                &Action::GotoTab(2),
+                true
+            ),
+            Some(WhenKettleIdle)
+        );
+        assert_eq!(
+            program_key_rule(
+                Trigger::new(Mods::ALT, KKey::Char('3')),
+                &Action::GotoTab(0),
+                false
+            ),
+            None
+        );
+    }
+
+    /// Every rule names a chord this platform actually ships, and every
+    /// shipped chord that should yield has its rule, so a change to either
+    /// side cannot leave a rule matching nothing or a default without one.
+    #[test]
+    fn every_program_key_rule_is_a_shipped_default() {
+        let macos = cfg!(target_os = "macos");
+        let defaults = kettle_config::keybinds::defaults();
+        let mut yielding: Vec<String> = defaults
+            .iter()
+            .filter(|(trigger, action)| super::program_key_rule(**trigger, action, macos).is_some())
+            .map(|(trigger, _)| trigger.label())
+            .collect();
+        yielding.sort();
+        let mut expected: Vec<String> = [
+            "Shift+Left",
+            "Shift+Right",
+            "Shift+Up",
+            "Shift+Down",
+            "Ctrl+Up",
+            "Ctrl+Down",
+            "Ctrl+Home",
+            "Ctrl+End",
+            "Shift+Home",
+            "Shift+End",
+            "Shift+PageUp",
+            "Shift+PageDown",
+            "Ctrl+Shift+Up",
+            "Ctrl+Shift+Down",
+            "Ctrl+PageUp",
+            "Ctrl+PageDown",
+            "Ctrl+Shift+PageUp",
+            "Ctrl+Shift+PageDown",
+        ]
+        .iter()
+        .map(|chord| chord.to_string())
+        .chain((1..=9).map(|n| format!("Alt+{n}")))
+        .chain(
+            macos
+                .then(|| {
+                    ["Super+Up".to_string(), "Super+Down".to_string()]
+                        .into_iter()
+                        .chain((1..=9).map(|n| format!("Super+{n}")))
+                })
+                .into_iter()
+                .flatten(),
+        )
+        .collect();
+        expected.sort();
+        assert_eq!(yielding, expected);
+    }
+
+    /// Shift+Arrow resize goes to a program that owns the keyboard, never to
+    /// a shell idle at its prompt or a pane with no program modes.
+    #[test]
+    fn program_first_chords_follow_keyboard_ownership() {
+        use super::{ProgramKeyRule::ProgramFirst, program_gets_chord};
+        use kettle_config::Action;
+        let resize = Action::ResizeLeft;
+        assert!(program_gets_chord(
+            ProgramFirst,
+            &resize,
+            &claims(true),
+            &one_tab()
+        ));
+        assert!(!program_gets_chord(
+            ProgramFirst,
+            &resize,
+            &claims(false),
+            &one_tab()
+        ));
+        let idle_prompt = kettle_core::KeyboardClaims {
+            keyboard_protocol: true,
+            at_prompt: true,
+            ..kettle_core::KeyboardClaims::default()
+        };
+        assert!(!program_gets_chord(
+            ProgramFirst,
+            &resize,
+            &idle_prompt,
+            &one_tab()
+        ));
+    }
+
+    /// The other chords go to the program only when Kettle's action would do
+    /// nothing, and never while the view is scrolled into history.
+    #[test]
+    fn idle_kettle_chords_yield_only_when_the_action_does_nothing() {
+        use super::{KettleActionState, ProgramKeyRule::WhenKettleIdle, program_gets_chord};
+        use kettle_config::Action;
+        let owns = claims(true);
+        let gets = |action: Action, c: &kettle_core::KeyboardClaims, k: &KettleActionState| {
+            program_gets_chord(WhenKettleIdle, &action, c, k)
+        };
+        // Prompt jumps.
+        assert!(gets(Action::JumpPrevPrompt, &owns, &one_tab()));
+        let prompt_above = kettle_core::KeyboardClaims {
+            prompt_above: true,
+            ..owns
+        };
+        assert!(!gets(Action::JumpPrevPrompt, &prompt_above, &one_tab()));
+        assert!(gets(Action::JumpNextPrompt, &prompt_above, &one_tab()));
+        // Scrolling at the bottom: nothing to scroll on the alternate screen
+        // or without history; with history, only the downward chords.
+        let alt = kettle_core::KeyboardClaims {
+            alt_screen: true,
+            ..owns
+        };
+        let history = kettle_core::KeyboardClaims {
+            history_size: 500,
+            ..owns
+        };
+        for action in [
+            Action::ScrollToTop,
+            Action::ScrollPageUp,
+            Action::ScrollLineUp,
+        ] {
+            assert!(gets(action.clone(), &alt, &one_tab()), "{action:?} alt");
+            assert!(gets(action.clone(), &owns, &one_tab()), "{action:?} empty");
+            assert!(!gets(action.clone(), &history, &one_tab()), "{action:?}");
+        }
+        for action in [
+            Action::ScrollToBottom,
+            Action::ScrollPageDown,
+            Action::ScrollLineDown,
+        ] {
+            assert!(gets(action.clone(), &history, &one_tab()), "{action:?}");
+        }
+        // Scrolled into history: every chord stays Kettle's, even at the top
+        // where scrolling up would do nothing, and even with nothing to jump
+        // to; the key would otherwise snap the view to the bottom.
+        let scrolled_to_top = kettle_core::KeyboardClaims {
+            history_size: 500,
+            display_offset: 500,
+            ..owns
+        };
+        for action in [
+            Action::ScrollToTop,
+            Action::ScrollPageUp,
+            Action::ScrollLineUp,
+            Action::ScrollPageDown,
+            Action::JumpPrevPrompt,
+            Action::JumpNextPrompt,
+            Action::SelectToTop,
+            Action::NextTab,
+            Action::GotoTab(0),
+        ] {
+            assert!(
+                !gets(action.clone(), &scrolled_to_top, &one_tab()),
+                "{action:?} while scrolled back"
+            );
+        }
+        // Shift+Home/End: a selection to extend keeps them Kettle's on either
+        // screen; with none they go to the program on either screen.
+        let extending = KettleActionState {
+            selection_exists: true,
+            ..one_tab()
+        };
+        for screen in [&alt, &history] {
+            assert!(gets(Action::SelectToTop, screen, &one_tab()));
+            assert!(!gets(Action::SelectToTop, screen, &extending));
+            assert!(!gets(Action::SelectToBottom, screen, &extending));
+        }
+        // Tabs.
+        let two_tabs = KettleActionState {
+            tabs: 2,
+            ..one_tab()
+        };
+        assert!(gets(Action::NextTab, &owns, &one_tab()));
+        assert!(!gets(Action::NextTab, &owns, &two_tabs));
+        assert!(!gets(Action::MoveTabLeft, &owns, &two_tabs));
+        assert!(
+            gets(Action::GotoTab(0), &owns, &two_tabs),
+            "already the current tab"
+        );
+        assert!(!gets(Action::GotoTab(1), &owns, &two_tabs));
+        assert!(gets(Action::GotoTab(4), &owns, &two_tabs), "no such tab");
+        // Chords without a rule never count as idle.
+        assert!(!gets(Action::Copy, &owns, &one_tab()));
+        // None of it without a program.
+        assert!(!gets(Action::NextTab, &claims(false), &one_tab()));
+    }
+
+    /// Real keys and the `dispatch_keybind` diagnostic share one routing
+    /// decision; the search bar keeps only the adaptive focus rule, since the
+    /// program cannot receive a key while the bar has the keyboard.
+    #[test]
+    fn keyboard_and_control_routes_share_the_program_key_decision() {
+        let src = production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_string()
+        };
+        assert!(
+            body("chord_falls_through")
+                .contains("|| self.chord_goes_to_program(ws, trigger, action)"),
+            "both routes must consult the program-key decision"
+        );
+        let decision = body("chord_goes_to_program");
+        for guard in [
+            "configured_program_key_rule(&self.cfg, trigger, action, cfg!(target_os = \"macos\"))",
+            "ws.mux.is_broadcast_on()",
+            "pane.read_only || pane.pty_input_failed()",
+            "pane.term.keyboard_claims()",
+            "program_gets_chord(rule, action, &claims, &kettle)",
+        ] {
+            assert!(
+                decision.contains(guard),
+                "chord_goes_to_program lost {guard}"
+            );
+        }
+        assert_eq!(
+            src.matches("self.chord_falls_through(ws, trigger, &")
+                .count(),
+            2
+        );
+        let search = src
+            .split("fn search_bar_shortcut(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("search_bar_shortcut");
+        assert!(search.contains("self.adaptive_focus_chord_falls_through(ws, trigger, &action)"));
+        assert!(!search.contains("chord_falls_through(ws, trigger, &action) ||"));
+        assert!(!search.contains("self.chord_falls_through("));
+        assert_eq!(
+            src.matches("self.adaptive_focus_chord_falls_through(ws, trigger, &action)")
+                .count(),
+            1,
+            "only the search bar calls the adaptive rule alone"
         );
     }
 
