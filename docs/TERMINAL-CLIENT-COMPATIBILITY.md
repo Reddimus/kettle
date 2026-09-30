@@ -210,11 +210,17 @@ the chord back to the application.
 
 Option is separate from Super, and `macos-option-as-alt` covers only keys that
 produce text. The policy exists so `⌥e` can compose `´` instead of sending
-`ESC e`. Keys that compose no character (Backspace, Delete, the arrows,
-Home/End, Page Up/Down, Insert and the F-keys) always carry Alt to the
-encoder, on every setting and from either Option key, because there is no
+`ESC e`. Keys that compose no character (Return, Backspace, Delete, the
+arrows, Home/End, Page Up/Down, Insert and the F-keys) always carry Alt to
+the encoder, on every setting and from either Option key, because there is no
 composition to protect. `⌥⌫` is `ESC DEL` and `⌥←`/`⌥→` are
-`CSI 1;3D`/`CSI 1;3C`. kitty draws the same line for the same reason.
+`CSI 1;3D`/`CSI 1;3C`. `⌥↩` is Alt+Return, encoded as the table below
+gives it: `CSI 13;3u` to a program that negotiated the kitty protocol, which
+Codex and Claude Code read as "insert a newline", and `ESC CR` where no
+keyboard mode applies, a newline in zsh's emacs keymap. bash leaves `ESC CR`
+unbound and rings the bell, and a canonical-mode prompt (`read`, a password)
+keeps the ESC in its line, as in every terminal that sends Alt as ESC. kitty
+draws the same line for the same reason.
 
 What the application does with `ESC DEL` is then its own business, and one
 client is worth naming. Neovim leaves `<M-BS>` unmapped, so `⌥⌫` does not
@@ -256,9 +262,9 @@ Plain keys are unchanged at every level. In particular, plain Enter is always
 
 | Keyboard mode | Enter | Shift+Enter | Ctrl+Enter | Alt+Enter |
 |---|---|---|---|---|
-| No negotiation; `auto` at a canonical/unknown shell prompt | `0D` | `0D` | `0D` | `0D` |
+| No negotiation; `auto` at a canonical/unknown shell prompt | `0D` | `0D` | `0D` | `ESC 0D` |
 | No negotiation; `auto` in a recognized agent composer, or `always` | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
-| Negotiated xterm level 0 | `0D` | `0D` | `0D` | `0D` |
+| Negotiated xterm level 0 | `0D` | `0D` | `0D` | `ESC 0D` |
 | Negotiated xterm level 1 | `0D` | `0D` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Negotiated xterm level 2 | `0D` | `ESC [ 27;2;13~` | `ESC [ 27;5;13~` | `ESC [ 27;3;13~` |
 | Kitty disambiguation negotiated | `0D` | `ESC [ 13;2u` | `ESC [ 13;5u` | `ESC [ 13;3u` |
