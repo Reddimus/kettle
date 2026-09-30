@@ -78,6 +78,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Holding a toggle chord (vi mode, zoom, fullscreen, broadcast, read-only,
   and the other toggles) toggles once; key repeat used to flip the state back
   and forth for as long as the chord was held.
+- A control-socket embedder that reconnects as soon as Kettle closes its
+  connection (after the connection sat idle, say) is served. With all eight
+  connection places in use, Kettle announced the close before it freed the
+  place, and could refuse the reconnect.
 
 ## [4.8.0] — 2026-09-28
 

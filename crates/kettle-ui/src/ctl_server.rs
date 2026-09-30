@@ -312,8 +312,20 @@ fn accept_loop(
     wake: Arc<dyn Fn() + Send + Sync>,
     policy: ConnectionPolicy,
 ) {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    accept_loop_counting(listener, tx, wake, policy, active);
+}
+
+/// [`accept_loop`] counting its live connections in `active`, which tests
+/// read.
+fn accept_loop_counting(
+    listener: CtlListener,
+    tx: Sender<CtlServerMsg>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    policy: ConnectionPolicy,
+    active: Arc<std::sync::atomic::AtomicUsize>,
+) {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     let mut consecutive_errors = 0u32;
     loop {
         let conn = match listener.accept() {
@@ -347,7 +359,7 @@ fn accept_loop(
             }
         }
         // Hard connection cap: refuse (and close) once MAX_CONNECTIONS are live.
-        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+        if active.load(Ordering::Acquire) >= MAX_CONNECTIONS {
             log::warn!("agent-server: connection cap ({MAX_CONNECTIONS}) reached; refusing");
             drop(conn); // closes the socket / pipe handle
             continue;
@@ -363,11 +375,10 @@ fn accept_loop(
             .name(format!("kettle-ctl-{conn_id}"))
             .spawn(move || {
                 if start_rx.recv().is_err() {
-                    active_dec.fetch_sub(1, Ordering::Relaxed);
+                    active_dec.fetch_sub(1, Ordering::Release);
                     return;
                 }
-                connection_loop(conn, conn_id, ctx, cwake, event_rx, policy);
-                active_dec.fetch_sub(1, Ordering::Relaxed);
+                connection_loop(conn, conn_id, ctx, cwake, event_rx, policy, active_dec);
             });
         finish_worker_spawn(spawned, conn_id, event_tx, &tx, &wake, start_tx, &active);
     }
@@ -392,15 +403,40 @@ fn finish_worker_spawn(
             }
         }
         Err(error) => {
-            active.fetch_sub(1, Ordering::Relaxed);
+            active.fetch_sub(1, Ordering::Release);
             log::warn!("agent-server: cannot spawn connection worker: {error}");
         }
     }
 }
 
+/// Ends a connection, however [`connection_loop`] returns, in the order its
+/// observers need. First its place under `MAX_CONNECTIONS` is freed, then the
+/// App hears `Disconnect`, and only then does the handle close (a parameter,
+/// it drops after this guard, a local). A client that reconnects on seeing
+/// EOF, or a test that does on seeing `Disconnect`, therefore finds the place
+/// free; announcing first let such a reconnect reach the cap check while the
+/// old place was still counted, and at the cap it was refused.
+struct ConnectionExit {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    conn_id: u64,
+    tx: Sender<CtlServerMsg>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Drop for ConnectionExit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Release);
+        let _ = self.tx.send(CtlServerMsg::Disconnect {
+            conn_id: self.conn_id,
+        });
+        (self.wake)();
+    }
+}
+
 /// One connection, one thread: read requests + write responses/events on the
 /// SAME handle, sequentially so frames cannot interleave. A `subscribe`
-/// request flips the connection into event-only streaming.
+/// request flips the connection into event-only streaming. `active` counts
+/// this connection until it ends (see [`ConnectionExit`]).
 fn connection_loop(
     mut conn: CtlStream,
     conn_id: u64,
@@ -408,7 +444,14 @@ fn connection_loop(
     wake: Arc<dyn Fn() + Send + Sync>,
     event_rx: Receiver<Event>,
     policy: ConnectionPolicy,
+    active: Arc<std::sync::atomic::AtomicUsize>,
 ) {
+    let _exit = ConnectionExit {
+        active,
+        conn_id,
+        tx: tx.clone(),
+        wake: wake.clone(),
+    };
     let mut acc: Vec<u8> = Vec::with_capacity(4096);
     let mut scan_offset = 0;
     let mut buf = [0u8; 4096];
@@ -499,9 +542,8 @@ fn connection_loop(
             // reply on a short interval and probe `conn.peer_disconnected()` on
             // each timeout. The zero-byte peek is safe here — this IS the
             // connection thread with no other I/O outstanding. On a gone peer we
-            // send `Disconnect` (so the App drops the `PendingRun` + clears the
-            // badge) and end the connection; the trailing `Disconnect` at loop
-            // exit is a harmless no-op (`remove_conn` ignores an absent id).
+            // end the connection, and `ConnectionExit` sends `Disconnect` (so the
+            // App drops the `PendingRun` + clears the badge).
             let response_deadline = Instant::now() + policy.response_wait;
             let resp = loop {
                 match rrx.recv_timeout(Duration::from_millis(200)) {
@@ -511,8 +553,6 @@ fn connection_loop(
                             break 'outer;
                         }
                         if conn.peer_disconnected() {
-                            let _ = tx.send(CtlServerMsg::Disconnect { conn_id });
-                            wake();
                             break 'outer;
                         }
                     }
@@ -600,8 +640,6 @@ fn connection_loop(
             Ok(n) => acc.extend_from_slice(&buf[..n]),
         }
     }
-    let _ = tx.send(CtlServerMsg::Disconnect { conn_id });
-    wake();
 }
 
 /// Serialize and write a response within the server amplification budget.
@@ -887,6 +925,75 @@ mod tests {
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         std::thread::spawn(move || accept_loop(listener, tx, wake, policy));
         (endpoint, rx)
+    }
+
+    /// A connection that ends frees its place under `MAX_CONNECTIONS` before
+    /// the App hears `Disconnect`, and the App hears it before the client sees
+    /// EOF. A client reconnecting on either signal must never find its old
+    /// place still counted: at the cap the server refuses it.
+    #[test]
+    fn an_ended_connection_frees_its_place_before_anyone_hears_it_ended() {
+        let policy = ConnectionPolicy {
+            request_idle: Duration::from_millis(100),
+            frame_assembly: Duration::from_millis(200),
+            write: Duration::from_millis(200),
+            response_wait: Duration::from_secs(1),
+            subscriber_keepalive: Duration::from_millis(200),
+        };
+        let endpoint = test_endpoint("exit-order");
+        let listener = CtlListener::bind(&endpoint).expect("bind test control listener");
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // `wake` runs right after each message is sent, on the sending
+        // thread: after `NewConn` on the accept thread, after `Disconnect` on
+        // the connection's own.
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wake: Arc<dyn Fn() + Send + Sync> = {
+            let (active, seen) = (active.clone(), seen.clone());
+            Arc::new(move || seen.lock().unwrap().push(active.load(Ordering::Acquire)))
+        };
+        let counted = active.clone();
+        std::thread::spawn(move || accept_loop_counting(listener, tx, wake, policy, counted));
+
+        let mut client = kettle_ctl::transport::connect(&endpoint).expect("connect control peer");
+        let (conn_id, _) = recv_new_conn(&rx, Duration::from_secs(2));
+        // The server closes the idle connection; wait for its EOF.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut byte = [0u8; 1];
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the idle connection never closed"
+            );
+            match client.wait_readable(Duration::from_millis(50)) {
+                Ok(false) => {}
+                Ok(true) => match std::io::Read::read(&mut client, &mut byte) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                },
+                // A Windows named pipe reports the server's close as a failed
+                // peek (ERROR_BROKEN_PIPE), not as readable.
+                Err(_) => break,
+            }
+        }
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(CtlServerMsg::Disconnect { conn_id: ended }) if ended == conn_id
+            ),
+            "the client saw EOF before the App heard Disconnect"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while seen.lock().unwrap().len() < 2 {
+            assert!(Instant::now() < deadline, "Disconnect never woke the App");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [1, 0],
+            "the connection was counted as it was admitted, and no longer counted \
+             when the App heard it ended"
+        );
     }
 
     fn recv_new_conn(rx: &Receiver<CtlServerMsg>, timeout: Duration) -> (u64, Sender<Event>) {
