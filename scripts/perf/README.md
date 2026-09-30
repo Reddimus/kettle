@@ -102,7 +102,9 @@ end. Each launch records the machine's thermal state and Low Power Mode.
 `--startup-phases` runs Kettle's startup rounds with
 `RUST_LOG=warn,kettle::startup=info` and records each phase Kettle stamps (from
 `main` through the built event loop, `Resumed`, the first pane's spawn, the
-window and the GPU to the first frame) as `phase_<name>_ms` since the launch
+window and the GPU to the first frame, plus the font thread's
+`fonts_enumerated` and `fonts_ready` and the first window's wait for it, from
+`fonts_join_start` to `fonts_joined`) as `phase_<name>_ms` since the launch
 probe spawned it, plus the pane's startup path. The format is pinned by
 `macos-standing/startup-phases.fixture`, which Kettle's own tests share. Other
 terminals launch unchanged, and only startup rounds are stamped.

@@ -504,19 +504,39 @@ planner's fallback surface for a saved window without geometry is the same rule
 in physical pixels. Restored geometry and explicit new-window geometry are
 applied after these attributes and still win.
 
+The first window's fonts load while the event loop starts. `run_with` starts
+the `kettle-font-preload` thread (`font_preload.rs`) before it builds the event
+loop. The thread enumerates the system fonts, loads the bundled face and
+resolves the text-presentation face (`PreparedFonts` in `kettle-render`), none
+of which needs a display. While it waits for the config, it shapes the cell
+probe in the compiled-in family, so cosmic-text's matches and faces for it are
+loaded; once the config arrives, it does the same for the configured family if
+that differs. Bold is not warmed: the first styled cell loads the bundled bold
+faces, which clears cosmic-text's match cache. On macOS the thread raises
+itself to the user-initiated QoS class: a thread spawned from the main thread
+starts at a lower class, and joining it does not raise it. `resumed` joins the
+thread and only measures the cell at the monitor's scale. If the thread could
+not start, the first window loads the fonts itself, as every later window does.
+A renderer given fonts measured for another scale or size measures them again
+(`StartupFonts::remeasure`) instead of enumerating the system fonts a second
+time.
+
 Startup marks its phases in `startup_trace` (`kettle-ui`): `main`, `run_with`,
-the built event loop, the loaded config, the built `App`, the first pane's
-spawn, `Resumed`, the created window, the ready GPU, the reveal and the first
-frame. Each mark is one atomic store of the raw monotonic clock, the first time
-only: `CLOCK_UPTIME_RAW` on macOS, the clock the macOS standing harness uses,
-and `CLOCK_MONOTONIC` on Linux. The first frame is the first one the window
-startup created presents, not one that timed out or found the window occluded,
-and not a restored secondary window's. The stamps print once,
-in the order they happened, under the `kettle::startup` log target, so
-`RUST_LOG=warn,kettle::startup=info` shows them without turning on anything
-else. They print at that first frame; a window that starts hidden prints them
-at the end of its startup, without a first frame, and a startup that exits
-before any frame prints how far it got.
+the built event loop, the loaded config, the built `App`, the font thread's
+enumerated and ready fonts, `Resumed`, the start and end of the first window's
+wait for the font thread and cell measurement, including its own full font load
+without a thread, the first pane's spawn, the created window, the ready GPU,
+the reveal and the first frame.
+The two font-thread phases print `thread=fonts`. Each mark is one atomic
+store of the raw monotonic clock, the first time only: `CLOCK_UPTIME_RAW` on
+macOS, the clock the macOS standing harness uses, and `CLOCK_MONOTONIC` on
+Linux. The first frame is the first one the window startup created presents,
+not one that timed out or found the window occluded, and not a restored
+secondary window's. The stamps print once, in the order they happened, under
+the `kettle::startup` log target, so `RUST_LOG=warn,kettle::startup=info` shows
+them without turning on anything else. They print at that first frame; a window
+that starts hidden prints them at the end of its startup, without a first
+frame, and a startup that exits before any frame prints how far it got.
 
 A no-argument GUI launch first uses the private activation endpoint under the
 per-user runtime/state directory. One advisory lock elects a primary; the
