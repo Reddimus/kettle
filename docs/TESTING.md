@@ -2202,6 +2202,12 @@ retained compile/regression checks on **windows**:
   auto-repeat in both directions across the consume/pass-through boundary; the
   eventual release must follow the terminal-owned repeat rather than a stale
   consumed press, and a later UI-owned repeat cannot reclaim it.
+  Every modal branch of the keyboard path records the key whose press closed
+  the modal, so its repeats are dropped rather than reaching the terminal
+  (a source guard counts the branches), and a truth table pins which keys
+  act once per press in each modal. A HID-level check holding Enter in the
+  command palette recorded no stray Enter behind it, where main sent one per
+  repeat.
 - The legacy modifier sweep walks all 16 subsets of Shift/Alt/Control/Super
   across arrows, navigation, function, editing, keypad and character keys, in
   legacy, DECCKM, DECKPAM, both `modifyOtherKeys` levels and five Kitty flag

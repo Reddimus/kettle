@@ -750,9 +750,12 @@ pub(crate) struct WindowState {
     /// prevents a later geometry or modal transition from swallowing the
     /// matching release and leaving a Kitty-protocol client with a stuck key.
     pub(crate) terminal_owned_key_releases: std::collections::HashSet<winit::keyboard::PhysicalKey>,
-    /// The key whose press closed the search bar, until it is released. Its
-    /// repeats are dropped instead of reaching the terminal.
-    pub(crate) search_closing_key: Option<winit::keyboard::PhysicalKey>,
+    /// Keys whose press closed or replaced a Kettle modal (the search bar,
+    /// palette, menu, a dialog, vi mode...), each until it is released. Their
+    /// repeats are dropped instead of reaching whatever the modal uncovered,
+    /// so holding Enter to confirm a paste cannot send the shell an extra
+    /// Enter.
+    pub(crate) closing_keys: std::collections::HashSet<winit::keyboard::PhysicalKey>,
     /// Active input-method composition and its byte-indexed selection range.
     /// Committed text is written to the PTY and this preedit is cleared.
     pub(crate) ime_preedit: Option<(String, Option<(usize, usize)>)>,
@@ -1126,7 +1129,7 @@ impl WindowState {
             macos_right_option_pressed: false,
             suppressed_key_releases: std::collections::HashSet::new(),
             terminal_owned_key_releases: std::collections::HashSet::new(),
-            search_closing_key: None,
+            closing_keys: std::collections::HashSet::new(),
             ime_preedit: None,
             ime_preedit_owner: None,
             ime_focus_generation: 0,

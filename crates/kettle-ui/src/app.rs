@@ -13872,6 +13872,17 @@ impl App {
         ws.search.open || self.non_search_modal_open(ws)
     }
 
+    /// Whether the focused Settings row is a number, which Left/Right step.
+    fn settings_row_steps(&self, ws: &WindowState) -> bool {
+        let Some(nav) = ws.settings_nav.as_ref() else {
+            return false;
+        };
+        crate::settings::categories(&self.gpu_choices)
+            .get(nav.category)
+            .and_then(|category| category.fields.get(nav.field))
+            .is_some_and(|field| matches!(field.kind, crate::settings::FieldKind::Number { .. }))
+    }
+
     /// Every modal except the search bar. The one list both
     /// `any_modal_open` and `pointer_modal_open` derive from, so the two
     /// cannot drift apart on anything but search.
@@ -23593,24 +23604,157 @@ fn search_button_ignores_repeat(focused: kettle_render::SearchControl, key: &Key
         )
 }
 
-/// Drop the repeats of the key that closed the search bar. They belong to
-/// the press the bar consumed, not to the terminal the bar uncovered; its
-/// release is already suppressed with that press. Returns whether to drop
-/// this event.
-fn drop_search_closing_repeat(
-    closing: &mut Option<PhysicalKey>,
+/// Drop the repeats of a key that closed a Kettle modal. They belong to the
+/// press the modal consumed, not to the terminal it uncovered; its release is
+/// already suppressed with that press. The key's release, or a fresh press of
+/// it, ends the suppression. Returns whether to drop this event.
+fn drop_closing_key_repeat(
+    closing: &mut HashSet<PhysicalKey>,
     physical_key: PhysicalKey,
     state: ElementState,
     repeat: bool,
 ) -> bool {
-    if *closing != Some(physical_key) {
+    if !closing.contains(&physical_key) {
         return false;
     }
     if state == ElementState::Pressed && repeat {
         return true;
     }
-    *closing = None;
+    closing.remove(&physical_key);
     false
+}
+
+/// The Kettle modal that owns the keyboard, in the keyboard path's dispatch
+/// order (the first open one gets the key).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyModal {
+    ConfirmDialog,
+    ContextMenu,
+    ViMode,
+    Hint,
+    Palette,
+    SettingsText,
+    SettingsCapture,
+    Settings,
+    LayoutPicker,
+    Ssh,
+    TitleEdit,
+    Search,
+}
+
+fn top_modal(ws: &WindowState) -> Option<KeyModal> {
+    Some(if ws.confirm_dialog.is_some() {
+        KeyModal::ConfirmDialog
+    } else if ws.context_menu.is_some() {
+        KeyModal::ContextMenu
+    } else if ws.vi_mode.is_some() {
+        KeyModal::ViMode
+    } else if ws.hint_state.is_some() {
+        KeyModal::Hint
+    } else if ws.palette_input.is_some() {
+        KeyModal::Palette
+    } else if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
+        KeyModal::SettingsText
+    } else if settings_capture_active(ws) {
+        KeyModal::SettingsCapture
+    } else if ws.settings_nav.is_some() {
+        KeyModal::Settings
+    } else if ws.layout_picker_input.is_some() {
+        KeyModal::LayoutPicker
+    } else if ws.ssh_input.is_some() {
+        KeyModal::Ssh
+    } else if ws.editing_title.is_some() {
+        KeyModal::TitleEdit
+    } else if ws.search.open {
+        KeyModal::Search
+    } else {
+        return None;
+    })
+}
+
+/// Record `key` as the one that closed or replaced the modal it was pressed
+/// in, so its auto-repeats are dropped (`drop_closing_key_repeat`) instead of
+/// reaching whatever the modal uncovered: the terminal, the parent Settings
+/// under a closed text field, or the layout picker the palette just opened.
+fn remember_closing_key(ws: &mut WindowState, key_modal: Option<KeyModal>, key: PhysicalKey) {
+    if top_modal(ws) != key_modal {
+        ws.closing_keys.insert(key);
+    }
+}
+
+/// A Kettle modal whose keys do not all repeat (see `modal_repeat_is_inert`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModalRepeat {
+    ConfirmDialog,
+    /// `vim_nav`: `vim-menu-nav` is on, so `j`/`k` and Ctrl+D/U move.
+    ContextMenu {
+        vim_nav: bool,
+    },
+    ViMode,
+    Hint,
+    Palette,
+    /// `steps`: the focused row is a number, which Left/Right step. On a
+    /// toggle or a choice they flip or cycle it and persist each step.
+    Settings {
+        steps: bool,
+    },
+}
+
+/// Whether an auto-repeat of `key` must do nothing in `modal`. Keys that
+/// activate, toggle or pick act once per press: holding the Enter that opened
+/// a submenu would otherwise activate its first row, and holding Space on a
+/// Settings toggle would flip it at the repeat rate. Keys that move keep
+/// repeating.
+fn modal_repeat_is_inert(modal: ModalRepeat, repeat: bool, key: &Key, ctrl: bool) -> bool {
+    if !repeat {
+        return false;
+    }
+    let moves = |key: &Key| {
+        matches!(
+            key,
+            Key::Named(
+                NamedKey::ArrowUp
+                    | NamedKey::ArrowDown
+                    | NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+                    | NamedKey::Tab
+            )
+        )
+    };
+    let letter = |key: &Key, letters: &[&str]| matches!(key, Key::Character(c) if letters.iter().any(|l| c.eq_ignore_ascii_case(l)));
+    match modal {
+        // Rows are also picked by mnemonic letters and vim `l`; only the
+        // highlight moves repeat: arrows, and with vim-menu-nav `j`/`k` and
+        // Ctrl+D/U half pages. Without it, `j` and `k` are mnemonics.
+        ModalRepeat::ContextMenu { vim_nav } => {
+            let vim_move = vim_nav
+                && if ctrl {
+                    letter(key, &["d", "u"])
+                } else {
+                    letter(key, &["j", "k"])
+                };
+            !(moves(key) || vim_move)
+        }
+        // A dialog's letters and Enter/Space answer it; focus moves repeat.
+        ModalRepeat::ConfirmDialog => !moves(key),
+        // The query is typed text; only Enter runs the selection.
+        ModalRepeat::Palette => matches!(key, Key::Named(NamedKey::Enter)),
+        // Enter and Space activate or toggle the focused row. Left/Right (and
+        // vim `h`/`l`) step a number and repeat; on a toggle or a choice they
+        // flip or cycle it, persisting each step, so act once per press.
+        ModalRepeat::Settings { steps } => {
+            matches!(key, Key::Named(NamedKey::Enter | NamedKey::Space))
+                || (!steps
+                    && (matches!(key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight))
+                        || letter(key, &["h", "l"])))
+        }
+        // `v` toggles visual mode; motions repeat.
+        ModalRepeat::ViMode => letter(key, &["v"]),
+        // Label letters only pick a target; nothing in hint mode moves.
+        ModalRepeat::Hint => true,
+    }
 }
 
 /// Whether the Settings overlay is waiting for a keybind chord.
@@ -28939,7 +29083,7 @@ impl App {
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
                     ws.terminal_owned_key_releases.clear();
-                    ws.search_closing_key = None;
+                    ws.closing_keys.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
@@ -29099,8 +29243,11 @@ impl App {
                     || ws.editing_title.is_some()
                     || ws.search.open
                     || ws.ime_preedit.is_some();
-                if drop_search_closing_repeat(
-                    &mut ws.search_closing_key,
+                // The modal that gets this press, if any; a press after which
+                // it is no longer the top modal closed or replaced it.
+                let key_modal = top_modal(ws);
+                if drop_closing_key_repeat(
+                    &mut ws.closing_keys,
                     event.physical_key,
                     event.state,
                     event.repeat,
@@ -29167,6 +29314,9 @@ impl App {
                     && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
                 {
                     ws.pane_drag = None;
+                    // Its repeats must not go on to close a modal or reach
+                    // the terminal.
+                    ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29183,6 +29333,7 @@ impl App {
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;
+                    ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29198,6 +29349,7 @@ impl App {
                     && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
                 {
                     self.abandon_torn_drag(Some(ws));
+                    ws.closing_keys.insert(event.physical_key);
                     return;
                 }
                 // Keep the cursor solid while actively typing.
@@ -29217,11 +29369,29 @@ impl App {
                 // modal without dispatching. The modal is exclusive, so
                 // non-nav keys are swallowed.
                 if ws.confirm_dialog.is_some() {
-                    self.confirm_dialog_key(ws, &event.logical_key, event_loop);
+                    if !modal_repeat_is_inert(
+                        ModalRepeat::ConfirmDialog,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
+                        self.confirm_dialog_key(ws, &event.logical_key, event_loop);
+                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     return;
                 }
                 if ws.context_menu.is_some() {
-                    self.context_menu_key(ws, &event.logical_key, text, event_loop);
+                    if !modal_repeat_is_inert(
+                        ModalRepeat::ContextMenu {
+                            vim_nav: self.cfg.vim_menu_nav,
+                        },
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
+                        self.context_menu_key(ws, &event.logical_key, text, event_loop);
+                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29244,9 +29414,15 @@ impl App {
                         if !event.repeat {
                             self.exit_vi_mode(ws);
                         }
-                    } else {
+                    } else if !modal_repeat_is_inert(
+                        ModalRepeat::ViMode,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
                         self.vi_mode_key(ws, &event.logical_key, text);
                     }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29254,7 +29430,15 @@ impl App {
                 }
 
                 if ws.hint_state.is_some() {
-                    self.hint_key(ws, &event.logical_key, text);
+                    if !modal_repeat_is_inert(
+                        ModalRepeat::Hint,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
+                        self.hint_key(ws, &event.logical_key, text);
+                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29262,7 +29446,15 @@ impl App {
                 }
 
                 if ws.palette_input.is_some() {
-                    self.palette_key(ws, &event.logical_key, text, event_loop);
+                    if !modal_repeat_is_inert(
+                        ModalRepeat::Palette,
+                        event.repeat,
+                        &event.logical_key,
+                        ws.mods.control_key(),
+                    ) {
+                        self.palette_key(ws, &event.logical_key, text, event_loop);
+                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29273,6 +29465,7 @@ impl App {
                 // (typed text → the buffer; Enter/Esc finish it).
                 if ws.settings_nav.is_some() && ws.settings_text_edit.is_some() {
                     self.settings_text_key(ws, &event.logical_key, text);
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29283,9 +29476,22 @@ impl App {
                     // Chord capture waits for a new press. Auto-repeat of the
                     // Space or Enter that started it would otherwise be
                     // captured, or refused with a notification, once per repeat.
-                    if !(event.repeat && settings_capture_active(ws)) {
+                    let inert = if settings_capture_active(ws) {
+                        event.repeat
+                    } else {
+                        // Only a repeat needs the focused row's kind.
+                        let steps = event.repeat && self.settings_row_steps(ws);
+                        modal_repeat_is_inert(
+                            ModalRepeat::Settings { steps },
+                            event.repeat,
+                            &event.logical_key,
+                            ws.mods.control_key(),
+                        )
+                    };
+                    if !inert {
                         self.settings_key(ws, &event.logical_key, event_loop);
                     }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29294,6 +29500,7 @@ impl App {
 
                 if ws.layout_picker_input.is_some() {
                     self.layout_picker_key(ws, &event.logical_key, text);
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29302,6 +29509,7 @@ impl App {
 
                 if ws.ssh_input.is_some() {
                     self.ssh_key(ws, &event.logical_key, text);
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29313,6 +29521,7 @@ impl App {
                 // Backspace removes one char; printable text appends.
                 if ws.editing_title.is_some() {
                     self.title_edit_key(ws, &event.logical_key, text);
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29337,9 +29546,7 @@ impl App {
                             event_loop,
                         );
                     }
-                    if !ws.search.open {
-                        ws.search_closing_key = Some(event.physical_key);
-                    }
+                    remember_closing_key(ws, key_modal, event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -35048,7 +35255,10 @@ mod tests {
         let native = src
             .split("if ws.search.open {\n                    if event.repeat")
             .nth(1)
-            .and_then(|rest| rest.split("ws.search_closing_key = Some(").next())
+            .and_then(|rest| {
+                rest.split("remember_closing_key(ws, key_modal, event.physical_key);")
+                    .next()
+            })
             .expect("native search key branch");
         assert!(
             native.contains(
@@ -35105,29 +35315,29 @@ mod tests {
         use winit::keyboard::PhysicalKey;
         let space = PhysicalKey::Code(winit::keyboard::KeyCode::Space);
         let other = PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
-        let mut closing = Some(space);
+        let mut closing = std::collections::HashSet::from([space]);
         let pressed = ElementState::Pressed;
-        assert!(super::drop_search_closing_repeat(
+        assert!(super::drop_closing_key_repeat(
             &mut closing,
             space,
             pressed,
             true
         ));
-        assert!(!super::drop_search_closing_repeat(
+        assert!(!super::drop_closing_key_repeat(
             &mut closing,
             other,
             pressed,
             true
         ));
-        assert_eq!(closing, Some(space));
-        assert!(!super::drop_search_closing_repeat(
+        assert!(closing.contains(&space));
+        assert!(!super::drop_closing_key_repeat(
             &mut closing,
             space,
             ElementState::Released,
             false
         ));
-        assert_eq!(closing, None);
-        assert!(!super::drop_search_closing_repeat(
+        assert!(closing.is_empty());
+        assert!(!super::drop_closing_key_repeat(
             &mut closing,
             space,
             pressed,
@@ -36841,8 +37051,238 @@ mod tests {
             "the search bar's shortcut route must skip toggle repeats"
         );
         assert!(
-            src.contains("if !(event.repeat && settings_capture_active(ws)) {"),
+            src.contains(
+                "let inert = if settings_capture_active(ws) {\n                        event.repeat"
+            ),
             "keybind capture must wait for a new press, not take the activating key's repeats"
+        );
+    }
+
+    /// In a Kettle modal, keys that activate, toggle or pick act once per
+    /// press, keys that move keep repeating, and a first press always acts.
+    #[test]
+    fn modal_activation_keys_act_once_per_press() {
+        use super::{ModalRepeat::*, modal_repeat_is_inert};
+        use winit::keyboard::{Key, NamedKey};
+        let enter = Key::Named(NamedKey::Enter);
+        let space = Key::Named(NamedKey::Space);
+        let down = Key::Named(NamedKey::ArrowDown);
+        let right = Key::Named(NamedKey::ArrowRight);
+        let chr = |c: &str| Key::Character(c.into());
+        let menu = ContextMenu { vim_nav: true };
+        let plain_menu = ContextMenu { vim_nav: false };
+        let toggle_row = Settings { steps: false };
+        let number_row = Settings { steps: true };
+        for modal in [ConfirmDialog, menu, ViMode, Hint, Palette, toggle_row] {
+            for key in [&enter, &space, &down, &chr("v"), &chr("l")] {
+                assert!(
+                    !modal_repeat_is_inert(modal, false, key, false),
+                    "{modal:?} {key:?} press"
+                );
+            }
+        }
+        for (modal, key, ctrl, inert) in [
+            (menu, &enter, false, true),
+            (menu, &space, false, true),
+            (menu, &chr("l"), false, true),
+            (menu, &chr("n"), false, true),
+            (menu, &down, false, false),
+            (menu, &right, false, false),
+            (menu, &chr("j"), false, false),
+            (menu, &chr("K"), false, false),
+            (menu, &chr("d"), true, false),
+            (menu, &chr("U"), true, false),
+            (menu, &chr("d"), false, true),
+            // Without vim-menu-nav, `j` and `k` are mnemonics.
+            (plain_menu, &chr("j"), false, true),
+            (plain_menu, &chr("d"), true, true),
+            (plain_menu, &down, false, false),
+            (ConfirmDialog, &enter, false, true),
+            (ConfirmDialog, &chr("y"), false, true),
+            (ConfirmDialog, &right, false, false),
+            (Palette, &enter, false, true),
+            (Palette, &chr("a"), false, false),
+            (Palette, &down, false, false),
+            (toggle_row, &enter, false, true),
+            (toggle_row, &space, false, true),
+            (toggle_row, &right, false, true),
+            (toggle_row, &chr("h"), false, true),
+            (toggle_row, &down, false, false),
+            (number_row, &right, false, false),
+            (number_row, &chr("l"), false, false),
+            (number_row, &enter, false, true),
+            (ViMode, &chr("v"), false, true),
+            (ViMode, &chr("j"), false, false),
+            (Hint, &chr("a"), false, true),
+        ] {
+            assert_eq!(
+                modal_repeat_is_inert(modal, true, key, ctrl),
+                inert,
+                "{modal:?} {key:?} ctrl={ctrl}"
+            );
+        }
+    }
+
+    /// The key whose press closed or replaced a modal is remembered, so its
+    /// repeats are dropped: whether nothing is open afterwards, or another
+    /// modal took over (the palette running "Open layout picker"). A press the
+    /// modal kept is not remembered.
+    #[test]
+    fn a_key_that_closes_or_replaces_a_modal_stops_repeating() {
+        use super::{KeyModal, drop_closing_key_repeat, remember_closing_key, top_modal};
+        use winit::event::ElementState;
+        use winit::keyboard::{KeyCode, PhysicalKey};
+
+        let enter = PhysicalKey::Code(KeyCode::Enter);
+        let mut ws = WindowState::new(0, false, Mux::new());
+        ws.palette_input = Some((String::new(), 0));
+        let owner = top_modal(&ws);
+        assert_eq!(owner, Some(KeyModal::Palette));
+
+        // Typing keeps the palette open: nothing to drop.
+        remember_closing_key(&mut ws, owner, enter);
+        assert!(ws.closing_keys.is_empty());
+
+        // Enter runs "Open layout picker": the palette is replaced.
+        ws.palette_input = None;
+        ws.layout_picker_input = Some((String::new(), 0));
+        remember_closing_key(&mut ws, owner, enter);
+        assert!(ws.closing_keys.contains(&enter));
+        assert!(
+            drop_closing_key_repeat(&mut ws.closing_keys, enter, ElementState::Pressed, true),
+            "the repeat must not reach the layout picker"
+        );
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            enter,
+            ElementState::Released,
+            false
+        ));
+        assert!(ws.closing_keys.is_empty(), "the release ends it");
+
+        // Escape closes the last modal: nothing open afterwards.
+        let escape = PhysicalKey::Code(KeyCode::Escape);
+        let owner = top_modal(&ws);
+        ws.layout_picker_input = None;
+        remember_closing_key(&mut ws, owner, escape);
+        assert!(ws.closing_keys.contains(&escape));
+        assert!(drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            escape,
+            ElementState::Pressed,
+            true
+        ));
+        // A fresh press of Escape is never swallowed, and ends its
+        // suppression.
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            escape,
+            ElementState::Pressed,
+            false
+        ));
+        assert!(ws.closing_keys.is_empty());
+        // The Escape that cancels a keybind capture ends the capture mode,
+        // so its repeats cannot go on to close Settings.
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            category: 0,
+            field: 0,
+            capturing: true,
+        });
+        let owner = top_modal(&ws);
+        assert_eq!(owner, Some(KeyModal::SettingsCapture));
+        ws.settings_nav.as_mut().unwrap().capturing = false;
+        remember_closing_key(&mut ws, owner, escape);
+        assert!(ws.closing_keys.contains(&escape));
+    }
+
+    /// Each held key that closed a modal stops repeating until its own
+    /// release: Enter runs a palette command that opens Settings, then
+    /// Escape, pressed while Enter is still down, closes Settings. Recording
+    /// Escape must not end Enter's suppression.
+    #[test]
+    fn every_held_closing_key_stops_repeating() {
+        use super::{KeyModal, drop_closing_key_repeat, remember_closing_key, top_modal};
+        use winit::event::ElementState;
+        use winit::keyboard::{KeyCode, PhysicalKey};
+
+        let enter = PhysicalKey::Code(KeyCode::Enter);
+        let escape = PhysicalKey::Code(KeyCode::Escape);
+        let mut ws = WindowState::new(0, false, Mux::new());
+        ws.palette_input = Some((String::new(), 0));
+        let owner = top_modal(&ws);
+        ws.palette_input = None;
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            category: 0,
+            field: 0,
+            capturing: false,
+        });
+        remember_closing_key(&mut ws, owner, enter);
+        let owner = top_modal(&ws);
+        assert_eq!(owner, Some(KeyModal::Settings));
+        ws.settings_nav = None;
+        remember_closing_key(&mut ws, owner, escape);
+
+        for key in [enter, escape] {
+            assert!(
+                drop_closing_key_repeat(&mut ws.closing_keys, key, ElementState::Pressed, true),
+                "{key:?} closed a modal; its repeat must not reach the terminal"
+            );
+        }
+        // Releasing Escape leaves Enter suppressed until its own release.
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            escape,
+            ElementState::Released,
+            false
+        ));
+        assert!(drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            enter,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            enter,
+            ElementState::Released,
+            false
+        ));
+        assert!(ws.closing_keys.is_empty());
+    }
+
+    /// Every modal branch of the keyboard path records the key that closed it,
+    /// so the key's repeats never reach the terminal it uncovered, and the
+    /// modals with activation keys gate their repeats.
+    #[test]
+    fn every_modal_branch_records_its_closing_key() {
+        let src = production_source();
+        assert_eq!(
+            src.matches("remember_closing_key(ws, key_modal, event.physical_key);")
+                .count(),
+            11,
+            "confirm, context menu, vi, hint, palette, settings text, settings, \
+             layout picker, ssh, title edit and search"
+        );
+        for gate in [
+            "ModalRepeat::ConfirmDialog,",
+            "ModalRepeat::ContextMenu {",
+            "ModalRepeat::ViMode,",
+            "ModalRepeat::Hint,",
+            "ModalRepeat::Palette,",
+            "ModalRepeat::Settings { steps },",
+        ] {
+            assert!(src.contains(gate), "{gate} must gate its repeats");
+        }
+        assert!(
+            src.contains("if drop_closing_key_repeat(\n                    &mut ws.closing_keys,")
+        );
+        // The Escape that cancels a pane, tab or torn-window drag is consumed
+        // the same way.
+        assert_eq!(
+            src.matches("ws.closing_keys.insert(event.physical_key);")
+                .count(),
+            3,
+            "pane drag, tab drag and torn-window drag cancels"
         );
     }
 
