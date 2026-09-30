@@ -1,7 +1,6 @@
 //! Privacy-safe event-loop stall and exit diagnostics.
 
-use std::fs::File;
-use std::io::{self, Write as _};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -291,7 +290,6 @@ fn write_incident(
         );
     }
     let timestamp = unix_millis();
-    let (path, mut file) = create_private_file(&dir, timestamp, std::process::id())?;
     let incident = Incident {
         schema_version: SCHEMA_VERSION,
         timestamp_unix_ms: timestamp,
@@ -304,9 +302,9 @@ fn write_incident(
         windows: shared.windows.load(Ordering::Acquire),
         error: error.map(sanitize),
     };
-    serde_json::to_writer(&mut file, &incident).map_err(io::Error::other)?;
-    file.write_all(b"\n")?;
-    file.flush()?;
+    let mut bytes = serde_json::to_vec(&incident).map_err(io::Error::other)?;
+    bytes.push(b'\n');
+    let path = publish_incident(&dir, timestamp, std::process::id(), &bytes)?;
     prune_incidents(&dir, &path)?;
     log::error!("runtime diagnostics: {}", path.display());
     Ok(path)
@@ -318,7 +316,11 @@ fn diagnostic_dir(cache_dir: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("kettle-diagnostics"))
 }
 
-fn create_private_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(PathBuf, File)> {
+/// Publish a complete incident under the first free `runtime-<ms>-<pid>`
+/// name. The bytes are written and synced under a staged name and then linked
+/// into place, so a reader (a user's tool, or the tests) never sees a
+/// half-written incident, and an existing one is never replaced.
+fn publish_incident(dir: &Path, unix_ms: u128, pid: u32, bytes: &[u8]) -> io::Result<PathBuf> {
     for suffix in 0..100u8 {
         let suffix = if suffix == 0 {
             String::new()
@@ -326,10 +328,9 @@ fn create_private_file(dir: &Path, unix_ms: u128, pid: u32) -> io::Result<(PathB
             format!("-{suffix}")
         };
         let path = dir.join(format!("runtime-{unix_ms}-{pid}{suffix}.json"));
-        match kettle_state::create_private_file_new(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
+        if kettle_state::atomic_create_new(&path, bytes, kettle_state::AtomicWriteOptions::PRIVATE)?
+        {
+            return Ok(path);
         }
     }
     Err(io::Error::new(
@@ -395,6 +396,29 @@ fn unix_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The published incidents, oldest first. A staged incident (a dot file
+    /// that is linked into place once complete) is not one yet.
+    #[cfg(unix)]
+    fn published_incidents(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.starts_with("runtime-") && name.ends_with(".json")
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files
+    }
 
     #[test]
     fn sanitizes_and_bounds_error_text() {
@@ -535,6 +559,69 @@ mod tests {
         );
     }
 
+    /// A reader never sees a half-written incident: every published
+    /// `runtime-*.json` parses whole while incidents are being written.
+    #[cfg(unix)]
+    #[test]
+    fn a_published_incident_is_always_complete() {
+        in_child(
+            "runtime_diagnostics::tests::a_published_incident_is_always_complete",
+            || {
+                let root = kettle_test_support::private_tempdir("kettle-runtime-atomic-test-");
+                // SAFETY: only the isolated child reaches this closure.
+                unsafe { std::env::set_var("XDG_CACHE_HOME", root.path()) };
+                let shared = Arc::new(Shared {
+                    phase: Mutex::new(PhaseState {
+                        name: "redraw",
+                        entered: Instant::now(),
+                        watchdog_deadline: None,
+                    }),
+                    wake: Condvar::new(),
+                    parked: AtomicBool::new(false),
+                    stall_after: NORMAL_STALL,
+                    gpu_init_stall_after: GPU_INIT_STALL,
+                    loops: AtomicUsize::new(0),
+                    windows: AtomicUsize::new(1),
+                    stop: AtomicBool::new(false),
+                    stall_written: AtomicBool::new(false),
+                    cache_dir: Some(root.path().to_path_buf()),
+                    version: "test".to_string(),
+                });
+                let dir = diagnostic_dir(Some(root.path()));
+                let done = Arc::new(AtomicBool::new(false));
+                let reader = {
+                    let (dir, done) = (dir.clone(), done.clone());
+                    std::thread::spawn(move || {
+                        let mut checked = 0usize;
+                        while !done.load(Ordering::Acquire) {
+                            for path in published_incidents(&dir) {
+                                // Pruning can remove a file between listing and
+                                // reading; only an existing file must parse.
+                                let Ok(text) = std::fs::read_to_string(&path) else {
+                                    continue;
+                                };
+                                serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(
+                                    |error| panic!("half-written {}: {error}", path.display()),
+                                );
+                                checked += 1;
+                            }
+                        }
+                        checked
+                    })
+                };
+                for _ in 0..40 {
+                    let phase = shared.phase.lock().unwrap().clone();
+                    write_incident(&shared, "test", &phase, None).unwrap();
+                }
+                done.store(true, Ordering::Release);
+                assert!(reader.join().unwrap() > 0, "the reader saw no incident");
+                let src = include_str!("runtime_diagnostics.rs");
+                let body = src.split("fn publish_incident(").nth(1).unwrap();
+                assert!(body.contains("kettle_state::atomic_create_new("));
+            },
+        );
+    }
+
     /// A phase that runs past its deadline is still recorded, once, while the
     /// watchdog sleeps between deadlines instead of polling.
     #[cfg(unix)]
@@ -554,7 +641,7 @@ mod tests {
                     stall,
                 );
                 let dir = diagnostic_dir(Some(root.path()));
-                let incidents = || std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+                let incidents = || published_incidents(&dir).len();
 
                 tracker.set_phase("redraw");
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -566,15 +653,7 @@ mod tests {
                     1,
                     "a phase stuck past its deadline was not recorded"
                 );
-                let text = std::fs::read_to_string(
-                    std::fs::read_dir(&dir)
-                        .unwrap()
-                        .next()
-                        .unwrap()
-                        .unwrap()
-                        .path(),
-                )
-                .unwrap();
+                let text = std::fs::read_to_string(&published_incidents(&dir)[0]).unwrap();
                 assert!(text.contains("\"event_loop_stall\"") && text.contains("\"redraw\""));
 
                 // Still stuck: no second incident for the same phase.
@@ -604,7 +683,7 @@ mod tests {
                     Duration::from_secs(5),
                 );
                 let dir = diagnostic_dir(Some(root.path()));
-                let incidents = || std::fs::read_dir(&dir).map(|d| d.count()).unwrap_or(0);
+                let incidents = || published_incidents(&dir).len();
 
                 // Long enough for the watchdog to read `gpu_init` and sleep
                 // toward its 5 s deadline.
@@ -665,7 +744,11 @@ mod tests {
                 }
                 let dir = diagnostic_dir(Some(root.path()));
                 let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-                assert_eq!(files.len(), RETAINED_INCIDENTS);
+                assert_eq!(
+                    files.len(),
+                    RETAINED_INCIDENTS,
+                    "no staged file is left behind"
+                );
                 for file in files {
                     assert_eq!(
                         file.unwrap().metadata().unwrap().permissions().mode() & 0o777,
