@@ -27,6 +27,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A blinking cursor no longer re-uploads the window's shapes or re-prepares its
   text on each blink; the blink only changes what is drawn.
+- A window whose content is not changing writes nothing to the GPU, a
+  blinking cursor included. On macOS the driver then releases its blit pool:
+  3 s after a burst of output Kettle's memory is 236 MiB instead of 365 MiB
+  (10 paired rounds on an Apple M5 Max, B/A 0.647, 95% CI 0.645-0.653). While
+  any frame draws, the render pool (about 168 MiB) stays.
 - `Shift+Arrow` reaches a program that owns the keyboard (the alternate
   screen or mouse reporting, or the kitty keyboard protocol or
   `modifyOtherKeys` away from the shell prompt) instead of resizing a split,
