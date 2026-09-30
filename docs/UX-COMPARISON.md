@@ -401,7 +401,10 @@ v2.20.0 decision gate shipped, the rest are tracked.
   advertisement (sixel=4, clipboard=52), kitty graphics `a=q` query replies:
   one shared pre-engine plumbing effort in `kettle-vt` (the `extract.rs`
   interception seam) over the existing `PtyWrite` reply channel. Four
-  features, roughly one plumbing pass.
+  features, roughly one plumbing pass. Three have since shipped: DA1 in
+  v2.25.1, and XTGETTCAP and DECRQSS, with XTVERSION and DECXCPR, in 4.9.0
+  (see [Terminal queries](TERMINAL-CLIENT-COMPATIBILITY.md#terminal-queries)).
+  Graphics `a=q` replies remain backlog.
 - **Clipboard paste-protection bundle** — confirm pastes with embedded
   newlines (copy-paste command injection), bracketed pastes safe by default;
   packaged with the existing OSC 52 deny-read posture as a coherent
@@ -439,7 +442,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | `command-palette-entry` (user-defined palette commands) | Ghostty | ⛔ | medium | S | → backlog (capped by the v2.20.0 decision gate) | Palette and parsed action grammar both exist; mirrors `menu-item`, compounds with the agent server. |
 | Kitty keyboard protocol (CSI-u progressive enhancement) | Ghostty | ⛔ at v2.20 | high | M | → backlog at the v2.20.0 decision gate; shipped later | At this historical gate the engine flag existed but the encoder did not. Current Kettle answers capability queries and emits negotiated CSI-u events. |
 | Kitty graphics query replies (`a=q` OK/error + quiet flags) | Ghostty | ⛔ | high | S | → backlog (capped by the v2.20.0 decision gate) | kitten-icat-style probing cannot see kettle's shipped graphics; the PtyWrite reply channel already exists. |
-| XTGETTCAP (DCS `+q`) capability queries | Ghostty | ⛔ | medium | M | → backlog (capped by the v2.20.0 decision gate) | TUIs probe capabilities via DCS; a small static cap table on the existing pre-engine interception. |
+| XTGETTCAP (DCS `+q`) capability queries | Ghostty | ✅ | medium | M | ✅ shipped 4.9.0 | TUIs probe capabilities via DCS. Kettle answers a fixed table (truecolor, styled and coloured underlines, cursor shapes, palette size) in the terminal engine, where the reply can see the live state, rather than at the pre-engine interception this row first proposed. |
 | DA1 feature advertisement (sixel=4, clipboard=52) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1; policy truthfulness hardened next release | Primary DA reports `CSI ? 6 ; 4 ; 52 c` when OSC 52 writes are actually available and `CSI ? 6 ; 4 c` otherwise, so capability probers discover the sixel decoder without being misled about clipboard policy. |
 | Protocol desktop notifications (OSC 9 / OSC 777) | Ghostty | ✅ | medium | S | ✅ shipped v2.25.1 | `OSC 9 ; message` and `OSC 777 ; notify ; title ; body` now parse into bounded desktop notifications through the existing notification dispatcher; `OSC 9;4` remains taskbar progress. |
 | Hardened shell-integration scripts (robust OSC 133 marking) | Ghostty | 🟡 | high | M | → backlog (capped by the v2.20.0 decision gate) | Pure script work improving shipped jump-to-prompt; re-implement from spec — Ghostty's scripts are GPLv3. |
@@ -486,7 +489,7 @@ are marked, so the 11 shipped features occupy 13 "now" rows.
 | Audible bell (`bell-features` audio + path + volume) | Ghostty | 🟡 | low | M | backlog | Visual/attention bell coverage is already rich; pulling an audio stack in for BEL is a dependency decision. |
 | `palette-generate` + `palette-harmonious` | Ghostty | ⛔ | low | M | backlog | Theme-author tool, off by default even upstream; wait for custom theme files. |
 | `clipboard-codepoint-map` (copy-time rewriting) | Ghostty | ⛔ | low | S | backlog | Cheap char-map pass in the copy helper; few users discover they want it. |
-| DECRQSS (DCS `$q`) status-string reports | Ghostty | ⛔ | low | S | backlog | Rides the XTGETTCAP DCS-reply plumbing; vim cursor-shape restore is the classic consumer. |
+| DECRQSS (DCS `$q`) status-string reports | Ghostty | ✅ | low | S | ✅ shipped 4.9.0 | SGR, scroll region and cursor shape. Neovim's truecolor and undercurl probes are the consumers that matter now; vim cursor-shape restore is the classic one. |
 | Mode 2048 in-band window size reports | Ghostty | ⛔ | medium | M | backlog | Neovim 0.10+ and modern tmux consume it; needs kettle-vt mode tracking once the DCS layer exists. |
 | Kitty graphics `t=f/t/s` transmission mediums | Ghostty | ⛔ | medium | M | backlog | Faster local images, but terminal-reads-client-paths is security-sensitive; deserves its own careful pass. |
 | Mode 2031 color-scheme change reports | Ghostty | ⛔ | low | M | backlog | Only meaningful once kettle follows the OS theme; bundle with that feature. |
