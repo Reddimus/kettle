@@ -1449,10 +1449,10 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(c, Char('='), IncreaseFontSize);
     bind(cs, Char('+'), IncreaseFontSize);
     bind(cs, Char('='), IncreaseFontSize);
+    // Ctrl+Minus needs no Shift, so unlike Ctrl+Plus it has no Shift
+    // variant: `Ctrl+Shift+-` is `Ctrl+_`, which is undo in Claude Code, zsh,
+    // bash, emacs and nano, and stays theirs.
     bind(c, Char('-'), DecreaseFontSize);
-    // `Ctrl+_` (== `Ctrl+Shift+-` on US) — same logic as Ctrl+Plus above.
-    bind(cs, Char('-'), DecreaseFontSize);
-    bind(cs, Char('_'), DecreaseFontSize);
     bind(c, Char('0'), ResetFontSize);
     bind(cs, Char('x'), ToggleZoom);
     bind(cs, Char('r'), Reset);
@@ -1578,29 +1578,28 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
 /// a user to remove a default like `Ctrl+Shift+C` they want their shell or
 /// another tool to receive instead. Matches Ghostty's `unbind` and WezTerm's
 /// `DisableDefaultAssignment` / Alacritty's empty-action behavior.
-pub fn apply_keybind(map: &mut Bindings, value: &str) {
+///
+/// Returns the trigger when the line bound one, so the config can record it
+/// as the user's own (`Config::keybinds_declared`).
+pub fn apply_keybind(map: &mut Bindings, value: &str) -> Option<Trigger> {
     if value.is_empty() {
-        return;
+        return None;
     }
     // Split on the LAST `=`, not the first. The trigger can
     // BE the `=` key (a shipped default binding), so `ctrl+==increase_font_size`
     // must parse as trigger `ctrl+=` / action `increase_font_size`. Action text
     // never contains `=` (a `text:` payload spells it `\x3d`), so the final `=`
     // is unambiguously the separator.
-    let Some((trig, act)) = value.rsplit_once('=') else {
-        return;
-    };
-    let Some(t) = parse_trigger(trig) else {
-        return;
-    };
+    let (trig, act) = value.rsplit_once('=')?;
+    let t = parse_trigger(trig)?;
     let act_trim = act.trim();
     if is_unbind_token(act_trim) {
         map.remove(&t);
-        return;
+        return None;
     }
-    if let Some(a) = Action::from_name(act_trim) {
-        map.insert(t, a);
-    }
+    let a = Action::from_name(act_trim)?;
+    map.insert(t, a);
+    Some(t)
 }
 
 /// Bind `value` (`trigger=action`) as the ONLY chord for that action, dropping
@@ -1617,26 +1616,23 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
 /// alongside the imported one. Someone rebinding `new_tab` precisely BECAUSE
 /// Ctrl+Shift+T collides with tmux, AstroNvim, or an agent CLI would find the
 /// chord still captured after the import.
-pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
-    let Some((trig, act)) = value.rsplit_once('=') else {
-        return;
-    };
-    let Some(t) = parse_trigger(trig) else {
-        return;
-    };
+///
+/// Returns the trigger when the line bound one, like [`apply_keybind`].
+pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) -> Option<Trigger> {
+    let (trig, act) = value.rsplit_once('=')?;
+    let t = parse_trigger(trig)?;
     let act_trim = act.trim();
     if is_unbind_token(act_trim) {
         map.remove(&t);
-        return;
+        return None;
     }
-    let Some(a) = Action::from_name(act_trim) else {
-        return;
-    };
+    let a = Action::from_name(act_trim)?;
     // Drop every OTHER chord for this action first. Parameterized actions
     // (`goto_tab:3`) compare by value, so rebinding one tab's chord leaves the
     // other tabs' chords alone.
     map.retain(|existing, bound| *existing == t || *bound != a);
     map.insert(t, a);
+    Some(t)
 }
 
 /// Remove every chord bound to `action_name`.
@@ -2195,7 +2191,9 @@ mod tests {
         // `Ctrl+Shift+=` (Shift held because `+` lives on `=`). winit
         // reports it as `mods = Ctrl+Shift, key = '+'` — without a
         // Ctrl+Shift+Plus binding the chord did nothing. Same family
-        // for Ctrl+Shift+= and Ctrl+Shift+- (== Ctrl+_).
+        // for Ctrl+Shift+=. Ctrl+Minus needs no Shift, and Ctrl+Shift+- is
+        // Ctrl+_ (undo in Claude Code, zsh, bash, emacs, nano), so it and
+        // Ctrl+Shift+_ stay unbound and reach the program.
         let d = defaults();
         let c = Mods::CTRL;
         let cs = Mods::CTRL | Mods::SHIFT;
@@ -2205,8 +2203,6 @@ mod tests {
             (cs, '+', Action::IncreaseFontSize),
             (cs, '=', Action::IncreaseFontSize),
             (c, '-', Action::DecreaseFontSize),
-            (cs, '-', Action::DecreaseFontSize),
-            (cs, '_', Action::DecreaseFontSize),
         ] {
             let t = Trigger::new(mods, Key::Char(k));
             assert_eq!(
@@ -2215,6 +2211,32 @@ mod tests {
                 "{t:?} should map to {expected:?}"
             );
         }
+        for k in ['-', '_'] {
+            let t = Trigger::new(cs, Key::Char(k));
+            assert_eq!(
+                d.get(&t),
+                None,
+                "{t:?} is Ctrl+_ (undo) and belongs to the program"
+            );
+        }
+        // The lines TERMINAL-CLIENT-COMPATIBILITY.md gives to get them back.
+        let mut m = defaults();
+        for line in [
+            "ctrl+shift+minus=decrease_font_size",
+            "ctrl+shift+_=decrease_font_size",
+        ] {
+            assert!(apply_keybind(&mut m, line).is_some(), "{line}");
+        }
+        for k in ['-', '_'] {
+            assert_eq!(
+                m.get(&Trigger::new(cs, Key::Char(k))),
+                Some(&Action::DecreaseFontSize)
+            );
+        }
+        assert_eq!(
+            apply_keybind(&mut m, "ctrl+alt+left=resize_left"),
+            Some(Trigger::new(Mods::CTRL | Mods::ALT, Key::Left))
+        );
     }
 
     /// Dropdown parity: `new_tab_shell_N` parses like the established

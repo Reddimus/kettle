@@ -884,6 +884,16 @@ zoom-keybind-smoke:
 alt-arrow-zoom-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release alt-arrow-zoom
 
+# Prove a default chord a program also uses goes to the program while it owns
+# the keyboard: a byte recorder takes kitty flags and the alternate screen in a
+# split, Shift+Left reaches it as ESC [1;2D (a real key press on macOS) without
+# moving the split, and once it lets go Shift+Left resizes again and sends it
+# nothing. Captures dispatch JSON and the recorded bytes under
+# target/diagnostics/program-keys-*.
+[unix]
+program-keys-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release program-keys
+
 # Prove the grid stays mouse-interactive under an open search bar: drag
 # selection, bar-control clicks, the bar's Copy chord, a right-click menu that
 # leaves the bar open, focus-following across splits, Kettle's shortcuts while

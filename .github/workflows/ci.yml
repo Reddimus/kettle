@@ -498,6 +498,31 @@ jobs:
           path: target/diagnostics/live-ui-split-exit-resize
           if-no-files-found: warn
           retention-days: 7
+      - name: Live UI program-keys smoke (Linux, quarantined)
+        if: runner.os == 'Linux'
+        # A default Kettle chord that a program also uses (Shift+Left for
+        # resizing a split, Codex's queued-message key) must reach a program
+        # that holds kitty flags and the alternate screen, and stay Kettle's
+        # once it lets go. The routing is unit-tested; this drives it through
+        # the control route's real resolver against a real PTY. Only macOS
+        # posts real key presses, since Xvfb has no window manager to focus.
+        # Quarantined like the other live-UI legs.
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          xvfb-run -a python3 scripts/check-live-ui-smoke.py program-keys \
+            --kettle ./target/release/kettle \
+            --out-dir target/diagnostics/live-ui-program-keys
+      - name: Upload live UI program-keys evidence
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: live-ui-program-keys-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/diagnostics/live-ui-program-keys
+          if-no-files-found: warn
+          retention-days: 7
       - name: --gpu-info diagnostic smoke (Linux/macOS)
         # Pin that `--gpu-info` resolves an adapter and prints the expected
         # key:value layout, so an output-format change (e.g. to JSON) fails

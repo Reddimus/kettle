@@ -717,8 +717,9 @@ turn broadcast off
 .B Ctrl+Shift+Plus
 increase font size
 .TP
-.B Ctrl+Shift+Minus
-decrease font size
+.B Ctrl+Minus
+decrease font size. Ctrl+Shift+Minus (Ctrl+_) is not bound, so it
+reaches the program: undo in Claude Code, zsh and bash
 .TP
 .B Ctrl+0
 reset font size to the configured default
@@ -727,6 +728,10 @@ reset font size to the configured default
 .B Shift+Arrow
 resize the focused split (up / down / left / right). Composes
 with split-tree weights so adjacent panes grow proportionally.
+While a program owns the keyboard (Codex, Neovim, fzf: kitty keyboard
+flags or modifyOtherKeys away from the shell prompt, the alternate
+screen, or mouse reporting) the keys go to the program instead; see
+\fBkeybind-yield\fR.
 .SS Scroll
 .TP
 .B Shift+PgUp
@@ -737,7 +742,7 @@ scroll one page up / down through scrollback
 .B Shift+Home
 .TQ
 .B Shift+End
-jump to scrollback top / bottom
+extend the selection to the top / bottom of scrollback
 .SS Right-click
 A right click anywhere in a pane opens a context menu with:
 Copy / Paste / Split Auto, Right, Left, Down and Up / Zoom / Close Pane /

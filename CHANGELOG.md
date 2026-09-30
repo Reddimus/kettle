@@ -10,11 +10,26 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - `RUST_LOG=warn,kettle::startup=info` prints how long each startup phase
   took, from `main` to the first frame.
+- `keybind-yield` (`auto` by default) decides which default chords a program
+  in the pane gets while it owns the keyboard; `off` keeps every default chord
+  Kettle's, as in 4.8.
 
 ### Changed
 
 - A blinking cursor no longer re-uploads the window's shapes or re-prepares its
   text on each blink; the blink only changes what is drawn.
+- `Shift+Arrow` reaches a program that owns the keyboard (the alternate
+  screen or mouse reporting, or the kitty keyboard protocol or
+  `modifyOtherKeys` away from the shell prompt) instead of resizing a split,
+  so Codex's `Shift+Left` ("shift+← to answer" a queued question) and
+  `Shift+Right`, and Neovim's `Shift+Arrow` motions, work. Jump to prompt,
+  scrolling, `Shift+Home/End` and tab switching reach such a program when
+  Kettle's action would do nothing and the view is not scrolled back. At a
+  shell prompt, with broadcast input on, and for chords you bind yourself,
+  nothing changes.
+- `Ctrl+Shift+-` and `Ctrl+Shift+_` no longer shrink the font, so `Ctrl+_`
+  reaches the program (undo in Claude Code, zsh, bash and emacs). `Ctrl+-` and
+  `Cmd+-` still shrink it.
 
 ## [4.8.0] — 2026-09-28
 

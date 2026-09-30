@@ -4123,6 +4123,44 @@ fn receive_pty_chunk(
     }
 }
 
+/// What a pane's terminal says about who should get a key that both Kettle
+/// and a program in the pane could use: Kettle's split resize on Shift+Arrow,
+/// say, against Codex's Shift+Left. Kettle-ui decides from this snapshot and
+/// its own state (splits, tabs, selection); see its program-keyboard rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardClaims {
+    /// The active screen negotiated kitty keyboard flags or xterm
+    /// modifyOtherKeys. A program asks for these, and so does a fish prompt.
+    pub keyboard_protocol: bool,
+    /// Mouse reporting is on (fzf, htop, Neovim with `mouse=a`). A shell
+    /// prompt never turns it on.
+    pub mouse_mode: bool,
+    pub alt_screen: bool,
+    /// Scrollback rows above the screen, and how far the view is scrolled
+    /// into them.
+    pub history_size: usize,
+    pub display_offset: usize,
+    /// A retained OSC 133 prompt lies above / below the current view, so
+    /// jumping to a prompt would move.
+    pub prompt_above: bool,
+    pub prompt_below: bool,
+    /// Shell integration shows the shell at its prompt: a prompt mark has
+    /// been seen and no command has started since (see
+    /// [`Terminal::shell_at_prompt`]).
+    pub at_prompt: bool,
+}
+
+impl KeyboardClaims {
+    /// A program, not a shell sitting at its prompt, owns the keyboard. The
+    /// alternate screen and mouse reporting always mean a program, even one a
+    /// shell key binding started without a command mark (fzf on Ctrl+T). A
+    /// keyboard protocol means a program only away from the prompt, since
+    /// fish pushes kitty flags for its own line editor.
+    pub fn program_owns_keyboard(&self) -> bool {
+        self.alt_screen || self.mouse_mode || (self.keyboard_protocol && !self.at_prompt)
+    }
+}
+
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
 pub struct TermSize {
@@ -5841,6 +5879,8 @@ fn rebase_prompt_marks_after_column_reflow(
     }
 }
 
+/// Prune marks that have left the retained grid, then find the display offset
+/// of the adjacent prompt (see [`prompt_navigation_target`]).
 fn prompt_navigation_offset(
     ring: &mut std::collections::VecDeque<u64>,
     history_origin: u64,
@@ -5849,21 +5889,44 @@ fn prompt_navigation_offset(
     display_offset: usize,
     previous: bool,
 ) -> Option<usize> {
+    let retained_end = history_origin
+        .saturating_add(history_size as u64)
+        .saturating_add(screen_lines as u64);
+    ring.retain(|mark| *mark >= history_origin && *mark < retained_end);
+    prompt_navigation_target(
+        ring,
+        history_origin,
+        history_size,
+        screen_lines,
+        display_offset,
+        previous,
+    )
+}
+
+/// The display offset a jump to the adjacent prompt would scroll to, or `None`
+/// when there is no prompt that way. Marks outside the retained grid are
+/// skipped rather than pruned, so a caller that only asks (the keyboard
+/// ownership check) needs neither a mutable ring nor a copy of it.
+fn prompt_navigation_target(
+    ring: &std::collections::VecDeque<u64>,
+    history_origin: u64,
+    history_size: usize,
+    screen_lines: usize,
+    display_offset: usize,
+    previous: bool,
+) -> Option<usize> {
     let screen_top = history_origin.saturating_add(history_size as u64);
     let retained_end = screen_top.saturating_add(screen_lines as u64);
-    ring.retain(|mark| *mark >= history_origin && *mark < retained_end);
+    let retained = ring
+        .iter()
+        .copied()
+        .filter(|mark| *mark >= history_origin && *mark < retained_end);
 
     let current_top = screen_top.saturating_sub(display_offset.min(history_size) as u64);
     let target = if previous {
-        ring.iter()
-            .copied()
-            .filter(|mark| *mark < current_top)
-            .max()
+        retained.filter(|mark| *mark < current_top).max()
     } else {
-        ring.iter()
-            .copied()
-            .filter(|mark| *mark > current_top)
-            .min()
+        retained.filter(|mark| *mark > current_top).min()
     }?;
 
     let offset = screen_top.saturating_sub(target).min(history_size as u64);
@@ -8084,6 +8147,85 @@ impl Terminal {
     /// CommandEnd never arrives stays "running", which errs toward asking.
     pub fn shell_idle(&self) -> bool {
         self.shell_activity() == ShellActivity::Idle
+    }
+
+    /// Whether shell integration shows the shell at its prompt: at least one
+    /// prompt mark has arrived and no command has started since the last
+    /// one. Unlike [`shell_idle`](Self::shell_idle), this does not wait for a
+    /// first OutputStart, so a fresh prompt already counts; B clears a stray
+    /// OutputStart the way it does for `shell_idle`. Without integration it
+    /// is always false.
+    pub fn shell_at_prompt(&self) -> bool {
+        let seen_prompts = self.prompts.lock().map(|p| !p.is_empty()).unwrap_or(false);
+        seen_prompts
+            && self
+                .output_started_at
+                .lock()
+                .map(|started| started.is_none())
+                .unwrap_or(false)
+    }
+
+    /// What this pane's terminal says about who should get a key that both
+    /// Kettle and a program could use (see [`KeyboardClaims`]). Read only for
+    /// chords that can yield, so it costs nothing on ordinary typing. Locks the
+    /// term, then the prompt ring, in the reader thread's order, as
+    /// `jump_to_prompt` does, and only reads the ring: nothing is pruned or
+    /// moved. A poisoned term lock reports nothing, which keeps every chord
+    /// Kettle's.
+    pub fn keyboard_claims(&self) -> KeyboardClaims {
+        use alacritty_terminal::term::TermMode;
+
+        let at_prompt = self.shell_at_prompt();
+        let Ok(term) = self.term.lock() else {
+            return KeyboardClaims {
+                at_prompt,
+                ..KeyboardClaims::default()
+            };
+        };
+        let mode = *term.mode();
+        let alt_screen = mode.contains(TermMode::ALT_SCREEN);
+        let grid = term.grid();
+        let (history_origin, history_size, screen_lines, display_offset) = (
+            grid.history_origin(),
+            grid.history_size(),
+            grid.screen_lines(),
+            grid.display_offset(),
+        );
+        let (prompt_above, prompt_below) = if alt_screen {
+            // Prompt ids belong to the primary grid (see `prompt_marks`).
+            (false, false)
+        } else {
+            self.prompts
+                .lock()
+                .map(|marks| {
+                    // A jump counts only if it would move the view: a prompt
+                    // already on screen at the bottom maps back to offset 0.
+                    let can_jump = |previous| {
+                        prompt_navigation_target(
+                            &marks,
+                            history_origin,
+                            history_size,
+                            screen_lines,
+                            display_offset,
+                            previous,
+                        )
+                        .is_some_and(|offset| offset != display_offset)
+                    };
+                    (can_jump(true), can_jump(false))
+                })
+                .unwrap_or((false, false))
+        };
+        KeyboardClaims {
+            keyboard_protocol: mode
+                .intersects(TermMode::KITTY_KEYBOARD_PROTOCOL | TermMode::MODIFY_OTHER_KEYS),
+            mouse_mode: mode.intersects(TermMode::MOUSE_MODE),
+            alt_screen,
+            history_size,
+            display_offset,
+            prompt_above,
+            prompt_below,
+            at_prompt,
+        }
     }
 
     /// Install a path whose secure open/create is deferred to the persistence
@@ -13622,6 +13764,28 @@ mod teardown_tests {
     }
 
     #[test]
+    fn prompt_navigation_target_answers_like_the_jump_without_touching_the_ring() {
+        use std::collections::VecDeque;
+
+        // The keyboard ownership check asks where a jump would go through the
+        // read-only form; it must agree with the pruning jump for every
+        // offset and direction, evicted and past-the-grid marks included.
+        let marks = VecDeque::from([99, 100, 102, 104, 107, 108]);
+        for display_offset in 0..=5 {
+            for previous in [true, false] {
+                let mut pruned = marks.clone();
+                assert_eq!(
+                    prompt_navigation_target(&marks, 100, 4, 4, display_offset, previous),
+                    prompt_navigation_offset(&mut pruned, 100, 4, 4, display_offset, previous),
+                    "offset {display_offset}, previous {previous}"
+                );
+            }
+        }
+        assert_eq!(marks, VecDeque::from([99, 100, 102, 104, 107, 108]));
+        assert_eq!(prompt_navigation_target(&marks, 110, 0, 4, 0, false), None);
+    }
+
+    #[test]
     fn prompt_navigation_prunes_evicted_and_reset_rows() {
         use std::collections::VecDeque;
 
@@ -13865,6 +14029,241 @@ mod teardown_tests {
             term.child_exited(),
             "child_exited agrees once code is known"
         );
+    }
+
+    /// Run `printf FORMAT` in a real PTY child and return the pane once
+    /// `ready` accepts it, or after `wait` whatever it shows. The child sleeps
+    /// after printing, so its modes stay while the test looks; dropping the
+    /// returned terminal ends it.
+    #[cfg(unix)]
+    fn pane_after(
+        format: &str,
+        ready: impl Fn(&Terminal) -> bool,
+        wait: Duration,
+    ) -> Option<Terminal> {
+        let argv: Vec<String> = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("printf '{format}'; sleep 10"),
+        ];
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping keyboard claims: no PTY ({e})");
+                return None;
+            }
+        };
+        let deadline = std::time::Instant::now() + wait;
+        while !ready(&term) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Some(term)
+    }
+
+    /// The pane's keyboard claims once `done` accepts them (see `pane_after`).
+    #[cfg(unix)]
+    fn claims_after(
+        format: &str,
+        done: impl Fn(&KeyboardClaims) -> bool,
+        wait: Duration,
+    ) -> Option<KeyboardClaims> {
+        pane_after(format, |t| done(&t.keyboard_claims()), wait).map(|t| t.keyboard_claims())
+    }
+
+    /// A program takes the keyboard by negotiating kitty flags or
+    /// modifyOtherKeys, switching to the alternate screen, or turning on mouse
+    /// reporting; bracketed paste, cursor-key mode and focus reports alone do
+    /// not take it.
+    #[cfg(unix)]
+    #[test]
+    fn keyboard_claims_follow_the_modes_a_program_negotiates() {
+        // (sequence, keyboard protocol, mouse, alternate screen)
+        for (format, protocol, mouse, alt) in [
+            ("\\033[>1u", true, false, false),
+            ("\\033[>7u", true, false, false),
+            ("\\033[>4;2m", true, false, false),
+            ("\\033[?1049h", false, false, true),
+            ("\\033[?1000h", false, true, false),
+            ("\\033[?1003h\\033[?1006h", false, true, false),
+        ] {
+            let Some(claims) = claims_after(
+                format,
+                |c| c.program_owns_keyboard(),
+                Duration::from_secs(10),
+            ) else {
+                return;
+            };
+            assert_eq!(claims.keyboard_protocol, protocol, "{format}");
+            assert_eq!(claims.mouse_mode, mouse, "{format}");
+            assert_eq!(claims.alt_screen, alt, "{format}");
+            assert!(!claims.at_prompt, "{format}: no shell integration");
+            assert!(claims.program_owns_keyboard(), "{format}");
+        }
+        // Modes that change nothing about who reads keys. Wait until the
+        // child has certainly set them, so the check cannot pass early.
+        let marker = "\\033[?2004h\\033[?1h\\033[?1004h";
+        let Some(pane) = pane_after(
+            marker,
+            |t| {
+                t.term.lock().is_ok_and(|term| {
+                    term.mode().contains(
+                        alacritty_terminal::term::TermMode::BRACKETED_PASTE
+                            | alacritty_terminal::term::TermMode::APP_CURSOR
+                            | alacritty_terminal::term::TermMode::FOCUS_IN_OUT,
+                    )
+                })
+            },
+            Duration::from_secs(10),
+        ) else {
+            return;
+        };
+        assert!(
+            pane.term.lock().unwrap().mode().contains(
+                alacritty_terminal::term::TermMode::BRACKETED_PASTE
+                    | alacritty_terminal::term::TermMode::APP_CURSOR
+                    | alacritty_terminal::term::TermMode::FOCUS_IN_OUT
+            ),
+            "the negative control needs its modes set"
+        );
+        let claims = pane.keyboard_claims();
+        assert!(!claims.keyboard_protocol && !claims.mouse_mode && !claims.alt_screen);
+        assert!(!claims.program_owns_keyboard());
+    }
+
+    /// A shell at its integrated prompt keeps the keyboard even when the prompt
+    /// itself pushes kitty flags, as fish does, from its very first prompt;
+    /// a command running under the same shell does not. The alternate screen
+    /// and mouse reporting mean a program even without a command mark, as
+    /// when a shell key binding starts fzf.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_prompt_keeps_the_keyboard_despite_its_own_kitty_flags() {
+        let prompt = "\\033]133;A\\007$ \\033]133;B\\007";
+        for (label, format) in [
+            (
+                "a fresh prompt, no command yet",
+                format!("{prompt}\\033[>1u"),
+            ),
+            (
+                "the prompt after a command",
+                format!("{prompt}\\033]133;C\\007out\\n\\033]133;D;0\\007{prompt}\\033[>1u"),
+            ),
+            (
+                "a stray OutputStart before the prompt ends",
+                "\\033]133;A\\007\\033]133;C\\007$ \\033]133;B\\007\\033[>1u".to_string(),
+            ),
+        ] {
+            let Some(claims) = claims_after(
+                &format,
+                |c| c.keyboard_protocol && c.at_prompt,
+                Duration::from_secs(10),
+            ) else {
+                return;
+            };
+            assert!(claims.keyboard_protocol && claims.at_prompt, "{label}");
+            assert!(
+                !claims.program_owns_keyboard(),
+                "{label}: the shell's own flags"
+            );
+        }
+        // The same flags pushed by a command that is still running.
+        let running = format!("{prompt}\\033]133;C\\007\\033[>1u");
+        let Some(claims) = claims_after(&running, |c| c.keyboard_protocol, Duration::from_secs(10))
+        else {
+            return;
+        };
+        assert!(!claims.at_prompt);
+        assert!(claims.program_owns_keyboard());
+        // Mouse reporting or the alternate screen at the prompt: a program a
+        // key binding started.
+        for modes in ["\\033[?1000h\\033[?1006h", "\\033[?1049h"] {
+            let Some(claims) = claims_after(
+                &format!("{prompt}{modes}"),
+                |c| c.at_prompt && (c.mouse_mode || c.alt_screen),
+                Duration::from_secs(10),
+            ) else {
+                return;
+            };
+            assert!(claims.at_prompt, "{modes}");
+            assert!(claims.program_owns_keyboard(), "{modes}");
+        }
+    }
+
+    /// Prompt navigation is reported only when a jump would move the view:
+    /// never on the alternate screen, never to a prompt the view already
+    /// shows at the bottom, and both ways from a view scrolled between two
+    /// prompts.
+    #[cfg(unix)]
+    #[test]
+    fn keyboard_claims_report_where_a_prompt_jump_would_go() {
+        use alacritty_terminal::grid::Scroll;
+
+        let mark = "\\033]133;A\\007$ \\033]133;B\\007\\033]133;C\\007";
+        let rows =
+            |from: usize| -> String { (from..from + 40).map(|n| format!("line{n}\\n")).collect() };
+        // Prompt, 40 rows, prompt, 40 rows: both prompts end up in history.
+        let two = format!("{mark}{}{mark}{}", rows(0), rows(40));
+        let Some(pane) = pane_after(
+            &two,
+            |t| t.keyboard_claims().history_size > 50,
+            Duration::from_secs(10),
+        ) else {
+            return;
+        };
+        let claims = pane.keyboard_claims();
+        assert!(claims.history_size > 50);
+        assert_eq!(claims.display_offset, 0);
+        assert!(claims.prompt_above, "the prompts scrolled into history");
+        assert!(!claims.prompt_below, "nothing below the bottom of the view");
+        // Scroll the view to the very top: the first prompt is at or above it,
+        // the second below it.
+        pane.term.lock().unwrap().scroll_display(Scroll::Top);
+        let claims = pane.keyboard_claims();
+        assert!(claims.display_offset > 0);
+        assert!(
+            claims.prompt_below,
+            "the second prompt lies below: {claims:?}"
+        );
+        assert!(!claims.prompt_above, "nothing above the top: {claims:?}");
+
+        // A prompt on the visible screen at the bottom is where a jump would
+        // already be: neither direction moves the view, so neither counts.
+        let on_screen = format!("{}\\033]133;A\\007$ ", rows(0));
+        let Some(claims) =
+            claims_after(&on_screen, |c| c.history_size > 10, Duration::from_secs(10))
+        else {
+            return;
+        };
+        assert_eq!(claims.display_offset, 0);
+        assert!(
+            !claims.prompt_below && !claims.prompt_above,
+            "a jump to the visible prompt would not move: {claims:?}"
+        );
+
+        let Some(claims) = claims_after(
+            &(two + "\\033[?1049h"),
+            |c| c.alt_screen,
+            Duration::from_secs(10),
+        ) else {
+            return;
+        };
+        assert!(claims.alt_screen);
+        assert!(!claims.prompt_above && !claims.prompt_below);
     }
 
     /// Portable ordering model for legacy ConPTY teardown. Closing a

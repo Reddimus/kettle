@@ -269,6 +269,48 @@ by Kettle UI or a Kettle keybinding also suppresses its matching physical
 release, so a Kitty-aware child never receives a release for a press it did not
 see.
 
+## Keys a program shares with Kettle
+
+Some Kettle default chords are also application keys: Codex answers a queued
+question with `Shift+Left` and steps back with `Shift+Right`, Codex and Claude
+Code extend selections and change reasoning effort with `Shift+Arrow`, Neovim
+moves by word with `Shift+Left/Right`, AstroNvim resizes windows with
+`Ctrl+Up/Down`, and `Ctrl+_` is undo in Claude Code and most line editors.
+
+Kettle decides who gets such a chord from what the program has told the
+terminal, not from its name. A program owns the keyboard while its screen:
+
+- is the alternate screen, or has mouse reporting on (Neovim, fzf, htop), or
+- has negotiated the kitty keyboard protocol or xterm `modifyOtherKeys` while
+  shell integration does not show the shell at its prompt (Codex, Claude Code).
+
+A plain shell prompt owns nothing, and neither does a fish prompt that pushes
+its own kitty flags, even before its first command. The rule also works over
+ssh, because the remote program sets the same modes. While a program owns the
+keyboard:
+
+- `Shift+Arrow` goes to the program; Kettle resizes splits with it only when
+  no program has the keyboard. Drag the divider meanwhile, or bind resizing to
+  a chord of your own (`keybind = ctrl+alt+left=resize_left`).
+- Jump to prompt (`Ctrl+Up/Down`, and `Cmd+Up/Down` on macOS), the scroll
+  chords, `Shift+Home/End`, tab switching and `Alt+1`-`9` (and `Cmd+1`-`9` on
+  macOS) go to the program only when Kettle's action would do nothing: no
+  prompt to jump to, nothing to scroll, one tab, no selection to extend. While
+  the view is scrolled back into history they stay Kettle's, because a key
+  sent to the program would snap the view to the bottom.
+- Copy stays Kettle's: Codex reads `Ctrl+Shift+C` as `Ctrl+C`, which would
+  discard its draft.
+- Every other chord stays Kettle's, and so do all of them while broadcast
+  input is on, since the other panes may not own their keyboards.
+
+A chord you bind yourself is always Kettle's, even when your line restates the
+default. `keybind-yield = off` keeps every default chord Kettle's, as in 4.8.
+
+`Ctrl+Shift+-` and `Ctrl+Shift+_` (`Ctrl+_`) are no longer bound to shrinking
+the font, whatever `keybind-yield` says; `Ctrl+-` and `Cmd+-` still are. To
+shrink with them again, add `keybind = ctrl+shift+minus=decrease_font_size`
+and `keybind = ctrl+shift+_=decrease_font_size`.
+
 ## Claude Code diff panel
 
 Claude Code 2.1.260 and newer draws a diff panel beside the conversation

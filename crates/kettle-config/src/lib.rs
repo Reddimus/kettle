@@ -25,6 +25,7 @@ pub mod template;
 pub mod theme;
 mod theme_filter;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use std::io::Read as _;
@@ -313,6 +314,30 @@ impl ModifyOtherKeysMode {
         match self {
             Self::Auto => "auto",
             Self::Always => "always",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// Whether a default chord that a program in the pane also uses goes to the
+/// program while it owns the keyboard. `Auto` (default) gives Shift+Arrow
+/// (split resize) to such a program always, and a handful of other defaults
+/// (jump to prompt, scrolling, Shift+Home/End, tab switching) only when
+/// Kettle's action would do nothing and the view is not scrolled into
+/// history. Copy is always Kettle's. `Off` makes every default chord Kettle's,
+/// as in 4.8. A trigger the config binds itself is always Kettle's
+/// ([`Config::keybinds_declared`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeybindYield {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl KeybindYield {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
             Self::Off => "off",
         }
     }
@@ -1156,6 +1181,9 @@ pub struct Config {
     pub macos_option_as_alt: MacosOptionAsAlt,
     /// Kettle's modified-Enter fallback before a client negotiates key encoding.
     pub modify_other_keys: ModifyOtherKeysMode,
+    /// Whether default chords a program also uses go to a program that owns
+    /// the keyboard (see [`KeybindYield`]).
+    pub keybind_yield: KeybindYield,
     /// Paste a clipboard file list (e.g. a file copied in Explorer) as a
     /// shell-quoted path (default: on). See [`PasteFiles`].
     pub paste_files: PasteFiles,
@@ -1789,6 +1817,11 @@ pub struct Config {
     pub search_foreground: Option<Rgb>,
     pub search_background: Option<Rgb>,
     pub keybinds: Bindings,
+    /// Triggers the config binds itself: a `keybind = trigger=action` line, an
+    /// imported Terminator accelerator, or a rebind saved from Settings.
+    /// `keybind-yield` never hands one of these to a program, even when the
+    /// line restates a default pair, so a chord the user bound is Kettle's.
+    pub keybinds_declared: HashSet<keybinds::Trigger>,
     /// Shell override; `None` uses `$SHELL` / platform default.
     pub shell: Option<String>,
     /// Named SSH targets: `ssh-host = name=user@host` (repeatable).
@@ -2624,6 +2657,7 @@ impl Default for Config {
             osc52: Osc52::Copy,
             macos_option_as_alt: MacosOptionAsAlt::None,
             modify_other_keys: ModifyOtherKeysMode::Auto,
+            keybind_yield: KeybindYield::Auto,
             paste_files: PasteFiles::On,
             paste_images: PasteImages::On,
             paste_image_preview: true,
@@ -2770,6 +2804,7 @@ impl Default for Config {
             search_foreground: None, // derive from theme.background
             search_background: None, // derive from theme.palette[3]
             keybinds: keybinds::defaults(),
+            keybinds_declared: HashSet::new(),
             shell: None,
             ssh_hosts: Vec::new(),
             triggers: Vec::new(),
@@ -3680,6 +3715,9 @@ impl Config {
                     v.to_ascii_lowercase().as_str(),
                     "auto" | "always" | "enter" | "off"
                 ),
+                "keybind-yield" | "keybind_yield" => {
+                    matches!(v.to_ascii_lowercase().as_str(), "auto" | "off")
+                }
                 "paste-files" | "paste-images" | "paste-image" => {
                     parse_paste_policy(v).is_some()
                 }
@@ -4250,6 +4288,12 @@ impl Config {
                         "always" | "enter" => ModifyOtherKeysMode::Always,
                         "off" => ModifyOtherKeysMode::Off,
                         _ => ModifyOtherKeysMode::Auto,
+                    }
+                }
+                "keybind-yield" | "keybind_yield" => {
+                    cfg.keybind_yield = match e.value.to_ascii_lowercase().as_str() {
+                        "off" => KeybindYield::Off,
+                        _ => KeybindYield::Auto,
                     }
                 }
                 "paste-files" => {
@@ -5255,7 +5299,11 @@ impl Config {
                         }
                     }
                 }
-                "keybind" => keybinds::apply_keybind(&mut cfg.keybinds, &e.value),
+                "keybind" => {
+                    if let Some(trigger) = keybinds::apply_keybind(&mut cfg.keybinds, &e.value) {
+                        cfg.keybinds_declared.insert(trigger);
+                    }
+                }
                 // A line keyed by a bare ACTION name is Terminator's
                 // `[keybindings]` grammar: `new_tab = <Control><Shift>t`, the
                 // inverse of kettle's `keybind = <trigger>=<action>`. Without a
@@ -5281,10 +5329,12 @@ impl Config {
                     // accelerator per action — so an imported line REPLACES
                     // the action's chord rather than adding to it. See
                     // `apply_exclusive_keybind`.
-                    keybinds::apply_exclusive_keybind(
+                    if let Some(trigger) = keybinds::apply_exclusive_keybind(
                         &mut cfg.keybinds,
                         &format!("{}={}", e.value, e.raw_key),
-                    );
+                    ) {
+                        cfg.keybinds_declared.insert(trigger);
+                    }
                 }
                 // Report the spelling the user actually wrote, not the folded
                 // one — otherwise the warning names a line that does not exist
@@ -6865,6 +6915,32 @@ cell-height = 1.2\n";
     }
 
     #[test]
+    fn keybind_yield_parsing_validation_and_default() {
+        assert_eq!(Config::default().keybind_yield, KeybindYield::Auto);
+        assert_eq!(
+            Config::parse_text("keybind-yield = off").keybind_yield,
+            KeybindYield::Off
+        );
+        assert_eq!(
+            Config::parse_text("keybind_yield = OFF").keybind_yield,
+            KeybindYield::Off
+        );
+        assert_eq!(
+            Config::parse_text("keybind-yield = auto").keybind_yield,
+            KeybindYield::Auto
+        );
+        assert!(Config::detect_malformed_values("keybind-yield = auto\n").is_empty());
+        assert!(Config::detect_malformed_values("keybind-yield = off\n").is_empty());
+        assert_eq!(
+            Config::detect_malformed_values("keybind-yield = never\n").len(),
+            1
+        );
+        let (_, unknown) = Config::parse_collect("keybind-yield = off\nkeybind_yield = auto\n");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        assert_eq!(KeybindYield::Off.as_str(), "off");
+    }
+
+    #[test]
     fn modify_other_keys_policy_parsing_validation_and_default() {
         assert_eq!(
             Config::default().modify_other_keys,
@@ -8419,6 +8495,8 @@ split_horiz = <Control><Shift>j
             ("macos_option_as_alt", "left"),
             ("modify-other-keys", "auto"),
             ("modify_other_keys", "always"),
+            ("keybind-yield", "off"),
+            ("keybind_yield", "off"),
             // The three background-image placement enums (+ snake_case).
             ("background-image-mode", "scale"),
             ("background_image_mode", "scale"),
