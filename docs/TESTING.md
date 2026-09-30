@@ -1940,7 +1940,7 @@ session run
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
-`just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`,
+`just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
 `just search-selection-smoke`, `just bell-flash-smoke`,
 `just default-window-size-smoke`, and
 `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
@@ -2111,6 +2111,11 @@ retained compile/regression checks on **windows**:
   `stty size` because the grid commits even when the native resize fails.
   Quarantined for the same reason as `search-history`: creating a window under
   Xvfb on a hosted runner is the flake source, not the assertion.
+- A quarantined Linux **live-UI `program-keys` smoke** gives a split pane to a
+  byte recorder that holds the alternate screen and kitty flags, and asserts
+  through `dispatch_keybind` that `Shift+Left` falls through to it and resizes
+  the split again once it lets go. Only the macOS run presses real keys,
+  because Xvfb without a window manager cannot focus the window.
 - The **`--screenshot` end-to-end** +
   **`--screenshot-menu` visual regression** smokes on Linux
   (both run the release binary under `LIBGL_ALWAYS_SOFTWARE=1`).

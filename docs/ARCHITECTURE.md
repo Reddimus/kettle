@@ -1464,6 +1464,25 @@ text, so its bitmap is already resident).
   through its release; otherwise the UI-owned press suppresses that release.
   Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /
   `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
+- **Program-owned keys** (`keybind-yield = auto`) extend the same routing
+  helper. A handful of default (trigger, action) pairs carry a rule
+  (`program_key_rule`): `Shift+Arrow` resize is program-first, and prompt
+  jumps, scrolling, `Shift+Home/End` and tab switching go to the program only
+  when Kettle's action would do nothing and the view is at the bottom. A
+  trigger the config binds itself (`Config::keybinds_declared`) never yields,
+  and nothing yields while broadcast input is on or the pane cannot take
+  input. The decision reads one `KeyboardClaims` snapshot from the focused
+  pane's terminal, and only after a pair matched: the keyboard protocol
+  (kitty flags or `modifyOtherKeys`), mouse reporting, the alternate screen,
+  scrollback position, whether a prompt jump would move the view, and whether
+  shell integration shows the shell at its prompt (`shell_at_prompt`: a prompt
+  mark and no command started since). A program owns the keyboard on the
+  alternate screen or with mouse reporting, or with a keyboard protocol away
+  from the prompt, so a fish prompt that pushes its own kitty flags keeps
+  Kettle's chords, while a program reached over ssh is recognised by the modes
+  it sets. Process names are never consulted. The search bar keeps only the
+  adaptive focus rule, since the program cannot receive a key while the bar
+  has the keyboard.
 - **Allocation hot-paths**: the copies on the `App::drain_events` and
   `App::redraw` paths are load-bearing. `LuaEvent::Output(id, bytes)` copies the
   byte slice into a fresh `Vec<u8>` for the Lua callback (no
