@@ -1578,29 +1578,28 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
 /// a user to remove a default like `Ctrl+Shift+C` they want their shell or
 /// another tool to receive instead. Matches Ghostty's `unbind` and WezTerm's
 /// `DisableDefaultAssignment` / Alacritty's empty-action behavior.
-pub fn apply_keybind(map: &mut Bindings, value: &str) {
+///
+/// Returns the trigger when the line bound one, so the config can record it
+/// as the user's own (`Config::keybinds_declared`).
+pub fn apply_keybind(map: &mut Bindings, value: &str) -> Option<Trigger> {
     if value.is_empty() {
-        return;
+        return None;
     }
     // Split on the LAST `=`, not the first. The trigger can
     // BE the `=` key (a shipped default binding), so `ctrl+==increase_font_size`
     // must parse as trigger `ctrl+=` / action `increase_font_size`. Action text
     // never contains `=` (a `text:` payload spells it `\x3d`), so the final `=`
     // is unambiguously the separator.
-    let Some((trig, act)) = value.rsplit_once('=') else {
-        return;
-    };
-    let Some(t) = parse_trigger(trig) else {
-        return;
-    };
+    let (trig, act) = value.rsplit_once('=')?;
+    let t = parse_trigger(trig)?;
     let act_trim = act.trim();
     if is_unbind_token(act_trim) {
         map.remove(&t);
-        return;
+        return None;
     }
-    if let Some(a) = Action::from_name(act_trim) {
-        map.insert(t, a);
-    }
+    let a = Action::from_name(act_trim)?;
+    map.insert(t, a);
+    Some(t)
 }
 
 /// Bind `value` (`trigger=action`) as the ONLY chord for that action, dropping
@@ -1617,26 +1616,23 @@ pub fn apply_keybind(map: &mut Bindings, value: &str) {
 /// alongside the imported one. Someone rebinding `new_tab` precisely BECAUSE
 /// Ctrl+Shift+T collides with tmux, AstroNvim, or an agent CLI would find the
 /// chord still captured after the import.
-pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) {
-    let Some((trig, act)) = value.rsplit_once('=') else {
-        return;
-    };
-    let Some(t) = parse_trigger(trig) else {
-        return;
-    };
+///
+/// Returns the trigger when the line bound one, like [`apply_keybind`].
+pub fn apply_exclusive_keybind(map: &mut Bindings, value: &str) -> Option<Trigger> {
+    let (trig, act) = value.rsplit_once('=')?;
+    let t = parse_trigger(trig)?;
     let act_trim = act.trim();
     if is_unbind_token(act_trim) {
         map.remove(&t);
-        return;
+        return None;
     }
-    let Some(a) = Action::from_name(act_trim) else {
-        return;
-    };
+    let a = Action::from_name(act_trim)?;
     // Drop every OTHER chord for this action first. Parameterized actions
     // (`goto_tab:3`) compare by value, so rebinding one tab's chord leaves the
     // other tabs' chords alone.
     map.retain(|existing, bound| *existing == t || *bound != a);
     map.insert(t, a);
+    Some(t)
 }
 
 /// Remove every chord bound to `action_name`.
