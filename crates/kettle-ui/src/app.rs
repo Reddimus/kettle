@@ -263,6 +263,10 @@ fn macos_effective_modifiers(
 fn option_is_meta_for(key: &Key) -> bool {
     match key {
         Key::Named(NamedKey::Backspace) => true,
+        // Return composes nothing either, though winit gives it the text
+        // "\r". Option+Return is Alt+Return, the newline chord in Codex,
+        // Claude Code, zsh and fish; masked, it would submit instead.
+        Key::Named(NamedKey::Enter) => true,
         Key::Named(named) => named.to_text().is_none(),
         // Exactly what the policy protects. Restoring ALT for a character key
         // would prefix ESC to a glyph macOS has already composed, so `⌥e` would
@@ -31371,6 +31375,9 @@ mod tests {
             NamedKey::Insert,
             NamedKey::F1,
             NamedKey::F12,
+            // Text "\r", but no composed character: Option+Return must be
+            // Alt+Return, or it submits where a newline was asked for.
+            NamedKey::Enter,
         ] {
             assert!(
                 option_is_meta_for(&Key::Named(named)),
@@ -31378,12 +31385,9 @@ mod tests {
             );
         }
 
-        for named in [
-            NamedKey::Enter,
-            NamedKey::Space,
-            NamedKey::Tab,
-            NamedKey::Escape,
-        ] {
+        // Option+Space composes a no-break space; Tab and Escape keep what
+        // they send.
+        for named in [NamedKey::Space, NamedKey::Tab, NamedKey::Escape] {
             assert!(
                 !option_is_meta_for(&Key::Named(named)),
                 "{named:?} produces text; restoring ALT would ESC-prefix it"
@@ -31466,7 +31470,6 @@ mod tests {
         };
 
         // Composing keys keep their unmodified bytes.
-        assert_eq!(encode(&Key::Named(NamedKey::Enter), None), b"\r".to_vec());
         assert_eq!(encode(&Key::Named(NamedKey::Space), None), vec![0x20]);
         assert_eq!(encode(&Key::Named(NamedKey::Tab), None), b"\t".to_vec());
         assert_eq!(encode(&Key::Named(NamedKey::Escape), None), vec![0x1b]);
@@ -31476,7 +31479,13 @@ mod tests {
             "´".as_bytes().to_vec()
         );
 
-        // And the keys the fix is for do change.
+        // And the keys the fix is for do change. Return composes nothing,
+        // so Option+Return is Alt+Return: ESC CR, a newline in zsh, Codex and
+        // Claude Code, where a masked Option would submit the line.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Enter), None),
+            b"\x1b\r".to_vec()
+        );
         assert_eq!(
             encode(&Key::Named(NamedKey::Backspace), None),
             vec![0x1b, 0x7f],

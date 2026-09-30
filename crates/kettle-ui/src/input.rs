@@ -483,6 +483,10 @@ pub fn encode(
                     && !modify_other_keys_was_negotiated(mode);
                 return Some(if modded && fallback {
                     format!("\x1b[27;{m};13~").into_bytes()
+                } else if alt {
+                    // Alt as ESC, as for every other legacy key: zsh, fish,
+                    // Claude Code and Codex read ESC CR as "insert a newline".
+                    b"\x1b\r".to_vec()
                 } else {
                     vec![b'\r']
                 });
@@ -1609,14 +1613,10 @@ mod tests {
                                 escaped_bytes(bytes)
                             );
                         }
-                        // Enter is the one intentional exception: without a
-                        // negotiated modified-key mode or Kettle's fallback,
-                        // its shipped legacy contract remains CR for every
-                        // modifier. Every other emitted Alt chord uses Kettle's
-                        // xterm altSendsEscape-on policy.
+                        // Every emitted Alt chord, Enter included, uses
+                        // Kettle's xterm altSendsEscape-on policy.
                         if mods.alt_key()
                             && !mods.super_key()
-                            && !matches!(&key.key, Key::Named(NamedKey::Enter))
                             && let Some(bytes) = bytes
                         {
                             assert_eq!(
@@ -2891,15 +2891,16 @@ mod tests {
                 mods: ModifiersState::SHIFT,
                 expected: [b"\r", b"\r", b"\x1b[27;2;13~"],
             },
+            // Below level 1 Alt is an ESC prefix, as for every legacy key.
             ReturnRow {
                 name: "Alt",
                 mods: ModifiersState::ALT,
-                expected: [b"\r", b"\x1b[27;3;13~", b"\x1b[27;3;13~"],
+                expected: [b"\x1b\r", b"\x1b[27;3;13~", b"\x1b[27;3;13~"],
             },
             ReturnRow {
                 name: "Shift+Alt",
                 mods: ModifiersState::SHIFT | ModifiersState::ALT,
-                expected: [b"\r", b"\x1b[27;4;13~", b"\x1b[27;4;13~"],
+                expected: [b"\x1b\r", b"\x1b[27;4;13~", b"\x1b[27;4;13~"],
             },
             ReturnRow {
                 name: "Control",
@@ -3092,10 +3093,23 @@ mod tests {
         let enter = Key::Named(NamedKey::Enter);
         let fallback = TermMode::UNNEGOTIATED_MODIFIED_ENTER;
 
-        for (mods, expected) in [
-            (ModifiersState::SHIFT, b"\x1b[27;2;13~".as_slice()),
-            (ModifiersState::CONTROL, b"\x1b[27;5;13~".as_slice()),
-            (ModifiersState::ALT, b"\x1b[27;3;13~".as_slice()),
+        for (mods, expected, negotiated) in [
+            (
+                ModifiersState::SHIFT,
+                b"\x1b[27;2;13~".as_slice(),
+                b"\r".as_slice(),
+            ),
+            (
+                ModifiersState::CONTROL,
+                b"\x1b[27;5;13~".as_slice(),
+                b"\r".as_slice(),
+            ),
+            // Without the fallback, Alt is an ESC prefix.
+            (
+                ModifiersState::ALT,
+                b"\x1b[27;3;13~".as_slice(),
+                b"\x1b\r".as_slice(),
+            ),
         ] {
             assert_eq!(
                 encode_key_press(&enter, mods, fallback),
@@ -3107,7 +3121,7 @@ mod tests {
                     mods,
                     fallback | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED,
                 ),
-                Some(b"\r".to_vec())
+                Some(negotiated.to_vec())
             );
         }
         assert_eq!(
