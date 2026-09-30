@@ -27,9 +27,10 @@ argument path. Workloads:
 Rounds rotate the terminal order so no terminal always runs first. Startup,
 idle and flood rows report medians; vtebench reports the mean of each
 benchmark's samples per round, then the mean over rounds. Kettle is compared
-with the best other terminal round by round, with a bootstrap 95% interval
-over rounds and a count of the rounds Kettle won. With --kettle-b the run
-compares two Kettle builds and reports B/A the same way.
+with the best other terminal round by round: the geometric mean of the
+per-round ratios with a Student-t 95% interval on their logs, and a count of
+the rounds Kettle won. With --kettle-b the run compares two Kettle builds and
+reports B/A the same way.
 
 Each workload reuses one payload script (values that change per launch go in
 a sourced params file), since macOS assesses a new script the first time it
@@ -137,7 +138,9 @@ LATENCY_NOT_MEASURED_SHARE = 0.3
 # Kettle's default is ranked; this variant is published beside it, unranked.
 KETTLE_OPAQUE = "background-opacity = 1\nwindow-blur = false"
 
-BOOTSTRAP = 10_000
+# Two-sided level of every interval. Rows tested together (vtebench's
+# benchmarks in an A/A) also get a Bonferroni interval at 1 - (1 - LEVEL) / k.
+LEVEL = 0.95
 SEED = 7
 CLAIM_SESSIONS = 3
 CLAIM_WIN_SHARE = 0.8
@@ -1073,11 +1076,94 @@ def dumps(value) -> str:
     return json.dumps(finite(value), indent=1, allow_nan=False)
 
 
-def bootstrap(values: Sequence[float], statistic, seed: int = SEED) -> tuple:
-    """2.5th and 97.5th percentiles of `statistic` over resamples of `values`."""
-    rng = random.Random(seed)
-    boots = sorted(statistic(rng.choices(values, k=len(values))) for _ in range(BOOTSTRAP))
-    return boots[250], boots[9_749]
+def _beta_continued_fraction(a: float, b: float, x: float) -> float:
+    """Lentz's continued fraction for the regularized incomplete beta."""
+    tiny = 1e-300
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 400):
+        m2 = 2 * m
+        numerator = m * (b - m) * x / ((a + m2 - 1.0) * (a + m2))
+        d = 1.0 + numerator * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + numerator / c if abs(c) > tiny else tiny
+        h *= d * c
+        numerator = -(a + m) * (a + b + m) * x / ((a + m2) * (a + m2 + 1.0))
+        d = 1.0 + numerator * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + numerator / c if abs(c) > tiny else tiny
+        step = d * c
+        h *= step
+        if abs(step - 1.0) < 1e-15:
+            break
+    return h
+
+
+def regularized_beta(a: float, b: float, x: float) -> float:
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                     + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_continued_fraction(a, b, x) / a
+    return 1.0 - front * _beta_continued_fraction(b, a, 1.0 - x) / b
+
+
+def t_cdf(t: float, df: int) -> float:
+    tail = 0.5 * regularized_beta(df / 2.0, 0.5, df / (df + t * t))
+    return 1.0 - tail if t >= 0 else tail
+
+
+def t_quantile(p: float, df: int) -> float:
+    """The p-quantile of Student's t with `df` degrees of freedom, for p in
+    (0.5, 1), by bisection on the CDF."""
+    low, high = 0.0, 1.0
+    while t_cdf(high, df) < p:
+        high *= 2.0
+    for _ in range(200):
+        mid = (low + high) / 2.0
+        if t_cdf(mid, df) < p:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
+def t_interval(values: Sequence[float], level: float = LEVEL) -> Tuple[float, float, float]:
+    """The mean with a two-sided Student-t interval. It keeps its coverage at
+    the 5-10 rounds a session has, where a percentile bootstrap over rounds
+    runs narrow (about 0.85-0.93 at a nominal 0.95). One value has no
+    spread, so its interval is unbounded."""
+    mean = statistics.mean(values)
+    if len(values) < 2:
+        return mean, -math.inf, math.inf
+    half = (t_quantile(1.0 - (1.0 - level) / 2.0, len(values) - 1)
+            * statistics.stdev(values) / math.sqrt(len(values)))
+    return mean, mean - half, mean + half
+
+
+def median_interval(values: Sequence[float], level: float = LEVEL) -> Tuple[float, float, float]:
+    """The median with the distribution-free order-statistic (sign-test)
+    interval: the narrowest symmetric pair of order statistics whose
+    Binomial(n, 1/2) coverage is at least `level`. With fewer rounds than
+    that needs (6 at 95 %), no pair reaches it and the interval is unbounded."""
+    ordered = sorted(values)
+    n = len(ordered)
+    # r is the largest rank with P(Binomial(n, 1/2) <= r - 1) <= (1 - level) / 2;
+    # the interval is [x_(r), x_(n+1-r)] in 1-based order statistics.
+    within, cumulative = 0, 0.0
+    for j in range(n):
+        cumulative += math.comb(n, j) / 2.0 ** n
+        if cumulative > (1.0 - level) / 2.0:
+            break
+        within += 1
+    if within == 0:
+        return statistics.median(ordered), -math.inf, math.inf
+    k = min(within - 1, (n - 1) // 2)
+    return statistics.median(ordered), ordered[k], ordered[n - 1 - k]
 
 
 def ratio(base: float, test: float) -> float:
@@ -1088,38 +1174,55 @@ def ratio(base: float, test: float) -> float:
     return test / base
 
 
-def paired(a: List[Optional[float]], b: List[Optional[float]], seed: int = SEED) -> dict:
-    """Median of b/a round pairs with a bootstrap 95% interval, and the rounds
-    in which b was lower."""
+def exp_bound(value: float) -> float:
+    """exp for an interval bound: past the largest finite float the bound is
+    unbounded, not an overflow."""
+    return math.inf if value > 709.0 else math.exp(value)
+
+
+def family_level(family: int) -> float:
+    """The Bonferroni level for one of `family` rows tested together."""
+    return 1.0 - (1.0 - LEVEL) / max(1, family)
+
+
+def paired(a: List[Optional[float]], b: List[Optional[float]], family: int = 1) -> dict:
+    """b against a, rounds paired by index: the geometric mean of the b/a
+    ratios with a Student-t 95 % interval on their logs, and the rounds in
+    which b was lower. With `family` > 1, `family_low`/`family_high` hold the
+    interval at the Bonferroni level for rows tested together, which an A/A
+    judges vtebench's benchmarks by.
+
+    A zero in a pair (a round with no wakeups) has no log ratio. The estimate
+    is then the median ratio and the interval the whole range of ratios,
+    which can only be wider."""
     pairs = [(x, y) for x, y in zip(a, b) if x is not None and y is not None]
     if not pairs:
         return {}
     ratios = [ratio(x, y) for x, y in pairs]
-    low, high = bootstrap(ratios, statistics.median, seed)
-    return {"ratio": statistics.median(ratios), "low": low, "high": high,
-            "wins": sum(1 for x, y in pairs if y < x), "n": len(ratios)}
+    levels = [LEVEL] + ([family_level(family)] if family > 1 else [])
+    if all(0.0 < r < math.inf for r in ratios):
+        logs = [math.log(r) for r in ratios]
+        bounds = [t_interval(logs, level) for level in levels]
+        estimate = exp_bound(bounds[0][0])
+        bounds = [(exp_bound(low), exp_bound(high)) for _, low, high in bounds]
+    else:
+        estimate = statistics.median(ratios)
+        bounds = [(min(ratios), max(ratios))] * len(levels)
+    stats = {"ratio": estimate, "low": bounds[0][0], "high": bounds[0][1],
+             "wins": sum(1 for x, y in pairs if y < x), "n": len(ratios)}
+    if family > 1:
+        stats.update({"family": family, "family_low": bounds[1][0], "family_high": bounds[1][1]})
+    return stats
 
 
-def paired_difference(a: List[Optional[float]], b: List[Optional[float]], seed: int = SEED) -> dict:
-    """Median of b - a round pairs, in the metric's own unit, with a bootstrap
-    95% interval: the absolute gain a ratio hides."""
+def paired_difference(a: List[Optional[float]], b: List[Optional[float]]) -> dict:
+    """The mean of b - a round pairs, in the metric's own unit, with a
+    Student-t 95 % interval: the absolute gain a ratio hides."""
     diffs = [y - x for x, y in zip(a, b) if x is not None and y is not None]
     if not diffs:
         return {}
-    low, high = bootstrap(diffs, statistics.median, seed)
-    return {"diff": statistics.median(diffs), "low": low, "high": high, "n": len(diffs)}
-
-
-def ratio_of_rounds(base: List[Optional[float]], test: List[Optional[float]], seed: int = SEED) -> dict:
-    """Mean of test/base round pairs with a bootstrap 95% interval over rounds,
-    and the rounds in which test was lower. Rounds pair by index."""
-    pairs = [(x, y) for x, y in zip(base, test) if x is not None and y is not None]
-    if not pairs:
-        return {}
-    ratios = [ratio(x, y) for x, y in pairs]
-    low, high = bootstrap(ratios, statistics.mean, seed)
-    return {"ratio": statistics.mean(ratios), "low": low, "high": high,
-            "wins": sum(1 for x, y in pairs if y < x), "n": len(ratios)}
+    mean, low, high = t_interval(diffs)
+    return {"diff": mean, "low": low, "high": high, "n": len(diffs)}
 
 
 def latency_keys(run: dict, censor_ms: float) -> Optional[List[float]]:
@@ -1136,57 +1239,33 @@ def pooled_mean(rounds: Sequence[Sequence[float]]) -> float:
     return sum(sum(r) for r in rounds) / sum(len(r) for r in rounds)
 
 
-def cluster_mean_ci(rounds: List[Optional[List[float]]], seed: int = SEED) -> dict:
-    """Mean over every key of every round, with a 95% interval from a
-    two-stage bootstrap: rounds (launches) with replacement, then keys within
-    each drawn round. Keys of one launch share a window, a GPU state and a
-    compositor path, so they are not independent."""
+def cluster_mean_ci(rounds: List[Optional[List[float]]]) -> dict:
+    """Mean latency: the mean of the round (launch) means, with a Student-t
+    95 % interval over rounds. Keys of one launch share a window, a GPU state
+    and a compositor path, so they are not independent; the launch is the
+    unit. Every round has the same key count, so this is the pooled mean."""
     present = [r for r in rounds if r]
     if not present:
         return {}
-    rng = random.Random(seed)
-    boots = []
-    for _ in range(BOOTSTRAP):
-        total = count = 0.0
-        for _ in range(len(present)):
-            keys = present[rng.randrange(len(present))]
-            total += sum(rng.choices(keys, k=len(keys)))
-            count += len(keys)
-        boots.append(total / count)
-    boots.sort()
-    return {"mean": pooled_mean(present), "low": boots[250], "high": boots[9_749], "n": len(present)}
+    mean, low, high = t_interval([statistics.mean(r) for r in present])
+    return {"mean": mean, "low": low, "high": high, "n": len(present)}
 
 
-def cluster_compare(base: List[Optional[List[float]]], test: List[Optional[List[float]]],
-                    seed: int = SEED) -> dict:
-    """test against base on mean latency, rounds paired by index, with 95%
-    intervals from one two-stage bootstrap: each resample draws round
-    indices, then each drawn round's keys for each side. The ratio test/base
-    and the difference test-base share every resample, so the ratio's
-    interval excludes 1 exactly when the difference's excludes 0. A round is
-    won when test's round mean is lower."""
-    pairs = [(b, t) for b, t in zip(base, test) if b and t]
+def cluster_compare(base: List[Optional[List[float]]], test: List[Optional[List[float]]]) -> dict:
+    """test against base on mean latency, rounds paired by index, from the
+    round (launch) means. The difference in ms has a Student-t 95 % interval
+    on the per-round differences; it sets latency's A/B gate. The ratio is the
+    geometric mean of the per-round ratios with a t interval on their logs,
+    as for every other row; being its own test, its interval can disagree
+    with the difference's at the margin. A round is won when test's round
+    mean is lower."""
+    pairs = [(statistics.mean(b), statistics.mean(t)) for b, t in zip(base, test) if b and t]
     if not pairs:
         return {}
-    rng = random.Random(seed)
-    ratios, diffs = [], []
-    for _ in range(BOOTSTRAP):
-        b_sum = b_count = t_sum = t_count = 0.0
-        for _ in range(len(pairs)):
-            b_keys, t_keys = pairs[rng.randrange(len(pairs))]
-            b_sum += sum(rng.choices(b_keys, k=len(b_keys)))
-            b_count += len(b_keys)
-            t_sum += sum(rng.choices(t_keys, k=len(t_keys)))
-            t_count += len(t_keys)
-        b_mean, t_mean = b_sum / b_count, t_sum / t_count
-        ratios.append(ratio(b_mean, t_mean))
-        diffs.append(t_mean - b_mean)
-    ratios.sort()
-    diffs.sort()
-    b_mean, t_mean = pooled_mean([b for b, _ in pairs]), pooled_mean([t for _, t in pairs])
-    return {"ratio": ratio(b_mean, t_mean), "low": ratios[250], "high": ratios[9_749],
-            "diff": t_mean - b_mean, "diff_low": diffs[250], "diff_high": diffs[9_749],
-            "wins": sum(1 for b, t in pairs if statistics.mean(t) < statistics.mean(b)), "n": len(pairs)}
+    diff, diff_low, diff_high = t_interval([t - b for b, t in pairs])
+    stats = paired([b for b, _ in pairs], [t for _, t in pairs])
+    return {"ratio": stats["ratio"], "low": stats["low"], "high": stats["high"], "diff": diff,
+            "diff_low": diff_low, "diff_high": diff_high, "wins": stats["wins"], "n": stats["n"]}
 
 
 def latency_standing(runs: List[dict], censor_ms: float, planned: int) -> dict:
@@ -1206,14 +1285,14 @@ def latency_standing(runs: List[dict], censor_ms: float, planned: int) -> dict:
                        and out_of_range <= LATENCY_CENSOR_SHARE * keys)}
 
 
-def median_ci(values: Sequence[float], seed: int = SEED) -> dict:
-    low, high = bootstrap(values, statistics.median, seed)
-    return {"median": statistics.median(values), "low": low, "high": high, "n": len(values)}
+def median_ci(values: Sequence[float]) -> dict:
+    median, low, high = median_interval(values)
+    return {"median": median, "low": low, "high": high, "n": len(values)}
 
 
-def mean_ci(values: Sequence[float], seed: int = SEED) -> dict:
-    low, high = bootstrap(values, statistics.mean, seed)
-    return {"mean": statistics.mean(values), "low": low, "high": high, "n": len(values)}
+def mean_ci(values: Sequence[float]) -> dict:
+    mean, low, high = t_interval(values)
+    return {"mean": mean, "low": low, "high": high, "n": len(values)}
 
 
 def distribution(samples_ms: Sequence[float], censored: int = 0) -> dict:
@@ -1284,10 +1363,16 @@ def ab_verdict(sessions: List[dict], gate: Optional[float] = None) -> dict:
 
 
 def aa_gate(stats: dict) -> dict:
-    """An A/A interval must contain 1; its half-width sets that metric's gate."""
+    """An A/A interval must contain 1; its 95 % half-width sets that metric's
+    gate. A row tested with others (a vtebench benchmark) is judged by its
+    Bonferroni interval, so one A/A of 12 benchmarks is not 12 chances to
+    fail."""
     half = (stats["high"] - stats["low"]) / 2
-    return {"contains_one": stats["low"] <= 1 <= stats["high"], "half_width": half,
-            "gate": max(0.03, 2 * half)}
+    low, high = stats.get("family_low", stats["low"]), stats.get("family_high", stats["high"])
+    gate = {"contains_one": low <= 1 <= high, "half_width": half, "gate": max(0.03, 2 * half)}
+    if "family" in stats:
+        gate["family"] = stats["family"]
+    return gate
 
 
 def latency_aa_gate(stats: dict) -> dict:
@@ -1396,7 +1481,9 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
             continue
         mean_based = workload == "vtebench"
         metrics: Dict[str, dict] = {}
-        for metric, per_name in workload_metrics(workload, rows, results.get("meta")).items():
+        per_metric = workload_metrics(workload, rows, results.get("meta"))
+        benchmarks = sum(1 for metric in per_metric if metric != "geometric mean")
+        for metric, per_name in per_metric.items():
             terminals = {}
             for name in names:
                 present = [v for v in per_name.get(name, []) if v is not None]
@@ -1411,9 +1498,11 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
                                        "n": ci["n"]}
             entry: dict = {"kind": "mean" if mean_based else "median", "terminals": terminals,
                            "values": {name: per_name.get(name, []) for name in names}}
-            compare = ratio_of_rounds if mean_based else paired
+            # vtebench's benchmarks are tested together; the geometric mean
+            # is one row.
+            family = benchmarks if mean_based and metric != "geometric mean" else 1
             if ab and len(names) == 2:
-                entry["ab"] = compare(per_name.get(names[0], []), per_name.get(names[1], []))
+                entry["ab"] = paired(per_name.get(names[0], []), per_name.get(names[1], []), family)
                 if workload == "startup":
                     entry["ab_diff"] = paired_difference(per_name.get(names[0], []), per_name.get(names[1], []))
             elif kettle in terminals:
@@ -1422,7 +1511,7 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
                 if others:
                     best = min(others, key=lambda name: others[name]["estimate"])
                     entry["best_other"] = best
-                    entry["vs_best"] = compare(per_name[best], per_name[kettle])
+                    entry["vs_best"] = paired(per_name[best], per_name[kettle])
                     if workload == "startup":
                         entry["vs_best_diff"] = paired_difference(per_name[best], per_name[kettle])
                     order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
@@ -1446,9 +1535,9 @@ def latency_censor_ms(results: dict) -> float:
 
 def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str], ab: bool) -> dict:
     """The latency workload: every entry that ran (the terminals, then the
-    unranked opaque variant and the floors), with mean latency from the
-    two-stage bootstrap. Kettle is compared with the fastest other ranked
-    terminal, or B with A, on every key of every paired round."""
+    unranked opaque variant and the floors), with mean latency over rounds
+    (launches). Kettle is compared with the fastest other ranked terminal, or
+    B with A, on the round means of every paired round."""
     censor_ms = latency_censor_ms(results)
     planned = ((results.get("meta") or {}).get("rounds") or {}).get("latency", 0)
     entries = [name for name in names if name in rows] + [name for name in rows if name not in names]

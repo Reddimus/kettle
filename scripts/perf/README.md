@@ -148,12 +148,13 @@ measured block.
 
 Defaults are 10 rounds, 20 discarded and 100 measured keys per round
 (`--latency-rounds`, `--latency-warmup`, `--latency-keys`). The row reports
-the mean with a two-stage bootstrap interval: rounds (launches), then keys
-within each drawn round, since one launch's keys share a window and a GPU
-state. Median, p95, p99 and the two halves come from every counted key of the
-session. Kettle is ranked on the mean against the fastest other terminal, with
-the ratio and the difference in ms from one bootstrap, and the claim rule
-applies as for every other row. A censored key counts at the censor bound, in
+the mean of the round (launch) means with a Student-t interval over rounds,
+since one launch's keys share a window and a GPU state. Median, p95, p99 and
+the two halves come from every counted key of the session. Kettle is ranked on
+the mean against the fastest other terminal: the difference in ms has a
+Student-t interval on the per-round differences, the ratio is the geometric
+mean of the per-round ratios with a t interval on their logs, as elsewhere,
+and the claim rule applies as for every other row. A censored key counts at the censor bound, in
 every figure. A row with more than 1 % of its keys censored is unranked, and
 an entry that lost 3 or more of 10 rounds is not measured; the other entries
 still are. An A/B needs both sides ranked, and its gate is in ms: a change
@@ -178,11 +179,21 @@ Rounds rotate the terminal order. Startup (time to window and to shell), idle
 because launches have cold outliers; other numbers a round records are kept
 but never compared. vtebench reports each benchmark's mean sample per round,
 then the mean over rounds, and a geometric mean per round. Kettle is compared
-with the best other terminal round by round: the median (or, for vtebench, the
-mean) of the per-round ratios, a 10,000-resample bootstrap 95 % interval over
-rounds, and the number of rounds Kettle won. Idle rows count only rounds in
-which the terminal was frontmost, since blinking cursors run only in a focused
-window.
+with the best other terminal round by round: the geometric mean of the
+per-round ratios, a Student-t 95 % interval on their logs, and the number of
+rounds Kettle won. A cold outlier widens that interval rather than moving a
+median, so it can only make a claim harder. A terminal's own median carries
+the distribution-free order-statistic (sign-test) interval, and its own mean a
+Student-t interval. Idle rows count only rounds in which the terminal was
+frontmost, since blinking cursors run only in a focused window.
+
+Why not a bootstrap: over the 5-10 rounds a session has, a percentile
+bootstrap covered only about 0.85-0.93 of simulated same-binary sessions at a
+nominal 0.95; the t interval keeps 0.95 (`macos-standing-self-test.py` checks
+both). An A/A also judges vtebench's benchmarks together: each at the
+Bonferroni level for the 12 of them (1 - 0.05/12), the geometric mean at 95 %.
+Judged each at 95 %, an A/A with no real difference fails most of the time.
+Every gate still comes from the 95 % half-width.
 
 Publication defaults are 30 startup, 5 idle, 5 flood, 5 vtebench and 10
 latency rounds, 10 s per vtebench benchmark (upstream's default), a 30 s idle

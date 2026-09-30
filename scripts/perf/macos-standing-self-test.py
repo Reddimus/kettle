@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json as _json
 import math
+import random
 import shutil
 import sys
 import time
@@ -190,19 +191,18 @@ class Summary(unittest.TestCase):
 
 
 class RoundStatistics(unittest.TestCase):
-    def test_ratio_of_rounds_is_round_paired_seeded_and_counts_wins(self) -> None:
+    def test_paired_is_the_geometric_mean_ratio_of_paired_rounds(self) -> None:
         base = [10.0, 10.0, 10.0, 10.0]
         test = [9.0, 9.0, 11.0, 9.0]
-        stats = standing.ratio_of_rounds(base, test)
-        self.assertAlmostEqual(stats["ratio"], 0.95)
+        stats = standing.paired(base, test)
+        self.assertAlmostEqual(stats["ratio"], math.exp((3 * math.log(0.9) + math.log(1.1)) / 4))
         self.assertEqual((stats["wins"], stats["n"]), (3, 4))
         self.assertLessEqual(stats["low"], stats["ratio"])
         self.assertLessEqual(stats["ratio"], stats["high"])
-        self.assertEqual(stats, standing.ratio_of_rounds(base, test), "same seed, same interval")
         # Rounds pair by index: a missing round drops its pair, not a shift.
-        shifted = standing.ratio_of_rounds([10.0, None, 10.0], [9.0, 1.0, 11.0])
+        shifted = standing.paired([10.0, None, 10.0], [9.0, 1.0, 11.0])
         self.assertEqual(shifted["n"], 2)
-        self.assertAlmostEqual(shifted["ratio"], 1.0)
+        self.assertAlmostEqual(shifted["ratio"], math.sqrt(0.99))
 
     def test_zero_values_stay_in_the_pairs(self) -> None:
         # A terminal with no wakeups in a round won that round; dropping the
@@ -210,9 +210,67 @@ class RoundStatistics(unittest.TestCase):
         stats = standing.paired([1.0, 0.0, 1.0], [0.0, 0.0, 2.0])
         self.assertEqual((stats["n"], stats["wins"]), (3, 1))
         self.assertEqual(stats["ratio"], 1.0)
-        behind = standing.ratio_of_rounds([0.0], [0.5])
+        behind = standing.paired([0.0], [0.5])
         self.assertEqual(behind["high"], math.inf)
         self.assertEqual(behind["wins"], 0)
+
+    def test_t_quantiles_match_published_tables(self) -> None:
+        for p, df, value in [(0.975, 1, 12.706205), (0.975, 3, 3.182446), (0.975, 9, 2.262157),
+                             (0.975, 29, 2.045230), (0.995, 9, 3.249836), (0.999, 9, 4.296806),
+                             (0.975, 1000, 1.962339)]:
+            self.assertAlmostEqual(standing.t_quantile(p, df), value, places=5, msg=(p, df))
+        self.assertEqual(standing.t_interval([3.0]), (3.0, -math.inf, math.inf))
+
+    def test_median_interval_uses_sign_test_order_statistics(self) -> None:
+        # n=10: [x(2), x(9)] covers 97.9 %; n=30: [x(10), x(21)]; n=6: the
+        # extremes cover 96.9 %. Below 6 rounds no pair of order statistics
+        # reaches 95 % (the extremes of 5 cover 93.75 %), so nothing is claimed.
+        self.assertEqual(standing.median_interval(list(range(10))), (4.5, 1, 8))
+        self.assertEqual(standing.median_interval(list(range(30))), (14.5, 9, 20))
+        self.assertEqual(standing.median_interval(list(range(6))), (2.5, 0, 5))
+        self.assertEqual(standing.median_interval(list(range(5))), (2, -math.inf, math.inf))
+        self.assertEqual(standing.median_interval([4.0]), (4.0, -math.inf, math.inf))
+
+    def test_a_wide_interval_is_unbounded_not_an_overflow(self) -> None:
+        # exp of a log bound past about 709.8 overflows a float.
+        stats = standing.paired([1.0, 1.0], [1.0, 20000.0], family=12)
+        self.assertEqual(stats["family_high"], math.inf)
+        self.assertLess(stats["family_low"], 1.0)
+
+    def test_vtebench_intervals_keep_their_coverage_over_ten_rounds(self) -> None:
+        # Same-binary sessions: every benchmark's B/A interval should contain
+        # 1 about 95 % of the time. A percentile bootstrap over 10 rounds
+        # covered about 0.89.
+        rng = random.Random(11)
+        covered = sessions = 400
+        for _ in range(sessions):
+            rows = {name: [{"means_ms": {"unicode": 8.0 * math.exp(rng.gauss(0, 0.04))}} for _ in range(10)]
+                    for name in ("kettle-a", "kettle-b")}
+            stats = standing.analyze({"workloads": {"vtebench": rows}}, ["kettle-a", "kettle-b"], True)
+            ab = stats["vtebench"]["metrics"]["unicode"]["ab"]
+            covered -= not ab["low"] <= 1 <= ab["high"]
+        self.assertGreaterEqual(covered / sessions, 0.92)
+
+    def test_an_aa_of_twelve_benchmarks_is_judged_family_wise(self) -> None:
+        # Twelve benchmarks with no real difference: judging each at 95 %
+        # failed most same-binary A/As; the Bonferroni interval should pass
+        # them about 95 % of the time.
+        rng = random.Random(12)
+        benches = [f"bench{i:02d}" for i in range(12)]
+        passed = sessions = 150
+        for _ in range(sessions):
+            rows = {name: [{"means_ms": {bench: 10.0 * math.exp(rng.gauss(0, 0.04)) for bench in benches}}
+                           for _ in range(10)] for name in ("kettle-a", "kettle-b")}
+            metrics = standing.analyze({"workloads": {"vtebench": rows}}, ["kettle-a", "kettle-b"], True)
+            gates = [standing.aa_gate(metrics["vtebench"]["metrics"][bench]["ab"]) for bench in benches]
+            passed -= not all(gate["contains_one"] for gate in gates)
+        self.assertGreaterEqual(passed / sessions, 0.85)
+        # The gate still comes from the 95 % half-width.
+        entry = metrics["vtebench"]["metrics"]["bench00"]["ab"]
+        self.assertEqual(entry["family"], 12)
+        self.assertLess(entry["family_low"], entry["low"])
+        self.assertAlmostEqual(standing.aa_gate(entry)["half_width"], (entry["high"] - entry["low"]) / 2)
+        self.assertNotIn("family", metrics["vtebench"]["metrics"]["geometric mean"]["ab"])
 
     def test_median_ci_brackets_the_median(self) -> None:
         stats = standing.median_ci([5.0, 1.0, 3.0, 2.0, 4.0])
@@ -547,11 +605,17 @@ class Safety(unittest.TestCase):
             probe = work / "killer.sh"
             # Stops when asked, but reports that it had to SIGKILL the terminal.
             probe.write_text('#!/bin/sh\ntrap \'echo "{\\"killed\\": true}" > "$1"; exit 0\' TERM\n'
-                             'while :; do sleep 0.05; done\n')
+                             ': > "$1.ready"\nwhile :; do sleep 0.05; done\n')
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
             process = runner.launch("kettle", "true", 1)
-            time.sleep(0.3)
+            # Signal only once the trap is set: a loaded machine can take
+            # longer than any fixed sleep to start the shell.
+            ready = work / "launch.json.ready"
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "the probe never set its trap")
             self.assertFalse(runner.stop(process, 5))
 
     def test_a_probe_that_never_finishes_is_cleaned_up_and_reported(self) -> None:
@@ -1403,12 +1467,13 @@ class StartupPhases(unittest.TestCase):
         rows = [line.split("|")[1].strip() for line in text.splitlines() if line.startswith("| phase_")]
         self.assertEqual(rows, ["phase_main_ms", "phase_app_built_ms", "phase_gpu_ready_ms", "phase_first_frame_ms"])
 
-    def test_paired_difference_is_the_median_round_difference(self) -> None:
+    def test_paired_difference_is_the_mean_round_difference(self) -> None:
         stats = standing.paired_difference([200.0, 210.0, 205.0, 220.0], [180.0, 195.0, 185.0, 200.0])
-        self.assertEqual((stats["diff"], stats["n"]), (-20.0, 4))
-        self.assertLessEqual(stats["low"], -20.0)
-        self.assertGreaterEqual(stats["high"], -20.0)
-        self.assertEqual(stats, standing.paired_difference([200.0, 210.0, 205.0, 220.0], [180.0, 195.0, 185.0, 200.0]))
+        self.assertEqual((stats["diff"], stats["n"]), (-18.75, 4))
+        self.assertLess(stats["low"], -18.75)
+        self.assertGreater(stats["high"], -18.75)
+        # Student t with 3 degrees of freedom: 3.182446 x sd / sqrt(n).
+        self.assertAlmostEqual(stats["high"] - stats["diff"], 3.182446 * 2.5 / 2, places=5)
 
     def test_ab_startup_lines_give_the_difference_in_ms(self) -> None:
         results = {"context": "t", "workloads": {"startup": {
@@ -1586,7 +1651,17 @@ class Latency(unittest.TestCase):
         self.assertFalse(standing.round_ok("latency", row))
         self.assertIsNone(standing.latency_keys(row, 500))
 
-    def test_the_cluster_bootstrap_is_deterministic_and_counts_rounds(self) -> None:
+    def test_the_latency_ratio_accounts_for_the_baselines_spread(self) -> None:
+        # Base rounds of 10 or 30 ms, test always 10 ms slower: the ratio of
+        # means is uncertain even though the difference is exact.
+        stats = standing.cluster_compare([[10.0]] * 4 + [[30.0]], [[20.0]] * 4 + [[40.0]])
+        self.assertEqual((stats["diff"], stats["diff_low"], stats["diff_high"]), (10.0, 10.0, 10.0))
+        self.assertLess(stats["low"], stats["ratio"])
+        self.assertLess(stats["ratio"], stats["high"])
+        self.assertLess(stats["low"], 1.5)
+        self.assertGreater(stats["high"], 1.5)
+
+    def test_the_latency_comparison_uses_round_means_and_counts_rounds(self) -> None:
         base = [[20.0 + (i + j) % 4 for j in range(30)] for i in range(6)]
         test = [[15.0 + (i + j) % 4 for j in range(30)] for i in range(6)]
         stats = standing.cluster_compare(base, test)
