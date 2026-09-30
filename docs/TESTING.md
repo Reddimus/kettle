@@ -759,6 +759,8 @@ skips an unchanged upload; a source guard fails on any `write_buffer` or
 `write_texture` outside `upload.rs`, and `just steady-uploads-smoke` checks the
 same through `ui_geometry.render_uploads` in a live window: unchanged
 screenshots, a blinking window, and a blinking window after 2 MiB of output.
+The window runs a plain `/bin/sh` with a fixed prompt, since a user's shell can
+redraw its prompt after the smoke has decided the window is steady.
 
 ### kettle-remote (50+ tests)
 

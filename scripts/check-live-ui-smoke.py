@@ -18638,7 +18638,17 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         return {"before": before, "after": after, "frames": frames}
 
     analysis: Dict[str, object] = {}
-    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+    # A plain sh with a fixed prompt. The user's own shell can redraw its
+    # prompt after a second of quiet (async prompt segments, a slow first load
+    # after a build), and that is output, not a steady window.
+    extra_args = [] if os.name == "nt" else ["-e", "/bin/sh"]
+    with LiveKettle(
+        kettle,
+        cfg,
+        out / "kettle.log",
+        extra_args=extra_args,
+        extra_env={"PS1": "$ ", "ENV": None},
+    ) as live:
         before = settled(live, "phase A")
         for index in range(5):
             live.screenshot(out / f"a-{index}.png")
