@@ -1015,6 +1015,10 @@ pub(crate) struct WindowState {
     /// hint once AppKit has built that window's caption, and windows reach
     /// that point at different times. See `app::native_theme_sync_is_due`.
     pub(crate) native_theme_synced: Option<Option<winit::window::Theme>>,
+    /// The (dark, background) this window's panes last heard through DEC mode
+    /// 2031, synced lazily at redraw like `native_theme_synced`. A new
+    /// background is a colour change even when the theme stays dark.
+    pub(crate) color_scheme_synced: Option<(bool, kettle_config::Rgb)>,
     /// Per-pane `Terminal::output_generation` values consumed by this
     /// window's last successfully presented frame. During genuine device loss,
     /// the redraw guard intentionally snapshots these without presentation so
@@ -1192,6 +1196,7 @@ impl WindowState {
             window_shown: false,
             startup_window: false,
             native_theme_synced: None,
+            color_scheme_synced: None,
             seen_output_gen: std::collections::HashMap::new(),
             pending_output_gen: std::collections::HashMap::new(),
             frame_recovery: FrameRecoveryState::default(),
