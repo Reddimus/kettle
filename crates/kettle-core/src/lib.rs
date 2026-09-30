@@ -65,8 +65,8 @@ pub use search::{
     SearchPoint, SearchScanToken, SearchSpan, search, search_with,
 };
 pub use term::{
-    CommandFinished, ProtocolNotification, PtyEofProgress, PtyGeometry, PtyInputTail,
-    PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
+    CommandFinished, KeyboardClaims, ProtocolNotification, PtyEofProgress, PtyGeometry,
+    PtyInputTail, PtyOutputSender, PtyReadProgress, PtyReadStatus, PtyStdin, PtyWriter, ScreenText,
     SessionLogFailure, SharedTerm, ShellActivity, Terminal, TerminalCapabilities,
     WorkingDirectoryPolicy,
 };
