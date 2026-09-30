@@ -169,6 +169,21 @@ def native_keys(live, names, *, middle=False):
         x.XCloseDisplay(display)
 
 
+CODEX_MODEL = "gpt-6-astra"
+
+
+def codex_session_ready(helpers, live):
+    """Codex's session composer is up. Codex first draws a startup draft with
+    the same placeholder, whose composer inserts a pasted image path as plain
+    text. The draft names no model ("loading" in 0.155's header, nothing in
+    0.159's); the session's header or footer does ("gpt-6-astra" in 0.155,
+    "GPT-6-Astra" in 0.159), and its composer attaches images."""
+    text = helpers.screen_text(live.json_ctl("read_screen"))
+    return "Ask Codex to do anything" in text and re.search(
+        rf"\b{re.escape(CODEX_MODEL)}\b", text, re.IGNORECASE
+    )
+
+
 def check_codex(helpers, kettle, config, image, out, codex):
     home = out / "codex-home"
     workspace = out / "workspace"
@@ -201,7 +216,7 @@ def check_codex(helpers, kettle, config, image, out, codex):
         "-c",
         "model_providers.image-test.requires_openai_auth=false",
         "--model",
-        "gpt-6-astra",
+        CODEX_MODEL,
     ]
     results = []
     with (
@@ -219,6 +234,11 @@ def check_codex(helpers, kettle, config, image, out, codex):
         failure_evidence(live, out, "codex-failure"),
     ):
         live.wait_for_text("Ask Codex to do anything", timeout_ms=20000)
+        wait_for(
+            lambda: codex_session_ready(helpers, live),
+            "Codex session composer (not its startup draft)",
+            timeout=20,
+        )
         if platform.system() == "Darwin":
             helpers.focus_live_kettle_window(live)
         else:
