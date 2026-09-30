@@ -38,6 +38,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A runtime diagnostic incident appears in `<cache>/kettle/diagnostics` only
+  once it is complete; a reader could see one empty or half-written.
 - A cursor position report (`CSI 6 n`) under origin mode counts the row from
   the top margin, as xterm does, so a program that saves the position and
   restores it with CUP lands where it was.
