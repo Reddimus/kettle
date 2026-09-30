@@ -23604,23 +23604,23 @@ fn search_button_ignores_repeat(focused: kettle_render::SearchControl, key: &Key
         )
 }
 
-/// Drop the repeats of the key that closed the last Kettle modal. They belong
-/// to the press the modal consumed, not to the terminal it uncovered; its
-/// release is already suppressed with that press. Returns whether to drop
-/// this event.
+/// Drop the repeats of a key that closed a Kettle modal. They belong to the
+/// press the modal consumed, not to the terminal it uncovered; its release is
+/// already suppressed with that press. The key's release, or a fresh press of
+/// it, ends the suppression. Returns whether to drop this event.
 fn drop_closing_key_repeat(
-    closing: &mut Option<PhysicalKey>,
+    closing: &mut HashSet<PhysicalKey>,
     physical_key: PhysicalKey,
     state: ElementState,
     repeat: bool,
 ) -> bool {
-    if *closing != Some(physical_key) {
+    if !closing.contains(&physical_key) {
         return false;
     }
     if state == ElementState::Pressed && repeat {
         return true;
     }
-    *closing = None;
+    closing.remove(&physical_key);
     false
 }
 
@@ -23678,7 +23678,7 @@ fn top_modal(ws: &WindowState) -> Option<KeyModal> {
 /// under a closed text field, or the layout picker the palette just opened.
 fn remember_closing_key(ws: &mut WindowState, key_modal: Option<KeyModal>, key: PhysicalKey) {
     if top_modal(ws) != key_modal {
-        ws.closing_key = Some(key);
+        ws.closing_keys.insert(key);
     }
 }
 
@@ -29083,7 +29083,7 @@ impl App {
                     // missing half of an old shortcut.
                     ws.suppressed_key_releases.clear();
                     ws.terminal_owned_key_releases.clear();
-                    ws.closing_key = None;
+                    ws.closing_keys.clear();
                     ws.ime_preedit = None;
                     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
                     ws.search.dragging_editor = false;
@@ -29247,7 +29247,7 @@ impl App {
                 // it is no longer the top modal closed or replaced it.
                 let key_modal = top_modal(ws);
                 if drop_closing_key_repeat(
-                    &mut ws.closing_key,
+                    &mut ws.closing_keys,
                     event.physical_key,
                     event.state,
                     event.repeat,
@@ -29316,7 +29316,7 @@ impl App {
                     ws.pane_drag = None;
                     // Its repeats must not go on to close a modal or reach
                     // the terminal.
-                    ws.closing_key = Some(event.physical_key);
+                    ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29333,7 +29333,7 @@ impl App {
                     ws.tab_drag_active = false;
                     ws.tab_drag_press = None;
                     ws.tab_pressed_idx = None;
-                    ws.closing_key = Some(event.physical_key);
+                    ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29349,7 +29349,7 @@ impl App {
                     && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
                 {
                     self.abandon_torn_drag(Some(ws));
-                    ws.closing_key = Some(event.physical_key);
+                    ws.closing_keys.insert(event.physical_key);
                     return;
                 }
                 // Keep the cursor solid while actively typing.
@@ -35255,7 +35255,10 @@ mod tests {
         let native = src
             .split("if ws.search.open {\n                    if event.repeat")
             .nth(1)
-            .and_then(|rest| rest.split("ws.closing_key = Some(").next())
+            .and_then(|rest| {
+                rest.split("remember_closing_key(ws, key_modal, event.physical_key);")
+                    .next()
+            })
             .expect("native search key branch");
         assert!(
             native.contains(
@@ -35312,7 +35315,7 @@ mod tests {
         use winit::keyboard::PhysicalKey;
         let space = PhysicalKey::Code(winit::keyboard::KeyCode::Space);
         let other = PhysicalKey::Code(winit::keyboard::KeyCode::KeyA);
-        let mut closing = Some(space);
+        let mut closing = std::collections::HashSet::from([space]);
         let pressed = ElementState::Pressed;
         assert!(super::drop_closing_key_repeat(
             &mut closing,
@@ -35326,14 +35329,14 @@ mod tests {
             pressed,
             true
         ));
-        assert_eq!(closing, Some(space));
+        assert!(closing.contains(&space));
         assert!(!super::drop_closing_key_repeat(
             &mut closing,
             space,
             ElementState::Released,
             false
         ));
-        assert_eq!(closing, None);
+        assert!(closing.is_empty());
         assert!(!super::drop_closing_key_repeat(
             &mut closing,
             space,
@@ -37138,44 +37141,46 @@ mod tests {
 
         // Typing keeps the palette open: nothing to drop.
         remember_closing_key(&mut ws, owner, enter);
-        assert_eq!(ws.closing_key, None);
+        assert!(ws.closing_keys.is_empty());
 
         // Enter runs "Open layout picker": the palette is replaced.
         ws.palette_input = None;
         ws.layout_picker_input = Some((String::new(), 0));
         remember_closing_key(&mut ws, owner, enter);
-        assert_eq!(ws.closing_key, Some(enter));
+        assert!(ws.closing_keys.contains(&enter));
         assert!(
-            drop_closing_key_repeat(&mut ws.closing_key, enter, ElementState::Pressed, true),
+            drop_closing_key_repeat(&mut ws.closing_keys, enter, ElementState::Pressed, true),
             "the repeat must not reach the layout picker"
         );
         assert!(!drop_closing_key_repeat(
-            &mut ws.closing_key,
+            &mut ws.closing_keys,
             enter,
             ElementState::Released,
             false
         ));
-        assert_eq!(ws.closing_key, None, "the release ends it");
+        assert!(ws.closing_keys.is_empty(), "the release ends it");
 
         // Escape closes the last modal: nothing open afterwards.
         let escape = PhysicalKey::Code(KeyCode::Escape);
         let owner = top_modal(&ws);
         ws.layout_picker_input = None;
         remember_closing_key(&mut ws, owner, escape);
-        assert_eq!(ws.closing_key, Some(escape));
+        assert!(ws.closing_keys.contains(&escape));
         assert!(drop_closing_key_repeat(
-            &mut ws.closing_key,
+            &mut ws.closing_keys,
             escape,
             ElementState::Pressed,
             true
         ));
-        // A fresh press of another key is never swallowed, and clears it.
+        // A fresh press of Escape is never swallowed, and ends its
+        // suppression.
         assert!(!drop_closing_key_repeat(
-            &mut ws.closing_key,
-            enter,
+            &mut ws.closing_keys,
+            escape,
             ElementState::Pressed,
             false
         ));
+        assert!(ws.closing_keys.is_empty());
         // The Escape that cancels a keybind capture ends the capture mode,
         // so its repeats cannot go on to close Settings.
         ws.settings_nav = Some(crate::settings::SettingsNav {
@@ -37187,7 +37192,62 @@ mod tests {
         assert_eq!(owner, Some(KeyModal::SettingsCapture));
         ws.settings_nav.as_mut().unwrap().capturing = false;
         remember_closing_key(&mut ws, owner, escape);
-        assert_eq!(ws.closing_key, Some(escape));
+        assert!(ws.closing_keys.contains(&escape));
+    }
+
+    /// Each held key that closed a modal stops repeating until its own
+    /// release: Enter runs a palette command that opens Settings, then
+    /// Escape, pressed while Enter is still down, closes Settings. Recording
+    /// Escape must not end Enter's suppression.
+    #[test]
+    fn every_held_closing_key_stops_repeating() {
+        use super::{KeyModal, drop_closing_key_repeat, remember_closing_key, top_modal};
+        use winit::event::ElementState;
+        use winit::keyboard::{KeyCode, PhysicalKey};
+
+        let enter = PhysicalKey::Code(KeyCode::Enter);
+        let escape = PhysicalKey::Code(KeyCode::Escape);
+        let mut ws = WindowState::new(0, false, Mux::new());
+        ws.palette_input = Some((String::new(), 0));
+        let owner = top_modal(&ws);
+        ws.palette_input = None;
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            category: 0,
+            field: 0,
+            capturing: false,
+        });
+        remember_closing_key(&mut ws, owner, enter);
+        let owner = top_modal(&ws);
+        assert_eq!(owner, Some(KeyModal::Settings));
+        ws.settings_nav = None;
+        remember_closing_key(&mut ws, owner, escape);
+
+        for key in [enter, escape] {
+            assert!(
+                drop_closing_key_repeat(&mut ws.closing_keys, key, ElementState::Pressed, true),
+                "{key:?} closed a modal; its repeat must not reach the terminal"
+            );
+        }
+        // Releasing Escape leaves Enter suppressed until its own release.
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            escape,
+            ElementState::Released,
+            false
+        ));
+        assert!(drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            enter,
+            ElementState::Pressed,
+            true
+        ));
+        assert!(!drop_closing_key_repeat(
+            &mut ws.closing_keys,
+            enter,
+            ElementState::Released,
+            false
+        ));
+        assert!(ws.closing_keys.is_empty());
     }
 
     /// Every modal branch of the keyboard path records the key that closed it,
@@ -37214,12 +37274,12 @@ mod tests {
             assert!(src.contains(gate), "{gate} must gate its repeats");
         }
         assert!(
-            src.contains("if drop_closing_key_repeat(\n                    &mut ws.closing_key,")
+            src.contains("if drop_closing_key_repeat(\n                    &mut ws.closing_keys,")
         );
         // The Escape that cancels a pane, tab or torn-window drag is consumed
         // the same way.
         assert_eq!(
-            src.matches("ws.closing_key = Some(event.physical_key);")
+            src.matches("ws.closing_keys.insert(event.physical_key);")
                 .count(),
             3,
             "pane drag, tab drag and torn-window drag cancels"
