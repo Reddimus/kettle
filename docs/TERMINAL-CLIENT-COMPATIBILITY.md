@@ -38,11 +38,20 @@ answers these:
 | DECRQSS (`DCS $ q Pt ST`) | the current SGR (`m`), scroll region (`r`) or cursor shape (` q`); anything else is answered as invalid | Neovim's truecolor and undercurl probes |
 | XTGETTCAP (`DCS + q Pt ST`) | `Tc`, `RGB`, `setrgbf`, `setrgbb`, `Smulx`, `Setulc`, `Ss`, `Se`, `Co` and `colors`; one reply per name, in one write, and any other name answered as unknown (kitty's and Ghostty's form; xterm joins the names and stops at the first unknown one) | Neovim, tmux |
 | Kitty keyboard flags (`CSI ? u`) | the active flags | Codex, Claude Code, Neovim |
+| Colour scheme (`CSI ? 996 n`), and DEC mode 2031 | `CSI ? 997 ; 1 n` for a dark theme, `CSI ? 997 ; 2 n` for light; with mode 2031 on, the same report whenever the theme's colours change, dark to dark included | Claude Code (mode 2031) |
 
 What the answers change:
 
 - Claude Code probes DECRQM 2026 only after XTVERSION answers, and then draws
   with synchronized output, so a redraw arrives as one frame.
+- Claude Code turns on mode 2031 and, with its theme set to follow the
+  terminal (`/theme`, the automatic option), takes each report as a cue to
+  re-read the background with OSC 11 and decide light or dark from that
+  colour itself. It therefore switches when Kettle's theme does:
+  `theme-mode = auto` following the system appearance or a schedule,
+  `toggle_light_dark`, or a theme picked by hand. Kettle reports every change
+  of the theme's colours, not only a flip between light and dark, because
+  Claude Code's threshold differs from Kettle's.
 - Neovim turns `termguicolors` on from the XTGETTCAP or DECRQSS answer when
   `COLORTERM` is unset, as it usually is over ssh, and draws undercurl
   diagnostics as curly lines rather than plain underlines, although

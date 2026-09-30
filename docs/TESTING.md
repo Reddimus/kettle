@@ -1952,6 +1952,7 @@ session run
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
 `just text-presentation-smoke`,
 `just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
+`just color-scheme-smoke`,
 `just search-selection-smoke`, `just bell-flash-smoke`,
 `just default-window-size-smoke`, and
 `just underline-scroll-smoke`. Artifacts land under `target/diagnostics/*`
@@ -2122,6 +2123,9 @@ retained compile/regression checks on **windows**:
   `stty size` because the grid commits even when the native resize fails.
   Quarantined for the same reason as `search-history`: creating a window under
   Xvfb on a hosted runner is the flake source, not the assertion.
+- A quarantined Linux **live-UI `color-scheme` smoke** runs a recorder that
+  turns on DEC mode 2031 and asks for the scheme once, then flips the theme
+  with `toggle_light_dark` twice and asserts exactly one report per flip.
 - A quarantined Linux **live-UI `program-keys` smoke** gives a split pane to a
   byte recorder that holds the alternate screen and kitty flags, and asserts
   through `dispatch_keybind` that `Shift+Left` falls through to it and resizes

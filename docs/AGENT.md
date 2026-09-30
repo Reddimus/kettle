@@ -654,6 +654,15 @@ dispatches `FocusLeft`/`FocusRight`. On macOS it only proves Option+Arrow stays
 unbound. Artifacts land under `target/diagnostics/alt-arrow-zoom-*`.
 
 ```sh
+just color-scheme-smoke
+```
+
+Runs a recorder in a real Kettle window that turns on DEC mode 2031 and asks
+for the colour scheme (`CSI ? 996 n`), which must answer dark for a dark theme.
+Each `toggle_light_dark` must then reach it as `CSI ? 997 ; 2 n` or `; 1 n`,
+once per flip. Artifacts land under `target/diagnostics/color-scheme-*`.
+
+```sh
 just program-keys-smoke
 ```
 
