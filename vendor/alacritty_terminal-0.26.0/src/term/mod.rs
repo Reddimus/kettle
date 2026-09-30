@@ -532,6 +532,10 @@ pub struct Config {
 
     /// OSC52 support mode.
     pub osc52: Osc52,
+
+    /// The `name(version)` XTVERSION (`CSI > q`) reports, such as
+    /// `kettle(4.9.0)`; `None` leaves the query unanswered.
+    pub xtversion: Option<String>,
 }
 
 impl Default for Config {
@@ -544,6 +548,7 @@ impl Default for Config {
             kitty_keyboard: Default::default(),
             unnegotiated_modified_enter: true,
             osc52: Default::default(),
+            xtversion: None,
         }
     }
 }
@@ -1368,6 +1373,22 @@ impl<T> Term<T> {
         trace!("Setting keyboard mode to {mode:?}");
         self.mode |= mode;
     }
+
+    /// The 1-based cursor position a cursor position report gives. Under
+    /// origin mode (DECOM) the row counts from the top margin, as xterm and
+    /// kitty report it, so a program can feed it back to CUP unchanged.
+    /// DECRC does not restore DECOM here as it does in xterm, so the cursor
+    /// can sit above the margin with DECOM on; the row then reports as 1, the
+    /// row CUP would put it on, rather than as zero or negative.
+    fn cursor_report_position(&self) -> (i32, usize) {
+        let point = self.grid.cursor.point;
+        let top = if self.mode.contains(TermMode::ORIGIN) {
+            self.scroll_region.start.0
+        } else {
+            0
+        };
+        ((point.line.0 - top).max(0) + 1, point.column.0 + 1)
+    }
 }
 
 impl<T> Dimensions for Term<T> {
@@ -1741,12 +1762,85 @@ impl<T: EventListener> Handler for Term<T> {
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
             6 => {
-                let pos = self.grid.cursor.point;
-                let text = format!("\x1b[{};{}R", pos.line + 1, pos.column + 1);
+                let (line, column) = self.cursor_report_position();
+                let text = format!("\x1b[{line};{column}R");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
             _ => debug!("unknown device status query: {arg}"),
         };
+    }
+
+    #[inline]
+    fn device_status_private(&mut self, arg: usize) {
+        trace!("Reporting private device status: {arg}");
+        match arg {
+            // DECXCPR: the cursor position with DEC's `?` marker, which a
+            // program can tell apart from a function key with modifiers.
+            6 => {
+                let (line, column) = self.cursor_report_position();
+                let text = format!("\x1b[?{line};{column}R");
+                self.event_proxy.send_event(Event::PtyWrite(text));
+            }
+            _ => debug!("unknown private device status query: {arg}"),
+        }
+    }
+
+    #[inline]
+    fn report_version(&mut self) {
+        match &self.config.xtversion {
+            Some(version) => {
+                trace!("Reporting terminal version {version}");
+                let text = format!("\x1bP>|{version}\x1b\\");
+                self.event_proxy.send_event(Event::PtyWrite(text));
+            }
+            None => debug!("XTVERSION left unanswered"),
+        }
+    }
+
+    #[inline]
+    fn request_setting(&mut self, request: Option<&[u8]>) {
+        trace!("DECRQSS {request:?}");
+        let setting = match request {
+            Some(b"m") => Some(format!("{}m", sgr_report(&self.grid.cursor.template))),
+            Some(b"r") => Some(format!(
+                "{};{}r",
+                self.scroll_region.start.0 + 1,
+                self.scroll_region.end.0
+            )),
+            Some(b" q") => {
+                let style = self
+                    .cursor_style
+                    .unwrap_or(self.config.default_cursor_style);
+                Some(format!("{} q", decscusr_number(style)))
+            }
+            _ => None,
+        };
+        // An unknown request is answered as invalid and never echoed back.
+        let text = match setting {
+            Some(setting) => format!("\x1bP1$r{setting}\x1b\\"),
+            None => String::from("\x1bP0$r\x1b\\"),
+        };
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
+    #[inline]
+    fn request_termcap(&mut self, request: Option<&[u8]>) {
+        trace!("XTGETTCAP {request:?}");
+        let Some(request) = request else {
+            self.event_proxy
+                .send_event(Event::PtyWrite(String::from("\x1bP0+r\x1b\\")));
+            return;
+        };
+        // One reply per name, as kitty and Ghostty send them, so a reader
+        // that matches one capability per reply (Neovim's) sees each of them.
+        // xterm instead joins known names into one reply and stops at the
+        // first unknown one. All the replies go out in one write.
+        let text: String = request
+            .split(|&byte| byte == b';')
+            .take(TERMCAP_NAMES_MAX)
+            .map(termcap_reply)
+            .collect();
+        self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
     #[inline]
@@ -2567,6 +2661,8 @@ impl<T: EventListener> Handler for Term<T> {
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
             },
+            // The older alternate-screen modes `set_private_mode` handles.
+            PrivateMode::Unknown(47 | 1047) => self.mode.contains(TermMode::ALT_SCREEN).into(),
             PrivateMode::Unknown(_) => ModeState::NotSupported,
         };
 
@@ -2772,6 +2868,116 @@ enum ModeState {
 impl From<bool> for ModeState {
     fn from(value: bool) -> Self {
         if value { Self::Set } else { Self::Reset }
+    }
+}
+
+/// The most capability names one XTGETTCAP request is answered for.
+const TERMCAP_NAMES_MAX: usize = 32;
+
+/// The SGR parameters that rebuild `cell`'s attributes from a reset, in the
+/// DECRQSS form: `0`, then each attribute, `;`-separated, with colour and
+/// underline-style sub-parameters `:`-separated (`0;1;4:3;48:2::1:2:3`).
+fn sgr_report(cell: &Cell) -> String {
+    let flags = cell.flags;
+    let mut parts: Vec<String> = vec![String::from("0")];
+    for (flag, sgr) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::UNDERLINE, "4"),
+        (Flags::DOUBLE_UNDERLINE, "4:2"),
+        (Flags::UNDERCURL, "4:3"),
+        (Flags::DOTTED_UNDERLINE, "4:4"),
+        (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
+        if flags.contains(flag) {
+            parts.push(sgr.to_owned());
+        }
+    }
+    parts.extend(sgr_color(cell.fg, 30, 90, 38));
+    parts.extend(sgr_color(cell.bg, 40, 100, 48));
+    if let Some(color) = cell.underline_color() {
+        // Underline colour has no short form; a palette colour is `58:5:n`.
+        let color = match color {
+            Color::Named(named) if (named as usize) < 16 => Color::Indexed(named as u8),
+            other => other,
+        };
+        parts.extend(sgr_color(color, 58, 58, 58));
+    }
+    parts.join(";")
+}
+
+/// One colour's SGR attribute: `base + n` for the first 8 palette colours,
+/// `bright + n - 8` for the next 8, and the colon form of `extended` for the
+/// 256-colour and direct forms. The default colours need no attribute.
+fn sgr_color(color: Color, base: u8, bright: u8, extended: u8) -> Option<String> {
+    match color {
+        Color::Named(named) => match named as usize {
+            index @ 0..=7 => Some((usize::from(base) + index).to_string()),
+            index @ 8..=15 => Some((usize::from(bright) + index - 8).to_string()),
+            _ => None,
+        },
+        Color::Indexed(index) => Some(format!("{extended}:5:{index}")),
+        Color::Spec(rgb) => Some(format!("{extended}:2::{}:{}:{}", rgb.r, rgb.g, rgb.b)),
+    }
+}
+
+/// The DECSCUSR number that sets `style`.
+fn decscusr_number(style: CursorStyle) -> u8 {
+    let steady = match style.shape {
+        CursorShape::Underline => 4,
+        CursorShape::Beam => 6,
+        CursorShape::Block | CursorShape::HollowBlock | CursorShape::Hidden => 2,
+    };
+    if style.blinking { steady - 1 } else { steady }
+}
+
+/// The capabilities XTGETTCAP answers, in terminfo source form. Only what
+/// this terminal does, and nothing a program would read as a key: truecolor,
+/// styled and coloured underlines, cursor shapes, and the palette size.
+fn termcap_value(name: &[u8]) -> Option<Option<&'static str>> {
+    Some(match name {
+        b"Tc" | b"RGB" => None,
+        b"setrgbf" => Some("\\E[38;2;%p1%d;%p2%d;%p3%dm"),
+        b"setrgbb" => Some("\\E[48;2;%p1%d;%p2%d;%p3%dm"),
+        b"Smulx" => Some("\\E[4:%p1%dm"),
+        b"Setulc" => Some("\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m"),
+        b"Ss" => Some("\\E[%p1%d q"),
+        b"Se" => Some("\\E[0 q"),
+        b"Co" | b"colors" => Some("256"),
+        _ => return None,
+    })
+}
+
+/// The XTGETTCAP reply for one hex-encoded capability name: `DCS 1 + r
+/// name[=value] ST` when known, `DCS 0 + r name ST` when not. The name is
+/// echoed only once it is known to be hex digits, so a request can never
+/// smuggle a control sequence into the reply.
+fn termcap_reply(hex_name: &[u8]) -> String {
+    let valid_hex = !hex_name.is_empty()
+        && hex_name.len() % 2 == 0
+        && hex_name.iter().all(u8::is_ascii_hexdigit);
+    if !valid_hex {
+        return String::from("\x1bP0+r\x1b\\");
+    }
+    let echo = String::from_utf8_lossy(hex_name).to_ascii_uppercase();
+    let name: Vec<u8> = hex_name
+        .chunks(2)
+        .map(|pair| {
+            let digits = str::from_utf8(pair).unwrap_or("00");
+            u8::from_str_radix(digits, 16).unwrap_or(0)
+        })
+        .collect();
+    match termcap_value(&name) {
+        Some(None) => format!("\x1bP1+r{echo}\x1b\\"),
+        Some(Some(value)) => {
+            let value: String = value.bytes().map(|byte| format!("{byte:02X}")).collect();
+            format!("\x1bP1+r{echo}={value}\x1b\\")
+        }
+        None => format!("\x1bP0+r{echo}\x1b\\"),
     }
 }
 
@@ -3064,6 +3270,182 @@ mod tests {
         processor.advance(&mut term, b"\x1b[>4;0m");
         assert!(!term.mode().intersects(TermMode::MODIFY_OTHER_KEYS));
         assert!(term.mode().contains(TermMode::MODIFY_OTHER_KEYS_NEGOTIATED));
+    }
+
+    #[test]
+    fn terminal_queries_are_answered() {
+        let size = TermSize::new(20, 6);
+        let listener = PtyWriteListener::default();
+        let config = Config {
+            xtversion: Some("kettle(9.9.9)".into()),
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        // XTVERSION, and DECXCPR next to the plain cursor position report.
+        processor.advance(&mut term, b"\x1b[3;5H\x1b[>q\x1b[?6n\x1b[6n");
+        assert_eq!(
+            listener.drain(),
+            ["\x1bP>|kettle(9.9.9)\x1b\\", "\x1b[?3;5R", "\x1b[3;5R"]
+        );
+
+        // Under origin mode both count rows from the top margin, so the
+        // report goes back to CUP unchanged.
+        processor.advance(
+            &mut term,
+            b"\x1b[2;5r\x1b[?6h\x1b[1;4H\x1b[?6n\x1b[6n\x1b[?6l\x1b[r",
+        );
+        assert_eq!(listener.drain(), ["\x1b[?1;4R", "\x1b[1;4R"]);
+
+        // DECRC can leave the cursor above the margin with DECOM on; the
+        // report never goes below row 1.
+        processor.advance(
+            &mut term,
+            b"\x1b[1;3H\x1b7\x1b[3;5r\x1b[?6h\x1b8\x1b[?6n\x1b[6n\x1b[?6l\x1b[r",
+        );
+        assert_eq!(listener.drain(), ["\x1b[?1;3R", "\x1b[1;3R"]);
+
+        // DECRQSS for the scroll region, set and reset, and every cursor
+        // style.
+        processor.advance(&mut term, b"\x1b[2;5r\x1bP$qr\x1b\\\x1b[r\x1bP$qr\x1b\\");
+        assert_eq!(
+            listener.drain(),
+            ["\x1bP1$r2;5r\x1b\\", "\x1bP1$r1;6r\x1b\\"]
+        );
+        for style in 1..=6 {
+            let query = format!("\x1b[{style} q\x1bP$q q\x1b\\");
+            processor.advance(&mut term, query.as_bytes());
+            assert_eq!(listener.drain(), [format!("\x1bP1$r{style} q\x1b\\")]);
+        }
+
+        // Unknown and oversized requests get the bare invalid reply: a body
+        // is never echoed, not even one holding a command line.
+        processor.advance(&mut term, b"\x1bP$q\rtouch x\n\x1b\\\x1bP$qzz\x1b\\");
+        let mut long = b"\x1bP$q".to_vec();
+        long.extend(std::iter::repeat_n(b'm', 2048));
+        long.extend(b"\x1b\\");
+        processor.advance(&mut term, &long);
+        assert_eq!(listener.drain(), ["\x1bP0$r\x1b\\"; 3]);
+
+        // A query cut off before ST is not answered at all.
+        processor.advance(&mut term, b"\x1bP$qm\x18\x1bP$qm\x1b[0m");
+        assert!(listener.drain().is_empty());
+
+        // DECRQM knows the older alternate-screen modes.
+        processor.advance(
+            &mut term,
+            b"\x1b[?1047$p\x1b[?1047h\x1b[?47$p\x1b[?1047$p\x1b[?1047l",
+        );
+        assert_eq!(
+            listener.drain(),
+            ["\x1b[?1047;2$y", "\x1b[?47;1$y", "\x1b[?1047;1$y"]
+        );
+
+        // Without a configured name, XTVERSION stays unanswered.
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        processor.advance(&mut term, b"\x1b[>0q");
+        assert!(listener.drain().is_empty());
+    }
+
+    /// The exact probes Neovim sends: undercurl (`CSI 4:3 m` then DECRQSS
+    /// SGR, matched against `1$r0;4:3m`) and truecolor (`CSI 0 m CSI
+    /// 48;2;1;2;3 m` then DECRQSS SGR), plus every other attribute.
+    #[test]
+    fn decrqss_reports_sgr_as_neovim_reads_it() {
+        let size = TermSize::new(20, 6);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        for (sgr, report) in [
+            ("\x1b[4:3m", "0;4:3"),
+            ("\x1b[0m\x1b[48;2;1;2;3m", "0;48:2::1:2:3"),
+            ("\x1b[0m", "0"),
+            ("\x1b[0;1;2;3;7;8;9;4:5;31;102m", "0;1;2;3;4:5;7;8;9;31;102"),
+            (
+                "\x1b[0;4;38;5;200;48:2::9:8:7;58:5:3m",
+                "0;4;38:5:200;48:2::9:8:7;58:5:3",
+            ),
+            ("\x1b[0;4:2;39;49;59m", "0;4:2"),
+            ("\x1b[0;4:4;58:2::1:2:3;93m", "0;4:4;93;58:2::1:2:3"),
+        ] {
+            processor.advance(&mut term, sgr.as_bytes());
+            processor.advance(&mut term, b"\x1bP$qm\x1b\\");
+            assert_eq!(
+                listener.drain(),
+                [format!("\x1bP1$r{report}m\x1b\\")],
+                "{sgr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn xtgettcap_answers_each_name_and_echoes_only_hex() {
+        let size = TermSize::new(20, 6);
+        let listener = PtyWriteListener::default();
+        let mut term = Term::new(Config::default(), &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        let hex = |text: &str| text.bytes().map(|b| format!("{b:02X}")).collect::<String>();
+        let flag = |name: &str| format!("\x1bP1+r{}\x1b\\", hex(name));
+        let value = |name: &str, value: &str| format!("\x1bP1+r{}={}\x1b\\", hex(name), hex(value));
+
+        // Every capability, in one write: Neovim's truecolor query
+        // (`Tc;RGB;setrgbf;setrgbb`) and the rest.
+        let names = [
+            "Tc", "RGB", "setrgbf", "setrgbb", "Smulx", "Setulc", "Ss", "Se", "Co", "colors",
+        ];
+        let request = names.map(hex).join(";");
+        processor.advance(&mut term, format!("\x1bP+q{request}\x1b\\").as_bytes());
+        let every = [
+            flag("Tc"),
+            flag("RGB"),
+            value("setrgbf", "\\E[38;2;%p1%d;%p2%d;%p3%dm"),
+            value("setrgbb", "\\E[48;2;%p1%d;%p2%d;%p3%dm"),
+            value("Smulx", "\\E[4:%p1%dm"),
+            value(
+                "Setulc",
+                "\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m",
+            ),
+            value("Ss", "\\E[%p1%d q"),
+            value("Se", "\\E[0 q"),
+            value("Co", "256"),
+            value("colors", "256"),
+        ];
+        assert_eq!(listener.drain(), [every.concat()]);
+
+        // Lowercase hex is accepted and echoed uppercase; an unknown name is
+        // echoed as hex; a key capability is not answered.
+        processor.advance(&mut term, b"\x1bP+q536d756c78;6b637575\x1b\\");
+        assert_eq!(
+            listener.drain(),
+            [format!(
+                "{}\x1bP0+r6B637575\x1b\\",
+                value("Smulx", "\\E[4:%p1%dm")
+            )]
+        );
+
+        // Anything that is not an even run of hex digits is never echoed, and
+        // an oversized request gets one bare reply.
+        processor.advance(&mut term, b"\x1bP+q1b5b;545;zz;\x1b\\");
+        let mut long = b"\x1bP+q".to_vec();
+        long.extend(std::iter::repeat_n(b'4', 2048));
+        long.extend(b"\x1b\\");
+        processor.advance(&mut term, &long);
+        assert_eq!(
+            listener.drain(),
+            [
+                format!("\x1bP0+r1B5B\x1b\\{}", "\x1bP0+r\x1b\\".repeat(3)),
+                String::from("\x1bP0+r\x1b\\"),
+            ]
+        );
+
+        // At most TERMCAP_NAMES_MAX replies per request.
+        let many = vec![hex("Tc"); TERMCAP_NAMES_MAX + 5].join(";");
+        processor.advance(&mut term, format!("\x1bP+q{many}\x1b\\").as_bytes());
+        assert_eq!(listener.drain(), [flag("Tc").repeat(TERMCAP_NAMES_MAX)]);
     }
 
     #[test]

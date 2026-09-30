@@ -23,6 +23,38 @@ must use its own protocol delimiter or `--timeout`. Kettle leaves conin open so
 terminal queries and normal child lifetime are not converted into a forced
 `STATUS_CONTROL_C_EXIT`.
 
+## Terminal queries
+
+Programs ask the terminal what it supports and adapt to the answers. Kettle
+answers these:
+
+| Query | Reply | Who uses it |
+|---|---|---|
+| DA1 (`CSI c`) | `CSI ? 6 ; 4 ; 52 c`: VT102-compatible, sixel, and OSC 52 clipboard writes while they are allowed | Neovim's OSC 52 clipboard, sixel viewers |
+| DA2 (`CSI > c`) | the terminal engine's version | vim's `termresponse` |
+| XTVERSION (`CSI > q`) | `DCS > \| kettle(<version>) ST` | Claude Code, tmux |
+| DSR (`CSI 5 n`, `CSI 6 n`) and DECXCPR (`CSI ? 6 n`) | status, and the cursor position with or without DEC's `?`, counted from the top margin under origin mode | shells, Claude Code |
+| DECRQM (`CSI ? Ps $ p`) | each mode's state, including 47, 1047, 1049 and 2026 | Claude Code |
+| DECRQSS (`DCS $ q Pt ST`) | the current SGR (`m`), scroll region (`r`) or cursor shape (` q`); anything else is answered as invalid | Neovim's truecolor and undercurl probes |
+| XTGETTCAP (`DCS + q Pt ST`) | `Tc`, `RGB`, `setrgbf`, `setrgbb`, `Smulx`, `Setulc`, `Ss`, `Se`, `Co` and `colors`; one reply per name, in one write, and any other name answered as unknown (kitty's and Ghostty's form; xterm joins the names and stops at the first unknown one) | Neovim, tmux |
+| Kitty keyboard flags (`CSI ? u`) | the active flags | Codex, Claude Code, Neovim |
+
+What the answers change:
+
+- Claude Code probes DECRQM 2026 only after XTVERSION answers, and then draws
+  with synchronized output, so a redraw arrives as one frame.
+- Neovim turns `termguicolors` on from the XTGETTCAP or DECRQSS answer when
+  `COLORTERM` is unset, as it usually is over ssh, and draws undercurl
+  diagnostics as curly lines rather than plain underlines, although
+  `TERM=xterm-256color` has no `Smulx`.
+
+No reply echoes what the program sent: an unknown DECRQSS setting gets the
+bare invalid reply, and XTGETTCAP repeats a capability name only after
+checking that it is hex digits. A request over 1 KiB gets the bare invalid
+reply without its contents being kept, names past the 32nd in one XTGETTCAP
+request get no reply, and a request that CAN, SUB or another escape sequence
+cuts off before its ST gets none either.
+
 ## Terminal-rendered inline graphics
 
 Sixel, Kitty graphics, and iTerm2 OSC 1337 are terminal output protocols,

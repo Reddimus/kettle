@@ -242,11 +242,41 @@ fn parse_number(input: &[u8]) -> Option<u8> {
     Some(num)
 }
 
+/// Longest DECRQSS or XTGETTCAP request body kept. Real requests are a few
+/// bytes (`m`, ` q`) or a handful of hex capability names; anything longer is
+/// answered as invalid without being stored.
+const DCS_QUERY_MAX: usize = 1024;
+
+/// A DCS request whose reply needs the terminal's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DcsQueryKind {
+    /// DECRQSS: `DCS $ q Pt ST`.
+    Setting,
+    /// XTGETTCAP: `DCS + q Pt ST`.
+    Termcap,
+}
+
+/// The body of a DCS request being received; DCS strings can span reads.
+#[derive(Debug)]
+struct DcsQuery {
+    kind: DcsQueryKind,
+    body: Vec<u8>,
+    /// The body passed `DCS_QUERY_MAX`; it is answered as invalid.
+    overflowed: bool,
+    /// The parser unhooked. It does that for ESC, CAN and SUB alike, so the
+    /// query is answered only when the parser reports it ended with ST
+    /// (`dcs_terminated_by_st`); anything else abandons it unanswered.
+    ended: bool,
+}
+
 /// Internal state for VTE processor.
 #[derive(Debug, Default)]
 struct ProcessorState<T: Timeout> {
     /// Last processed character for repetition.
     preceding_char: Option<char>,
+
+    /// DECRQSS or XTGETTCAP request in progress.
+    dcs_query: Option<DcsQuery>,
 
     /// State for synchronized terminal updates.
     sync_state: SyncState<T>,
@@ -516,6 +546,15 @@ impl<'a, H: Handler + 'a, T: Timeout> Performer<'a, H, T> {
     pub fn new<'b>(state: &'b mut ProcessorState<T>, handler: &'b mut H) -> Performer<'b, H, T> {
         Performer { state, handler, terminated: Default::default() }
     }
+
+    /// Drop a DCS query that ended without ST: cancelled, or cut off by
+    /// another escape sequence. It gets no reply.
+    #[inline]
+    fn abandon_dcs_query(&mut self) {
+        if matches!(&self.state.dcs_query, Some(query) if query.ended) {
+            self.state.dcs_query = None;
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -614,6 +653,21 @@ pub trait Handler {
 
     /// Report device status.
     fn device_status(&mut self, _: usize) {}
+
+    /// Report device status in DEC's private form (`CSI ? Ps n`), such as the
+    /// extended cursor position report DECXCPR (`Ps` = 6).
+    fn device_status_private(&mut self, _: usize) {}
+
+    /// Report the terminal's name and version (XTVERSION, `CSI > q`).
+    fn report_version(&mut self) {}
+
+    /// Answer DECRQSS (`DCS $ q Pt ST`) for the setting named by `request`,
+    /// or `None` when the request was too long to be a real one.
+    fn request_setting(&mut self, _request: Option<&[u8]>) {}
+
+    /// Answer XTGETTCAP (`DCS + q Pt ST`) for the hex-encoded capability
+    /// names in `request`, or `None` when the request was too long.
+    fn request_termcap(&mut self, _request: Option<&[u8]>) {}
 
     /// Move cursor forward `cols`.
     fn move_forward(&mut self, _col: usize) {}
@@ -1387,12 +1441,15 @@ where
 {
     #[inline]
     fn print(&mut self, c: char) {
+        self.abandon_dcs_query();
         self.handler.input(c);
         self.state.preceding_char = Some(c);
     }
 
     #[inline]
     fn execute(&mut self, byte: u8) {
+        // CAN and SUB end a DCS string by cancelling it.
+        self.abandon_dcs_query();
         match byte {
             C0::HT => self.handler.put_tab(1),
             C0::BS => self.handler.backspace(),
@@ -1408,24 +1465,58 @@ where
 
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        debug!(
-            "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
-            params, intermediates, ignore, action
-        );
+        // The parser pushes the pending parameter before hooking, so a bare
+        // `DCS $ q` arrives with one parameter, 0.
+        let bare = params.len() <= 1 && params.iter().all(|param| param == [0]);
+        let kind = match (intermediates, action) {
+            _ if ignore || !bare => None,
+            ([b'$'], 'q') => Some(DcsQueryKind::Setting),
+            ([b'+'], 'q') => Some(DcsQueryKind::Termcap),
+            _ => None,
+        };
+        self.state.dcs_query =
+            kind.map(|kind| DcsQuery { kind, body: Vec::new(), overflowed: false, ended: false });
+        if kind.is_none() {
+            debug!(
+                "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
+                params, intermediates, ignore, action
+            );
+        }
     }
 
     #[inline]
     fn put(&mut self, byte: u8) {
-        debug!("[unhandled put] byte={:?}", byte);
+        match &mut self.state.dcs_query {
+            Some(query) if query.body.len() < DCS_QUERY_MAX => query.body.push(byte),
+            Some(query) => query.overflowed = true,
+            None => debug!("[unhandled put] byte={:?}", byte),
+        }
     }
 
     #[inline]
     fn unhook(&mut self) {
-        debug!("[unhandled unhook]");
+        match &mut self.state.dcs_query {
+            Some(query) => query.ended = true,
+            None => debug!("[unhandled unhook]"),
+        }
+    }
+
+    #[inline]
+    fn dcs_terminated_by_st(&mut self) {
+        let query = match self.state.dcs_query.take() {
+            Some(query) => query,
+            None => return,
+        };
+        let body = if query.overflowed { None } else { Some(query.body.as_slice()) };
+        match query.kind {
+            DcsQueryKind::Setting => self.handler.request_setting(body),
+            DcsQueryKind::Termcap => self.handler.request_termcap(body),
+        }
     }
 
     #[inline]
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.abandon_dcs_query();
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 
         fn unhandled(params: &[&[u8]]) {
@@ -1632,6 +1723,7 @@ where
         has_ignored_intermediates: bool,
         action: char,
     ) {
+        self.abandon_dcs_query();
         macro_rules! unhandled {
             () => {{
                 debug!(
@@ -1807,6 +1899,7 @@ where
                 }
             },
             ('n', []) => handler.device_status(next_param_or(0) as usize),
+            ('n', [b'?']) => handler.device_status_private(next_param_or(0) as usize),
             ('P', []) => handler.delete_chars(next_param_or(1) as usize),
             ('p', [b'$']) => {
                 let mode = next_param_or(0);
@@ -1820,6 +1913,14 @@ where
             // this to the hard reset would clear the screen and scrollback of
             // any user whose program initializes the terminal.
             ('p', [b'!']) => handler.soft_reset_state(),
+            // XTVERSION (CSI > Ps q). Only Ps = 0 is defined.
+            ('q', [b'>']) => {
+                if next_param_or(0) == 0 {
+                    handler.report_version();
+                } else {
+                    unhandled!();
+                }
+            },
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -1883,6 +1984,7 @@ where
 
     #[inline]
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.abandon_dcs_query();
         macro_rules! unhandled {
             () => {{
                 debug!(
@@ -2224,6 +2326,100 @@ mod tests {
         fn sync_marker(&mut self, id: u64) {
             self.events.push(OrderedEvent::HandlerMarker(id));
         }
+    }
+
+    /// Records the terminal-query callbacks.
+    #[derive(Default)]
+    struct QueryHandler {
+        versions: usize,
+        private_status: Vec<usize>,
+        settings: Vec<Option<Vec<u8>>>,
+        termcaps: Vec<Option<Vec<u8>>>,
+    }
+
+    impl Handler for QueryHandler {
+        fn report_version(&mut self) {
+            self.versions += 1;
+        }
+
+        fn device_status_private(&mut self, arg: usize) {
+            self.private_status.push(arg);
+        }
+
+        fn request_setting(&mut self, request: Option<&[u8]>) {
+            self.settings.push(request.map(<[u8]>::to_vec));
+        }
+
+        fn request_termcap(&mut self, request: Option<&[u8]>) {
+            self.termcaps.push(request.map(<[u8]>::to_vec));
+        }
+    }
+
+    #[test]
+    fn parse_terminal_queries() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = QueryHandler::default();
+
+        parser.advance(&mut handler, b"\x1b[>q\x1b[>0q\x1b[>1q\x1b[?6n\x1b[?996n");
+        assert_eq!(handler.versions, 2, "XTVERSION with Ps 0 or none only");
+        assert_eq!(handler.private_status, [6, 996]);
+
+        // DECRQSS and XTGETTCAP, split across reads. BEL does not end a DCS
+        // string (only ST does), so it stays in the body.
+        parser.advance(&mut handler, b"\x1bP$q");
+        parser.advance(&mut handler, b" q\x1b\\\x1bP$qm\x1b\\\x1bP$qr\x07\x1b\\\x1bP+q54");
+        parser.advance(&mut handler, b"63;524742\x1b\\");
+        assert_eq!(
+            handler.settings,
+            [Some(b" q".to_vec()), Some(b"m".to_vec()), Some(b"r\x07".to_vec())]
+        );
+        assert_eq!(handler.termcaps, [Some(b"5463;524742".to_vec())]);
+
+        // A DCS cancelled by CAN or SUB, or cut off by another escape
+        // sequence, asks nothing; the next string still works.
+        parser.advance(
+            &mut handler,
+            b"\x1bP$qm\x18\x1bP$qm\x1a\x1bP$qm\x1b[31m\x1bP+q5463\x1bP$qr\x1b\\",
+        );
+        assert_eq!(handler.settings.len(), 4, "only the ST-terminated `r`");
+        assert_eq!(handler.settings[3], Some(b"r".to_vec()));
+        assert_eq!(handler.termcaps.len(), 1);
+
+        // A later, stray ST does not revive a query another sequence cut off,
+        // not even one right after a second ESC.
+        parser.advance(
+            &mut handler,
+            b"\x1bP$qm\x1b[31mtext\x1b\\\x1bP$qm\x1b7\x1b\\\x1bP$qm\x1b\x1b\\",
+        );
+        assert_eq!(handler.settings.len(), 4);
+
+        // The 8-bit ST ends a query as `ESC \` does.
+        parser.advance(&mut handler, b"\x1bP$q q\x9c");
+        assert_eq!(handler.settings.len(), 5);
+        assert_eq!(handler.settings[4], Some(b" q".to_vec()));
+
+        // Other DCS strings, and a DECRQSS with parameters, ask nothing.
+        parser.advance(&mut handler, b"\x1bP1$qm\x1b\\\x1bPq#0;2;0;0;0\x1b\\\x1bP=1s\x1b\\");
+        assert_eq!(handler.settings.len(), 5);
+        assert_eq!(handler.termcaps.len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_dcs_query_is_reported_without_its_body() {
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = QueryHandler::default();
+
+        let mut long = b"\x1bP+q".to_vec();
+        long.extend(std::iter::repeat(b'4').take(DCS_QUERY_MAX + 1));
+        long.extend(b"\x1b\\");
+        parser.advance(&mut handler, &long);
+        assert_eq!(handler.termcaps, [None]);
+
+        let mut exact = b"\x1bP$q".to_vec();
+        exact.extend(std::iter::repeat(b'm').take(DCS_QUERY_MAX));
+        exact.extend(b"\x1b\\");
+        parser.advance(&mut handler, &exact);
+        assert_eq!(handler.settings, [Some(vec![b'm'; DCS_QUERY_MAX])]);
     }
 
     #[derive(Default)]

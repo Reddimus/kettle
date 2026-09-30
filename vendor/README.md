@@ -46,15 +46,25 @@ and local patches.
   known preload pattern should not ship even unreferenced. Scrolling a region
   rotates its rows in one slice move while they sit contiguously in the ring
   buffer. Upstream swaps them one at a time, one wrapped index per row in the
-  region for every line scrolled.
+  region for every line scrolled. The terminal answers the queries programs
+  probe it with: XTVERSION with the `Config::xtversion` name (unanswered when
+  unset), DECXCPR (`CSI ? 6 n`), DECRQSS for SGR, DECSTBM and DECSCUSR (an
+  unknown setting is answered as invalid and never echoed), XTGETTCAP for a
+  fixed set of truecolor, underline, cursor-shape and palette capabilities
+  (each name answered separately, in one write, and echoed only as validated
+  hex, at most 32 per request), and DECRQM for modes 47 and 1047. DSR and
+  DECXCPR count the row from the top margin under origin mode, as xterm
+  does, never below row 1 (DECRC does not restore DECOM here, so the cursor
+  can sit above the margin); upstream reported the absolute row.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
   Kettle's public terminal-parser integration but does not run package-owned
   targets. Retained direct unit tests cover the mode stack, monotonic history
   origin, selection eviction, alternate-screen semantics, graphics-event
-  ordering/coalescing, overflow recovery, and region scrolls against the
-  row-by-row swap; run them with
+  ordering/coalescing, overflow recovery, region scrolls against the
+  row-by-row swap, and the query replies (including Neovim's exact undercurl
+  and truecolor probes); run them with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p alacritty_terminal`.
 
@@ -113,6 +123,15 @@ cosmic-text release that contains `1e0074c8`.
   markers to defer graphics control strings before decoding can mutate
   buffer-local state, then replay each action against the exact terminal
   screen and cursor state that existed at its position in the PTY stream.
+  Terminal queries reach the handler: XTVERSION (`CSI > q`), DEC private
+  device status (`CSI ? Ps n`), and the bodies of DECRQSS (`DCS $ q`) and
+  XTGETTCAP (`DCS + q`), kept across reads in a buffer bounded at 1 KiB; a
+  longer body is reported without its contents so it is answered as invalid.
+  The parser unhooks on ESC, CAN and SUB alike, so `Perform` gains
+  `dcs_terminated_by_st`, called after `unhook` only when the string ended
+  with ST: the 8-bit `0x9C`, or an ESC whose very next byte is `\`. A query is
+  answered only then; one that CAN, SUB or another sequence cuts off gets no
+  reply.
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a

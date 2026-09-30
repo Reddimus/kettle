@@ -210,6 +210,17 @@ targets, doctests, and warnings-denied clippy targets with:
 just vendor-check
 ```
 
+The terminal-query replies are tested at both levels. The vendored units pin
+each reply byte for byte: XTVERSION, DSR and DECXCPR under origin mode,
+DECRQSS for every SGR form (including Neovim's exact undercurl and truecolor
+probes), the scroll region and every cursor style, XTGETTCAP for every
+capability with hex-only echoes, and DECRQM for modes 47 and 1047. They also
+pin that an unknown or oversized request is never echoed, and that a string
+cut off before ST is not answered. `kettle-core`'s
+`terminal_queries_get_their_replies_through_a_pty` sends XTVERSION, DECXCPR,
+DECRQSS and XTGETTCAP from a real PTY child through the kettle-vt extractor,
+so `cargo test --workspace` catches a reply lost on the product path.
+
 CI runs `vte` plus its `alacritty_terminal` consumer on Linux. It runs
 `portable-pty` on Linux, macOS, and Windows because each compiles its own
 descriptor or pipe code: Linux uses `close_range`, macOS lists open

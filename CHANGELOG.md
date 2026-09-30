@@ -13,6 +13,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `keybind-yield` (`auto` by default) decides which default chords a program
   in the pane gets while it owns the keyboard; `off` keeps every default chord
   Kettle's, as in 4.8.
+- Kettle answers XTVERSION (`kettle(<version>)`), DECXCPR, DECRQSS (SGR,
+  scroll region, cursor shape) and XTGETTCAP (truecolor, styled and coloured
+  underlines, cursor shapes, palette size), and DECRQM for modes 47 and 1047.
+  Claude Code now draws with synchronized output in Kettle, and Neovim finds
+  truecolor without `COLORTERM` (over ssh) and draws undercurls as curls.
 
 ### Changed
 
@@ -30,6 +35,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `Ctrl+Shift+-` and `Ctrl+Shift+_` no longer shrink the font, so `Ctrl+_`
   reaches the program (undo in Claude Code, zsh, bash and emacs). `Ctrl+-` and
   `Cmd+-` still shrink it.
+
+### Fixed
+
+- A cursor position report (`CSI 6 n`) under origin mode counts the row from
+  the top margin, as xterm does, so a program that saves the position and
+  restores it with CUP lands where it was.
 
 ## [4.8.0] — 2026-09-28
 

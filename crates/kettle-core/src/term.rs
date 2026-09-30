@@ -4161,6 +4161,12 @@ impl KeyboardClaims {
     }
 }
 
+/// What XTVERSION (`CSI > q`) reports: the name and version that programs
+/// such as Claude Code and tmux key their capability probes on.
+pub(crate) fn xtversion() -> String {
+    format!("kettle({})", env!("CARGO_PKG_VERSION"))
+}
+
 /// Grid dimensions passed to `alacritty_terminal` (implements `Dimensions`).
 #[derive(Clone, Copy)]
 pub struct TermSize {
@@ -6726,6 +6732,7 @@ impl Terminal {
             kitty_keyboard: true,
             unnegotiated_modified_enter: capabilities.unnegotiated_modified_enter,
             default_cursor_style,
+            xtversion: Some(xtversion()),
             ..TermConfig::default()
         };
         // Word delimiters drive double-click word selection (and the
@@ -13954,6 +13961,67 @@ mod teardown_tests {
             7,
             "line-count cap still wins when it is smaller"
         );
+    }
+
+    /// A program's terminal queries, sent through a real PTY and the
+    /// kettle-vt extractor, get their replies: XTVERSION names Kettle (Claude
+    /// Code runs its second probe stage, and so turns synchronized output on,
+    /// only after an answer), and DECXCPR, DECRQSS and XTGETTCAP answer as
+    /// Neovim reads them.
+    #[cfg(unix)]
+    #[test]
+    fn terminal_queries_get_their_replies_through_a_pty() {
+        assert_eq!(
+            xtversion(),
+            format!("kettle({})", env!("CARGO_PKG_VERSION"))
+        );
+        // XTVERSION, DECXCPR at 3;5, DECRQSS for SGR after an undercurl, and
+        // XTGETTCAP for Tc and an unknown name.
+        let queries =
+            "\\033[>q\\033[3;5H\\033[?6n\\033[4:3m\\033P$qm\\033\\\\\\033P+q5463;6b75\\033\\\\";
+        let argv: Vec<String> = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("printf '{queries}'; sleep 5"),
+        ]
+        .to_vec();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let _term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping terminal queries: no PTY ({e})");
+                return;
+            }
+        };
+        let expected = format!(
+            "\x1bP>|{}\x1b\\\x1b[?3;5R\x1bP1$r0;4:3m\x1b\\\x1bP1+r5463\x1b\\\x1bP0+r6B75\x1b\\",
+            xtversion()
+        );
+        let mut replies = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while replies != expected {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(TermEvent::PtyWrite(text)) => replies.push_str(&text),
+                _ if std::time::Instant::now() > deadline => {
+                    panic!("replies {replies:?}, expected {expected:?}")
+                }
+                _ => {}
+            }
+        }
     }
 
     /// `child_exit_code` must surface the child's real exit status once it
