@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 /// The log target the stamps print under.
 pub const TARGET: &str = "kettle::startup";
 
-/// Startup phases in the order they happen.
+/// Startup phases, listed roughly in the order they happen. The printed
+/// lines are sorted by time instead, so the font thread's phases, which run
+/// alongside the main thread's, can print earlier than they are listed here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// The first statement of `main`.
@@ -27,10 +29,19 @@ pub enum Phase {
     ConfigLoaded,
     /// The `App` exists, just before the event loop runs.
     AppBuilt,
+    /// The font preload thread enumerated the system fonts.
+    FontsEnumerated,
+    /// The font preload thread loaded the configured family and finished.
+    FontsReady,
     /// The first pane's shell was spawned.
     PaneSpawned,
     /// winit delivered `Resumed` and the first window's setup begins.
     Resumed,
+    /// The first window starts waiting for the font preload thread.
+    FontsJoinStart,
+    /// The first window has measured the fonts from the preload thread or,
+    /// when the thread did not start or finish, its own fallback load.
+    FontsJoined,
     /// The native window exists.
     WindowCreated,
     /// The GPU device, surface and pipelines are ready.
@@ -42,14 +53,18 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Phase; 11] = [
+    pub const ALL: [Phase; 15] = [
         Phase::Main,
         Phase::RunWith,
         Phase::EventLoopBuilt,
         Phase::ConfigLoaded,
         Phase::AppBuilt,
+        Phase::FontsEnumerated,
+        Phase::FontsReady,
         Phase::PaneSpawned,
         Phase::Resumed,
+        Phase::FontsJoinStart,
+        Phase::FontsJoined,
         Phase::WindowCreated,
         Phase::GpuReady,
         Phase::WindowRevealed,
@@ -64,8 +79,12 @@ impl Phase {
             Phase::EventLoopBuilt => "event_loop_built",
             Phase::ConfigLoaded => "config_loaded",
             Phase::AppBuilt => "app_built",
+            Phase::FontsEnumerated => "fonts_enumerated",
+            Phase::FontsReady => "fonts_ready",
             Phase::PaneSpawned => "pane_spawned",
             Phase::Resumed => "resumed",
+            Phase::FontsJoinStart => "fonts_join_start",
+            Phase::FontsJoined => "fonts_joined",
             Phase::WindowCreated => "window_created",
             Phase::GpuReady => "gpu_ready",
             Phase::WindowRevealed => "window_revealed",
@@ -75,7 +94,10 @@ impl Phase {
 
     /// The thread that marks this phase.
     fn thread(self) -> &'static str {
-        "main"
+        match self {
+            Phase::FontsEnumerated | Phase::FontsReady => "fonts",
+            _ => "main",
+        }
     }
 }
 
@@ -400,6 +422,65 @@ mod tests {
         assert!(
             order.windows(2).all(|w| w[0] < w[1]),
             "resumed_inner marks out of order: {order:?}"
+        );
+
+        // The font preload marks its own phases: two on its thread, and the
+        // first window's wait for it in `finish`, which resumed_inner calls
+        // before it spawns the first pane.
+        let preload = include_str!("font_preload.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        for phase in [
+            Phase::FontsEnumerated,
+            Phase::FontsReady,
+            Phase::FontsJoinStart,
+            Phase::FontsJoined,
+        ] {
+            assert_eq!(count(preload, phase), 1, "{phase:?} in font_preload.rs");
+            assert_eq!(count(production, phase), 0, "{phase:?} in app.rs");
+        }
+        // The thread warms the compiled-in family while the config is still
+        // being read, not after it arrives, so a join right after the config
+        // does not wait for that warm-up.
+        let thread = preload.split_once("fn prepare(").unwrap().1;
+        let order = [
+            at(thread, "raise_priority();"),
+            at(thread, "PreparedFonts::enumerate()"),
+            at(thread, &needle(Phase::FontsEnumerated)),
+            at(thread, "prepared.warm_family(kettle_config::font::FAMILY);"),
+            at(thread, "requested.recv()"),
+            at(thread, "prepared.warm_family(&family);"),
+            at(thread, &needle(Phase::FontsReady)),
+        ];
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "the preload thread marks out of order: {order:?}"
+        );
+        // A fallback load happens inside the stamped wait, so the trace never
+        // shows a short wait while the first window loaded the fonts itself.
+        let finish = preload.split_once("fn finish(").unwrap().1;
+        let finish = finish.split_once("\n    }\n").unwrap().0;
+        let order = [
+            at(finish, &needle(Phase::FontsJoinStart)),
+            at(finish, "thread.join()"),
+            at(finish, "unwrap_or_else(PreparedFonts::enumerate)"),
+            at(finish, "prepared.measure(cfg, scale)"),
+            at(finish, &needle(Phase::FontsJoined)),
+        ];
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "finish marks out of order: {order:?}"
+        );
+        let order = [
+            at(resumed, &needle(Phase::Resumed)),
+            at(resumed, "preload.finish(&self.cfg, startup_scale)"),
+            at(resumed, "self.spawn_first_tab(ws, has_launch_override)"),
+            at(resumed, "event_loop.create_window(attrs)"),
+        ];
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "resumed_inner joins the font preload out of order: {order:?}"
         );
 
         // The first frame is the first one presented, marked after the

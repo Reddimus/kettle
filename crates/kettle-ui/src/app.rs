@@ -6518,6 +6518,9 @@ pub struct App {
     /// in `resumed`; `open_window` reuses it for the synchronous (no
     /// adapter/device request) renderer init of windows 2..N.
     gpu: Option<kettle_render::GpuContext>,
+    /// The system fonts, loading on their own thread since `run_with`
+    /// began. Window 1 takes them in `resumed`; later windows load their own.
+    font_preload: Option<crate::font_preload::FontPreload>,
     /// Detected GPUs as `(token, label)` pairs for the Settings →
     /// Graphics device picker. Enumerated ONCE when the settings overlay first
     /// opens (a wgpu instance + adapter walk is ~tens of ms — too heavy per
@@ -7102,6 +7105,9 @@ impl App {
     pub fn run_with(mut startup: crate::Options) -> Result<()> {
         crate::startup_trace::mark(crate::startup_trace::Phase::RunWith);
         let _trace = crate::startup_trace::FlushOnDrop;
+        // Enumerate the system fonts while the event loop starts (AppKit's
+        // launch, on macOS) instead of after it.
+        let mut font_preload = crate::font_preload::FontPreload::start();
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
@@ -7326,6 +7332,7 @@ impl App {
         // in a different project a different (but per-project stable) accent.
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
         crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);
+        font_preload.request_family(&initial_cfg.font_family);
         // Seed the ToggleFullscreen tracking flag from the
         // effective window-state (config `window-state = fullscreen` or `-f`).
         // Starting it `false` would make a fullscreen launch need TWO
@@ -7515,6 +7522,7 @@ impl App {
             focused_seq: 1,
             next_window_seq: 2,
             gpu: None,
+            font_preload: Some(font_preload),
             gpu_choices: Vec::new(),
             gpu_recovery: RecoveryState::default(),
             gpu_incident: None,
@@ -27252,13 +27260,19 @@ impl App {
             Some((windows, geometries))
         });
 
-        // Load the fonts before the window. A pane's grid needs only the cell,
-        // so a fresh window can size itself to exactly the configured grid and
-        // start its first pane while the window and GPU initialize. The
+        // Measure the fonts before the window. A pane's grid needs only the
+        // cell, so a fresh window can size itself to exactly the configured
+        // grid and start its first pane while the window and GPU initialize.
+        // The system fonts have been loading on their own thread since
+        // `run_with` began, and only the measurement needs this scale. The
         // renderer takes the fonts over.
         let startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
-        let fonts = kettle_render::StartupFonts::load(&self.cfg, startup_scale);
+        let fonts = match self.font_preload.take() {
+            Some(preload) => preload.finish(&self.cfg, startup_scale),
+            None => kettle_render::StartupFonts::load(&self.cfg, startup_scale),
+        };
         ws.startup_cell = Some(fonts.cell);
+        ws.startup_fonts = Some(fonts);
         // A restored window keeps its saved geometry, and a maximized or
         // full-screen one gets its size from the OS after creation. Only a
         // fresh normal or hidden window knows its size before it exists.
@@ -27421,7 +27435,7 @@ impl App {
                 size.height.max(1),
                 scale,
                 &self.cfg,
-                Some(fonts),
+                ws.startup_fonts.take(),
             ))
         };
         // Disarm the watchdog the moment init returns, on BOTH the success and
@@ -34706,7 +34720,78 @@ mod tests {
             .find("Renderer::new_with_display_handle(")
             .expect("renderer init");
         assert!(spawn < window && window < gpu);
-        assert!(body[gpu..].contains("Some(fonts),"));
+        assert!(body[gpu..].contains("ws.startup_fonts.take(),"));
+    }
+
+    /// The system fonts load on their own thread from the start of
+    /// `run_with`, so enumerating them overlaps the event loop's start
+    /// (AppKit's launch, on macOS) instead of delaying the first pane, and
+    /// window 1 only measures them. The thread starts before anything can
+    /// fail or read the config, learns the family once the command-line
+    /// overrides are in, and is joined before the first pane spawns.
+    #[test]
+    fn the_fonts_load_while_the_event_loop_starts() {
+        let src = super::production_source();
+        let run = src
+            .split_once("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+            .expect("run_with")
+            .1;
+        let run = &run[..run.find("event_loop.run_app(&mut app)").expect("run_app")];
+        let start = run
+            .find("let mut font_preload = crate::font_preload::FontPreload::start();")
+            .expect("run_with starts the font preload");
+        let trace = run
+            .find("let _trace = crate::startup_trace::FlushOnDrop;")
+            .expect("trace guard");
+        assert!(
+            trace < start
+                && run[trace..start]
+                    .lines()
+                    .skip(1)
+                    .all(|line| line.trim().is_empty() || line.trim_start().starts_with("//")),
+            "the preload starts right after the trace guard"
+        );
+        for later in [
+            "crate::paste_image::sweep_stale();",
+            "disable_app_state_restoration();",
+            "EventLoop::<UserEvent>::with_user_event().build()",
+            "Config::read_from_with_trust(",
+        ] {
+            let at = run.find(later).unwrap_or_else(|| panic!("missing {later}"));
+            assert!(start < at, "the preload starts before {later}");
+        }
+        let loaded = run
+            .find("crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);")
+            .expect("config loaded");
+        let request = run
+            .find("font_preload.request_family(&initial_cfg.font_family);")
+            .expect("run_with sends the configured family");
+        assert!(
+            loaded < request,
+            "the family is final once the overrides are in"
+        );
+        assert!(run[request..].contains("font_preload: Some(font_preload),"));
+        assert_eq!(src.matches("FontPreload::start()").count(), 1);
+
+        // Window 1 takes the preload before it sizes and spawns its first
+        // pane; no other window waits for it. The measured fonts wait in
+        // `ws.startup_fonts` for the renderer, which would otherwise load
+        // them a second time on the main thread.
+        assert_eq!(src.matches("self.font_preload.take()").count(), 1);
+        let resumed = src
+            .split_once("fn resumed_inner(")
+            .expect("resumed_inner")
+            .1;
+        let take = resumed
+            .find("let fonts = match self.font_preload.take() {")
+            .expect("window 1 takes the preloaded fonts");
+        let kept = resumed
+            .find("ws.startup_fonts = Some(fonts);")
+            .expect("window 1 keeps the measured fonts for its renderer");
+        let spawn = resumed
+            .find("self.spawn_first_tab(ws, has_launch_override)")
+            .expect("early spawn");
+        assert!(take < kept && kept < spawn);
     }
 
     #[test]

@@ -2237,9 +2237,10 @@ class StartupPhases(unittest.TestCase):
         # The same fixture crates/kettle-ui/src/startup_trace.rs tests against.
         phases = standing.parse_phases(self.FIXTURE, 900_000_000)
         self.assertEqual(phases["phase_main_ms"], 100.0)
-        self.assertEqual(phases["phase_first_frame_ms"], 200.0)
+        self.assertEqual(phases["phase_fonts_ready_ms"], 160.0)
+        self.assertEqual(phases["phase_first_frame_ms"], 240.0)
         self.assertEqual(phases["startup_path"], "resumed_early")
-        self.assertEqual(len([k for k in phases if k.startswith("phase_")]), 11)
+        self.assertEqual(len([k for k in phases if k.startswith("phase_")]), 15)
 
     def test_finish_reads_the_stamps_kettle_printed(self) -> None:
         import json
@@ -2255,7 +2256,7 @@ class StartupPhases(unittest.TestCase):
             (work / "terminal.stderr").write_text(self.FIXTURE)
             process = __import__("subprocess").Popen(["/usr/bin/true"])
             result = runner.finish(process, 1)
-            self.assertEqual(result["phase_first_frame_ms"], 200.0)
+            self.assertEqual(result["phase_first_frame_ms"], 240.0)
             self.assertEqual(result["startup_path"], "resumed_early")
 
     def launched_env(self, stamped: set, name: str, startup: bool = True, ambient: str = "") -> str:
@@ -4658,7 +4659,9 @@ class NativeEvidence(unittest.TestCase):
         self.assertIsNone(standing.startup_phase_evidence(no_threads, None)["durations"]["fonts_join_wait_ms"])
 
     def test_s1_identical_and_unknown_optional_stamps_are_diagnostic_only(self):
-        s1 = StartupPhases.FIXTURE
+        # A frozen S1-era capture: startup-phases.fixture follows the live
+        # producer (startup_trace.rs tests against it) and gains phases.
+        s1 = (HERE / "macos-standing" / "startup-phases-s1.fixture").read_text()
         expected = {f"phase_{name}_ms": 100. + index * 10. for index, name in enumerate(
             ("main", "run_with", "event_loop_built", "config_loaded", "app_built", "pane_spawned", "resumed", "window_created", "gpu_ready", "window_revealed", "first_frame"))}
         expected["startup_path"] = "resumed_early"
