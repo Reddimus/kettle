@@ -30656,15 +30656,28 @@ mod tests {
 
         let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
         mux.panes[&target].term.write(lines.as_bytes());
-        // The line discipline echoes each line at once and `cat` prints it
-        // again after reading it. Wait for both copies of the last line, so no
-        // output is still arriving when the scrollback is cleared.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !mux.panes[&target]
-            .term
-            .screen_text(100)
-            .is_some_and(|screen| screen.text.matches("line 39").count() == 2)
-        {
+        // The line discipline echoes each line as it arrives and `cat` prints it
+        // again. On a slow machine the two streams interleave mid-line, so an
+        // exact count of "line 39" can wait forever. Wait instead for the last
+        // line to show and the screen to stop changing, so no output is still
+        // arriving when the scrollback is cleared.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut seen = String::new();
+        let mut unchanged_since = std::time::Instant::now();
+        loop {
+            let text = mux.panes[&target]
+                .term
+                .screen_text(100)
+                .map(|screen| screen.text)
+                .unwrap_or_default();
+            if text != seen {
+                seen = text;
+                unchanged_since = std::time::Instant::now();
+            } else if seen.contains("line 39")
+                && unchanged_since.elapsed() >= std::time::Duration::from_millis(300)
+            {
+                break;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "cat did not print its input"
