@@ -44,6 +44,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A runtime diagnostic incident appears in `<cache>/kettle/diagnostics` only
   once it is complete; a reader could see one empty or half-written.
+- A key that closes or replaces one of Kettle's own modals (Enter in the
+  command palette, a dialog, the layout picker or the SSH launcher, Escape in
+  vi mode or a Settings text field) no longer acts again when held: holding
+  Enter to confirm used to send the program behind it an extra Enter per key
+  repeat, or launch the first entry of the layout picker the palette had just
+  opened, and holding Escape in a Settings text field or a keybind capture
+  closed Settings too. The Escape that cancels a pane or tab drag is held
+  back the same way. Inside a modal, keys that activate, toggle or pick act
+  once per press, so holding Enter no longer runs a context submenu's first
+  row, holding Space or Left/Right no longer flips a Settings toggle or cycles
+  a choice back and forth (a number still steps), a held hint letter no longer
+  completes a doubled label, and holding `v` in vi mode no longer flickers
+  visual mode. Moving keys still repeat.
 - A cursor position report (`CSI 6 n`) under origin mode counts the row from
   the top margin, as xterm does, so a program that saves the position and
   restores it with CUP lands where it was.
