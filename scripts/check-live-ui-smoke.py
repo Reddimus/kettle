@@ -18559,6 +18559,188 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     return out
 
 
+PROGRAM_KEYS_RECORDER = r"""
+import os, sys, termios, tty
+
+# Take the keyboard as Codex does (kitty flags 7 and the alternate screen),
+# log every byte read, drop both modes on "p", and stop on "q". Kitty keeps
+# one flag stack per screen, so push after entering the alternate screen and
+# pop before leaving it, as crossterm applications do.
+log = open(sys.argv[1], "ab", buffering=0)
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(1, b"\x1b[?1049h\x1b[>7uRECORDING-OWNED\r\n")
+try:
+    while True:
+        data = os.read(fd, 64)
+        if not data or data == b"q":
+            break
+        if data == b"p":
+            os.write(1, b"\x1b[<u\x1b[?1049lRECORDING-PLAIN\r\n")
+            log.write(b"<plain>")
+            continue
+        log.write(data)
+finally:
+    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+"""
+
+
+def macos_shift_arrow(key_code: int) -> None:
+    """Post one real Shift+Arrow press and release at the HID tap."""
+    import ctypes
+
+    core_graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    core_foundation = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    core_graphics.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+    core_graphics.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+    core_graphics.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    core_graphics.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    core_graphics.CGPreflightPostEventAccess.restype = ctypes.c_bool
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    if not core_graphics.CGPreflightPostEventAccess():
+        raise SystemExit("program-keys smoke: grant Accessibility access to the invoking terminal")
+    shift = 0x20000  # kCGEventFlagMaskShift
+    for down in (True, False):
+        event = core_graphics.CGEventCreateKeyboardEvent(None, key_code, down)
+        if not event:
+            raise SystemExit("program-keys smoke: CGEventCreateKeyboardEvent failed")
+        core_graphics.CGEventSetFlags(event, shift)
+        core_graphics.CGEventPost(0, event)
+        core_foundation.CFRelease(event)
+        time.sleep(0.05)
+
+
+def run_program_keys(kettle: str, root: Path) -> Path:
+    """A default chord a program also uses goes to a program that owns the
+    keyboard, and stays Kettle's otherwise.
+
+    A byte recorder takes the keyboard in the right pane of a split the way
+    Codex does (kitty flags and the alternate screen). While it owns it, the
+    control route reports Shift+Left as `terminal_fallthrough` and, on macOS,
+    a real Shift+Left press reaches it as `ESC [1;2D` without moving the
+    split. Once it drops both modes, Shift+Left resizes the split again and no
+    byte reaches it. Codex answers a queued question with exactly this key.
+    """
+    out = root / f"program-keys-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 120",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    recorder = out / "recorder.py"
+    recorder.write_text(PROGRAM_KEYS_RECORDER)
+    log = out / "recorded.bin"
+    log.write_bytes(b"")
+
+    def focused(live: LiveKettle) -> Dict[str, object]:
+        panes = [p for p in live.json_ctl("list_panes").get("panes", []) if isinstance(p, dict)]
+        hits = [p for p in panes if p.get("focused")]
+        if len(hits) != 1:
+            raise SystemExit(f"program-keys smoke: expected one focused pane: {panes}")
+        return hits[0]
+
+    def wait_screen(live: LiveKettle, pane: object, needle: str) -> None:
+        deadline = time.monotonic() + 15.0
+        while needle not in screen_text(live.json_ctl("read_screen", {"pane": pane})):
+            if time.monotonic() > deadline:
+                raise SystemExit(f"program-keys smoke: never saw {needle!r}")
+            time.sleep(0.1)
+
+    def dispatch(live: LiveKettle, label: str) -> Dict[str, object]:
+        result = live.json_ctl("dispatch_keybind", {"logical": "left", "mods": "shift"})
+        (out / f"{label}.dispatch.json").write_text(json.dumps(result, indent=2) + "\n")
+        return result
+
+    def cols(live: LiveKettle) -> int:
+        return int(focused(live).get("cols", 0))
+
+    def require_window_focus(live: LiveKettle, label: str) -> None:
+        # The helper clicks the window's middle, which on a split is the
+        # divider, so focus is taken once before the split and only checked
+        # here: a native key press goes wherever the desktop sends it.
+        if live.json_ctl("ui_geometry").get("window_focused") is not True:
+            live.screenshot(out / f"{label}-unfocused.png")
+            raise SystemExit(f"program-keys smoke: {label}: the window lost focus")
+
+    analysis: Dict[str, object] = {}
+    native = platform.system() == "Darwin"
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        if native:
+            focus_live_kettle_window(live)
+            deadline = time.monotonic() + 10.0
+            while live.json_ctl("ui_geometry").get("window_focused") is not True:
+                if time.monotonic() > deadline:
+                    live.screenshot(out / "focus-failed.png")
+                    raise SystemExit("program-keys smoke: the window never took focus")
+                time.sleep(0.1)
+        live.json_ctl("perform_action", {"action": "split_right"})
+        deadline = time.monotonic() + 10.0
+        while len(live.json_ctl("list_panes").get("panes", [])) != 2:
+            if time.monotonic() > deadline:
+                raise SystemExit("program-keys smoke: the split never appeared")
+            time.sleep(0.1)
+        time.sleep(1.0)
+        pane = focused(live).get("id")
+        live.ctl("send_text", params={"pane": pane, "text": f"python3 '{recorder}' '{log}'\r"})
+        wait_screen(live, pane, "RECORDING-OWNED")
+        time.sleep(0.3)
+
+        owned = dispatch(live, "owned")
+        if owned.get("terminal_fallthrough") is not True or owned.get("dispatched") is not False:
+            raise SystemExit(f"program-keys smoke: Shift+Left must go to the owning program: {owned}")
+        analysis["owned_dispatch"] = owned
+        if native:
+            require_window_focus(live, "owned")
+            before = cols(live)
+            macos_shift_arrow(123)
+            time.sleep(0.8)
+            recorded = log.read_bytes()
+            after = cols(live)
+            analysis["owned_native"] = {"recorded": recorded.hex(), "cols": [before, after]}
+            if b"\x1b[1;2D" not in recorded:
+                raise SystemExit(f"program-keys smoke: Shift+Left never reached the program: {recorded!r}")
+            if after != before:
+                raise SystemExit(f"program-keys smoke: the split moved while the program owned the key: {before} -> {after}")
+
+        live.ctl("send_text", params={"pane": pane, "text": "p"})
+        wait_screen(live, pane, "RECORDING-PLAIN")
+        time.sleep(0.3)
+        plain = dispatch(live, "plain")
+        if plain.get("dispatched") is not True or plain.get("action") != "ResizeLeft":
+            raise SystemExit(f"program-keys smoke: without the modes Shift+Left must resize: {plain}")
+        analysis["plain_dispatch"] = plain
+        if native:
+            require_window_focus(live, "plain")
+            marker = len(log.read_bytes())
+            before = cols(live)
+            macos_shift_arrow(123)
+            time.sleep(0.8)
+            after = cols(live)
+            tail = log.read_bytes()[marker:]
+            analysis["plain_native"] = {"recorded_after": tail.hex(), "cols": [before, after]}
+            if tail:
+                raise SystemExit(f"program-keys smoke: a Kettle resize leaked bytes to the program: {tail!r}")
+            if after == before:
+                raise SystemExit("program-keys smoke: Shift+Left did not resize the split once the program let go")
+        live.ctl("send_text", params={"pane": pane, "text": "q"})
+    (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
 def run_split_exit_resize(kettle: str, root: Path) -> Path:
     """A split closed by its own shell must hand its rows back.
 
@@ -19006,6 +19188,7 @@ def main() -> int:
             "tearoff",
             "split-titlebar",
             "split-exit-resize",
+            "program-keys",
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
@@ -19140,6 +19323,9 @@ def main() -> int:
     if args.case in ("split-exit-resize", "all"):
         out = run_split_exit_resize(args.kettle, root)
         print(f"split-exit-resize smoke: OK artifacts={out}")
+    if args.case in ("program-keys", "all"):
+        out = run_program_keys(args.kettle, root)
+        print(f"program-keys smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")
