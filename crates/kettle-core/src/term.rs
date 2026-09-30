@@ -4886,30 +4886,48 @@ mod local_output_tests {
         );
     }
 
+    /// Prints 40 lines and then a marker with no newline, and waits in `cat`.
+    /// One process writes all of it, so once the marker is on screen no
+    /// output is still arriving. Lines typed into `cat` would come back
+    /// twice, as the line discipline's echo and as `cat`'s copy, and Linux can
+    /// interleave the two mid-line, so no count of them marks the end.
+    const LINES_THEN_CAT: &str = r#"i=0; while [ $i -lt 40 ]; do echo "line $i"; i=$((i+1)); done; printf lines-done; exec cat"#;
+
     #[test]
     fn a_local_history_clear_keeps_the_screen() {
-        let Some((terminal, events)) = cat_terminal() else {
+        let argv = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            LINES_THEN_CAT.to_string(),
+        ];
+        let Some((terminal, events)) = spawn_terminal(&argv) else {
             return;
         };
-        let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
-        terminal.write(lines.as_bytes());
         let history = |terminal: &Terminal| terminal.term.lock().unwrap().grid().history_size();
-        // Echo and `cat` print every line once each. Wait for both copies of
-        // the last one, so no output is still arriving when history is cleared.
-        assert!(wait_for(&terminal, &events, |terminal, _| {
-            terminal
-                .screen_text(100)
-                .is_some_and(|screen| screen.text.matches("line 39").count() == 2)
-                && history(terminal) > 0
-        }));
+        assert!(
+            wait_for(&terminal, &events, |terminal, text| {
+                text.contains("lines-done") && history(terminal) > 0
+            }),
+            "the lines never arrived: {:?}",
+            terminal.screen_text(100).map(|screen| screen.text)
+        );
+        let before = terminal.screen_text(0).expect("screen").text;
 
         assert!(terminal.apply_local_output(b"\x1b[3J"));
         assert!(
             wait_for(&terminal, &events, |terminal, _| history(terminal) == 0),
             "CSI 3 J did not clear the scrollback"
         );
+        assert_eq!(
+            terminal.screen_text(0).expect("screen").text,
+            before,
+            "the visible screen changed"
+        );
+
+        // Anything the child received would be echoed before this line.
+        terminal.write(b"after\n");
+        assert!(wait_for(&terminal, &events, |_, text| text.contains("after")));
         let text = terminal.screen_text(0).expect("screen").text;
-        assert!(text.contains("line 39"), "the visible screen was cleared");
         assert!(
             !text.contains("^["),
             "the clear reached the child: {text:?}"
