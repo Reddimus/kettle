@@ -5507,17 +5507,23 @@ mod tests {
         );
     }
 
+    /// The worker publishes nothing for a scan that ran past its 25 ms
+    /// budget, and waits for the next request; the app asks again on its
+    /// next poll. So does this test: on a loaded machine walking this test
+    /// process's threads can take longer than one budget.
     #[test]
     fn background_probe_worker_returns_a_current_process_snapshot() {
         let worker = RemoteScanWorker::spawn().unwrap();
         let pid = std::process::id();
-        worker.submit(vec![RemoteProbeTarget {
+        let target = RemoteProbeTarget {
             pid,
             foreground_pid: Some(pid),
             allow_native_cwd: false,
-        }]);
+        };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            worker.submit(vec![target]);
+            std::thread::sleep(std::time::Duration::from_millis(50));
             if let Some(snapshot) = worker.take_latest() {
                 assert!(snapshot.probes.contains_key(&pid));
                 break;
@@ -5526,7 +5532,6 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "background remote scan did not publish within five seconds"
             );
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
