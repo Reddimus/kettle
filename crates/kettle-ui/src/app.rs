@@ -30890,45 +30890,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reset_and_clear_scrollback_change_the_terminal_not_the_child() {
-        let (mut mux, target, _sibling) = title_test_split_mux();
+        // One process prints the lines and then a marker with no newline, so
+        // once the marker shows no output is still arriving. Lines typed into
+        // `cat` would come back twice, as the line discipline's echo and as
+        // `cat`'s copy, and Linux can interleave the two mid-line.
+        let script = r#"i=0; while [ $i -lt 40 ]; do echo "line $i"; i=$((i+1)); done; printf lines-done; exec cat"#;
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
+        let waker: kettle_core::Waker = Arc::new(|| {});
+        let mut mux = Mux::new();
+        mux.new_tab_with(&title_test_config(), 80, 24, 8, 16, waker, &argv, None)
+            .expect("spawn the pane");
+        let target = mux.active_focus().expect("target pane id");
         mux.panes.get_mut(&target).unwrap().read_only = true;
-
-        let lines: String = (0..40).map(|n| format!("line {n}\n")).collect();
-        mux.panes[&target].term.write(lines.as_bytes());
-        // The line discipline echoes each line as it arrives and `cat` prints it
-        // again. On a slow machine the two streams interleave mid-line, so an
-        // exact count of "line 39" can wait forever. Wait instead for the last
-        // line to show and the screen to stop changing, so no output is still
-        // arriving when the scrollback is cleared.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        let mut seen = String::new();
-        let mut unchanged_since = std::time::Instant::now();
-        loop {
-            let text = mux.panes[&target]
-                .term
-                .screen_text(100)
-                .map(|screen| screen.text)
-                .unwrap_or_default();
-            if text != seen {
-                seen = text;
-                unchanged_since = std::time::Instant::now();
-            } else if seen.contains("line 39")
-                && unchanged_since.elapsed() >= std::time::Duration::from_millis(300)
-            {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "cat did not print its input"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        assert!(
+            wait_for_pane_screen(&mux, target, |text, history| {
+                text.contains("lines-done") && history > 0
+            }),
+            "the shell did not print its lines"
+        );
+        let before = mux.panes[&target].term.screen_text(0).unwrap().text;
 
         super::apply_terminal_control(&mux, &[target], b"\x1b[3J");
         assert!(
-            wait_for_pane_screen(&mux, target, |text, history| {
-                history == 0 && text.contains("line 39")
-            }),
+            wait_for_pane_screen(&mux, target, |text, history| history == 0 && text == before),
             "Clear Scrollback must drop the history and keep the screen"
         );
 
