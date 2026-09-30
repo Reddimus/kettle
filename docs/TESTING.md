@@ -2355,8 +2355,11 @@ and receipt survival after key release. Bare Ctrl+V must reach the client throug
 Kitty keyboard encoding and dismiss the previous receipt. This offline client
 proves terminal routing. Optional `--codex /path/to/codex` also tests Codex
 0.155.1's real composer with an empty private profile, a trusted empty directory,
-and an offline provider. Each shortcut must add a new numbered attachment;
-Kettle thumbnails must follow the documented shortcut policy. No prompt is
+and an offline provider. It pastes only once the screen names the model: Codex
+first draws a startup draft with the same placeholder, whose composer inserts a
+pasted image path as text, and the draft names no model. Each shortcut must add
+a new numbered attachment; Kettle thumbnails must follow the documented
+shortcut policy. No prompt is
 submitted and no credentials are needed. CI downloads the fixed official release
 and checks its pinned SHA-256 before execution. `results.json` records the actual
 OS, render surface, grid, and outcomes; `codex-results.json` records the client

@@ -8957,87 +8957,125 @@ def live_helper_selftest() -> None:
             powershell = windows_system_executable(
                 "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
             )
-            native_job_process = subprocess.Popen(
-                [
-                    powershell,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-Command",
-                    native_job.powershell_assign_current_process_command()
-                    + "; $KettleSmokeHeld=[IO.File]::Open("
-                    + shell_quote(str(held_file), windows=True)
-                    + ",[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,"
-                    + "[IO.FileShare]::None); [IO.File]::WriteAllText("
-                    + shell_quote(str(ready_file), windows=True)
-                    + ",'ready'); Start-Sleep -Seconds 60",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            ready_deadline = time.monotonic() + 15
-            while (
-                time.monotonic() < ready_deadline
-                and not ready_file.is_file()
-                and native_job_process.poll() is None
-            ):
-                time.sleep(0.02)
-            if not ready_file.is_file():
-                native_job_process.kill()
-                stdout, stderr = native_job_process.communicate(timeout=3)
-                raise AssertionError(
-                    "PowerShell did not self-assign to the named Job: "
-                    f"stdout={stdout!r} stderr={stderr!r}"
-                )
-            assert native_job.active_processes() >= 1
-            real_wait_empty = native_job.wait_empty
-            real_rmtree = shutil.rmtree
-            drain_finished: List[bool] = []
-
-            # Exercise Windows deletion itself, not just callback order.  The
-            # contained process deliberately opened this file without delete
-            # sharing, so a pre-drain tree removal must be refused by the OS.
+            # PowerShell's output goes to files, not pipes. Add-Type compiles
+            # out of process: the compiler inherits PowerShell's output handles
+            # and can outlive a kill of PowerShell, so reading pipes to EOF
+            # could wait on it and hide the failure being reported.
+            native_job_log_dir = Path(tempfile.mkdtemp(prefix="kettle-job-selftest-"))
             try:
-                real_rmtree(native_job_root)
-            except OSError:
-                pass
-            else:
-                raise AssertionError(
-                    "Windows removed a sandbox before its contained Job drained"
-                )
-            assert native_job_root.exists() and held_file.exists(), (
-                "the pre-drain deletion probe did not retain the locked sandbox"
-            )
-
-            def record_real_job_drain(timeout_s: float = 5.0) -> None:
-                real_wait_empty(timeout_s)
-                native_job_process.poll()
-                assert native_job_process.returncode is not None, (
-                    "Job accounting reached zero before its contained process exited"
-                )
-                drain_finished.append(True)
-
-            def reject_premature_sandbox_remove(path: object, *args: object, **kwargs: object) -> None:
-                assert drain_finished == [True], (
-                    "sandbox removal began before the real Windows Job drained"
-                )
-                real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
-
-            native_job.wait_empty = record_real_job_drain  # type: ignore[method-assign]
-            shutil.rmtree = reject_premature_sandbox_remove  # type: ignore[assignment]
-            try:
-                native_job_target.cleanup_nvim_sandbox_host(
-                    str(native_job_root), windows_job=native_job
-                )
-                native_job_process.wait(timeout=3)
-            finally:
-                shutil.rmtree = real_rmtree
-                if native_job_process.returncode is None:
+                native_job_stdout = native_job_log_dir / "stdout.txt"
+                native_job_stderr = native_job_log_dir / "stderr.txt"
+                stamp = "[DateTime]::UtcNow.ToString('o')"
+                with native_job_stdout.open("wb") as stdout_file, native_job_stderr.open(
+                    "wb"
+                ) as stderr_file:
+                    native_job_process = subprocess.Popen(
+                        [
+                            powershell,
+                            "-NoLogo",
+                            "-NoProfile",
+                            "-Command",
+                            f"Write-Output ('started ' + {stamp}); "
+                            + native_job.powershell_assign_current_process_command()
+                            + f"; Write-Output ('assigned ' + {stamp})"
+                            + "; $KettleSmokeHeld=[IO.File]::Open("
+                            + shell_quote(str(held_file), windows=True)
+                            + ",[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,"
+                            + "[IO.FileShare]::None); [IO.File]::WriteAllText("
+                            + shell_quote(str(ready_file), windows=True)
+                            + ",'ready'); Start-Sleep -Seconds 60",
+                        ],
+                        stdout=stdout_file,
+                        stderr=stderr_file,
+                    )
+                # The compile has taken over 20 s on a starved runner. The wait
+                # ends as soon as the ready file appears.
+                ready_wait = 120
+                ready_started = time.monotonic()
+                while (
+                    time.monotonic() - ready_started < ready_wait
+                    and not ready_file.is_file()
+                    and native_job_process.poll() is None
+                ):
+                    time.sleep(0.02)
+                if not ready_file.is_file():
+                    waited = time.monotonic() - ready_started
+                    # End the whole tree: the compiler Add-Type started is
+                    # PowerShell's child, in no Job, and holds the log files
+                    # open. Popen still holds PowerShell's handle, so its PID
+                    # cannot have been reused.
+                    subprocess.run(
+                        [
+                            windows_system_executable("System32", "taskkill.exe"),
+                            "/T",
+                            "/F",
+                            "/PID",
+                            str(native_job_process.pid),
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=30,
+                        check=False,
+                    )
                     native_job_process.kill()
-                    native_job_process.wait(timeout=3)
-                if native_job_root.exists():
+                    native_job_process.wait(timeout=10)
+                    stdout = native_job_stdout.read_text(encoding="utf-8", errors="replace")
+                    stderr = native_job_stderr.read_text(encoding="utf-8", errors="replace")
+                    raise AssertionError(
+                        "PowerShell did not self-assign to the named Job "
+                        f"(waited {waited:.1f} s): stdout={stdout!r} stderr={stderr!r}"
+                    )
+                assert native_job.active_processes() >= 1
+                real_wait_empty = native_job.wait_empty
+                real_rmtree = shutil.rmtree
+                drain_finished: List[bool] = []
+
+                # Exercise Windows deletion itself, not just callback order.  The
+                # contained process deliberately opened this file without delete
+                # sharing, so a pre-drain tree removal must be refused by the OS.
+                try:
                     real_rmtree(native_job_root)
-            assert not native_job_root.exists()
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "Windows removed a sandbox before its contained Job drained"
+                    )
+                assert native_job_root.exists() and held_file.exists(), (
+                    "the pre-drain deletion probe did not retain the locked sandbox"
+                )
+
+                def record_real_job_drain(timeout_s: float = 5.0) -> None:
+                    real_wait_empty(timeout_s)
+                    native_job_process.poll()
+                    assert native_job_process.returncode is not None, (
+                        "Job accounting reached zero before its contained process exited"
+                    )
+                    drain_finished.append(True)
+
+                def reject_premature_sandbox_remove(path: object, *args: object, **kwargs: object) -> None:
+                    assert drain_finished == [True], (
+                        "sandbox removal began before the real Windows Job drained"
+                    )
+                    real_rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+                native_job.wait_empty = record_real_job_drain  # type: ignore[method-assign]
+                shutil.rmtree = reject_premature_sandbox_remove  # type: ignore[assignment]
+                try:
+                    native_job_target.cleanup_nvim_sandbox_host(
+                        str(native_job_root), windows_job=native_job
+                    )
+                    native_job_process.wait(timeout=3)
+                finally:
+                    shutil.rmtree = real_rmtree
+                    if native_job_process.returncode is None:
+                        native_job_process.kill()
+                        native_job_process.wait(timeout=3)
+                    if native_job_root.exists():
+                        real_rmtree(native_job_root)
+                assert not native_job_root.exists()
+            finally:
+                shutil.rmtree(native_job_log_dir, ignore_errors=True)
 
             # Junctions are a separate Windows reparse type: DirEntry.is_symlink
             # is false for them. Cleanup must remove the junction itself without
