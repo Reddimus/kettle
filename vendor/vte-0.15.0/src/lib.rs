@@ -67,6 +67,9 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
+    /// ESC just unhooked a device control string. Only if the very next byte
+    /// is `\` did the string end with ST rather than being cut off.
+    dcs_unhooked_by_esc: bool,
 }
 
 impl Parser {
@@ -324,12 +327,14 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             },
             0x1B => {
                 performer.unhook();
+                self.dcs_unhooked_by_esc = true;
                 self.reset_params();
                 self.state = State::Escape
             },
             0x7F => (),
             0x9C => {
                 performer.unhook();
+                performer.dcs_terminated_by_st();
                 self.state = State::Ground
             },
             _ => (),
@@ -338,6 +343,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
 
     #[inline(always)]
     fn advance_esc<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        let dcs_unhooked_by_esc = core::mem::take(&mut self.dcs_unhooked_by_esc);
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => performer.execute(byte),
             0x20..=0x2F => {
@@ -366,6 +372,9 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.state = State::CsiEntry
             },
             0x5C => {
+                if dcs_unhooked_by_esc {
+                    performer.dcs_terminated_by_st();
+                }
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
             },
@@ -787,6 +796,12 @@ pub trait Perform {
     /// The previously selected handler should be notified that the DCS has
     /// terminated.
     fn unhook(&mut self) {}
+
+    /// Called right after `unhook` when the device control string ended with
+    /// ST (`ESC \` or 8-bit `0x9C`), not cancelled by CAN or SUB or cut off
+    /// by another escape sequence. For `ESC \` it comes after the next byte
+    /// proves the ESC began ST, before that `\` is dispatched.
+    fn dcs_terminated_by_st(&mut self) {}
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}

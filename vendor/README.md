@@ -113,6 +113,15 @@ cosmic-text release that contains `1e0074c8`.
   markers to defer graphics control strings before decoding can mutate
   buffer-local state, then replay each action against the exact terminal
   screen and cursor state that existed at its position in the PTY stream.
+  Terminal queries reach the handler: XTVERSION (`CSI > q`), DEC private
+  device status (`CSI ? Ps n`), and the bodies of DECRQSS (`DCS $ q`) and
+  XTGETTCAP (`DCS + q`), kept across reads in a buffer bounded at 1 KiB; a
+  longer body is reported without its contents so it is answered as invalid.
+  The parser unhooks on ESC, CAN and SUB alike, so `Perform` gains
+  `dcs_terminated_by_st`, called after `unhook` only when the string ended
+  with ST: the 8-bit `0x9C`, or an ESC whose very next byte is `\`. A query is
+  answered only then; one that CAN, SUB or another sequence cuts off gets no
+  reply.
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a
