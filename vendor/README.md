@@ -46,15 +46,25 @@ and local patches.
   known preload pattern should not ship even unreferenced. Scrolling a region
   rotates its rows in one slice move while they sit contiguously in the ring
   buffer. Upstream swaps them one at a time, one wrapped index per row in the
-  region for every line scrolled.
+  region for every line scrolled. The terminal answers the queries programs
+  probe it with: XTVERSION with the `Config::xtversion` name (unanswered when
+  unset), DECXCPR (`CSI ? 6 n`), DECRQSS for SGR, DECSTBM and DECSCUSR (an
+  unknown setting is answered as invalid and never echoed), XTGETTCAP for a
+  fixed set of truecolor, underline, cursor-shape and palette capabilities
+  (each name answered separately, in one write, and echoed only as validated
+  hex, at most 32 per request), and DECRQM for modes 47 and 1047. DSR and
+  DECXCPR count the row from the top margin under origin mode, as xterm
+  does, never below row 1 (DECRC does not restore DECOM here, so the cursor
+  can sit above the margin); upstream reported the absolute row.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
   Kettle's public terminal-parser integration but does not run package-owned
   targets. Retained direct unit tests cover the mode stack, monotonic history
   origin, selection eviction, alternate-screen semantics, graphics-event
-  ordering/coalescing, overflow recovery, and region scrolls against the
-  row-by-row swap; run them with
+  ordering/coalescing, overflow recovery, region scrolls against the
+  row-by-row swap, and the query replies (including Neovim's exact undercurl
+  and truecolor probes); run them with
   `cargo test --locked --manifest-path vendor/Cargo.toml --target-dir
   target/vendor-check -p alacritty_terminal`.
 
