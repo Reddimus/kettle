@@ -547,11 +547,17 @@ class Safety(unittest.TestCase):
             probe = work / "killer.sh"
             # Stops when asked, but reports that it had to SIGKILL the terminal.
             probe.write_text('#!/bin/sh\ntrap \'echo "{\\"killed\\": true}" > "$1"; exit 0\' TERM\n'
-                             'while :; do sleep 0.05; done\n')
+                             ': > "$1.ready"\nwhile :; do sleep 0.05; done\n')
             probe.chmod(0o755)
             runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
             process = runner.launch("kettle", "true", 1)
-            time.sleep(0.3)
+            # Signal only once the trap is set: a loaded machine can take
+            # longer than any fixed sleep to start the shell.
+            ready = work / "launch.json.ready"
+            deadline = time.monotonic() + 10
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "the probe never set its trap")
             self.assertFalse(runner.stop(process, 5))
 
     def test_a_probe_that_never_finishes_is_cleaned_up_and_reported(self) -> None:
