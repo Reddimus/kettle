@@ -52,9 +52,9 @@ Results go to --out-dir as results.json, rewritten after every row, and
 summary.md.
 """
 
-from __future__ import annotations
-
 import argparse
+import base64
+import contextlib
 import datetime
 import hashlib
 import json
@@ -63,10 +63,12 @@ import os
 import plistlib
 import random
 import re
+import select
 import resource
 import shlex
 import shutil
 import signal
+import stat
 import statistics
 import struct
 import subprocess
@@ -74,7 +76,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 PROBES = Path(__file__).resolve().parent / "macos-standing"
@@ -508,6 +510,480 @@ def write_configs(work: Path, kettle_configs: Optional[Dict[str, str]] = None) -
     )
 
 
+GHOSTTY_DOMAIN = "com.mitchellh.ghostty"
+# Ghostty 1.3 opens every new window at the last window's frame, which it
+# keeps in this user default, and ignores window-width/window-height when it
+# is set. After the user tiles a Ghostty window, the measured Ghostty opens at
+# that tile's grid instead of COLS x ROWS.
+GHOSTTY_FRAME_KEY = "NSWindowLastPosition"
+
+
+def read_default(domain: str, key: str):
+    """A user default's typed value (None when it is not set), from `defaults
+    export`, which keeps types that `defaults read` flattens to text. A
+    missing domain exports an empty dictionary; a failed export raises, since
+    reading it as "not set" would let a restore delete the real value."""
+    exported = subprocess.run(["defaults", "export", domain, "-"], capture_output=True, timeout=10)
+    if exported.returncode != 0:
+        raise RuntimeError(f"defaults export {domain} failed with status {exported.returncode}")
+    return plistlib.loads(exported.stdout).get(key)
+
+
+def plist_fragment(value) -> str:
+    """A value as the XML property-list fragment `defaults write` takes, which
+    keeps its types (reals stay reals)."""
+    document = plistlib.dumps(value, fmt=plistlib.FMT_XML).decode()
+    return document.split("<plist version=\"1.0\">", 1)[1].rsplit("</plist>", 1)[0].strip()
+
+
+def write_default(domain: str, key: str, value) -> bool:
+    """Set a user default to a typed value, or delete it for None, and say
+    whether reading it back shows the change. `defaults delete` also fails
+    when the key is absent, so its status cannot tell."""
+    if value is None:
+        subprocess.run(["defaults", "delete", domain, key], capture_output=True, timeout=10)
+    else:
+        subprocess.run(["defaults", "write", domain, key, plist_fragment(value)], capture_output=True, timeout=10)
+    return read_default(domain, key) == value
+
+
+def set_default(domain: str, key: str, value, attempts: int = 2) -> bool:
+    """write_default, tried again once: a running Ghostty can write the same
+    default at any moment."""
+    return any(write_default(domain, key, value) for _ in range(attempts))
+
+
+# How long past its timeout, or past being told to stop, a launch probe can
+# take to end: it gives its terminal 10 s, then 1 s from SIGTERM to SIGKILL.
+PROBE_STOP_GRACE = 15.0
+
+
+# How long a group that still holds a live process is waited for past the
+# probe's own deadline: the probe itself failed, and the Ghostty it left may
+# still close and write its frame.
+ROUND_CAP = 600.0
+
+
+def round_until(seconds: float, tracked: Optional[float], ended: float) -> float:
+    """How long wait_for_round may wait for the Ghostty launch last
+    announced, whose probe has timeout `seconds`. With the probe's group
+    known, `tracked` is when it was learned, after the probe's spawn: the
+    probe SIGKILLs a Ghostty still running by its own deadline (the spawn
+    plus `seconds`, then at most 11 s), and the cap lies ROUND_CAP past that.
+    With no group (the harness ended around the spawn), the grace runs from
+    `ended`, when the harness was seen to go: a probe whose harness is gone
+    stops its terminal as if told to."""
+    if tracked is None:
+        return ended + PROBE_STOP_GRACE
+    return tracked + seconds + PROBE_STOP_GRACE + ROUND_CAP
+
+
+def wait_for_round(pgid: Optional[int], until: float,
+                   clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+                   live: Optional[Callable[[int], Optional[bool]]] = None) -> bool:
+    """Wait until a measured Ghostty can no longer write its own frame over
+    the one about to go back, and say whether that is known. Its launch probe
+    leads a process group holding it and the Ghostty it spawned, and the
+    probe exits only once that Ghostty has, so the round is over once the
+    group has emptied; a group ps cannot judge counts as live. With no group,
+    the wait lasts until `until` and counts as over. A group still live at
+    `until` returns False. It sends no signal: once the harness is gone,
+    nothing unreaped holds the group's id."""
+    live = live or group_has_live_members
+    while True:
+        if pgid is not None and live(pgid) is False:
+            return True
+        if clock() >= until:
+            return pgid is None
+        sleep(0.1)
+
+
+# The hidden mode in which this script runs as GhosttyFrame's keeper.
+KEEP_DEFAULT_ARG = "--keep-default"
+
+
+def keep_default(domain: str, key: str, encoded: str) -> int:
+    """GhosttyFrame's keeper, a separate process in its own session and the
+    only writer of the default while a session runs. "clear N" clears it and
+    answers "ok N"; "clear N SECONDS" also says a Ghostty launch with that
+    timeout follows, and "round N PGID" names its launch probe's process
+    group. "done N", or end of input however the harness ended (SIGKILL
+    included), waits until that Ghostty can no longer write its own frame
+    (wait_for_round), puts the saved value back, answers "restored N",
+    "late N" (restored, but that Ghostty had not been seen to end) or
+    "not-restored N", and exits. One writer means no clear can still be in
+    flight when the value goes back. It ignores SIGTERM, SIGINT and SIGHUP: a
+    kill by name aimed at the harness also matches this process, whose argv
+    names the same script, and only end of input may end it."""
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+    saved = plistlib.loads(base64.b64decode(encoded))["value"] if encoded != "absent" else None
+
+    def say(text: str) -> None:
+        # The harness may be gone, and its end of the pipe with it; the value
+        # still has to go back.
+        try:
+            print(text, flush=True)
+        except OSError:
+            sys.stdout = open(os.devnull, "w")
+
+    tag = "eof"
+    launching = False
+    seconds = 0.0
+    pgid: Optional[int] = None
+    tracked: Optional[float] = None
+    for line in sys.stdin:
+        words = line.split()
+        if len(words) in (2, 3) and words[0] == "clear":
+            try:
+                set_default(domain, key, None)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
+            if len(words) == 3:
+                # The launch follows the answer.
+                launching, pgid, tracked = True, None, None
+                try:
+                    seconds = max(0.0, float(words[2]))
+                except ValueError:
+                    seconds = 0.0
+            say(f"ok {words[1]}")
+            continue
+        if len(words) == 3 and words[0] == "round":
+            if words[2].isdigit() and int(words[2]) > 1:
+                pgid, tracked = int(words[2]), time.monotonic()
+            say(f"ok {words[1]}")
+            continue
+        if len(words) == 2 and words[0] == "done":
+            tag = words[1]
+        break
+    over = True
+    if launching:
+        over = wait_for_round(pgid, round_until(seconds, tracked, time.monotonic()))
+    try:
+        restored = set_default(domain, key, saved)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        restored = False
+    say(f"{'not-restored' if not restored else 'restored' if over else 'late'} {tag}")
+    return 0
+
+
+class GhosttyFrame:
+    """Around a session that measures Ghostty: save the user's last-window
+    frame, clear it before every Ghostty launch so Ghostty opens at the
+    configured grid, and put the saved value back when the session ends.
+    Nothing changes unless the saved value could be read. A keeper process
+    holds the saved value and makes every change, and puts the value back
+    when the harness says so or ends any other way (an exception, SIGTERM,
+    SIGKILL), so the harness needs no signal handlers. It learns of each
+    Ghostty launch (clear, track), so that it puts the value back only once
+    a measured Ghostty still running can no longer write its own frame over
+    it. Until the value is back, `recovery` holds the command that restores
+    it by hand. The user's own Ghostty windows are never touched; a new
+    window they open mid-session would open at the harness's grid."""
+
+    # Longer than the keeper's worst case for one request: two attempts, each
+    # a `defaults` call and an export capped at 10 s.
+    WAIT = 60.0
+
+    def __init__(self, domain: str = GHOSTTY_DOMAIN, key: str = GHOSTTY_FRAME_KEY,
+                 recovery: Optional[Path] = None):
+        self.domain, self.key, self.recovery = domain, key, recovery
+        self.saved = None
+        self.active = False
+        self.keeper: Optional[subprocess.Popen] = None
+        self.sequence = 0
+        self.pending = b""
+        # The Ghostty launch last announced: its timeout, its probe, and when
+        # the keeper was told of the probe.
+        self.launching = False
+        self.seconds = 0.0
+        self.round: Optional[subprocess.Popen] = None
+        self.tracked: Optional[float] = None
+
+    def restore_command(self) -> str:
+        return (f"defaults delete {self.domain} {self.key}" if self.saved is None
+                else f"defaults write {self.domain} {self.key} '{plist_fragment(self.saved)}'")
+
+    def __enter__(self) -> "GhosttyFrame":
+        self.saved = read_default(self.domain, self.key)
+        if self.recovery is not None:
+            self.recovery.write_text(self.restore_command() + "\n")
+        encoded = ("absent" if self.saved is None
+                   else base64.b64encode(plistlib.dumps({"value": self.saved}, fmt=plistlib.FMT_BINARY)).decode())
+        self.keeper = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), KEEP_DEFAULT_ARG, self.domain, self.key, encoded],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.active = True
+        try:
+            self.clear()
+        except BaseException:
+            self._restore()
+            raise
+        return self
+
+    def request(self, verb: str, timeout: float, *args) -> str:
+        """Send "verb N args..." and return the keeper's answer to that N, or
+        "" if none comes within `timeout` or the keeper has ended. An answer
+        that arrives late for an earlier request is skipped, never taken for
+        this one. Reads the raw pipe, so select cannot miss a line already
+        buffered."""
+        if self.keeper.stdin.closed:
+            raise BrokenPipeError("the keeper's input is closed")
+        self.sequence += 1
+        tag = str(self.sequence)
+        try:
+            self.keeper.stdin.write(" ".join([verb, tag, *map(str, args)]).encode() + b"\n")
+            self.keeper.stdin.flush()
+        except OSError:
+            # The keeper is gone. Close the pipe now, or its unflushed bytes
+            # fail again when the object is collected.
+            try:
+                self.keeper.stdin.close()
+            except OSError:
+                pass
+            raise
+        if verb == "done":
+            self.keeper.stdin.close()
+        fd = self.keeper.stdout.fileno()
+        deadline = time.monotonic() + timeout
+        while True:
+            while b"\n" in self.pending:
+                line, self.pending = self.pending.split(b"\n", 1)
+                words = line.decode(errors="replace").split()
+                if len(words) == 2 and words[1] == tag:
+                    return words[0]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return ""
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                return ""
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return ""
+            self.pending += chunk
+
+    def clear(self, seconds: Optional[float] = None) -> None:
+        """Clear the default; with `seconds`, a Ghostty launch with that
+        timeout follows at once."""
+        # A clear that does not take shows up as a round at another grid,
+        # which the grid check fails; it is not worth ending a session over.
+        if not self.active:
+            return
+        if seconds is not None:
+            self.launching, self.seconds, self.round, self.tracked = True, seconds, None, None
+        try:
+            answer = self.request("clear", self.WAIT, *([] if seconds is None else [seconds]))
+        except OSError:
+            answer = ""
+        if answer != "ok":
+            # The keeper is gone or stuck: clear directly (a clear still in
+            # flight there clears too); the restore falls back as well.
+            try:
+                set_default(self.domain, self.key, None)
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                pass
+
+    def track(self, probe: subprocess.Popen) -> None:
+        """Name the launch probe of the Ghostty just announced by clear."""
+        if not self.active:
+            return
+        self.round, self.tracked = probe, time.monotonic()
+        try:
+            self.request("round", self.WAIT, probe.pid)
+        except OSError:
+            pass
+
+    def _wait_for_round(self) -> bool:
+        """wait_for_round, here, for the fallback."""
+        if not self.launching:
+            return True
+        return wait_for_round(self.round.pid if self.round is not None else None,
+                              round_until(self.seconds, self.tracked, time.monotonic()))
+
+    def _restore(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        try:
+            # The keeper first waits out a Ghostty round still in flight.
+            waiting = 0.0
+            if self.launching:
+                waiting = max(0.0, round_until(self.seconds, self.tracked, time.monotonic()) - time.monotonic())
+                if self.round is not None and self.round.poll() is None:
+                    print(f"waiting for the measured Ghostty to close before {self.key} goes back",
+                          file=sys.stderr, flush=True)
+            try:
+                answer = self.request("done", self.WAIT + waiting)
+            except OSError:
+                answer = ""
+            if answer in ("restored", "late"):
+                try:
+                    self.keeper.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
+                if answer == "restored":
+                    self._restored()
+                else:
+                    self._report("a measured Ghostty was still running when the value went back")
+                return
+            # The keeper could not restore, or is gone or stuck: stop it and
+            # whatever it started, and restore here only once none of them
+            # can still write.
+            try:
+                stopped = self._stop_keeper()
+            except Exception:
+                stopped = False
+            if not stopped:
+                self._report("could not confirm that the processes the keeper started have stopped")
+                return
+            over = self._wait_for_round()
+            try:
+                restored = set_default(self.domain, self.key, self.saved)
+            except Exception:
+                restored = False
+            if not restored:
+                self._report("the value read back differs")
+            elif over:
+                self._restored()
+            else:
+                self._report("a measured Ghostty was still running when the value went back")
+        except BaseException:
+            # A second interrupt while restoring here: say how to finish.
+            self._report("interrupted while restoring")
+            raise
+        finally:
+            try:
+                self.keeper.stdout.close()
+            except OSError:
+                pass
+
+    def _restored(self) -> None:
+        if self.recovery is not None:
+            self.recovery.unlink(missing_ok=True)
+
+    def _report(self, why: str) -> None:
+        where = f" (also in {self.recovery})" if self.recovery is not None else ""
+        print(f"could not restore {self.domain} {self.key} ({why}); restore it with: "
+              f"{self.restore_command()}{where}", file=sys.stderr, flush=True)
+
+    def _stop_keeper(self) -> bool:
+        """Kill the keeper's process group (its own session: the keeper and
+        any `defaults` command it started) and wait for it to empty. The
+        keeper stays unreaped until then, so its pid, the group's id, cannot
+        be reused by another process meanwhile. Returns whether the group
+        emptied; if not, a writer may still be pending and nothing may be
+        restored over it."""
+        try:
+            os.killpg(self.keeper.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # macOS answers EPERM for a group whose only member is the
+            # zombie leader; ps below tells whether anything live is left.
+            pass
+        deadline = time.monotonic() + 10
+        while True:
+            live = group_has_live_members(self.keeper.pid)
+            if live is False:
+                break
+            # Live, or unknown because ps failed: never restore over a
+            # writer that may still be pending.
+            if live is None or time.monotonic() > deadline:
+                return False
+            time.sleep(0.05)
+        try:
+            self.keeper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        return True
+
+    def __exit__(self, *exc) -> None:
+        self._restore()
+
+
+def group_has_live_members(pgid: int) -> Optional[bool]:
+    """Whether any process other than a zombie is still in process group
+    `pgid`, from ps: a group whose only member is an unreaped zombie still
+    answers kill(-pgid, 0), with success on some systems and EPERM on macOS.
+    None when ps cannot say (it failed, was refused or timed out): the caller
+    must then treat the group as possibly live."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS: also the answer for a group holding only a zombie.
+        pass
+    try:
+        listed = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 or not listed.stdout.strip():
+        return None
+    return any(fields[0] == str(pgid) and not fields[1].startswith("Z")
+               for fields in (line.split() for line in listed.stdout.splitlines()) if len(fields) >= 2)
+
+
+def stamp_grid(stamp: Path) -> Optional[Tuple[int, int]]:
+    """The (cols, rows) the stamp probe recorded when the payload started, or
+    None if it never ran."""
+    try:
+        fields = stamp.read_text().split()
+        return int(fields[1]), int(fields[2])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+# How long a payload waits for its terminal to reach COLS x ROWS: a terminal
+# can start its child before its first resize.
+SETTLE_SECONDS = 5
+
+
+def settled_grid(path: Path) -> Optional[Tuple[int, int]]:
+    """The (cols, rows) `stamp --settle` ended at, or None if it never ran."""
+    try:
+        fields = path.read_text().split()
+        return int(fields[0]), int(fields[1])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def round_grid(work: Path) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+    """The grid a round's workload ran at, and the grid its payload started
+    at. The settled grid decides; without one (the payload was stopped before
+    it got there) the start grid stands in."""
+    start = stamp_grid(work / "stamp")
+    return settled_grid(work / "grid") or start, start
+
+
+def check_grid(row: dict, grid: Optional[Tuple[int, int]],
+               start: Optional[Tuple[int, int]] = None) -> dict:
+    """Record the round's grid, also on a round that failed for another
+    reason (a terminal's first launch decides whether the session can
+    compare), and fail a round that ran at any grid but COLS x ROWS: a smaller
+    grid does less work, so its numbers would not compare. A start grid that
+    differs (the terminal resized after starting its child) is recorded, not
+    failed."""
+    if grid is None:
+        return row
+    moved = {"start_cols": start[0], "start_rows": start[1]} if start and start != grid else {}
+    row = {**row, "cols": grid[0], "rows": grid[1], **moved}
+    if grid != (COLS, ROWS) and "error" not in row:
+        return {"error": f"grid {grid[0]}x{grid[1]}, not {COLS}x{ROWS}", "cols": grid[0], "rows": grid[1], **moved}
+    return row
+
+
+def first_launch_refusal(name: str, row: dict, launched: set) -> Optional[str]:
+    """A terminal's first launch in a session shows the grid it opens at. At
+    any grid but COLS x ROWS none of its rounds can compare, so the session is
+    refused then, not after a night of rounds that cannot count."""
+    if name in launched or not row.get("cols"):
+        return None
+    launched.add(name)
+    if (row["cols"], row["rows"]) != (COLS, ROWS):
+        return f"{name} opened at {row['cols']}x{row['rows']}, not {COLS}x{ROWS}"
+    return None
+
+
 class Runner:
     def __init__(self, probes: Dict[str, Path], work: Path, kettle: Dict[str, str]):
         self.probes = probes
@@ -518,6 +994,11 @@ class Runner:
         self.phases: set = set()
         # How long past its own timeout a launch probe may take to report.
         self.grace = 15.0
+        # Cleared before each Ghostty launch while a session measures Ghostty.
+        self.ghostty_frame: Optional[GhosttyFrame] = None
+        # The launch probe of the round in flight, stopped if the session ends
+        # while it runs.
+        self.current: Optional[subprocess.Popen] = None
 
     def script(self, body: str) -> Path:
         """One script per distinct body, reused across launches. macOS assesses
@@ -530,22 +1011,34 @@ class Runner:
             path.chmod(0o755)
         return path
 
+    def settle_command(self) -> str:
+        """Waits for the terminal to reach COLS x ROWS and records the grid it
+        ended at (round_grid)."""
+        return f'"{self.probes["stamp"]}" --settle {COLS} {ROWS} {SETTLE_SECONDS} "{self.work / "grid"}"'
+
     def launch(self, name: str, body: str, timeout: float,
                params: Optional[Dict[str, str]] = None, phases: bool = False,
-               argv: Optional[List[str]] = None) -> subprocess.Popen:
-        """Start `name` running `body` after the stamp. Values that change per
-        launch go in a params file the script sources, so the script stays the
-        same file. `argv` replaces the terminal and its payload (the latency
-        floors, which are their own windows); nothing then writes the stamp."""
+               argv: Optional[List[str]] = None, settle: bool = True) -> subprocess.Popen:
+        """Start `name` running `body` after the stamp and, with `settle`,
+        after the terminal has reached COLS x ROWS; without it, `body` places
+        settle_command itself. Values that change per launch go in a params
+        file the script sources, so the script stays the same file. `argv`
+        replaces the terminal and its payload (the latency floors, which are
+        their own windows); nothing then writes the stamp."""
         stamp = self.work / "stamp"
         # A failed launch writes no result, so nothing from the previous round
         # may be left to be read in its place.
-        for stale in (stamp, Path(str(stamp) + ".pid"), self.work / "done", self.work / "launch.json"):
+        for stale in (stamp, Path(str(stamp) + ".pid"), self.work / "grid", self.work / "done",
+                      self.work / "launch.json"):
             stale.unlink(missing_ok=True)
         params_file = self.work / "params"
         params_file.write_text("".join(f"{key}={shlex.quote(value)}\n" for key, value in (params or {}).items()))
+        frame = self.ghostty_frame if name == "ghostty" else None
+        if frame is not None:
+            frame.clear(timeout)
         if argv is None:
-            payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{body}')
+            settled = f"{self.settle_command()}\n" if settle else ""
+            payload = self.script(f'"{self.probes["stamp"]}" "{stamp}"\n. "{params_file}"\n{settled}{body}')
             argv = terminal_argv(name, payload, self.work, self.kettle)
         # Every terminal runs with the log filter it ships with, whatever the
         # harness's own shell sets. Kettle's phase stamps go to its stderr,
@@ -559,10 +1052,18 @@ class Runner:
         # Its own session, so the probe leads a process group holding only it
         # and what it starts; stop() can clean that group up if it must.
         with (stderr_path.open("w") if stamped else open(os.devnull, "w")) as stderr:
-            return subprocess.Popen(
+            self.current = subprocess.Popen(
                 [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
                 stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True, env=env,
             )
+        if frame is not None:
+            frame.track(self.current)
+        return self.current
+
+    def stop_current(self) -> None:
+        """Stop the round still in flight, if the session ended during it."""
+        if self.current is not None and self.current.poll() is None:
+            self.stop(self.current, 30)
 
     def latency(self, name: str, options: dict, seed: int, keep: Optional[Path] = None) -> dict:
         """One keystroke-to-screen round. The terminal runs keyblock (a floor
@@ -579,7 +1080,7 @@ class Runner:
             ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
         else:
             process = self.launch(name, f'exec "{self.probes["keyblock"]}" "{log}"', 600)
-            ready = self.wait_for(self.work / "stamp", 30)
+            ready = self.wait_for(self.work / "grid", 30 + SETTLE_SECONDS)
         pid = self.pid()
         if not ready or pid is None:
             self.stop(process, 30)
@@ -640,10 +1141,11 @@ class Runner:
         stderr_path = self.work / "terminal.stderr"
         if stderr_path.exists():
             result.update(parse_phases(stderr_path.read_text(errors="replace"), result.get("started_ns")))
-        stamp = self.work / "stamp"
-        if stamp.exists():
-            fields = stamp.read_text().split()
-            result["cols"], result["rows"] = int(fields[1]), int(fields[2])
+        grid, start = round_grid(self.work)
+        if grid:
+            result["cols"], result["rows"] = grid
+        if start and start != grid:
+            result["start_cols"], result["start_rows"] = start
         return result
 
     def wait_for(self, path: Path, timeout: float) -> bool:
@@ -731,13 +1233,16 @@ class Runner:
 
     def startup(self, name: str) -> dict:
         # Hold the window for a second so terminals that spawn the child before
-        # showing a window still reach the window server.
-        process = self.launch(name, "exec /bin/sleep 1", 20, phases=True)
+        # showing a window still reach the window server. The child must start
+        # at once, so the grid is read after the hold.
+        process = self.launch(name, f"/bin/sleep 1\nexec {self.settle_command()}", 20, phases=True,
+                              settle=False)
         return self.finish(process, 20)
 
     def idle(self, name: str, settle: float, window: float, activate: bool) -> dict:
-        process = self.launch(name, f"exec /bin/sleep {settle + window + 5}", settle + window + 20)
-        if not self.wait_for(self.work / "stamp", 20):
+        process = self.launch(name, f"exec /bin/sleep {settle + window + 5}",
+                              settle + window + 20 + SETTLE_SECONDS)
+        if not self.wait_for(self.work / "grid", 20 + SETTLE_SECONDS):
             self.stop(process, 30)
             return {"error": "the terminal never ran its payload"}
         activated = self.activate() if activate else None
@@ -2132,7 +2637,7 @@ def preflight_refusals(state: dict) -> List[str]:
     if state["harness_dirty"] is None:
         refusals.append("harness state unknown (git failed)")
     elif state["harness_dirty"]:
-        refusals.append("scripts/perf has local changes")
+        refusals.append("the harness has local changes")
     if state["procs"] is None:
         refusals.append("could not list processes")
         return refusals
@@ -2165,15 +2670,129 @@ def checked(argv: List[str]) -> Optional[str]:
     return done.stdout if done.returncode == 0 and done.stdout.strip() else None
 
 
+# Files under scripts/perf that no session runs or reads: the docs, the
+# self-tests, their fixtures and the other perf tools. Everything else there,
+# whatever its name or kind (a module Python could load before the harness's
+# first line, bytecode, a symlink, a submodule), is part of the harness
+# version, so a merge that changes only these keeps a session set open, and a
+# file nobody listed counts.
+INERT = frozenset({
+    "scripts/perf/README.md",
+    "scripts/perf/kettle-live-probes.py",
+    "scripts/perf/linux-compare.sh",
+    "scripts/perf/macos-compare-score-self-test.py",
+    "scripts/perf/macos-compare.sh",
+    "scripts/perf/macos-standing-self-test.py",
+})
+
+
+def runs_in_a_session(path: str) -> bool:
+    """Whether a path under scripts/perf is part of the harness version.
+    Python's bytecode cache is not: it loads a file from __pycache__ only
+    for a source beside it, which counts. Nor is Finder's .DS_Store."""
+    if "/__pycache__/" in path or path.endswith("/__pycache__") or path.rpartition("/")[2] == ".DS_Store":
+        return False
+    return not (path in INERT or (path.startswith("scripts/perf/macos-standing/") and path.endswith(".fixture")))
+
+
+def git_blob_id(data: bytes, algorithm: str = "sha1") -> str:
+    """The object id Git gives a file with these bytes, in a repository
+    whose object format is `algorithm` (sha1 or sha256)."""
+    return hashlib.new(algorithm, b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def git_file_id(path: str, expected: os.stat_result, algorithm: str = "sha1") -> Tuple[str, str]:
+    """(mode, object id) of the regular file at `path`, which lstat showed
+    as `expected`, hashed in bounded chunks. Opening neither follows a link
+    nor waits on a writer, and a file replaced or resized while it is read
+    raises OSError."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError(f"{path} changed while it was read")
+        digest = hashlib.new(algorithm, b"blob %d\0" % opened.st_size)
+        remaining = opened.st_size
+        while True:
+            chunk = os.read(descriptor, 1 << 20)
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if remaining != 0:
+            raise OSError(f"{path} changed while it was read")
+    finally:
+        os.close(descriptor)
+    return ("100755" if opened.st_mode & 0o100 else "100644"), digest.hexdigest()
+
+
+def _raise(error: OSError) -> None:
+    raise error
+
+
+def working_entries(repo: Path, algorithm: str = "sha1") -> Optional[Dict[str, Tuple[str, str]]]:
+    """Every file a session runs, as it is on disk: path to (mode, object id)
+    in Git's terms, a symlink by its target. It reads the directory itself,
+    so no Git index flag (assume-unchanged, skip-worktree), ignore rule or
+    sparse checkout can hide one. A FIFO, socket or device, which Git cannot
+    hold, is listed as such and so differs from any commit. None when any
+    directory or file cannot be read."""
+    entries: Dict[str, Tuple[str, str]] = {}
+    try:
+        for directory, subdirectories, files in os.walk(repo / "scripts" / "perf", onerror=_raise,
+                                                       followlinks=False):
+            # A symlinked directory is an entry of its own.
+            for name in list(subdirectories):
+                if os.path.islink(os.path.join(directory, name)):
+                    subdirectories.remove(name)
+                    files.append(name)
+            for name in files:
+                full = os.path.join(directory, name)
+                path = Path(full).relative_to(repo).as_posix()
+                if not runs_in_a_session(path):
+                    continue
+                info = os.lstat(full)
+                if stat.S_ISLNK(info.st_mode):
+                    entries[path] = ("120000", git_blob_id(os.fsencode(os.readlink(full)), algorithm))
+                elif stat.S_ISREG(info.st_mode):
+                    entries[path] = git_file_id(full, info, algorithm)
+                else:
+                    entries[path] = ("special", stat.filemode(info.st_mode))
+    except OSError:
+        return None
+    return entries
+
+
 def harness_revision(repo: Path = REPO) -> dict:
-    """The tree hash of scripts/perf, so merges outside the harness do not
-    change it, and whether that tree has local changes."""
-    tree = checked(["git", "-C", str(repo), "rev-parse", "HEAD:scripts/perf"])
-    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", "scripts/perf"],
-                            capture_output=True, text=True)
-    # Either command failing leaves the state unknown, which refuses.
-    dirty = bool(status.stdout.strip()) if tree and status.returncode == 0 else None
-    return {"harness_tree": tree.strip() if tree else None, "harness_dirty": dirty}
+    """A hash of what a session runs: every file under scripts/perf but the
+    INERT ones, by path, mode and object id, taken from the files on disk.
+    And whether that differs from HEAD, which a session refuses: an edit, an
+    untracked or ignored file, an index flag hiding a change."""
+    try:
+        listed = subprocess.run(["git", "-C", str(repo), "ls-tree", "-r", "-z", "HEAD", "--", "scripts/perf"],
+                                capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        listed = None
+    committed: Optional[Dict[str, Tuple[str, str]]] = None
+    if listed is not None and listed.returncode == 0:
+        committed = {}
+        for record in listed.stdout.split(b"\0"):
+            if not record:
+                continue
+            meta, _, raw_path = record.partition(b"\t")
+            path = raw_path.decode("utf-8", "surrogateescape")
+            mode, _, oid = meta.decode().split(" ")
+            if runs_in_a_session(path):
+                committed[path] = (mode, oid)
+    # The ids HEAD lists tell the repository's object format.
+    algorithm = "sha256" if committed and any(len(oid) == 64 for _, oid in committed.values()) else "sha1"
+    entries = working_entries(repo, algorithm)
+    if not entries:
+        return {"harness_tree": None, "harness_dirty": None}
+    tree = hashlib.sha256("\0".join(f"{mode} {oid}\t{path}" for path, (mode, oid) in sorted(entries.items()))
+                          .encode("utf-8", "surrogateescape")).hexdigest()
+    # Without HEAD's list the state is unknown, which refuses.
+    return {"harness_tree": tree, "harness_dirty": None if committed is None else committed != entries}
 
 
 def collect_preflight(field: Dict[str, str], host_pid: Optional[int], wait_quiet: float) -> dict:
@@ -2359,6 +2978,8 @@ def run_combine(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    if len(sys.argv) == 5 and sys.argv[1] == KEEP_DEFAULT_ARG:
+        return keep_default(sys.argv[2], sys.argv[3], sys.argv[4])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--kettle", default=str(DEFAULT_KETTLE))
     parser.add_argument("--kettle-b", help="compare this Kettle build against --kettle instead of peers")
@@ -2623,46 +3244,72 @@ def main() -> int:
             benchmarks = prepare_benchmarks(vtebench.parents[2] / "benchmarks", work / "benchmarks")
         latency_options = {"keys": args.latency_keys, "warmup": args.latency_warmup,
                            "censor_ms": args.latency_censor_ms, "inject": args.latency_inject}
-        for workload in workloads:
-            entries = latency_names if workload == "latency" else names
-            rows: Dict[str, List[dict]] = {name: [] for name in entries}
-            results["workloads"][workload] = rows
-            # A whole rotation of failed latency rounds in a row points at the
-            # machine (an alert over the windows, lost grants), not at a
-            # terminal: the rest of the workload is recorded as not run.
-            failures_in_a_row = 0
-            # Warm-up launches run first for every terminal, are flagged, and
-            # never enter a statistic; they absorb first-launch costs such as
-            # the payload script's one-time assessment.
-            warmups = args.warmup if workload == "startup" else 0
-            for round_index in range(warmups + rounds[workload]):
-                for name in rotated(entries, round_index):
-                    if workload == "startup":
-                        row = runner.startup(name)
-                    elif workload == "idle":
-                        row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
-                    elif workload == "flood-memory":
-                        row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
-                    elif workload == "latency":
-                        if failures_in_a_row >= len(entries):
-                            row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
-                        else:
-                            # A new gap sequence every round, the same for
-                            # every entry in it.
-                            row = runner.latency(name, latency_options, SEED * 1000 + round_index,
-                                                 out_dir / f"latency-{name}-r{round_index}.json")
-                            failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
-                    else:
-                        row = runner.vtebench(name, vtebench, benchmarks,
-                                              out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
-                    if round_index < warmups:
-                        row["warmup"] = True
-                    row["at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-                    row["load"] = list(os.getloadavg()[:2])
-                    rows[name].append(row)
-                    recorder.write()
-                    print(f"{workload} round {round_index} {name}: {json.dumps(row)}", flush=True)
-                    time.sleep(1.0)
+        measured = set(names) | set(latency_names if "latency" in workloads else ())
+        frame = (GhosttyFrame(recovery=out_dir / "ghostty-frame-restore.txt") if "ghostty" in measured
+                 else contextlib.nullcontext())
+        # The terminals whose first launch showed its grid.
+        launched: set = set()
+        with frame:
+            runner.ghostty_frame = frame if isinstance(frame, GhosttyFrame) else None
+            try:
+                for workload in workloads:
+                    entries = latency_names if workload == "latency" else names
+                    rows: Dict[str, List[dict]] = {name: [] for name in entries}
+                    results["workloads"][workload] = rows
+                    # A whole rotation of failed latency rounds in a row points at the
+                    # machine (an alert over the windows, lost grants), not at a
+                    # terminal: the rest of the workload is recorded as not run.
+                    failures_in_a_row = 0
+                    # Warm-up launches run first for every terminal, are flagged, and
+                    # never enter a statistic; they absorb first-launch costs such as
+                    # the payload script's one-time assessment.
+                    warmups = args.warmup if workload == "startup" else 0
+                    for round_index in range(warmups + rounds[workload]):
+                        for name in rotated(entries, round_index):
+                            # A round that never launches (latency's "not run")
+                            # must not read the previous launch's grid.
+                            for stale in (work / "stamp", work / "grid"):
+                                stale.unlink(missing_ok=True)
+                            if workload == "startup":
+                                row = runner.startup(name)
+                            elif workload == "idle":
+                                row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
+                            elif workload == "flood-memory":
+                                row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
+                            elif workload == "latency":
+                                if failures_in_a_row >= len(entries):
+                                    row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
+                                else:
+                                    # A new gap sequence every round, the same for
+                                    # every entry in it.
+                                    row = runner.latency(name, latency_options, SEED * 1000 + round_index,
+                                                         out_dir / f"latency-{name}-r{round_index}.json")
+                                    failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
+                            else:
+                                row = runner.vtebench(name, vtebench, benchmarks,
+                                                      out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
+                            if not name.startswith("floor-"):
+                                row = check_grid(row, *round_grid(work))
+                                reason = first_launch_refusal(name, row, launched)
+                                if reason:
+                                    results["meta"]["refusals"].append(reason)
+                                    rows[name].append(row)
+                                    recorder.write()
+                                    raise SystemExit(f"refused: {reason}")
+                            if round_index < warmups:
+                                row["warmup"] = True
+                            row["at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+                            row["load"] = list(os.getloadavg()[:2])
+                            rows[name].append(row)
+                            recorder.write()
+                            print(f"{workload} round {round_index} {name}: {json.dumps(row)}", flush=True)
+                            time.sleep(1.0)
+            finally:
+                # A round still in flight (an interrupt, a crash) is stopped
+                # before the frame goes back: a measured Ghostty closing later
+                # would write its own frame over the restored one. The keeper
+                # waits for it anyway (wait_for_round); this keeps that short.
+                runner.stop_current()
 
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
