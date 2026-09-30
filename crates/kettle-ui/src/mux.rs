@@ -2829,9 +2829,15 @@ impl Mux {
         }
     }
 
+    /// Grow or shrink the focused pane's split. A zoomed tab shows only the
+    /// focused pane, so there is no visible split to move: resizing then would
+    /// change the hidden layout, and unzooming would show panes that moved
+    /// without the user seeing them move.
     pub fn resize_focus(&mut self, dir: Dir, delta: f32) {
         let a = self.active;
-        if let Some(tab) = self.tabs.get_mut(a) {
+        if let Some(tab) = self.tabs.get_mut(a)
+            && !tab.zoomed
+        {
             let f = tab.focus;
             tab.root.resize(f, dir, delta);
         }
@@ -7813,6 +7819,35 @@ mod node_tests {
         assert_eq!(z[0], (2, (0.0, 0.0, 100.0, 50.0)));
         m.toggle_zoom();
         assert_eq!(m.layout(0, (0.0, 0.0, 100.0, 50.0)).len(), 2);
+    }
+
+    /// Resizing while zoomed leaves the hidden split alone, so unzooming shows
+    /// the layout the user last saw; unzoomed, the same call still resizes.
+    #[test]
+    fn resize_is_a_no_op_while_zoomed() {
+        let mut m = Mux::new();
+        let mut root = Node::Leaf(1);
+        root.split_leaf(1, 2, Dir::Horizontal);
+        m.tabs.push(Tab {
+            root,
+            focus: 2,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            title_override: None,
+        });
+        m.active = 0;
+        let area = (0.0, 0.0, 100.0, 50.0);
+        let before = m.layout(0, area);
+
+        m.toggle_zoom();
+        m.resize_focus(Dir::Horizontal, -0.2);
+        m.toggle_zoom();
+        assert_eq!(m.layout(0, area), before, "zoomed resize moved the split");
+
+        m.resize_focus(Dir::Horizontal, -0.2);
+        assert_ne!(m.layout(0, area), before, "unzoomed resize must still work");
     }
 
     #[test]

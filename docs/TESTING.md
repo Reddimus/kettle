@@ -2209,8 +2209,7 @@ retained compile/regression checks on **windows**:
   class of the Command bug. They do **not** catch a modifier dropped from a
   payload with no parameter (encoding `Ctrl+A` as a plain `a` still satisfies
   them), so the per-chord exact-byte tests are still required. `Alt` implying
-  an ESC prefix holds for every legacy chord it emits, with plain Enter as the
-  one recorded exception. Source
+  an ESC prefix holds for every legacy chord it emits, Enter included. Source
   drift guards pin that each legacy entry point consults the Super predicate
   and that the Kitty path still reports Super, so a later cleanup cannot
   "fix" the protocol that is entitled to it.

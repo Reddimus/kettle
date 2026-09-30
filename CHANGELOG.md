@@ -41,6 +41,19 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A cursor position report (`CSI 6 n`) under origin mode counts the row from
   the top margin, as xterm does, so a program that saves the position and
   restores it with CUP lands where it was.
+- `Option+Return` on macOS is `Alt+Return`, so it adds a newline in Codex,
+  Claude Code and zsh's emacs keymap instead of submitting. Where no keyboard
+  mode applies (no kitty protocol, no `modifyOtherKeys` level that encodes it,
+  no modified-Enter fallback), `Alt+Return` sends `ESC CR`, as other terminals
+  do, instead of a bare CR.
+- `Ctrl+Shift+Space` toggles vi mode, in and out; the default never matched a
+  real key press, neither did any `space` chord in a config, and vi mode
+  took the chord before it could leave.
+- Resizing a split while its tab is zoomed no longer moves the hidden panes,
+  which then appeared moved on unzoom.
+- Holding a toggle chord (vi mode, zoom, fullscreen, broadcast, read-only,
+  and the other toggles) toggles once; key repeat used to flip the state back
+  and forth for as long as the chord was held.
 
 ## [4.8.0] — 2026-09-28
 

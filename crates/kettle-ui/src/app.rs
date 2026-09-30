@@ -263,6 +263,10 @@ fn macos_effective_modifiers(
 fn option_is_meta_for(key: &Key) -> bool {
     match key {
         Key::Named(NamedKey::Backspace) => true,
+        // Return composes nothing either, though winit gives it the text
+        // "\r". Option+Return is Alt+Return, the newline chord in Codex,
+        // Claude Code, zsh and fish; masked, it would submit instead.
+        Key::Named(NamedKey::Enter) => true,
         Key::Named(named) => named.to_text().is_none(),
         // Exactly what the policy protects. Restoring ALT for a character key
         // would prefix ESC to a glyph macOS has already composed, so `⌥e` would
@@ -19234,7 +19238,7 @@ impl App {
                 TextModal::TitleEdit => self.title_edit_key(ws, key, text),
                 TextModal::Search => {
                     if !self.search_key(ws, key, None, text) {
-                        self.search_bar_shortcut(ws, key, None, event_loop);
+                        self.search_bar_shortcut(ws, key, None, false, event_loop);
                     }
                 }
             }
@@ -21602,6 +21606,7 @@ impl App {
         ws: &mut WindowState,
         key: &Key,
         physical_key: Option<&PhysicalKey>,
+        repeat: bool,
         event_loop: &ActiveEventLoop,
     ) -> bool {
         let Some((trigger, action)) =
@@ -21626,7 +21631,11 @@ impl App {
                 if self.adaptive_focus_chord_falls_through(ws, trigger, &action) {
                     return false;
                 }
-                self.handle_action(ws, action, event_loop);
+                // A held toggle chord toggles once, as on the main keyboard
+                // path; its repeats are still the bar's to swallow.
+                if !(repeat && toggles_once_per_press(&action)) {
+                    self.handle_action(ws, action, event_loop);
+                }
                 true
             }
         }
@@ -23586,6 +23595,55 @@ fn drop_search_closing_repeat(
     false
 }
 
+/// Whether the Settings overlay is waiting for a keybind chord.
+fn settings_capture_active(ws: &WindowState) -> bool {
+    ws.settings_nav.as_ref().is_some_and(|nav| nav.capturing)
+}
+
+/// Whether an action flips a state, so auto-repeat of its held chord must not
+/// run it again: the chord would otherwise flip the state back and forth for
+/// as long as it is held, and leave it wherever the last repeat fell. Such a
+/// repeat is still consumed, so it never reaches the program.
+fn toggles_once_per_press(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::ToggleViMode
+            | Action::ToggleZoom
+            | Action::ScaledZoom
+            | Action::ToggleFullscreen
+            | Action::ToggleBroadcastAll
+            | Action::ToggleBroadcastGroup
+            | Action::ToggleBroadcastOff
+            | Action::ToggleBroadcastWindow
+            | Action::ToggleCopyOnSelect
+            | Action::ToggleCursorBlink
+            | Action::ToggleMouseHide
+            | Action::TogglePaneReadOnly
+            | Action::ToggleScrollbar
+            | Action::ToggleLightDark
+            | Action::ToggleSessionLog
+            | Action::ToggleGroupAll
+            | Action::ToggleGroupTab
+            | Action::ToggleGroupWindow
+            | Action::ToggleWindowVisibility
+    )
+}
+
+/// Whether a key press is bound to toggling vi mode. Vi mode takes every key
+/// before the keybind table is consulted, so without this check the chord
+/// that entered it (`Ctrl+Shift+Space` by default) could not leave it.
+fn is_vi_mode_toggle_chord(
+    bindings: &Bindings,
+    logical_key: &Key,
+    physical_key: &PhysicalKey,
+    mods: ModifiersState,
+) -> bool {
+    matches!(
+        resolve_keybind_action(bindings, Some(logical_key), Some(physical_key), mods),
+        Some((_, Action::ToggleViMode))
+    )
+}
+
 fn resolve_keybind_action(
     bindings: &Bindings,
     logical_key: Option<&Key>,
@@ -23910,6 +23968,10 @@ fn to_kkey(key: &Key) -> Option<KKey> {
             NamedKey::End => KKey::End,
             NamedKey::Enter => KKey::Enter,
             NamedKey::Tab => KKey::Tab,
+            // winit reports the space bar as a named key, never as the
+            // character " ", so without this the `ctrl+shift+space` vi-mode
+            // default, and any `space` chord in a config, never matched.
+            NamedKey::Space => KKey::Char(' '),
             // Without these two the `cmd+backspace` default parses out of the
             // config and then never matches a real key press.
             NamedKey::Backspace => KKey::Backspace,
@@ -29151,9 +29213,22 @@ impl App {
                 // Vi-mode key dispatch. When
                 // vi_mode is Some, intercept keys for vi-style
                 // navigation before they reach the PTY. h/j/k/l move
-                // the vi cursor; 0/$/g/G jump; Esc exits.
+                // the vi cursor; 0/$/g/G jump; Esc exits, and so does the
+                // chord that entered it.
                 if ws.vi_mode.is_some() {
-                    self.vi_mode_key(ws, &event.logical_key, text);
+                    if is_vi_mode_toggle_chord(
+                        &self.cfg.keybinds,
+                        &event.logical_key,
+                        &event.physical_key,
+                        ws.mods,
+                    ) {
+                        // A held chord leaves once, not on every repeat.
+                        if !event.repeat {
+                            self.exit_vi_mode(ws);
+                        }
+                    } else {
+                        self.vi_mode_key(ws, &event.logical_key, text);
+                    }
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29187,7 +29262,12 @@ impl App {
                 }
                 // Settings overlay key handling (exclusive modal).
                 if ws.settings_nav.is_some() {
-                    self.settings_key(ws, &event.logical_key, event_loop);
+                    // Chord capture waits for a new press. Auto-repeat of the
+                    // Space or Enter that started it would otherwise be
+                    // captured, or refused with a notification, once per repeat.
+                    if !(event.repeat && settings_capture_active(ws)) {
+                        self.settings_key(ws, &event.logical_key, event_loop);
+                    }
                     if let Some(w) = &ws.window {
                         w.request_redraw();
                     }
@@ -29235,6 +29315,7 @@ impl App {
                             ws,
                             &event.logical_key,
                             Some(&event.physical_key),
+                            event.repeat,
                             event_loop,
                         );
                     }
@@ -29261,7 +29342,9 @@ impl App {
                         event.state,
                         true,
                     );
-                    self.handle_action(ws, act, event_loop);
+                    if !(event.repeat && toggles_once_per_press(&act)) {
+                        self.handle_action(ws, act, event_loop);
+                    }
                     return;
                 }
 
@@ -31371,6 +31454,9 @@ mod tests {
             NamedKey::Insert,
             NamedKey::F1,
             NamedKey::F12,
+            // Text "\r", but no composed character: Option+Return must be
+            // Alt+Return, or it submits where a newline was asked for.
+            NamedKey::Enter,
         ] {
             assert!(
                 option_is_meta_for(&Key::Named(named)),
@@ -31378,12 +31464,9 @@ mod tests {
             );
         }
 
-        for named in [
-            NamedKey::Enter,
-            NamedKey::Space,
-            NamedKey::Tab,
-            NamedKey::Escape,
-        ] {
+        // Option+Space composes a no-break space; Tab and Escape keep what
+        // they send.
+        for named in [NamedKey::Space, NamedKey::Tab, NamedKey::Escape] {
             assert!(
                 !option_is_meta_for(&Key::Named(named)),
                 "{named:?} produces text; restoring ALT would ESC-prefix it"
@@ -31466,7 +31549,6 @@ mod tests {
         };
 
         // Composing keys keep their unmodified bytes.
-        assert_eq!(encode(&Key::Named(NamedKey::Enter), None), b"\r".to_vec());
         assert_eq!(encode(&Key::Named(NamedKey::Space), None), vec![0x20]);
         assert_eq!(encode(&Key::Named(NamedKey::Tab), None), b"\t".to_vec());
         assert_eq!(encode(&Key::Named(NamedKey::Escape), None), vec![0x1b]);
@@ -31476,7 +31558,13 @@ mod tests {
             "´".as_bytes().to_vec()
         );
 
-        // And the keys the fix is for do change.
+        // And the keys the fix is for do change. Return composes nothing,
+        // so Option+Return is Alt+Return: ESC CR, a newline in zsh, Codex and
+        // Claude Code, where a masked Option would submit the line.
+        assert_eq!(
+            encode(&Key::Named(NamedKey::Enter), None),
+            b"\x1b\r".to_vec()
+        );
         assert_eq!(
             encode(&Key::Named(NamedKey::Backspace), None),
             vec![0x1b, 0x7f],
@@ -34944,7 +35032,7 @@ mod tests {
             .expect("control-plane search key branch");
         assert!(
             ctl.contains("if !self.search_key(ws, key, None, text) {")
-                && ctl.contains("self.search_bar_shortcut(ws, key, None, event_loop);"),
+                && ctl.contains("self.search_bar_shortcut(ws, key, None, false, event_loop);"),
             "a dispatched key the bar does not use must reach the shortcuts"
         );
     }
@@ -36564,6 +36652,166 @@ mod tests {
             ),
             Some(b"\x1b[32;5u".to_vec()),
             "synthetic Control chords must not invent associated text"
+        );
+    }
+
+    /// Every named key a config can bind arrives from the winit key that
+    /// produces it: winit reports the space bar as `NamedKey::Space`, so the
+    /// `ctrl+shift+space` vi-mode default was dead until it was mapped.
+    #[test]
+    fn every_configurable_named_key_matches_its_real_key() {
+        use super::{resolve_keybind_action, to_kkey};
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let mut pairs = vec![
+            ("up", NamedKey::ArrowUp),
+            ("down", NamedKey::ArrowDown),
+            ("left", NamedKey::ArrowLeft),
+            ("right", NamedKey::ArrowRight),
+            ("pageup", NamedKey::PageUp),
+            ("pagedown", NamedKey::PageDown),
+            ("home", NamedKey::Home),
+            ("end", NamedKey::End),
+            ("enter", NamedKey::Enter),
+            ("tab", NamedKey::Tab),
+            ("backspace", NamedKey::Backspace),
+            ("delete", NamedKey::Delete),
+            ("space", NamedKey::Space),
+        ];
+        let fkeys = [
+            NamedKey::F1,
+            NamedKey::F2,
+            NamedKey::F3,
+            NamedKey::F4,
+            NamedKey::F5,
+            NamedKey::F6,
+            NamedKey::F7,
+            NamedKey::F8,
+            NamedKey::F9,
+            NamedKey::F10,
+            NamedKey::F11,
+            NamedKey::F12,
+        ];
+        let fnames: Vec<String> = (1..=12).map(|n| format!("f{n}")).collect();
+        pairs.extend(fnames.iter().map(String::as_str).zip(fkeys));
+        for (name, named) in pairs {
+            let config = kettle_config::Config::parse_text(&format!(
+                "keybind = ctrl+alt+{name}=toggle_vi_mode\n"
+            ));
+            let trigger = config
+                .keybinds_declared
+                .iter()
+                .next()
+                .copied()
+                .unwrap_or_else(|| panic!("`{name}` does not parse"));
+            assert_eq!(
+                to_kkey(&Key::Named(named)),
+                Some(trigger.key),
+                "`{name}` parses to {:?} but {named:?} does not map to it",
+                trigger.key
+            );
+        }
+
+        let defaults = kettle_config::keybinds::defaults();
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            resolve_keybind_action(&defaults, Some(&Key::Named(NamedKey::Space)), None, mods),
+            Some((
+                Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char(' ')),
+                Action::ToggleViMode
+            ))
+        );
+    }
+
+    /// The chord that enters vi mode also leaves it, although vi mode takes
+    /// every key before the keybind table; other keys still drive it.
+    #[test]
+    fn the_vi_mode_chord_leaves_vi_mode() {
+        use super::is_vi_mode_toggle_chord;
+        use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
+
+        let defaults = kettle_config::keybinds::defaults();
+        let space = PhysicalKey::Code(KeyCode::Space);
+        let cs = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(is_vi_mode_toggle_chord(
+            &defaults,
+            &Key::Named(NamedKey::Space),
+            &space,
+            cs
+        ));
+        assert!(!is_vi_mode_toggle_chord(
+            &defaults,
+            &Key::Named(NamedKey::Space),
+            &space,
+            ModifiersState::empty()
+        ));
+        assert!(!is_vi_mode_toggle_chord(
+            &defaults,
+            &Key::Character("j".into()),
+            &PhysicalKey::Code(KeyCode::KeyJ),
+            ModifiersState::empty()
+        ));
+        let src = production_source();
+        let intercept = src
+            .split("if ws.vi_mode.is_some() {\n                    if is_vi_mode_toggle_chord(")
+            .nth(1)
+            .expect("the keyboard vi-mode intercept must check the toggle chord");
+        let exit = intercept
+            .find("self.exit_vi_mode(ws)")
+            .expect("the chord exits vi mode");
+        assert!(
+            intercept[..exit].contains("if !event.repeat {"),
+            "a held chord must leave vi mode once, not flip it on every repeat"
+        );
+    }
+
+    /// Auto-repeat of a held toggle chord runs the toggle once; repeat of a
+    /// motion or scroll chord keeps running it.
+    #[test]
+    fn toggles_run_once_per_press_while_held() {
+        use super::toggles_once_per_press;
+        use kettle_config::Action;
+        for toggle in [
+            Action::ToggleViMode,
+            Action::ToggleZoom,
+            Action::ScaledZoom,
+            Action::ToggleFullscreen,
+            Action::ToggleBroadcastAll,
+            Action::TogglePaneReadOnly,
+        ] {
+            assert!(toggles_once_per_press(&toggle), "{toggle:?}");
+        }
+        for repeating in [
+            Action::ScrollLineUp,
+            Action::ScrollPageDown,
+            Action::ResizeLeft,
+            Action::IncreaseFontSize,
+            Action::NextTab,
+            Action::JumpPrevPrompt,
+        ] {
+            assert!(!toggles_once_per_press(&repeating), "{repeating:?}");
+        }
+        // Every toggle a config can bind is in the list.
+        for name in kettle_config::keybinds::action_names() {
+            if let Some(action) = Action::from_name(name)
+                && format!("{action:?}").starts_with("Toggle")
+            {
+                assert!(toggles_once_per_press(&action), "{name} is a toggle");
+            }
+        }
+        let src = production_source();
+        assert!(
+            src.contains("if !(event.repeat && toggles_once_per_press(&act)) {"),
+            "the keyboard keybind path must skip toggle repeats"
+        );
+        assert!(
+            src.contains("if !(repeat && toggles_once_per_press(&action)) {"),
+            "the search bar's shortcut route must skip toggle repeats"
+        );
+        assert!(
+            src.contains("if !(event.repeat && settings_capture_active(ws)) {"),
+            "keybind capture must wait for a new press, not take the activating key's repeats"
         );
     }
 
