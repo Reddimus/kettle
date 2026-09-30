@@ -1592,6 +1592,11 @@ pub struct Mux {
     /// platform clipboard availability. New panes inherit it and live panes
     /// receive updates through [`Mux::set_osc52_copy_allowed`].
     pub osc52_copy_allowed: bool,
+    /// Whether the theme is dark, for programs that ask for the colour scheme
+    /// (`CSI ? 996 n`) or follow it (DEC mode 2031); `None` until the window's
+    /// first redraw settles its theme. New panes inherit it and live panes
+    /// receive updates through [`Mux::set_color_scheme`].
+    pub color_scheme_dark: Option<bool>,
     /// Ring buffer of recently-closed tab snapshots.
     /// Bounded so a long-running session doesn't accumulate state.
     /// LIFO: `pop_back` returns the most-recently-closed tab.
@@ -1647,6 +1652,7 @@ impl Mux {
             lua_output_subscribed: false,
             record_lossless: false,
             osc52_copy_allowed: true,
+            color_scheme_dark: None,
             closed_tabs: std::collections::VecDeque::with_capacity(CLOSED_TAB_RING_CAP),
             autoclean_groups: true,
         }
@@ -1666,6 +1672,15 @@ impl Mux {
             }
         }
         changed
+    }
+
+    /// The theme's colours changed: record whether it is dark and pass that to
+    /// every pane, which reports it to a program that turned on DEC mode 2031.
+    pub fn set_color_scheme(&mut self, dark: Option<bool>) {
+        self.color_scheme_dark = dark;
+        for pane in self.panes.values() {
+            pane.term.set_color_scheme(dark);
+        }
     }
 
     pub fn set_osc52_copy_allowed(&mut self, allowed: bool) {
@@ -1808,6 +1823,7 @@ impl Mux {
                 unnegotiated_modified_enter: unnegotiated_modified_enter(cfg.modify_other_keys),
                 contain_process_tree: false,
                 observe_child_exit: true,
+                color_scheme_dark: self.color_scheme_dark,
             },
             tx,
             waker.clone(),

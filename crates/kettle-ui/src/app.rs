@@ -12935,6 +12935,7 @@ impl App {
         // Compare-only when nothing changed; independent of GPU health, so it
         // runs before the device-lost early-return below.
         self.maybe_sync_native_theme(ws);
+        self.maybe_sync_color_scheme(ws);
         if let (Some(material), Some(window)) = (&ws.native_material, &ws.window) {
             material.sync(window, &self.cfg);
         }
@@ -17320,6 +17321,23 @@ impl App {
                 .filter_map(|s| s.window.as_ref())
             {
                 w.set_window_icon(icon.clone());
+            }
+        }
+    }
+
+    /// Tell every window's panes when the theme's colours changed, so a program
+    /// following DEC mode 2031 (Claude Code's automatic theme) re-reads the
+    /// background. Like `maybe_sync_native_theme`, it runs at every redraw and
+    /// every theme mutation ends in one, so no mutation path (actions, menu
+    /// previews, Lua, reload, schedule, OS appearance) needs its own call; it
+    /// only compares when nothing changed. Hidden windows are synced too,
+    /// since their programs still run.
+    fn maybe_sync_color_scheme(&mut self, ws: &mut WindowState) {
+        let scheme = (self.cfg.theme.is_dark(), self.cfg.theme.background);
+        for state in std::iter::once(&mut *ws).chain(self.windows.values_mut()) {
+            if state.color_scheme_synced != Some(scheme) {
+                state.color_scheme_synced = Some(scheme);
+                state.mux.set_color_scheme(Some(scheme.0));
             }
         }
     }
@@ -37427,6 +37445,36 @@ mod tests {
         assert!(!gets(Action::Copy, &owns, &one_tab()));
         // None of it without a program.
         assert!(!gets(Action::NextTab, &claims(false), &one_tab()));
+    }
+
+    /// Every theme change reaches the panes' colour scheme (DEC mode 2031)
+    /// through the redraw-time sync, which fires on a new background even when
+    /// the theme stays dark, and a new pane spawns with the window's scheme.
+    #[test]
+    fn theme_changes_reach_every_panes_color_scheme() {
+        let src = production_source();
+        let body = |name: &str| {
+            src.split(&format!("fn {name}("))
+                .nth(1)
+                .and_then(|rest| rest.split("\n    fn ").next())
+                .unwrap_or_else(|| panic!("{name}"))
+                .to_string()
+        };
+        assert!(
+            body("redraw").contains(
+                "self.maybe_sync_native_theme(ws);\n        self.maybe_sync_color_scheme(ws);"
+            ),
+            "the colour scheme must sync at every redraw, after the native theme"
+        );
+        let sync = body("maybe_sync_color_scheme");
+        assert!(sync.contains("(self.cfg.theme.is_dark(), self.cfg.theme.background)"));
+        assert!(sync.contains("std::iter::once(&mut *ws).chain(self.windows.values_mut())"));
+        assert!(sync.contains("state.mux.set_color_scheme(Some(scheme.0));"));
+        let mux = include_str!("mux.rs");
+        assert!(
+            mux.contains("color_scheme_dark: self.color_scheme_dark,"),
+            "a new pane must spawn with its window's scheme"
+        );
     }
 
     /// Real keys and the `dispatch_keybind` diagnostic share one routing

@@ -56,6 +56,10 @@ and local patches.
   DECXCPR count the row from the top margin under origin mode, as xterm
   does, never below row 1 (DECRC does not restore DECOM here, so the cursor
   can sit above the margin); upstream reported the absolute row.
+  `Term::set_color_scheme` and `Config::color_scheme_dark` give the light or
+  dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
+  colour change the caller signals, dark to dark included; DECSTR and RIS
+  turn mode 2031 off.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
@@ -132,6 +136,7 @@ cosmic-text release that contains `1e0074c8`.
   with ST: the 8-bit `0x9C`, or an ESC whose very next byte is `\`. A query is
   answered only then; one that CAN, SUB or another sequence cuts off gets no
   reply.
+  DEC mode 2031 is a named private mode (`ColorSchemeReports`).
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a

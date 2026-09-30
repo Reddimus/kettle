@@ -884,6 +884,15 @@ zoom-keybind-smoke:
 alt-arrow-zoom-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release alt-arrow-zoom
 
+# Prove a program following the colour scheme (DEC mode 2031, as Claude Code's
+# automatic theme does) hears Kettle's theme flip: a recorder turns the mode on
+# and asks once (CSI ? 996 n), then each toggle_light_dark must reach it as
+# CSI ? 997 ; 2 n or ; 1 n. Captures the recorded bytes under
+# target/diagnostics/color-scheme-*.
+[unix]
+color-scheme-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release color-scheme
+
 # Prove a default chord a program also uses goes to the program while it owns
 # the keyboard: a byte recorder takes kitty flags and the alternate screen in a
 # split, Shift+Left reaches it as ESC [1;2D (a real key press on macOS) without

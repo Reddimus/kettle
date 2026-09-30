@@ -18613,6 +18613,91 @@ def macos_shift_arrow(key_code: int) -> None:
         time.sleep(0.05)
 
 
+COLOR_SCHEME_RECORDER = r"""
+import os, sys, termios, tty
+
+# Turn on DEC mode 2031, ask for the scheme once, log every byte read, and
+# stop on "q".
+log = open(sys.argv[1], "ab", buffering=0)
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(1, b"\x1b[?2031h\x1b[?996nSCHEME-READY\r\n")
+try:
+    while True:
+        data = os.read(fd, 64)
+        if not data or data == b"q":
+            break
+        log.write(data)
+finally:
+    os.write(1, b"\x1b[?2031l")
+    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+"""
+
+
+def run_color_scheme(kettle: str, root: Path) -> Path:
+    """A program that follows the colour scheme (DEC mode 2031) hears Kettle's
+    theme flip between light and dark.
+
+    A recorder turns on mode 2031 and asks once with `CSI ? 996 n`, which
+    must answer dark for a dark theme. Each `toggle_light_dark` must then
+    reach it as `CSI ? 997 ; 2 n` (light) or `; 1 n` (dark), once per flip.
+    Claude Code's automatic theme follows Kettle this way.
+    """
+    out = root / f"color-scheme-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "restore-session = false",
+                "update-check = false",
+                "theme = TokyoNight Night",
+                "light-theme = TokyoNight Day",
+                "dark-theme = TokyoNight Night",
+            ]
+        )
+        + "\n"
+    )
+    recorder = out / "recorder.py"
+    recorder.write_text(COLOR_SCHEME_RECORDER)
+    log = out / "recorded.bin"
+    log.write_bytes(b"")
+
+    def wait_log(expected: bytes, label: str) -> None:
+        deadline = time.monotonic() + 10.0
+        while log.read_bytes() != expected:
+            if time.monotonic() > deadline:
+                raise SystemExit(
+                    f"color-scheme smoke: {label}: recorded {log.read_bytes()!r}, expected {expected!r}"
+                )
+            time.sleep(0.1)
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        time.sleep(1.0)
+        live.ctl("send_text", params={"text": f"python3 '{recorder}' '{log}'\r"})
+        deadline = time.monotonic() + 15.0
+        while "SCHEME-READY" not in screen_text(live.json_ctl("read_screen")):
+            if time.monotonic() > deadline:
+                raise SystemExit("color-scheme smoke: the recorder never started")
+            time.sleep(0.1)
+        dark, light = b"\x1b[?997;1n", b"\x1b[?997;2n"
+        wait_log(dark, "the query answers dark for a dark theme")
+        live.json_ctl("perform_action", {"action": "toggle_light_dark"})
+        wait_log(dark + light, "a flip to light is reported")
+        live.json_ctl("perform_action", {"action": "toggle_light_dark"})
+        wait_log(dark + light + dark, "a flip back to dark is reported")
+        time.sleep(0.5)
+        if log.read_bytes() != dark + light + dark:
+            raise SystemExit(f"color-scheme smoke: extra reports {log.read_bytes()!r}")
+        live.ctl("send_text", params={"text": "q"})
+    (out / "analysis.json").write_text(
+        json.dumps({"recorded": log.read_bytes().hex()}, indent=2) + "\n"
+    )
+    return out
+
+
 def run_program_keys(kettle: str, root: Path) -> Path:
     """A default chord a program also uses goes to a program that owns the
     keyboard, and stays Kettle's otherwise.
@@ -19189,6 +19274,7 @@ def main() -> int:
             "split-titlebar",
             "split-exit-resize",
             "program-keys",
+            "color-scheme",
             "text-presentation",
             "zoom-keybind",
             "line-edit-chords",
@@ -19326,6 +19412,9 @@ def main() -> int:
     if args.case in ("program-keys", "all"):
         out = run_program_keys(args.kettle, root)
         print(f"program-keys smoke: OK artifacts={out}")
+    if args.case in ("color-scheme", "all"):
+        out = run_color_scheme(args.kettle, root)
+        print(f"color-scheme smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")

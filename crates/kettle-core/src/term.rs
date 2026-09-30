@@ -1438,6 +1438,10 @@ pub struct TerminalCapabilities {
     /// drain policy. Headless exec already owns process-status polling and
     /// must not allocate a redundant observer.
     pub observe_child_exit: bool,
+    /// Whether the colour scheme is dark, for `CSI ? 996 n` and DEC mode
+    /// 2031; `None` (headless) leaves both silent. Live changes go through
+    /// [`Terminal::set_color_scheme`].
+    pub color_scheme_dark: Option<bool>,
 }
 
 impl Default for TerminalCapabilities {
@@ -1447,6 +1451,7 @@ impl Default for TerminalCapabilities {
             unnegotiated_modified_enter: true,
             contain_process_tree: false,
             observe_child_exit: false,
+            color_scheme_dark: None,
         }
     }
 }
@@ -6733,6 +6738,7 @@ impl Terminal {
             unnegotiated_modified_enter: capabilities.unnegotiated_modified_enter,
             default_cursor_style,
             xtversion: Some(xtversion()),
+            color_scheme_dark: capabilities.color_scheme_dark,
             ..TermConfig::default()
         };
         // Word delimiters drive double-click word selection (and the
@@ -8067,6 +8073,15 @@ impl Terminal {
     /// live config reload takes effect without restarting the pane.
     pub fn set_osc52_copy_allowed(&self, allowed: bool) {
         self.osc52_copy_allowed.store(allowed, Ordering::Release);
+    }
+
+    /// The colours changed: record whether the scheme is dark, and report it
+    /// at once (`CSI ? 997 ; 1|2 n`) to a program that turned on DEC mode 2031.
+    /// Any program can ask with `CSI ? 996 n`.
+    pub fn set_color_scheme(&self, dark: Option<bool>) {
+        if let Ok(mut term) = self.term.lock() {
+            term.set_color_scheme(dark);
+        }
     }
 
     /// Update Kettle's modified-Enter fallback before keyboard negotiation.
@@ -14022,6 +14037,123 @@ mod teardown_tests {
                 _ => {}
             }
         }
+    }
+
+    /// A pane spawned with a known scheme answers `CSI ? 996 n` from the start;
+    /// one spawned without (headless `kettle exec`) stays silent.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_pane_answers_the_color_scheme_query_from_its_capabilities() {
+        for (seed, expected) in [
+            (Some(false), Some("\x1b[?997;2n")),
+            (Some(true), Some("\x1b[?997;1n")),
+            (None, None),
+        ] {
+            let argv: Vec<String> = [
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf '\\033[?996n'; sleep 5".to_string(),
+            ]
+            .to_vec();
+            let (tx, rx) = crossbeam_channel::unbounded();
+            let waker: Waker = std::sync::Arc::new(|| {});
+            let _term = match Terminal::new_with_env_and_output_geometry_and_capabilities(
+                &argv,
+                None,
+                1000,
+                0,
+                PtyGeometry::new(80, 24, 8, 16),
+                false,
+                CursorShape::Block,
+                None,
+                "",
+                "",
+                &[],
+                false,
+                false,
+                TerminalCapabilities {
+                    color_scheme_dark: seed,
+                    ..TerminalCapabilities::default()
+                },
+                tx,
+                waker,
+                None,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("skipping colour scheme seed: no PTY ({e})");
+                    return;
+                }
+            };
+            let wait = if expected.is_some() { 10 } else { 2 };
+            let deadline = std::time::Instant::now() + Duration::from_secs(wait);
+            let mut reply = None;
+            while std::time::Instant::now() < deadline && reply.is_none() {
+                if let Ok(TermEvent::PtyWrite(text)) = rx.recv_timeout(Duration::from_millis(100))
+                    && text.starts_with("\x1b[?997")
+                {
+                    reply = Some(text);
+                }
+            }
+            assert_eq!(reply.as_deref(), expected, "seed {seed:?}");
+        }
+    }
+
+    /// A program that turned on DEC mode 2031 hears each colour change from
+    /// `Terminal::set_color_scheme`.
+    #[cfg(unix)]
+    #[test]
+    fn color_scheme_changes_reach_a_program_that_asked() {
+        use alacritty_terminal::term::TermMode;
+
+        let argv: Vec<String> = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '\\033[?2031h'; sleep 5".to_string(),
+        ]
+        .to_vec();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping colour scheme: no PTY ({e})");
+                return;
+            }
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !term
+            .term
+            .lock()
+            .is_ok_and(|t| t.mode().contains(TermMode::COLOR_SCHEME_REPORTS))
+        {
+            assert!(std::time::Instant::now() < deadline, "mode 2031 never set");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let next_reply = || loop {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(TermEvent::PtyWrite(text)) => return text,
+                Ok(_) => continue,
+                Err(e) => panic!("no colour-scheme report: {e}"),
+            }
+        };
+        term.set_color_scheme(Some(true));
+        assert_eq!(next_reply(), "\x1b[?997;1n");
+        term.set_color_scheme(Some(false));
+        assert_eq!(next_reply(), "\x1b[?997;2n");
     }
 
     /// `child_exit_code` must surface the child's real exit status once it

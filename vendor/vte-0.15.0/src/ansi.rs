@@ -1067,6 +1067,7 @@ impl PrivateMode {
             1049 => Self::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor),
             2004 => Self::Named(NamedPrivateMode::BracketedPaste),
             2026 => Self::Named(NamedPrivateMode::SyncUpdate),
+            2031 => Self::Named(NamedPrivateMode::ColorSchemeReports),
             _ => Self::Unknown(mode),
         }
     }
@@ -1118,6 +1119,10 @@ pub enum NamedPrivateMode {
     BracketedPaste = 2004,
     /// The mode is handled automatically by [`Processor`].
     SyncUpdate = 2026,
+    /// Report the terminal's light or dark colour scheme whenever it changes
+    /// (`CSI ? 997 ; 1 n` dark, `CSI ? 997 ; 2 n` light), as proposed by
+    /// Contour and implemented by kitty and Ghostty.
+    ColorSchemeReports = 2031,
 }
 
 /// Mode for clearing line.

@@ -89,6 +89,8 @@ bitflags! {
         const MODIFY_OTHER_KEYS_NEGOTIATED = 1 << 25;
         /// Kettle's modified-Enter fallback before a client negotiates key encoding.
         const UNNEGOTIATED_MODIFIED_ENTER = 1 << 26;
+        /// DEC mode 2031: report colour-scheme changes.
+        const COLOR_SCHEME_REPORTS    = 1 << 27;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         /// All effective xterm modifyOtherKeys levels.
         const MODIFY_OTHER_KEYS       = Self::MODIFY_OTHER_KEYS_1.bits()
@@ -340,6 +342,13 @@ pub struct Term<T> {
     /// Mode flags.
     mode: TermMode,
 
+    /// Whether the colour scheme is dark, when known (DEC mode 2031).
+    color_scheme_dark: Option<bool>,
+
+    /// A `CSI ? 996 n` arrived while the scheme was unknown; it is answered
+    /// as soon as the scheme is set.
+    color_scheme_query_pending: bool,
+
     /// Scroll region.
     ///
     /// Range going from top to bottom of the terminal, indexed from the top of the viewport.
@@ -536,6 +545,11 @@ pub struct Config {
     /// The `name(version)` XTVERSION (`CSI > q`) reports, such as
     /// `kettle(4.9.0)`; `None` leaves the query unanswered.
     pub xtversion: Option<String>,
+
+    /// Whether the colour scheme is dark, for `CSI ? 996 n` and mode 2031;
+    /// `None` leaves both silent. Only seeds a new terminal: change it with
+    /// [`Term::set_color_scheme`].
+    pub color_scheme_dark: Option<bool>,
 }
 
 impl Default for Config {
@@ -549,6 +563,7 @@ impl Default for Config {
             unnegotiated_modified_enter: true,
             osc52: Default::default(),
             xtversion: None,
+            color_scheme_dark: None,
         }
     }
 }
@@ -620,6 +635,8 @@ impl<T> Term<T> {
             scroll_region,
             event_proxy,
             damage,
+            color_scheme_dark: config.color_scheme_dark,
+            color_scheme_query_pending: false,
             config,
             grid,
             tabs,
@@ -1374,6 +1391,34 @@ impl<T> Term<T> {
         self.mode |= mode;
     }
 
+    /// The terminal's colours changed: record whether the scheme is dark
+    /// (`None` when unknown) and report it at once to a program that turned on
+    /// DEC mode 2031, even when it stayed dark or light. Such programs (Claude
+    /// Code, Neovim) take the report as a cue to re-read the background with
+    /// OSC 11 and classify it themselves, so a dark-to-dark switch matters too.
+    /// The caller decides when the colours changed; a program that did not
+    /// turn the mode on asks with `CSI ? 996 n`.
+    pub fn set_color_scheme(&mut self, dark: Option<bool>)
+    where
+        T: EventListener,
+    {
+        self.color_scheme_dark = dark;
+        // A query that came while the scheme was unknown is answered now, once,
+        // whether or not the program also turned on mode 2031.
+        let pending = dark.is_some() && std::mem::take(&mut self.color_scheme_query_pending);
+        if pending || self.mode.contains(TermMode::COLOR_SCHEME_REPORTS) {
+            if let Some(text) = self.color_scheme_report() {
+                self.event_proxy.send_event(Event::PtyWrite(text));
+            }
+        }
+    }
+
+    /// `CSI ? 997 ; 1 n` for a dark scheme, `; 2 n` for light.
+    fn color_scheme_report(&self) -> Option<String> {
+        self.color_scheme_dark
+            .map(|dark| format!("\x1b[?997;{}n", if dark { 1 } else { 2 }))
+    }
+
     /// The 1-based cursor position a cursor position report gives. Under
     /// origin mode (DECOM) the row counts from the top margin, as xterm and
     /// kitty report it, so a program can feed it back to CUP unchanged.
@@ -1781,6 +1826,13 @@ impl<T: EventListener> Handler for Term<T> {
                 let text = format!("\x1b[?{line};{column}R");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
+            // The colour-scheme query, answered while the scheme is known.
+            996 => match self.color_scheme_report() {
+                Some(text) => self.event_proxy.send_event(Event::PtyWrite(text)),
+                // Answered by `set_color_scheme` once the scheme is known, so
+                // a program asking early at startup still hears back.
+                None => self.color_scheme_query_pending = true,
+            },
             _ => debug!("unknown private device status query: {arg}"),
         }
     }
@@ -2387,8 +2439,14 @@ impl<T: EventListener> Handler for Term<T> {
         // title alone. Programs emit `CSI ! p` from terminfo `is2`/`rs2` while
         // initializing, so clearing here would destroy a user's scrollback
         // whenever a program started.
-        self.mode
-            .remove(TermMode::MODIFY_OTHER_KEYS | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED);
+        // Colour-scheme reports (DEC mode 2031) go too, as in kitty, so a
+        // program that crashed with them on cannot leave its successor
+        // receiving reports it never asked for.
+        self.mode.remove(
+            TermMode::MODIFY_OTHER_KEYS
+                | TermMode::MODIFY_OTHER_KEYS_NEGOTIATED
+                | TermMode::COLOR_SCHEME_REPORTS,
+        );
         self.mode.insert(unnegotiated_modified_enter_term_mode(
             self.config.unnegotiated_modified_enter,
         ));
@@ -2522,6 +2580,9 @@ impl<T: EventListener> Handler for Term<T> {
             }
             NamedPrivateMode::ReportFocusInOut => self.mode.insert(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.insert(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ColorSchemeReports => {
+                self.mode.insert(TermMode::COLOR_SCHEME_REPORTS)
+            }
             // Mouse encodings are mutually exclusive.
             NamedPrivateMode::SgrMouse => {
                 self.mode.remove(TermMode::UTF8_MOUSE);
@@ -2600,6 +2661,9 @@ impl<T: EventListener> Handler for Term<T> {
             }
             NamedPrivateMode::ReportFocusInOut => self.mode.remove(TermMode::FOCUS_IN_OUT),
             NamedPrivateMode::BracketedPaste => self.mode.remove(TermMode::BRACKETED_PASTE),
+            NamedPrivateMode::ColorSchemeReports => {
+                self.mode.remove(TermMode::COLOR_SCHEME_REPORTS)
+            }
             NamedPrivateMode::SgrMouse => self.mode.remove(TermMode::SGR_MOUSE),
             NamedPrivateMode::Utf8Mouse => self.mode.remove(TermMode::UTF8_MOUSE),
             NamedPrivateMode::AlternateScroll => self.mode.remove(TermMode::ALTERNATE_SCROLL),
@@ -2659,6 +2723,9 @@ impl<T: EventListener> Handler for Term<T> {
                     self.mode.contains(TermMode::BRACKETED_PASTE).into()
                 }
                 NamedPrivateMode::SyncUpdate => ModeState::Reset,
+                NamedPrivateMode::ColorSchemeReports => {
+                    self.mode.contains(TermMode::COLOR_SCHEME_REPORTS).into()
+                }
                 NamedPrivateMode::ColumnMode => ModeState::NotSupported,
             },
             // The older alternate-screen modes `set_private_mode` handles.
@@ -3446,6 +3513,75 @@ mod tests {
         let many = vec![hex("Tc"); TERMCAP_NAMES_MAX + 5].join(";");
         processor.advance(&mut term, format!("\x1bP+q{many}\x1b\\").as_bytes());
         assert_eq!(listener.drain(), [flag("Tc").repeat(TERMCAP_NAMES_MAX)]);
+    }
+
+    #[test]
+    fn color_scheme_is_queried_and_reported_on_change() {
+        let size = TermSize::new(20, 6);
+        let listener = PtyWriteListener::default();
+        let config = Config {
+            color_scheme_dark: Some(true),
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &size, listener.clone());
+        let mut processor: Processor = Processor::new();
+
+        // The query answers from the start; nothing is reported unasked.
+        processor.advance(&mut term, b"\x1b[?996n\x1b[?2031$p");
+        assert_eq!(listener.drain(), ["\x1b[?997;1n", "\x1b[?2031;2$y"]);
+        term.set_color_scheme(Some(false));
+        assert!(listener.drain().is_empty(), "mode 2031 is off");
+
+        // With mode 2031 on, every colour change is reported, a dark-to-dark
+        // one included: the program re-reads the background itself.
+        processor.advance(&mut term, b"\x1b[?2031h\x1b[?2031$p");
+        assert_eq!(listener.drain(), ["\x1b[?2031;1$y"]);
+        term.set_color_scheme(Some(true));
+        term.set_color_scheme(Some(true));
+        assert_eq!(listener.drain(), ["\x1b[?997;1n", "\x1b[?997;1n"]);
+        term.set_color_scheme(Some(false));
+        assert_eq!(listener.drain(), ["\x1b[?997;2n"]);
+
+        // An unknown scheme is not reported, and a query waits for it: the
+        // next known scheme answers it once, even with mode 2031 off.
+        term.set_color_scheme(None);
+        processor.advance(&mut term, b"\x1b[?996n");
+        assert!(listener.drain().is_empty());
+        processor.advance(&mut term, b"\x1b[?2031l\x1b[?996n");
+        term.set_color_scheme(None);
+        assert!(listener.drain().is_empty());
+        term.set_color_scheme(Some(false));
+        assert_eq!(
+            listener.drain(),
+            ["\x1b[?997;2n"],
+            "the waiting query, answered once"
+        );
+        term.set_color_scheme(Some(false));
+        assert!(
+            listener.drain().is_empty(),
+            "mode 2031 is off and nothing waits"
+        );
+        processor.advance(&mut term, b"\x1b[?2031h");
+
+        // Turning the mode off, or RIS, stops the reports; RIS keeps the
+        // scheme itself.
+        term.set_color_scheme(Some(true));
+        assert_eq!(listener.drain(), ["\x1b[?997;1n"]);
+        processor.advance(&mut term, b"\x1b[?2031l");
+        term.set_color_scheme(Some(false));
+        assert!(listener.drain().is_empty());
+        processor.advance(&mut term, b"\x1b[?2031h\x1bc");
+        term.set_color_scheme(Some(true));
+        assert!(listener.drain().is_empty(), "RIS clears mode 2031");
+        processor.advance(&mut term, b"\x1b[?2031h\x1b[!p\x1b[?2031$p");
+        term.set_color_scheme(Some(true));
+        assert_eq!(
+            listener.drain(),
+            ["\x1b[?2031;2$y"],
+            "DECSTR clears mode 2031"
+        );
+        processor.advance(&mut term, b"\x1b[?996n");
+        assert_eq!(listener.drain(), ["\x1b[?997;1n"]);
     }
 
     #[test]

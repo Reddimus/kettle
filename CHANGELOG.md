@@ -18,6 +18,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   underlines, cursor shapes, palette size), and DECRQM for modes 47 and 1047.
   Claude Code now draws with synchronized output in Kettle, and Neovim finds
   truecolor without `COLORTERM` (over ssh) and draws undercurls as curls.
+- Programs can follow Kettle's light or dark theme: `CSI ? 996 n` answers
+  the scheme, and DEC mode 2031 reports every change of the theme's colours,
+  whether from `theme-mode = auto`, `toggle_light_dark` or a theme picked by
+  hand. Claude Code's automatic theme switches with Kettle.
 
 ### Changed
 
