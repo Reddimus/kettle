@@ -1449,10 +1449,10 @@ pub fn defaults_audit() -> (Bindings, Vec<Trigger>) {
     bind(c, Char('='), IncreaseFontSize);
     bind(cs, Char('+'), IncreaseFontSize);
     bind(cs, Char('='), IncreaseFontSize);
+    // Ctrl+Minus needs no Shift, so unlike Ctrl+Plus it has no Shift
+    // variant: `Ctrl+Shift+-` is `Ctrl+_`, which is undo in Claude Code, zsh,
+    // bash, emacs and nano, and stays theirs.
     bind(c, Char('-'), DecreaseFontSize);
-    // `Ctrl+_` (== `Ctrl+Shift+-` on US) — same logic as Ctrl+Plus above.
-    bind(cs, Char('-'), DecreaseFontSize);
-    bind(cs, Char('_'), DecreaseFontSize);
     bind(c, Char('0'), ResetFontSize);
     bind(cs, Char('x'), ToggleZoom);
     bind(cs, Char('r'), Reset);
@@ -2191,7 +2191,9 @@ mod tests {
         // `Ctrl+Shift+=` (Shift held because `+` lives on `=`). winit
         // reports it as `mods = Ctrl+Shift, key = '+'` — without a
         // Ctrl+Shift+Plus binding the chord did nothing. Same family
-        // for Ctrl+Shift+= and Ctrl+Shift+- (== Ctrl+_).
+        // for Ctrl+Shift+=. Ctrl+Minus needs no Shift, and Ctrl+Shift+- is
+        // Ctrl+_ (undo in Claude Code, zsh, bash, emacs, nano), so it and
+        // Ctrl+Shift+_ stay unbound and reach the program.
         let d = defaults();
         let c = Mods::CTRL;
         let cs = Mods::CTRL | Mods::SHIFT;
@@ -2201,8 +2203,6 @@ mod tests {
             (cs, '+', Action::IncreaseFontSize),
             (cs, '=', Action::IncreaseFontSize),
             (c, '-', Action::DecreaseFontSize),
-            (cs, '-', Action::DecreaseFontSize),
-            (cs, '_', Action::DecreaseFontSize),
         ] {
             let t = Trigger::new(mods, Key::Char(k));
             assert_eq!(
@@ -2211,6 +2211,32 @@ mod tests {
                 "{t:?} should map to {expected:?}"
             );
         }
+        for k in ['-', '_'] {
+            let t = Trigger::new(cs, Key::Char(k));
+            assert_eq!(
+                d.get(&t),
+                None,
+                "{t:?} is Ctrl+_ (undo) and belongs to the program"
+            );
+        }
+        // The lines TERMINAL-CLIENT-COMPATIBILITY.md gives to get them back.
+        let mut m = defaults();
+        for line in [
+            "ctrl+shift+minus=decrease_font_size",
+            "ctrl+shift+_=decrease_font_size",
+        ] {
+            assert!(apply_keybind(&mut m, line).is_some(), "{line}");
+        }
+        for k in ['-', '_'] {
+            assert_eq!(
+                m.get(&Trigger::new(cs, Key::Char(k))),
+                Some(&Action::DecreaseFontSize)
+            );
+        }
+        assert_eq!(
+            apply_keybind(&mut m, "ctrl+alt+left=resize_left"),
+            Some(Trigger::new(Mods::CTRL | Mods::ALT, Key::Left))
+        );
     }
 
     /// Dropdown parity: `new_tab_shell_N` parses like the established
