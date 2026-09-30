@@ -17,11 +17,17 @@ crate manifests only as resolution support files. Updating vendored manifests
 or this lock requires a reviewed vendor-source update that revalidates provenance
 and local patches.
 
+Each section also records where its local changes stand upstream, and on what
+date. Recheck that before upgrading a crate or dropping a patch.
+
 ## `alacritty_terminal-0.26.0`
 
 - Source: crates.io `alacritty_terminal` 0.26.0.
 - Upstream revision recorded in the crate's `.cargo_vcs_info.json`.
-- License: Apache-2.0; upstream license and README are retained.
+- License: Apache-2.0; upstream license and README are retained. The
+  README's four relative links are rewritten as absolute links to upstream's
+  `v0.16.1` tag so that they resolve here. That tag ships
+  `alacritty_terminal` 0.25.1; 0.26.0 shipped with `v0.17.0`.
 - Local changes: keyboard-mode stack overflow evicts the oldest keyboard mode,
   not an unrelated title-stack entry; active keyboard flags are tracked per
   screen so direct flag changes are queryable, survive screen switches, and
@@ -60,6 +66,43 @@ and local patches.
   dark scheme that `CSI ? 996 n` answers and DEC mode 2031 reports on every
   colour change the caller signals, dark to dark included; DECSTR and RIS
   turn mode 2031 off.
+  Each cell keeps at most 30 combining marks, `MAX_ZEROWIDTH_PER_CELL`, and
+  drops the rest. 30 is the Stream-Safe Text Format's limit on a run of
+  non-starters. Upstream stores every mark, so a program that prints one base
+  character and then marks without end grows a single cell without bound, and
+  the per-pane `scrollback-bytes` budget, which estimates from
+  `size_of::<Cell>()`, never sees it. The terminal tracks xterm's
+  modifyOtherKeys. `CSI > 4 ; Pv m` selects level 0, 1 or 2, `CSI ? 4 m` is
+  answered with the level in effect as `CSI > 4 ; Pv m`, and any set, restore,
+  disable or query counts as negotiation. Upstream's `Term` ignores both
+  sequences, so a query gets no reply. `Config::unnegotiated_modified_enter`,
+  on by default, sets `TermMode::UNNEGOTIATED_MODIFIED_ENTER`. The flag tells
+  an embedder's key encoder that it may send its own modified-Enter sequence
+  while nothing has negotiated; the crate itself sends nothing for it. A config
+  change updates only that flag, never the level a program chose. Kettle
+  does not rely on the engine's copy: before each keystroke is encoded,
+  `Pane::effective_key_mode` in `kettle-ui` overwrites the flag from the
+  `modify-other-keys` setting, and the encoder takes only the level and the
+  negotiation from the engine.
+  DECSTR (`CSI ! p`) is a soft reset. Besides turning mode 2031 off, it drops
+  modifyOtherKeys back to level zero, clears the negotiation, restores the
+  fallback flag from the config, and resets the scrolling region. It leaves
+  the screen, the scrollback and the title alone, and resets nothing else
+  DECSTR covers, such as SGR, origin mode, autowrap, cursor visibility,
+  insert mode, the cursor-key and keypad modes, the character sets and the
+  saved cursor. RIS restores the same modifyOtherKeys state and fallback flag.
+  `ShellUser::from_env` in `tty/unix.rs` carries a scoped
+  `#[allow(clippy::question_mark)]`. From Rust 1.97 that lint flags the
+  function's three `match pw` fallbacks and suggests `pw?`, which does not
+  compile there because all three share one `pw`. Drop the allow if a later
+  upstream release rewrites the function.
+- Upstream status, checked 2026-09-30: crates.io's newest `alacritty_terminal`
+  is still 0.26.0, published 2026-04-06. Alacritty's `master`, at `d692748d`
+  from 2026-08-31, is `0.26.1-dev`. Since
+  [alacritty/alacritty#9035](https://github.com/alacritty/alacritty/pull/9035)
+  merged on 2026-08-26, it caps combining marks at 9 per cell, so upgrading to
+  that line means choosing between upstream's 9 and this copy's 30. `master`
+  has none of the other changes above.
 - Excluded: the 46 MB upstream terminal reference fixture corpus and its
   explicit reference-test target. This crate is excluded from root workspace
   membership, so `cargo test --workspace` covers the patched behavior through
@@ -91,6 +134,9 @@ upstream release that contains all of these fixes.
   holding those between left-to-right and right-to-left text failed the
   assertion. The line is now laid out in its first paragraph's direction. The
   change is `src/shape.rs` only, +6 -14, identical to upstream's.
+- Upstream status, checked 2026-09-30: `1e0074c8` is on pop-os/cosmic-text's
+  `main`, and crates.io's newest `cosmic-text` is still 0.19.0, published
+  2026-04-22, before that commit.
 - Excluded: the registry marker, generated lockfile, upstream CI metadata and
   helper scripts, the README and its screenshots, the bundled test fonts,
   samples, the integration tests and benchmarks that read them, and
@@ -137,10 +183,22 @@ cosmic-text release that contains `1e0074c8`.
   answered only then; one that CAN, SUB or another sequence cuts off gets no
   reply.
   DEC mode 2031 is a named private mode (`ColorSchemeReports`).
+  XTMODKEYS tells restore from disable. Upstream's `ModifyOtherKeys::Reset` is
+  split in two. `Restore` covers `CSI > 4 m` and a parameterless `CSI > m`,
+  which the parser reads as `CSI > 0 m`. `Disable` covers `CSI > 4 ; 0 m`.
+  Upstream maps `CSI > 4 m` and `CSI > 4 ; 0 m` to the one `Reset` and ignores
+  `CSI > m`. A sub-parameter or an extra parameter now leaves the sequence
+  unhandled. DECSTR (`CSI ! p`), which upstream drops as unhandled, reaches a
+  new `Handler::soft_reset_state` hook. It is kept apart from RIS's
+  `reset_state` so that a program sending DECSTR from terminfo `is2` or `rs2`
+  while it initializes cannot clear the screen and the scrollback.
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a
   later upstream release already carries it.
+- Upstream status, checked 2026-09-30: crates.io's newest `vte` is still
+  0.15.0, published 2025-02-02. alacritty/vte's `master`, at `abeae765` from
+  2026-02-28, has none of the changes above, the OSC log fix included.
 - Excluded: the crates.io registry marker, generated lockfile/build output,
   upstream CI metadata, parser-log example/demo fixture, and unrelated
   documentation sample. This crate is excluded from root workspace membership.
@@ -149,9 +207,12 @@ cosmic-text release that contains `1e0074c8`.
   target/vendor-check -p vte --features ansi`.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to an
-upstream VTE release that provides an equivalent bounded, out-of-band,
-byte-ordered synchronized-update marker API, or after Kettle no longer needs
-to route graphics controls around the text parser.
+upstream VTE release that carries an equivalent of every behavior change
+above. The marker API is the one exception: it is needed only while Kettle
+routes graphics controls around the text parser. The vendored
+`alacritty_terminal` implements the `Handler` methods this copy adds and uses
+the `Restore` and `Disable` variants, so it does not build against an upstream
+`vte` that lacks them.
 
 ## `portable-pty-0.9.0`
 
@@ -187,7 +248,8 @@ to route graphics controls around the text parser.
   Between `fork` and `exec` the Unix child makes only direct system calls and
   async-signal-safe library calls, and never allocates. It marks inherited
   descriptors close-on-exec instead of closing them, so std's exec-error
-  channel still reports a failed `exec`. Linux uses one
+  channel still reports a failed `exec`, and the public
+  `unix::close_random_fds`, which closed them, is gone. Linux uses one
   `close_range(CLOSE_RANGE_CLOEXEC)` call when the kernel accepts it. macOS 11
   and later mark the descriptors the kernel lists through
   `proc_pidinfo(PROC_PIDLISTFDS)` into a buffer the parent allocates before
@@ -198,12 +260,57 @@ to route graphics controls around the text parser.
   unreadable or fills the buffer. The macOS list keeps pane spawns from paying
   that loop under the 1,048,576 soft limit that Node-based launchers such as
   VS Code set.
+  On Unix the passwd lookup for the login shell and home directory calls
+  `getpwuid_r` with a buffer it owns and checks each field for NULL. Upstream
+  calls `getpwuid`, whose buffer the whole process shares, so two panes
+  spawning at once race, and it reads both fields without a NULL check. A
+  child killed by a signal reports the shell's `128 + N` exit code and keeps
+  the number in `ExitStatus::signal_number`. Upstream reports 1 for every
+  signal, the same code as `exit 1`. On Windows, program lookup appends each
+  `PATHEXT` entry to the requested name, so `foo.bar` finds `foo.bar.EXE` as
+  Windows does. It skips an empty entry and uses one that is not UTF-8 as it
+  is. Upstream replaces the name's extension instead, and panics on both
+  kinds of entry. `REG_EXPAND_SZ` environment values are decoded byte pair by
+  byte pair instead of through a misaligned `u16` slice, terminated before
+  `ExpandEnvironmentStringsW` reads them, and kept unexpanded when expansion
+  fails. `WinChild::kill` reads `TerminateProcess`'s result the right way
+  round, treats a child that has already exited as killed, and returns the
+  outcome instead of discarding it. If the exit-code query or the wait
+  fails, the caller gets the error. Upstream reports a failed query as "still
+  running" and ignores a failed wait. Running out of handles is an error
+  rather than a panic. Polling a `WinChild` as a future starts one waiter
+  thread per child, which owns its handle for the whole wait. Upstream starts
+  a thread on every pending poll and closes the handle that thread waits on.
   Validation-only maintenance also replaces an uninitialized Win32 attribute
   buffer with initialized storage and applies behavior-preserving lint cleanups
   required by Kettle's warnings-denied direct-package clippy gate. Five
   additional Unix-only cleanups apply Rust 1.97's suggestions for redundant imports,
   borrows, conversions, and `Option` dereferencing. Drop those cleanups if a
   later upstream release already carries them.
+- Upstream status, checked 2026-09-30: crates.io's newest `portable-pty` is
+  still 0.9.0, published 2025-02-11. WezTerm develops it in the `pty/`
+  directory of wezterm/wezterm, whose `main` is at `cab25161` from 2026-09-29.
+  - One fix above is on `main` but in no crates.io release.
+    [wezterm/wezterm#7709](https://github.com/wezterm/wezterm/pull/7709),
+    which landed 2026-06-07, reads `TerminateProcess`'s result the right way
+    round.
+  - The writer's drop typing a newline and EOF is
+    [wezterm/wezterm#7898](https://github.com/wezterm/wezterm/issues/7898),
+    open, with no pull request yet.
+  - `pre_exec` closing std's exec-error pipe is
+    [wezterm/wezterm#7742](https://github.com/wezterm/wezterm/issues/7742)
+    and [wezterm/wezterm#7893](https://github.com/wezterm/wezterm/issues/7893),
+    both open. Open pull request
+    [wezterm/wezterm#7743](https://github.com/wezterm/wezterm/pull/7743) marks
+    the descriptors close-on-exec as this copy does, but still lists them by
+    reading `/dev/fd` after `fork`, which allocates.
+  - The panic on an empty `PATHEXT` entry is
+    [wezterm/wezterm#6499](https://github.com/wezterm/wezterm/issues/6499),
+    open.
+  - `main` has none of the other changes above. It has also moved the Windows
+    backend from `winapi` to `windows-sys` in
+    [wezterm/wezterm#8073](https://github.com/wezterm/wezterm/pull/8073), so
+    the Windows changes will need porting, not reapplying.
 - Excluded: the crates.io package's registry marker, generated lockfile, and
   standalone examples. Their explicit target stanzas and example-only
   development dependencies are removed from the local manifest; the optional
@@ -218,5 +325,7 @@ to route graphics controls around the text parser.
   containment field and its enabled round trip on every native vendor gate.
 
 Remove the `[patch.crates-io]` entry and this directory after upgrading to an
-upstream release that provides both an equivalent nonblocking writer and
-pre-resume process-tree containment.
+upstream release that carries an equivalent of every behavior change above.
+Kettle calls `take_nonblocking_writer`, `set_process_tree_containment` and
+`set_require_cwd` directly, so it does not build against a release without
+them.
