@@ -132,6 +132,7 @@ cosmic-text release that contains `1e0074c8`.
   with ST: the 8-bit `0x9C`, or an ESC whose very next byte is `\`. A query is
   answered only then; one that CAN, SUB or another sequence cuts off gets no
   reply.
+  DEC mode 2031 is a named private mode (`ColorSchemeReports`).
   One unrelated single-token fix: an OSC debug log borrowed its buffer
   redundantly, which upstream's own `#![deny(clippy::all)]` rejects from Rust
   1.97 onward under `clippy::useless_borrows_in_formatting`. Drop the fix if a
