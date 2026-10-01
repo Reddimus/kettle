@@ -61,10 +61,33 @@ set size leaves out. Workloads:
   must match exactly once or the build stops. A run stops if any benchmark
   comes back without samples.
 
-Every terminal runs with its default configuration on a 120x36 grid. Helpers
-under `macos-standing/` are compiled into `target/perf-tools/` on first use,
-which needs the Xcode command line tools, and vtebench is cloned and built
-there too.
+Every terminal runs with its default configuration on a 120x36 grid. A
+terminal can start its child before its first resize (Ghostty sometimes starts
+it at the previous window's size), so every payload waits, up to 5 s, for its
+terminal to reach 120x36 before its workload runs; startup rounds, whose child
+must start at once, wait after their one-second hold instead. Every round
+records the grid it settled at, and the grid it started at when that differs.
+A smaller grid does less work, so a round that never reached 120x36 fails, and
+a terminal whose first launch in a session does not reach it refuses the
+session there. Ghostty 1.3 opens a
+new window at the last Ghostty window's frame, which it keeps in the user
+default `NSWindowLastPosition`, and ignores `window-width`/`window-height`
+while that is set, so a tiled Ghostty window would set the measured Ghostty's
+grid. A session that measures Ghostty saves that default, clears it before
+every Ghostty launch, and puts the saved value back when the session ends.
+A keeper process holds the saved value and makes every change, so no clear
+can still be in flight when the value goes back; it also puts the value back
+if the run ends any other way, SIGKILL included. It first waits for a
+measured Ghostty still running to close, since a closing Ghostty writes its
+own frame; the launch probe stops its terminal as soon as the harness is gone,
+so that wait is short. Until the value is back, the session folder's
+`ghostty-frame-restore.txt` holds the command that restores it by hand. The
+user's own Ghostty windows are never touched, but a frame they write during a
+session is replaced by the saved one at its end.
+
+Helpers under `macos-standing/` are compiled into `target/perf-tools/` on
+first use, which needs the Xcode command line tools, and vtebench is cloned
+and built there too.
 
 Each workload runs one script, reused for every launch; values that change
 per launch go in a file the script sources. macOS assesses a script the first
@@ -234,9 +257,16 @@ fails its round; a probe that stops responding is killed with its process
 group. Each run writes a new directory and refuses one that already holds a
 session. `results.json` is rewritten after every
 row, so an interrupted session keeps its data but not its standing. It records
-the harness version
-(the tree hash of `scripts/perf`), each terminal's version, hash and
-signature, the display mode, power state and per-row load.
+the harness version, each terminal's version, hash and signature, the display
+mode, power state and per-row load. The harness version is a hash of what a
+session runs: every file under `scripts/perf` as it is on disk, except the
+ones no session runs or reads (this README, the two self-tests, the test
+fixtures under `macos-standing/`, the other perf tools, Python's
+`__pycache__` and `.DS_Store`). A merge that changes only those keeps a set
+of sessions comparable, and any file nobody listed counts. A session refuses
+to start while those files differ from the commit: an edit, an untracked or
+ignored file (a sourceless `.pyc` here would replace a standard module), or
+a change a Git index flag hides.
 Each terminal's path and signing team go in `local-manifest.json` beside the
 results, never into `results.json` or anything combined from it.
 `--combine DIR...` merges sessions into `combined.md` and `combined.json`:

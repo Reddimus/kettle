@@ -7,8 +7,10 @@
 // STAMP_FILE.pid for helpers that sample it while it runs, and removed as soon
 // as the terminal is reaped, since the pid may then be reused. SIGTERM to this
 // probe stops the terminal: only the probe can signal it safely, because it
-// has not reaped it yet. A terminal still running at the timeout, or 10 s
-// after a stop, gets SIGTERM, then SIGKILL. The result also carries the spawn
+// has not reaped it yet. The probe also stops the terminal once the process
+// that started it is gone (its parent changes), so a harness killed mid-round
+// leaves no terminal running on. A terminal still running at the timeout, or
+// 10 s after a stop, gets SIGTERM, then SIGKILL. The result also carries the spawn
 // time itself (started_ns), so other stamps on the same clock can be placed
 // against it, and the machine's thermal state and Low Power Mode.
 import CoreGraphics
@@ -30,6 +32,10 @@ let outPath = args[1], stampPath = args[2]
 let argv = Array(args[5...])
 try? FileManager.default.removeItem(atPath: stampPath)
 
+let parent = getppid()
+// Already orphaned: the process that started the probe is gone, and launchd
+// adopted it before this line. Nothing may be spawned for it.
+guard parent != 1 else { exit(3) }
 var pid: pid_t = 0
 let cargs = argv.map { strdup($0) } + [nil]
 let started = now()
@@ -45,7 +51,7 @@ var status: Int32 = 0
 var deadline = started + UInt64(timeout * 1e9)
 var stopped = false
 while now() < deadline {
-    if stopRequested != 0 && !stopped {
+    if (stopRequested != 0 || getppid() != parent) && !stopped {
         stopped = true
         kill(pid, SIGTERM)
         deadline = min(deadline, now() + 10_000_000_000)

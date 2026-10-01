@@ -6,8 +6,12 @@ from __future__ import annotations
 import importlib.util
 import json as _json
 import math
+import os
 import random
 import shutil
+import shlex
+import signal
+import subprocess
 import sys
 import time
 import unittest
@@ -188,6 +192,629 @@ class Summary(unittest.TestCase):
         text = standing.summarize(results, ["kettle", "wezterm"], ab=False)
         self.assertIn("| cpu_percent | 0.04 | - |", text)
         self.assertIn("| frontmost rounds | 2/3 | 0/3 |", text)
+
+
+class Grid(unittest.TestCase):
+    def test_a_round_at_another_grid_fails_and_records_it(self) -> None:
+        ok = standing.check_grid({"window_ms": 1.0}, (standing.COLS, standing.ROWS))
+        self.assertEqual((ok["cols"], ok["rows"], ok["window_ms"]), (standing.COLS, standing.ROWS, 1.0))
+        small = standing.check_grid({"window_ms": 1.0}, (99, 35))
+        self.assertEqual(small, {"error": f"grid 99x35, not {standing.COLS}x{standing.ROWS}",
+                                 "cols": 99, "rows": 35})
+        # No stamp: the payload never ran.
+        self.assertEqual(standing.check_grid({"window_ms": 1.0}, None), {"window_ms": 1.0})
+        # A round that failed for another reason keeps its error and still
+        # records its grid.
+        self.assertEqual(standing.check_grid({"error": "x"}, (99, 35)), {"error": "x", "cols": 99, "rows": 35})
+
+    def test_the_stamp_records_the_grid(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            stamp = Path(tmp) / "stamp"
+            self.assertIsNone(standing.stamp_grid(stamp))
+            stamp.write_text("123456789 120 36\n")
+            self.assertEqual(standing.stamp_grid(stamp), (120, 36))
+            stamp.write_text("123456789\n")
+            self.assertIsNone(standing.stamp_grid(stamp))
+
+    def test_a_first_launch_at_another_grid_refuses_the_session(self) -> None:
+        launched: set = set()
+        self.assertIsNone(standing.first_launch_refusal("kettle", {"cols": 120, "rows": 36}, launched))
+        self.assertEqual(standing.first_launch_refusal("ghostty", {"error": "grid 99x35, not 120x36",
+                                                                   "cols": 99, "rows": 35}, launched),
+                         "ghostty opened at 99x35, not 120x36")
+        # Only the first launch decides; later rounds just fail on their own.
+        self.assertIsNone(standing.first_launch_refusal("kettle", {"cols": 99, "rows": 35}, launched))
+        # A launch that never ran its payload decides nothing yet.
+        self.assertIsNone(standing.first_launch_refusal("kitty", {"error": "no window"}, launched))
+        self.assertNotIn("kitty", launched)
+        # A first launch that failed for another reason at the wrong grid
+        # still refuses the session.
+        failed = standing.check_grid({"error": "terminal exited before sampling"}, (99, 35))
+        self.assertEqual(standing.first_launch_refusal("wezterm", failed, launched),
+                         "wezterm opened at 99x35, not 120x36")
+
+    def test_the_settled_grid_decides_and_a_moved_start_is_kept(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            self.assertEqual(standing.round_grid(work), (None, None))
+            (work / "stamp").write_text("123 99 35\n")
+            # The payload was stopped before it settled: the start stands in.
+            self.assertEqual(standing.round_grid(work), ((99, 35), (99, 35)))
+            (work / "grid").write_text("120 36 40\n")
+            grid, start = standing.round_grid(work)
+            self.assertEqual((grid, start), ((120, 36), (99, 35)))
+            # Ghostty sometimes starts its child before its first resize: the
+            # round counts, and the start grid is kept for the record.
+            row = standing.check_grid({"window_ms": 1.0}, grid, start)
+            self.assertEqual(row, {"window_ms": 1.0, "cols": 120, "rows": 36, "start_cols": 99, "start_rows": 35})
+            self.assertIsNone(standing.first_launch_refusal("ghostty", row, set()))
+            # A terminal that never reached the grid still fails.
+            (work / "grid").write_text("99 35 5000\n")
+            self.assertIn("error", standing.check_grid({"window_ms": 1.0}, *standing.round_grid(work)))
+
+    def test_every_payload_settles_before_its_workload_but_startup_after_its_hold(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "probe.sh"
+            probe.write_text("#!/bin/sh\nexit 0\n")
+            probe.chmod(0o755)
+            runner = standing.Runner({"launch": probe, "stamp": work / "stamp-probe"}, work, {"kettle": "/bin/true"})
+            (work / "grid").write_text("99 35 0\n")
+            runner.launch("kettle", "exec /bin/sleep 7", 1).wait(10)
+            self.assertFalse((work / "grid").exists(), "a previous round's grid is cleared")
+            runner.startup("kettle")
+            scripts = {path.read_text() for path in work.glob("payload-*.sh")}
+            settle = runner.settle_command()
+            workload = next(text for text in scripts if "sleep 7" in text)
+            self.assertLess(workload.index(settle), workload.index("exec /bin/sleep 7"))
+            startup = next(text for text in scripts if "sleep 1" in text)
+            self.assertEqual(startup.count(settle), 1)
+            self.assertLess(startup.index("/bin/sleep 1"), startup.index(settle))
+
+    def test_only_a_ghostty_launch_clears_its_saved_frame(self) -> None:
+        import tempfile
+
+        class Frame:
+            cleared: list = []
+            tracked: list = []
+
+            def clear(self, seconds=None) -> None:
+                Frame.cleared.append(seconds)
+
+            def track(self, probe) -> None:
+                Frame.tracked.append(probe.pid)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "probe.sh"
+            probe.write_text("#!/bin/sh\nexit 0\n")
+            probe.chmod(0o755)
+            runner = standing.Runner({"launch": probe, "stamp": probe}, work, {"kettle": "/bin/true"})
+            runner.ghostty_frame = Frame()
+            runner.launch("kettle", "", 1, argv=["/bin/true"]).wait(10)
+            self.assertEqual((Frame.cleared, Frame.tracked), ([], []))
+            probe = runner.launch("ghostty", "", 7, argv=["/bin/true"])
+            probe.wait(10)
+            # Announced with its timeout before the spawn, then named.
+            self.assertEqual((Frame.cleared, Frame.tracked), ([7], [probe.pid]))
+
+
+class RoundWait(unittest.TestCase):
+    """wait_for_round on a fake clock: it never signals, only waits."""
+
+    def wait(self, pgid, answers, until=10.0):
+        # Whole milliseconds, so the sleeps add up exactly.
+        ms = [0]
+        asked = []
+
+        def live(group):
+            asked.append(group)
+            return answers(ms[0] / 1000)
+
+        over = standing.wait_for_round(pgid, until, clock=lambda: ms[0] / 1000,
+                                       sleep=lambda seconds: ms.__setitem__(0, ms[0] + round(seconds * 1000)),
+                                       live=live)
+        return over, ms[0] / 1000, asked
+
+    def test_it_ends_when_the_probes_group_empties(self) -> None:
+        over, ended, asked = self.wait(4242, lambda now: now < 1.0)
+        self.assertEqual((over, ended), (True, 1.0))
+        self.assertEqual(set(asked), {4242})
+
+    def test_a_group_still_live_or_unknown_at_the_cap_is_not_over(self) -> None:
+        self.assertEqual(self.wait(4242, lambda now: True)[:2], (False, 10.0))
+        self.assertEqual(self.wait(4242, lambda now: None)[:2], (False, 10.0))
+
+    def test_a_launch_with_no_group_is_waited_out_for_its_grace(self) -> None:
+        self.assertEqual(self.wait(None, lambda now: self.fail("no group to ask about")), (True, 10.0, []))
+
+    def test_the_grace_runs_from_the_tracked_spawn_or_from_the_harness_going(self) -> None:
+        grace, cap = standing.PROBE_STOP_GRACE, standing.ROUND_CAP
+        # A clear that took long before the spawn cannot eat into the wait:
+        # it counts from when the probe was named.
+        self.assertEqual(standing.round_until(30, tracked=100.0, ended=500.0), 100.0 + 30 + grace + cap)
+        # No group: the harness went around the spawn; its orphaned probe
+        # stops the terminal within the grace of that.
+        self.assertEqual(standing.round_until(30, tracked=None, ended=500.0), 500.0 + grace)
+
+
+@unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+class Settle(unittest.TestCase):
+    """stamp --settle in a pty whose size this test sets."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import tempfile
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.stamp = Path(cls.tmp.name) / "stamp"
+        subprocess.run(["clang", "-O", "-o", str(cls.stamp), str(HERE / "macos-standing" / "stamp.c")],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.tmp.cleanup()
+
+    def run_in_pty(self, size, resize_to, after: float, seconds: float):
+        import fcntl
+        import pty
+        import struct
+        import termios
+
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[1], size[0], 0, 0))
+        out = Path(self.tmp.name) / f"grid-{time.monotonic_ns()}"
+        started = time.monotonic()
+        process = subprocess.Popen([str(self.stamp), "--settle", "120", "36", str(seconds), str(out)],
+                                   stdin=slave, stdout=subprocess.DEVNULL, cwd=self.tmp.name)
+        if resize_to:
+            time.sleep(after)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", resize_to[1], resize_to[0], 0, 0))
+        os.close(slave)
+        self.assertEqual(process.wait(10), 0)
+        elapsed = time.monotonic() - started
+        self.assertFalse(Path(str(out) + ".tmp").exists())
+        cols, rows, waited = map(int, out.read_text().split())
+        return (cols, rows), waited, elapsed
+
+    def test_it_waits_for_the_first_resize(self) -> None:
+        grid, waited, elapsed = self.run_in_pty((99, 35), (120, 36), 0.3, 5)
+        self.assertEqual(grid, (120, 36))
+        self.assertGreaterEqual(waited, 250)
+        self.assertLess(elapsed, 3, "it ends at the resize, not at its limit")
+
+    def test_it_ends_at_once_on_the_right_grid(self) -> None:
+        grid, waited, _ = self.run_in_pty((120, 36), None, 0, 5)
+        self.assertEqual(grid, (120, 36))
+        self.assertLess(waited, 100)
+
+    def test_a_terminal_that_never_resizes_records_its_own_grid(self) -> None:
+        grid, waited, _ = self.run_in_pty((99, 35), None, 0, 0.5)
+        self.assertEqual(grid, (99, 35))
+        self.assertGreaterEqual(waited, 450)
+
+
+@unittest.skipUnless(sys.platform == "darwin" and shutil.which("defaults"), "user defaults are macOS")
+class GhosttyFrame(unittest.TestCase):
+    """GhosttyFrame against a scratch plist file, never Ghostty's domain; a
+    file path keeps even an emptied domain out of ~/Library/Preferences."""
+
+    KEY = standing.GHOSTTY_FRAME_KEY
+
+    def setUp(self) -> None:
+        import tempfile
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.domain = str(self.dir / "frame.plist")
+
+    def frame(self):
+        return standing.GhosttyFrame(self.domain, self.KEY)
+
+    def value(self):
+        return standing.read_default(self.domain, self.KEY)
+
+    def wait_for_value(self, expected, timeout: float = 15.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and self.value() != expected:
+            time.sleep(0.1)
+        return self.value()
+
+    def test_the_saved_frame_comes_back_with_its_types(self) -> None:
+        saved = [0.0, 0.0, 961.0, 1050.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        with self.frame() as frame:
+            self.assertIsNone(self.value())
+            # A measured Ghostty closing writes its own frame.
+            standing.write_default(self.domain, self.KEY, [10.0, 20.0, 1000.0, 700.0])
+            frame.clear()
+            self.assertIsNone(self.value())
+        restored = self.value()
+        self.assertEqual(restored, saved)
+        self.assertTrue(all(isinstance(value, float) for value in restored))
+        self.assertEqual(frame.keeper.returncode, 0)
+
+    def test_an_absent_frame_stays_absent(self) -> None:
+        with self.frame():
+            standing.write_default(self.domain, self.KEY, [1.0, 2.0, 3.0, 4.0])
+        self.assertIsNone(self.value())
+
+    def test_an_exception_in_the_session_restores_it(self) -> None:
+        saved = [5.0, 6.0, 7.0, 8.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        with self.assertRaises(RuntimeError):
+            with self.frame():
+                raise RuntimeError("a round crashed")
+        self.assertEqual(self.value(), saved)
+
+    def test_a_failed_export_changes_nothing(self) -> None:
+        from unittest import mock
+
+        saved = [1.0, 2.0, 3.0, 4.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        failed = subprocess.CompletedProcess(["defaults"], 1, b"", b"")
+        real_run = subprocess.run
+
+        def export_fails(argv, *args, **kwargs):
+            return failed if argv[1] == "export" else real_run(argv, *args, **kwargs)
+
+        with mock.patch.object(standing.subprocess, "run", export_fails):
+            with self.assertRaises(RuntimeError):
+                with self.frame():
+                    self.fail("the session must not start")
+        self.assertEqual(self.value(), saved)
+
+    def run_that_ends(self, ending: str) -> None:
+        """A harness process that enters the frame, then ends as `ending`
+        says; the keeper must put the saved value back."""
+        saved = [9.0, 8.0, 7.0, 6.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        script = ("import importlib.util, os, sys, time\n"
+                  f"spec = importlib.util.spec_from_file_location('st', {str(HERE / 'macos-standing.py')!r})\n"
+                  "st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)\n"
+                  f"with st.GhosttyFrame({self.domain!r}, {self.KEY!r}) as frame:\n"
+                  "    print('entered', frame.keeper.pid, flush=True)\n"
+                  "    if sys.argv[1] == 'clear-in-flight':\n"
+                  "        frame.keeper.stdin.write(b'clear 99\\n'); frame.keeper.stdin.flush(); os._exit(0)\n"
+                  "    time.sleep(60)\n")
+        run = subprocess.Popen([sys.executable, "-c", script, ending], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(run.stdout.close)
+        entered, keeper_pid = run.stdout.readline().split()
+        self.assertEqual(entered, "entered")
+        keeper_pid = int(keeper_pid)
+        if ending == "SIGKILL":
+            run.send_signal(signal.SIGKILL)
+        elif ending == "SIGTERM":
+            run.send_signal(signal.SIGTERM)
+        elif ending == "by-name":
+            # A kill by name aimed at the harness also matches the keeper,
+            # whose argv names the same script.
+            run.send_signal(signal.SIGTERM)
+            os.kill(keeper_pid, signal.SIGTERM)
+        run.wait(10)
+        self.assertEqual(self.wait_for_value(saved), saved)
+        # The keeper (this test's grandchild) must be gone before the scratch
+        # directory is, or its read-back could re-create it.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                os.kill(keeper_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the keeper outlived its run")
+
+    def test_a_killed_run_is_restored_by_the_keeper(self) -> None:
+        self.run_that_ends("SIGKILL")
+
+    def test_a_terminated_run_is_restored_by_the_keeper(self) -> None:
+        self.run_that_ends("SIGTERM")
+
+    def test_a_clear_in_flight_when_the_run_dies_still_ends_restored(self) -> None:
+        self.run_that_ends("clear-in-flight")
+
+    def test_a_kill_by_name_that_also_hits_the_keeper_still_ends_restored(self) -> None:
+        self.run_that_ends("by-name")
+
+    def closing_ghostty(self, frame_value, after: float) -> str:
+        """A stand-in for a measured Ghostty under its launch probe: it
+        writes its own frame `after` seconds on, as Ghostty does when it
+        closes, then exits."""
+        return (f"import subprocess, time\ntime.sleep({after})\n"
+                f"subprocess.run(['defaults', 'write', {self.domain!r}, {self.KEY!r}, "
+                f"{standing.plist_fragment(frame_value)!r}], capture_output=True)\n")
+
+    def run_that_ends_mid_round(self, ending: signal.Signals) -> None:
+        """A harness process killed while a measured Ghostty still runs: the
+        keeper must put the value back only once that Ghostty has written
+        its own frame and gone."""
+        saved = [9.0, 1.0, 9.0, 1.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        ghostty = self.closing_ghostty([11.0, 22.0, 1000.0, 700.0], 2.0)
+        script = ("import importlib.util, subprocess, sys, time\n"
+                  f"spec = importlib.util.spec_from_file_location('st', {str(HERE / 'macos-standing.py')!r})\n"
+                  "st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)\n"
+                  f"with st.GhosttyFrame({self.domain!r}, {self.KEY!r}) as frame:\n"
+                  "    frame.clear(30)\n"
+                  f"    probe = subprocess.Popen([sys.executable, '-c', {ghostty!r}], start_new_session=True)\n"
+                  "    frame.track(probe)\n"
+                  "    print('entered', frame.keeper.pid, probe.pid, flush=True)\n"
+                  "    time.sleep(60)\n")
+        run = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(run.stdout.close)
+        entered, keeper_pid, probe_pid = run.stdout.readline().split()
+        self.assertEqual(entered, "entered")
+        run.send_signal(ending)
+        run.wait(10)
+        for pid in (int(probe_pid), int(keeper_pid)):
+            self.assertTrue(gone_within(pid, 20), "the stand-in Ghostty and the keeper end")
+        self.assertEqual(self.value(), saved)
+
+    def test_a_killed_run_mid_round_is_restored_after_its_ghostty(self) -> None:
+        self.run_that_ends_mid_round(signal.SIGKILL)
+
+    def test_a_terminated_run_mid_round_is_restored_after_its_ghostty(self) -> None:
+        self.run_that_ends_mid_round(signal.SIGTERM)
+
+    def test_a_hung_up_run_mid_round_is_restored_after_its_ghostty(self) -> None:
+        self.run_that_ends_mid_round(signal.SIGHUP)
+
+    def test_an_interrupt_while_stopping_the_round_still_waits_for_its_ghostty(self) -> None:
+        # A second Ctrl-C inside stop_current: the round's probe has been
+        # told to stop, and its Ghostty writes its frame while closing,
+        # after the session has already left for the restore.
+        from unittest import mock
+
+        saved = [3.0, 3.0, 8.0, 8.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        closing = self.dir / "closing.sh"
+        closing.write_text(f"sleep 1.5\ndefaults write {shlex.quote(self.domain)} {self.KEY} "
+                           f"{shlex.quote(standing.plist_fragment([1.0, 2.0, 1000.0, 700.0]))}\n")
+        probe = self.dir / "probe.sh"
+        probe.write_text("#!/bin/sh\n"
+                         f"trap '/bin/sh {shlex.quote(str(closing))}; exit 0' TERM\n"
+                         ': > "$1.ready"\nwhile :; do sleep 0.05; done\n')
+        probe.chmod(0o755)
+        recovery = self.dir / "restore.txt"
+        runner = standing.Runner({"launch": probe, "stamp": probe}, self.dir, {"kettle": "/bin/true"})
+        with self.assertRaises(KeyboardInterrupt):
+            with standing.GhosttyFrame(self.domain, self.KEY, recovery=recovery) as frame:
+                runner.ghostty_frame = frame
+                process = runner.launch("ghostty", "", 30, argv=["/bin/true"])
+                ready = self.dir / "launch.json.ready"
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists(), "the stand-in probe never set its trap")
+                with mock.patch.object(process, "wait", side_effect=KeyboardInterrupt):
+                    runner.stop_current()
+        process.wait(10)
+        self.assertEqual(self.value(), saved)
+        self.assertFalse(recovery.exists())
+
+    def test_a_lost_keeper_with_a_round_in_flight_restores_after_its_ghostty(self) -> None:
+        # The harness restores by itself, and so must wait out the round too.
+        saved = [2.0, 4.0, 6.0, 8.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        ghostty = subprocess.Popen([sys.executable, "-c", self.closing_ghostty([5.0, 5.0, 900.0, 600.0], 1.5)],
+                                   start_new_session=True)
+        with self.frame() as frame:
+            frame.clear(30)
+            frame.track(ghostty)
+            os.kill(frame.keeper.pid, signal.SIGKILL)
+            frame.keeper.stdout.read()
+        ghostty.wait(10)
+        self.assertEqual(self.value(), saved)
+
+    def test_a_late_restore_keeps_the_recovery_file_and_says_so(self) -> None:
+        # The keeper put the value back while the round's group was still
+        # live past its cap: that Ghostty may still write over it.
+        import contextlib
+        import io
+
+        saved = [1.0, 3.0, 5.0, 7.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        stand_in = ("import sys\n"
+                    "for line in sys.stdin:\n"
+                    "    verb, tag = line.split()[:2]\n"
+                    "    print(('late' if verb == 'done' else 'ok'), tag, flush=True)\n"
+                    "    if verb == 'done': break\n")
+        keeper = subprocess.Popen([sys.executable, "-c", stand_in], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, start_new_session=True)
+        recovery = self.dir / "restore.txt"
+        recovery.write_text("defaults write ...\n")
+        frame = standing.GhosttyFrame(self.domain, self.KEY, recovery=recovery)
+        frame.saved, frame.active, frame.keeper = saved, True, keeper
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            frame._restore()
+        self.assertTrue(recovery.exists())
+        self.assertIn("still running", err.getvalue())
+        self.assertEqual(keeper.returncode, 0, "no fallback kill for a restore the keeper made")
+
+    def test_a_keeper_that_ends_mid_clear_leaves_the_clear_to_the_harness(self) -> None:
+        saved = [8.0, 6.0, 4.0, 2.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        # Reads the request, then ends before clearing.
+        keeper = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.readline()"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+        frame = self.frame()
+        frame.saved, frame.active, frame.keeper = saved, True, keeper
+        frame.clear(1)
+        self.assertIsNone(self.value())
+        frame._restore()
+        self.assertEqual(self.value(), saved)
+
+    def test_the_recovery_file_says_how_to_restore_until_the_value_is_back(self) -> None:
+        saved = [1.0, 1.0, 2.0, 3.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        recovery = self.dir / "restore.txt"
+        with standing.GhosttyFrame(self.domain, self.KEY, recovery=recovery):
+            self.assertIn(f"defaults write {self.domain} {self.KEY} '<array>", recovery.read_text())
+        self.assertFalse(recovery.exists())
+        self.assertEqual(self.value(), saved)
+
+    def test_a_late_answer_is_not_taken_for_the_next_request(self) -> None:
+        # A stand-in keeper speaking the same protocol answers the first
+        # clear late; the harness must not take that answer for the next
+        # request, and must still end through a clean "restored".
+        saved = [4.0, 4.0, 2.0, 2.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        fragment = standing.plist_fragment(saved)
+        stand_in = ("import subprocess, sys, time\n"
+                    "for line in sys.stdin:\n"
+                    "    verb, tag = line.split()\n"
+                    "    if verb == 'clear':\n"
+                    "        time.sleep(1.0 if tag == '1' else 0)\n"
+                    f"        subprocess.run(['defaults', 'delete', {self.domain!r}, {self.KEY!r}], capture_output=True)\n"
+                    "        print('ok', tag, flush=True)\n"
+                    "        continue\n"
+                    f"    subprocess.run(['defaults', 'write', {self.domain!r}, {self.KEY!r}, {fragment!r}])\n"
+                    "    print('restored', tag, flush=True)\n"
+                    "    break\n")
+        keeper = subprocess.Popen([sys.executable, "-c", stand_in], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, start_new_session=True)
+        frame = self.frame()
+        frame.WAIT = 0.3
+        frame.saved, frame.active, frame.keeper = saved, True, keeper
+        started = time.monotonic()
+        frame.clear()  # "clear 1": the stand-in answers after the wait
+        self.assertLess(time.monotonic() - started, 0.9)
+        frame.WAIT = 5.0
+        self.assertEqual(frame.request("clear", frame.WAIT), "ok")  # "clear 2", past the late "ok 1"
+        frame._restore()
+        self.assertEqual(keeper.returncode, 0, "ended through its own restore, not the kill path")
+        self.assertEqual(self.value(), saved)
+
+    def test_a_failing_direct_clear_does_not_end_the_session(self) -> None:
+        from unittest import mock
+
+        saved = [5.0, 5.0, 5.0, 5.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        with self.frame() as frame:
+            os.kill(frame.keeper.pid, signal.SIGKILL)
+            frame.keeper.stdout.read()
+            with mock.patch.object(standing, "set_default", side_effect=RuntimeError("defaults failed")):
+                frame.clear()
+        self.assertEqual(self.value(), saved)
+
+    def test_a_second_interrupt_while_restoring_says_how_to_finish(self) -> None:
+        import contextlib
+        import io
+        from unittest import mock
+
+        saved = [7.0, 7.0, 7.0, 7.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        err = io.StringIO()
+        frame = self.frame()
+        with contextlib.redirect_stderr(err), self.assertRaises(KeyboardInterrupt):
+            with frame:
+                os.kill(frame.keeper.pid, signal.SIGKILL)
+                with mock.patch.object(standing, "group_has_live_members", side_effect=KeyboardInterrupt):
+                    frame._restore()
+        frame.keeper.wait(10)
+        self.assertIn(f"restore it with: defaults write {self.domain} {self.KEY}", err.getvalue())
+
+    def test_a_lost_keeper_leaves_the_restore_to_the_harness(self) -> None:
+        saved = [3.0, 1.0, 4.0, 1.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        with self.frame() as frame:
+            # Killed, and left unreaped as a real lost keeper would be.
+            os.kill(frame.keeper.pid, signal.SIGKILL)
+            frame.keeper.stdout.read()
+            frame.clear()
+        self.assertEqual(self.value(), saved)
+
+    def test_a_lost_keepers_leftover_writer_cannot_undo_the_restore(self) -> None:
+        # The keeper died while a `defaults delete` it started was still
+        # pending; that command must not land after the harness restores.
+        # The writer waits for a file the test creates only once the restore
+        # has returned, so it is pending then whatever the timing.
+        saved = [2.0, 7.0, 1.0, 8.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        go = self.dir / "go"
+        late_delete = (f"while [ ! -e {shlex.quote(str(go))} ]; do sleep 0.02; done; "
+                       f"defaults delete {shlex.quote(self.domain)} {self.KEY}")
+        # Like a `defaults` run under capture_output, the leftover writer does
+        # not hold the keeper's stdout, so the harness sees the keeper end at
+        # once.
+        stand_in = ("import subprocess, time\n"
+                    f"subprocess.Popen(['/bin/sh', '-c', {late_delete!r}], stdout=subprocess.DEVNULL,"
+                    " stderr=subprocess.DEVNULL)\n"
+                    "print('started', flush=True)\n"
+                    "time.sleep(60)\n")
+        keeper = subprocess.Popen([sys.executable, "-c", stand_in], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, start_new_session=True)
+        self.assertEqual(keeper.stdout.readline().strip(), b"started")
+        standing.write_default(self.domain, self.KEY, None)
+        os.kill(keeper.pid, signal.SIGKILL)
+        frame = self.frame()
+        frame.saved, frame.active, frame.keeper = saved, True, keeper
+        frame._restore()
+        go.touch()
+        time.sleep(1.0)
+        self.assertEqual(self.value(), saved)
+        self.assertFalse(standing.group_has_live_members(keeper.pid))
+
+    def test_an_unreadable_process_list_blocks_the_direct_restore(self) -> None:
+        # If ps cannot say whether the lost keeper's group has emptied, a
+        # writer may still be pending: print the command, write nothing.
+        import contextlib
+        import io
+        from unittest import mock
+
+        saved = [6.0, 2.0, 8.0, 3.0]
+        standing.write_default(self.domain, self.KEY, saved)
+        real_run = subprocess.run
+        for failure in ("status", "raises"):
+            standing.write_default(self.domain, self.KEY, None)
+            keeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True)
+            os.kill(keeper.pid, signal.SIGKILL)
+
+            def ps_fails(argv, *args, **kwargs):
+                if argv[0] != "ps":
+                    return real_run(argv, *args, **kwargs)
+                if failure == "raises":
+                    raise PermissionError("ps refused")
+                return subprocess.CompletedProcess(argv, 1, "", "")
+
+            frame = self.frame()
+            frame.saved, frame.active, frame.keeper = saved, True, keeper
+            err = io.StringIO()
+            with mock.patch.object(standing.subprocess, "run", ps_fails), contextlib.redirect_stderr(err):
+                frame._restore()
+            self.assertIsNone(self.value(), failure)
+            self.assertIn("restore it with: defaults write", err.getvalue(), failure)
+            keeper.wait(10)
+
+    def test_a_restore_that_cannot_write_says_how_to_finish_it(self) -> None:
+        import contextlib
+        import io
+
+        saved = [1.5, 2.5, 3.5, 4.5]
+        standing.write_default(self.domain, self.KEY, saved)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.frame():
+                self.dir.chmod(0o500)
+                self.addCleanup(self.dir.chmod, 0o700)
+        self.assertIn(f"restore it with: defaults write {self.domain} {self.KEY} '<array>", err.getvalue())
+        self.dir.chmod(0o700)
+        # A delete that did not take is not reported as done.
+        from unittest import mock
+        real_run = subprocess.run
+        standing.write_default(self.domain, self.KEY, saved)
+        with mock.patch.object(standing.subprocess, "run",
+                               lambda argv, *a, **k: subprocess.CompletedProcess(argv, 0, b"", b"")
+                               if argv[1] == "delete" else real_run(argv, *a, **k)):
+            self.assertFalse(standing.write_default(self.domain, self.KEY, None))
 
 
 class RoundStatistics(unittest.TestCase):
@@ -577,6 +1204,97 @@ class Safety(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
 
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "needs macOS and swiftc")
+    def test_a_launch_probe_whose_harness_is_gone_stops_its_terminal(self) -> None:
+        # A harness killed mid-round must not leave its terminal running on
+        # (a measured Ghostty would write its frame whenever it closed).
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "launch"
+            subprocess.run(["swiftc", "-O", "-o", str(probe), str(HERE / "macos-standing" / "launch.swift")],
+                           check=True, capture_output=True)
+            stamp = work / "stamp"
+            # A stand-in harness: it starts the probe in its own session, as
+            # the Runner does, says the probe's pid, and waits to be killed.
+            harness = subprocess.Popen(
+                [sys.executable, "-c",
+                 "import subprocess, sys, time\n"
+                 "p = subprocess.Popen(sys.argv[1:], start_new_session=True)\n"
+                 "print(p.pid, flush=True)\ntime.sleep(120)\n",
+                 str(probe), str(work / "out.json"), str(stamp), "60", "--", "/bin/sleep", "60"],
+                stdout=subprocess.PIPE, text=True)
+            self.addCleanup(harness.stdout.close)
+            probe_pid = int(harness.stdout.readline())
+            pid_file = Path(str(stamp) + ".pid")
+            deadline = time.monotonic() + 10
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            child = int(pid_file.read_text())
+            harness.kill()
+            harness.wait(10)
+            # Far below the terminal's 60 s: the probe noticed its parent go.
+            self.assertTrue(gone_within(probe_pid, 15), "the probe outlived its harness")
+            self.assertTrue(gone_within(child, 5), "the terminal outlived its harness")
+            result = json.loads((work / "out.json").read_text())
+            self.assertTrue(result["stopped"])
+            self.assertFalse(result["killed"])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("swiftc"), "needs macOS and swiftc")
+    def test_a_launch_probe_orphaned_before_it_starts_spawns_nothing(self) -> None:
+        # The harness can die between spawning the probe and the probe's
+        # first look at its parent; launchd has adopted it by then.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            probe = work / "launch"
+            subprocess.run(["swiftc", "-O", "-o", str(probe), str(HERE / "macos-standing" / "launch.swift")],
+                           check=True, capture_output=True)
+            stamp = work / "stamp"
+            # A holder in its own session, which this test leaves unreaped
+            # until the end so its group stays this test's to kill, forks a
+            # middle process. That forks the probe's process, says its pid
+            # and exits; the probe's process execs the probe only once it is
+            # orphaned, still in the holder's group.
+            helper = ("import os, sys, time\n"
+                      "middle = os.fork()\n"
+                      "if middle:\n"
+                      "    os.waitpid(middle, 0); time.sleep(120); os._exit(0)\n"
+                      "pid = os.fork()\n"
+                      "if pid:\n"
+                      "    print(pid, flush=True); os._exit(0)\n"
+                      "null = os.open(os.devnull, os.O_RDWR)\n"
+                      "os.dup2(null, 1); os.dup2(null, 2)\n"
+                      "while os.getppid() != 1: time.sleep(0.01)\n"
+                      "os.execv(sys.argv[1], sys.argv[1:])\n")
+            holder = subprocess.Popen([sys.executable, "-c", helper, str(probe), str(work / "out.json"), str(stamp),
+                                       "60", "--", "/bin/sleep", "60"], stdout=subprocess.PIPE, text=True,
+                                      start_new_session=True)
+            try:
+                orphan = int(holder.stdout.readline())
+                self.assertTrue(gone_within(orphan, 10), "the orphaned probe ends")
+                self.assertFalse(Path(str(stamp) + ".pid").exists(), "no terminal was spawned")
+            finally:
+                # Whatever a failing probe left in the group goes with it.
+                os.killpg(holder.pid, signal.SIGKILL)
+                holder.wait(10)
+                holder.stdout.close()
+
+    def test_idle_and_latency_count_from_the_settled_grid(self) -> None:
+        import inspect
+
+        for method in (standing.Runner.idle, standing.Runner.latency):
+            self.assertIn('self.wait_for(self.work / "grid"', inspect.getsource(method), method.__name__)
+
+    def test_the_settled_grid_file_appears_whole(self) -> None:
+        source = (HERE / "macos-standing" / "stamp.c").read_text()
+        settle = source[source.index("static int settle("):source.index("int main(")]
+        self.assertIn('"%s.tmp"', settle)
+        self.assertIn("rename(tmp, argv[5])", settle)
+
     def test_a_probe_that_ignores_stop_is_killed_with_its_group_and_reported(self) -> None:
         import tempfile
 
@@ -792,7 +1510,7 @@ class Preflight(unittest.TestCase):
                  "time_machine": True, "load": [2.5, 1.0, 1.0], "harness_dirty": True, "display": None}
         refusals = standing.preflight_refusals(state)
         for reason in ("battery power", "Low Power Mode is on", "screen is locked",
-                       "Time Machine backup running", "load 2.50", "scripts/perf has local changes",
+                       "Time Machine backup running", "load 2.50", "the harness has local changes",
                        "display mode unknown"):
             self.assertTrue(any(reason in r for r in refusals), f"{reason} not in {refusals}")
 
@@ -811,6 +1529,138 @@ class Preflight(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(standing.harness_revision(Path(tmp)), {"harness_tree": None, "harness_dirty": None})
         self.assertIsNotNone(standing.harness_revision()["harness_tree"])
+
+    def test_everything_but_the_inert_files_decides_the_harness_revision(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+
+            def git(*args: str) -> None:
+                subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                                "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+
+            git("init", "-q")
+            # Kettle's own ignore rules, which hide *.pyc and __pycache__.
+            shutil.copy(HERE.parents[1] / ".gitignore", repo / ".gitignore")
+            perf = repo / "scripts" / "perf"
+            (perf / "macos-standing").mkdir(parents=True)
+            inert = ["README.md", "macos-standing-self-test.py", "macos-compare.sh",
+                     "macos-standing/startup-phases.fixture"]
+            for name in ["macos-standing.py", "macos-standing/stamp.c", *inert]:
+                (perf / name).write_text(name)
+            git("add", "-A")
+            git("commit", "-q", "-m", "base")
+            base = standing.harness_revision(repo)
+            self.assertEqual(base["harness_dirty"], False)
+            self.assertIsNotNone(base["harness_tree"])
+            # An inert file, changed or committed: nothing moves.
+            for name in inert:
+                (perf / name).write_text("changed")
+                self.assertEqual(standing.harness_revision(repo), base, name)
+            git("commit", "-q", "-am", "inert")
+            self.assertEqual(standing.harness_revision(repo), base)
+            # Anything else, whatever its name or kind: a local change until
+            # committed, then a new version.
+            (perf / "pkg").mkdir()
+            for name in ("macos-standing.py", "macos-standing/stamp.c", "sitecustomize.py", "statistics.py",
+                         "pkg/caf\u00e9.json", "config.fixture -> active.json"):
+                (perf / name).write_text("changed")
+                self.assertTrue(standing.harness_revision(repo)["harness_dirty"], name)
+                git("add", "-A")
+                git("commit", "-q", "-m", "change")
+                after = standing.harness_revision(repo)
+                self.assertEqual(after["harness_dirty"], False, name)
+                self.assertNotEqual(after["harness_tree"], base["harness_tree"], name)
+                base = after
+            # An ignored sourceless module counts; the bytecode cache and
+            # Finder's metadata do not.
+            (perf / "statistics.pyc").write_bytes(b"bytecode")
+            self.assertTrue(standing.harness_revision(repo)["harness_dirty"])
+            (perf / "statistics.pyc").unlink()
+            (perf / "__pycache__").mkdir()
+            (perf / "__pycache__" / "statistics.cpython-314.pyc").write_bytes(b"cache")
+            (perf / ".DS_Store").write_bytes(b"finder")
+            self.assertEqual(standing.harness_revision(repo), base)
+            # An untracked symlink to a package.
+            (perf / "sitecustomize").symlink_to(perf / "pkg")
+            self.assertTrue(standing.harness_revision(repo)["harness_dirty"])
+            (perf / "sitecustomize").unlink()
+            # A rename from an inert name to one that counts.
+            git("mv", "scripts/perf/macos-compare.sh", "scripts/perf/helper.sh")
+            self.assertTrue(standing.harness_revision(repo)["harness_dirty"])
+            git("mv", "scripts/perf/helper.sh", "scripts/perf/macos-compare.sh")
+            self.assertEqual(standing.harness_revision(repo), base)
+            # How Git quotes paths changes nothing.
+            for quote in ("true", "false"):
+                git("config", "core.quotePath", quote)
+                self.assertEqual(standing.harness_revision(repo), base, quote)
+            # An index flag that hides an edit from `git status` hides it
+            # from nothing here.
+            for flag in ("--assume-unchanged", "--skip-worktree"):
+                git("update-index", flag, "scripts/perf/macos-standing.py")
+                (perf / "macos-standing.py").write_text("edited under " + flag)
+                edited = standing.harness_revision(repo)
+                self.assertTrue(edited["harness_dirty"], flag)
+                self.assertNotEqual(edited["harness_tree"], base["harness_tree"], flag)
+                git("update-index", flag.replace("--", "--no-"), "scripts/perf/macos-standing.py")
+                git("checkout", "--", "scripts/perf/macos-standing.py")
+                self.assertEqual(standing.harness_revision(repo), base, flag)
+
+    def test_the_walk_refuses_what_it_cannot_read_and_never_blocks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True)
+            perf = repo / "scripts" / "perf"
+            perf.mkdir(parents=True)
+            # More than one read chunk: the streamed id is Git's.
+            big = perf / "macos-standing.py"
+            big.write_bytes(bytes(range(256)) * 12_000)
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], check=True, capture_output=True)
+            self.assertEqual(standing.harness_revision(repo)["harness_dirty"], False)
+            # A FIFO with no writer: listed, not opened. A subprocess bounds
+            # the check, so a regression fails instead of hanging the suite.
+            os.mkfifo(perf / "debug.pipe")
+            probe = ("import importlib.util, sys; from pathlib import Path\n"
+                     f"spec = importlib.util.spec_from_file_location('st', {str(HERE / 'macos-standing.py')!r})\n"
+                     "st = importlib.util.module_from_spec(spec); spec.loader.exec_module(st)\n"
+                     f"print(st.harness_revision(Path({tmp!r}))['harness_dirty'])\n")
+            ran = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=30)
+            self.assertEqual(ran.stdout.strip(), "True", ran.stderr)
+            (perf / "debug.pipe").unlink()
+            # A directory it can enter but not list leaves the state unknown.
+            hidden = perf / "statistics"
+            hidden.mkdir()
+            (hidden / "__init__.py").write_text("x = 1\n")
+            hidden.chmod(0o300)
+            try:
+                self.assertEqual(standing.harness_revision(repo), {"harness_tree": None, "harness_dirty": None})
+            finally:
+                hidden.chmod(0o700)
+
+    def test_a_sha256_repository_is_clean_when_it_matches_head(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            made = subprocess.run(["git", "init", "-q", "--object-format=sha256", tmp], capture_output=True)
+            if made.returncode != 0:
+                self.skipTest("this git cannot make a sha256 repository")
+            perf = Path(tmp) / "scripts" / "perf"
+            perf.mkdir(parents=True)
+            (perf / "macos-standing.py").write_text("harness")
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", "add", "-A"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"], check=True, capture_output=True)
+            revision = standing.harness_revision(Path(tmp))
+            self.assertEqual(revision["harness_dirty"], False)
+            (perf / "macos-standing.py").write_text("edited")
+            self.assertTrue(standing.harness_revision(Path(tmp))["harness_dirty"])
 
     def test_session_metadata_keys_are_distinct(self) -> None:
         # A repeated key in the metadata literal silently drops the first value.
