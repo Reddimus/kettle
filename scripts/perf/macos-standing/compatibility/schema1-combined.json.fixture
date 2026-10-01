@@ -1,0 +1,382 @@
+{
+ "sessions": [
+  {
+   "dir": "session",
+   "label": "session",
+   "date": "2027-01-29",
+   "countable": false,
+   "schema": 1
+  }
+ ],
+ "rows": {
+  "startup.window_ms": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 21.0,
+      "kettle-b": 21.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "startup.child_ms": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 31.0,
+      "kettle-b": 31.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.cpu_percent": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 0.21000000000000002,
+      "kettle-b": 0.21000000000000002
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.wakeups_per_second": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 0.41000000000000003,
+      "kettle-b": 0.41000000000000003
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.footprint_mib": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 17.0,
+      "kettle-b": 17.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.peak_mib": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 101.0,
+      "kettle-b": 101.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.done3_mib": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 81.0,
+      "kettle-b": 81.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.done20_mib": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 17.0,
+      "kettle-b": 17.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "vtebench.geometric mean": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {}
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "latency.mean_ms": {
+   "terminals": {},
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-29",
+     "started": "2027-01-29",
+     "countable": false,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "diff": 0.0,
+     "diff_low": 0.0,
+     "diff_high": 0.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 15.0,
+      "kettle-b": 15.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.median_ms": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 15.0,
+      "kettle-b": 15.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.p95_ms": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 20.0,
+      "kettle-b": 20.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.p99_ms": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 20.0,
+      "kettle-b": 20.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.input_ms": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 2.0,
+      "kettle-b": 2.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.output_ms": {
+   "terminals": {},
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": false,
+     "estimates": {
+      "kettle-a": 3.0,
+      "kettle-b": 3.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  }
+ }
+}

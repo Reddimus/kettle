@@ -264,6 +264,17 @@ func selfTest() -> Int32 {
         }
     }
 
+    let parseBase = ["probe", "--pid", "1", "--out", "unused"]
+    check(parse(parseBase)?.initialGapMs == 0, "default initial gap is zero")
+    check(parse(parseBase + ["--initial-gap-ms", "2000"])?.initialGapMs == 2000, "cursor initial gap parses")
+    check(parse(parseBase + ["--initial-gap-ms", "-1"]) == nil, "negative initial gap refuses")
+    check(parse(parseBase + ["--initial-gap-ms", "10001"]) == nil, "unbounded initial gap refuses")
+    check(enabledStamp("ENABLED 100\n", acceptedNs: 100, now: 101) == 100, "accepted cursor acknowledgment")
+    for bad in ["ENABLED 99\n", "ENABLED 102\n", "ENABLED 100", "ENABLED 100\nENABLED 100\n"] {
+        check(enabledStamp(bad, acceptedNs: 100, now: 101) == nil, "early duplicate torn cursor acknowledgment refuses")
+    }
+    check(parse(parseBase + ["--cursor-control", "fifo"]) == nil, "missing cursor acknowledgment path refuses")
+
     let off = solid(200, 100, 20)
     var on = off
     let block = PixelRect(x: 40, y: 30, width: 128, height: 68)
@@ -526,6 +537,9 @@ struct Options {
     var out = ""
     var keys = 100
     var warmup = 20
+    var initialGapMs = 0
+    var cursorControl = ""
+    var cursorAck = ""
     var gapMs = (100, 300)
     var censorMs = 500
     var seed: UInt64 = 7
@@ -603,6 +617,19 @@ func finish(_ object: [String: Any], to path: String, code: Int32) -> Never {
     exit(code)
 }
 
+func guardedPostTime(_ options: Options, probeStartNs: UInt64, now: () -> UInt64,
+                     emit: () -> Void) throws -> UInt64 {
+    try gate.withLock {
+        guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
+        if options.deadlineMs > 0 && now() - probeStartNs > UInt64(options.deadlineMs) * 1_000_000 {
+            throw Failure(reason: "deadline passed")
+        }
+        let postNs = now()
+        emit()
+        return postNs
+    }
+}
+
 func cancelInvocation() -> Never {
     gate.lock()
     exit(4)
@@ -651,13 +678,14 @@ func calibrateBlock(_ options: Options, guardedPost: () throws -> UInt64,
 func measureKeys(_ options: Options, guardedPost: () throws -> UInt64, expect: (Bool) -> Void,
                  frames: () -> [Observed], now: () -> UInt64,
                  sleep: (UInt64) async throws -> Void,
-                 sampleGuard: () throws -> Void) async throws -> ([[String: Any]], UInt64, UInt64) {
+                 sampleGuard: () throws -> Void, beforeKey: () throws -> Void = {}) async throws -> ([[String: Any]], UInt64, UInt64) {
     var rng = Rng(state: options.seed)
     var on = false
     var samples: [[String: Any]] = []
     var typingStartMach: UInt64 = 0, typingEndMach: UInt64 = 0
     let censorNs = UInt64(options.censorMs) * 1_000_000
     for seq in 1...(options.warmup + options.keys) {
+        try beforeKey()
         on.toggle()
         expect(on)
         let postNs = try guardedPost()
@@ -795,14 +823,8 @@ func run(_ options: Options) async throws -> [String: Any] {
         // The deadline is checked at the post itself, under the gate the
         // deadline's finish takes: a guard query that stalls across the
         // deadline cannot let a key through.
-        let postNs: UInt64 = try gate.withLock {
-            guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
-            if options.deadlineMs > 0 && nowNs() - probeStartNs > UInt64(options.deadlineMs) * 1_000_000 {
-                throw Failure(reason: "deadline passed")
-            }
-            let postNs = nowNs()
+        let postNs = try guardedPostTime(options, probeStartNs: probeStartNs, now: nowNs) {
             post(events, options)
-            return postNs
         }
         lastPostNs = postNs
         return postNs
@@ -816,6 +838,7 @@ func run(_ options: Options) async throws -> [String: Any] {
     result["calibration"] = ["on": calibration.on, "off": calibration.off, "box_px": [box!.x, box!.y, box!.width, box!.height]]
 
     // Measuring stream: just the block and a 4 pt margin.
+    let calibrationAcceptedNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
     let margin = 4 * scale
     let boxPt = CGRect(x: config.sourceRect.minX + CGFloat(box!.x - margin) / CGFloat(scale),
                        y: config.sourceRect.minY + CGFloat(box!.y - margin) / CGFloat(scale),
@@ -833,6 +856,12 @@ func run(_ options: Options) async throws -> [String: Any] {
     let vsync = VsyncLog()
     await MainActor.run { vsync.start() }
 
+    let cursorEnabledNs = try await beginCursorStream(options, acceptedNs: calibrationAcceptedNs,
+        probeStartNs: probeStartNs, rawNow: { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) },
+        enable: { try await enableCursor(options, acceptedNs: calibrationAcceptedNs, probeStartNs: probeStartNs) },
+        sleep: { try await Task.sleep(nanoseconds: $0) })
+    if let stamp = cursorEnabledNs { result["cursor_enabled_ns"] = stamp }
+
     let (samples, typingStartMach, typingEndMach) = try await measureKeys(options,
         guardedPost: guardedPost, expect: { capture.expect(on: $0) }, frames: { capture.frames() },
         now: nowNs, sleep: { try await Task.sleep(nanoseconds: $0) }, sampleGuard: {
@@ -840,6 +869,8 @@ func run(_ options: Options) async throws -> [String: Any] {
               obscuring(onScreenWindows(), window: measured, rect: watched) == nil else {
             throw Failure(reason: "focus changed or a window covered the block during a sample")
         }
+        }, beforeKey: {
+            if let stamp = cursorEnabledNs { try unchangedCursorAck(options.cursorAck, stamp: stamp) }
         })
 
     await MainActor.run { vsync.stop() }
@@ -858,6 +889,80 @@ func run(_ options: Options) async throws -> [String: Any] {
         "typing_end_ns": typingRawNs(typingEndMach, typingClockBefore),
         "pid": options.pid, "window_id": measured, "guards_ok": true] as [String: Any]
     return result
+}
+
+// Calibration has completed before this transition. The initial gap uses
+// the payload's raw-clock acknowledgment, not the probe's receipt time.
+func beginCursorStream(_ options: Options, acceptedNs: UInt64, probeStartNs: UInt64,
+                       rawNow: () -> UInt64, enable: () async throws -> UInt64,
+                       sleep: (UInt64) async throws -> Void) async throws -> UInt64? {
+    var cursorEnabledNs: UInt64? = nil
+    if !options.cursorControl.isEmpty { cursorEnabledNs = try await enable() }
+    let quietStart = cursorEnabledNs ?? rawNow()
+    let quietUntil = quietStart + UInt64(options.initialGapMs) * 1_000_000
+    let currentRaw = rawNow()
+    if quietUntil > currentRaw { try await sleep(quietUntil - currentRaw) }
+    return cursorEnabledNs
+}
+
+func unchangedCursorAck(_ path: String, stamp: UInt64) throws {
+    let ack = try readCursorAck(path)
+    guard ack == "ENABLED \(stamp)\n" else { throw Failure(reason: "cursor acknowledgment changed") }
+}
+
+func enabledStamp(_ text: String, acceptedNs: UInt64, now: UInt64) -> UInt64? {
+    guard text.hasPrefix("ENABLED "), text.hasSuffix("\n"), text.count <= 64,
+          let stamp = UInt64(text.dropFirst(8).dropLast()), stamp >= acceptedNs, stamp <= now else { return nil }
+    return stamp
+}
+
+func readCursorAck(_ path: String) throws -> String? {
+    let fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW)
+    if fd < 0 {
+        if errno == ENOENT { return nil }
+        throw Failure(reason: "cursor acknowledgment open failed")
+    }
+    defer { close(fd) }
+    var st = stat()
+    guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG,
+          st.st_size > 0, st.st_size <= 64 else { throw Failure(reason: "cursor acknowledgment type/size invalid") }
+    var bytes = [UInt8](repeating: 0, count: 65)
+    let count = Darwin.read(fd, &bytes, bytes.count)
+    guard count == Int(st.st_size), let text = String(bytes: bytes.prefix(count), encoding: .utf8)
+    else { throw Failure(reason: "cursor acknowledgment torn") }
+    return text
+}
+
+// Nonblocking FIFO open/write and bounded ack wait. The lease/deadline gate
+// remains authoritative at posting even if a native query stalls later.
+func enableCursor(_ options: Options, acceptedNs: UInt64, probeStartNs: UInt64) async throws -> UInt64 {
+    guard !FileManager.default.fileExists(atPath: options.cursorAck) else { throw Failure(reason: "early cursor acknowledgment") }
+    let until = min(probeStartNs + UInt64(options.deadlineMs) * 1_000_000, nowNs() + 5_000_000_000)
+    func alive() throws {
+        guard invocationAlive(options.leaseFile), nowNs() < until else { throw Failure(reason: "cursor handshake deadline/cancellation") }
+    }
+    var fd: Int32 = -1
+    while fd < 0 {
+        try alive()
+        fd = open(options.cursorControl, O_WRONLY | O_NONBLOCK | O_NOFOLLOW)
+        if fd < 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+    }
+    defer { close(fd) }
+    var st = stat()
+    guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFIFO else { throw Failure(reason: "cursor control is not FIFO") }
+    try alive()
+    let request = Array("ENABLE\n".utf8)
+    let sent = request.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+    guard sent == request.count else { throw Failure(reason: "cursor enable write failed") }
+    while true {
+        try alive()
+        if let text = try readCursorAck(options.cursorAck) {
+            guard let stamp = enabledStamp(text, acceptedNs: acceptedNs, now: clock_gettime_nsec_np(CLOCK_UPTIME_RAW))
+            else { throw Failure(reason: "invalid cursor acknowledgment") }
+            return stamp
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
 }
 
 func parse(_ args: [String]) -> Options? {
@@ -882,10 +987,15 @@ func parse(_ args: [String]) -> Options? {
         case "--out": guard let v = value() else { return nil }; o.out = v
         case "--keys": guard let v = value(), let n = Int(v) else { return nil }; o.keys = n
         case "--warmup": guard let v = value(), let n = Int(v) else { return nil }; o.warmup = n
+        case "--initial-gap-ms":
+            guard let v = value(), let n = Int(v), (0...10000).contains(n) else { return nil }
+            o.initialGapMs = n
+        case "--cursor-control": guard let v = value(), !v.isEmpty else { return nil }; o.cursorControl = v
+        case "--cursor-ack": guard let v = value(), !v.isEmpty else { return nil }; o.cursorAck = v
         case "--gap-ms":
             guard let v = value() else { return nil }
             let parts = v.split(separator: ":").compactMap { Int($0) }
-            guard parts.count == 2, parts[0] <= parts[1] else { return nil }
+            guard parts.count == 2, parts[0] > 0, parts[0] <= parts[1], parts[1] <= 5000 else { return nil }
             o.gapMs = (parts[0], parts[1])
         case "--censor-ms": guard let v = value(), let n = Int(v) else { return nil }; o.censorMs = n
         case "--seed": guard let v = value(), let n = UInt64(v) else { return nil }; o.seed = n
@@ -896,6 +1006,9 @@ func parse(_ args: [String]) -> Options? {
         }
         i += 1
     }
+    if o.cursorControl.isEmpty != o.cursorAck.isEmpty { return nil }
+    if !o.cursorControl.isEmpty && (o.initialGapMs < 1500 || o.gapMs.0 < 1500 || o.deadlineMs == 0) { return nil }
+    if o.warmup < 0 || o.warmup > 200 || o.keys > 1000 || !(1...5000).contains(o.censorMs) { return nil }
     if o.blinkCheck && (o.startedNs == 0 || o.cursorRect == nil || o.blinkWindowID == 0) { return nil }
     return o.pid > 0 && !o.out.isEmpty && o.keys > 0 ? o : nil
 }
@@ -1065,11 +1178,88 @@ func typingFixture(failGuard: Bool) async throws -> [String: Any] {
             "typing_start_ns": typingRawNs(start, check), "typing_end_ns": typingRawNs(end, check)]
 }
 
+// Runs production calibration, cursor preparation, measurement and posting
+// gates with virtual frames and time. It never initializes AppKit or posts input.
+func cursorFixture(_ output: String, scenario: String, leasePath: String) async throws -> [String: Any] {
+    guard var options = parse(["probe", "--pid", "1", "--out", output, "--keys", "2", "--warmup", "2",
+        "--initial-gap-ms", "2000", "--gap-ms", "2000:2400", "--cursor-control", "fixture",
+        "--cursor-ack", output + ".ack", "--deadline-ms", "60000"]) else {
+        throw Failure(reason: "cursor fixture arguments rejected")
+    }
+    options.leaseFile = leasePath
+    defer { unlink(options.cursorAck) }
+    var clock: UInt64 = 1_000_000_000
+    let start = clock
+    var posts = 0
+    var events: [[String: Any]] = []
+    func record(_ kind: String, _ extra: [String: Any] = [:]) {
+        events.append(extra.merging(["kind": kind, "at": clock]) { _, new in new })
+    }
+    func sleep(_ ns: UInt64) async { record("sleep", ["ns": ns]); clock += ns }
+    func guardedPost() throws -> UInt64 {
+        // Model a native query that completes after cancellation/deadline.
+        if posts == 6 && scenario == "late-query" { clock = start + 61_000_000_000 }
+        if posts == 6 && scenario == "cancel-query" { unlink(options.leaseFile) }
+        record("query")
+        return try guardedPostTime(options, probeStartNs: start, now: { clock }) {
+            posts += 1; record("post", ["number": posts])
+        }
+    }
+    func frame() -> Frame {
+        var pixels = [UInt8](repeating: 20, count: 200 * 100 * 4)
+        if posts % 2 == 1 {
+            for y in 30..<98 { for x in 40..<168 {
+                let i = (y * 200 + x) * 4
+                pixels[i] = 230; pixels[i+1] = 230; pixels[i+2] = 230
+            } }
+        }
+        return Frame(width: 200, height: 100, bytesPerRow: 800, pixels: pixels)
+    }
+    _ = try await calibrateBlock(options, guardedPost: guardedPost, latestFrame: { frame() }, sleep: sleep)
+    record("accepted", ["posts": posts])
+    let accepted = clock
+    let stamp = try await beginCursorStream(options, acceptedNs: accepted, probeStartNs: start,
+        rawNow: { clock }, enable: {
+            record("enable", ["posts": posts])
+            // Ack arrives 100 ms after the payload transition. Waiting begins
+            // at the transition, so only 1900 ms of initial delay remains.
+            let stamp = clock
+            try "ENABLED \(stamp)\n".write(toFile: options.cursorAck, atomically: true, encoding: .utf8)
+            clock += 100_000_000
+            return stamp
+        }, sleep: sleep)
+    var currentPost: UInt64 = 0
+    do {
+        let (samples, first, last) = try await measureKeys(options, guardedPost: {
+            currentPost = try guardedPost(); return currentPost
+        }, expect: { record("expect", ["on": $0]) }, frames: {
+            [Observed(displayNs: currentPost+2_000_000, arrivalNs: currentPost+2_500_000, share: 0.96)]
+        }, now: { clock }, sleep: sleep, sampleGuard: { record("guard") }, beforeKey: {
+            if scenario == "changed-ack" {
+                try "ENABLED 0\n".write(toFile: options.cursorAck, atomically: true, encoding: .utf8)
+            }
+            if let stamp = stamp { try unchangedCursorAck(options.cursorAck, stamp: stamp) }
+        })
+        return ["events": events, "samples": samples, "start_mach_ns": first, "end_mach_ns": last,
+                "enabled_ns": stamp as Any, "initial_gap_ms": options.initialGapMs]
+    } catch let failure as Failure {
+        return ["events": events, "error": failure.reason, "posts": posts]
+    }
+}
+
 // MARK: - Entry
 
 let probeStartNs = nowNs()
 let args = CommandLine.arguments
 if args.contains("--self-test") { exit(selfTest()) }
+if let cursorIndex = args.firstIndex(of: "--self-test-cursor"), cursorIndex + 3 < args.count {
+    let output = args[cursorIndex+1], scenario = args[cursorIndex+2]
+    Task.detached {
+        do { finish(try await cursorFixture(output, scenario: scenario, leasePath: args[cursorIndex+3]), to: output, code: 0) }
+        catch { finish(["error": "cursor fixture failed: \(error)"], to: output, code: 1) }
+    }
+    dispatchMain()
+}
 if let typingIndex = args.firstIndex(of: "--self-test-typing"), typingIndex + 1 < args.count {
     let output = args[typingIndex + 1]
     Task.detached {

@@ -149,3 +149,18 @@ values fail instead of silently choosing a different estimator.
 This PR does not add publication fill helpers, probe receipts, asset closure,
 new collectors or native instrumentation. Those belong to the remaining
 harness-completion PRs.
+
+## Cursor input and exit coverage
+
+The optional `cursor_exit_v1` stderr stream starts with one capability. An
+input record has exactly `event: "input"`, `launch_id`, `pane_id` and `key_seq`.
+The producer emits one for each counted key that does not latch an exit and
+for each cancelled exit ticket. Calibration keys 1..6 must be inputs.
+Sequences 7..6+W+N must be exits with `layer_active: true`, in key order.
+Every sequence from 1 through the highest seen must occur exactly once across
+both record types. Input records can arrive before an earlier exit completes.
+Any input at sequence 7 or later, sequence beyond 6+W+N, gap, duplicate,
+or pane/launch mismatch invalidates the stream. Raw input records remain in
+the stderr artifact; `cursor_exit_records` and statistics contain exits only.
+A legacy stream without capability remains unavailable. A capable empty or
+partial stream fails.

@@ -88,6 +88,9 @@ PROBES = Path(__file__).resolve().parent / "macos-standing"
 _hc_spec = importlib.util.spec_from_file_location("standing_output_blink", PROBES / "output_blink.py")
 hc = importlib.util.module_from_spec(_hc_spec)
 _hc_spec.loader.exec_module(hc)
+_cursor_spec = importlib.util.spec_from_file_location("standing_cursor", PROBES / "cursor_latency.py")
+cursor = importlib.util.module_from_spec(_cursor_spec)
+_cursor_spec.loader.exec_module(cursor)
 DEFAULT_KETTLE = REPO / "target" / "release" / "kettle"
 INSTALLED_KETTLE = "/Applications/kettle.app/Contents/MacOS/kettle"
 VTEBENCH_URL = "https://github.com/alacritty/vtebench"
@@ -106,7 +109,7 @@ APPS = {
 WORKLOADS = ("startup", "idle", "flood-memory", "vtebench")
 # Never in the default list: latency posts key presses, needs the probe's
 # Screen Recording and Accessibility grants, and needs the machine to itself.
-OPT_IN_WORKLOADS = ("latency", "output-memory", "blink-window")
+OPT_IN_WORKLOADS = ("latency", "latency-cursor", "output-memory", "blink-window")
 # Publication defaults. Counts are multiples of five so a five-terminal
 # rotation is balanced.
 ROUNDS = {"startup": 30, "idle": 5, "flood-memory": 5, "vtebench": 5, "latency": 10}
@@ -123,7 +126,7 @@ MIN_PAIRED_SHARE = 0.8
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
-                "footprint_detail", "startup_phases", "latency", "config_closures", "output_blink")
+                "footprint_detail", "startup_phases", "latency", "config_closures", "output_blink", "latency-cursor")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -1677,7 +1680,7 @@ class Runner:
 
     def launch(self, name: str, body: str, timeout: float,
                params: Optional[Dict[str, str]] = None, phases: bool = False,
-               argv: Optional[List[str]] = None, settle: bool = True) -> subprocess.Popen:
+               argv: Optional[List[str]] = None, settle: bool = True, cursor_exit_context: Optional[Path] = None) -> subprocess.Popen:
         """Start `name` running `body` after the stamp and, with `settle`,
         after the terminal has reached COLS x ROWS; without it, `body` places
         settle_command itself. Values that change per launch go in a params
@@ -1712,9 +1715,12 @@ class Runner:
             env["KETTLE_HC_LAUNCH_CONTEXT"] = str(self.observation_context)
         if stamped:
             env["RUST_LOG"] = "warn,kettle::startup=info"
+        if cursor_exit_context is not None:
+            env["RUST_LOG"] = "warn,kettle::cursor_blink=info"
+            env["KETTLE_CURSOR_EXIT_CONTEXT"] = str(cursor_exit_context)
         # Its own session, so the probe leads a process group holding only it
         # and what it starts; stop() can clean that group up if it must.
-        with (stderr_path.open("w") if stamped else open(os.devnull, "w")) as stderr:
+        with (stderr_path.open("w") if stamped or cursor_exit_context is not None else open(os.devnull, "w")) as stderr:
             self.current = subprocess.Popen(
                 [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
                 stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True, env=env,
@@ -1737,27 +1743,50 @@ class Runner:
         log, out = self.work / "keyblock.log", self.work / "latency.json"
         context, timeline = self.work / "typing-launch.json", self.work / "typing-memory.jsonl"
         floor_mode = name.startswith("floor-")
+        cursor_mode = options.get("payload") == "cursor"
+        enable, ack = self.work / "cursor.control", self.work / "cursor.ack"
+        exit_context = self.work / "cursor-exit-context.json"
+        launch_id = os.urandom(16).hex() if cursor_mode else None
+        if cursor_mode:
+            for path in (enable, ack, Path(str(ack) + ".tmp"), exit_context):
+                path.unlink(missing_ok=True)
+            os.mkfifo(enable, 0o600)
+            private_json(exit_context, {"contract": cursor.CONTRACT, "launch_id": launch_id,
+                "calibration_keys": 6, "warmup": options["warmup"], "keys": options["keys"]})
         receipts = [Path(str(context) + ".observer-" + suffix)
                     for suffix in ("request", "started", "stop", "reaped")]
         for stale in (log, out, context, timeline, *receipts):
             stale.unlink(missing_ok=True)
+        pending_result = None
+        def linked_result(value):
+            nonlocal pending_result
+            pending_result = value
+            if cursor_mode and keep:
+                value["cursor_artifacts"] = {kind: {"name": path.name, "sha256": file_sha256(path)}
+                    for kind, path in (("probe", keep), ("keyblock", keep.with_suffix(".keyblock.log")),
+                        ("launch", keep.with_suffix(".launch.json")), ("ack", keep.with_suffix(".cursor.ack")),
+                        ("context", keep.with_suffix(".cursor-context.json")),
+                        ("exits", keep.with_suffix(".cursor-exits.log"))) if path.is_file()}
+            return value
         process, observer = None, None
-        # The probe posts nothing after its deadline. Keep the existing timing
-        # budget; the observer is bounded by the launch owner's 600 s lifetime.
-        budget = 120 + (LATENCY_CALIBRATION_KEYS + options["warmup"] + options["keys"]) * (
-            0.3 + options["censor_ms"] / 1000 + 0.2)
+        deadlines = cursor.budget(options)
+        budget = deadlines["probe_s"]
         try:
             self.observation_context = None if floor_mode else context
             if floor_mode:
                 floor = [str(self.probes["latency-floor"]), name[len("floor-"):], str(log)]
-                process = self.launch(name, "", 600, argv=floor)
+                process = self.launch(name, "", deadlines["launch_s"], argv=floor)
                 ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
             else:
-                process = self.launch(name, f'exec "{self.probes["keyblock"]}" "{log}"', 600)
+                body = f'exec "{self.probes["keyblock"]}" "{log}"'
+                if cursor_mode:
+                    body += f' cursor "{enable}" "{ack}" {int(deadlines["launch_s"] * 1000)}'
+                process = self.launch(name, body, deadlines["launch_s"],
+                    **({"cursor_exit_context": exit_context} if cursor_mode and options.get("exit_logs") else {}))
                 ready = self.wait_for(self.work / "grid", 30 + SETTLE_SECONDS)
             pid = self.pid()
             if not ready or pid is None:
-                return {"error": "the terminal never ran its payload"}
+                return linked_result({"error": "the terminal never ran its payload"})
             time.sleep(1.0)
             info, observer_reason = {}, None
             if not floor_mode:
@@ -1770,17 +1799,28 @@ class Runner:
                         raise ValueError("typing launch window identity mismatch")
                     info = launch_info
                     sample_ms = options.get("sample_ms", 100)
-                    observer = hc.start_observer(self, process, context, [str(self.probes["observer"]),
-                        str(pid), str(info["window_id"]), str(timeline), str(hc.now_ns()),
-                        str(sample_ms), str(math.ceil(600_000 / sample_ms))])
+                    if not cursor_mode:
+                        observer = hc.start_observer(self, process, context, [str(self.probes["observer"]),
+                            str(pid), str(info["window_id"]), str(timeline), str(hc.now_ns()),
+                            str(sample_ms), str(math.ceil(deadlines["launch_s"] * 1000 / sample_ms))])
                     # Confirm a native query before any probe calibration.
-                    if not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2):
+                    if not cursor_mode and (not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2)):
                         observer_reason = "typing observer readiness missing"
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     observer_reason = "typing launch context unavailable or invalid"
+            if cursor_mode and observer_reason:
+                return linked_result({"error": "cursor launch window identity unavailable"})
             args = ["--pid", str(pid), "--out", str(out), "--keys", str(options["keys"]),
                     "--warmup", str(options["warmup"]), "--censor-ms", str(options["censor_ms"]),
                     "--seed", str(seed), "--inject", options["inject"], "--deadline-ms", str(int(budget * 1000))]
+            if cursor_mode:
+                args += ["--cursor-control", str(enable), "--cursor-ack", str(ack),
+                         "--initial-gap-ms", str(options.get("first_gap_ms", 2000))]
+            if cursor_mode or "gap_ms" in options:
+                gaps = options.get("gap_ms", [2000, 2400] if cursor_mode else [100, 300])
+                args += ["--gap-ms", f"{gaps[0]}:{gaps[1]}"]
+            if not cursor_mode and options.get("first_gap_ms"):
+                args += ["--initial-gap-ms", str(options["first_gap_ms"])]
             started = time.monotonic()
             try:
                 with verified_probe_use(self.probes["latency-probe"]) as artifact:
@@ -1798,23 +1838,55 @@ class Runner:
                         clean = self.stop(process, 30)
                 finally:
                     self.observation_context = None
+                    if cursor_mode:
+                        enable.unlink(missing_ok=True)
                     if keep:
                         for source, dest in ((out, keep), (timeline, keep.with_suffix(".memory.jsonl")),
                                              (log, keep.with_suffix(".keyblock.log")),
                                              (context, keep.with_suffix(".launch.json"))):
                             if source.exists():
                                 shutil.copyfile(source, dest)
+                        if cursor_mode:
+                            for source, suffix in ((ack, ".cursor.ack"), (exit_context, ".cursor-context.json"),
+                                                   (self.work / "terminal.stderr", ".cursor-exits.log")):
+                                if source.exists():
+                                    shutil.copyfile(source, keep.with_suffix(suffix))
+                    if pending_result is not None:
+                        linked_result(pending_result)
         if not finished:
-            return {"error": "the latency probe never finished"}
+            return linked_result({"error": "the latency probe never finished"})
         try:
             probe = json.loads(out.read_text())
         except (OSError, json.JSONDecodeError):
-            return {"error": "the latency probe wrote no result"}
+            return linked_result({"error": "the latency probe wrote no result"})
         if "error" in probe:
-            return {"error": f"latency probe: {probe['error']}"}
-        row = latency_row(probe, read_keyblock_log(log), options["censor_ms"])
+            return linked_result({"error": f"latency probe: {probe['error']}"})
+        payload_records = read_keyblock_log(log)
+        if cursor_mode:
+            try:
+                payload_records = cursor.read_payload(log.read_bytes())
+                cursor.validate_stream(probe, payload_records, options["warmup"], options["keys"])
+            except (OSError, ValueError, TypeError, KeyError):
+                return linked_result({"error": "cursor stream invalid"})
+        row = latency_row(probe, payload_records, options["censor_ms"])
         row["tool_artifact"] = artifact
-        if not floor_mode:
+        if cursor_mode:
+            row.update(latency_payload="cursor", gap_ms=options.get("gap_ms", [2000, 2400]),
+                       first_gap_ms=options.get("first_gap_ms", 2000))
+            if options.get("exit_logs"):
+                try:
+                    with (self.work / "terminal.stderr").open("rb") as stderr:
+                        raw = stderr.read(8 * 1024 * 1024 + 1)
+                    if len(raw) > 8 * 1024 * 1024:
+                        raise ValueError("cursor exit log exceeds bound")
+                    row.update(cursor.parse_exits(raw.decode("utf-8"), launch_id, info.get("window_id"),
+                        probe, payload_records, options["warmup"], options["keys"], percentile))
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    row.update(error="cursor exit evidence invalid", cursor_exit_valid=False)
+            else:
+                row.update(cursor.parse_exits("", launch_id, info.get("window_id"), probe, payload_records,
+                    options["warmup"], options["keys"], percentile))
+        if not floor_mode and not cursor_mode:
             try:
                 samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
             except (OSError, ValueError, TypeError) as exc:
@@ -1831,7 +1903,7 @@ class Runner:
                     row["typing_timeline_sha256"] = row["typing_artifacts"]["memory"]["sha256"]
         if not clean:
             row["killed"] = True
-        return row
+        return linked_result(row)
 
     def kill_group(self, process: subprocess.Popen) -> None:
         """Kill a launch probe that stopped responding, with everything it
@@ -3005,9 +3077,9 @@ METRIC_REGISTRY = {
         Metric("latency-cursor.mean_ms", "ms", "latency", "censored-keys", "latency-standing",
                "arithmetic mean of launch means with Student-t interval", "mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval", "latency-difference", "latency",
                "diagnostic"),
-        *(Metric(f"latency.{f}", "ms", "distribution", "pooled-keys", "latency-standing",
+        *(Metric(f"{w}.{f}", "ms", "distribution", "pooled-keys", "latency-standing",
                  "pooled key quantile", "none", "none", "none", "descriptive") for f in
-          ("median_ms", "p95_ms", "p99_ms", "input_ms", "output_ms")),
+          ("median_ms", "p95_ms", "p99_ms", "input_ms", "output_ms") for w in ("latency", "latency-cursor")),
     ]
 }
 
@@ -3154,7 +3226,7 @@ LATENCY_METRICS = ("mean_ms", "median_ms", "p95_ms", "p99_ms", "input_ms", "outp
 def workload_metrics(workload: str, rows: Dict[str, List[dict]],
                      meta: Optional[dict] = None) -> Dict[str, Dict[str, List[Optional[float]]]]:
     """{metric: {terminal: [value per round]}} with rounds aligned by index."""
-    if workload == "latency":
+    if workload in ("latency", "latency-cursor"):
         return {metric: {name: [row_value(workload, run, metric) for run in runs] for name, runs in rows.items()}
                 for metric in LATENCY_METRICS}
     if workload == "vtebench":
@@ -3196,8 +3268,8 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     kettle = names[0]
     unranked = set(results.get("unranked", []))
     for workload, rows in results["workloads"].items():
-        if workload == "latency":
-            analysis[workload] = analyze_latency(results, rows, names, ab)
+        if workload in ("latency", "latency-cursor"):
+            analysis[workload] = analyze_latency(results, rows, [n for n in names if n in rows], ab, workload)
             continue
         mean_based = workload == "vtebench"
         metrics: Dict[str, dict] = {}
@@ -3224,19 +3296,19 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
     return analysis
 
 
-def latency_censor_ms(results: dict) -> float:
-    return float(((results.get("meta") or {}).get("latency") or {}).get("censor_ms", 500))
+def latency_censor_ms(results: dict, workload: str = "latency") -> float:
+    return float(((results.get("meta") or {}).get(workload) or {}).get("censor_ms", 500))
 
 
-def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str], ab: bool) -> dict:
+def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str], ab: bool, workload: str = "latency") -> dict:
     """The latency workload: every entry that ran (the terminals, then the
     unranked opaque variant and the floors), with mean latency over rounds
     (launches). Kettle is compared with the fastest other ranked terminal, or
     B with A, on the round means of every paired round."""
-    censor_ms = latency_censor_ms(results)
-    planned = ((results.get("meta") or {}).get("rounds") or {}).get("latency", 0)
+    censor_ms = latency_censor_ms(results, workload)
+    planned = ((results.get("meta") or {}).get("rounds") or {}).get(workload, 0)
     entries = [name for name in names if name in rows] + [name for name in rows if name not in names]
-    unranked = set(results.get("unranked", []))
+    unranked = set(results.get("unranked", [])) | (set(rows) if workload == "latency-cursor" else set())
     keys = {name: [latency_keys(run, censor_ms) for run in rows[name]] for name in entries}
     standing = {name: latency_standing(rows[name], censor_ms, planned) for name in entries}
     metrics: Dict[str, dict] = {}
@@ -3246,7 +3318,7 @@ def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str]
     halves = {half: {name: [v for run in rows[name] if latency_keys(run, censor_ms) is not None
                             for v in run.get(half) or [] if is_number(v)] for name in entries}
               for half in ("inputs_ms", "outputs_ms")}
-    for metric, per_name in workload_metrics("latency", rows).items():
+    for metric, per_name in workload_metrics(workload, rows).items():
         terminals = {}
         for name in entries:
             if not standing[name]["measured"]:
@@ -3283,7 +3355,7 @@ def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str]
                     entry["vs_best"] = cluster_compare(keys[best], keys[names[0]])
                     order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
                     entry["rank"] = order.index(names[0]) + 1
-        descriptor = metric_descriptor("latency", metric)
+        descriptor = metric_descriptor(workload, metric)
         entry["descriptor"] = descriptor.record()
         if metric == "mean_ms":
             ranked = sorted((name for name in terminals if name not in unranked and standing[name]["ranked"]),
@@ -3305,11 +3377,16 @@ def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str]
         metrics[metric] = entry
     for descriptor in METRIC_REGISTRY.values():
         field = descriptor.id.split(".", 1)[1]
-        if (descriptor.id.split(".", 1)[0] == "latency" and descriptor.kind == "scalar"
+        if (descriptor.id.split(".", 1)[0] == workload and descriptor.kind == "scalar"
                 and any(field in run for runs in rows.values() for run in runs)):
             values = {name: [metric_value(descriptor, "latency", run) for run in rows[name]] for name in entries}
             metrics[field] = scalar_entry(descriptor, values, entries, ab, unranked)
-    return {"metrics": metrics, "entries": entries, "standing": standing}
+    result = {"metrics": metrics, "entries": entries, "standing": standing}
+    if workload == "latency-cursor":
+        result["exit_frames"] = {name: cursor.pooled(rows[name], percentile)
+            if cursor.complete_exits(rows[name], planned) else None for name in entries}
+        result["diagnostic"] = True
+    return result
 
 
 def latency_markdown(info: dict, ab: bool, countable: Optional[bool] = None) -> List[str]:
@@ -3327,10 +3404,16 @@ def latency_markdown(info: dict, ab: bool, countable: Optional[bool] = None) -> 
         mean_cell = f"{mean['estimate']:.1f} ({mean['low']:.1f}-{mean['high']:.1f})" if mean else "-"
         if not standing["measured"]:
             mean_cell += " not measured"
-        elif not standing["ranked"]:
+        elif not standing["ranked"] or info.get("diagnostic"):
             mean_cell += " unranked"
         out.append(f"| {name} | {mean_cell} | " + " | ".join(cell(m, name) for m in LATENCY_METRICS[1:])
                    + f" | {standing['censored']}/{standing['keys']} | {mean['n'] if mean else 0} |")
+    if info.get("diagnostic"):
+        out.append("Cursor latency is diagnostic and unranked; block latency remains the standing row.")
+        for name, frames in info["exit_frames"].items():
+            out.append(f"{name} total exit frame: " + ("unavailable" if frames is None else
+                f"p50 {frames['p50_us']:.0f} us, p95 {frames['p95_us']:.0f} us, max {frames['max_us']} us, "
+                f"n {frames['count']}; p95 <= 4000: {'yes' if frames['p95_le_4000'] else 'NO'}"))
     entry = metrics["mean_ms"]
     stats = entry.get("ab") if ab else entry.get("vs_best")
     if stats:
@@ -3372,8 +3455,8 @@ def summarize(results: dict, names: List[str], ab: bool, analysis: Optional[dict
     for workload, info in analysis.items():
         out.append(f"## {workload}")
         out.append("")
-        if workload == "latency":
-            countable = ((results.get("meta") or {}).get("workload_countable") or {}).get("latency")
+        if workload in ("latency", "latency-cursor"):
+            countable = ((results.get("meta") or {}).get("workload_countable") or {}).get(workload)
             out.extend(latency_markdown(info, ab, countable))
             out.append("")
             continue
@@ -3494,7 +3577,7 @@ def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
         return False
     if workload == "vtebench":
         return bool(run.get("means_ms"))
-    if workload == "latency":
+    if workload in ("latency", "latency-cursor"):
         # A key read with another, or a read nobody posted, shifts the join
         # of samples to records: the round is not trusted.
         return (isinstance(run.get("samples_ms"), list) and not run.get("killed")
@@ -3518,11 +3601,11 @@ def workload_complete(results: dict, meta: dict, workload: str) -> bool:
             return False
         # A latency entry that lost rounds is judged on its own (see
         # latency_standing); the other entries still count.
-        if workload != "latency" and not all(round_ok(workload, run, meta) for run in runs):
+        if workload not in ("latency", "latency-cursor") and not all(round_ok(workload, run, meta) for run in runs):
             return False
-    if workload == "latency":
+    if workload in ("latency", "latency-cursor"):
         # A refresh rate that changed mid-session moves every sample.
-        rates = {run.get("refresh_hz") for runs in results["workloads"]["latency"].values() for run in runs
+        rates = {run.get("refresh_hz") for runs in results["workloads"][workload].values() for run in runs
                  if round_ok(workload, run, meta)}
         return len(rates) <= 1
     return True
@@ -3577,7 +3660,7 @@ def metric_countability(results: dict, workload: str, metric: str, entry: dict, 
             if n != planned or not planned:
                 reasons.append("incomplete metric rounds")
         elif descriptor.kind == "latency":
-            status = latency_standing(runs, latency_censor_ms(results), planned)
+            status = latency_standing(runs, latency_censor_ms(results, workload), planned)
             if not status["measured"]:
                 reasons.append("latency not measured")
         if descriptor.kind == "benchmark" and planned and n != planned:
@@ -3667,14 +3750,17 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
         # tools both ran are compared.
         reference = counted[0] if counted else sessions[0]
         differs = sorted(key for key in control["setup"]
-                         if key not in ("identity", "configs", "rounds", "tool_hashes", "latency", "config_closures")
+                         if key not in ("identity", "configs", "rounds", "tool_hashes", "latency", "latency-cursor", "config_closures")
                          and control["setup"][key] != reference["setup"][key])
         # Latency's knobs must match when both ran it; its entries differ by
         # design (a standing adds floors).
-        knobs = ("keys", "warmup", "censor_ms", "inject", "signed", "typing_memory")
-        latency_a, latency_b = control["setup"].get("latency"), reference["setup"].get("latency")
-        if latency_a and latency_b and any(latency_a.get(k) != latency_b.get(k) for k in knobs):
-            differs.append("latency")
+        knobs = ("keys", "warmup", "censor_ms", "inject", "signed", "typing_memory", "gap_ms", "first_gap_ms", "payload", "exit_logs", "exit_contract")
+        for mode in ("latency", "latency-cursor"):
+            latency_a, latency_b = control["setup"].get(mode), reference["setup"].get(mode)
+            if latency_a and latency_b and any(
+                    latency_a.get(k, {"gap_ms": [100, 300], "first_gap_ms": 0, "payload": "block", "exit_logs": False}.get(k)) !=
+                    latency_b.get(k, {"gap_ms": [100, 300], "first_gap_ms": 0, "payload": "block", "exit_logs": False}.get(k)) for k in knobs):
+                differs.append(mode)
         tools_a, tools_b = control["setup"].get("tool_hashes") or {}, reference["setup"].get("tool_hashes") or {}
         if any(tools_a[name] != tools_b[name] for name in tools_a.keys() & tools_b.keys()):
             differs.append("tool_hashes")
@@ -3776,6 +3862,17 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
             for per in row["sessions"]:
                 per.pop("statistics", None)
                 per.pop("difference", None)
+    if any("latency-cursor" in session["results"]["workloads"] for session in sessions):
+        cursor_runs = {}
+        cursor_complete = {}
+        for session in sessions:
+            for name, runs in session["results"]["workloads"].get("latency-cursor", {}).items():
+                cursor_runs.setdefault(name, []).extend(runs)
+                cursor_complete[name] = cursor_complete.get(name, True) and (
+                    session["workload_countable"].get("latency-cursor", False) and cursor.complete_exits(
+                        runs, session["rounds"].get("latency-cursor", 0)))
+        combined["cursor_exit_frames"] = {name: cursor.pooled(runs, percentile)
+            if cursor_complete[name] else None for name, runs in cursor_runs.items()}
     combined["markdown"] = combined_markdown(combined, ab)
     return combined
 
@@ -3787,6 +3884,12 @@ def combined_markdown(combined: dict, ab: bool) -> str:
     for s in combined["sessions"]:
         out.append(f"| {s['label']} | {s['date']} | {'yes' if s['countable'] else 'no'} |")
     out.append("")
+    if "cursor_exit_frames" in combined:
+        for name, frames in combined["cursor_exit_frames"].items():
+            out.append(f"{name} pooled complete exit frame: " + ("unavailable" if frames is None else
+                f"p95 {frames['p95_us']:.0f} us, n {frames['count']}; p95 <= 4000: "
+                + ("yes" if frames['p95_le_4000'] else "NO")))
+        out.append("")
     if ab:
         out.append("| row | A | B | sessions (B/A, 95% CI) | verdict |")
         out.append("|---|---:|---:|---|---|")
@@ -4337,20 +4440,36 @@ def claim_out_dir(path: Path) -> Path:
     return resolved
 
 
+def select_latency_workloads(workloads: List[str], payload: str, exit_logs: bool) -> List[str]:
+    selected = ["latency-cursor" if w == "latency" and payload == "cursor" else w for w in workloads]
+    if len(selected) != len(set(selected)):
+        raise ValueError("duplicate workload selection")
+    if exit_logs and "latency-cursor" not in selected:
+        raise ValueError("--cursor-exit-logs requires latency-cursor")
+    return selected
+
+
 def resolve_rounds(args: argparse.Namespace) -> Dict[str, int]:
     if args.rounds:
-        selected = [w for w in ("output-memory", "blink-window") if w in getattr(args, "workloads", "") or (w == "blink-window" and getattr(args, "blink_validate_only", False))]
+        selected = [w for w in ("output-memory", "blink-window", "latency-cursor") if w in getattr(args, "workloads", "") or (w == "blink-window" and getattr(args, "blink_validate_only", False))]
         return {workload: args.rounds for workload in WORKLOADS + ("latency",) + tuple(selected)}
     return {"startup": args.startup_rounds, "idle": args.idle_rounds, "flood-memory": args.flood_rounds,
             "vtebench": args.vtebench_rounds, "latency": args.latency_rounds,
+            **({"latency-cursor": args.cursor_rounds} if "latency-cursor" in getattr(args, "workloads", "") else {}),
             **({"output-memory": args.output_memory_rounds} if "output-memory" in getattr(args, "workloads", "") else {}),
             **({"blink-window": args.blink_rounds} if "blink-window" in getattr(args, "workloads", "") or getattr(args, "blink_validate_only", False) else {})}
 
 
-def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str]) -> List[str]:
+def workload_entries(workload: str, names: List[str], latency_names: List[str], cursor_names: List[str]) -> List[str]:
+    return cursor_names if workload == "latency-cursor" else latency_names if workload == "latency" else names
+
+
+def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str], payload: str = "block") -> List[str]:
     """The latency rotation: the session's terminals, then, in a standing
     session, Kettle's opaque variant and the floors, which are published
     beside them and never ranked. An A/B compares its two builds only."""
+    if payload == "cursor":
+        return [name for name in names if name == "kettle" or name in ("kettle-a", "kettle-b")]
     if ab:
         return list(names)
     return names + (["kettle-opaque"] if opaque else []) + [f"floor-{mode}" for mode in floors]
@@ -4425,6 +4544,12 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--blink-shape", help="shipped cursor shape recorded by the owner pilot")
     parser.add_argument("--blink-timeout", type=float, help="shipped blink timeout seconds, 0 for none")
     parser.add_argument("--blink-disabled-default", default="", help="comma list of peers with shipped blink disabled")
+    parser.add_argument("--cursor-rounds", type=int, default=10)
+    parser.add_argument("--latency-payload", choices=("block", "cursor"), default="block",
+                        help="map selected latency to the Kettle-only cursor diagnostic")
+    parser.add_argument("--latency-gap-ms", help="MIN:MAX; block 100:300, cursor 2000:2400")
+    parser.add_argument("--latency-first-gap-ms", type=int, help="initial stream delay; block 0, cursor 2000")
+    parser.add_argument("--cursor-exit-logs", action="store_true", help="capture optional C2 complete exit evidence")
     parser.add_argument("--latency-keys", type=int, default=100, help="measured keys per latency round")
     parser.add_argument("--latency-warmup", type=int, default=20, help="discarded keys before them")
     parser.add_argument("--latency-censor-ms", type=int, default=500,
@@ -4504,6 +4629,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     # the probe's nanosecond arithmetic cannot overflow.
     for flag, value, least, most in (("--latency-keys", args.latency_keys, 1, 1000),
                                      ("--latency-rounds", args.latency_rounds, 1, 100),
+                                     ("--cursor-rounds", args.cursor_rounds, 1, 100),
                                      ("--latency-censor-ms", args.latency_censor_ms, 1, 5000),
                                      ("--latency-warmup", args.latency_warmup, 0, 200),
                                      ("--rounds", args.rounds, 1, 1000)):
@@ -4554,6 +4680,14 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     unknown = set(workloads) - set(WORKLOADS) - set(OPT_IN_WORKLOADS)
     if unknown:
         parser.error(f"unknown workloads: {', '.join(sorted(unknown))}")
+    try:
+        workloads = select_latency_workloads(workloads, args.latency_payload, args.cursor_exit_logs)
+        methods = {mode: cursor.method("cursor" if mode == "latency-cursor" else "block",
+                     args.latency_gap_ms, args.latency_first_gap_ms)
+                   for mode in workloads if mode in ("latency", "latency-cursor")}
+    except ValueError as error:
+        parser.error(str(error))
+    args.workloads = ",".join(workloads)
     floors = [f for f in args.latency_floors.split(",") if f]
     if set(floors) - set(LATENCY_FLOORS):
         parser.error(f"unknown latency floors: {', '.join(sorted(set(floors) - set(LATENCY_FLOORS)))}")
@@ -4595,6 +4729,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     except ValueError as error:
         parser.error(str(error))
     latency_names = latency_entries(names, is_ab(kettle), args.latency_kettle_opaque, floors)
+    cursor_names = latency_entries(names, is_ab(kettle), False, [], "cursor")
     if "latency" in workloads and "kettle-opaque" in latency_names:
         kettle["kettle-opaque"] = kettle["kettle"]
         kettle_configs["kettle-opaque"] = KETTLE_OPAQUE
@@ -4626,7 +4761,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         return 1 if refusals else 0
 
     tools = REPO / "target" / "perf-tools" / "macos-standing"
-    if "latency" in workloads or args.blink_validate_only:
+    if set(workloads) & {"latency", "latency-cursor"} or args.blink_validate_only:
         cleanup.enter_context(probe_lock(tools))
         validate_latency_probe(tools / "KettleLatencyProbe.app", args.latency_sign_identity)
     if needs_build(args.kettle, args.kettle_b, args.no_build):
@@ -4642,12 +4777,12 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
 
     # Build every tool first: compiling right before measuring adds load and
     # heat, so the preflight that decides the session runs after it.
-    probes = build_probes(tools, latency="latency" in workloads or args.blink_validate_only, sign_identity=args.latency_sign_identity)
-    if set(workloads) & {"latency", "output-memory", "blink-window"}:
+    probes = build_probes(tools, latency=bool(set(workloads) & {"latency", "latency-cursor"}) or args.blink_validate_only, sign_identity=args.latency_sign_identity)
+    if set(workloads) & {"latency", "latency-cursor", "output-memory", "blink-window"}:
         probes.update(hc.build_helpers(PROBES, tools))
     vtebench = build_vtebench(tools) if "vtebench" in workloads else None
     tool_hashes, tool_artifacts = probe_tool_identity(probes, args.latency_sign_identity)
-    if "latency" in workloads:
+    if set(workloads) & {"latency", "latency-cursor"}:
         with tempfile.TemporaryDirectory(prefix="kettle-latency-grants-") as tmp:
             grants = latency_grants(probes["latency-probe"], Path(tmp))
         if not all(grants.values()):
@@ -4715,6 +4850,13 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         },
         "workloads": {},
     }
+    if "latency-cursor" in workloads:
+        results["meta"]["latency-cursor"] = {"keys": args.latency_keys, "warmup": args.latency_warmup,
+            "censor_ms": args.latency_censor_ms, "inject": args.latency_inject,
+            "entries": cursor_names, "signed": "identity" if args.latency_sign_identity else "ad hoc",
+            **methods["latency-cursor"], "exit_logs": args.cursor_exit_logs, "exit_contract": cursor.CONTRACT}
+    if "latency" in workloads and (args.latency_gap_ms is not None or args.latency_first_gap_ms is not None):
+        results["meta"]["latency"].update(methods["latency"])
     local_manifest = {"configs": config_record(kettle_configs)[1]}
     if tool_artifacts:
         local_manifest["latency_probe"] = json.loads((tools / "KettleLatencyProbe.build.json").read_text())
@@ -4766,6 +4908,9 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         latency_options = {"keys": args.latency_keys, "warmup": args.latency_warmup,
                            "censor_ms": args.latency_censor_ms, "inject": args.latency_inject,
                            "sample_ms": args.memory_sample_ms}
+        cursor_options = {**latency_options, **methods.get("latency-cursor", {}), "exit_logs": args.cursor_exit_logs}
+        if "latency" in methods and (args.latency_gap_ms is not None or args.latency_first_gap_ms is not None):
+            latency_options.update(methods["latency"])
         measured = set(names) | set(latency_names if "latency" in workloads else ())
         frame = (GhosttyFrame(recovery=out_dir / "ghostty-frame-restore.txt") if "ghostty" in measured
                  else contextlib.nullcontext())
@@ -4775,7 +4920,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
             runner.ghostty_frame = frame if isinstance(frame, GhosttyFrame) else None
             try:
                 for workload in workloads:
-                    entries = latency_names if workload == "latency" else names
+                    entries = workload_entries(workload, names, latency_names, cursor_names)
                     rows: Dict[str, List[dict]] = {name: [] for name in entries}
                     results["workloads"][workload] = rows
                     # A whole rotation of failed latency rounds in a row points at the
@@ -4810,14 +4955,14 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                                     row = hc.collect(runner, name, workload,
                                         {**optional_options, "disabled": name in args.blink_disabled_default.split(",")},
                                         out_dir / f"{workload}-{name}-r{round_index}", setup)
-                                elif workload == "latency":
+                                elif workload in ("latency", "latency-cursor"):
                                     if failures_in_a_row >= len(entries):
                                         row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
                                     else:
                                         # A new gap sequence every round, the same for
                                         # every entry in it.
-                                        row = runner.latency(name, latency_options, SEED * 1000 + round_index,
-                                                             out_dir / f"latency-{name}-r{round_index}.json")
+                                        row = runner.latency(name, cursor_options if workload == "latency-cursor" else latency_options, SEED * 1000 + round_index,
+                                                             out_dir / f"{workload}-{name}-r{round_index}.json")
                                         failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
                                 else:
                                     row = runner.vtebench(name, vtebench, benchmarks,

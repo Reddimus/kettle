@@ -2361,7 +2361,7 @@ class StartupPhases(unittest.TestCase):
         self.assertIn("-29.0 ms", text)
 
 
-KEYBLOCK_SHA256 = "ff2c9a12acd3bd7512d01b30eb0349d4ac9e073bd1931d96718951b924cb9c43"
+KEYBLOCK_SHA256 = "628ab3d3c1b5a265a1aa36d77c530ce80594ad65ca7feed4c445468a836e839e"
 
 
 def latency_run(samples, censored=0, refresh=60, keys=None, **extra):
@@ -2387,15 +2387,16 @@ class Latency(unittest.TestCase):
     def test_the_default_workloads_never_post_keys(self) -> None:
         self.assertEqual(standing.WORKLOADS, ("startup", "idle", "flood-memory", "vtebench"))
         self.assertNotIn("latency", standing.WORKLOADS)
-        self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency", "output-memory", "blink-window"))
+        self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency", "latency-cursor", "output-memory", "blink-window"))
         import inspect
 
         source = inspect.getsource(standing.standing_main)
         self.assertIn('parser.add_argument("--workloads", default=",".join(WORKLOADS))', inspect.getsource(standing))
-        self.assertIn('build_probes(tools, latency="latency" in workloads', source)
+        self.assertIn('build_probes(tools, latency=bool(set(workloads) & {"latency", "latency-cursor"})', source)
 
     def test_keyblock_is_pinned(self) -> None:
-        # Every terminal and every release runs these exact bytes.
+        # Pin the source artifact and execute the block payload's byte contract.
+        TypingMemory().test_payload_initialization_and_frames()
         digest = standing.file_sha256(HERE / "macos-standing" / "keyblock.c")
         self.assertEqual(digest, KEYBLOCK_SHA256, "keyblock.c changed: re-pin it and start a new session set")
 
@@ -2648,24 +2649,8 @@ class Latency(unittest.TestCase):
         self.assertEqual(metrics["median_ms"]["terminals"]["kettle"]["estimate"], 20.0)
 
     def test_the_harness_waits_past_the_probe_deadline(self) -> None:
-        import inspect
-
-        source = inspect.getsource(standing.Runner.latency)
-        self.assertIn('"--deadline-ms", str(int(budget * 1000))', source)
-        self.assertIn("budget + 15", source, "open is waited on longer than the probe may run")
-        probe = (HERE / "macos-standing" / "latency-probe.swift").read_text()
-        self.assertIn("let postNs = try guardedPost()", probe, "the post time is taken after the guards")
-        guarded = probe.split("func guardedPost() throws -> UInt64 {")[1].split("\n    }\n")[0]
-        order = [guarded.index(needle) for needle in (
-            "guard let events = keyEvents()", "mayPost(", "gate.withLock", "deadlineMs", "let postNs = nowNs()",
-            "post(events, options)")]
-        self.assertNotIn("compactMap", probe.split("func keyEvents()")[1].split("\n}\n")[0],
-                         "a key-down is never posted without its key-up")
-        self.assertEqual(order, sorted(order), "events built first; deadline checked and time taken under the gate")
-        self.assertEqual(probe.count("exit("), 5, "finish() and locked cancellation end runs; the rest are CLI modes")
-        cancellation = probe[probe.index("func cancelInvocation()"):probe.index("func secondsSince")]
-        self.assertIn("gate.lock()", cancellation)
-        self.assertIn("gate.lock()\n    write(object, to: path)\n    exit(code)", probe)
+        CursorLatency().test_quiet_gaps_budget_and_selection()
+        CursorLatency().test_handshake_hidden_calibration_and_guard_order()
 
     def test_keys_outside_the_arrival_window_unrank_a_row(self) -> None:
         probe = {"vsync": {"period_ns": 16_666_667}, "display": {"refresh_hz": 60}}
@@ -5396,7 +5381,7 @@ static void (*fixture_signal(int sig, void (*handler)(int)))(int) { return handl
 int main(int argc, char **argv) { return payload_main(argc,argv); }
 ''')
             build=subprocess.run(['clang','-O','-o',str(binary),str(fixture)],capture_output=True,text=True,timeout=30)
-            self.assertEqual(build.returncode,0,build.stderr)
+            self.assertEqual(build.returncode,0,'native probe build failed: '+build.stderr)
             log=work/'log'
             run=subprocess.run([str(binary),str(log)],capture_output=True,timeout=10)
             self.assertEqual(run.returncode,0,run.stderr)
@@ -5520,6 +5505,491 @@ int main(int argc, char **argv) { return payload_main(argc,argv); }
                 self.assertTrue((work/'keep.keyblock.log').is_file())
                 self.assertTrue((work/'keep.json').is_file())
                 self.assertTrue((work/'keep.launch.json').is_file())
+
+
+class CursorLatency(unittest.TestCase):
+    def fixture(self, warmup=1, measured=3, durations=None):
+        durations = durations or [9000] * warmup + [1000, 2000, 3000][:measured]
+        launch, window, pane = '0123456789abcdef0123456789abcdef', 9, 2
+        header = dict(event='capability', launch_id=launch, pane_id=pane, window_id=window,
+                      clock='CLOCK_UPTIME_RAW', first_key_seq=7)
+        samples, exits = [], []
+        records = {i: (1, i, i) for i in range(1, 7)}
+        for i, us in enumerate(durations):
+            post = 1_000_000_000 + i * 3_000_000_000
+            samples.append(dict(seq=i+7,warmup=i<warmup,t_post=post,censored=False,
+                                display=post+10_000_000,arrival=post+9_000_000))
+            records[i+7] = (1, post+1000, post+2000)
+            exits.append(dict(event='exit',launch_id=launch,pane_id=pane,key_seq=i+7,
+                t_start_ns=post+3000,t_end_ns=post+3000+us*1000,total_frame_us=us,layer_active=True))
+        epoch = dict(clock='CLOCK_UPTIME_RAW',probe_clock='mach_absolute_time_ns',window_id=window,
+            guards_ok=True,typing_end_ns=samples[-1]['t_post']+1_000_000_000,
+            clock_before=dict(raw_before_ns=100,raw_after_ns=100,mach_ns=100),
+            clock_after=dict(raw_before_ns=samples[-1]['t_post']+1_000_000_000,
+                             raw_after_ns=samples[-1]['t_post']+1_000_000_000,
+                             mach_ns=samples[-1]['t_post']+1_000_000_000))
+        return header, exits, dict(samples=samples,typing_epoch=epoch,calibration_keys=6), records
+
+    def inputs(self, header):
+        return [dict(event='input', launch_id=header['launch_id'], pane_id=header['pane_id'], key_seq=i)
+                for i in range(1, 7)]
+
+    def wire(self, header, records):
+        return ''.join('cursor_exit_v1 '+_json.dumps(r)+'\n' for r in [header,*records])
+
+    def parse(self, header, exits, probe, records, warmup=1, measured=3):
+        text = self.wire(header, [*self.inputs(header), *exits])
+        return standing.cursor.parse_exits(text, header['launch_id'], 9, probe, records,
+                                          warmup, measured, standing.percentile)
+
+    def test_exit_coverage_and_identity(self):
+        import copy
+        h,e,p,r = self.fixture()
+        row = self.parse(h,e,p,r)
+        self.assertEqual((row['cursor_exit_count'],row['cursor_exit_measured_count']), (4,3))
+        self.assertEqual(row['cursor_exit_max_us'],3000)
+        self.assertEqual(row['cursor_exit_p95_us'],2900)
+        self.assertTrue(standing.cursor.complete_exits([row],1))
+        self.assertFalse(standing.cursor.complete_exits([row,{'cursor_exit_valid':False}],2))
+        self.assertFalse(standing.cursor.complete_exits([row],2))
+        self.assertFalse(standing.cursor.complete_exits([{**row,'error':'failed'}],1))
+        fixture=HERE/'macos-standing/cursor-exits.fixture'
+        self.assertEqual(standing.cursor.parse_exits(fixture.read_text(),h['launch_id'],9,p,r,1,3,standing.percentile),row)
+        for label,change in [
+            ('missing',lambda x:x.pop()), ('excess',lambda x:x.append(x[-1])),
+            ('duplicate',lambda x:x.__setitem__(1,x[0])),
+            ('shifted',lambda x:x[0].update(key_seq=8)),
+            ('calibration',lambda x:x[0].update(key_seq=6)),
+            ('negative',lambda x:x[0].update(total_frame_us=-1)),
+            ('nonfinite',lambda x:x[0].update(total_frame_us=float('nan'))),
+            ('fractional type',lambda x:x[0].update(total_frame_us=9000.0)),
+            ('pane',lambda x:x[0].update(pane_id=3)),
+            ('launch',lambda x:x[0].update(launch_id='other')),
+            ('inactive',lambda x:x[0].update(layer_active=False)),
+            ('endpoint',lambda x:x[0].update(t_end_ns=x[0]['t_start_ns']-1)),
+            ('wrong interval',lambda x:x[0].update(t_start_ns=0)),
+            ('wrong cost',lambda x:x[0].update(total_frame_us=100)),
+        ]:
+            x=copy.deepcopy(e);change(x)
+            with self.subTest(label=label),self.assertRaises(ValueError):self.parse(h,x,p,r)
+        for field,value in [('window_id',8),('pane_id',False),('clock','wall')]:
+            with self.subTest(field=field),self.assertRaises(ValueError):self.parse({**h,field:value},e,p,r)
+        for raw in ['cursor_exit_v1 '+_json.dumps(h), 'cursor_exit_v1 {bad}\n',
+                    'exit_frame_us=100 render_frame_us=10\n',
+                    'cursor_exit_v1 {"event":"exit","event":"exit"}\n']:
+            with self.assertRaises(ValueError):standing.cursor.parse_exits(raw,h['launch_id'],9,p,r,1,3,standing.percentile)
+        complete_text=self.wire(h,[*self.inputs(h),*e])
+        with self.assertRaises(ValueError):standing.cursor.parse_exits(complete_text[:-1],h['launch_id'],9,p,r,1,3,standing.percentile)
+        with self.assertRaises(ValueError):self.parse(h,[],p,r)
+        missing=standing.cursor.parse_exits('ordinary warning\n',h['launch_id'],9,p,r,1,3,standing.percentile)
+        self.assertFalse(missing['cursor_exit_available']);self.assertIsNone(missing['cursor_exit_p95_us'])
+        with self.assertRaises(ValueError):self.parse(h,e[:1],p,r)
+        for bad in [{**p,'samples':p['samples'][1:]}, {**p,'typing_epoch':{}},
+                    {**p,'samples':[{**p['samples'][0],'warmup':False},*p['samples'][1:]]}]:
+            with self.assertRaises(ValueError):self.parse(h,e,bad,r)
+
+    def parse_wire(self, header, wire, probe, payload):
+        return standing.cursor.parse_exits(self.wire(header, wire), header['launch_id'], 9,
+                                           probe, payload, 1, 3, standing.percentile)
+
+    def test_calibration_input_records_pass(self):
+        h,e,p,r = self.fixture()
+        row = self.parse_wire(h, [*self.inputs(h), *e], p, r)
+        self.assertTrue(row['cursor_exit_valid'])
+        self.assertEqual(row['cursor_exit_records'], e)
+        # Input arrival order need not match key order when a frame coalesces.
+        self.assertEqual(self.parse_wire(h, [*reversed(self.inputs(h)), *e], p, r), row)
+
+    def test_cmd_c_after_final_exit_invalidates_campaign(self):
+        h,e,p,r = self.fixture()
+        extra = dict(event='input', launch_id=h['launch_id'], pane_id=h['pane_id'], key_seq=11)
+        with self.assertRaises(ValueError):
+            self.parse_wire(h, [*self.inputs(h), *e, extra], p, r)
+
+    def test_input_in_measured_range_fails(self):
+        h,e,p,r = self.fixture()
+        cancelled = dict(event='input', launch_id=h['launch_id'], pane_id=h['pane_id'], key_seq=8)
+        with self.assertRaises(ValueError):
+            self.parse_wire(h, [*self.inputs(h), e[0], cancelled, *e[2:]], p, r)
+        with self.assertRaises(ValueError):
+            self.parse_wire(h, [*self.inputs(h), *e, cancelled], p, r)
+        # Coalesced key 8 is logged before the earlier key 7's frame finishes.
+        with self.assertRaises(ValueError):
+            self.parse_wire(h, [*self.inputs(h), cancelled, e[0], *e[2:]], p, r)
+
+    def test_input_exit_gaps_and_duplicates_fail(self):
+        h,e,p,r = self.fixture()
+        inputs = self.inputs(h)
+        for label, wire in [
+            ('missing calibration', [*inputs[1:], *e]),
+            ('missing exit', [*inputs, *e[:2], e[-1]]),
+            ('duplicate calibration', [*inputs, inputs[0], *e]),
+            ('duplicate exit', [*inputs, *e, e[0]]),
+            ('cross event duplicate', [*inputs, *e, {**inputs[0], 'key_seq':7}]),
+            ('all calibration missing', e),
+        ]:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.parse_wire(h, wire, p, r)
+
+    def test_input_schema_and_identity_fail(self):
+        h,e,p,r = self.fixture()
+        for change in [dict(pane_id=3), dict(launch_id='other'), dict(pane_id=True),
+                       dict(key_seq=True), dict(key_seq=0), dict(key_seq=1.0),
+                       dict(key_seq=2**64), dict(extra=0), dict(event='exit')]:
+            inputs = self.inputs(h)
+            inputs[0] = {**inputs[0], **change}
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.parse_wire(h, [*inputs, *e], p, r)
+        inputs = self.inputs(h); del inputs[0]['pane_id']
+        with self.assertRaises(ValueError):
+            self.parse_wire(h, [*inputs, *e], p, r)
+
+    def test_cursor_stream_strict_payload(self):
+        h,e,p,r=self.fixture()
+        raw=b''.join(standing.KEYBLOCK_RECORD.pack(seq,*v) for seq,v in r.items())
+        self.assertEqual(standing.cursor.read_payload(raw),r)
+        standing.cursor.validate_stream(p,r,1,3)
+        for data in [raw+b'x',raw+raw[:32]]:
+            with self.assertRaises(ValueError):standing.cursor.read_payload(data)
+        for bad in [{**p,'calibration_keys':5}, {**p,'samples':p['samples'][1:]},
+                    {**p,'samples':[{**p['samples'][0],'seq':8},*p['samples'][1:]]}]:
+            with self.assertRaises(ValueError):standing.cursor.validate_stream(bad,r,1,3)
+        with self.assertRaises(ValueError):standing.cursor.validate_stream(p,{**r,7:(2,1,1)},1,3)
+
+    def test_quiet_gaps_budget_and_selection(self):
+        c=standing.cursor
+        self.assertEqual(c.method('cursor'),dict(payload='cursor',gap_ms=[2000,2400],first_gap_ms=2000))
+        self.assertEqual(c.method(),dict(payload='block',gap_ms=[100,300],first_gap_ms=0))
+        for gap,first in [('1499:2400',2000),('2000:5001',2000),('2400:2000',2000),
+                          ('2000:2400',1499),('1:2:3',2000)]:
+            with self.assertRaises(ValueError):c.method('cursor',gap,first)
+        options=dict(keys=1000,warmup=200,censor_ms=5000,**c.method('cursor','2000:5000',10000))
+        b=c.budget(options)
+        self.assertGreater(b['probe_s'],12000)
+        self.assertGreater(b['launch_s'],b['wait_s']+15)
+        self.assertGreater(b['wait_s'],b['probe_s'])
+        self.assertEqual(standing.select_latency_workloads(['latency','latency-cursor'],'block',True),['latency','latency-cursor'])
+        self.assertEqual(standing.select_latency_workloads(['latency'],'cursor',False),['latency-cursor'])
+        with self.assertRaises(ValueError):standing.select_latency_workloads(['latency','latency-cursor'],'cursor',False)
+        with self.assertRaises(ValueError):standing.select_latency_workloads(['latency'],'block',True)
+        self.assertEqual(standing.latency_entries(['kettle','kitty'],False,True,['ca'],'cursor'),['kettle'])
+        self.assertEqual(standing.latency_entries(['kettle-a','kettle-b'],True,True,['ca'],'cursor'),['kettle-a','kettle-b'])
+        import argparse,contextlib,tempfile
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);runner=standing.Runner({k:root/k for k in ('keyblock','latency-probe')},root,{})
+            def launch(name,body,lifetime,**kw):
+                self.assertEqual(lifetime,b['launch_s'])
+                self.assertIn(str(int(lifetime*1000)),body)
+                (root/'typing-launch.json').write_text(_json.dumps(dict(pid=42,window_id=9)))
+                return Mock()
+            @contextlib.contextmanager
+            def verified(*args):yield {}
+            def run(probe,args,work,timeout):
+                self.assertEqual(timeout,b['wait_s'])
+                self.assertEqual(args[args.index('--deadline-ms')+1],str(int(b['probe_s']*1000)))
+                self.assertEqual(args[args.index('--initial-gap-ms')+1],'10000')
+                self.assertEqual(args[args.index('--gap-ms')+1],'2000:5000')
+            with patch.object(runner,'launch',side_effect=launch),patch.object(runner,'wait_for',return_value=True), \
+                 patch.object(runner,'pid',return_value=42),patch.object(runner,'stop',return_value=True), \
+                 patch.object(standing,'verified_probe_use',verified),patch.object(standing,'run_latency_probe',side_effect=run), \
+                 patch.object(standing,'wait_for_text',return_value=False),patch.object(standing.time,'sleep'), \
+                 patch.object(standing.hc,'start_observer') as observer:
+                runner.latency('kettle',{**options,'inject':'hid'},7)
+                observer.assert_not_called()
+        args=argparse.Namespace(rounds=None,workloads='latency,latency-cursor',startup_rounds=30,
+            idle_rounds=5,flood_rounds=5,vtebench_rounds=5,latency_rounds=7,cursor_rounds=10)
+        self.assertEqual(standing.resolve_rounds(args)['latency-cursor'],10)
+        args.rounds=3;self.assertEqual(standing.resolve_rounds(args)['latency-cursor'],3)
+
+    def test_handshake_hidden_calibration_and_guard_order(self):
+        import tempfile
+        if sys.platform != 'darwin' or not shutil.which('swiftc'):
+            self.skipTest('cursor campaign fixture needs macOS swiftc')
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);binary=root/'probe'
+            build=subprocess.run(['swiftc','-O',str(HERE/'macos-standing/latency-probe.swift'),
+                '-o',str(binary)],capture_output=True,text=True,timeout=60)
+            self.assertEqual(build.returncode,0,'native probe build failed: '+build.stderr)
+            pure=subprocess.run([str(binary),'--self-test'],capture_output=True,text=True,timeout=10)
+            self.assertEqual(pure.returncode,0,pure.stderr)
+            for scenario,reason in [('normal',None),('late-query','deadline passed'),
+                                    ('cancel-query','invocation cancelled'),('changed-ack','cursor acknowledgment changed')]:
+                with self.subTest(scenario=scenario):
+                    out=root/(scenario+'.json')
+                    with standing.probe_invocation_lease(root) as lease:
+                        run=subprocess.run([str(binary),'--self-test-cursor',str(out),scenario,str(lease)],
+                            capture_output=True,text=True,timeout=10)
+                    self.assertEqual(run.returncode,0,run.stderr)
+                    row=_json.loads(out.read_text());events=row['events']
+                    posts=[e for e in events if e['kind']=='post']
+                    accepted=next(e for e in events if e['kind']=='accepted')
+                    enabled=next(e for e in events if e['kind']=='enable')
+                    self.assertEqual(accepted['posts'],6);self.assertEqual(enabled['posts'],6)
+                    self.assertLess(events.index(accepted),events.index(enabled))
+                    if reason:
+                        self.assertIn('error',row,'guard failure must reject the stream')
+                        self.assertEqual(row['error'],reason)
+                        self.assertEqual(len(posts),6,'guard failure must prevent the stream key')
+                    else:
+                        self.assertEqual(row['initial_gap_ms'],2000)
+                        self.assertEqual(posts[6]['at']-row['enabled_ns'],2_000_000_000)
+                        self.assertEqual([r['seq'] for r in row['samples']],list(range(7,11)))
+                        self.assertEqual([r['warmup'] for r in row['samples']],[True,True,False,False])
+                        self.assertEqual(row['start_mach_ns'],posts[8]['at'])
+                        self.assertEqual(row['end_mach_ns'],[e for e in events if e['kind']=='guard'][-1]['at'])
+                        # Compute seeded gaps independently, rather than read source.
+                        state=7;expected=[];mask=(1<<64)-1
+                        for _ in range(4):
+                            state=(state+0x9E3779B97F4A7C15)&mask
+                            z=((state^(state>>30))*0xBF58476D1CE4E5B9)&mask
+                            z=((z^(z>>27))*0x94D049BB133111EB)&mask
+                            expected.append((2000+((z^(z>>31))%401))*1_000_000)
+                        gaps=[events[i+1]['ns'] for i,e in enumerate(events) if e['kind']=='guard']
+                        self.assertEqual(gaps,expected)
+        self.test_native_cursor_handshake_on_owned_socket()
+
+    def test_payload_mode_bytes_independently(self):
+        self.test_native_cursor_handshake_on_owned_socket()
+        import hashlib,re
+        # Independent bytes for each mode, including all six hidden flips.
+        def frame(on):
+            return b''.join(f'\x1b[{row};53H\x1b[{7 if on else 27}m'.encode()+b' '*16 for row in range(17,21))+b'\x1b[0m'
+        init=b'\x1b[?25l\x1b[2 q\x1b[0m\x1b[2J\x1b[H'+frame(False)
+        expected=[init,*[frame(i%2==0) for i in range(6)],standing.cursor.ENABLE,frame(True)+b'\x1b[2;3H']
+        hashes=[hashlib.sha256(v).hexdigest() for v in expected]
+        self.assertEqual(hashes,_json.loads((HERE/'macos-standing/cursor-frames.fixture').read_text()))
+        if sys.platform=='darwin' and shutil.which('clang'):
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp);c=path/'frames.c';binary=path/'frames'
+                c.write_text('#define main payload_main\n#include '+_json.dumps(str(HERE/'macos-standing/keyblock.c'))+
+                    '\n#undef main\nint main(void) { char a[512],b[768]; size_t n;'
+                    ' n=frame(a,sizeof a,0); fputs("\\033[?25l\\033[2 q\\033[0m\\033[2J\\033[H",stdout); fwrite(a,1,n,stdout); fputc(0,stdout);'
+                    ' for(int i=0;i<6;i++){n=frame(a,sizeof a,i%2==0);n=cursor_frame(b,a,n,0);fwrite(b,1,n,stdout);fputc(0,stdout);}'
+                    ' fputs("\\033[?25h\\033[1 q\\033[2;3H",stdout);fputc(0,stdout);'
+                    ' n=frame(a,sizeof a,1);n=cursor_frame(b,a,n,1);fwrite(b,1,n,stdout);fputc(0,stdout);'
+                    ' return !(may_enable(6,0) && !may_enable(5,0) && !may_enable(6,1));}\n')
+                subprocess.run(['clang','-Wall','-Wextra','-Werror','-O','-o',str(binary),str(c)],check=True,capture_output=True)
+                actual=subprocess.check_output([str(binary)]).split(b'\0')[:-1]
+                self.assertEqual(actual,expected)
+
+    def test_pooled_percentiles_warmup_and_gate(self):
+        h,e,p,r=self.fixture();row=self.parse(h,e,p,r)
+        warm={**row,'warmup':True}
+        huge={**row,'error':'failed','cursor_exit_records':[{**e[-1],'total_frame_us':99999}]}
+        pooled=standing.cursor.pooled([warm,row,row,huge],standing.percentile)
+        self.assertEqual(pooled,dict(count=6,p50_us=2000.,p95_us=3000.,max_us=3000,p95_le_4000=True))
+        row2={**row,'cursor_exit_count':2,'cursor_exit_measured_count':1,'cursor_exit_p95_us':9000,
+              'cursor_exit_records':[e[0],{**e[1],'total_frame_us':9000}]}
+        mixed=standing.cursor.pooled([row,row2],standing.percentile)
+        self.assertAlmostEqual(mixed['p95_us'],8100)
+        self.assertNotEqual(mixed['p95_us'],(2900+9000)/2)
+        self.assertFalse(mixed['p95_le_4000'])
+        boundary={**row2,'cursor_exit_records':[e[0],{**e[1],'total_frame_us':4000}]}
+        self.assertTrue(standing.cursor.pooled([boundary],standing.percentile)['p95_le_4000'])
+
+    def test_two_namespaces_unranked_cursor_and_no_typing_cells(self):
+        rows={name:[latency_run([10.,20.]) for _ in range(3)] for name in ['kettle-a','kettle-b']}
+        r=dict(schema=3,context='fixture',terminals=list(rows),meta=dict(rounds={'latency':3,'latency-cursor':3}),
+               workloads={'latency':rows,'latency-cursor':rows})
+        info=standing.analyze(r,r['terminals'],True)
+        self.assertEqual(info['latency']['metrics']['mean_ms']['descriptor']['id'],'latency.mean_ms')
+        self.assertEqual(info['latency-cursor']['metrics']['mean_ms']['descriptor']['id'],'latency-cursor.mean_ms')
+        self.assertIn('ab',info['latency-cursor']['metrics']['mean_ms'])
+        self.assertEqual(info['latency-cursor']['metrics']['mean_ms']['pairwise'],[])
+        names=['kettle','kitty'];block=standing.latency_entries(names,False,True,['ca'])
+        cursor=standing.latency_entries(names,False,True,['ca'],'cursor')
+        self.assertEqual(standing.workload_entries('latency-cursor',names,block,cursor),['kettle'])
+        self.assertEqual(standing.workload_entries('latency',names,block,cursor),['kettle','kitty','kettle-opaque','floor-ca'])
+        self.assertNotIn('typing_footprint_mib',info['latency-cursor']['metrics'])
+        self.assertIn('diagnostic and unranked',standing.summarize(r,r['terminals'],True))
+
+    def test_cursor_runner_cancellation_closes_lease_before_target(self):
+        # The production owned-open helper is already exercised with repeated
+        # cancellation. Here select cursor specifically and verify teardown.
+        import contextlib,tempfile
+        from unittest.mock import Mock,patch
+        self.test_cursor_success_links_exact_retained_bytes()
+        for failure in [KeyboardInterrupt(),subprocess.TimeoutExpired('probe',1),RuntimeError('guard trip')]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);runner=standing.Runner({k:root/k for k in ('keyblock','latency-probe')},root,{})
+                process=Mock();events=[]
+                def launch(*args,**kwargs):
+                    (root/'typing-launch.json').write_text(_json.dumps(dict(pid=42,window_id=9)))
+                    return process
+                @contextlib.contextmanager
+                def verified(*args):
+                    events.append('verify-before')
+                    try:yield {}
+                    finally:events.append('verify-after')
+                def run(*args):
+                    events.append('lease-closed');raise failure
+                def stop(*args):events.append('target');return True
+                with patch.object(runner,'launch',side_effect=launch),patch.object(runner,'wait_for',return_value=True),\
+                     patch.object(runner,'pid',return_value=42),patch.object(runner,'stop',side_effect=stop),\
+                     patch.object(standing,'verified_probe_use',verified),patch.object(standing,'run_latency_probe',side_effect=run),\
+                     patch.object(standing,'wait_for_text',return_value=False),patch.object(standing.time,'sleep'),\
+                     patch.object(standing.hc,'start_observer') as observer:
+                    options=dict(keys=3,warmup=1,censor_ms=500,inject='hid',**standing.cursor.method('cursor'))
+                    if isinstance(failure,subprocess.TimeoutExpired):self.assertIn('error',runner.latency('kettle',options,7))
+                    else:
+                        with self.assertRaises(type(failure)):runner.latency('kettle',options,7)
+                    observer.assert_not_called()
+                self.assertEqual(events,['verify-before','lease-closed','verify-after','target'])
+                self.assertFalse((root/'cursor.control').exists());self.assertIsNone(runner.observation_context)
+
+    def test_cursor_aa_method_is_distinct_and_gaps_are_guarded(self):
+        import tempfile,copy
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);aa=root/'control';ab=root/'candidate';aa.mkdir();ab.mkdir()
+            rows={n:[latency_run([10.,20.]) for _ in range(3)] for n in ['kettle-a','kettle-b']}
+            base=dict(schema=3,context='fixture',terminals=list(rows),meta=dict(date='2026-09-30',label='fixture',
+                complete=True,mode='ab',rounds={'latency-cursor':3},harness_clean=True,harness_tree='fixture',
+                identity={'kettle-a':{'sha256':'same'},'kettle-b':{'sha256':'same'}},configs={},
+                **{'latency-cursor':dict(keys=2,warmup=20,censor_ms=500,inject='hid',**standing.cursor.method('cursor'))}),
+                workloads={'latency-cursor':rows})
+            (aa/'results.json').write_text(_json.dumps(base));(ab/'results.json').write_text(_json.dumps(base))
+            combined=standing.combine([ab],aa)
+            self.assertIn('aa',combined['rows']['latency-cursor.mean_ms'])
+            for field,value in [('gap_ms',[2000,2401]),('first_gap_ms',2001),('exit_logs',True)]:
+                bad=copy.deepcopy(base);bad['meta']['latency-cursor'][field]=value
+                (ab/'results.json').write_text(_json.dumps(bad))
+                with self.assertRaises(SystemExit):standing.combine([ab],aa)
+            block=copy.deepcopy(base);block['meta'].pop('latency-cursor');block['workloads']={'latency':rows};block['meta']['rounds']={'latency':3}
+            (aa/'results.json').write_text(_json.dumps(block));(ab/'results.json').write_text(_json.dumps(base))
+            self.assertNotIn('aa',standing.combine([ab],aa)['rows']['latency-cursor.mean_ms'])
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('clang'), 'needs macOS clang')
+    def test_native_cursor_handshake_on_owned_socket(self):
+        # Replace only the tty device and termios syscalls with a private
+        # socket. The payload's real read/poll/control/log path still runs.
+        import socket,select,tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);source=root/'socket-payload.c';binary=root/'socket-payload'
+            source.write_text('#include <fcntl.h>\n#include <termios.h>\n#include <unistd.h>\n'
+                'int scratch_open(const char*,int,...);\nint scratch_get(int,struct termios*);\nint scratch_set(int,int,const struct termios*);\n'
+                '#define open scratch_open\n#define tcgetattr scratch_get\n#define tcsetattr scratch_set\n'
+                '#define main payload_main\n#include '+_json.dumps(str(HERE/'macos-standing/keyblock.c'))+
+                '\n#undef main\n#undef open\n#undef tcgetattr\n#undef tcsetattr\n#include <stdarg.h>\n'
+                'int scratch_open(const char *p,int flags,...){if(!strcmp(p,"/dev/tty"))return dup(0);'
+                'if(flags&O_CREAT){va_list ap;va_start(ap,flags);int mode=va_arg(ap,int);va_end(ap);return open(p,flags,mode);}return open(p,flags);}'
+                'int scratch_get(int fd,struct termios *t){(void)fd;memset(t,0,sizeof *t);return 0;}'
+                'int scratch_set(int fd,int action,const struct termios *t){(void)fd;(void)action;(void)t;return 0;}'
+                'int main(int argc,char **argv){return payload_main(argc,argv);}\n')
+            subprocess.run(['clang','-Wall','-Wextra','-Werror','-O','-o',str(binary),str(source)],check=True,capture_output=True)
+            def frame(on):
+                return b''.join(f'\x1b[{r};53H\x1b[{7 if on else 27}m'.encode()+b' '*16 for r in range(17,21))+b'\x1b[0m'
+            init=b'\x1b[?25l\x1b[2 q\x1b[0m\x1b[2J\x1b[H'+frame(False)
+            for case in ['enable','early','duplicate','missing','torn']:
+                with self.subTest(case=case):
+                    fifo=root/(case+'.fifo');ack=root/(case+'.ack');log=root/(case+'.log')
+                    os.mkfifo(fifo,0o600);parent,child=socket.socketpair();parent.settimeout(3)
+                    process=subprocess.Popen([str(binary),str(log),'cursor',str(fifo),str(ack),'1800'],
+                        stdin=child,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+                    child.close()
+                    def receive(expected):
+                        actual=b''
+                        while len(actual)<len(expected):
+                            try:chunk=parent.recv(len(expected)-len(actual))
+                            except TimeoutError:self.fail('timed out waiting for owned payload bytes')
+                            self.assertTrue(chunk,'owned socket closed early');actual+=chunk
+                        self.assertEqual(actual,expected)
+                    try:
+                        receive(init)
+                        for i in range(5 if case=='early' else 6):
+                            parent.sendall(b'j');receive(frame(i%2==0))
+                        self.assertFalse(select.select([parent],[],[],.05)[0], 'read six must stay hidden')
+                        if case=='missing':
+                            self.assertEqual(process.wait(timeout=3),1)
+                        else:
+                            control=os.open(fifo,os.O_WRONLY|os.O_NONBLOCK)
+                            try:os.write(control,b'BAD\n' if case=='torn' else b'ENABLE\n')
+                            finally:os.close(control)
+                            if case in ['early','torn']:
+                                self.assertEqual(process.wait(timeout=3),1);self.assertFalse(ack.exists())
+                            else:
+                                receive(standing.cursor.ENABLE)
+                                until=time.monotonic()+2
+                                while not ack.exists() and time.monotonic()<until:time.sleep(.01)
+                                self.assertRegex(ack.read_text(),r'^ENABLED [0-9]+\n$')
+                                self.assertEqual(len(log.read_bytes()),6*32)
+                                parent.sendall(b'j');receive(frame(True)+b'\x1b[2;3H')
+                                if case=='duplicate':
+                                    control=os.open(fifo,os.O_WRONLY|os.O_NONBLOCK)
+                                    try:os.write(control,b'ENABLE\n')
+                                    finally:os.close(control)
+                                    self.assertEqual(process.wait(timeout=3),1)
+                                else:
+                                    parent.close();self.assertEqual(process.wait(timeout=3),1)
+                        self.assertIsNotNone(process.returncode)
+                    finally:
+                        parent.close()
+                        if process.poll() is None:process.kill()
+                        process.wait(timeout=3);process.stderr.close()
+
+    def test_cursor_success_links_exact_retained_bytes(self):
+        import tempfile,contextlib,hashlib,copy
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);keep=root/'retained.json'
+            runner=standing.Runner({k:root/k for k in ('keyblock','latency-probe')},root,{})
+            process=Mock();h,e,p,r=self.fixture()
+            (root/'cursor.ack.tmp').write_text('interrupted prior acknowledgment')
+            def launch(*args,**kwargs):
+                self.assertIn('cursor_exit_context',kwargs)
+                self.assertFalse((root/'cursor.ack.tmp').exists())
+                (root/'typing-launch.json').write_text(_json.dumps(dict(pid=42,window_id=9)))
+                return process
+            def run(*args):
+                launch_id=_json.loads((root/'cursor-exit-context.json').read_text())['launch_id']
+                header={**h,'launch_id':launch_id};exits=[{**x,'launch_id':launch_id} for x in e]
+                (root/'terminal.stderr').write_text(self.wire(header,[*self.inputs(header),*exits]))
+                (root/'latency.json').write_text(_json.dumps(p))
+                (root/'keyblock.log').write_bytes(b''.join(standing.KEYBLOCK_RECORD.pack(seq,*v) for seq,v in r.items()))
+                (root/'cursor.ack').write_text('ENABLED 100\n')
+            @contextlib.contextmanager
+            def verified(*args):yield dict(bundle_sha256='f'*64)
+            with patch.object(runner,'launch',side_effect=launch),patch.object(runner,'wait_for',return_value=True),\
+                 patch.object(runner,'pid',return_value=42),patch.object(runner,'stop',return_value=True),\
+                 patch.object(standing,'run_latency_probe',side_effect=run),patch.object(standing,'verified_probe_use',verified),\
+                 patch.object(standing.time,'sleep'),patch.object(standing,'wait_for_text',return_value=True),\
+                 patch.object(standing.hc,'start_observer') as observer:
+                row=runner.latency('kettle-b',dict(keys=3,warmup=1,censor_ms=500,inject='hid',
+                    exit_logs=True,**standing.cursor.method('cursor')),7,keep)
+                observer.assert_not_called()
+            self.assertNotIn('error',row);self.assertTrue(row['cursor_exit_valid'])
+            self.assertIn('cursor_artifacts',row)
+            self.assertEqual(set(row['cursor_artifacts']),{'probe','keyblock','launch','ack','context','exits'})
+            for artifact in row['cursor_artifacts'].values():
+                self.assertNotIn('/',artifact['name'])
+                self.assertEqual(artifact['sha256'],hashlib.sha256((root/artifact['name']).read_bytes()).hexdigest())
+            self.assertFalse(any(k.startswith('typing_') for k in row),'cursor cannot supply typing-memory evidence')
+            raw=(root/row['cursor_artifacts']['exits']['name']);raw.write_bytes(raw.read_bytes()+b'tamper')
+            self.assertNotEqual(row['cursor_artifacts']['exits']['sha256'],hashlib.sha256(raw.read_bytes()).hexdigest())
+
+    def test_existing_output_files_match_bytes_under_optimization(self):
+        import tempfile
+        fixture=HERE/'macos-standing/compatibility'
+        for schema in [1,2,3]:
+            with self.subTest(schema=schema),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)/'session';root.mkdir()
+                data=(fixture/f'schema{schema}-results.json.fixture').read_bytes()
+                (root/'results.json').write_bytes(data)
+                # Pin schema-1's file-date reconstruction too: local noon on the
+                # fixtures' date, so the date matches in every time zone.
+                noon=time.mktime((2027,1,29,12,0,0,0,0,-1))
+                os.utime(root/'results.json',(noon,noon))
+                result=_json.loads(data);names=result['terminals']
+                artifacts={'results.json':standing.dumps(result),
+                    'analysis.json':standing.dumps(standing.analyze(result,names,True)),
+                    'summary.md':standing.summarize(result,names,True)}
+                combined=standing.combine([root]);markdown=combined.pop('markdown')
+                artifacts.update({'combined.json':standing.dumps(combined),'combined.md':markdown})
+                # Each fixture is the exact output plus one LF, which the
+                # tracked-file audit requires of every text file.
+                for name,text in artifacts.items():
+                    self.assertEqual(text.encode()+b'\n',(fixture/f'schema{schema}-{name}.fixture').read_bytes(),name)
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])

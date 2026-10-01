@@ -1,0 +1,51 @@
+# Combined macOS sessions
+
+| session | date | countable |
+|---|---|---|
+| session | 2027-01-30 | yes |
+
+| row | A | B | sessions (B/A, 95% CI) | verdict |
+|---|---:|---:|---|---|
+| startup window_ms | 21.00 | 21.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| startup child_ms | 31.00 | 31.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| idle cpu_percent | 0.21 | 0.21 | 1.000 (1.000-1.000) | insufficient sessions |
+| idle wakeups_per_second | 0.41 | 0.41 | 1.000 (1.000-1.000) | insufficient sessions |
+| idle footprint_mib | 17.00 | 17.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory peak_mib | 101.00 | 101.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory done3_mib | 81.00 | 81.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory done20_mib | 17.00 | 17.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| vtebench dense | 21.00 | 21.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| vtebench scrolling | 11.00 | 11.00 | 1.000 (1.000-1.000) | insufficient sessions |
+| vtebench geometric mean | 15.20 | 15.20 | 1.000 (1.000-1.000) | insufficient sessions |
+| latency mean_ms | 15.00 | 15.00 | 1.000 (1.000-1.000) | insufficient sessions; no regression |
+| latency median_ms | 15.00 | 15.00 |  | insufficient sessions |
+| latency p95_ms | 20.00 | 20.00 |  | insufficient sessions |
+| latency p99_ms | 20.00 | 20.00 |  | insufficient sessions |
+| latency input_ms | 2.00 | 2.00 |  | insufficient sessions |
+| latency output_ms | 3.00 | 3.00 |  | insufficient sessions |
+
+## Absolute differences
+
+Differences use the metric's unit and the current Student-t interval.
+
+| metric | unit | session | mean difference (Student-t CI) |
+|---|---|---|---|
+| startup.window_ms | ms | session | +0.000 (+0.000 to +0.000) |
+| startup.child_ms | ms | session | +0.000 (+0.000 to +0.000) |
+| idle.cpu_percent | percentage points | session | +0.000 (+0.000 to +0.000) |
+| idle.wakeups_per_second | /s | session | +0.000 (+0.000 to +0.000) |
+| idle.footprint_mib | MiB | session | +0.000 (+0.000 to +0.000) |
+| flood-memory.peak_mib | MiB | session | +0.000 (+0.000 to +0.000) |
+| flood-memory.done3_mib | MiB | session | +0.000 (+0.000 to +0.000) |
+| flood-memory.done20_mib | MiB | session | +0.000 (+0.000 to +0.000) |
+| vtebench.dense | ms | session | +0.000 (+0.000 to +0.000) |
+| vtebench.scrolling | ms | session | +0.000 (+0.000 to +0.000) |
+| vtebench.geometric mean | ms | session | +0.000 (+0.000 to +0.000) |
+| latency.mean_ms | ms | session | +0.000 (+0.000 to +0.000) |
+| latency.median_ms | ms | session | not available |
+| latency.p95_ms | ms | session | not available |
+| latency.p99_ms | ms | session | not available |
+| latency.input_ms | ms | session | not available |
+| latency.output_ms | ms | session | not available |
+
+
