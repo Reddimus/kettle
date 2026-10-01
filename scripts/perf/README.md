@@ -584,3 +584,96 @@ savings can be reported. This mode never promotes traces to countable results.
 Inputs are bounded regular files. Diagnostic JSON rejects duplicate members
 and nonfinite constants. Reports exclude source paths, raw stderr, launch/pane
 identities and arbitrary payload text. Invalid input produces a generic refusal.
+
+### Paced printing and launch blink window
+
+The four default workloads remain `startup,idle,flood-memory,vtebench`. Select
+`output-memory` or `blink-window` explicitly. Both default to ten rounds, with
+`--output-memory-rounds` and `--blink-rounds` overrides. These collectors use
+an owned native observer at absolute 100 ms deadlines. It writes bounded JSONL
+with query start/end times, cumulative counters, process start identity, and
+timestamped focus/window checks. It never signals the target. The launch
+helper owns and reaps the observer before releasing its target PID, including
+when the target exits unexpectedly. Existing idle and flood observers are
+unchanged.
+
+Printing emits 80 numbered lines, at absolute deadlines 0 through 7900 ms,
+then records completion at or after 8000 ms. Every line is `NN: The quick
+brown fox jumps over the lazy dog 0123456789` followed by a newline, NN 01
+through 80. The complete payload is byte-pinned. The grid, activation, target
+window and first successful observer query must be ready before the output
+barrier opens. The first query wholly at or after began+6 s supplies
+`printing_mib` and the same query supplies descriptive lifetime
+`printing_max_mib`. Its completion must precede done and be no later than
+began+6.25 s. Known focus loss anywhere in the output interval invalidates the
+result. No later sample substitutes for a designated query that lost focus.
+Both focus checks must bracket the query, stay within 250 ms of the
+corresponding query boundary, and advance beyond the preceding sample's focus
+checks. All lines and the done marker are required; line completion lateness
+over 250 ms or a schedule outside 8..8.25 s fails.
+
+Blink observes a quiet payload with shipped cursor behavior. It changes no
+cursor escape sequences or defaults. The interval is launch+2.5..+8.5 s;
+readiness and activation must finish before the first boundary. It divides
+cumulative CPU/wakeup deltas by the actual endpoint query span. Endpoint current
+footprint and descriptive current interval median/peak remain separate from
+lifetime maximum. Coverage must reach 80%, including endpoint coverage, with
+no uncovered gap or query lateness over 250 ms. Every retained query must have
+valid exact-window checks. Alternate `--blink-settle` or `--blink-window` values
+are diagnostic and cannot count under this method.
+
+`blink_activity` is `verified`, `disabled-default`, or `unproven`. Only verified
+setup evidence permits active-blink comparisons. Use `--blink-disabled-default`
+to name terminals whose shipped cursor does not blink; their quiet-window
+numbers stay descriptive. Missing, malformed or mismatched validation leaves
+the setup unproven. Unknown display identity cannot certify a setup.
+
+Run `--blink-validate-only` in a separate owner measurement window, with
+explicit bundles, `--no-build`, a fresh `--out-dir`, and these metadata flags:
+
+- `--blink-cursor-rect x,y,width,height`, a cursor-only crop in window points
+  determined in an excluded pilot, at most 256 points in each dimension.
+- `--blink-shape NAME`, the shipped cursor shape.
+- `--blink-timeout SECONDS`, the shipped timeout, or 0 for none.
+
+The dedicated probe's `--blink-check` mode requires only Screen Recording. It
+posts no keys, clicks or pointer motion, performs no block calibration, and
+requests no grants. It uses the same verified bundle invocation through `open`,
+preparation/use lock and private invocation lease as latency. The receipt is
+verified before and after capture; lease loss cancels capture.
+`--memory-sample-ms` accepts 50..1000 ms. The default is 100; overrides
+change the method identity and are diagnostic. Idle and flood ignore this flag.
+
+The probe bundle's grant attribution must pass the live preparation pilot
+before freeze. The capture uses the launch helper's exact window and a 100 ms
+cursor-area stream. It hashes complete pixels; idle stream notifications
+confirm unchanged complete pixels. Partial/stopped frames never refresh them.
+Evidence retains frame hashes, arrival/observation timestamps, native display
+dimensions/refresh, crop, shape, timeout, and launch-origin boundaries.
+Exactly two stable states and repeated transitions near both ends, with no
+stopped interior interval, are required. This strict pixel rule can leave
+noisy or antialiased captures unproven; inspect the pilot rather than relaxing
+the rule after seeing results.
+
+Pass the resulting JSON with `--blink-validation FILE` for a counted
+invocation, using the same crop/shape/timeout flags. Binary bytes, sealed
+location-independent configuration closure, display, interval and native
+display identity must match. A post-set validation uses
+`--blink-validation-before FILE` to retain the prior content hash. Both
+validation artifacts and their linkage must be inspected before publication.
+Separate validation supports the unchanged setup, not continuous phase
+observation in every counted round. Counted runs never capture pixels. No A/A,
+gate or live pilot has been established by synthetic fixtures.
+
+The printing and observer helpers prepare separately. The blink probe uses
+the receipt-v2 verified preparation/use path. Both new workloads launch from
+the canonical session directory through the sealed managed configuration
+closure, with row checks before and after collection. Printing publication
+remains an explicit owner choice.
+
+Imported blink frames require integer observation and arrival timestamps,
+nondecreasing arrivals and strictly increasing observations. An arrival must
+precede its observation by at most 250 ms. Linkage IDs contain decimal digits;
+linkage digests are null or 64 lowercase hexadecimal digits. Public evidence
+projects only these validated fields. Trace read failures use logical errors;
+trace paths and files remain in the private session directory.
