@@ -864,6 +864,20 @@ split-exit-resize-smoke:
 steady-uploads-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release steady-uploads
 
+# macOS: once a focused window idles for a blink half-period, the window server
+# blinks the cursor in a Core Animation layer and Kettle presents nothing. Reads
+# ui_geometry.cursor_blink, which draws no frame: the hand-off over the cursor
+# cell, footprint, wakeups and CPU while the layer blinks, the rest at the
+# timeout, and the exits a reload and a key cause. `--pixels` also compares
+# screencapture frames with the layer on and off; it needs Screen Recording for
+# the terminal that runs it. Artifacts under target/diagnostics/cursor-blink-layer-*.
+cursor-blink-layer-self-test:
+    python3 scripts/check-cursor-blink-layer-smoke-self-test.py
+
+[macos]
+cursor-blink-layer-smoke *ARGS: cursor-blink-layer-self-test release
+    python3 scripts/check-cursor-blink-layer-smoke.py --kettle ./target/release/kettle {{ARGS}}
+
 # Hunt for the intermittent "split never loads" report. On demand only: it is a
 # hunt, not a contract, so it is in no gate. The default fixture is a free
 # shell-churn process; `just split-repro --claude` drives a real Claude Code
