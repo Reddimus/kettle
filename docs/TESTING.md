@@ -327,6 +327,42 @@ machine quiet. See [scripts/perf/README.md](../scripts/perf/README.md). The Linu
 comparator remains a narrower diagnostic gate and requires the documented peer
 terminals and a real X11 or Wayland session.
 
+The standing self-test also checks schema-1 `.dat` reconstruction, schema-2
+reads and schema-3 absence rules; typed MiB/rate/signed comparisons; metric
+failure isolation; interrupted sessions and first countable dates; finite
+inputs; warmup exclusion; legacy zero-containing A/A gates and verdicts;
+scientific-notation flood offsets; fixed-set vtebench aggregates with invalid
+members; and latency censoring. The date-selection fixture has one invalid
+optional round out of five, leaving four paired comparisons. It must reject
+the actual `countable: counts and covered` revert. The latency fixture rejects
+negative keys and negative, fractional or boolean censor counts, and must fail
+with the original latency-key decoder restored.
+Adjacent peer fixtures check the current log-ratio and launch-difference
+Student-t intervals and require all ranked pairwise comparisons, including
+peer pairs that omit Kettle. Analysis, combine and Markdown checks reject
+supplemental estimators. Markdown checks require adjacent labels after the
+completed tables and no labels without new metrics. The existing Student-t
+coverage simulations still run. A change to the harness's analysis must also
+keep every existing output file (`summary.md`, `combined.md`, `combined.json`
+and `results.json`) byte-identical for schema-1/2 sessions, compared as whole
+files rather than prefixes or selected JSON fields.
+
+For per-file review snapshots, put `macos-standing-self-test.py` beside the
+patched harness, retain the helper source snapshots under `macos-standing/`,
+and place the repository ignore-rule snapshot at `snapshot.gitignore`. Run
+`python3 macos-standing-self-test.py` in that directory. That file marks the
+snapshot layout, which keeps temporary files and compiler caches inside the
+snapshot directory. It skips
+the host user-default tests, four tests requiring the real repository or its
+packaging plist, and two controlling-terminal/`ps` tests requiring an
+unrestricted native runner. A snapshot pass does not certify those checks.
+In a checkout, `scripts/perf` has no `snapshot.gitignore`, so every test
+runs, and a stray one makes the harness version dirty. No GUI measurements or
+A/A are part of this self-test.
+
+See [the standing analysis schema](perf-standing-schema.md) for the current
+statistical contract, units, eligibility fields and preserved legacy reads.
+
 The PowerShell performance campaign and its self-tests retired with the final
 Windows-supported 3.3.0 line. The measurements and methodology remain in
 [PERFORMANCE.md](PERFORMANCE.md) as historical evidence. To reproduce that

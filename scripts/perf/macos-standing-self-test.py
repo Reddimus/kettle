@@ -18,6 +18,17 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+SNAPSHOT_LAYOUT = (HERE / "snapshot.gitignore").is_file()
+if SNAPSHOT_LAYOUT:
+    # Per-file review snapshots have no workspace and must keep test writes local.
+    import tempfile
+    tempfile.tempdir = str(HERE / ".test-tmp")
+    Path(tempfile.tempdir).mkdir(exist_ok=True)
+    for variable, directory in (("TMPDIR", ".test-tmp"), ("CLANG_MODULE_CACHE_PATH", ".cache/clang"),
+                                ("SWIFT_MODULECACHE_PATH", ".cache/swift")):
+        cache = HERE / directory
+        cache.mkdir(parents=True, exist_ok=True)
+        os.environ[variable] = str(cache)
 
 
 def gone_within(pid: int, timeout: float = 5.0) -> bool:
@@ -399,7 +410,8 @@ class Settle(unittest.TestCase):
         self.assertGreaterEqual(waited, 450)
 
 
-@unittest.skipUnless(sys.platform == "darwin" and shutil.which("defaults"), "user defaults are macOS")
+@unittest.skipUnless(not SNAPSHOT_LAYOUT and sys.platform == "darwin" and shutil.which("defaults"),
+                     "needs macOS user defaults; skipped in per-file snapshots")
 class GhosttyFrame(unittest.TestCase):
     """GhosttyFrame against a scratch plist file, never Ghostty's domain; a
     file path keeps even an emptied domain out of ~/Library/Preferences."""
@@ -1103,6 +1115,8 @@ class Safety(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "bundles and codesign are macOS")
     def test_a_local_build_is_measured_inside_a_signed_bundle(self) -> None:
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('packaging Info.plist needs the real repository')
         import subprocess
         import tempfile
 
@@ -1131,6 +1145,8 @@ class Safety(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "bundles and codesign are macOS")
     def test_a_bundle_never_touches_another_runs_work(self) -> None:
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('packaging Info.plist needs the real repository')
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1528,6 +1544,8 @@ class Preflight(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(standing.harness_revision(Path(tmp)), {"harness_tree": None, "harness_dirty": None})
+        if SNAPSHOT_LAYOUT:
+            self.skipTest("live harness revision needs the real repository")
         self.assertIsNotNone(standing.harness_revision()["harness_tree"])
 
     def test_everything_but_the_inert_files_decides_the_harness_revision(self) -> None:
@@ -1542,7 +1560,8 @@ class Preflight(unittest.TestCase):
 
             git("init", "-q")
             # Kettle's own ignore rules, which hide *.pyc and __pycache__.
-            shutil.copy(HERE.parents[1] / ".gitignore", repo / ".gitignore")
+            shutil.copy(HERE / "snapshot.gitignore" if SNAPSHOT_LAYOUT else HERE.parents[1] / ".gitignore",
+                        repo / ".gitignore")
             perf = repo / "scripts" / "perf"
             (perf / "macos-standing").mkdir(parents=True)
             inert = ["README.md", "macos-standing-self-test.py", "macos-compare.sh",
@@ -2382,6 +2401,8 @@ class Latency(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
     def test_keyblock_toggles_on_each_byte_and_logs_in_order(self) -> None:
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('controlling-terminal native test needs an unrestricted runner')
         import os
         import pty
         import select
@@ -2850,6 +2871,8 @@ class VtebenchCheckout(unittest.TestCase):
         # not list it.
         import tomllib
 
+        if SNAPSHOT_LAYOUT:
+            self.skipTest("workspace excludes need the real repository Cargo.toml")
         manifest = tomllib.loads((standing.REPO / "Cargo.toml").read_text())
         for name in ("vtebench", "vtebench-us"):
             checkout = standing.REPO / "target" / "perf-tools" / "macos-standing" / name
@@ -2918,6 +2941,8 @@ class VtebenchSizeFix(unittest.TestCase):
         (self.source / "top_region" / "benchmark").symlink_to("../probe/benchmark")
 
     def test_the_patched_scripts_see_the_real_window_size(self) -> None:
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('native ps/tty lookup needs an unrestricted runner')
         benchmarks = standing.prepare_benchmarks(self.source, Path(self.tmp.name) / "patched")
         self.assertEqual(run_like_vtebench(benchmarks / "probe" / "benchmark", 50, 20), "50 20")
         self.assertEqual(
@@ -2946,6 +2971,325 @@ class VtebenchSizeFix(unittest.TestCase):
         self.assertEqual(
             standing.missing_benchmarks(benchmarks, {"probe": 7.0, "top_region": 9.0}), []
         )
+
+
+class MetricContracts(unittest.TestCase):
+    def setUp(self) -> None:
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    @staticmethod
+    def validity(valid=True, **extra):
+        return {"valid": valid, "expected": 5, "observed": 5, "capability_version": "fixture-v1", **extra}
+
+    def scalar_results(self, field="footprint_mib", workload="idle", a=None, b=None, optional=False):
+        a = a or [10., 10., 10.]
+        b = b or [11., 12., 18.]
+        runs = lambda values: [{field: v, "frontmost": True, "cpu_percent": 1., "wakeups_per_second": 1.,
+                               "child_ms": 10., "window_ms": 10., "footprint_mib": 10., field: v,
+                               **({"metric_validity": {field: self.validity()}} if optional else {})} for v in values]
+        meta = {"date": "2026-01-01", "complete": True, "mode": "ab", "rounds": {workload: 3}, "warmup": 0}
+        return {"schema": 3, "context": "fixture", "meta": meta, "terminals": ["kettle-a", "kettle-b"],
+                "workloads": {workload: {"kettle-a": runs(a), "kettle-b": runs(b)}}}
+
+    def store(self, results, name="fixture"):
+        folder = self.root / name
+        folder.mkdir()
+        (folder / "results.json").write_text(json_dumps(results))
+        return folder
+
+    def test_typing_memory_has_ratio_gate_and_mib_difference(self):
+        results = self.scalar_results("typing_footprint_mib", "latency", optional=True)
+        for runs in results["workloads"]["latency"].values():
+            for run in runs:
+                run.update(latency_run([10., 10.]))
+        control = self.scalar_results("typing_footprint_mib", "latency", b=[10., 10., 10.], optional=True)
+        for runs in control["workloads"]["latency"].values():
+            for run in runs:
+                run.update(latency_run([10., 10.]))
+        combined = standing.combine([self.store(results)], self.store(control, "aa"))
+        row = combined["rows"]["latency.typing_footprint_mib"]
+        self.assertEqual(row["descriptor"]["unit"], "MiB")
+        self.assertEqual(row["descriptor"]["direction"], "lower")
+        self.assertEqual(row["descriptor"]["analysis_kind"], "scalar")
+        self.assertIn("gate", row["aa"])
+        self.assertNotIn("gate_ms", row["aa"])
+        self.assertAlmostEqual(row["sessions"][0]["difference"]["diff"], 11 / 3)
+        self.assertNotIn("headline_ms", row["verdict"])
+
+    def test_idle_and_startup_differences_survive_combine(self):
+        for workload, field, unit in (("idle", "footprint_mib", "MiB"), ("startup", "child_ms", "ms")):
+            results = self.scalar_results(field, workload)
+            row = standing.combine([self.store(results, workload)])["rows"][f"{workload}.{field}"]
+            self.assertEqual(row["descriptor"]["unit"], unit)
+            self.assertAlmostEqual(row["sessions"][0]["difference"]["diff"], 11 / 3)
+            self.assertEqual(row["per_session"][0]["ab_diff"]["n"], 3)
+
+    def test_signed_slack_keeps_negative_difference_without_ratio(self):
+        field = "fonts_ready_to_resumed_ms"
+        results = self.scalar_results(field, "startup", a=[1., 2., 3.], b=[-1., -2., -3.], optional=True)
+        entry = standing.analyze(results, results["terminals"], True)["startup"]["metrics"][field]
+        self.assertEqual(entry["ab_diff"]["diff"], -4.)
+        self.assertEqual(entry["descriptor"]["direction"], "none")
+        self.assertNotIn("ab", entry)
+        row = standing.combine([self.store(results)])["rows"]["startup." + field]
+        self.assertEqual(row["per_session"][0]["ab_diff"]["diff"], -4.)
+        self.assertEqual(row["verdict"]["verdict"], "diagnostic only")
+
+    def test_adjacent_peer_ties_need_all_pairwise_intervals(self):
+        names = ["kettle", "alacritty", "kitty"]
+        rows = {"kettle": [latency_run([10., 10.]) for _ in range(6)],
+                "alacritty": [latency_run([v, v]) for v in [10., 12., 10., 12., 10., 12.]],
+                "kitty": [latency_run([20., 20.]) for _ in range(6)]}
+        results = {"workloads": {"latency": rows}, "meta": {"rounds": {"latency": 6}}}
+        entry = standing.analyze(results, names, False)["latency"]["metrics"]["mean_ms"]
+        self.assertEqual(len(entry["pairwise"]), 3)
+        self.assertEqual(entry["adjacent"], [{"base": "kettle", "test": "alacritty", "order": "tied"},
+                                              {"base": "alacritty", "test": "kitty", "order": "ordered"}])
+        pair = next(p for p in entry["pairwise"] if p["base"] == "alacritty")
+        self.assertEqual(pair["current"]["diff"], 9.)
+        self.assertGreater(pair["current"]["diff_low"], 0.)
+        self.assertNotIn("plan", pair)
+        results.update(schema=3, context="fixture", terminals=names)
+        results["meta"].update(date="2026-01-01", complete=True, mode="standing")
+        combined = standing.combine([self.store(results)])["rows"]["latency.mean_ms"]
+        self.assertEqual(combined["per_session"][0]["pairwise"], entry["pairwise"])
+        self.assertEqual(combined["per_session"][0]["adjacent"], entry["adjacent"])
+        self.assertEqual(entry["rank"], 1, "legacy numeric rank remains unchanged")
+
+    def test_metric_failure_does_not_discard_other_measurements(self):
+        results = self.scalar_results("typing_footprint_mib", "latency", optional=True)
+        for runs in results["workloads"]["latency"].values():
+            for run in runs:
+                run.update(latency_run([10., 10.]))
+        results["workloads"]["latency"]["kettle-b"][1]["metric_validity"]["typing_footprint_mib"] = self.validity(False, reason="coverage")
+        combined = standing.combine([self.store(results)])
+        memory = combined["rows"]["latency.typing_footprint_mib"]
+        timing = combined["rows"]["latency.mean_ms"]
+        self.assertFalse(memory["sessions"][0]["countable"])
+        self.assertTrue(timing["sessions"][0]["countable"])
+        self.assertEqual(memory["per_session"][0]["metric_countable"]["kettle-b"]["failed"], 1)
+        self.assertIn("coverage", memory["per_session"][0]["metric_countable"]["kettle-b"]["reasons"])
+
+    def test_optional_fields_need_evidence_and_keep_valid_zero(self):
+        descriptor = standing.metric_descriptor("latency", "typing_footprint_mib")
+        field = "typing_footprint_mib"
+        self.assertIsNone(standing.metric_value(descriptor, "latency", {field: 0.}))
+        good = {field: 0., "metric_validity": {field: self.validity()}}
+        self.assertEqual(standing.metric_value(descriptor, "latency", good), 0.)
+        for change in ({"capability_version": None}, {"observed": 4}, {"expected": None}, {"valid": False}):
+            bad = {field: 0., "metric_validity": {field: self.validity(**change)}}
+            self.assertIsNone(standing.metric_value(descriptor, "latency", bad))
+
+    def test_nonfinite_samples_never_enter_analysis(self):
+        for value in (math.nan, math.inf, -math.inf, True):
+            self.assertIsNone(standing.row_value("startup", {"child_ms": value}, "child_ms"))
+            self.assertIsNone(standing.latency_keys({"samples_ms": [value]}, 500.))
+        self.assertIsNone(standing.latency_keys({"samples_ms": [1.], "censored": -1}, 500.))
+
+    def test_schema3_and_old_schema_reads_do_not_invent_capabilities(self):
+        for schema in (1, 2, 3):
+            results = self.scalar_results("child_ms", "startup")
+            results["schema"] = schema
+            loaded = standing.load_session(self.store(results, str(schema)))
+            self.assertEqual(loaded["schema"], schema)
+            analysis = standing.analyze(loaded["results"], loaded["names"], True)
+            self.assertNotIn("first_output_ms", analysis["startup"]["metrics"])
+            self.assertNotIn("metric_validity", loaded["results"]["workloads"]["startup"]["kettle-a"][0])
+            self.assertEqual(loaded["countable"], schema != 1)
+        self.assertEqual(standing.SCHEMA, 3)
+        self.assertEqual(standing.EVIDENCE_CONTRACT, "hc-v1")
+        results["schema"] = 99
+        with self.assertRaisesRegex(ValueError, "unsupported results schema"):
+            standing.load_session(self.store(results, "unknown"))
+
+    def test_zero_containing_ratio_control_keeps_legacy_gate(self):
+        control = self.scalar_results("wakeups_per_second", a=[0., 1., 1., 1., 1.], b=[1.] * 5)
+        control["meta"]["rounds"]["idle"] = 5
+        folders = []
+        for day in (2, 3):
+            result = self.scalar_results("wakeups_per_second", a=[2.] * 5, b=[1.] * 5)
+            result["meta"].update(date=f"2026-01-0{day}", rounds={"idle": 5})
+            folders.append(self.store(result, str(day)))
+        row = standing.combine(folders, self.store(control, "aa"))["rows"]["idle.wakeups_per_second"]
+        self.assertTrue(row["aa"]["contains_one"])
+        self.assertEqual(row["aa"]["half_width"], math.inf)
+        self.assertEqual(row["aa"]["gate"], math.inf)
+        self.assertEqual(row["verdict"], {"verdict": "no change", "headline": .5, "gate": math.inf})
+
+    def test_current_warmup_exclusion_and_censor_bound(self):
+        results = self.scalar_results("child_ms", "startup")
+        results["workloads"]["startup"]["kettle-a"].insert(0, {"child_ms": 999., "warmup": True})
+        entry = standing.analyze(results, results["terminals"], True)["startup"]["metrics"]["child_ms"]
+        self.assertEqual(entry["values"]["kettle-a"], [None, 10., 10., 10.])
+        rows = {"kettle": [latency_run([1.], censored=1)]}
+        info = standing.analyze({"workloads": {"latency": rows}}, ["kettle"], False)
+        current = info["latency"]["metrics"]["mean_ms"]["statistics"]["current"]["terminals"]["kettle"]
+        self.assertEqual(current["estimate"], 250.5)
+        self.assertEqual(current["n"], 1)
+        # These rows distinguish the original decoder, which accepts negative
+        # keys and coerces fractional/bool censor counts with int().
+        for row in ({"samples_ms": [-1.]}, {"samples_ms": [1.], "censored": -1},
+                    {"samples_ms": [1.], "censored": .5}, {"samples_ms": [1.], "censored": True}):
+            self.assertIsNone(standing.latency_keys(row, 500.))
+        for bound in (0., -1., math.inf):
+            self.assertIsNone(standing.latency_keys({"samples_ms": [1.]}, bound))
+
+    def test_interruption_and_first_dates_stay_metric_local(self):
+        folders = []
+        for i, (day, complete, valid) in enumerate((("2026-01-01", False, True),
+                                                   ("2026-01-02", True, False),
+                                                   ("2026-01-03", True, True),
+                                                   ("2026-01-04", True, True))):
+            r = self.scalar_results("typing_footprint_mib", "latency", a=[10.] * 5, b=[20.] * 5, optional=True)
+            r["meta"].update(date=day, complete=complete, rounds={"latency": 5})
+            for runs in r["workloads"]["latency"].values():
+                for run in runs:
+                    run.update(latency_run([10., 10.]))
+                # Four valid pairs meet the 80% comparison threshold, while
+                # the optional metric still lacks one required round.
+                if not valid:
+                    runs[1]["metric_validity"]["typing_footprint_mib"] = self.validity(False)
+            folders.append(self.store(r, str(i)))
+        row = standing.combine(folders)["rows"]["latency.typing_footprint_mib"]
+        dates = standing.first_per_date(row["sessions"], 2)
+        self.assertEqual([s["date"] for s in dates], ["2026-01-03", "2026-01-04"])
+        self.assertFalse(row["sessions"][0]["countable"])
+        self.assertEqual(row["sessions"][1]["n"], 4)
+        self.assertFalse(row["sessions"][1]["countable"])
+
+
+    def test_latency_adjacent_without_paired_launches_is_tied(self):
+        names = ["kettle", "kitty"]
+        # Descriptive entries can be ranked before completeness rejects the
+        # session. Their available launch positions still need not overlap.
+        rows = {"kettle": [latency_run([10.]), {"error": "missing"}],
+                "kitty": [{"error": "missing"}, latency_run([20.])]}
+        results = {"workloads": {"latency": rows}, "meta": {"rounds": {"latency": 6}}}
+        entry = standing.analyze(results, names, False)["latency"]["metrics"]["mean_ms"]
+        self.assertEqual(entry["pairwise"], [{"base": "kettle", "test": "kitty", "current": {}}])
+        self.assertEqual(entry["adjacent"], [{"base": "kettle", "test": "kitty", "order": "tied"}])
+
+    def test_scalar_adjacent_peers_use_current_ratio_intervals(self):
+        names = ["kettle", "alacritty", "kitty"]
+        values = {"kettle": [10.] * 6, "alacritty": [10., 12., 10., 12., 10., 12.], "kitty": [20.] * 6}
+        results = {"schema": 3, "context": "fixture", "terminals": names,
+                   "meta": {"rounds": {"idle": 6}, "date": "2026-01-01", "complete": True, "mode": "standing"},
+                   "workloads": {"idle": {name: [{"frontmost": True, "footprint_mib": v,
+                                                  "cpu_percent": 1., "wakeups_per_second": 1.} for v in vs]
+                                          for name, vs in values.items()}}}
+        entry = standing.analyze(results, names, False)["idle"]["metrics"]["footprint_mib"]
+        self.assertEqual(entry["adjacent"], [{"base": "kettle", "test": "alacritty", "order": "tied"},
+                                              {"base": "alacritty", "test": "kitty", "order": "ordered"}])
+        self.assertEqual(len(entry["pairwise"]), 3)
+        peer = next(p for p in entry["pairwise"] if p["base"] == "alacritty")
+        self.assertAlmostEqual(peer["current"]["ratio"], (10 / 3) ** .5)
+        self.assertGreater(peer["current"]["low"], 1.)
+        combined = standing.combine([self.store(results)])["rows"]["idle.footprint_mib"]
+        self.assertEqual(combined["per_session"][0]["adjacent"], entry["adjacent"])
+        self.assertEqual(combined["per_session"][0]["pairwise"], entry["pairwise"])
+
+    def test_only_current_statistics_are_emitted(self):
+        results = self.scalar_results()
+        combined = standing.combine([self.store(results)])
+        analysis = standing.analyze(results, results["terminals"], True)
+        for info in analysis.values():
+            for entry in info["metrics"].values():
+                self.assertEqual(set(entry["statistics"]), {"authoritative", "current"})
+        for row in combined["rows"].values():
+            for session in row["per_session"]:
+                self.assertEqual(set(session["statistics"]), {"authoritative", "current"})
+        rows = {"kettle": [latency_run([10., 12.]) for _ in range(3)]}
+        latency = standing.analyze({"workloads": {"latency": rows}}, ["kettle"], False)
+        for entry in latency["latency"]["metrics"].values():
+            self.assertEqual(set(entry["statistics"]), {"authoritative", "current"})
+        markdown = standing.summarize(results, results["terminals"], True, analysis) + combined["markdown"]
+        self.assertNotIn("bootstrap", markdown)
+        self.assertNotIn("statistics.plan", markdown)
+        source = (HERE / "macos-standing.py").read_text()
+        for removed in ("def plan_scalar", "def plan_latency", "PLAN_RESAMPLES", "def bootstrap_ci"):
+            self.assertNotIn(removed, source)
+
+
+    def test_vtebench_invalid_member_loses_aggregate_round(self):
+        for value in ("nan", "inf", math.nan, math.inf, -math.inf):
+            rows = [{"means_ms": {"x": 1., "y": 100.}} for _ in range(5)]
+            rows[4]["means_ms"]["x"] = value
+            results = {"schema": 3, "context": "fixture", "terminals": ["kettle"],
+                       "meta": {"rounds": {"vtebench": 5}, "complete": True,
+                                "date": "2026-01-01", "mode": "standing"},
+                       "workloads": {"vtebench": {"kettle": rows}}}
+            entry = standing.analyze(results, ["kettle"], False)["vtebench"]["metrics"]["geometric mean"]
+            self.assertIsNone(entry["values"]["kettle"][4])
+            for value in entry["values"]["kettle"][:4]:
+                self.assertAlmostEqual(value, 10.)
+            self.assertEqual(entry["terminals"]["kettle"]["n"], 4)
+            local = entry["metric_countable"]["kettle"]
+            self.assertEqual(local["failed"], 1)
+            self.assertFalse(local["countable"])
+            row = standing.combine([self.store(results, str(value) + str(len(list(self.root.iterdir()))))])["rows"]["vtebench.geometric mean"]
+            self.assertNotIn("kettle", row["terminals"])
+        # A missing member cannot change the benchmark set either.
+        del rows[4]["means_ms"]["x"]
+        values = standing.workload_metrics("vtebench", {"kettle": rows})
+        self.assertIsNone(values["geometric mean"]["kettle"][4])
+
+    def test_flood_generated_offset_spellings_have_contracts(self):
+        offsets = [0., .00001, .000001, 1.25, 1000000., 1e20, -1e-5]
+        fields = standing.flood_metrics(offsets)
+        # Parsing a historical descriptor must also tolerate nonfinite :g
+        # spellings. Offset validity is the collector's separate responsibility.
+        for field in standing.flood_metrics(offsets + [math.inf, -math.inf, math.nan]):
+            self.assertEqual(standing.metric_descriptor("flood-memory", field).unit, "MiB")
+        results = {"schema": 2, "context": "fixture", "terminals": ["kettle"],
+                   "meta": {"date": "2026-01-01", "complete": True, "mode": "standing",
+                            "rounds": {"flood-memory": 3}, "flood_offsets": offsets},
+                   "workloads": {"flood-memory": {"kettle": [dict.fromkeys(fields, 10.) for _ in range(3)]}}}
+        analysis = standing.analyze(results, ["kettle"], False)
+        self.assertEqual(tuple(analysis["flood-memory"]["metrics"]), fields)
+        combined = standing.combine([self.store(results)])
+        self.assertEqual(tuple(combined["rows"]), tuple("flood-memory." + field for field in fields))
+
+    def test_adjacent_labels_follow_completed_tables(self):
+        names = ["kettle", "kitty"]
+        rows = {name: [{"child_ms": 10., "window_ms": 20., "first_output_ms": 30.,
+                        "metric_validity": {"first_output_ms": self.validity()}} for _ in range(3)]
+                for name in names}
+        results = {"schema": 3, "context": "fixture", "terminals": names,
+                   "meta": {"date": "2026-01-01", "complete": True, "mode": "standing",
+                            "rounds": {"startup": 3}}, "workloads": {"startup": rows}}
+        outputs = [standing.summarize(results, names, False), standing.combine([self.store(results)])["markdown"]]
+        for output in outputs:
+            lines = output.splitlines()
+            first = next(i for i, line in enumerate(lines) if line.startswith("Adjacent "))
+            last_table_row = max(i for i, line in enumerate(lines) if line.startswith("|"))
+            self.assertGreater(first, last_table_row)
+            self.assertEqual(lines[last_table_row + 1], "")
+        # Schema 3 can expose contracts, but labels require a new metric.
+        for runs in rows.values():
+            for run in runs:
+                del run["first_output_ms"]
+        self.assertNotIn("Adjacent ", standing.summarize(results, names, False))
+        self.assertNotIn("Adjacent ", standing.combine([self.store(results, "without-new")])["markdown"])
+
+    def test_legacy_reports_do_not_add_fields_or_sections(self):
+        results = {"schema": 2, "context": "fixture", "terminals": ["kettle", "kitty"],
+                   "meta": {"date": "2026-01-01", "complete": True, "mode": "standing",
+                            "rounds": {"startup": 3}},
+                   "workloads": {"startup": {name: [{"child_ms": 10., "window_ms": 20.} for _ in range(3)]
+                                             for name in ("kettle", "kitty")}}}
+        self.assertEqual(standing.summarize(results, results["terminals"], False), '# macOS standing\n\nfixture\n\n## startup\n\n| metric | kettle | kitty |\n|---|---:|---:|\n| window_ms | 20.00 | 20.00 |\n| child_ms | 10.00 | 10.00 |\n\n| metric | best other | Kettle/other | 95% CI | Kettle lower in | Kettle-other (95% CI) |\n|---|---|---:|---|---:|---|\n| window_ms | kitty | 1.000 | 1.000-1.000 | 0/3 | +0.0 ms (+0.0 to +0.0) |\n| child_ms | kitty | 1.000 | 1.000-1.000 | 0/3 | +0.0 ms (+0.0 to +0.0) |\n')
+        combined = standing.combine([self.store(results)])
+        self.assertEqual(set(combined), {"sessions", "rows", "markdown"})
+        for row in combined["rows"].values():
+            self.assertEqual(set(row), {"terminals", "sessions", "per_session", "claim"})
+            self.assertEqual(set(row["per_session"][0]), {"label", "countable", "estimates"})
+            self.assertNotIn("difference", row["sessions"][0])
+        self.assertNotIn("## Absolute differences", combined["markdown"])
+        self.assertNotIn("Adjacent ", combined["markdown"])
+
 
 
 if __name__ == "__main__":

@@ -86,7 +86,8 @@ VTEBENCH_URL = "https://github.com/alacritty/vtebench"
 VTEBENCH_REV = "ead80032e57dee2e75f0b51f2ea67528647d9944"
 COLS, ROWS = 120, 36
 FLOOD_BYTES = 32 * 1024 * 1024
-SCHEMA = 2
+SCHEMA = 3
+EVIDENCE_CONTRACT = "hc-v1"
 
 APPS = {
     "alacritty": "/Applications/Alacritty.app/Contents/MacOS/alacritty",
@@ -1542,12 +1543,20 @@ def vtebench_row(text: str, unit: str) -> dict:
     }
 
 
-def vtebench_means(row: dict) -> Dict[str, float]:
+def vtebench_means(row: dict) -> Dict[str, Optional[float]]:
     """Benchmark means of a round. A schema-1 row holds medians, so its means
     come from its .dat file (see load_session)."""
-    if "means_ms" in row:
-        return row["means_ms"]
-    return {key: value for key, value in row.items() if isinstance(value, (int, float)) and key != "error"}
+    values = row["means_ms"] if "means_ms" in row else row
+    return {key: value if is_number(value) else None for key, value in values.items() if key != "error"}
+
+
+def vtebench_aggregate(run: dict, benchmarks: Sequence[str]) -> Optional[float]:
+    """Keep the session's benchmark set fixed; an invalid member loses a round."""
+    means = vtebench_means(run)
+    if ("error" in run or not benchmarks or set(means) != set(benchmarks)
+            or any(not is_number(means[bench]) or means[bench] <= 0 for bench in benchmarks)):
+        return None
+    return geometric_mean(means[bench] for bench in benchmarks)
 
 
 def geometric_mean(values: Iterable[float]) -> float:
@@ -1736,7 +1745,12 @@ def latency_keys(run: dict, censor_ms: float) -> Optional[List[float]]:
     if ("error" in run or run.get("warmup") or run.get("seq_mismatch")
             or not isinstance(run.get("samples_ms"), list)):
         return None
-    keys = list(run["samples_ms"]) + [float(censor_ms)] * int(run.get("censored") or 0)
+    censored = run.get("censored") or 0
+    if (not isinstance(censored, int) or isinstance(censored, bool) or censored < 0
+            or not is_number(censor_ms) or censor_ms <= 0
+            or any(not is_number(v) or v < 0 for v in run["samples_ms"])):
+        return None
+    keys = list(run["samples_ms"]) + [float(censor_ms)] * censored
     return keys or None
 
 
@@ -1912,8 +1926,164 @@ def latency_ab_verdict(sessions: List[dict], gate_ms: Optional[float] = None) ->
 # === Analysis ========================================================
 
 
+class Metric:
+    """Analysis contract. Reserved fields do not imply collector support."""
+    def __init__(self, id: str, unit: str, kind: str = "scalar", extract: str = "field",
+                 eligibility: str = "legacy", estimate: str = "median with distribution-free sign-test interval",
+                 comparison: str = "geometric mean of paired ratios with log Student-t interval", aa_kind: str = "ratio",
+                 claim_kind: str = "ratio", publication_role: str = "standing", direction: str = "lower"):
+        self.id, self.unit, self.kind = id, unit, kind
+        self.direction, self.analysis_kind = direction, kind
+        self.extract, self.eligibility, self.estimate = extract, eligibility, estimate
+        self.comparison, self.aa_kind = comparison, aa_kind
+        self.claim_kind, self.publication_role = claim_kind, publication_role
+
+    def record(self) -> dict:
+        return dict(vars(self))
+
+
+def scalar_metric(workload: str, field: str, unit: str, optional: bool = False,
+                  signed: bool = False, diagnostic: bool = False) -> Metric:
+    return Metric(f"{workload}.{field}", unit, kind="signed" if signed else "scalar",
+                  eligibility="metric-validity" if optional else "legacy",
+                  comparison="mean of paired differences with Student-t interval" if signed else "geometric mean of paired ratios with log Student-t interval",
+                  aa_kind="none" if diagnostic or signed else "ratio",
+                  claim_kind="none" if diagnostic or signed else "ratio",
+                  publication_role="diagnostic" if diagnostic or signed else "standing",
+                  direction="none" if signed else "lower")
+
+
+METRIC_REGISTRY = {
+    m.id: m for m in [
+        *(scalar_metric("startup", f, "ms") for f in METRICS["startup"]),
+        scalar_metric("idle", "cpu_percent", "percentage points"),
+        scalar_metric("idle", "wakeups_per_second", "/s"),
+        scalar_metric("idle", "footprint_mib", "MiB"),
+        scalar_metric("startup", "first_output_ms", "ms", optional=True),
+        *(scalar_metric("startup", f, "ms", optional=True, signed=True) for f in
+          ("fonts_ready_to_resumed_ms", "fonts_ready_after_config_ms")),
+        *(scalar_metric("startup", f, "ms", optional=True, diagnostic=True) for f in
+          ("fonts_join_wait_ms", "event_loop_build_ms", "gpu_init_ms")),
+        scalar_metric("latency", "typing_footprint_mib", "MiB", optional=True),
+        *(scalar_metric("latency", f, "MiB", optional=True, diagnostic=True)
+          for f in ("typing_observed_peak_mib", "typing_max_footprint_mib")),
+        *(scalar_metric("output-memory", f, "MiB", optional=True, diagnostic=f != "printing_mib")
+          for f in ("printing_mib", "printing_max_mib")),
+        scalar_metric("blink-window", "footprint_mib", "MiB", optional=True),
+        scalar_metric("blink-window", "cpu_percent", "percentage points", optional=True),
+        scalar_metric("blink-window", "wakeups_per_second", "/s", optional=True),
+        *(scalar_metric("blink-window", f, "MiB", optional=True, diagnostic=True)
+          for f in ("blink_median_footprint_mib", "blink_peak_mib")),
+        Metric("latency.mean_ms", "ms", "latency", "censored-keys", "latency-standing",
+               "arithmetic mean of launch means with Student-t interval", "mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval", "latency-difference", "latency"),
+        Metric("latency-cursor.mean_ms", "ms", "latency", "censored-keys", "latency-standing",
+               "arithmetic mean of launch means with Student-t interval", "mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval", "latency-difference", "latency",
+               "diagnostic"),
+        *(Metric(f"latency.{f}", "ms", "distribution", "pooled-keys", "latency-standing",
+                 "pooled key quantile", "none", "none", "none", "descriptive") for f in
+          ("median_ms", "p95_ms", "p99_ms", "input_ms", "output_ms")),
+    ]
+}
+
+
+def metric_descriptor(workload: str, field: str) -> Metric:
+    key = f"{workload}.{field}"
+    if key in METRIC_REGISTRY:
+        return METRIC_REGISTRY[key]
+    if workload == "flood-memory" and field in flood_metrics(DEFAULT_FLOOD_OFFSETS):
+        return scalar_metric(workload, field, "MiB")
+    if workload == "flood-memory" and re.fullmatch(r"done(?:[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:e[+-]?[0-9]+)?|[+-]?inf|nan)_mib", field):
+        return scalar_metric(workload, field, "MiB")
+    if workload == "vtebench":
+        return Metric(key, "ms", "benchmark", "benchmark-means", "legacy", "arithmetic mean of round means with Student-t interval")
+    if workload == "startup" and field.startswith("phase_") and field.endswith("_ms"):
+        # Keep the cumulative phase comparisons available to old readers.
+        return scalar_metric(workload, field, "ms")
+    raise ValueError(f"no metric contract for {key}")
+
+
+def metric_reason(descriptor: Metric, workload: str, run: dict) -> Optional[str]:
+    if run.get("warmup"):
+        return "warmup"
+    if "error" in run or (descriptor.eligibility == "metric-validity" and run.get("killed")):
+        return "round failed"
+    if workload == "idle" and not run.get("frontmost"):
+        return "not frontmost"
+    field = descriptor.id.split(".", 1)[1]
+    if descriptor.eligibility == "metric-validity":
+        validity = (run.get("metric_validity") or {}).get(field)
+        if not isinstance(validity, dict):
+            return "metric evidence unavailable"
+        if validity.get("valid") is not True:
+            return validity.get("reason") or "metric evidence invalid"
+        if not validity.get("capability_version"):
+            return "metric capability unavailable"
+        expected, observed = validity.get("expected"), validity.get("observed")
+        if not is_number(expected) or not is_number(observed) or expected <= 0 or observed < expected:
+            return "metric evidence incomplete"
+    return None
+
+
+def metric_value(descriptor: Metric, workload: str, run: dict) -> Optional[float]:
+    if metric_reason(descriptor, workload, run):
+        return None
+    value = row_value(workload, run, descriptor.id.split(".", 1)[1])
+    if (descriptor.eligibility == "metric-validity" and value is not None and value < 0
+            and descriptor.kind != "signed"):
+        return None
+    return value
+
+
+def scalar_entry(descriptor: Metric, per_name: dict, names: List[str], ab: bool, unranked: set,
+                 family: int = 1) -> dict:
+    mean = descriptor.kind == "benchmark"
+    terminals = {}
+    for name in names:
+        present = [v for v in per_name.get(name, []) if v is not None]
+        if present:
+            ci = mean_ci(present) if mean else median_ci(present)
+            terminals[name] = {"estimate": ci["mean" if mean else "median"], "low": ci["low"],
+                               "high": ci["high"], "n": ci["n"]}
+    entry = {"kind": "mean" if mean else "median", "descriptor": descriptor.record(), "terminals": terminals,
+             "values": {name: per_name.get(name, []) for name in names}}
+    def compare(base: str, test: str, label: str) -> None:
+        a, b = per_name.get(base, []), per_name.get(test, [])
+        if descriptor.kind != "signed":
+            entry[label] = paired(a, b, family if ab else 1)
+        entry[label + "_diff"] = paired_difference(a, b)
+    if ab and len(names) == 2:
+        compare(names[0], names[1], "ab")
+    elif names[0] in terminals and descriptor.claim_kind != "none":
+        ranked = {name: t for name, t in terminals.items() if name not in unranked}
+        others = {name: t for name, t in ranked.items() if name != names[0]}
+        if others:
+            best = min(others, key=lambda name: others[name]["estimate"])
+            entry["best_other"] = best
+            compare(best, names[0], "vs_best")
+            entry["rank"] = sorted(ranked, key=lambda name: ranked[name]["estimate"]).index(names[0]) + 1
+    if not ab and descriptor.claim_kind != "none":
+        ranked = sorted((name for name in terminals if name not in unranked),
+                        key=lambda name: (terminals[name]["estimate"], name))
+        comparisons = []
+        for i, base in enumerate(ranked):
+            for test in ranked[i + 1:]:
+                comparisons.append({"base": base, "test": test,
+                                    "current": paired(per_name[base], per_name[test])})
+        entry["pairwise"] = comparisons
+        entry["adjacent"] = [{"base": base, "test": test,
+                              "order": "ordered" if comparison["current"].get("low", 0) > 1 else "tied"}
+                             for base, test in zip(ranked, ranked[1:])
+                             for comparison in comparisons if comparison["base"] == base and comparison["test"] == test]
+    entry["statistics"] = {"authoritative": "current", "current": {
+        "estimate": descriptor.estimate, "comparison": descriptor.comparison,
+        "difference_estimator": "mean of paired differences/Student-t",
+        "terminals": {name: dict(t) for name, t in terminals.items()},
+        **{k: entry[k] for k in ("ab", "ab_diff", "vs_best", "vs_best_diff") if k in entry}}}
+    return entry
+
+
 def is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 def row_value(workload: str, row: dict, metric: str) -> Optional[float]:
@@ -1955,7 +2125,7 @@ def workload_metrics(workload: str, rows: Dict[str, List[dict]],
             for bench in benches:
                 values[bench][name] = [None if "error" in run else vtebench_means(run).get(bench) for run in runs]
             values["geometric mean"][name] = [
-                None if "error" in run or not vtebench_means(run) else geometric_mean(vtebench_means(run).values())
+                vtebench_aggregate(run, benches)
                 for run in runs
             ]
         return values
@@ -1971,8 +2141,12 @@ def workload_metrics(workload: str, rows: Dict[str, List[dict]],
                     if key.startswith("phase_") and is_number(value):
                         phases.setdefault(key, []).append(value)
         metrics += sorted(phases, key=lambda key: (statistics.median(phases[key]), key))
-    return {metric: {name: [row_value(workload, run, metric) for run in runs] for name, runs in rows.items()}
-            for metric in metrics}
+    metrics += [m.id.split(".", 1)[1] for m in METRIC_REGISTRY.values()
+                if m.id.split(".", 1)[0] == workload and m.eligibility == "metric-validity"
+                and m.id.split(".", 1)[1] not in metrics
+                and any(m.id.split(".", 1)[1] in run for runs in rows.values() for run in runs)]
+    return {metric: {name: [metric_value(metric_descriptor(workload, metric), workload, run) for run in runs]
+                           for name, runs in rows.items()} for metric in metrics}
 
 
 def analyze(results: dict, names: List[str], ab: bool) -> dict:
@@ -1989,38 +2163,9 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
         per_metric = workload_metrics(workload, rows, results.get("meta"))
         benchmarks = sum(1 for metric in per_metric if metric != "geometric mean")
         for metric, per_name in per_metric.items():
-            terminals = {}
-            for name in names:
-                present = [v for v in per_name.get(name, []) if v is not None]
-                if not present:
-                    continue
-                if mean_based:
-                    ci = mean_ci(present)
-                    terminals[name] = {"estimate": ci["mean"], "low": ci["low"], "high": ci["high"], "n": ci["n"]}
-                else:
-                    ci = median_ci(present)
-                    terminals[name] = {"estimate": ci["median"], "low": ci["low"], "high": ci["high"],
-                                       "n": ci["n"]}
-            entry: dict = {"kind": "mean" if mean_based else "median", "terminals": terminals,
-                           "values": {name: per_name.get(name, []) for name in names}}
-            # vtebench's benchmarks are tested together; the geometric mean
-            # is one row.
+            descriptor = metric_descriptor(workload, metric)
             family = benchmarks if mean_based and metric != "geometric mean" else 1
-            if ab and len(names) == 2:
-                entry["ab"] = paired(per_name.get(names[0], []), per_name.get(names[1], []), family)
-                if workload == "startup":
-                    entry["ab_diff"] = paired_difference(per_name.get(names[0], []), per_name.get(names[1], []))
-            elif kettle in terminals:
-                ranked = {name: t for name, t in terminals.items() if name not in unranked}
-                others = {name: t for name, t in ranked.items() if name != kettle}
-                if others:
-                    best = min(others, key=lambda name: others[name]["estimate"])
-                    entry["best_other"] = best
-                    entry["vs_best"] = paired(per_name[best], per_name[kettle])
-                    if workload == "startup":
-                        entry["vs_best_diff"] = paired_difference(per_name[best], per_name[kettle])
-                    order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
-                    entry["rank"] = order.index(kettle) + 1
+            entry = scalar_entry(descriptor, per_name, names, ab, unranked, family)
             metrics[metric] = entry
         info: dict = {"metrics": metrics}
         if workload == "idle":
@@ -2031,6 +2176,10 @@ def analyze(results: dict, names: List[str], ab: bool) -> dict:
         if any(grids.values()):
             info["grids"] = grids
         analysis[workload] = info
+    counts = workload_countable(results, results.get("meta") or {})
+    for workload, info in analysis.items():
+        for metric, entry in info["metrics"].items():
+            entry["metric_countable"] = metric_countability(results, workload, metric, entry, counts.get(workload, False))
     return analysis
 
 
@@ -2054,7 +2203,7 @@ def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str]
     # session, never from per-round summaries.
     pooled = {name: [k for r in keys[name] if r for k in r] for name in entries}
     halves = {half: {name: [v for run in rows[name] if latency_keys(run, censor_ms) is not None
-                            for v in run.get(half) or []] for name in entries}
+                            for v in run.get(half) or [] if is_number(v)] for name in entries}
               for half in ("inputs_ms", "outputs_ms")}
     for metric, per_name in workload_metrics("latency", rows).items():
         terminals = {}
@@ -2093,7 +2242,32 @@ def analyze_latency(results: dict, rows: Dict[str, List[dict]], names: List[str]
                     entry["vs_best"] = cluster_compare(keys[best], keys[names[0]])
                     order = sorted(ranked, key=lambda name: ranked[name]["estimate"])
                     entry["rank"] = order.index(names[0]) + 1
+        descriptor = metric_descriptor("latency", metric)
+        entry["descriptor"] = descriptor.record()
+        if metric == "mean_ms":
+            ranked = sorted((name for name in terminals if name not in unranked and standing[name]["ranked"]),
+                            key=lambda name: (terminals[name]["estimate"], name))
+            comparisons = []
+            for i, base in enumerate(ranked):
+                for test in ranked[i + 1:]:
+                    stats = cluster_compare(keys[base], keys[test])
+                    comparisons.append({"base": base, "test": test, "current": stats})
+            entry["pairwise"] = comparisons
+            entry["adjacent"] = [{"base": base, "test": test,
+                                  "order": "ordered" if comparison["current"].get("diff_low", 0) > 0 else "tied"}
+                                 for base, test in zip(ranked, ranked[1:])
+                                 for comparison in comparisons if comparison["base"] == base and comparison["test"] == test]
+        entry["statistics"] = {"authoritative": "current", "current": {
+            "estimate": descriptor.estimate, "comparison": descriptor.comparison,
+            "terminals": {name: dict(t) for name, t in terminals.items()},
+            **{k: entry[k] for k in ("ab", "vs_best") if k in entry}}}
         metrics[metric] = entry
+    for descriptor in METRIC_REGISTRY.values():
+        field = descriptor.id.split(".", 1)[1]
+        if (descriptor.id.split(".", 1)[0] == "latency" and descriptor.kind == "scalar"
+                and any(field in run for runs in rows.values() for run in runs)):
+            values = {name: [metric_value(descriptor, "latency", run) for run in rows[name]] for name in entries}
+            metrics[field] = scalar_entry(descriptor, values, entries, ab, unranked)
     return {"metrics": metrics, "entries": entries, "standing": standing}
 
 
@@ -2132,11 +2306,27 @@ def latency_markdown(info: dict, ab: bool, countable: Optional[bool] = None) -> 
     elif ab:
         out.append("")
         out.append("mean_ms: no comparison (a side is not measured or not ranked)")
+    for field, optional in metrics.items():
+        if optional["descriptor"]["kind"] == "scalar":
+            out.extend(["", f"{field} ({optional['descriptor']['unit']}): " + ", ".join(
+                f"{name} {value['estimate']:.2f}" for name, value in optional["terminals"].items())])
+            if optional.get("ab_diff"):
+                out.append(f"B-A {optional['ab_diff']['diff']:+.2f} {optional['descriptor']['unit']} "
+                           "(mean paired difference); ratio gate.")
     return out
 
 
-def summarize(results: dict, names: List[str], ab: bool) -> str:
-    analysis = analyze(results, names, ab)
+def extended_report(results: dict) -> bool:
+    """Only schema 3 or a new metric opts a session into the added report fields."""
+    return results.get("schema", 1) >= 3 or any(
+        descriptor.eligibility == "metric-validity"
+        and any(descriptor.id.split(".", 1)[1] in run for runs in results["workloads"].get(
+            descriptor.id.split(".", 1)[0], {}).values() for run in runs)
+        for descriptor in METRIC_REGISTRY.values())
+
+
+def summarize(results: dict, names: List[str], ab: bool, analysis: Optional[dict] = None) -> str:
+    analysis = analyze(results, names, ab) if analysis is None else analysis
     out = ["# macOS standing", "", results["context"], ""]
     for workload, info in analysis.items():
         out.append(f"## {workload}")
@@ -2172,14 +2362,19 @@ def summarize(results: dict, names: List[str], ab: bool) -> str:
             for metric in ordered + (["geometric mean"] if "geometric mean" in metrics else []):
                 stats = metrics[metric].get("ab")
                 if stats:
-                    diff = metrics[metric].get("ab_diff")
-                    delta = (f"; B-A {diff['diff']:+.1f} ms, 95% CI {diff['low']:+.1f} to {diff['high']:+.1f}"
+                    diff = metrics[metric].get("ab_diff") if workload == "startup" else None
+                    delta = (f"; B-A {diff['diff']:+.1f} {metrics[metric]['descriptor']['unit']}, 95% CI {diff['low']:+.1f} to {diff['high']:+.1f}"
                              if diff else "")
                     out.append(
                         f"{metric}: B/A {stats['ratio']:.3f} "
                         f"(95% CI {stats['low']:.3f}-{stats['high']:.3f}, n={stats['n']}, "
                         f"B lower in {stats['wins']}/{stats['n']}{delta})"
                     )
+            for metric, entry in metrics.items():
+                if entry["descriptor"]["kind"] == "signed" and entry.get("ab_diff"):
+                    diff = entry["ab_diff"]
+                    out.append(f"{metric}: B-A {diff['diff']:+.2f} {entry['descriptor']['unit']}, "
+                               f"95% CI {diff['low']:+.2f} to {diff['high']:+.2f}; diagnostic only")
         else:
             compared = [m for m in ordered + (["geometric mean"] if "geometric mean" in metrics else [])
                         if metrics[m].get("vs_best")]
@@ -2199,7 +2394,36 @@ def summarize(results: dict, names: List[str], ab: bool) -> str:
                                 else " - |")
                     out.append(row)
         out.append("")
+    if extended_report(results):
+        out.extend(statistics_markdown(analysis))
     return "\n".join(out)
+
+
+def statistics_markdown(analysis: dict) -> List[str]:
+    out = ["## Statistical contracts", "", "statistics.current is authoritative.", "",
+           "| metric | unit | direction | analysis kind | estimate / comparison | mean difference (Student-t CI) |",
+           "|---|---|---|---|---|---|"]
+    labels = []
+    has_new_metrics = any(entry["descriptor"]["eligibility"] == "metric-validity"
+                          for info in analysis.values() for entry in info["metrics"].values())
+    for info in analysis.values():
+        for entry in info["metrics"].values():
+            descriptor = entry["descriptor"]
+            diff = entry.get("ab_diff") or entry.get("vs_best_diff") or {}
+            comparison = entry.get("ab") or entry.get("vs_best") or {}
+            if not diff and "diff" in comparison:
+                diff = {"diff": comparison["diff"], "low": comparison["diff_low"], "high": comparison["diff_high"]}
+            difference = (f"{diff['diff']:+.3f} ({diff['low']:+.3f} to {diff['high']:+.3f})"
+                          if diff else "not available")
+            out.append(f"| {descriptor['id']} | {descriptor['unit']} | {descriptor['direction']} | "
+                       f"{descriptor['analysis_kind']} | {descriptor['estimate']} / {descriptor['comparison']} | {difference} |")
+            if has_new_metrics:
+                for pair in entry.get("adjacent", []):
+                    labels.append(f"Adjacent {descriptor['id']}: {pair['base']} / {pair['test']}: {pair['order']}.")
+    out.append("")
+    out.extend(labels)
+    out.append("")
+    return out
 
 
 # === Sessions and combining ==========================================
@@ -2272,6 +2496,42 @@ def workload_countable(results: dict, meta: dict) -> Dict[str, bool]:
             else defaults for workload in results["workloads"]}
 
 
+def metric_countability(results: dict, workload: str, metric: str, entry: dict, counts: bool) -> dict:
+    descriptor = metric_descriptor(workload, metric)
+    planned = ((results.get("meta") or {}).get("rounds") or {}).get(workload, 0)
+    rows = results["workloads"].get(workload, {})
+    report = {}
+    for name, values in entry["values"].items():
+        runs = rows.get(name, [])
+        n = (entry["terminals"].get(name, {}).get("n", 0) if descriptor.kind in ("latency", "distribution")
+             else sum(v is not None for v in values))
+        reasons = []
+        if not counts:
+            reasons.append("session/workload not countable")
+        if descriptor.eligibility == "metric-validity":
+            for run in runs:
+                reason = metric_reason(descriptor, workload, run)
+                if reason and reason != "warmup":
+                    reasons.append(reason)
+            if n != planned or not planned:
+                reasons.append("incomplete metric rounds")
+        elif descriptor.kind == "latency":
+            status = latency_standing(runs, latency_censor_ms(results), planned)
+            if not status["measured"]:
+                reasons.append("latency not measured")
+        if descriptor.kind == "benchmark" and planned and n != planned:
+            reasons.append("incomplete benchmark rounds")
+        if not n:
+            reasons.append("metric unavailable")
+        report[name] = {"countable": not reasons, "n": n, "planned": planned,
+                        "failed": sum(not r.get("warmup") and (metric_value(descriptor, workload, r) is None)
+                                      for r in runs) if descriptor.kind not in ("benchmark", "latency", "distribution")
+                                  else sum(v is None for r, v in zip(runs, values) if not r.get("warmup"))
+                                  if descriptor.kind == "benchmark" else sum("error" in r for r in runs),
+                        "reasons": sorted(set(reasons))}
+    return report
+
+
 def load_session(folder: Path) -> dict:
     """A session directory's results with the fields --combine needs.
 
@@ -2281,6 +2541,8 @@ def load_session(folder: Path) -> dict:
     """
     results = json.loads((folder / "results.json").read_text())
     schema = results.get("schema", 1)
+    if schema not in (1, 2, 3):
+        raise ValueError(f"unsupported results schema {schema}")
     names = results["terminals"]
     if schema == 1:
         date = datetime.date.fromtimestamp((folder / "results.json").stat().st_mtime).isoformat()
@@ -2301,6 +2563,8 @@ def load_session(folder: Path) -> dict:
     else:
         meta = results["meta"]
         countable = session_countable(meta) and rounds_complete(results, meta)
+    if meta.get("statistics_policy", "current") != "current":
+        raise ValueError("unsupported statistics_policy; only current is supported")
     per_workload = workload_countable(results, meta)
     setup = {key: meta.get(key) for key in SESSION_KEYS}
     setup["identity"] = {name: {k: v for k, v in (ident or {}).items() if k in ("sha256", "cdhash")}
@@ -2363,38 +2627,61 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
             for metric, entry in info["metrics"].items():
                 stats = entry.get("ab")
                 if stats and (not planned or stats["n"] >= math.ceil(MIN_PAIRED_SHARE * planned)):
-                    gates[f"{workload}.{metric}"] = latency_aa_gate(stats) if workload == "latency" else aa_gate(stats)
+                    descriptor = metric_descriptor(workload, metric)
+                    local = metric_countability(control["results"], workload, metric, entry, True)
+                    if descriptor.eligibility == "metric-validity" and not all(v["countable"] for v in local.values()):
+                        continue
+                    if descriptor.aa_kind == "latency-difference":
+                        gates[descriptor.id] = latency_aa_gate(stats)
+                    elif descriptor.aa_kind == "ratio":
+                        gates[descriptor.id] = aa_gate(stats)
     analyses = [analyze(s["results"], s["names"], s["ab"]) for s in sessions]
     rows: Dict[str, dict] = {}
     for session, analysis in zip(sessions, analyses):
         for workload, info in analysis.items():
             counts = session["workload_countable"].get(workload, session["countable"])
             for metric, entry in info["metrics"].items():
-                row = rows.setdefault(f"{workload}.{metric}", {"terminals": {}, "sessions": [], "per_session": []})
+                descriptor = metric_descriptor(workload, metric)
+                row = rows.setdefault(descriptor.id, {"descriptor": descriptor.record(), "terminals": {},
+                                                       "sessions": [], "per_session": []})
+                local = metric_countability(session["results"], workload, metric, entry, counts)
                 estimates = {name: terminal["estimate"] for name, terminal in entry["terminals"].items()}
                 row["per_session"].append({"label": session["label"], "countable": counts,
-                                           "estimates": estimates})
+                                           "estimates": estimates, "metric_countable": local,
+                                           "statistics": entry["statistics"],
+                                           **{k: entry[k] for k in ("ab_diff", "vs_best_diff", "pairwise", "adjacent") if k in entry}})
                 if counts:
                     for name, value in estimates.items():
-                        row["terminals"].setdefault(name, {"estimates": []})["estimates"].append(value)
+                        if local[name]["countable"]:
+                            row["terminals"].setdefault(name, {"estimates": []})["estimates"].append(value)
                 # A comparison with too few paired rounds (idle rounds that lost
                 # focus) does not stand for the session.
                 planned = session["rounds"].get(workload)
                 stats = entry.get("ab") if ab else entry.get("vs_best")
                 covered = not planned or (stats or {}).get("n", 0) >= math.ceil(MIN_PAIRED_SHARE * planned)
                 base = {"label": session["label"], "date": session["date"], "started": session["started"],
-                        "countable": counts and covered}
+                        "countable": counts and covered and all(local.get(name, {}).get("countable", False)
+                                                                               for name in (session["names"] if ab else
+                                                                                             [session["names"][0], entry.get("best_other")]))}
                 if ab and entry.get("ab"):
-                    row["sessions"].append({**base, **entry["ab"]})
+                    row["sessions"].append({**base, **entry["ab"], "statistics": entry["statistics"],
+                                            **({"difference": entry["ab_diff"]} if "ab_diff" in entry else {})})
                 elif entry.get("vs_best"):
                     row["sessions"].append({**base, **entry["vs_best"], "peer": entry["best_other"],
-                                            "rank": entry["rank"]})
+                                            "rank": entry["rank"], "statistics": entry["statistics"],
+                                            **({"difference": entry["vs_best_diff"]} if "vs_best_diff" in entry else {})})
     for key, row in rows.items():
         for terminal in row["terminals"].values():
             estimates = terminal["estimates"]
             terminal.update({"published": statistics.median(estimates), "min": min(estimates),
                              "max": max(estimates)})
         if ab:
+            if row["descriptor"]["claim_kind"] == "none":
+                # Retain old distribution rows' read behavior. They never
+                # supplied a comparison or a calibrated gain gate.
+                row["verdict"] = ({"verdict": "A/A missing"} if aa else latency_ab_verdict([])) \
+                    if row["descriptor"]["kind"] == "distribution" else {"verdict": "diagnostic only"}
+                continue
             gate = gates.get(key)
             if aa and not gate:
                 row["verdict"] = {"verdict": "A/A missing"}
@@ -2402,7 +2689,7 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                 # The same build differed from itself: that A/A cannot
                 # calibrate anything.
                 row["verdict"] = {"verdict": "A/A failed"}
-            elif key.startswith("latency."):
+            elif row["descriptor"]["aa_kind"] == "latency-difference":
                 row["verdict"] = latency_ab_verdict(row["sessions"], gate["gate_ms"] if gate else None)
             else:
                 row["verdict"] = ab_verdict(row["sessions"], gate["gate"] if gate else None)
@@ -2410,8 +2697,20 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                 row["aa"] = gate
         elif row["sessions"]:
             row["claim"] = claim(row["sessions"])
-    combined = {"sessions": [{k: s[k] for k in ("dir", "label", "date", "countable", "schema")} for s in sessions],
+    combined = {"schema": SCHEMA, "statistics_policy": "current", "sessions": [{k: s[k] for k in ("dir", "label", "date", "countable", "schema")} for s in sessions],
                 "rows": rows}
+    if not any(extended_report(s["results"]) for s in sessions) and not (aa and extended_report(control["results"])):
+        # Preserve key insertion order as well as values in the legacy JSON.
+        combined.pop("schema")
+        combined.pop("statistics_policy")
+        for row in rows.values():
+            row.pop("descriptor")
+            for per in row["per_session"]:
+                for key in ("metric_countable", "statistics", "ab_diff", "vs_best_diff", "pairwise", "adjacent"):
+                    per.pop(key, None)
+            for per in row["sessions"]:
+                per.pop("statistics", None)
+                per.pop("difference", None)
     combined["markdown"] = combined_markdown(combined, ab)
     return combined
 
@@ -2429,12 +2728,14 @@ def combined_markdown(combined: dict, ab: bool) -> str:
         for key, row in combined["rows"].items():
             a = row["terminals"].get("kettle-a", {}).get("published")
             b = row["terminals"].get("kettle-b", {}).get("published")
-            per = "; ".join(f"{s['ratio']:.3f} ({s['low']:.3f}-{s['high']:.3f})" for s in row["sessions"])
+            per = "; ".join(f"{s['ratio']:.3f} ({s['low']:.3f}-{s['high']:.3f})" for s in row["sessions"] if "ratio" in s)
             verdict = row.get("verdict", {}).get("verdict", "-")
             if row.get("verdict", {}).get("no_regression") is not None:
                 verdict += "; no regression" if row["verdict"]["no_regression"] else "; REGRESSION over +1 ms"
             out.append(f"| {key.replace('.', ' ', 1)} | {a if a is None else f'{a:.2f}'} | "
                        f"{b if b is None else f'{b:.2f}'} | {per} | {verdict} |")
+        if "schema" in combined:
+            out.extend(combined_statistics_markdown(combined))
         return "\n".join(out) + "\n"
     out.append("| row | Kettle | label | field (published = median of sessions) |")
     out.append("|---|---:|---|---|")
@@ -2453,7 +2754,37 @@ def combined_markdown(combined: dict, ab: bool) -> str:
             out.append(f"| {key.replace('.', ' ', 1)} | {s['label']} | {'yes' if s['countable'] else 'no'} | "
                        f"{s['peer']} | {s['ratio']:.3f} | {s['low']:.3f}-{s['high']:.3f} | {s['wins']}/{s['n']} | "
                        f"{s['rank']} |")
+    if "schema" in combined:
+        out.extend(combined_statistics_markdown(combined))
     return "\n".join(out) + "\n"
+
+
+
+def combined_statistics_markdown(combined: dict) -> List[str]:
+    out = ["", "## Absolute differences", "",
+           "Differences use the metric's unit and the current Student-t interval.", "",
+           "| metric | unit | session | mean difference (Student-t CI) |", "|---|---|---|---|"]
+    def cell(report: dict) -> str:
+        if not report:
+            return "not available"
+        return f"{report['diff']:+.3f} ({report['low']:+.3f} to {report['high']:+.3f})"
+    labels = []
+    has_new_metrics = any(row["descriptor"]["eligibility"] == "metric-validity"
+                          for row in combined["rows"].values())
+    for key, row in combined["rows"].items():
+        for session in row["per_session"]:
+            current = session["statistics"]["current"]
+            diff = current.get("ab_diff") or current.get("vs_best_diff") or {}
+            comparison = current.get("ab") or current.get("vs_best") or {}
+            if not diff and "diff" in comparison:
+                diff = {"diff": comparison["diff"], "low": comparison["diff_low"], "high": comparison["diff_high"]}
+            out.append(f"| {key} | {row['descriptor']['unit']} | {session['label']} | {cell(diff)} |")
+            if has_new_metrics:
+                for pair in session.get("adjacent", []):
+                    labels.append(f"Adjacent {key}: {pair['base']} / {pair['test']}: {pair['order']}.")
+    out.append("")
+    out.extend(labels)
+    return out
 
 
 # === Preflight, safety and metadata ==================================
@@ -3190,13 +3521,14 @@ def main() -> int:
     started = datetime.datetime.now().astimezone()
     host_terminal = host_terminal_of(state["procs"] or [], field, args.host_pid)
     results = {
-        "schema": SCHEMA,
+        "schema": SCHEMA, "evidence_contract": EVIDENCE_CONTRACT,
         "context": f"{host}, macOS {release}, load {load:.2f} at start, rounds "
                    + ", ".join(f"{w} {rounds[w]}" for w in workloads)
                    + f", {COLS}x{ROWS} grid, default configs, fd soft limit "
                    f"{resource.getrlimit(resource.RLIMIT_NOFILE)[0]}",
         "terminals": names, "skipped": skipped, "unranked": unranked,
         "meta": {
+            "statistics_policy": "current",
             "label": args.label or out_dir.name, "mode": "ab" if is_ab(kettle) else "standing",
             "started": started.isoformat(timespec="seconds"), "date": started.date().isoformat(),
             # countable is final only once every round has run (see
@@ -3314,8 +3646,12 @@ def main() -> int:
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
     results["meta"]["workload_countable"] = workload_countable(results, results["meta"])
+    analysis = analyze(results, names, is_ab(kettle))
+    results["meta"]["metric_countable"] = {entry["descriptor"]["id"]: entry["metric_countable"]
+                                          for info in analysis.values() for entry in info["metrics"].values()}
     recorder.write()
-    summary = summarize(results, names, is_ab(kettle))
+    (out_dir / "analysis.json").write_text(dumps({"schema": SCHEMA, "statistics_policy": "current", "workloads": analysis}))
+    summary = summarize(results, names, is_ab(kettle), analysis)
     (out_dir / "summary.md").write_text(summary + "\n")
     print(summary)
     return 0

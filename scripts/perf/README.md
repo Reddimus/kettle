@@ -223,6 +223,62 @@ latency rounds, 10 s per vtebench benchmark (upstream's default), a 30 s idle
 window and the 256-descriptor limit the Dock gives apps. `--rounds` overrides
 every count.
 
+### Typed analysis and current statistics
+
+New runs write schema 3 with `evidence_contract = hc-v1` and
+`meta.statistics_policy = current`. `analysis.json` records the metric
+contracts and statistics for the session. `combined.json` keeps these reports
+per session when an input uses schema 3 or contains a new metric. With only
+existing schema-1/2 data, `summary.md`, `combined.md`, `combined.json` and
+`results.json` retain their original bytes. Reading a session never rewrites
+it. Schemas 1 and 2 retain their original measurements and countability rules.
+Missing optional fields remain unavailable. Schema 1 still reconstructs
+vtebench means from `.dat` files and cannot count toward a publication claim.
+
+Each metric has an ID, unit, direction, analysis kind, extraction and
+eligibility rule, estimate, comparison, A/A kind, claim kind and publication
+role. Dispatch uses that contract. A memory field under `latency` uses a ratio
+gate and differences in MiB. CPU differences use percentage points; wakeup
+differences use /s. Signed phase slack uses differences and remains
+diagnostic. Reserved typing, printing, blink, cursor and startup fields do not
+imply that a collector ran. No new workload is enabled by this schema change.
+
+`statistics.current` contains the existing estimates and intervals described
+above and remains authoritative. Scalar comparisons also report the mean of
+paired absolute differences with a Student-t interval in their own unit.
+Combine retains startup differences and the new memory/rate differences.
+Finite zero samples retain the existing A/A gates and verdicts, including
+infinite derived ratio intervals. No gate is dropped merely because a ratio
+interval is unbounded.
+
+The PR #409 estimators are the only statistical policy. No supplemental
+bootstrap reports or estimator selection are emitted.
+
+Analysis adds all pairwise comparisons among ranked entries and adjacent
+`ordered`/`tied` labels. Scalar peers use the current geometric mean ratio
+and log Student-t interval. vtebench retains its existing Bonferroni family
+for A/B comparisons, including A/A controls.
+An adjacent order requires a ratio interval entirely above one. Mean latency
+peers use the current paired launch difference Student-t interval, and an
+adjacent order requires a difference interval entirely above zero. Overlapping
+intervals and missing paired data produce ties. The existing best-other
+comparison, numeric rank and cross-date claim rule remain unchanged. Markdown
+labels appear after the completed tables and only when new metrics are present.
+
+Optional metrics require `metric_validity` evidence with a valid flag,
+capability version and complete expected/observed coverage. Their failures
+remove only that metric's value, preserving round positions as `null`.
+Analysis and combine report metric countability per terminal, reasons and
+failure counts. New optional metrics require all planned rounds for that
+terminal; defaults retain their existing rules. vtebench aggregates keep the
+session's benchmark set fixed. A missing, nonfinite or nonpositive member
+makes that round's aggregate unavailable; it cannot change the geometric mean
+to a subset of benchmarks. Its failure and incomplete-round countability are
+reported. Flood fields accept every `:g` offset spelling, including
+`done1e-05_mib`. Distribution-only latency fields have no gain gate. See [the
+analysis schema](../../docs/perf-standing-schema.md) for field names and
+absence rules.
+
 ### Sessions, preflight and labels
 
 A run first checks the machine and refuses battery power, Low Power Mode, a
