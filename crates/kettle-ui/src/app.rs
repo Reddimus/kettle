@@ -15835,9 +15835,10 @@ impl App {
                     // scale factor on HiDPI.
                     let new = match action {
                         Action::IncreaseFontSize | Action::ZoomInAll => r.font_size() + 1.0,
-                        Action::DecreaseFontSize | Action::ZoomOutAll => {
-                            (r.font_size() - 1.0).max(6.0)
-                        }
+                        // `set_font_size` clamps to the renderer's 5..=72
+                        // range; a floor of 6 here turned "decrease" at a
+                        // configured 5 into an increase.
+                        Action::DecreaseFontSize | Action::ZoomOutAll => r.font_size() - 1.0,
                         _ => self.cfg.font_size,
                     };
                     r.set_font_size(new);
@@ -15895,10 +15896,16 @@ impl App {
                 };
             }
             Action::ToggleZoom => {
-                // Route through the helper ScaledZoom uses, so un-zooming via
-                // the plain toggle still restores or clears a pending
-                // scaled-zoom font baseline. See `toggle_zoom_with_scale`.
-                self.toggle_zoom_with_scale(ws, None);
+                // A tab with one pane has nothing to expand: entering zoom
+                // there would only leave a hidden flag that the first split
+                // then silently cleared. A zoomed tab can always leave zoom.
+                // ScaledZoom keeps its font step on a single pane.
+                if ws.mux.is_zoomed() || ws.mux.active_pane_count() > 1 {
+                    // Route through the helper ScaledZoom uses, so un-zooming
+                    // via the plain toggle still restores or clears a pending
+                    // scaled-zoom font baseline. See `toggle_zoom_with_scale`.
+                    self.toggle_zoom_with_scale(ws, None);
+                }
             }
             // Ghostty `equalize_splits` parity: rebalance the active tab's
             // split tree to equal pane areas, then push the new geometry into
@@ -19032,16 +19039,17 @@ impl App {
         trigger: Trigger,
         action: &Action,
     ) -> bool {
-        adaptive_alt_focus_direction(trigger, action, !cfg!(target_os = "macos")).is_some_and(
-            |(dx, dy)| {
-                adaptive_alt_focus_falls_through(
-                    trigger,
-                    action,
-                    true,
-                    ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
-                )
-            },
-        )
+        // A trigger the config binds itself, even to its default action, is
+        // always Kettle's, as for every program key rule.
+        let enabled = !cfg!(target_os = "macos") && !self.cfg.keybinds_declared.contains(&trigger);
+        adaptive_alt_focus_direction(trigger, action, enabled).is_some_and(|(dx, dy)| {
+            adaptive_alt_focus_falls_through(
+                trigger,
+                action,
+                true,
+                ws.mux.pane_in_direction(self.area(ws), dx, dy).is_some(),
+            )
+        })
     }
 
     /// The routing decision the real keyboard and `dispatch_keybind` share: a
@@ -19093,8 +19101,35 @@ impl App {
                     .lock()
                     .ok()
                     .is_some_and(|t| t.selection.is_some()),
+            focus_target_exists: self.focus_target_exists(ws, action),
+            chord_is_distinct: rule == ProgramKeyRule::WhenKettleIdleAndDistinct
+                && pane
+                    .term
+                    .term
+                    .lock()
+                    .ok()
+                    .is_some_and(|t| chord_reaches_program_distinctly(trigger, *t.mode())),
         };
         program_gets_chord(rule, action, &claims, &kettle)
+    }
+
+    /// Whether a focus action has a visible pane to move to. A zoomed tab
+    /// shows only its focused pane, so it has none in any direction, as a
+    /// single-pane tab has none.
+    fn focus_target_exists(&self, ws: &WindowState, action: &Action) -> bool {
+        let direction = match action {
+            Action::FocusUp => (0, -1),
+            Action::FocusDown => (0, 1),
+            Action::FocusLeft => (-1, 0),
+            Action::FocusRight => (1, 0),
+            Action::FocusNext | Action::FocusPrev => {
+                return ws.mux.layout(ws.mux.active, self.area(ws)).len() > 1;
+            }
+            _ => return false,
+        };
+        ws.mux
+            .pane_in_direction(self.area(ws), direction.0, direction.1)
+            .is_some()
     }
 
     /// `dispatch_keybind`: diagnostic route for app-level keybind matching.
@@ -23903,6 +23938,12 @@ enum ProgramKeyRule {
     /// and the view is not scrolled into history. Copy has no rule: Codex
     /// reads Ctrl+Shift+C as Ctrl+C, which would discard a draft.
     WhenKettleIdle,
+    /// As `WhenKettleIdle`, for pane-focus chords that have nowhere to go (a
+    /// zoomed or single-pane tab, or no pane on that side), and only while the
+    /// pane's negotiated keyboard mode tells the chord apart. Sent in plain
+    /// legacy mode, Ctrl+Shift+N would arrive as Ctrl+N, a different key, and
+    /// a Command chord would arrive as nothing at all.
+    WhenKettleIdleAndDistinct,
 }
 
 /// The rule for this chord under the user's config: none with
@@ -23971,6 +24012,22 @@ fn program_key_rule(trigger: Trigger, action: &Action, macos: bool) -> Option<Pr
         {
             WhenKettleIdle
         }
+        (m, Char('n'), Action::FocusNext) | (m, Char('p'), Action::FocusPrev)
+            if m == ctrl_shift =>
+        {
+            WhenKettleIdleAndDistinct
+        }
+        // macOS's two directional focus chords. Alt+Arrow elsewhere already
+        // falls through when it has nowhere to go
+        // (`adaptive_focus_chord_falls_through`).
+        (m, Up, Action::FocusUp)
+        | (m, Down, Action::FocusDown)
+        | (m, Left, Action::FocusLeft)
+        | (m, Right, Action::FocusRight)
+            if macos && (m == Mods::ALT | Mods::SUPER || m == Mods::CTRL | Mods::SUPER) =>
+        {
+            WhenKettleIdleAndDistinct
+        }
         // Alt+1-9 everywhere, and Cmd+1-9 on macOS.
         (m, Char(digit @ '1'..='9'), Action::GotoTab(index))
             if (m == Mods::ALT || (macos && m == Mods::SUPER))
@@ -23990,6 +24047,11 @@ struct KettleActionState {
     /// The pane has a Kettle selection (even an empty one a click left), which
     /// `Shift+Home/End` would extend.
     selection_exists: bool,
+    /// A focus action has a visible pane to move to.
+    focus_target_exists: bool,
+    /// The pane's keyboard mode encodes the chord as itself (see
+    /// [`chord_reaches_program_distinctly`]).
+    chord_is_distinct: bool,
 }
 
 /// Whether Kettle's action would change nothing if it ran now, with the view
@@ -24015,6 +24077,12 @@ fn kettle_action_is_idle(
             let index = usize::from(*index);
             index >= kettle.tabs || index == kettle.current_tab
         }
+        Action::FocusUp
+        | Action::FocusDown
+        | Action::FocusLeft
+        | Action::FocusRight
+        | Action::FocusNext
+        | Action::FocusPrev => !kettle.focus_target_exists,
         _ => false,
     }
 }
@@ -24039,7 +24107,73 @@ fn program_gets_chord(
         ProgramKeyRule::WhenKettleIdle => {
             claims.display_offset == 0 && kettle_action_is_idle(action, claims, kettle)
         }
+        ProgramKeyRule::WhenKettleIdleAndDistinct => {
+            kettle.chord_is_distinct
+                && claims.display_offset == 0
+                && kettle_action_is_idle(action, claims, kettle)
+        }
     }
+}
+
+/// Whether the pane's keyboard mode sends this chord as a key of its own: it
+/// encodes to bytes, and those bytes differ from the same key with any one of
+/// its modifiers released. Plain legacy mode sends Ctrl+Shift+N exactly as
+/// Ctrl+N and a Command chord as nothing, so a program could only mistake the
+/// one for another key or never see the other.
+fn chord_reaches_program_distinctly(trigger: Trigger, mode: kettle_core::TermMode) -> bool {
+    // The press below carries no text. A real Ctrl+Shift+N does, its Control
+    // character, and with kitty flags that neither disambiguate nor report all
+    // keys (event types alone, say) that text sends it down the legacy path as
+    // Ctrl+N. Only those two flags build the kitty sequence for a character
+    // key whatever its text, so require one of them.
+    if matches!(trigger.key, KKey::Char(_))
+        && mode.intersects(kettle_core::TermMode::KITTY_KEYBOARD_PROTOCOL)
+        && !mode.intersects(
+            kettle_core::TermMode::DISAMBIGUATE_ESC_CODES
+                | kettle_core::TermMode::REPORT_ALL_KEYS_AS_ESC,
+        )
+    {
+        return false;
+    }
+    let Some(key) = chord_key(trigger.key) else {
+        return false;
+    };
+    let mods = chord_modifiers(trigger.mods);
+    let Some(bytes) = crate::input::encode_key_press(&key, mods, mode) else {
+        return false;
+    };
+    [
+        ModifiersState::SHIFT,
+        ModifiersState::CONTROL,
+        ModifiersState::ALT,
+        ModifiersState::SUPER,
+    ]
+    .into_iter()
+    .filter(|m| mods.contains(*m))
+    .all(|m| crate::input::encode_key_press(&key, mods - m, mode).as_deref() != Some(&bytes[..]))
+}
+
+/// The winit key for the keys a [`ProgramKeyRule::WhenKettleIdleAndDistinct`]
+/// chord uses. A shifted letter is the lowercase character with Shift held, as
+/// winit reports it once the modifier is applied by the keybind lookup.
+fn chord_key(key: KKey) -> Option<Key> {
+    Some(match key {
+        KKey::Up => Key::Named(NamedKey::ArrowUp),
+        KKey::Down => Key::Named(NamedKey::ArrowDown),
+        KKey::Left => Key::Named(NamedKey::ArrowLeft),
+        KKey::Right => Key::Named(NamedKey::ArrowRight),
+        KKey::Char(c) => Key::Character(c.to_string().into()),
+        _ => return None,
+    })
+}
+
+fn chord_modifiers(m: Mods) -> ModifiersState {
+    let mut out = ModifiersState::empty();
+    out.set(ModifiersState::SHIFT, m.contains(Mods::SHIFT));
+    out.set(ModifiersState::CONTROL, m.contains(Mods::CTRL));
+    out.set(ModifiersState::ALT, m.contains(Mods::ALT));
+    out.set(ModifiersState::SUPER, m.contains(Mods::SUPER));
+    out
 }
 
 fn parse_ctl_mods(
@@ -36384,6 +36518,48 @@ mod tests {
         );
     }
 
+    /// A plain zoom toggle on a single-pane tab does nothing rather than set a
+    /// hidden zoom flag, while leaving zoom always works and ScaledZoom keeps
+    /// its font step. A behavioral test needs a live renderer + mux; the live
+    /// `zoomed-layout-keys` smoke drives it end to end.
+    #[test]
+    fn plain_zoom_toggle_needs_a_pane_to_expand() {
+        let src = production_source();
+        let toggle_arm = src
+            .split("Action::ToggleZoom => {")
+            .nth(1)
+            .and_then(|s| s.split("Action::EqualizeSplits").next())
+            .expect("ToggleZoom arm present");
+        assert!(
+            toggle_arm.contains("if ws.mux.is_zoomed() || ws.mux.active_pane_count() > 1 {"),
+            "ToggleZoom must leave a single-pane tab alone unless it is already zoomed"
+        );
+        let scaled_arm = src
+            .split("Action::ScaledZoom => {")
+            .nth(1)
+            .and_then(|s| s.split("Action::ToggleFullscreen").next())
+            .expect("ScaledZoom arm present");
+        assert!(
+            !scaled_arm.contains("active_pane_count"),
+            "ScaledZoom keeps its font step on a single pane"
+        );
+    }
+
+    /// Decreasing the font steps down to the renderer's own floor (5, see
+    /// `clamp_font_size`); a floor of 6 here once turned "decrease" at a
+    /// configured 5 into an increase.
+    #[test]
+    fn font_decrease_uses_the_renderer_floor() {
+        let src = production_source();
+        let arm = src
+            .split("Action::DecreaseFontSize | Action::ZoomOutAll =>")
+            .nth(1)
+            .and_then(|s| s.split("_ => self.cfg.font_size").next())
+            .expect("font step arm present");
+        assert!(arm.contains("r.font_size() - 1.0"), "steps by one point");
+        assert!(!arm.contains(".max("), "no floor above the renderer's own");
+    }
+
     /// Drift guard. `search_key`'s catch-all must route typed text through the
     /// shared modal rule and insert through its bounded editor.
     ///
@@ -37687,6 +37863,8 @@ mod tests {
             tabs: 1,
             current_tab: 0,
             selection_exists: false,
+            focus_target_exists: false,
+            chord_is_distinct: false,
         }
     }
 
@@ -37775,11 +37953,57 @@ mod tests {
                 Action::GotoTab(2),
                 WhenKettleIdle,
             ),
+            (
+                cs,
+                KKey::Char('n'),
+                Action::FocusNext,
+                WhenKettleIdleAndDistinct,
+            ),
+            (
+                cs,
+                KKey::Char('p'),
+                Action::FocusPrev,
+                WhenKettleIdleAndDistinct,
+            ),
         ] {
             for macos in [false, true] {
                 assert_eq!(
                     program_key_rule(Trigger::new(mods, key), &action, macos),
                     Some(rule),
+                    "{mods:?}+{key:?} -> {action:?}"
+                );
+            }
+        }
+        // macOS's directional focus chords, and only there: Alt+Arrow
+        // elsewhere has its own adaptive rule.
+        for mods in [Mods::ALT | Mods::SUPER, Mods::CTRL | Mods::SUPER] {
+            for (key, action) in [
+                (KKey::Up, Action::FocusUp),
+                (KKey::Down, Action::FocusDown),
+                (KKey::Left, Action::FocusLeft),
+                (KKey::Right, Action::FocusRight),
+            ] {
+                let trigger = Trigger::new(mods, key);
+                assert_eq!(
+                    program_key_rule(trigger, &action, true),
+                    Some(WhenKettleIdleAndDistinct),
+                    "{mods:?}+{key:?}"
+                );
+                assert_eq!(program_key_rule(trigger, &action, false), None);
+            }
+        }
+        for (mods, key, action) in [
+            (Mods::ALT, KKey::Left, Action::FocusLeft),
+            (Mods::CTRL | Mods::ALT, KKey::Left, Action::FocusLeft),
+            (Mods::ALT | Mods::SUPER, KKey::Left, Action::FocusRight),
+            (cs, KKey::Char('n'), Action::FocusPrev),
+            (ctrl, KKey::Char('n'), Action::FocusNext),
+            (cs, KKey::Char('x'), Action::ToggleZoom),
+        ] {
+            for macos in [false, true] {
+                assert_eq!(
+                    program_key_rule(Trigger::new(mods, key), &action, macos),
+                    None,
                     "{mods:?}+{key:?} -> {action:?}"
                 );
             }
@@ -37873,6 +38097,8 @@ mod tests {
             "Ctrl+PageDown",
             "Ctrl+Shift+PageUp",
             "Ctrl+Shift+PageDown",
+            "Ctrl+Shift+N",
+            "Ctrl+Shift+P",
         ]
         .iter()
         .map(|chord| chord.to_string())
@@ -37883,6 +38109,11 @@ mod tests {
                     ["Super+Up".to_string(), "Super+Down".to_string()]
                         .into_iter()
                         .chain((1..=9).map(|n| format!("Super+{n}")))
+                        .chain(["Alt+Super", "Ctrl+Super"].into_iter().flat_map(|m| {
+                            ["Up", "Down", "Left", "Right"]
+                                .into_iter()
+                                .map(move |k| format!("{m}+{k}"))
+                        }))
                 })
                 .into_iter()
                 .flatten(),
@@ -37890,6 +38121,132 @@ mod tests {
         .collect();
         expected.sort();
         assert_eq!(yielding, expected);
+    }
+
+    /// The adaptive Alt+Arrow fall-through obeys K1's rule that a chord the
+    /// config binds itself is Kettle's: the method's `enabled` flag, which the
+    /// pure predicates below treat as off, includes the declared-trigger check.
+    #[test]
+    fn adaptive_focus_respects_a_chord_the_user_binds() {
+        let src = include_str!("app.rs");
+        let method = src
+            .split("fn adaptive_focus_chord_falls_through(")
+            .nth(1)
+            .and_then(|s| s.split("\n    fn chord_falls_through(").next())
+            .expect("adaptive_focus_chord_falls_through body");
+        assert!(
+            method.contains("!self.cfg.keybinds_declared.contains(&trigger)"),
+            "a declared trigger must disable the adaptive fall-through"
+        );
+        assert!(
+            method.contains("adaptive_alt_focus_direction(trigger, action, enabled)"),
+            "the declared check must gate the direction lookup"
+        );
+        use super::adaptive_alt_focus_falls_through;
+        use kettle_config::{Action, Key as KKey, Mods, Trigger};
+        let alt_left = Trigger::new(Mods::ALT, KKey::Left);
+        assert!(!adaptive_alt_focus_falls_through(
+            alt_left,
+            &Action::FocusLeft,
+            false,
+            false
+        ));
+    }
+
+    /// A pane-focus chord with nowhere to go (a zoomed or single-pane tab, or
+    /// no pane on that side) goes to a program that owns the keyboard, but
+    /// only while the view is at the bottom and the program's keyboard mode
+    /// tells the chord apart from another key.
+    #[test]
+    fn focus_chords_with_nowhere_to_go_yield_only_when_distinct() {
+        use super::{
+            KettleActionState, ProgramKeyRule::WhenKettleIdleAndDistinct, program_gets_chord,
+        };
+        use kettle_config::Action;
+        let owns = claims(true);
+        let nowhere = KettleActionState {
+            chord_is_distinct: true,
+            ..one_tab()
+        };
+        for action in [
+            Action::FocusNext,
+            Action::FocusPrev,
+            Action::FocusUp,
+            Action::FocusDown,
+            Action::FocusLeft,
+            Action::FocusRight,
+        ] {
+            let gets = |c: &kettle_core::KeyboardClaims, k: &KettleActionState| {
+                program_gets_chord(WhenKettleIdleAndDistinct, &action, c, k)
+            };
+            assert!(gets(&owns, &nowhere), "{action:?} with nowhere to go");
+            // A visible pane to move to keeps the chord Kettle's.
+            let somewhere = KettleActionState {
+                focus_target_exists: true,
+                ..nowhere
+            };
+            assert!(!gets(&owns, &somewhere), "{action:?} with a target");
+            // A mode that would send it as another key, or as nothing.
+            let indistinct = KettleActionState {
+                chord_is_distinct: false,
+                ..nowhere
+            };
+            assert!(!gets(&owns, &indistinct), "{action:?} indistinct");
+            // No program, or a view scrolled into history.
+            assert!(!gets(&claims(false), &nowhere), "{action:?} no program");
+            let scrolled = kettle_core::KeyboardClaims {
+                history_size: 50,
+                display_offset: 10,
+                ..owns
+            };
+            assert!(!gets(&scrolled, &nowhere), "{action:?} scrolled back");
+        }
+    }
+
+    /// The encoder decides distinctness: plain legacy mode sends Ctrl+Shift+N
+    /// as Ctrl+N and a Command chord as nothing; the kitty protocol and
+    /// modifyOtherKeys level 2 send each as itself.
+    #[test]
+    fn a_chord_is_distinct_only_where_the_encoder_tells_it_apart() {
+        use super::chord_reaches_program_distinctly as distinct;
+        use kettle_config::{Key as KKey, Mods, Trigger};
+        use kettle_core::TermMode;
+        let ctrl_shift_n = Trigger::new(Mods::CTRL | Mods::SHIFT, KKey::Char('n'));
+        let cmd_opt_left = Trigger::new(Mods::ALT | Mods::SUPER, KKey::Left);
+        let ctrl_cmd_up = Trigger::new(Mods::CTRL | Mods::SUPER, KKey::Up);
+        let legacy = TermMode::empty();
+        let kitty = TermMode::DISAMBIGUATE_ESC_CODES;
+        let mok2 = TermMode::MODIFY_OTHER_KEYS_2;
+        assert!(!distinct(ctrl_shift_n, legacy), "legacy sends Ctrl+N");
+        assert!(distinct(ctrl_shift_n, kitty));
+        assert!(distinct(ctrl_shift_n, mok2));
+        assert!(
+            !distinct(ctrl_shift_n, TermMode::MODIFY_OTHER_KEYS_1),
+            "level 1 keeps Ctrl+N"
+        );
+        // A real press carries its Control text, which without disambiguation
+        // or report-all sends it as legacy Ctrl+N even under kitty flags.
+        for flags in [
+            TermMode::REPORT_EVENT_TYPES,
+            TermMode::REPORT_ALTERNATE_KEYS,
+        ] {
+            assert!(!distinct(ctrl_shift_n, flags), "{flags:?} alone");
+        }
+        assert!(distinct(ctrl_shift_n, TermMode::REPORT_ALL_KEYS_AS_ESC));
+        assert!(distinct(
+            ctrl_shift_n,
+            TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES
+        ));
+        // An arrow carries no text, so event types alone encode it as itself.
+        assert!(distinct(cmd_opt_left, TermMode::REPORT_EVENT_TYPES));
+        for chord in [cmd_opt_left, ctrl_cmd_up] {
+            assert!(!distinct(chord, legacy), "legacy has no Command bytes");
+            assert!(
+                !distinct(chord, mok2),
+                "modifyOtherKeys has no Command bytes"
+            );
+            assert!(distinct(chord, kitty), "kitty has a super bit");
+        }
     }
 
     /// Shift+Arrow resize goes to a program that owns the keyboard, never to

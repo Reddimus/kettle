@@ -1539,13 +1539,21 @@ and `take_cursor_patch_report()` API.
   two-set press/release ledger ensures that
   once any repeated press reaches the PTY, terminal ownership stays sticky
   through its release; otherwise the UI-owned press suppresses that release.
-  Menu, automation, customized-action, and the macOS `Cmd+Opt+Arrow` /
-  `Ctrl+Cmd+Arrow` dispatch remain explicit application actions.
+  Menu, automation and customized-action dispatch remain explicit application
+  actions; a trigger the config binds itself never falls through. The macOS
+  `Cmd+Opt+Arrow` / `Ctrl+Cmd+Arrow` defaults take the program-owned route
+  below instead.
 - **Program-owned keys** (`keybind-yield = auto`) extend the same routing
   helper. A handful of default (trigger, action) pairs carry a rule
   (`program_key_rule`): `Shift+Arrow` resize is program-first, and prompt
   jumps, scrolling, `Shift+Home/End` and tab switching go to the program only
-  when Kettle's action would do nothing and the view is at the bottom. A
+  when Kettle's action would do nothing and the view is at the bottom. Pane
+  focus (`Ctrl+Shift+N/P`, and `Cmd+Opt+Arrow` / `Ctrl+Cmd+Arrow` on macOS)
+  does the same when the visible layout offers no pane to move to, and only
+  while the pane's keyboard mode encodes the chord as itself: the key encoder
+  must produce bytes that differ from the same key with any one modifier
+  released (`chord_reaches_program_distinctly`), which plain legacy mode
+  cannot do for `Ctrl+Shift+N` or for any Command chord. A
   trigger the config binds itself (`Config::keybinds_declared`) never yields,
   and nothing yields while broadcast input is on or the pane cannot take
   input. The decision reads one `KeyboardClaims` snapshot from the focused

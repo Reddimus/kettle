@@ -48,6 +48,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `Ctrl+Shift+-` and `Ctrl+Shift+_` no longer shrink the font, so `Ctrl+_`
   reaches the program (undo in Claude Code, zsh, bash and emacs). `Ctrl+-` and
   `Cmd+-` still shrink it.
+- When focus has nowhere to go (a zoomed split, which shows only its focused
+  pane, a tab with one pane, or no pane on that side), the pane focus chords
+  `Ctrl+Shift+N/P`, and `Cmd+Opt+Arrow` and `Ctrl+Cmd+Arrow` on macOS, reach a
+  program that owns the keyboard, if its keyboard protocol sends the chord as
+  itself (the kitty protocol, or `modifyOtherKeys` level 2 for
+  `Ctrl+Shift+N/P`). `Alt+Arrow` on Linux and Windows already did.
 
 ### Fixed
 
@@ -83,6 +89,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   took the chord before it could leave.
 - Resizing a split while its tab is zoomed no longer moves the hidden panes,
   which then appeared moved on unzoom.
+- `Ctrl+Shift+X` on a tab with one pane does nothing. It used to set a hidden
+  zoom that the next split silently cleared. Scaled zoom still enlarges the
+  font there.
+- An `Alt+Arrow` chord you bind yourself stays Kettle's on Linux and Windows
+  even with no pane in that direction, as every chord you bind does.
+- Decreasing the font at size 5 no longer raises it to 6; the font now
+  shrinks to 5, the smallest size the config accepts.
 - Holding a toggle chord (vi mode, zoom, fullscreen, broadcast, read-only,
   and the other toggles) toggles once; key repeat used to flip the state back
   and forth for as long as the chord was held.
