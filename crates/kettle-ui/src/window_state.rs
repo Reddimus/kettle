@@ -702,6 +702,10 @@ pub(crate) struct WindowState {
     /// them over.
     pub(crate) startup_fonts: Option<kettle_render::StartupFonts>,
     pub(crate) pre_launch: Option<crate::app::StartupMonitor>,
+    /// macOS: the Core Animation layer that blinks the cursor, installed at
+    /// the first hand-off. Declared before `window`, so it leaves the view's
+    /// layer tree before the view goes.
+    pub(crate) cursor_layer: Option<crate::macos_cursor_layer::CursorLayer>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
     /// Native accessibility bridge. Constructed while the window is still
@@ -971,6 +975,9 @@ pub(crate) struct WindowState {
     /// The last keystroke, paste, focus change, or settings change. The cursor
     /// stops blinking `cursor-blink-timeout` after it. Output does not count.
     pub(crate) last_blink_activity: std::time::Instant,
+    /// Who draws the blink, the GPU or the window server's layer, and
+    /// whether the window has been quiet enough to hand it over.
+    pub(crate) blink_layer: crate::cursor_blink::BlinkLayer,
     /// When each pane last rang the bell, for the per-pane visual flash.
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
@@ -1124,6 +1131,7 @@ impl WindowState {
             startup_surface: None,
             startup_fonts: None,
             pre_launch: None,
+            cursor_layer: None,
             window: None,
             native_material: None,
             accessibility: None,
@@ -1203,6 +1211,7 @@ impl WindowState {
             blink_on: true,
             last_blink: std::time::Instant::now(),
             last_blink_activity: std::time::Instant::now(),
+            blink_layer: crate::cursor_blink::BlinkLayer::default(),
             bell_flashes: std::collections::HashMap::new(),
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),

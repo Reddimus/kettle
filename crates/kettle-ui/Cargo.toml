@@ -178,4 +178,8 @@ objc2-foundation = { version = "0.2", features = ["block2", "NSDictionary", "NSN
 objc2-core-foundation-03 = { package = "objc2-core-foundation", version = "0.3.2" }
 objc2-core-graphics-03 = { package = "objc2-core-graphics", version = "0.3.2" }
 objc2-foundation-03 = { package = "objc2-foundation", version = "0.3.2" }
+# The Core Animation layer that blinks the cursor (`macos_cursor_layer`).
+# wgpu-hal already builds this version; default features would also pull
+# objc2-core-video, which nothing else uses.
+objc2-quartz-core-03 = { package = "objc2-quartz-core", version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "objc2-metal", "CALayer", "CAMetalLayer", "CAAnimation", "CAMediaTiming", "CATransaction", "CABase"] }
 objc2-quick-look-thumbnailing = "0.3.2"

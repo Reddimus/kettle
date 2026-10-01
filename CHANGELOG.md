@@ -22,12 +22,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the scheme, and DEC mode 2031 reports every change of the theme's colours,
   whether from `theme-mode = auto`, `toggle_light_dark` or a theme picked by
   hand. Claude Code's automatic theme switches with Kettle.
+- `macos-cursor-blink-layer` (`true` by default, macOS only): once a window has
+  drawn nothing but its cursor blink for half a blink period, the window server
+  blinks the cursor and Kettle stops drawing until something changes. `false`
+  keeps redrawing the window at every blink. `ui_geometry` reports who draws the
+  blink under `cursor_blink`.
 
 ### Changed
 
 - On macOS, an eligible first shell starts before AppKit finishes launching,
   sized from the measured font cell to the exact configured grid. Restored
   sessions and later windows keep their existing startup paths.
+- Reading `ui_geometry` and closing a control connection that attached no pane
+  no longer request a frame. Polling geometry no longer forces a repaint on any
+  platform. Agents and resize probes must request an action when they need one.
 - Settings use consistent display text and unit spacing, stable label columns,
   separate label/value ellipses in narrow panels, evenly spaced category names,
   and contextual dependency and timing notes.

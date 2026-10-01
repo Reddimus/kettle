@@ -33,6 +33,9 @@ pub mod startup_trace;
 // Per-window state container. `App` keeps only process-global state;
 // everything tied to one OS window lives here.
 mod window_state;
+// The cursor blink's timeline, shared by the GPU scheduler and the macOS
+// Core Animation layer that can take the blink over.
+mod cursor_blink;
 // In-process control server (agent-first A2). The accept/reader/
 // writer threads run kettle-ctl's transport; the App drains requests on the
 // main thread via `UserEvent::Ctl`. Always compiled (gated at runtime by the
@@ -45,6 +48,9 @@ mod input;
 mod lua;
 #[cfg(target_os = "macos")]
 mod macos_display;
+// The Core Animation layer that blinks the cursor on macOS. Never exists
+// elsewhere.
+mod macos_cursor_layer;
 // macOS Dock context menu (right-click the Dock icon). No-op elsewhere.
 mod macos_dock;
 mod modal_input;

@@ -18703,6 +18703,9 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
                 "cursor-blink = true",
                 "cursor-blink-interval = 200",
                 "cursor-blink-timeout = 0",
+                # This counts the GPU blink's frames. On macOS an idle window
+                # would hand its blink to the window server and present none.
+                "macos-cursor-blink-layer = false",
                 "window-width = 100",
                 "window-height = 30",
             ]
