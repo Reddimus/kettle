@@ -23,8 +23,8 @@ def integer(value):
     return type(value) is int and value >= 0
 
 
-def read_jsonl(path, limit=2000):
-    if path.stat().st_size > 4 * 1024 * 1024:
+def read_jsonl(path, limit=2000, byte_limit=4 * 1024 * 1024):
+    if path.stat().st_size > byte_limit:
         raise ValueError('timeline exceeds byte bound')
     lines = path.read_text().splitlines()
     if not lines or len(lines) > limit:
@@ -462,3 +462,105 @@ def collect(runner, name, workload, options, keep, setup=None):
         except OSError:
             pass
         return {'error': 'observer/payload trace invalid'}
+
+
+TYPING_CONTRACT = 'hc-typing-memory-v1'
+
+
+def typing_method(sample_ms=100):
+    return dict(contract=TYPING_CONTRACT, clock='CLOCK_UPTIME_RAW',
+                probe_clock='mach_absolute_time_ns', sample_interval_ms=sample_ms,
+                minimum_samples=5, minimum_coverage=.8, maximum_gap_ms=250,
+                clock_tolerance_ns=1_000_000)
+
+
+def typing_artifact_valid(artifact):
+    return isinstance(artifact, dict) and all(isinstance(artifact.get(k), str)
+        and len(artifact[k]) == 64 and all(c in '0123456789abcdef' for c in artifact[k])
+        for k in ('bundle_sha256', 'executable_sha256', 'source_sha256'))
+
+
+def typing_epoch(probe, pid, window):
+    epoch = probe.get('typing_epoch')
+    if not isinstance(epoch, dict):
+        raise ValueError('typing epoch unavailable')
+    if (epoch.get('contract') != TYPING_CONTRACT or epoch.get('clock') != 'CLOCK_UPTIME_RAW'
+            or epoch.get('probe_clock') != 'mach_absolute_time_ns'):
+        raise ValueError('typing clock contract mismatch')
+    offsets = []
+    for key in ('clock_before', 'clock_after'):
+        check = epoch.get(key)
+        if not isinstance(check, dict) or any(not integer(check.get(f)) for f in
+                ('raw_before_ns', 'raw_after_ns', 'mach_ns')):
+            raise ValueError('typing clock conversion unavailable')
+        a, b = check['raw_before_ns'], check['raw_after_ns']
+        if not 0 <= b-a <= 1_000_000:
+            raise ValueError('typing clock check too wide')
+        offsets.append(a + (b-a)//2 - check['mach_ns'])
+    if abs(offsets[1]-offsets[0]) > 1_000_000:
+        raise ValueError('typing clock epoch drift')
+    start, end = epoch.get('typing_start_ns'), epoch.get('typing_end_ns')
+    if not integer(start) or not integer(end) or start >= end:
+        raise ValueError('typing epoch bounds invalid')
+    if any(not integer(epoch.get(f)) for f in ('start_mach_ns', 'end_mach_ns')):
+        raise ValueError('typing Mach bounds missing')
+    if start != epoch['start_mach_ns'] + offsets[0] or end != epoch['end_mach_ns'] + offsets[0]:
+        raise ValueError('typing clock conversion mismatch')
+    if not epoch['clock_before']['raw_after_ns'] <= start < end <= epoch['clock_after']['raw_before_ns']:
+        raise ValueError('typing clock checks do not bracket epoch')
+    measured = [s for s in probe.get('samples', []) if not s.get('warmup')]
+    if (not measured or measured[0].get('t_post') != epoch['start_mach_ns']
+            or not integer(measured[-1].get('t_post')) or measured[-1]['t_post'] > epoch['end_mach_ns']
+            or probe.get('error') or epoch.get('guards_ok') is not True
+            or epoch.get('pid') != pid or epoch.get('window_id') != window or not window):
+        raise ValueError('typing probe guards/window mismatch')
+    return epoch
+
+
+def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer_reason=None):
+    fields = ('typing_footprint_mib', 'typing_observed_peak_mib', 'typing_max_footprint_mib')
+    row = dict(typing_sample_interval_ms=sample_ms, typing_sample_count=0,
+               typing_expected_samples=0, typing_coverage=0., typing_timeline=samples,
+               typing_tool_artifact=artifact, typing_window_id=window, typing_pid=pid)
+    reason = observer_reason
+    try:
+        epoch = typing_epoch(probe, pid, window)
+        row.update(typing_start_ns=epoch['typing_start_ns'], typing_end_ns=epoch['typing_end_ns'],
+                   typing_clock=epoch)
+        start, end = epoch['typing_start_ns'], epoch['typing_end_ns']
+        if sample_ms != 100:
+            raise ValueError('diagnostic typing sample interval')
+        if not typing_artifact_valid(artifact):
+            raise ValueError('verified typing probe artifact unavailable')
+        if reason:
+            raise ValueError(reason)
+        reason = trace_reason(samples, pid, window)
+        if reason:
+            raise ValueError(reason)
+        if any(b['scheduled_ns']-a['scheduled_ns'] != sample_ms * 1_000_000
+               for a,b in zip(samples, samples[1:])):
+            raise ValueError('typing observer interval mismatch')
+        active = [s for s in samples if start <= s['query_start_ns'] <= s['query_end_ns'] <= end]
+        expected = math.ceil((end-start)/(sample_ms*1_000_000))
+        row.update(typing_sample_count=len(active), typing_expected_samples=expected,
+                   typing_coverage=len(active)/expected)
+        if len(active) < 5:
+            raise ValueError('insufficient typing memory duration')
+        reason = coverage_reason(active, start, end) or focus_reason(samples, start, end, pid, window)
+        if reason:
+            raise ValueError(reason)
+        if any(not visible(s, pid, window) for s in active):
+            raise ValueError('typing window not visible')
+        values = [s['footprint']/MIB for s in active]
+        row.update(typing_footprint_mib=statistics.median(values), typing_observed_peak_mib=max(values),
+                   typing_max_footprint_mib=max(s['max_footprint']/MIB for s in active))
+    except (ValueError, KeyError, TypeError) as exc:
+        reason = str(exc)
+    row.update(typing_memory_valid=reason is None, typing_memory_reason=reason)
+    for field in fields:
+        if reason:
+            row[field] = None
+        row.setdefault('metric_validity', {})[field] = dict(valid=reason is None, reason=reason,
+            capability_version=TYPING_CONTRACT,
+            expected=max(5, math.ceil(row['typing_expected_samples'] * .8)), observed=row['typing_sample_count'])
+    return row

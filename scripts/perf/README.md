@@ -221,6 +221,85 @@ records how long after ScreenCaptureKit delivered the frame it was displayed:
 about 13 ms on a 60 Hz display, since a frame is handed over before its
 scheduled display time.
 
+### Memory during typing
+
+Every terminal block-latency round starts the owned native observer before
+probe calibration. It queries current footprint every 100 ms on absolute
+`CLOCK_UPTIME_RAW` deadlines, writes bounded JSONL to a file, and is stopped
+and reaped before the launch helper releases the terminal. The observer never
+signals the target. It reuses the memory, process-lifetime and exact-window
+focus checks used by printing and blink observation. These queries and window
+checks add scheduler work; their cost requires an excluded pilot before freeze.
+
+`typing_start_ns` is the first measured key's post after calibration and the
+20 warmup keys. `typing_end_ns` is completion of the last measured key's
+post-sample guard, after its two-frame stability check. Gaps between measured
+keys belong to the epoch. Calibration, warmup, the final gap and post-run hold
+do not. Censored keys remain in this epoch and in timing statistics at their
+bound. The block payload bytes, six calibration flips and timing classifier
+rules stay unchanged. Native synthetic tests execute the same campaign loops
+with virtual time and frames.
+
+`typing_footprint_mib` is the median of current-footprint queries wholly inside
+that epoch. A query crossing either boundary is excluded. The descriptive
+`typing_observed_peak_mib` is the maximum current footprint in those queries;
+`typing_max_footprint_mib` is the kernel's process lifetime maximum, which can
+include earlier allocations. Neither descriptive maximum is a ranking gate.
+Floors have no terminal memory row. The opaque variant can have a memory row
+and remains unranked.
+
+The probe exports `typing_epoch` with its PID, window ID, successful guard
+status, Mach-nanosecond bounds and converted raw-clock bounds. Bracketed
+Mach/raw-clock checks before calibration and after capture must each span at
+most 1 ms and their offsets must agree within 1 ms. The conversion is checked
+before joining the probe epoch to native queries. The raw timestamps and
+checks are retained rather than treating two clock names as interchangeable.
+
+A valid memory row needs at least five queries, at least 80% of the expected
+100 ms samples and no uncovered edge or interior gap over 250 ms. Native
+query bounds, cadence, process identity and window/focus evidence must be
+valid. Tiny diagnostic campaigns can have valid timing and insufficient memory
+duration. Missing memory coverage invalidates only the memory scalar. Timing
+failures still invalidate memory. `--memory-sample-ms` accepts 50..1000 for
+these collectors; a nondefault typing cadence is diagnostic and cannot count.
+The existing flood cadence is unchanged.
+
+Rows retain `typing_sample_interval_ms`, `typing_sample_count`,
+`typing_expected_samples`, `typing_coverage`, `typing_memory_valid` and
+`typing_memory_reason`, plus per-metric coverage and capability entries.
+`typing_timeline` retains unrounded bytes, counters and query/focus timestamps.
+`typing_artifacts` maps probe JSON, memory JSONL, keyblock log and launch context
+to relative names and SHA-256 digests. `typing_timeline_artifact` and
+`typing_timeline_sha256` identify the memory file directly. Session metadata
+records the method and verified probe bundle identity. A source hash alone
+cannot calibrate typing memory.
+
+Analysis uses scalar medians, paired log-ratio intervals and absolute MiB
+differences for this row. It never uses key-cluster timing intervals or an ms
+gate. The summary and combined reports retain the typed row for publication
+consumers. Old sessions without typing memory keep their existing outputs.
+
+Before A/A, run an excluded observer-on/off pilot with the same terminal,
+sealed config, verified probe, payload, seed, display and timing settings.
+Predeclare ten valid paired launches per terminal, 100 measured keys and 20
+warmups, with paired order balanced between observer on and off. Retain every
+attempt and failure; do not select favorable launches or pool terminals. The
+diagnostic runner omits only the observer request on its off arm and marks
+both arms as observer-control data, never as standings or ordinary A/A.
+No countable invocation offers a sampler-off option.
+
+For each terminal, compute the paired launch-mean timing difference with the
+current Student-t 95% interval. Its entire interval must lie within -1 to
++1 ms. An interval containing zero is insufficient. Retain observer and target
+CPU/wakeup deltas, query durations, deadline lateness, coverage, clock checks
+and all raw files. Both arms use the same SCK capture. Observer-off memory is
+unavailable and cannot enter a memory comparison. Fix a failed method and
+repeat the excluded pilot before freeze; do not change cadence after A/A.
+The companion printing pilot requires its median memory-shift interval within
++/-0.5 MiB; blink requires target CPU within +/-0.01 percentage point and
+wakeups within +/-0.1/s. These are separate perturbation checks, not product
+gates or proof of unchanged noise on later dates.
+
 ### Statistics
 
 Rounds rotate the terminal order. Startup (time to window and to shell), idle
@@ -266,8 +345,9 @@ eligibility rule, estimate, comparison, A/A kind, claim kind and publication
 role. Dispatch uses that contract. A memory field under `latency` uses a ratio
 gate and differences in MiB. CPU differences use percentage points; wakeup
 differences use /s. Signed phase slack uses differences and remains
-diagnostic. Reserved typing, printing, blink, cursor and startup fields do not
-imply that a collector ran. No new workload is enabled by this schema change.
+diagnostic. Reserved cursor and startup fields do not imply that a collector
+ran. Typing memory is collected with block latency; printing and blink remain
+optional workloads. Schema migration alone enables no workload.
 
 `statistics.current` contains the existing estimates and intervals described
 above and remains authoritative. Scalar comparisons also report the mean of
