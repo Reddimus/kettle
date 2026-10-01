@@ -1259,7 +1259,16 @@ differs. This prevents glyph drift. Without pinning, a glyph whose advance
 differs from the cell width (fallback-font CJK / color emoji / some symbols,
 ligature clusters, a mismatched-width bold/italic face) shifts every following
 glyph off the `col × cell_w` grid that the selection highlight, cursor and mouse
-hit-testing all use. The grid pass has its own damage gate. Pane
+hit-testing all use. `ShapedRow` cuts trailing U+0020 cells from the
+shaping input. Interior spaces, spaces carrying combining marks, and other
+space characters stay. An inked row gets one pad blank in each distinct
+bold/italic face used by the cut cells, with attributes from `run_attrs` and
+a fixed colour. These blanks preserve the maximum ascent and descent used
+for the baseline, including when font variant families have different metrics.
+A completely blank row shapes empty text. The row key hashes the retained
+text and attributes plus the pad face mask, so recolouring only the cut
+blanks leaves it unchanged. Background and decoration quads still cover
+every cell. The grid pass has its own damage gate. Pane
 text/style/geometry changes refresh glyph instances. A cursor blink changes
 only what is drawn: the cursor's quads are built and uploaded in both phases,
 and the off phase skips their instance range and the cursor-glyph pass at draw

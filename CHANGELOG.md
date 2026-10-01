@@ -31,7 +31,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Settings use consistent display text and unit spacing, stable label columns,
   separate label/value ellipses in narrow panels, evenly spaced category names,
   and contextual dependency and timing notes.
-
+- Recolouring trailing blank cells, such as a reverse-video block or a
+  prompt's padding, no longer reshapes the row's text. Rows shape through
+  their last non-blank cell, with face-matched padding to preserve baselines.
 - A blinking cursor no longer re-uploads the window's shapes or re-prepares its
   text on each blink; the blink only changes what is drawn.
 - A window whose content is not changing writes nothing to the GPU, a
