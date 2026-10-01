@@ -6992,7 +6992,71 @@ impl App {
             }
             return;
         }
+        let mut ws = ws;
+        self.sync_pane_focus_reports(&mut ws);
         self.windows.insert(seq, ws);
+    }
+
+    /// Keep focus-event reports (DEC mode 1004) in step with the pane that
+    /// holds the keyboard: the focused pane of the active tab while the window
+    /// has OS focus. A pane that enabled the mode hears `CSI O` when that
+    /// stops being it, whether the window lost focus or focus moved to
+    /// another pane or tab (a key, a click, a control request or a close),
+    /// and `CSI I` when it becomes it again. tmux `focus-events`, Neovim's
+    /// `FocusGained`/`FocusLost` and the agent CLIs' notification state all
+    /// rely on that. Every dispatch passes through `finish_window_dispatch`,
+    /// so one check there covers every route, and a pane hears each change
+    /// once.
+    fn sync_pane_focus_reports(&mut self, ws: &mut WindowState) {
+        let focused = (ws.os_focus_known && ws.window_focused)
+            .then(|| ws.mux.active_focus())
+            .flatten();
+        let (lost, gained) = focus_report_transition(ws.focus_reported_pane, focused);
+        ws.focus_reported_pane = focused;
+        for (pane_id, focus) in [(lost, false), (gained, true)] {
+            let Some(pane_id) = pane_id else {
+                continue;
+            };
+            if !self
+                .pane_mode(ws, pane_id)
+                .is_some_and(|mode| mode.contains(kettle_core::TermMode::FOCUS_IN_OUT))
+            {
+                continue;
+            }
+            if let Some(pane) = ws.mux.panes.get(&pane_id) {
+                let result = pane.feed_focus_report(focus);
+                if !result.is_queued() {
+                    self.report_input_result(result);
+                }
+            }
+        }
+    }
+
+    /// A tab leaving this window takes its panes with it. If one of them holds
+    /// the reported focus, tell it focus left now, through the detached tab,
+    /// so the window that adopts it starts from "not focused" and its first
+    /// `CSI I` follows a `CSI O`. Called only after a detach succeeded, so a
+    /// failed transfer reports nothing.
+    fn release_focus_report_to(&mut self, ws: &mut WindowState, dt: &crate::mux::DetachedTab) {
+        let Some(reported) = ws.focus_reported_pane else {
+            return;
+        };
+        let Some((_, pane)) = dt.panes.iter().find(|(id, _)| *id == reported) else {
+            return;
+        };
+        ws.focus_reported_pane = None;
+        let reporting = pane
+            .term
+            .term
+            .lock()
+            .ok()
+            .is_some_and(|t| t.mode().contains(kettle_core::TermMode::FOCUS_IN_OUT));
+        if reporting {
+            let result = pane.feed_focus_report(false);
+            if !result.is_queued() {
+                self.report_input_result(result);
+            }
+        }
     }
 
     fn drain_activation_requests(&mut self, event_loop: &ActiveEventLoop) {
@@ -7679,6 +7743,8 @@ impl App {
                     Some(PendingLuaCommand::SendText { bytes, .. }) => bytes.clone(),
                     _ => unreachable!("front was checked as SendText"),
                 };
+                // An action earlier in this batch may have moved focus.
+                self.sync_pane_focus_reports(ws);
                 let result = if let Some(pane) = ws.mux.panes.get(&target_pane) {
                     Some(pane.feed_input_shared(bytes.clone()))
                 } else {
@@ -8428,6 +8494,7 @@ impl App {
     /// Deliver user-authored bytes with the same selection, cursor, broadcast,
     /// read-only, and scroll behavior for keyboard and IME commit paths.
     fn write_terminal_input(&mut self, ws: &mut WindowState, bytes: &[u8]) {
+        self.sync_pane_focus_reports(ws);
         if bytes.is_empty() {
             return;
         }
@@ -8465,6 +8532,7 @@ impl App {
         event: &winit::event::KeyEvent,
         prepare_input: bool,
     ) {
+        self.sync_pane_focus_reports(ws);
         let mods = pty_key_modifiers(ws, &event.logical_key);
         let modified_enter = key_is_modified_enter(&event.logical_key, mods);
         if !ws.mux.is_broadcast_on() {
@@ -9837,6 +9905,7 @@ impl App {
     }
 
     fn paste_text_confirmed(&mut self, ws: &mut WindowState, target: Option<u64>, text: &str) {
+        self.sync_pane_focus_reports(ws);
         if text.is_empty() {
             return;
         }
@@ -9973,6 +10042,7 @@ impl App {
         trailing_space: bool,
         video: Option<crate::video_preview::VideoPasteRequest>,
     ) {
+        self.sync_pane_focus_reports(ws);
         // Path delivery authors new terminal input. Keep the old receipt only
         // long enough to coalesce the separate DroppedFile events one OS drag
         // emits; every other outcome drops it here.
@@ -12330,6 +12400,7 @@ impl App {
         pressed: bool,
         motion: bool,
     ) -> bool {
+        self.sync_pane_focus_reports(ws);
         if search_bar_blocks_mouse_report(
             self.cursor_in_search_bar(ws),
             pressed,
@@ -14997,6 +15068,7 @@ impl App {
         click: ContextMenuClick,
         event_loop: &ActiveEventLoop,
     ) {
+        self.sync_pane_focus_reports(ws);
         match click {
             // Keep the menu open: swap the visible level for the submenu.
             ContextMenuClick::DrillIntoSubmenu(idx) => {
@@ -15529,6 +15601,7 @@ impl App {
         action: Action,
         event_loop: &ActiveEventLoop,
     ) {
+        self.sync_pane_focus_reports(ws);
         let area = self.area(ws);
         let (cols, rows) = self.grid_of(ws, area);
         let tab_geometry = self.pty_geometry_for_grid(ws, cols, rows);
@@ -16888,6 +16961,7 @@ impl App {
                 let Some(dt) = ws.mux.detach_tab(closing_idx) else {
                     return;
                 };
+                self.release_focus_report_to(ws, &dt);
                 match self.open_window(event_loop, WindowOpen::AdoptTab(dt), None, None) {
                     Ok(_) => {
                         // The tab LEFT this window, so plugins see a tab-close
@@ -19868,6 +19942,7 @@ impl App {
     /// detent, independent of `scroll-multiplier`); `steps.lines` drives
     /// continuous ones. Returns whether the wheel was consumed.
     fn dispatch_wheel(&mut self, ws: &mut WindowState, steps: input::WheelSteps) -> bool {
+        self.sync_pane_focus_reports(ws);
         // Wheel over an open context menu scrolls its rows, one row per notch
         // (Terminator menu UX). It pre-empts every other wheel dispatch so a
         // 512-entry Theme submenu scrolls instead of leaking through to the
@@ -20324,6 +20399,7 @@ impl App {
         conn_id: u64,
         req: &kettle_ctl::protocol::Request,
     ) -> kettle_ctl::protocol::Response {
+        self.sync_pane_focus_reports(ws);
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
@@ -20588,6 +20664,7 @@ impl App {
         req: &kettle_ctl::protocol::Request,
         reply: crate::ctl_server::ReplyTx,
     ) {
+        self.sync_pane_focus_reports(ws);
         use kettle_ctl::protocol::{Response, error_codes as ec};
         let pane = match self.ctl_resolve_pane(ws, &req.params) {
             Ok(p) => p,
@@ -20956,6 +21033,8 @@ impl App {
                     Some(PendingRemoteCommand::SendText { bytes, .. }) => bytes.clone(),
                     _ => unreachable!("front was checked as SendText"),
                 };
+                // An action earlier in this batch may have moved focus.
+                self.sync_pane_focus_reports(ws);
                 let result = if let Some(pane) = ws.mux.panes.get(&target_pane) {
                     Some(pane.feed_input_shared(bytes.clone()))
                 } else {
@@ -24509,6 +24588,20 @@ fn throttle_elapsed(
     last.is_none_or(|last| now.saturating_duration_since(last) >= interval)
 }
 
+/// Which pane loses and which gains the focus report when the pane holding
+/// the keyboard changes from `reported` to `focused` (`None`: no pane, as
+/// while the window lacks OS focus). No change, no reports.
+fn focus_report_transition(
+    reported: Option<u64>,
+    focused: Option<u64>,
+) -> (Option<u64>, Option<u64>) {
+    if reported == focused {
+        (None, None)
+    } else {
+        (reported, focused)
+    }
+}
+
 fn cursor_blink_active(configured: bool, pane_requests_blink: bool, window_focused: bool) -> bool {
     configured && pane_requests_blink && window_focused
 }
@@ -26337,6 +26430,7 @@ impl App {
         ws.tab_pressed_idx = None;
         ws.detach_drag = crate::detach::DragState::default();
         ws.drag_press = None;
+        self.release_focus_report_to(ws, &dt);
         match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, Some(size)) {
             Ok(torn_seq) => {
                 self.fire_tab_close_event(ws, closing_idx);
@@ -26790,7 +26884,11 @@ impl App {
                 ws.mux.attach_tab(dt, Some(donor_active));
                 return;
             };
+            self.release_focus_report_to(ws, &dt);
             self.dock_tab_into(&mut target, dt, idx, td.seq);
+            // The docked tab becomes the target's active tab; report it now,
+            // since an already focused target gets no new focus event.
+            self.sync_pane_focus_reports(&mut target);
             self.windows.insert(target_seq, target);
             self.focused_seq = target_seq;
             if ws.mux.tabs.is_empty() {
@@ -26817,9 +26915,12 @@ impl App {
                 return;
             };
             if target_seq == ws.seq {
+                self.release_focus_report_to(&mut torn, &dt);
                 self.dock_tab_into(ws, dt, idx, td.seq);
             } else if let Some(mut target) = self.windows.remove(&target_seq) {
+                self.release_focus_report_to(&mut torn, &dt);
                 self.dock_tab_into(&mut target, dt, idx, td.seq);
+                self.sync_pane_focus_reports(&mut target);
                 self.windows.insert(target_seq, target);
             } else {
                 torn.mux.attach_tab(dt, Some(donor_active));
@@ -29128,6 +29229,7 @@ impl App {
                                         p.y + ws.cursor.y as i32,
                                     )
                                 });
+                            self.release_focus_report_to(ws, &dt);
                             match self.open_window(event_loop, WindowOpen::AdoptTab(dt), pos, None)
                             {
                                 Ok(torn_seq) => {
@@ -29215,6 +29317,7 @@ impl App {
             }
             WindowEvent::Focused(f) => {
                 ws.window_focused = f;
+                ws.os_focus_known = true;
                 if f {
                     ws.frame_recovery.expedite(std::time::Instant::now());
                 }
@@ -29313,18 +29416,10 @@ impl App {
                 // because it runs inside `ws.mux.panes.values_mut()`
                 // and can't borrow `self` again — that one's documented.
                 self.reset_blink_phase(ws);
-                // Focus-event reporting (DEC private mode ?1004): apps that
-                // enabled it expect CSI I on focus-in, CSI O on focus-out.
-                if self
-                    .focused_mode(ws)
-                    .contains(kettle_core::TermMode::FOCUS_IN_OUT)
-                    && let Some(pane) = ws.mux.focused()
-                {
-                    let result = pane.feed_focus_report(f);
-                    if !result.is_queued() {
-                        self.report_input_result(result);
-                    }
-                }
+                // Focus-event reporting (DEC private mode ?1004) follows
+                // `window_focused` in `sync_pane_focus_reports`, which runs
+                // when this dispatch finishes and also covers focus moving
+                // between panes and tabs.
                 // winit's `request_user_attention(None)` alone does
                 // not reliably stop the Win11 taskbar flash once started, so
                 // when an attention request is outstanding, clear it directly
@@ -36373,6 +36468,153 @@ mod tests {
         assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
     }
 
+    /// A pane hears a focus report only when the pane holding the keyboard
+    /// changes, once per change.
+    #[test]
+    fn focus_reports_follow_the_pane_that_holds_the_keyboard() {
+        use super::focus_report_transition as transition;
+        assert_eq!(
+            transition(Some(1), Some(1)),
+            (None, None),
+            "no change, no report"
+        );
+        assert_eq!(transition(None, None), (None, None));
+        assert_eq!(
+            transition(Some(1), Some(2)),
+            (Some(1), Some(2)),
+            "pane to pane"
+        );
+        assert_eq!(
+            transition(Some(1), None),
+            (Some(1), None),
+            "window lost focus"
+        );
+        assert_eq!(
+            transition(None, Some(2)),
+            (None, Some(2)),
+            "window regained focus"
+        );
+    }
+
+    /// Every dispatch re-inserts its window through `finish_window_dispatch`,
+    /// so the reports are reconciled there, and the OS focus arm no longer
+    /// reports on its own (it would report twice, and miss pane changes).
+    #[test]
+    fn focus_reports_are_reconciled_after_every_dispatch() {
+        let source = production_source();
+        let finish = source
+            .split("fn finish_window_dispatch(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("finish_window_dispatch body");
+        let sync = finish
+            .find("self.sync_pane_focus_reports(&mut ws);")
+            .expect("finish_window_dispatch reconciles focus reports");
+        let insert = finish
+            .rfind("self.windows.insert(seq, ws);")
+            .expect("finish_window_dispatch re-inserts the window");
+        assert!(sync < insert, "reconcile before the window is stored again");
+        let focus_arm = source
+            .split("WindowEvent::Focused(f) => {")
+            .nth(1)
+            .and_then(|body| body.split("WindowEvent::").next())
+            .expect("focus event arm");
+        assert!(!focus_arm.contains("feed_focus_report"));
+        let sync_body = source
+            .split("fn sync_pane_focus_reports(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("focus report sync");
+        assert!(sync_body.contains("(ws.os_focus_known && ws.window_focused)"));
+        assert!(sync_body.contains("TermMode::FOCUS_IN_OUT"));
+    }
+
+    /// Census: a focus change and input to a pane can happen in one dispatch
+    /// (a Lua batch, a click on another pane, a control request), so every
+    /// function that writes input to a pane reconciles the focus reports first
+    /// and a newly focused pane hears `CSI I` before its first byte. The
+    /// `paste_*_into_target` helpers are called only from functions that do.
+    #[test]
+    fn every_pane_input_writer_reconciles_focus_reports_first() {
+        let source = production_source();
+        let mut checked = 0;
+        for chunk in source.split("\n    fn ").skip(1) {
+            let name = chunk.split('(').next().unwrap_or_default().to_string();
+            let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
+            let first_write = ["feed_input(", "feed_input_shared("]
+                .iter()
+                .filter_map(|needle| body.find(needle))
+                .min();
+            let Some(first_write) = first_write else {
+                continue;
+            };
+            checked += 1;
+            let sync = body.find("self.sync_pane_focus_reports(");
+            assert!(
+                sync.is_some_and(|sync| sync < first_write),
+                "{name} writes pane input without reconciling focus reports first"
+            );
+        }
+        assert!(checked >= 10, "census found only {checked} writers");
+        for caller in [
+            "paste_text_into_target(&mut ws.mux",
+            "paste_paths_into_target(&mut ws.mux",
+        ] {
+            let owner = source
+                .split("\n    fn ")
+                .find(|chunk| chunk.contains(caller))
+                .expect("paste caller");
+            let sync = owner
+                .find("self.sync_pane_focus_reports(")
+                .expect("paste caller syncs");
+            assert!(sync < owner.find(caller).unwrap());
+        }
+    }
+
+    /// Census: a tab that leaves its window takes the reported pane with it,
+    /// so every function that detaches a tab releases the report through the
+    /// detached tab before handing it on.
+    #[test]
+    fn every_tab_transfer_releases_the_focus_report() {
+        let source = production_source();
+        let mut transfers = 0;
+        for chunk in source.split("\n    fn ").skip(1) {
+            let name = chunk.split('(').next().unwrap_or_default().to_string();
+            let body = chunk.split("\n    }\n").next().unwrap_or(chunk);
+            if !body.contains(".mux.detach_tab(") {
+                continue;
+            }
+            transfers += 1;
+            let release = body.find("self.release_focus_report_to(");
+            let handoff = ["WindowOpen::AdoptTab(dt)", "self.dock_tab_into("]
+                .iter()
+                .filter_map(|needle| body.find(needle))
+                .min()
+                .expect("a detached tab is handed on");
+            assert!(
+                release.is_some_and(|release| release < handoff),
+                "{name} hands a tab on without releasing its focus report"
+            );
+        }
+        assert!(transfers >= 4, "census found only {transfers} transfers");
+        // A target window docked into outside the dispatch funnel is
+        // reconciled before it goes back into the window map.
+        let docks = source
+            .matches("self.dock_tab_into(&mut target, dt, idx, td.seq);")
+            .count();
+        let reconciled = source
+            .matches(
+                "self.dock_tab_into(&mut target, dt, idx, td.seq);\n            // The docked tab becomes the target's active tab; report it now,\n            // since an already focused target gets no new focus event.\n            self.sync_pane_focus_reports(&mut target);",
+            )
+            .count()
+            + source
+                .matches(
+                    "self.dock_tab_into(&mut target, dt, idx, td.seq);\n                self.sync_pane_focus_reports(&mut target);",
+                )
+                .count();
+        assert_eq!(docks, reconciled, "every docked target is reconciled");
+    }
+
     #[test]
     fn mouse_and_focus_reports_use_chronological_user_input() {
         let source = production_source();
@@ -36385,11 +36627,11 @@ mod tests {
         assert!(!mouse.contains("queue_protocol_reply"));
 
         let focus = source
-            .split("WindowEvent::Focused(f) => {")
+            .split("fn sync_pane_focus_reports(")
             .nth(1)
-            .and_then(|body| body.split("WindowEvent::").next())
-            .expect("focus event arm");
-        assert!(focus.contains("let result = pane.feed_focus_report(f);"));
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("focus report sync");
+        assert!(focus.contains("let result = pane.feed_focus_report(focus);"));
         assert!(!focus.contains("queue_protocol_reply"));
 
         let mux = include_str!("mux.rs").replace("\r\n", "\n");
