@@ -1,0 +1,6 @@
+# Synthetic publication table
+
+| metric | A | B |
+|---|---:|---:|
+| child start, ms | {{cell:startup.child_ms:kettle-a:published|ms}} | {{cell:startup.child_ms:kettle-b:published|ms}} |
+| memory during typing, MiB | {{cell:latency.typing_footprint_mib:kettle-a:published|MiB}} | {{cell:latency.typing_footprint_mib:kettle-b:published|MiB}} |

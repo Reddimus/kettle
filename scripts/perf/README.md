@@ -315,10 +315,8 @@ the distribution-free order-statistic (sign-test) interval, and its own mean a
 Student-t interval. Idle rows count only rounds in which the terminal was
 frontmost, since blinking cursors run only in a focused window.
 
-Why not a bootstrap: over the 5-10 rounds a session has, a percentile
-bootstrap covered only about 0.85-0.93 of simulated same-binary sessions at a
-nominal 0.95; the t interval keeps 0.95 (`macos-standing-self-test.py` checks
-both). An A/A also judges vtebench's benchmarks together: each at the
+The Student-t interval retains nominal 95 % coverage in the repository
+self-test simulations. An A/A also judges vtebench's benchmarks together: each at the
 Bonferroni level for the 12 of them (1 - 0.05/12), the geometric mean at 95 %.
 Judged each at 95 %, an A/A with no real difference fails most of the time.
 Every gate still comes from the 95 % half-width.
@@ -825,3 +823,68 @@ stream and measured counts, raw exit records, microsecond percentiles and
 `cursor_exit_valid`. The JSONL fixtures and fixed output fixtures under
 `macos-standing/` document parser examples. Native C2 integration and excluded
 4.8.0 focus/calibration pilots must pass before measurement claims.
+
+## Frozen shared control and publication
+
+The full method is in [standing-method.md](standing-method.md). Finish the
+measurement helpers, producer agreements, portable tests and excluded native
+pilots before collecting a control. Record the final on-disk runtime hash,
+verified probe bundle digest, config closures and owner decisions. Runtime
+code includes the analysis and fill helpers. A parser fixture does not prove
+that an application emits its optional capability.
+
+`--combine DIR... --aa CONTROL --out-dir NEW` compares each metric's method
+with one ordinary control. A campaign containing both latency modes can
+calibrate a block-only standing or a cursor-only A/B. Counts and entry lists
+may differ. Payload, clocks, sampler, relevant tool artifacts, baseline config
+closure, machine, OS, display and fd limit must match. All declared control
+pairs must be valid. Known A/A failures block publication; missing or
+mismatched metrics report `A/A missing` individually. All-zero and unbounded
+rate controls remain uncalibrated.
+
+New frozen reports write `combined.json`, `combined.md`, `aa-coverage.json`
+and `publication-values.json`. Historical schema-1/2 reports retain their
+whole-file formatting, values and exclusions. They cannot feed the new
+publication helper. Old schema-3 previews without the frozen evidence contract
+also retain their reader behavior and cannot feed that helper.
+
+Combined rows carry metric descriptors and per-session countability, current
+statistics, differences, source dates,
+coverage and reasons. The first eligible session on each of the first three
+standing dates, or two A/B dates, supplies published values. Extra dates cannot
+improve a label or change the published median. Complete key counts are
+required for latency publication. The registry chooses units and gates. Typing
+memory uses MiB and scalar ratios; latency distributions use pooled keys and
+have no independent gain or no-regression verdict. Cursor response uses its own millisecond mean-difference control and current
+intervals. Complete exit-frame percentiles remain diagnostic. The optional
+`cursor_exit_v1` wire has each key sequence exactly once: calibration keys
+1..6 are `input` records; all warmup and measured keys are `exit` records.
+The retained `cursor_exit_records` contain only exits. Publication pools only
+measured exits, excluding warmup and calibration records. Enabling exit logging
+changes the method and cannot reuse the ordinary external cursor control.
+
+The PR #409 estimators and intervals are the only statistical policy for
+analysis, combine, publication, fill and factcheck.
+
+The fill interface accepts `{{cell:ID|UNIT}}` tokens. It substitutes a cell's
+single rounded display value and refuses unknown or duplicate IDs, wrong units
+and unavailable required values. Both fill and factcheck rerun combine from
+original sessions and the shared control. An edited JSON file cannot replace
+a missing control. Factcheck compares the entire rendered document and runs
+independent arithmetic for session estimates, typing sample selection and
+pooled percentiles.
+
+```sh
+python3 scripts/perf/macos-standing-publication.py fill \
+  --template TABLE.md --values COMBINED/publication-values.json \
+  --sessions SESSION1 SESSION2 SESSION3 --aa CONTROL --document FILLED.md
+python3 scripts/perf/macos-standing-publication.py factcheck \
+  --template TABLE.md --values COMBINED/publication-values.json \
+  --sessions SESSION1 SESSION2 SESSION3 --aa CONTROL --document FILLED.md
+```
+
+The [fixture template](macos-standing/publication-template.fixture) exercises
+an A/B cell. Final D1/D2 documents require real data and independent review.
+Fixed historical numbers, release validation, narrative attribution and anchor
+checks remain separate evidence. This pipeline makes no numerical product
+claim.

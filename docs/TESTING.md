@@ -2698,7 +2698,10 @@ owned test process; a lock held by the probe itself cannot model that lifetime.
 The `compatibility/` fixtures pin complete schema-1/2/3 result, analysis,
 summary and combined output files with cursor latency absent. Comparisons use
 explicit unittest checks, including under `python3 -O`; optimization cannot
-remove them. Fixture data is method-neutral and excluded from the runtime
+remove them. Stored expectations contain exact output plus one LF, and the
+comparison appends that LF to generated output. Markdown expectations use
+JSON strings to retain output trailing LFs while the tracked fixture itself
+ends with exactly one LF. Schema-1 mtime dates are pinned to local noon. Fixture data is method-neutral and excluded from the runtime
 hash by the existing `.fixture` rule. Snapshot tests use `snapshot.gitignore`
 beside the self-test and keep temporary files inside that snapshot.
 
@@ -2707,3 +2710,41 @@ pilot for calibration, focus guards and completion, then a C2 integration for
 actual layer handoffs and exactly one complete exit frame per stream key.
 Do not infer native capability, permissions, an A/A pass or numeric acceptance
 from the parser fixtures.
+
+## Standing publication contract
+
+Run `just macos-standing-self-test` for the repository's portable parser,
+statistical, identity, coverage and publication fixtures. Run it under
+`TZ=Pacific/Kiritimati` as well. Whole-file schema-1/2 compatibility checks use
+explicit unittest comparisons and remain active with `python3 -O`.
+
+`PublicationFreeze` exercises all workload/control rows, scalar MiB dispatch,
+distribution exclusions, block/cursor method matching, referenced config assets,
+missing artifacts, complete pairs/keys, first dates, stamp observer equivalence,
+all-zero controls, strict fill IDs/units, transcription errors, privacy and
+owned caffeinate cancellation. Its fixed JSON fixture contains synthetic
+values; it is not measurement or acceptance evidence. The separate factcheck
+arithmetic recomputes typing sample intervals and pooled block/cursor key
+percentiles. Publication retains only the current PR #409 statistics, checked
+against raw-session analysis. Cursor method matching includes exit logging
+and the wire contract. The exit publication fixture parses all six calibration
+input records and every warmup/measured exit before pooling measured frames.
+
+The format and complete owner A/A protocol are documented in
+[scripts/perf/standing-method.md](../scripts/perf/standing-method.md).
+`macos-standing-publication.py` has fill and factcheck modes. Both require
+original session directories and one matching ordinary shared control and
+regenerate the typed extraction before using it. The fixture template is
+`macos-standing/publication-template.fixture`. No preview waiver is supported.
+
+Native CI must also cover the launch helper, observer, printing/keyblock
+payloads and the probe's permission-free self-test, seal, reuse and tamper
+refusal. Controlling-tty, defaults, packaging and workspace checks require an
+authorized repository runner. Functional/TCC, before/after blink, timestamp,
+observer-cost and real C2 exit-producer pilots run only in an owner measurement
+window. A parser fixture cannot establish those gates.
+
+Before freeze, run `cargo fmt --all --check`, `just macos-standing-self-test`,
+`just gauntlet`, `just tracked-audit` and the integrity `just gauntlet-strict`
+gate, plus native/portable CI and independent review. Check every owned child
+is reaped. Do not start the owner control in CI or from a default recipe.

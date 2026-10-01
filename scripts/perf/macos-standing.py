@@ -91,6 +91,9 @@ _hc_spec.loader.exec_module(hc)
 _cursor_spec = importlib.util.spec_from_file_location("standing_cursor", PROBES / "cursor_latency.py")
 cursor = importlib.util.module_from_spec(_cursor_spec)
 _cursor_spec.loader.exec_module(cursor)
+_publication_spec = importlib.util.spec_from_file_location("standing_publication", PROBES / "publication.py")
+publication = importlib.util.module_from_spec(_publication_spec)
+_publication_spec.loader.exec_module(publication)
 DEFAULT_KETTLE = REPO / "target" / "release" / "kettle"
 INSTALLED_KETTLE = "/Applications/kettle.app/Contents/MacOS/kettle"
 VTEBENCH_URL = "https://github.com/alacritty/vtebench"
@@ -127,6 +130,7 @@ MIN_PAIRED_SHARE = 0.8
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
                 "footprint_detail", "startup_phases", "latency", "config_closures", "output_blink", "latency-cursor")
+SESSION_KEYS += ("contracts", "tool_artifacts", "harness_dirty", "kind")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -1927,7 +1931,12 @@ class Runner:
         result = json.loads(launched.read_text())
         stderr_path = self.work / "terminal.stderr"
         if stderr_path.exists():
-            result.update(parse_phases(stderr_path.read_text(errors="replace"), result.get("started_ns")))
+            text = stderr_path.read_text(errors="replace")
+            result.update(parse_phases(text, result.get("started_ns")))
+            if "startup phase=" in text:
+                evidence = startup_phase_evidence(text, result.get("started_ns"))
+                result["startup_stamps_ns"] = evidence["startup_stamps_ns"]
+                result["startup_stamp_evidence"] = evidence
         grid, start = round_grid(self.work)
         if grid:
             result["cols"], result["rows"] = grid
@@ -3528,7 +3537,8 @@ def summarize(results: dict, names: List[str], ab: bool, analysis: Optional[dict
         out.append("")
     if extended_report(results):
         out.extend(statistics_markdown(analysis))
-    return "\n".join(out)
+    text = "\n".join(out)
+    return publication.public(text) if publication.modern(results) else text
 
 
 def statistics_markdown(analysis: dict) -> List[str]:
@@ -3567,7 +3577,8 @@ def session_countable(meta: dict) -> bool:
     that changes what the terminals do: walking their memory mid-measurement
     (--footprint-detail) or turning on Kettle's startup log (--startup-phases)."""
     return (not meta.get("refusals") and not meta.get("bare") and not meta.get("footprint_detail")
-            and not meta.get("startup_phases") and meta.get("complete") is True)
+            and not meta.get("startup_phases") and meta.get("kind", "ordinary") == "ordinary"
+            and meta.get("complete") is True)
 
 
 def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
@@ -3683,7 +3694,7 @@ def load_session(folder: Path) -> dict:
     counts; its vtebench rows hold medians, so their means are rebuilt from
     the round's .dat file.
     """
-    results = json.loads((folder / "results.json").read_text())
+    results = publication.strict_json(folder / "results.json", legacy=True)
     schema = results.get("schema", 1)
     if schema not in (1, 2, 3):
         raise ValueError(f"unsupported results schema {schema}")
@@ -3719,7 +3730,7 @@ def load_session(folder: Path) -> dict:
             "rounds": meta.get("rounds") or {}, "setup": setup, "configs": meta.get("configs") or {}}
 
 
-def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
+def _combine_current(folders: List[Path], aa: Optional[Path] = None) -> dict:
     """Merge sessions into published values and labels (see claim, ab_verdict)."""
     sessions = [load_session(Path(folder)) for folder in folders]
     if len({s["ab"] for s in sessions}) > 1:
@@ -3875,6 +3886,16 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
             if cursor_complete[name] else None for name, runs in cursor_runs.items()}
     combined["markdown"] = combined_markdown(combined, ab)
     return combined
+
+
+def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
+    return publication.combine(sys.modules[__name__] if __name__ in sys.modules else _publication_host(),
+                               folders, aa, _combine_current)
+
+
+def _publication_host():
+    # importlib callers need not register the module in sys.modules.
+    return argparse.Namespace(**globals())
 
 
 def combined_markdown(combined: dict, ab: bool) -> str:
@@ -4500,8 +4521,21 @@ def run_combine(args: argparse.Namespace) -> int:
     markdown = combined.pop("markdown")
     (out_dir / "combined.json").write_text(dumps(combined))
     (out_dir / "combined.md").write_text(markdown)
+    if combined.get("publication_contract"):
+        (out_dir / "aa-coverage.json").write_text(publication.canonical(combined["aa_coverage"]))
+        (out_dir / "publication-values.json").write_text(publication.canonical(publication.publication_values(combined)))
     print(markdown)
     return 0
+
+
+def start_caffeinate(cleanup: contextlib.ExitStack) -> subprocess.Popen:
+    process = subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
+    try:
+        cleanup.callback(reap_owned_child, process, 0)
+    except BaseException:
+        reap_owned_child(process, 0)
+        raise
+    return process
 
 
 def main() -> int:
@@ -4601,7 +4635,9 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--make-bundle", nargs=2, metavar=("BINARY", "APP"),
                         help="put a Kettle binary in an ad-hoc signed copy of the installed app and exit")
     parser.add_argument("--combine", nargs="+", metavar="DIR", help="merge session directories and exit")
-    parser.add_argument("--aa", metavar="DIR", help="with --combine: an A/A session whose intervals set the gates")
+    parser.add_argument("--aa", metavar="DIR", help="with --combine: ordinary shared A/A, checked metric by metric")
+    parser.add_argument("--observer-control", metavar="DIR",
+                        help="analyze a complete 30-pair stamp on/off diagnostic; launch nothing")
     parser.add_argument("--startup-input", nargs="+", metavar="FILE",
                         help="postprocess retained startup results JSON; launch no app")
     parser.add_argument("--startup-grid-policy", choices=("settled", "child", "native"),
@@ -4615,6 +4651,18 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--trace-input", nargs="+", metavar="FILE",
                         help="report retained private echo trace capability; launch no app")
     args = parser.parse_args()
+    if args.observer_control:
+        if args.combine or args.aa or args.make_bundle or args.latency_check or args.preflight_only or args.rebuild_latency_probe or any((args.startup_input, args.startup_phase_input, args.native_layer_input, args.trace_input)):
+            parser.error("--observer-control is standalone postprocessing")
+        try:
+            report = publication.observer_control(_publication_host(), Path(args.observer_control))
+        except (ValueError, OSError) as error:
+            parser.error(str(error))
+        out = claim_out_dir(Path(args.out_dir) if args.out_dir else default_out_dir(REPO / "target" / "perf-results" / "observer-control"))
+        (out / "observer-equivalence.json").write_text(publication.canonical(report))
+        return 0 if report["phase_attribution_allowed"] else 1
+    if args.aa and not args.combine:
+        parser.error("--aa requires --combine")
     diagnostic = any((args.startup_input, args.startup_phase_input,
                       args.native_layer_input, args.trace_input))
     if diagnostic:
@@ -4805,7 +4853,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         resource.setrlimit(resource.RLIMIT_NOFILE, (args.fd_limit, hard))
     # Keep the display and the machine awake for as long as this process runs.
-    subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())])
+    start_caffeinate(cleanup)
 
     out_dir = claim_out_dir(Path(args.out_dir) if args.out_dir else
                             default_out_dir(REPO / "target" / "perf-results" / "macos-standing"))
@@ -4824,6 +4872,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         "terminals": names, "skipped": skipped, "unranked": unranked,
         "meta": {
             "statistics_policy": "current",
+            "kind": "observer-control" if args.startup_phases == "b" and workloads == ["startup"] and is_ab(kettle) else "ordinary",
             "label": args.label or out_dir.name, "mode": "ab" if is_ab(kettle) else "standing",
             "started": started.isoformat(timespec="seconds"), "date": started.date().isoformat(),
             # countable is final only once every round has run (see
@@ -5007,6 +5056,8 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                                           for info in analysis.values() for entry in info["metrics"].values()}
     recorder.write()
     (out_dir / "analysis.json").write_text(dumps({"schema": SCHEMA, "statistics_policy": "current", "workloads": analysis}))
+    results["meta"]["contracts"] = publication.contracts(results["meta"], results["workloads"])
+    recorder.write()
     summary = summarize(results, names, is_ab(kettle), analysis)
     (out_dir / "summary.md").write_text(summary + "\n")
     print(summary)
