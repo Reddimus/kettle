@@ -357,6 +357,22 @@ impl OutlinePipeline {
         });
     }
 
+    /// The instances the last upload left in the GPU buffer, read back from
+    /// the retained copy. `None` when that copy does not cover them.
+    pub(crate) fn uploaded(&self) -> Option<impl Iterator<Item = OutlineInstance> + '_> {
+        const SIZE: usize = std::mem::size_of::<OutlineInstance>();
+        let bytes = self
+            .instances_held
+            .bytes()
+            .get(..self.count as usize * SIZE)?;
+        let (records, _) = bytes.as_chunks::<SIZE>();
+        Some(
+            records
+                .iter()
+                .map(|record| bytemuck::pod_read_unaligned(record)),
+        )
+    }
+
     pub fn draw<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         if self.count == 0 {
             return;

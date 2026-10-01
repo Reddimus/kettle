@@ -27,6 +27,11 @@ impl RetainedBytes {
         self.shadow.clear();
     }
 
+    /// The bytes the buffer holds from offset 0, as far as they are known.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.shadow
+    }
+
     /// The byte range of `bytes` that must be written, or `None` when the
     /// buffer already holds all of them: equal to the copy, or a prefix of it.
     /// The range starts at the first differing byte, rounded down to wgpu's

@@ -1277,6 +1277,70 @@ glyphon batches glyphs by atlas, not by renderer, so each pass reuses
 already-cached glyphs (the cursor glyph is part of the visible pane
 text, so its bitmap is already resident).
 
+### Cursor patch
+
+`Renderer::present_cursor_patch` (`crates/kettle-render/src/cursor_patch.rs`)
+renders the pixels a blinking cursor changes, so a Core Animation layer on
+macOS can blink them while Kettle submits no GPU work. It runs right after an
+off-phase frame is on screen and never changes what the window shows. It
+encodes the same scene twice more into small targets that hold only the patch
+rect, cursor on and cursor off. Both are `encode_scene_pass` with a window:
+the viewport maps the whole scene 1:1 with the window's top-left at the
+target's origin, so every pipeline keeps its full-size screen uniform, the
+glyph pipeline's pane scissors move with it, and nothing is uploaded. A combine
+pass writes the on pixel at alpha 1 where the two differ and transparent black
+elsewhere, into a drawable of the layer's `CAMetalLayer`
+(`attach_cursor_layer`, a second wgpu surface in the main surface's format).
+
+Composited over the off frame, the patch is the on frame: an opaque pixel is
+the on frame's, and a clear one shows the off frame, which equals the on frame
+wherever the cursor changed nothing. So the mask needs no prediction of what
+the cursor rasterizes to. The patch rect is the cursor quad's pixel bounds
+united with the inverted glyph's ink (placed as glyphon places it), at most
+four cells a side. Only Apple Metal adapters may present a patch;
+Intel/AMD Macs return `Ineligible(UnmeasuredGpu)` until their rasterization
+has been measured. The result is exact under three conditions, and a frame
+that may break one reports a `CursorPatchIneligible` reason and keeps GPU
+blink:
+
+- Every changed pixel is opaque in the on frame. On a translucent window, one
+  whose surface is `PreMultiplied` or `PostMultiplied` and whose scene is not
+  proven opaque, an inverted glyph whose ink leaves the block breaks this.
+  An `Opaque` surface shows the scene's colour and ignores its alpha, so the
+  patch's on colour at alpha 1 is exact there. Where every changed pixel has
+  alpha 1, premultiplied and straight colour agree, which is why the one
+  combine serves all three conventions; `Auto` and `Inherit`, which leave the
+  convention to the platform, are ineligible.
+- The small targets hold exact crops of the full frame. On an Apple M5 Max
+  flat quads and nearest-sampled glyphs on whole pixels crop exactly, except a
+  quad edge within 1/256 px of a pixel centre: the rasterizer snaps vertices to
+  1/256 px, and the offset viewport rounds them differently before the snap.
+  Linearly filtered images, the outlines' SDF antialiasing and the starfield's
+  fragment position do not crop exactly, so an image or outline over the patch,
+  a wallpaper and the starfield make a frame ineligible.
+- The combine's sRGB decode and re-encode returns every byte, measured for all
+  256 values in RGBA and BGRA.
+
+The patch targets are cached by size (two textures of the patch rect, a few
+tens of KiB at most for a normal font) and freed with the layer. The first
+hand-off and every patch-size change configure the layer surface. wgpu waits
+for the shared device to become idle during configure, so another window's
+GPU work can delay the UI thread. C2's latency gate must cover a hand-off
+after a cursor shape or ink-size change.
+
+Validation scopes cover configure and patch resource creation, encoding and
+submission. A validation failure clears the cached configuration; rejected
+submissions also drop the patch pipeline and targets. The acquired drawable
+is discarded before present. Core Animation keeps the last presented patch
+after a failed hand-off or detach. The UI must hide the layer unless the
+latest call returned `Presented`; detach does not clear its contents.
+
+C2 calls `present_cursor_patch` after an off-phase `Presented` frame, with
+the same config. Renderer geometry and compositing setters invalidate that
+frame record. Headless tests substitute an offscreen capture for a present.
+C1 uses this separate method instead of the planned `Overlay.cursor_layer`
+and `take_cursor_patch_report()` API.
+
 ## Threading model
 
 - **Main thread** — winit event loop, *all* GPU work, every window's

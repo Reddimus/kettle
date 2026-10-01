@@ -1986,6 +1986,7 @@ dependencies = [
  "kettle-state",
  "kettle-test-support",
  "log",
+ "objc2-quartz-core 0.3.2",
  "pollster",
  "raw-window-handle",
  "serde_json",
