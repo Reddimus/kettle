@@ -904,6 +904,14 @@ alt-arrow-zoom-smoke:
 zoomed-layout-keys-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release zoomed-layout-keys
 
+# Prove focus reports (DEC mode 1004) follow the pane that holds the keyboard:
+# a recorder that enabled them hears CSI O when a split or a new tab takes
+# focus and CSI I when it returns, once per change, and nothing on zoom.
+# Captures the recorded bytes under target/diagnostics/pane-focus-reports-*.
+[unix]
+pane-focus-reports-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release pane-focus-reports
+
 # Prove a program following the colour scheme (DEC mode 2031, as Claude Code's
 # automatic theme does) hears Kettle's theme flip: a recorder turns the mode on
 # and asks once (CSI ? 996 n), then each toggle_light_dark must reach it as

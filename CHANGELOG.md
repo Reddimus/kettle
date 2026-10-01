@@ -57,6 +57,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A program that asked for focus reports (DEC mode 1004: tmux with
+  `focus-events`, Neovim's `FocusGained`/`FocusLost`, Codex and Claude Code)
+  hears focus leave its pane when focus moves to another pane or tab, and
+  return when it comes back. Kettle used to report only the window gaining or
+  losing focus, so a pane in a hidden tab still believed it had the keyboard.
 - Underlines under detected paths and URLs stay on their text after a pane
   changes size without new output: zooming a pane, splitting next to it or
   resizing the window. They used to keep the old width's positions, so they

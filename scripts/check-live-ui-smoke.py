@@ -18831,6 +18831,28 @@ def macos_chord(key_code: int, flags: int, label: str) -> None:
         time.sleep(0.05)
 
 
+FOCUS_REPORTS_RECORDER = r"""
+import os, sys, termios, tty
+
+# Ask for focus reports (DEC mode 1004) and log every byte read, as tmux with
+# focus-events, Neovim or an agent CLI would. Stop on "q".
+log = open(sys.argv[1], "ab", buffering=0)
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(1, b"\x1b[?1004hFOCUSREC-READY\r\n")
+try:
+    while True:
+        data = os.read(fd, 64)
+        if not data or data == b"q":
+            break
+        log.write(data)
+finally:
+    os.write(1, b"\x1b[?1004l")
+    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+"""
+
+
 COLOR_SCHEME_RECORDER = r"""
 import os, sys, termios, tty
 
@@ -19245,6 +19267,114 @@ def run_zoomed_layout_keys(kettle: str, root: Path) -> Path:
                 raise SystemExit("zoomed-layout-keys smoke: Ctrl+Shift+X did not unzoom")
             time.sleep(0.1)
         live.ctl("send_text", params={"pane": owner, "text": "q"})
+    (out / "analysis.json").write_text(json.dumps({"steps": steps}, indent=2) + "\n")
+    return out
+
+
+def run_pane_focus_reports(kettle: str, root: Path) -> Path:
+    """A pane that asked for focus reports (DEC mode 1004) hears focus move
+    between panes and tabs, not only the window's OS focus.
+
+    A recorder enables the mode in the first pane and logs what it reads.
+    Splitting moves focus to the new pane (`CSI O`), focusing back returns it
+    (`CSI I`), zooming changes nothing, and a new tab and coming back report
+    out and in again. Each change is reported exactly once.
+    """
+    out = root / f"pane-focus-reports-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 100",
+                "window-height = 28",
+            ]
+        )
+        + "\n"
+    )
+    recorder = out / "recorder.py"
+    recorder.write_text(FOCUS_REPORTS_RECORDER)
+    log = out / "recorded.bin"
+    log.write_bytes(b"")
+    steps: List[Dict[str, object]] = []
+
+    def focused(live: LiveKettle) -> object:
+        panes = [p for p in live.json_ctl("list_panes").get("panes", []) if isinstance(p, dict)]
+        hits = [p.get("id") for p in panes if p.get("focused")]
+        if len(hits) != 1:
+            raise SystemExit(f"pane-focus-reports smoke: expected one focused pane: {panes}")
+        return hits[0]
+
+    def wait_screen(live: LiveKettle, pane: object, needle: str) -> None:
+        deadline = time.monotonic() + 15.0
+        while needle not in screen_text(live.json_ctl("read_screen", {"pane": pane})):
+            if time.monotonic() > deadline:
+                raise SystemExit(f"pane-focus-reports smoke: never saw {needle!r}")
+            time.sleep(0.1)
+
+    def step(live: LiveKettle, label: str, action: str, expected: bytes) -> None:
+        marker = len(log.read_bytes())
+        live.json_ctl("perform_action", {"action": action})
+        time.sleep(0.6)
+        got = log.read_bytes()[marker:]
+        steps.append({"label": label, "action": action, "recorded": got.hex()})
+        if got != expected:
+            raise SystemExit(f"pane-focus-reports smoke: {label}: expected {expected!r}, read {got!r}")
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        # A freshly launched window takes OS focus; only that window's
+        # focused pane hears reports. Click it into focus only if needed.
+        deadline = time.monotonic() + 5.0
+        while live.json_ctl("ui_geometry").get("window_focused") is not True:
+            if time.monotonic() > deadline:
+                if platform.system() != "Darwin":
+                    raise SystemExit("pane-focus-reports smoke: the window never took focus")
+                focus_live_kettle_window(live)
+                deadline = time.monotonic() + 10.0
+                while live.json_ctl("ui_geometry").get("window_focused") is not True:
+                    if time.monotonic() > deadline:
+                        live.screenshot(out / "focus-failed.png")
+                        raise SystemExit("pane-focus-reports smoke: the window never took focus")
+                    time.sleep(0.1)
+                break
+            time.sleep(0.1)
+        first = focused(live)
+        live.ctl("send_text", params={"pane": first, "text": f"python3 '{recorder}' '{log}'\r"})
+        wait_screen(live, first, "FOCUSREC-READY")
+        time.sleep(0.5)
+        log.write_bytes(b"")
+        step(live, "split away", "split_right", b"\x1b[O")
+        step(live, "focus back", "focus_prev", b"\x1b[I")
+        if focused(live) != first:
+            raise SystemExit("pane-focus-reports smoke: focus_prev did not return to the recorder")
+        step(live, "zoom", "toggle_zoom", b"")
+        step(live, "unzoom", "toggle_zoom", b"")
+        step(live, "new tab", "new_tab", b"\x1b[O")
+        step(live, "back to the tab", "prev_tab", b"\x1b[I")
+        if live.json_ctl("ui_geometry").get("window_focused") is not True:
+            raise SystemExit("pane-focus-reports smoke: the window lost focus during the run")
+        # Moving the recorder's tab to a new window: it hears focus leave as
+        # its tab leaves, and at most one focus-in once the new window takes
+        # OS focus, never a second focus-in without a focus-out between.
+        marker = len(log.read_bytes())
+        live.json_ctl("perform_action", {"action": "move_tab_to_new_window"})
+        time.sleep(1.5)
+        got = log.read_bytes()[marker:]
+        steps.append({"label": "move tab to a new window", "recorded": got.hex()})
+        reports = re.findall(rb"\x1b\[([IO])", got)
+        if (
+            got != b"".join(b"\x1b[" + r for r in reports)
+            or not reports
+            or reports[0] != b"O"
+            or any(a == b for a, b in zip(reports, reports[1:]))
+        ):
+            raise SystemExit(f"pane-focus-reports smoke: moving the tab: expected CSI O first, then alternating reports, read {got!r}")
+        live.ctl("send_text", params={"pane": first, "text": "q"})
     (out / "analysis.json").write_text(json.dumps({"steps": steps}, indent=2) + "\n")
     return out
 
@@ -19704,6 +19834,7 @@ def main() -> int:
             "line-edit-chords",
             "alt-arrow-zoom",
             "zoomed-layout-keys",
+            "pane-focus-reports",
             "search-selection",
             "bell-flash",
             "default-window-size",
@@ -19863,6 +19994,9 @@ def main() -> int:
     if args.case in ("zoomed-layout-keys", "all"):
         out = run_zoomed_layout_keys(args.kettle, root)
         print(f"zoomed-layout-keys smoke: OK artifacts={out}")
+    if args.case in ("pane-focus-reports", "all"):
+        out = run_pane_focus_reports(args.kettle, root)
+        print(f"pane-focus-reports smoke: OK artifacts={out}")
     # macOS-only and driven through the real Dock via accessibility, so it is
     # deliberately out of "all".
     if args.case == "dock-menu":

@@ -401,6 +401,10 @@ Claude Code session through both answers.
   underlines, and synchronized updates through the PTY. OSC 52 target `c`
   addresses the regular clipboard; `p`/`s` addresses Linux PRIMARY without
   falling back to the regular clipboard when a PRIMARY operation fails.
+- Focus reports (DEC mode 1004, tmux `focus-events`) follow the pane that holds
+  the keyboard, not only the window: a pane that enabled them hears `CSI O`
+  when focus moves to another pane or tab (or the window loses OS focus) and
+  `CSI I` when it comes back, once per change. Zooming changes nothing.
 - Keep Kettle's outer `TERM=xterm-256color`. Inside tmux, keep tmux's
   `default-terminal` at `tmux-256color`; do not globally force either value over
   the other. `COLORTERM=truecolor`, `TERM_PROGRAM=kettle`, and

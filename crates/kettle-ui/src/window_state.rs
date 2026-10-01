@@ -885,6 +885,16 @@ pub(crate) struct WindowState {
     /// to modal dispatch and the renderer paints the centered modal panel.
     pub(crate) confirm_dialog: Option<ConfirmDialogState>,
     pub(crate) window_focused: bool,
+    /// The pane that held the keyboard at the last focus-report
+    /// reconciliation (DEC mode 1004), whether or not it asked for reports,
+    /// or `None` while the window lacks OS focus. See
+    /// `App::sync_pane_focus_reports`.
+    pub(crate) focus_reported_pane: Option<u64>,
+    /// The OS has reported this window's focus at least once.
+    /// `window_focused` starts optimistically `true`; a focus report waits
+    /// for the real answer, or a new window would claim focus-in before the
+    /// OS gave it focus and then report it lost and regained.
+    pub(crate) os_focus_known: bool,
     /// `true` while the window is fully hidden behind other windows
     /// (winit `WindowEvent::Occluded(true)`). Gates the animated-background
     /// wake so a covered window costs zero idle (alongside an `is_minimized`
@@ -1165,6 +1175,8 @@ impl WindowState {
             pending_resize: false,
             confirm_dialog: None,
             window_focused: true,
+            focus_reported_pane: None,
+            os_focus_known: false,
             window_occluded: false,
             mouse_hidden: false,
             last_cursor_icon: None,
