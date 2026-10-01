@@ -2358,11 +2358,21 @@ def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
     return evidence_state("supported", "complete provisional native history", provisional=True, events=len(events))
 
 
-def cursor_layer_evidence(data: dict) -> dict:
-    """Read #418's analysis.json exactly, without inventing raw observations.
+# The C2 smoke's fixed sampling cadence and a physical bound on footprint.
+NATIVE_LAYER_SAMPLE_PERIOD_S = 0.5
+NATIVE_LAYER_MAX_FOOTPRINT_MIB = 1_048_576
 
-    The producer checks its live samples and twenty geometry reads but exports
-    only aggregates and selected states. Those cannot prove the interval here.
+
+def cursor_layer_evidence(data: dict, *, max_footprint_mib: float = 80.0,
+                          max_wakeups: float = 0.5, max_cpu_percent: float = 0.02) -> dict:
+    """Certify the smoke's exported monotonic samples and state transitions.
+
+    The certified figures cover the measured window the samples actually span
+    (`covered_interval`), which must lie inside the hand-off+1.5 s to timeout
+    window (`allowed_interval`), last at least 3 s and follow the producer's
+    fixed 0.5 s cadence. Nothing outside that window is claimed. Geometry
+    reads are controls after measurement, never footprint samples. Complete
+    evidence can still fail the caller's inclusive resource thresholds.
     """
     if not isinstance(data, dict) or "contract" not in data:
         return evidence_state("unavailable", "native layer smoke absent")
@@ -2392,11 +2402,153 @@ def cursor_layer_evidence(data: dict) -> dict:
             return evidence_state("malformed", "inconsistent exit frame coverage")
         states[label] = {"renderer": state["renderer"], **{k: state[k] for k in ("handoffs", "exits", "hides")},
                          "exit_frame_us": {k: frames.get(k) for k in ("count", "p50", "p95", "max")}}
-    return evidence_state(
-        "incomplete", "producer omits raw sampling bounds, timeout and geometry-read history",
-        capability="cursor-layer-smoke-418", aggregates=numbers, states=states,
-        interval_peak_mib=None, geometry_polling_valid=None, acceptance=None,
-    )
+    # Legacy files remain descriptive; partial raw exports must never certify.
+    raw_fields = ("clock", "stamps", "samples", "geometry_reads")
+    certify_ready = all(
+        set(contract[label]["exit_frame_us"]) >= {"count", "p50", "p95", "max"}
+        and (contract[label]["exit_frame_us"]["count"] == 0
+             or contract[label]["exit_frame_us"]["p50"] <= contract[label]["exit_frame_us"]["p95"]
+             <= contract[label]["exit_frame_us"]["max"])
+        for label in states)
+    details = dict(capability="cursor-layer-smoke-418", aggregates=numbers, states=states,
+                   interval_peak_mib=None, geometry_polling_valid=None, acceptance=None)
+    if not any(key in contract for key in raw_fields):
+        return evidence_state("unavailable", "legacy aggregate-only native layer smoke", **details)
+    bad = lambda reason: evidence_state("incomplete", reason, **details)
+    if any(key not in contract for key in raw_fields):
+        return bad("missing raw native layer evidence")
+    if contract["clock"] != "python-monotonic-s":
+        return evidence_state("malformed", "unknown native layer clock")
+    if not certify_ready:
+        return bad("exit frame summaries incomplete or unordered")
+    stamps = contract["stamps"]
+    stamp_keys = ("wait_started", "handoff_seen", "interval_ms", "timeout_s",
+                  "measure_start", "measure_end", "sample_period_s", "rest_read",
+                  "reload_written", "key_sent")
+    if not isinstance(stamps, dict):
+        return evidence_state("malformed", "invalid native layer stamps")
+    if any(key not in stamps for key in stamp_keys):
+        return bad("missing native layer stamp")
+    if any(not evidence_number(stamps[key]) for key in stamp_keys) or any(
+            stamps[key] <= 0 for key in ("interval_ms", "timeout_s", "sample_period_s")):
+        return evidence_state("malformed", "invalid native layer stamp value")
+    # The producer samples every 0.5 s. A declared period cannot widen the
+    # allowed gaps and so hide missing samples.
+    if stamps["sample_period_s"] != NATIVE_LAYER_SAMPLE_PERIOD_S:
+        return evidence_state("malformed", "unexpected native layer sample period")
+    s = stamps
+    interval = s["interval_ms"] / 1000
+    timeout_bound = s["wait_started"] + s["timeout_s"]
+    interval_start = s["handoff_seen"] + 1.5
+    if not (s["wait_started"] <= s["handoff_seen"] < s["measure_start"] <
+            s["measure_end"] < s["rest_read"] < s["reload_written"] < s["key_sent"]):
+        return bad("unordered native layer stamps")
+    if not (s["measure_start"] >= interval_start and s["measure_end"] <= timeout_bound):
+        return bad("measurement outside handoff-to-timeout interval")
+    if s["rest_read"] < timeout_bound + 2 * interval:
+        return bad("rest read precedes timeout and last edge")
+    handoff_after = s["handoff_seen"] - s["wait_started"]
+    if handoff_after > 3 * interval + 1.0:
+        return bad("handoff exceeds entry bound")
+    if not math.isclose(numbers["handoff_after_s"], handoff_after, rel_tol=1e-9, abs_tol=1e-9):
+        return bad("handoff aggregate mismatch")
+
+    samples = contract["samples"]
+    if not isinstance(samples, list):
+        return evidence_state("malformed", "invalid native layer samples")
+    if len(samples) < 2:
+        return bad("insufficient native layer samples")
+    for sample in samples:
+        if not isinstance(sample, dict) or any(not evidence_number(sample.get(key)) for key in
+                ("t", "footprint_mib", "cpu_ns", "wakeups")):
+            return evidence_state("malformed", "invalid native layer sample")
+        # A process footprint above 1 TiB is not a measurement.
+        if sample["footprint_mib"] > NATIVE_LAYER_MAX_FOOTPRINT_MIB:
+            return evidence_state("malformed", "implausible native layer footprint")
+    first, last = samples[0], samples[-1]
+    if first["t"] != s["measure_start"] or last["t"] != s["measure_end"]:
+        return bad("sample endpoints disagree with stamps")
+    period = s["sample_period_s"]
+    gap_limit = 1.5 * period
+    gaps = []
+    # The endpoints match the in-window stamps, and every gap is at least one
+    # period, so every sample is ordered and inside the allowed window.
+    for before, after in zip(samples, samples[1:]):
+        gap = after["t"] - before["t"]
+        if gap + 1e-9 < period or gap > gap_limit:
+            return bad("sample cadence or gap outside declared period")
+        if any(after[key] < before[key] for key in ("cpu_ns", "wakeups")):
+            return bad("nonmonotonic sample counters")
+        gaps.append(gap)
+    span = last["t"] - first["t"]
+    if span < 3.0:
+        return bad("idle sample span below 3 seconds")
+    computed = dict(span_s=span, peak_mib=max(sample["footprint_mib"] for sample in samples),
+                    wakeups_per_s=(last["wakeups"] - first["wakeups"]) / span,
+                    cpu_percent=(last["cpu_ns"] - first["cpu_ns"]) / (span * 1e9) * 100)
+    if any(not evidence_number(value) for value in computed.values()):
+        return evidence_state("malformed", "nonfinite native layer metrics")
+    if any(not math.isclose(idle[key], value, rel_tol=1e-9, abs_tol=1e-9)
+           for key, value in computed.items()):
+        return bad("idle aggregate mismatch")
+
+    reads = contract["geometry_reads"]
+    if not isinstance(reads, list):
+        return evidence_state("malformed", "invalid geometry reads")
+    if len(reads) != 20:
+        return bad("expected twenty geometry reads")
+    counters = ("handoffs", "exits", "hides")
+    handoff = states["handoff"]
+    previous = s["measure_end"]
+    for read in reads:
+        if not isinstance(read, dict) or not evidence_number(read.get("t")) or any(
+                not evidence_uint(read.get(key)) for key in counters):
+            return evidence_state("malformed", "invalid geometry read")
+        if not previous < read["t"] < s["rest_read"]:
+            return bad("geometry polling overlaps measurement or is unordered")
+        if read.get("renderer") != "layer" or any(read[key] != handoff[key] for key in counters):
+            return bad("geometry polling changed renderer or counters")
+        previous = read["t"]
+
+    rested, reload, key = (states[label] for label in ("rested", "after_reload", "after_key"))
+    if handoff["renderer"] != "layer" or handoff["handoffs"] == 0 or any(
+            contract[label].get("fallback", "missing") is not None for label in states):
+        return bad("layer handoff or fallback state unproven")
+    if (rested["renderer"] != "layer" or any(rested[k] != handoff[k] for k in counters) or
+            contract["rested"].get("phase_on") is not True or
+            "next_edge_ms" not in contract["rested"] or contract["rested"]["next_edge_ms"] is not None):
+        return bad("rested state inconsistent with timeout")
+    if (reload["renderer"] != "layer" or reload["exits"] != rested["exits"] + 1 or
+            reload["handoffs"] != rested["handoffs"] + 1 or reload["hides"] != rested["hides"]):
+        return bad("reload state did not exit once and hand off again")
+    if (key["exits"] <= reload["exits"] or key["hides"] != reload["hides"] or
+            key["handoffs"] < reload["handoffs"] or
+            (key["renderer"] == "layer" and key["handoffs"] <= reload["handoffs"])):
+        return bad("key state did not exit the reloaded layer")
+
+    # started/exited/hidden balance active handoffs; every exit records a frame.
+    if any(state["handoffs"] != state["exits"] + state["hides"] +
+           int(state["renderer"] == "layer") or state["exit_frame_us"]["count"] != state["exits"]
+           for state in states.values()):
+        return bad("cursor state counters or exit history inconsistent")
+
+    thresholds = dict(peak_mib=max_footprint_mib, wakeups_per_s=max_wakeups,
+                      cpu_percent=max_cpu_percent)
+    if any(not evidence_number(value) for value in thresholds.values()):
+        return evidence_state("malformed", "invalid native layer acceptance thresholds")
+    checks = {name: computed[name] <= limit for name, limit in thresholds.items()}
+    median = statistics.median(sample["footprint_mib"] for sample in samples)
+    if not evidence_number(median):
+        return evidence_state("malformed", "nonfinite native layer metrics")
+    details.update(interval_peak_mib=computed["peak_mib"], interval_median_mib=median,
+                   geometry_polling_valid=True, samples=len(samples), span_s=span,
+                   wakeups_per_s=computed["wakeups_per_s"], cpu_percent=computed["cpu_percent"],
+                   covered_interval=[first["t"], last["t"]],
+                   allowed_interval=[interval_start, timeout_bound],
+                   sample_period_s=period, max_gap_s=max(gaps), gap_limit_s=gap_limit,
+                   acceptance=dict(verdict="pass" if all(checks.values()) else "fail",
+                                   thresholds=thresholds, checks=checks))
+    return evidence_state("supported", "complete raw native layer evidence", **details)
 
 
 def renderer_trace_evidence(text: str) -> dict:
@@ -2453,7 +2605,11 @@ def run_evidence_postprocessing(args) -> int:
             reports.append({"kind": "startup-phases", "rows": phase_rows,
                             "summary": startup_duration_summary(phase_rows)})
         for path in args.native_layer_input or []:
-            reports.append({"kind": "native-layer", "evidence": cursor_layer_evidence(diagnostic_json(Path(path)))})
+            reports.append({"kind": "native-layer", "evidence": cursor_layer_evidence(
+                diagnostic_json(Path(path)),
+                max_footprint_mib=getattr(args, "native_layer_max_footprint_mib", 80.0),
+                max_wakeups=getattr(args, "native_layer_max_wakeups", 0.5),
+                max_cpu_percent=getattr(args, "native_layer_max_cpu_percent", 0.02))})
         for path in args.trace_input or []:
             text = config_file_bytes(Path(path), 16 * 1024 * 1024, follow=True)[0].decode("utf-8")
             reports.append({"kind": "renderer-trace", "evidence": renderer_trace_evidence(text)})
@@ -4647,7 +4803,13 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--startup-started-ns", type=int,
                         help="optional launch clock origin for a single --startup-phase-input")
     parser.add_argument("--native-layer-input", nargs="+", metavar="FILE",
-                        help="postprocess native cursor layer analysis.json aggregates")
+                        help="certify retained native cursor layer analysis.json raw evidence")
+    parser.add_argument("--native-layer-max-footprint-mib", type=float, default=80.0,
+                        help="native layer peak threshold in MiB (default: 80)")
+    parser.add_argument("--native-layer-max-wakeups", type=float, default=0.5,
+                        help="native layer wakeups/s threshold (default: 0.5)")
+    parser.add_argument("--native-layer-max-cpu-percent", type=float, default=0.02,
+                        help="native layer CPU percent threshold (default: 0.02)")
     parser.add_argument("--trace-input", nargs="+", metavar="FILE",
                         help="report retained private echo trace capability; launch no app")
     args = parser.parse_args()

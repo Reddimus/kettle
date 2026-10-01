@@ -1,0 +1,295 @@
+{
+  "contract": {
+    "handoff_after_s": 0.5999999999999943,
+    "clock": "python-monotonic-s",
+    "stamps": {
+      "wait_started": 100.001,
+      "handoff_seen": 100.601,
+      "interval_ms": 300,
+      "timeout_s": 12,
+      "measure_start": 102.102,
+      "measure_end": 105.61600000000007,
+      "sample_period_s": 0.5,
+      "rest_read": 112.602,
+      "reload_written": 112.60300000000001,
+      "key_sent": 113.20500000000001
+    },
+    "handoff": {
+      "renderer": "layer",
+      "handoffs": 1,
+      "exits": 0,
+      "hides": 0,
+      "exit_frame_us": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "max": 0
+      },
+      "phase_on": false,
+      "next_edge_ms": 100,
+      "fallback": null,
+      "layer_rect": [
+        10,
+        20,
+        8,
+        16
+      ]
+    },
+    "samples": [
+      {
+        "t": 102.102,
+        "footprint_mib": 73.0,
+        "cpu_ns": 900000000.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 102.60400000000001,
+        "footprint_mib": 74.0,
+        "cpu_ns": 900050200.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 103.10600000000002,
+        "footprint_mib": 72.0,
+        "cpu_ns": 900100400.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 103.60800000000003,
+        "footprint_mib": 75.0,
+        "cpu_ns": 900150600.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 104.11000000000004,
+        "footprint_mib": 72.0,
+        "cpu_ns": 900200800.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 104.61200000000005,
+        "footprint_mib": 71.0,
+        "cpu_ns": 900251000.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 105.11400000000006,
+        "footprint_mib": 70.0,
+        "cpu_ns": 900301200.0,
+        "wakeups": 100.0
+      },
+      {
+        "t": 105.61600000000007,
+        "footprint_mib": 74.0,
+        "cpu_ns": 900351400.0,
+        "wakeups": 101.0
+      }
+    ],
+    "idle": {
+      "span_s": 3.514000000000067,
+      "peak_mib": 75.0,
+      "wakeups_per_s": 0.2845759817871317,
+      "cpu_percent": 0.00999999999999981
+    },
+    "geometry_reads": [
+      {
+        "t": 105.61800000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 105.71900000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 105.82000000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 105.92100000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.02200000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.12300000000008,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.22400000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.32500000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.42600000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.52700000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.62800000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.72900000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.83000000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 106.93100000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.03200000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.13300000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.23400000000007,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.33500000000006,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.43600000000006,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      },
+      {
+        "t": 107.53700000000006,
+        "renderer": "layer",
+        "handoffs": 1,
+        "exits": 0,
+        "hides": 0
+      }
+    ],
+    "rested": {
+      "renderer": "layer",
+      "handoffs": 1,
+      "exits": 0,
+      "hides": 0,
+      "exit_frame_us": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "max": 0
+      },
+      "phase_on": true,
+      "next_edge_ms": null,
+      "fallback": null,
+      "layer_rect": [
+        10,
+        20,
+        8,
+        16
+      ]
+    },
+    "after_reload": {
+      "renderer": "layer",
+      "handoffs": 2,
+      "exits": 1,
+      "hides": 0,
+      "exit_frame_us": {
+        "count": 1,
+        "p50": 100,
+        "p95": 100,
+        "max": 100
+      },
+      "phase_on": false,
+      "next_edge_ms": 100,
+      "fallback": null,
+      "layer_rect": [
+        10,
+        20,
+        8,
+        16
+      ]
+    },
+    "after_key": {
+      "renderer": "gpu",
+      "handoffs": 2,
+      "exits": 2,
+      "hides": 0,
+      "exit_frame_us": {
+        "count": 2,
+        "p50": 100,
+        "p95": 200,
+        "max": 200
+      },
+      "phase_on": false,
+      "next_edge_ms": 100,
+      "fallback": null,
+      "layer_rect": null
+    }
+  }
+}
