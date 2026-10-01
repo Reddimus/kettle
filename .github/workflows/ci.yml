@@ -366,14 +366,16 @@ jobs:
       - name: Unix job-control compatibility (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 3
+        env:
+          RUST_LOG: "warn,kettle::startup=info"
         run: |
-          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh --expect-startup-path pre_launch --allow-fit-decline --columns 100 \
             --kettle ./target/release/kettle --background --cycles 3 \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
-          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh --expect-startup-path pre_launch --allow-fit-decline --columns 100 \
             --kettle ./target/release/kettle --alternate --background --cycles 3 \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
-          python3 scripts/check-job-control-smoke.py --hidden --shell zsh \
+          python3 scripts/check-job-control-smoke.py --hidden --shell zsh --expect-startup-path pre_launch --allow-fit-decline --columns 100 \
             --kettle ./target/release/kettle --split --cycles 3 \
             --out-dir "$RUNNER_TEMP/kettle-job-control"
           python3 scripts/check-job-control-smoke.py --hidden --shell zsh \

@@ -1009,7 +1009,7 @@ its thread instead of waiting for a family, and on macOS the thread runs at the
 user-initiated QoS class. A source guard proves `run_with` starts the preload
 right after the trace guard, before the event loop is built and before any
 config read, sends the family after the command-line overrides, and that
-`resumed_inner` joins it and keeps the fonts for the renderer before the first
+the first window joins it and keeps the fonts for the renderer before its
 pane spawns. Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
@@ -1017,6 +1017,63 @@ enforce reply-lane failure on overflow, and pin the precedence of
 require `read_only`, `busy`, `bad_params`, and `internal` to remain distinct;
 local-paste coverage requires 4 MiB to pass and one byte more to be rejected
 with visible feedback.
+S3 startup tests cover the command/directory override and every combination
+of session, layout and tab-handoff restore intent, window state and configured
+position. Display arithmetic and the shared monitor-fit boundary are checked
+at 1x, 2x and 3x, including odd point sizes. A real PTY child must exit within
+two seconds of `Mux::kill_children`; environments unable to open a PTY print
+an explicit skip, which is not native acceptance. Source guards keep the
+pre-launch spawn between App construction and `run_app`, preserve the override
+after its arguments are consumed, reuse the sizing/fonts, and hang up children
+on window/renderer failure. The #379 guard now requires three callers of the
+shared startup surface rule. Its fallback spawn/window/GPU order and #388's
+ApplePersistence registration order remain guarded.
+
+The optional native PTY recorder tests preserve an initial 99x30 observation
+across a correction to 100x30, read kernel geometry before correction, and
+keep errors, no-ops, overflow and incomplete intervals explicit. Source guards
+cover creation, both resize branches, pane linkage and early teardown.
+The production-capture regression opens a real PTY with deterministic opt-in,
+records a correction and finishes the trace. PTY creation failure fails that
+test. Separate zero-start and inverted-initial fixtures pin the completeness
+conjuncts. The macOS display test drives a missing screen match without AppKit.
+The provisional native_pty_v1 wire contract and bounded private collector are
+documented in `scripts/perf/README.md`.
+On a single-display Mac, `default-window-size` compiles a private SHELL
+observer and runs it through LiveKettle's owned tracker. Its explicit-size leg
+enables startup and native logs, uses a scratch XDG_CONFIG_HOME, and checks
+the collector's process/pane/session join. The default leg keeps the monitor-fit
+and 1296-pixel guards. The explicit leg requires settled and child 100x30, `path=pre_launch`,
+`monitor_match=true`, and zero SIGWINCH for two seconds. Native evidence must
+also start at 100x30, cover that child interval and contain no changing resize.
+A delayed-child control deliberately creates 99x30 then corrects to 100x30
+before the child installs its trap; the strict native policy must fail even
+when the child reports 100x30 and zero signals. Use 119x36 then 120x36 for the
+standing-size control. Missing, failed, dropped or mismatched evidence fails
+closed. Geometry diagnostics require a separate observer-equivalence check
+before use in measurements.
+
+Run the repository gates, the macOS hidden job-control CI smoke with
+`path=pre_launch`, `monitor_match=true` and ordered phases for each successful
+launch through `--expect-startup-path pre_launch`. Negative controls are exempt.
+CI runs these at 100 columns so the grid fits the 1024x768 runner display and
+the early path is exercised. It also passes `--allow-fit-decline`: a runner
+display too small for the grid
+may decline the early spawn, but only with Kettle's `startup pre_launch
+declined=fit` line giving the surface and monitor sizes, after the display
+read. Any other decline, or none, fails. Kettle prints a declined line for
+every reason (`ineligible`, `display`, `window`, `fit`), so a fallback is
+never silent. The live default-window-size smoke stays strict.
+Run the live default-window-size, split-exit-resize,
+dock-menu, window-close-isolation and tab-title smokes. Record command exit,
+directory override, multi-window restore, named-layout preservation, malformed
+config fallback, hidden launch and Cmd+N checks with an isolated
+`XDG_CONFIG_HOME`. Mixed-scale displays are an explicit skip if unavailable.
+Portable code also requires Docker Linux build/tests and an Xvfb launch with
+`path=resumed_early`. S3's paired 30-launch gate compares against S2: shell
+improvement at least 20 ms or B/A <= 0.92, with window time not worse. Stop on
+any wrong initial grid, single-display SIGWINCH or monitor disagreement.
+
 Lua tests preserve exact mixed-command FIFO order, separate large sends,
 enforce the 1 MiB call/8 MiB aggregate/1,024-entry limits, latch a retry's
 target pane, and retain a backpressured head until its deadline. Registry

@@ -108,6 +108,40 @@ window and the GPU to the first frame, plus the font thread's
 probe spawned it, plus the pane's startup path. The format is pinned by
 `macos-standing/startup-phases.fixture`, which Kettle's own tests share. Other
 terminals launch unchanged, and only startup rounds are stamped.
+
+Eligible macOS launches also stamp `display_read` and report `path=pre_launch`.
+The path summary appends `monitor_match` when a pre-launch comparison exists
+and `fonts_wait_ms` when both font-join endpoints exist. These fields are
+optional; old phase logs remain readable. Font wait and GPU duration must be
+computed per round from paired endpoints, not by subtracting phase medians.
+
+Private startup geometry diagnostics use a separate filter,
+`RUST_LOG=warn,kettle::startup=info,kettle::pty_geometry=info`. They are off by
+default, including with `--startup-phases`. The producer emits one
+`native_pty=<JSON>` line for the first Unix PTY. Version 1 uses
+`CLOCK_UPTIME_RAW` on macOS and `CLOCK_MONOTONIC` on Linux. It includes the
+application PID as `launch_id`, the UI `pane_id`, the direct `child_pid`,
+`recording_start_ns`, a native `initial` observation with `t_ns`, at most 64
+`events`, `recording_end_ns`, `complete`, `dropped`, `overflow`, and native
+`final` geometry. Each event has sequence, time, requested/observed geometry,
+`outcome=ok|error|noop`, `native_error`, and `reason=resize`. Geometry uses
+`cols`, `rows`, `pixel_width`, `pixel_height`, and numeric `error`; unknown
+geometry is null and error -1 means unavailable. It records application resize
+attempts, not arbitrary child-issued ioctls. A successful no-op makes no
+native resize call. Creation and final observations bracket the recorded
+application operations.
+
+Capture stderr in a private per-launch file and keep these diagnostics out
+of public standing artifacts. The three-second producer deadline is a tail
+for the child's two-second observation, not a coverage assumption: a parser
+must verify actual child and recording endpoints, application/pane linkage
+and clock agreement. A child payload forked from the direct child must report
+its session-leader linkage as well. Missing or early records, errors, overflow
+or wrong linkage are incomplete evidence. Initial wrong size or any changing
+startup resize fails the strict single-display policy even if the child later
+sees the right size. HC PR 7 owns parser implementation and producer agreement;
+this producer draft is not a claim that its native adapter has landed or been
+calibrated. Legacy binaries leave native evidence unavailable.
 `--startup-phases b` stamps only the B side of an A/B, so one build on both
 sides measures what the stamps themselves cost. It is a diagnostic: the
 session never counts, so `--combine` never publishes from it. Every terminal
@@ -715,35 +749,82 @@ old rows elide a matching initial grid, so a settled grid cannot reconstruct
 that observation. `native` also requires a complete native history. These
 policies apply only to postprocessing, not to an ordinary launch.
 
-The provisional `native_pty_v1` format has no application producer yet. A row
-supplies `launch_id`, `pane_id`, `started_ns`, `child_observed_ns` and its two
-explicit grids. Its optional `native_pty` object contains:
+The `native_pty_v1` contract is explicitly provisional. Kettle emits one
+`native_pty=` JSON line when `kettle::pty_geometry=info` is enabled. The harness
+joins it with its shell wrapper's child observation; Kettle never supplies
+`child_observation`. This diagnostic is separate from standing acquisition.
+Run the observer through the smoke's owned SHELL tracker, or retain an
+owner-controlled wrapper observation for a 120x36 diagnostic. Do not substitute
+the two-second observer for a timing payload.
 
-- `version: native_pty_v1`, `clock: CLOCK_UPTIME_RAW`, matching `launch_id` and
-  `pane_id`, `complete: true`, `dropped: 0`, `overflow: false`.
-- `recording_start_ns`, `created_ns`, `initial.t_ns`, `recording_end_ns` and
-  `initial_stage: after_create_before_correction`. Recording starts before
-  creation, includes the initial observation before the child, spans at least
-  two actual seconds and ends no earlier than the child observation.
-- `initial` and `final` with positive integer `cols`, `rows`, `pixel_width`,
-  `pixel_height` and `t_ns`. The final timestamp equals the recording end.
-- `child_observation` with `child_observed_ns`, `start_cols`, `start_rows` and
-  `sigwinch_count: 0`, linked to the row.
-- `event_count` and `events`. Events have contiguous integer `seq` starting at
-  1, increasing `t_ns` inside the recording, matching launch/pane identities,
-  `requested` and `observed` geometry, `outcome: ok|error|noop`, `native_error`,
-  `reason: initial|window|monitor|config` and boolean `signal_sent`.
+For one retained launch row, opt in to collection with:
 
-Strict acceptance requires an exact initial native grid. Every event must
-preserve all four geometry values, report no native error and send no signal.
-Failed attempts, missing events or recording endpoints, changed geometry,
-wrong identities and overflow cannot prove zero resize. Missing native data
-is `unavailable`, never a legacy pass. A supported provisional fixture is not
-native runtime evidence. The producer owner must confirm the layout and prove
-recording covers every attempt before this can certify S3.
+```sh
+python3 scripts/perf/macos-standing.py --startup-input one-row.json --startup-grid-policy native \
+  --startup-native-log kettle.log --startup-child-observation child-observation.json
+```
+
+The input needs exactly one `kettle`, `kettle-a` or `kettle-b` launch row with
+settled `cols,rows`, `started_ns`, and decimal-string `launch_id,pane_id`.
+`launch_id` is the application PID from the harness's owned spawn handle;
+`pane_id` is the initial focused ID from `list_panes`. Kettle echoes those
+identities as decimal strings. No environment identity variable is needed.
+The collector checks the wrapper's `session_id` against Kettle's numeric
+`child_pid`; the wrapper PID can differ when the SHELL tracker forks it.
+Identity values and raw logs stay private and never appear in public reports.
+Log and child files must be owner-private regular files without symlinks.
+The collector bounds logs to 1 MiB, each JSON record to 64 KiB and events to 64.
+It rejects duplicate JSON members, nonfinite numbers, torn or duplicate lines,
+unknown formats, malformed fields and identity mismatches. Invalid inputs
+produce a generic refusal; valid incomplete records retain explicit failure
+states. With collection off, the row and all ordinary output stay unchanged.
+
+The producer record contains these fields:
+
+- `version: "native_pty_v1"`, `clock: "CLOCK_UPTIME_RAW"` on macOS, string
+  `launch_id,pane_id`, and numeric `child_pid`. Missing identities are null
+  in incomplete records. Unix platforms other than macOS use CLOCK_MONOTONIC
+  and cannot satisfy the macOS native policy.
+- `recording_start_ns` immediately before openpty, `created_ns` immediately
+  after it returns, `initial_stage: "after_create_before_correction"`, and
+  `initial` with its read timestamp `t_ns`. The initial read precedes command
+  setup, child spawn and every correction.
+- `events`, capped at 64, and `event_count`, the retained event count. Each
+  event has contiguous `seq` starting at 1, nondecreasing `t_ns`, matching
+  string `launch_id,pane_id`, `reason: "resize"`, `outcome: "ok"|"error"|"noop"`,
+  `native_error`, `requested`, `observed`, and `signal_sent`. The recorder
+  knows resize attempts, not their UI cause. `signal_sent` is false only for
+  a no-op with no native call; it is null after a native attempt because ioctl
+  success does not prove delivery. Strict acceptance rejects unknown delivery.
+- Geometry objects contain `cols,rows,pixel_width,pixel_height,error`. Grid
+  dimensions are integers 1..65535; pixel dimensions may be zero and are
+  bounded by 65535. A native read failure has null dimensions and a numeric
+  error. A successful read has `error: null`. Requested geometry has no read
+  error. Error -1 means the numeric error or native descriptor was unavailable.
+- `recording_end_ns`, `complete`, `dropped`, `overflow`, and `final` with
+  `t_ns` equal to the recording end. The three-second deadline is scheduled
+  through the existing UI loop. Teardown before it ends is incomplete.
+
+The wrapper JSON contains `clock,pid,session_id,start_ns,t_ns,end_ns,cols,rows,
+pixel_width,pixel_height,sigwinch`. The harness adds `child_observation` with
+`child_observed_ns,start_cols,start_rows,sigwinch_count,start_ns,end_ns,
+pixel_width,pixel_height`, and fills the row's explicit child grid and timestamp.
+The wrapper observes the kernel, holds for two seconds, writes once with mode
+0600 and exclusive no-follow creation, then execs the shell. It records its
+session identity before that exec.
+
+Strict acceptance requires the recording to cover the child's entire interval,
+including its start, and at least two seconds after its geometry observation.
+The initial and final native grids, child grid and settled grid must match the
+target. Child and native pixel dimensions must agree. Every event must be a
+proven no-call no-op preserving all four native geometry fields. Errors,
+missing events/endpoints, geometry changes, SIGWINCH, wrong identities or
+overflow fail. Native absence is unavailable, never a legacy pass. The
+consumer validates retained evidence only; a supported fixture does not
+establish native runtime acceptance or observer equivalence.
 
 `--startup-phase-input FILE...` accepts one retained stderr file per round.
-The S1/S2 lines are `startup phase=NAME t_ns=N since_main_ms=M thread=main|fonts`
+The S1/S2/S3 lines are `startup phase=NAME t_ns=N since_main_ms=M thread=main|fonts`
 and `startup path=resumed_early|after_renderer|unknown`. `since_main_ms` may be
 `-`, and the optional thread suffix may be absent in older logs. Other log
 lines are ignored. Raw nanosecond stamps, threads, paths, duplicate conflicts
@@ -762,8 +843,14 @@ maximum, coverage and thread/path counts. It never subtracts endpoint medians.
 file. Intervals need no launch origin because their endpoints share the
 producer clock. Historical `phase_*_ms` and `startup_path` remain unchanged.
 
-S2 emits no monitor agreement or reported font wait, so those fields remain
-null. S4 emits no device/pipeline subphase endpoints; only the GPU interval
+S3 adds `display_read` and summaries of the form
+`startup path=<resumed_early|after_renderer|pre_launch|unknown>` with optional
+`monitor_match=<true|false>` and then optional `fonts_wait_ms=<n.nn>`.
+The report fills `monitor_match` and `reported_fonts_wait_ms`, leaving absent
+fields null. A malformed summary or conflicting path, monitor value or wait
+voids summary and font attribution. Identical repeated summaries are accepted.
+The live startup-phases.fixture follows the producer. The S1 and font-phase
+fixtures stay frozen. S4 emits no device/pipeline subphase endpoints; only the GPU interval
 above is available. `first_output_ms`, its origin and endpoint remain null.
 A first-frame present or per-key `output_ms` cannot certify displayed first
 output.

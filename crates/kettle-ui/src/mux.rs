@@ -1643,6 +1643,15 @@ pub struct RestoreOutcome {
 }
 
 impl Mux {
+    /// Hang up every child owned by this mux before a startup failure exits.
+    pub fn kill_children(&self) {
+        for pane in self.panes.values() {
+            if let Err(error) = pane.term.kill() {
+                log::warn!("failed to hang up child: {error}");
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             tabs: Vec::new(),
@@ -1804,7 +1813,7 @@ impl Mux {
         // cfg.term / cfg.colorterm / cfg.login_shell take effect at
         // PTY spawn. The legacy `Terminal::new` shim still exists
         // for non-Mux callers (currently none in-tree).
-        let term = Terminal::new_with_env_and_output_geometry_and_capabilities(
+        let mut term = Terminal::new_with_env_and_output_geometry_and_capabilities(
             argv,
             cwd,
             cfg.scrollback,
@@ -1831,6 +1840,7 @@ impl Mux {
         )?;
         let pty_input = PtyInputQueue::new(&term, waker)?;
         let id = NEXT_PANE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        term.link_startup_geometry(id);
         let initial_title = initial_pane_title(argv);
         // Only generic-shell panes ("kettle" seed) are eligible for conhost
         // startup-title suppression + cwd labelling; a `-e htop`/`ssh` pane keeps
@@ -4418,6 +4428,38 @@ impl Default for Mux {
 
 #[cfg(test)]
 mod node_tests {
+    #[cfg(unix)]
+    #[test]
+    fn kill_children_hangs_up_a_started_child() {
+        let cfg = Config {
+            shell_integration: false,
+            login_shell: false,
+            ..Config::default()
+        };
+        let mut mux = Mux::new();
+        let argv = vec!["/bin/sleep".to_owned(), "30".to_owned()];
+        if let Err(error) = mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(100, 30, 8, 16),
+            Arc::new(|| {}),
+            &argv,
+            None,
+        ) {
+            eprintln!("skipping: no PTY ({error})");
+            return;
+        }
+        assert!(!mux.panes.values().next().unwrap().term.child_exited());
+        mux.kill_children();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !mux.panes.values().all(|p| p.term.child_exited()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child did not hang up"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     use super::*;
 
     /// Focus must follow the tab, not the index.

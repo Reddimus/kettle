@@ -2269,7 +2269,7 @@ def parse_phases(text: str, started_ns: Optional[int]) -> dict:
 # Their reports cannot change a historical row or make a session countable.
 STARTUP_PHASES = (
     "main", "run_with", "event_loop_built", "config_loaded", "app_built",
-    "fonts_enumerated", "fonts_ready", "pane_spawned", "resumed",
+    "fonts_enumerated", "fonts_ready", "display_read", "pane_spawned", "resumed",
     "fonts_join_start", "fonts_joined", "window_created", "gpu_ready",
     "window_revealed", "first_frame",
 )
@@ -2285,7 +2285,10 @@ STARTUP_STAMP = re.compile(
     r"since_main_ms=(?:[0-9]+(?:\.[0-9]+)?|-)"
     r"(?: thread=(main|fonts))?$"
 )
-STARTUP_PATH = re.compile(r"startup path=(resumed_early|after_renderer|unknown)$")
+STARTUP_PATH = re.compile(
+    r"startup path=(resumed_early|after_renderer|pre_launch|unknown)"
+    r"(?: monitor_match=(true|false))?(?: fonts_wait_ms=([0-9]+\.[0-9]{2}))?$"
+)
 # The phase name alone, so a record whose timestamp is malformed still
 # invalidates its phase instead of leaving an earlier stamp in force.
 STARTUP_PHASE_NAME = re.compile(r"startup phase=([a-z][a-z0-9_]{0,63})\b")
@@ -2301,14 +2304,18 @@ def evidence_uint(value) -> bool:
     return type(value) is int and 0 <= value < 2**64
 
 
+
+def native_identity(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None and int(value) < 2**64
+
 def evidence_number(value) -> bool:
     return (type(value) is int and 0 <= value < 2**64) or (type(value) is float and math.isfinite(value) and value >= 0)
 
 
 def startup_phase_evidence(text: str, started_ns: Optional[int]) -> dict:
-    """Read S1/S2 stderr, preserving first raw stamps and explicit threads.
+    """Read S1/S2/S3 stderr, preserving first raw stamps and explicit threads.
 
-    S2 emits no monitor_match or reported wait. These stay unavailable.
+    Optional summary fields stay unavailable when absent.
     Duplicate conflicts invalidate the affected derived interval, never replace
     the first stamp. Unknown stamps remain diagnostics, outside published phases.
     """
@@ -2339,7 +2346,12 @@ def startup_phase_evidence(text: str, started_ns: Optional[int]) -> dict:
         elif "startup path=" in line:
             found = STARTUP_PATH.search(line.strip())
             if found:
-                paths.append(found[1])
+                wait = float(found[3]) if found[3] is not None else None
+                if wait is not None and not math.isfinite(wait):
+                    malformed += 1
+                    path_malformed = True
+                else:
+                    paths.append((found[1], None if found[2] is None else found[2] == "true", wait))
             else:
                 malformed += 1
                 path_malformed = True
@@ -2354,24 +2366,62 @@ def startup_phase_evidence(text: str, started_ns: Optional[int]) -> dict:
             reason = "unordered endpoints"
         elif field.startswith("fonts_") and (
                 not threads.get(begin) or not threads.get(end) or len(set(paths)) != 1
-                or paths[0] == "unknown" or path_malformed):
+                or paths[0][0] == "unknown" or path_malformed):
             reason = "missing thread/path attribution"
         durations[field] = None if reason else (stamps[end] - stamps[begin]) / 1e6
         validity[field] = evidence_state("unavailable" if reason else "supported", reason or ("ordered raw stamps" if ordered else "signed raw stamps"))
     return {
-        "capability": "startup-stamps-s1-s2", "startup_stamps_ns": stamps,
+        "capability": "startup-stamps-s1-s2-s3", "startup_stamps_ns": stamps,
         "startup_phase_threads": threads, "unknown_stamps_ns": unknown,
-        "startup_path": paths[0] if len(set(paths)) == 1 and not path_malformed else None,
+        "startup_path": paths[0][0] if len(set(paths)) == 1 and not path_malformed else None,
         "phase_ms": {name: (raw - started_ns) / 1e6 for name, raw in stamps.items()}
                     if evidence_uint(started_ns) else {},
         "durations": durations, "metric_validity": validity,
         "malformed_lines": malformed, "duplicate_stamps": duplicates,
         "invalid_phases": sorted(invalid),
-        "monitor_match": None, "reported_fonts_wait_ms": None,
+        "monitor_match": paths[0][1] if len(set(paths)) == 1 and not path_malformed else None,
+        "reported_fonts_wait_ms": paths[0][2] if len(set(paths)) == 1 and not path_malformed else None,
         "first_output_ms": None, "first_output_origin": None,
         "first_output_endpoint": None, "first_output_capability": "unavailable",
     }
 
+
+
+PRE_LAUNCH_FIT_DECLINE = re.compile(
+    r"startup pre_launch declined=fit surface=(\d+)x(\d+) monitor=(\d+)x(\d+) scale=([0-9.]+)$")
+
+
+def pre_launch_fit_decline(text: str) -> Optional[dict]:
+    """Kettle's explained decline when the configured grid does not fit the
+    display, or None. The phase and path parsers ignore this line."""
+    found = [PRE_LAUNCH_FIT_DECLINE.search(line.strip()) for line in text.splitlines()
+             if "startup pre_launch declined=" in line]
+    if len(found) != 1 or found[0] is None:
+        return None
+    width, height, monitor_w, monitor_h, scale = found[0].groups()
+    return {"surface": [int(width), int(height)], "monitor": [int(monitor_w), int(monitor_h)],
+            "scale": float(scale)}
+
+
+def require_pre_launch_startup(text: str, allow_fit_decline: bool = False) -> dict:
+    """Pinned single-display macOS smoke acceptance, also for hidden windows.
+    `allow_fit_decline` also accepts an explained decline for a grid that does
+    not fit the display (a small CI screen), never a silent fallback."""
+    if allow_fit_decline:
+        decline = pre_launch_fit_decline(text)
+        report = startup_phase_evidence(text, None)
+        if (decline is not None and report["startup_path"] in ("resumed_early", "after_renderer")
+                and "display_read" in report["startup_stamps_ns"]):
+            report["pre_launch_declined"] = decline
+            return report
+    report = startup_phase_evidence(text, None)
+    stamps = report["startup_stamps_ns"]
+    names = ("display_read", "pane_spawned", "resumed", "window_created", "gpu_ready")
+    if report["startup_path"] != "pre_launch" or report["monitor_match"] is not True or any(
+            name not in stamps or name in report["invalid_phases"] for name in names) or not (
+            stamps["display_read"] <= stamps["pane_spawned"] < stamps["resumed"] <= stamps["window_created"] <= stamps["gpu_ready"]):
+        raise ValueError("missing or unordered pre-launch startup evidence")
+    return report
 
 def startup_duration_summary(rows: List[dict]) -> dict:
     """Derive each round first. Never subtract medians of cumulative endpoints."""
@@ -2386,7 +2436,7 @@ def startup_duration_summary(rows: List[dict]) -> dict:
         }
     result["thread_rows"] = sum(bool(row["startup_phase_threads"]) for row in rows)
     result["path_counts"] = {path: sum(row["startup_path"] == path for row in rows)
-                             for path in ("resumed_early", "after_renderer", "unknown")}
+                             for path in ("resumed_early", "after_renderer", "pre_launch", "unknown")}
     return result
 
 
@@ -2413,7 +2463,7 @@ def startup_grid_evidence(row: dict, policy: str = "settled", cols: int = COLS,
 
 
 def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
-    """Provisional S3 v1. There is no app producer for this format yet."""
+    """Provisional S3 v1, assembled from Kettle and the harness wrapper."""
     native = row.get("native_pty")
     if native is None:
         return evidence_state("unavailable", "native PTY recorder absent", provisional=True)
@@ -2423,7 +2473,7 @@ def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
     if native.get("clock") != "CLOCK_UPTIME_RAW":
         return bad("native clock mismatch")
     for key in ("launch_id", "pane_id"):
-        if not isinstance(row.get(key), str) or not row[key] or native.get(key) != row[key]:
+        if not native_identity(row.get(key)) or native.get(key) != row[key]:
             return bad("native identity mismatch")
     if native.get("complete") is not True or native.get("overflow") is not False or type(native.get("dropped")) is not int or native["dropped"] != 0:
         return bad("native recording incomplete")
@@ -2431,7 +2481,7 @@ def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
              native.get("created_ns"), native.get("initial", {}).get("t_ns")
              if isinstance(native.get("initial"), dict) else None,
              row.get("child_observed_ns"), native.get("recording_end_ns")]
-    if not all(evidence_uint(t) for t in times) or times != sorted(times) or times[-1] < times[1] + 2_000_000_000:
+    if not all(evidence_uint(t) and t > 0 for t in times) or times != sorted(times) or times[-1] < times[1] + 2_000_000_000:
         return bad("missing or short recording endpoints")
     if native.get("initial_stage") != "after_create_before_correction":
         return bad("initial observation stage unproven")
@@ -2439,29 +2489,33 @@ def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
     if not isinstance(child, dict) or any(child.get(key) != row.get(key) for key in
             ("child_observed_ns", "start_cols", "start_rows")) or type(child.get("sigwinch_count")) is not int or child["sigwinch_count"] != 0:
         return bad("child observation linkage or SIGWINCH failed")
+    if not all(evidence_uint(child.get(k)) for k in ("start_ns", "end_ns")) or not times[1] <= child["start_ns"] <= times[4] <= child["end_ns"] <= times[-1] or child["end_ns"] - times[4] < 2_000_000_000:
+        return bad("child observation linkage or SIGWINCH failed")
     def geometry(value):
         keys = ("cols", "rows", "pixel_width", "pixel_height")
         return isinstance(value, dict) and all(
-            type(value.get(k)) is int and 0 < value[k] <= NATIVE_GEOMETRY_MAX for k in keys)
+            type(value.get(k)) is int and (1 if k in ("cols", "rows") else 0) <= value[k] <= NATIVE_GEOMETRY_MAX for k in keys) and "error" in value and value["error"] is None
     initial = native.get("initial")
     if not geometry(initial) or (initial["cols"], initial["rows"]) != (cols, rows):
         return bad("wrong initial native geometry")
+    if any(type(child.get(k)) is not int or child[k] != initial[k] for k in ("pixel_width", "pixel_height")):
+        return bad("child and native pixel geometry mismatch")
     events = native.get("events")
-    if not isinstance(events, list) or len(events) > 4096 or type(native.get("event_count")) is not int or native["event_count"] != len(events):
+    if not isinstance(events, list) or len(events) > 64 or type(native.get("event_count")) is not int or native["event_count"] != len(events):
         return bad("missing or dropped native events")
     previous, observed = times[3], initial
     geometry_keys = ("cols", "rows", "pixel_width", "pixel_height")
     for seq, event in enumerate(events, 1):
-        if not isinstance(event, dict) or type(event.get("seq")) is not int or event["seq"] != seq or not evidence_uint(event.get("t_ns")) or not previous < event["t_ns"] <= times[-1]:
+        if not isinstance(event, dict) or type(event.get("seq")) is not int or event["seq"] != seq or not evidence_uint(event.get("t_ns")) or not previous <= event["t_ns"] <= times[-1]:
             return bad("native sequence/time gap")
         if any(event.get(k) != row[k] for k in ("launch_id", "pane_id")):
             return bad("native event identity mismatch")
-        if event.get("reason") not in ("initial", "window", "monitor", "config") or event.get("outcome") not in ("ok", "noop") or event.get("native_error") is not None:
+        if event.get("reason") not in ("resize",) or event.get("outcome") not in ("ok", "noop") or event.get("native_error") is not None:
             return bad("failed or unrecorded resize")
         if not geometry(event.get("requested")) or not geometry(event.get("observed")):
             return bad("missing resize geometry")
-        if type(event.get("signal_sent")) is not bool or event["signal_sent"]:
-            return bad("startup resize sent SIGWINCH")
+        if event.get("outcome") != "noop" or event.get("signal_sent") is not False:
+            return bad("native signal delivery unproven")
         if any(event["requested"][k] != observed[k] or event["observed"][k] != observed[k] for k in geometry_keys):
             return bad("geometry-changing startup resize")
         previous, observed = event["t_ns"], event["observed"]
@@ -2474,6 +2528,98 @@ def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
 # The C2 smoke's fixed sampling cadence and a physical bound on footprint.
 NATIVE_LAYER_SAMPLE_PERIOD_S = 0.5
 NATIVE_LAYER_MAX_FOOTPRINT_MIB = 1_048_576
+
+NATIVE_RECORD_LIMIT = 64 * 1024
+
+
+def native_json(text: str) -> dict:
+    """Bound and reject duplicate members, nonfinite numbers and deep input."""
+    if len(text.encode("utf-8")) > NATIVE_RECORD_LIMIT:
+        raise ValueError("oversized native evidence")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate native member")
+            result[key] = value
+        return result
+    def nonfinite(value):
+        raise ValueError("nonfinite native value")
+    try:
+        value = json.loads(text, object_pairs_hook=unique, parse_constant=nonfinite)
+    except (RecursionError, OverflowError) as error:
+        raise ValueError("invalid native evidence") from error
+    if not isinstance(value, dict):
+        raise ValueError("native evidence must be an object")
+    return value
+
+
+def collect_native_pty(row: dict, text: str, child_text: str, *, enabled: bool = False) -> dict:
+    """Join one private log record to its owned launch/pane and child session.
+
+    Off returns the original row. Malformed evidence raises ValueError; valid
+    incomplete/error histories are retained for the strict policy to refuse.
+    The caller supplies decimal-string IDs from its spawn handle and list_panes.
+    """
+    if not enabled:
+        return row
+    if len(text.encode("utf-8")) > 1024 * 1024:
+        raise ValueError("oversized native log")
+    lines = [line for line in text.splitlines() if "native_pty=" in line]
+    if len(lines) != 1 or lines[0].count("native_pty=") != 1:
+        raise ValueError("missing or duplicate native record")
+    native = native_json(lines[0].split("native_pty=", 1)[1])
+    child = native_json(child_text)
+    for key in ("launch_id", "pane_id"):
+        identity = row.get(key)
+        if not native_identity(identity) or native.get(key) != identity:
+            raise ValueError("native identity mismatch")
+    if native.get("version") != "native_pty_v1" or native.get("clock") != "CLOCK_UPTIME_RAW" or child.get("clock") != native["clock"] or "child_observation" in native:
+        raise ValueError("native format mismatch")
+    if type(native.get("child_pid")) is not int or native["child_pid"] <= 0 or type(child.get("session_id")) is not int or child["session_id"] != native["child_pid"] or type(child.get("pid")) is not int or child["pid"] <= 0:
+        raise ValueError("child session mismatch")
+    def geometry(value, timed=False):
+        if not isinstance(value, dict) or (timed and not evidence_uint(value.get("t_ns"))):
+            return False
+        if type(value.get("error")) is int:
+            return all(value.get(k) is None for k in ("cols", "rows", "pixel_width", "pixel_height"))
+        return "error" in value and value["error"] is None and all(
+            type(value.get(k)) is int and (1 if k in ("cols", "rows") else 0) <= value[k] <= NATIVE_GEOMETRY_MAX
+            for k in ("cols", "rows", "pixel_width", "pixel_height"))
+    if any(not evidence_uint(native.get(k)) for k in ("created_ns", "recording_start_ns", "recording_end_ns", "event_count", "dropped")) or any(type(native.get(k)) is not bool for k in ("complete", "overflow")) or native.get("initial_stage") != "after_create_before_correction" or not geometry(native.get("initial"), True) or not geometry(native.get("final"), True):
+        raise ValueError("invalid native endpoints")
+    events = native.get("events")
+    if not isinstance(events, list) or len(events) > 64 or native["event_count"] != len(events):
+        raise ValueError("invalid native event count")
+    for seq, event in enumerate(events, 1):
+        if not isinstance(event, dict) or type(event.get("seq")) is not int or event["seq"] != seq or not evidence_uint(event.get("t_ns")) or event.get("reason") != "resize" or event.get("outcome") not in ("ok", "noop", "error") or any(event.get(k) != row[k] for k in ("launch_id", "pane_id")) or "signal_sent" not in event or (event["signal_sent"] is not None and type(event["signal_sent"]) is not bool) or "native_error" not in event or (event["native_error"] is not None and type(event["native_error"]) is not int) or not geometry(event.get("requested")) or not geometry(event.get("observed")):
+            raise ValueError("invalid native event")
+    if any(not evidence_uint(child.get(k)) for k in ("start_ns", "t_ns", "end_ns", "sigwinch")) or any(type(child.get(k)) is not int or not (1 if k in ("cols", "rows") else 0) <= child[k] <= NATIVE_GEOMETRY_MAX for k in ("cols", "rows", "pixel_width", "pixel_height")):
+        raise ValueError("invalid child observation")
+    observation = {"child_observed_ns": child["t_ns"], "start_cols": child["cols"],
+                   "start_rows": child["rows"], "sigwinch_count": child["sigwinch"],
+                   "start_ns": child["start_ns"], "end_ns": child["end_ns"],
+                   "pixel_width": child["pixel_width"], "pixel_height": child["pixel_height"]}
+    return {**row, "start_cols": child["cols"], "start_rows": child["rows"],
+            "child_observed_ns": child["t_ns"],
+            "native_pty": {**native, "child_observation": observation}}
+
+
+def private_native_text(path: Path, limit: int) -> str:
+    """Read a bounded owner-private regular file without following symlinks."""
+    import stat
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > limit:
+            raise ValueError("unsafe native evidence file")
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            data = source.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("oversized native evidence file")
+        return data.decode("utf-8")
+    finally:
+        os.close(fd)
 
 
 def cursor_layer_evidence(data: dict, *, max_footprint_mib: float = 80.0,
@@ -2695,18 +2841,30 @@ def diagnostic_json(path: Path) -> dict:
 def run_evidence_postprocessing(args) -> int:
     """Separate CLI exit path, before builds, platform checks or app launch."""
     reports = []
+    native_log = getattr(args, "startup_native_log", None)
+    child_file = getattr(args, "startup_child_observation", None)
     try:
+        if bool(native_log) != bool(child_file) or (native_log and len(args.startup_input or []) != 1):
+            raise ValueError("native collection needs one row input and both files")
         for path in args.startup_input or []:
             data = diagnostic_json(Path(path))
             workloads = data.get("workloads")
             if not isinstance(workloads, dict) or not isinstance(workloads.get("startup"), dict):
                 raise ValueError("startup input needs workloads.startup")
+            if native_log and sum(len(rows) if isinstance(rows, list) else 2 for rows in workloads["startup"].values()) != 1:
+                raise ValueError("native collection needs exactly one launch row")
             for name, rows in workloads["startup"].items():
                 if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
                     raise ValueError("invalid startup rows")
                 # Export no terminal names, paths, identities or private stderr.
                 if name not in ("kettle", "kettle-a", "kettle-b"):
+                    if native_log:
+                        raise ValueError("native collection requires a Kettle launch row")
                     continue
+                if native_log:
+                    rows = [collect_native_pty(rows[0],
+                        private_native_text(Path(native_log), 1024 * 1024),
+                        private_native_text(Path(child_file), NATIVE_RECORD_LIMIT), enabled=True)]
                 reports.append({"kind": "startup", "rows": [
                     startup_grid_evidence(row, args.startup_grid_policy) for row in rows
                     if not row.get("warmup")]})
@@ -5015,6 +5173,10 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                         help="postprocess retained S1/S2 startup stderr, one file per round")
     parser.add_argument("--startup-started-ns", type=int,
                         help="optional launch clock origin for a single --startup-phase-input")
+    parser.add_argument("--startup-native-log", metavar="FILE",
+                        help="join one private native_pty log to a single retained startup row")
+    parser.add_argument("--startup-child-observation", metavar="FILE",
+                        help="private shell-wrapper JSON for --startup-native-log")
     parser.add_argument("--native-layer-input", nargs="+", metavar="FILE",
                         help="certify retained native cursor layer analysis.json raw evidence")
     parser.add_argument("--native-layer-max-footprint-mib", type=float, default=80.0,
@@ -5040,7 +5202,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     if args.aa and not args.combine:
         parser.error("--aa requires --combine")
     diagnostic = any((args.startup_input, args.startup_phase_input,
-                      args.native_layer_input, args.trace_input))
+                      args.native_layer_input, args.trace_input, args.startup_native_log, args.startup_child_observation))
     if diagnostic:
         if args.combine or args.make_bundle or args.latency_check or args.preflight_only or args.rebuild_latency_probe:
             parser.error("evidence postprocessing cannot be combined with execution modes")

@@ -15547,11 +15547,36 @@ def startup_geometry_metrics(geometry: Dict[str, object]) -> Tuple[float, int]:
     return float(geometry["surface"]["width"]) / scale, int(800.0 * scale / cell_w)
 
 
+
+def startup_evidence_helpers():
+    import importlib.util
+    path = Path(__file__).resolve().parent / "perf" / "macos-standing.py"
+    spec = importlib.util.spec_from_file_location("kettle_startup_evidence", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def default_size_startup_evidence(row: dict, log_text: str, child_text: str) -> dict:
+    helpers = startup_evidence_helpers()
+    phases = helpers.require_pre_launch_startup(log_text)
+    joined = helpers.collect_native_pty(row, log_text, child_text, enabled=True)
+    evidence = helpers.startup_grid_evidence(joined, "native", 100, 30)
+    if evidence["state"] != "supported":
+        raise ValueError("default-window-size native startup acceptance failed")
+    return {"phases": phases, "native": evidence,
+            "child": joined["native_pty"]["child_observation"]}
+
 def run_default_window_size(kettle: str, root: Path) -> Path:
     """Check monitor-fitted defaults and explicit sizing in logical pixels."""
 
-    out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
-    out.mkdir(parents=True, exist_ok=True)
+    if platform.system() == "Darwin":
+        root.mkdir(parents=True, exist_ok=True)
+        out = Path(tempfile.mkdtemp(prefix="default-window-size-", dir=root))
+        out.chmod(0o700)
+    else:
+        out = root / f"default-window-size-{time.strftime('%Y%m%d-%H%M%S')}"
+        out.mkdir(parents=True, exist_ok=True)
     base = [
         "agent-server = full",
         "tab-bar = always",
@@ -15565,15 +15590,63 @@ def run_default_window_size(kettle: str, root: Path) -> Path:
     ]
 
     def launch(label: str, extra: List[str]) -> Dict[str, object]:
+        diagnostic = platform.system() == "Darwin" and label == "explicit"
         cfg = out / f"config-{label}"
+        launch_env = {}
+        child_file = out / "child-observation.json"
+        log_file = out / f"kettle-{label}.log"
+        if diagnostic:
+            out.chmod(0o700)
+            scratch_xdg = out / "xdg"
+            scratch_xdg.mkdir(mode=0o700)
+            observer = out / "child-observer"
+            source = Path(__file__).resolve().parent / "perf" / "macos-standing" / "child-observer.c"
+            subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-o", str(observer), str(source)],
+                           check=True, capture_output=True, timeout=30)
+            observer.chmod(0o700)
+            child_file.unlink(missing_ok=True)
+            extra = [*extra, "login-shell = false", "shell-integration = false"]
+            launch_env = {
+                "RUST_LOG": "warn,kettle::startup=info,kettle::pty_geometry=info",
+                "XDG_CONFIG_HOME": str(scratch_xdg),
+                "KETTLE_SMOKE_REAL_SHELL": str(observer),
+                "KETTLE_S3_CHILD_OBSERVATION": str(child_file),
+            }
+            log_file.touch(mode=0o600)
+            log_file.chmod(0o600)
         cfg.write_text("\n".join(base + extra) + "\n")
-        with LiveKettle(kettle, cfg, out / f"kettle-{label}.log") as live:
+        if diagnostic:
+            cfg.chmod(0o600)
+        started_ns = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW) if diagnostic else None
+        with LiveKettle(kettle, cfg, log_file, extra_env=launch_env) as live:
             panes = live.json_ctl("list_panes").get("panes", [])
             focused = next(p for p in panes if p.get("focused"))
             geometry = live.json_ctl("ui_geometry")
             (out / f"{label}.geometry.json").write_text(json.dumps(geometry, indent=2) + "\n")
             live.screenshot(out / f"{label}.png")
+            startup = {}
+            if diagnostic:
+                helpers = startup_evidence_helpers()
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline:
+                    log_text = helpers.private_native_text(log_file, 1024 * 1024)
+                    if child_file.exists() and "native_pty=" in log_text:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise SystemExit("default-window-size smoke: startup evidence did not finish")
+                # Read again after the native recorder ended; ctl readiness
+                # cannot shorten either the child or native interval.
+                focused = next(p for p in live.json_ctl("list_panes")["panes"] if p.get("focused"))
+                try:
+                    startup = default_size_startup_evidence({
+                        "launch_id": str(live.proc.pid), "pane_id": str(focused["id"]),
+                        "started_ns": started_ns, "cols": int(focused["cols"]), "rows": int(focused["rows"]),
+                    }, log_text, helpers.private_native_text(child_file, 64 * 1024))
+                except ValueError as error:
+                    raise SystemExit("default-window-size smoke: invalid startup evidence") from error
             return {
+                **({"startup": startup} if diagnostic else {}),
                 "cols": int(focused["cols"]),  # type: ignore[index]
                 "rows": int(focused["rows"]),  # type: ignore[index]
                 "surface": geometry["surface"],

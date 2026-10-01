@@ -33,6 +33,8 @@ pub enum Phase {
     FontsEnumerated,
     /// The font preload thread loaded the configured family and finished.
     FontsReady,
+    /// The pre-launch path read a usable display.
+    DisplayRead,
     /// The first pane's shell was spawned.
     PaneSpawned,
     /// winit delivered `Resumed` and the first window's setup begins.
@@ -53,7 +55,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Phase; 15] = [
+    pub const ALL: [Phase; 16] = [
         Phase::Main,
         Phase::RunWith,
         Phase::EventLoopBuilt,
@@ -61,6 +63,7 @@ impl Phase {
         Phase::AppBuilt,
         Phase::FontsEnumerated,
         Phase::FontsReady,
+        Phase::DisplayRead,
         Phase::PaneSpawned,
         Phase::Resumed,
         Phase::FontsJoinStart,
@@ -81,6 +84,7 @@ impl Phase {
             Phase::AppBuilt => "app_built",
             Phase::FontsEnumerated => "fonts_enumerated",
             Phase::FontsReady => "fonts_ready",
+            Phase::DisplayRead => "display_read",
             Phase::PaneSpawned => "pane_spawned",
             Phase::Resumed => "resumed",
             Phase::FontsJoinStart => "fonts_join_start",
@@ -109,6 +113,8 @@ pub enum StartupPath {
     ResumedEarly = 1,
     /// Spawned after the renderer, once the window's size was known.
     AfterRenderer = 2,
+    /// Spawned before AppKit finishes launching.
+    PreLaunch = 3,
 }
 
 impl StartupPath {
@@ -116,6 +122,7 @@ impl StartupPath {
         match self {
             StartupPath::ResumedEarly => "resumed_early",
             StartupPath::AfterRenderer => "after_renderer",
+            StartupPath::PreLaunch => "pre_launch",
         }
     }
 
@@ -123,6 +130,7 @@ impl StartupPath {
         match value {
             1 => Some(StartupPath::ResumedEarly),
             2 => Some(StartupPath::AfterRenderer),
+            3 => Some(StartupPath::PreLaunch),
             _ => None,
         }
     }
@@ -130,6 +138,31 @@ impl StartupPath {
 
 static STAMPS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
 static PATH: AtomicU8 = AtomicU8::new(0);
+// 0 is unavailable, 1 agrees, 2 differs.
+static MONITOR_MATCH: AtomicU8 = AtomicU8::new(0);
+
+/// Why an eligible-looking launch did not spawn before AppKit finished
+/// launching, printed as its own line so a fallback is never silent.
+static PRE_LAUNCH_DECLINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn note_pre_launch_decline(detail: String) {
+    let _ = PRE_LAUNCH_DECLINE.set(detail);
+}
+
+/// The decline line. Parsers of the phase and path lines ignore it.
+fn decline_line(detail: &str) -> String {
+    format!("startup pre_launch declined={detail}")
+}
+
+pub(crate) fn note_monitor_match(matched: bool) {
+    let _ = MONITOR_MATCH.compare_exchange(
+        0,
+        if matched { 1 } else { 2 },
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
 
 /// The raw clock, in nanoseconds.
 pub fn now_ns() -> u64 {
@@ -178,7 +211,11 @@ pub fn note_path(path: StartupPath) {
 
 /// The printed lines for a set of stamps, in the order the phases happened;
 /// unmarked phases are left out.
-fn render(stamps: &[u64; Phase::COUNT], path: Option<StartupPath>) -> Vec<String> {
+fn render(
+    stamps: &[u64; Phase::COUNT],
+    path: Option<StartupPath>,
+    monitor_match: Option<bool>,
+) -> Vec<String> {
     let main = stamps[Phase::Main as usize];
     let mut marked: Vec<&Phase> = Phase::ALL
         .iter()
@@ -202,10 +239,16 @@ fn render(stamps: &[u64; Phase::COUNT], path: Option<StartupPath>) -> Vec<String
             )
         })
         .collect();
-    lines.push(format!(
-        "startup path={}",
-        path.map_or("unknown", StartupPath::name)
-    ));
+    let mut summary = format!("startup path={}", path.map_or("unknown", StartupPath::name));
+    if let Some(matched) = monitor_match {
+        summary.push_str(&format!(" monitor_match={matched}"));
+    }
+    let start = stamps[Phase::FontsJoinStart as usize];
+    let end = stamps[Phase::FontsJoined as usize];
+    if start != 0 && end >= start {
+        summary.push_str(&format!(" fonts_wait_ms={:.2}", (end - start) as f64 / 1e6));
+    }
+    lines.push(summary);
     lines
 }
 
@@ -217,8 +260,20 @@ pub fn flush() {
         return;
     }
     let stamps: [u64; Phase::COUNT] = std::array::from_fn(|i| STAMPS[i].load(Ordering::Relaxed));
-    for line in render(&stamps, StartupPath::from_u8(PATH.load(Ordering::Relaxed))) {
+    let monitor_match = match MONITOR_MATCH.load(Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    };
+    for line in render(
+        &stamps,
+        StartupPath::from_u8(PATH.load(Ordering::Relaxed)),
+        monitor_match,
+    ) {
         log::info!(target: TARGET, "{line}");
+    }
+    if let Some(detail) = PRE_LAUNCH_DECLINE.get() {
+        log::info!(target: TARGET, "{}", decline_line(detail));
     }
 }
 
@@ -236,6 +291,76 @@ impl Drop for FlushOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pre_launch_decline_is_its_own_line() {
+        assert_eq!(
+            decline_line("fit surface=1900x1100 monitor=1024x768 scale=1"),
+            "startup pre_launch declined=fit surface=1900x1100 monitor=1024x768 scale=1"
+        );
+        // Not a phase or path line, so their parsers ignore it.
+        assert!(!decline_line("display").contains("startup phase="));
+        assert!(!decline_line("display").contains("startup path="));
+    }
+
+    /// Every way the early spawn can decline records why, so a fallback is
+    /// never silent in the startup log.
+    #[test]
+    fn every_pre_launch_decline_records_a_reason() {
+        let app_rs = include_str!("app.rs");
+        let body = app_rs
+            .split_once("fn start_first_pane_before_launch(&mut self)")
+            .expect("early spawn")
+            .1
+            .split_once("\n    fn spawn_first_tab(")
+            .expect("end of early spawn")
+            .0;
+        let macos = body
+            .split_once("#[cfg(target_os = \"macos\")]")
+            .expect("macOS body")
+            .1;
+        let declines = macos.matches("decline(").count();
+        let early_returns = macos.matches("return Ok(false);").count();
+        assert_eq!(early_returns, 3);
+        // Three early returns and the fit branch.
+        assert_eq!(declines, 4, "{macos}");
+        for reason in [
+            "\"ineligible\"",
+            "\"display\"",
+            "\"window\"",
+            "\"fit surface=",
+        ] {
+            assert!(macos.contains(reason), "{reason}");
+        }
+    }
+
+    #[test]
+    fn pre_launch_metadata_reports_agreement_and_join_duration() {
+        let mut stamps = [0u64; Phase::COUNT];
+        stamps[Phase::FontsJoinStart as usize] = 1_000_000;
+        stamps[Phase::FontsJoined as usize] = 3_500_000;
+        let summary = render(&stamps, Some(StartupPath::PreLaunch), Some(true))
+            .pop()
+            .unwrap();
+        assert_eq!(
+            summary,
+            "startup path=pre_launch monitor_match=true fonts_wait_ms=2.50"
+        );
+        assert_eq!(StartupPath::from_u8(3), Some(StartupPath::PreLaunch));
+        assert!(
+            render(&stamps, Some(StartupPath::PreLaunch), Some(false))
+                .pop()
+                .unwrap()
+                .contains("monitor_match=false")
+        );
+        stamps[Phase::FontsJoinStart as usize] = 4_000_000;
+        assert!(
+            !render(&stamps, None, None)
+                .pop()
+                .unwrap()
+                .contains("fonts_wait_ms")
+        );
+    }
 
     #[test]
     fn the_first_mark_wins_and_the_clock_moves_forward() {
@@ -262,7 +387,7 @@ mod tests {
         stamps[Phase::Main as usize] = 1_000;
         stamps[Phase::PaneSpawned as usize] = 3_000;
         stamps[Phase::Resumed as usize] = 2_000;
-        let names: Vec<String> = render(&stamps, None)
+        let names: Vec<String> = render(&stamps, None, None)
             .iter()
             .filter_map(|line| line.split_whitespace().nth(1).map(str::to_owned))
             .collect();
@@ -282,7 +407,7 @@ mod tests {
         let mut stamps = [0u64; Phase::COUNT];
         stamps[Phase::Main as usize] = 1_000_000;
         stamps[Phase::FirstFrame as usize] = 251_000_000;
-        let lines = render(&stamps, None);
+        let lines = render(&stamps, None, None);
         assert_eq!(
             lines,
             [
@@ -306,7 +431,10 @@ mod tests {
             .lines()
             .filter_map(|line| line.split_once("kettle::startup: ").map(|(_, rest)| rest))
             .collect();
-        assert_eq!(render(&stamps, Some(StartupPath::ResumedEarly)), expected);
+        assert_eq!(
+            render(&stamps, Some(StartupPath::PreLaunch), Some(true)),
+            expected
+        );
     }
 
     /// Every phase is marked in production code, only the phases with more
@@ -383,6 +511,30 @@ mod tests {
             2,
             "the early and the after-renderer spawn"
         );
+        assert_eq!(count(production, Phase::PaneSpawned), 3);
+        assert_eq!(count(production, Phase::DisplayRead), 1);
+        let pre_launch = production
+            .split_once("fn start_first_pane_before_launch(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        let pre_flat = flat(pre_launch);
+        let pre_order = [
+            pre_flat
+                .find("crate::macos_display::startup_display()")
+                .unwrap(),
+            pre_flat.find(&needle(Phase::DisplayRead)).unwrap(),
+            pre_flat
+                .find("self.prepare_startup_fonts(&mutws,monitor.scaleasf32)")
+                .unwrap(),
+            pre_flat
+                .find("self.spawn_first_tab(&mutws,self.launch_override)")
+                .unwrap(),
+            pre_flat.find(&needle(Phase::PaneSpawned)).unwrap(),
+        ];
+        assert!(pre_order.windows(2).all(|w| w[0] < w[1]));
         assert!(count(production, Phase::WindowRevealed) >= 2);
 
         let at = |text: &str, pattern: &str| {
@@ -399,6 +551,7 @@ mod tests {
             at(run_with, &needle(Phase::EventLoopBuilt)),
             at(run_with, &needle(Phase::ConfigLoaded)),
             at(run_with, &needle(Phase::AppBuilt)),
+            at(run_with, "app.start_first_pane_before_launch()"),
             at(run_with, "event_loop.run_app(&mut app)"),
         ];
         assert!(
@@ -474,7 +627,7 @@ mod tests {
         );
         let order = [
             at(resumed, &needle(Phase::Resumed)),
-            at(resumed, "preload.finish(&self.cfg, startup_scale)"),
+            at(resumed, "self.prepare_startup_fonts(ws, startup_scale)"),
             at(resumed, "self.spawn_first_tab(ws, has_launch_override)"),
             at(resumed, "event_loop.create_window(attrs)"),
         ];

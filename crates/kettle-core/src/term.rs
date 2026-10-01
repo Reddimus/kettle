@@ -4428,6 +4428,8 @@ pub struct Terminal {
     // moving a non-`Option` field out of `&mut self`. Always `Some` during
     // normal operation; only `None` transiently inside `Drop`.
     master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    #[cfg(unix)]
+    startup_geometry: Option<crate::startup_geometry::Trace>,
     /// State shared with an asynchronous ConPTY close. Once the master moves
     /// to that worker, only it may publish `stop`: on older Windows releases
     /// `ClosePseudoConsole` can wait for the reader to drain conout, so a later
@@ -6649,7 +6651,13 @@ impl Terminal {
         // ConPTY's signed COORD and Unix's unsigned winsize have different grid
         // bounds; `native_pty_size` applies the platform contract before the
         // backend sees it. Exact total pixels are preserved on Unix.
+        #[cfg(unix)]
+        let recording_start_ns = crate::startup_geometry::Trace::begin();
         let pair = pty.openpty(native_pty_size(geometry))?;
+        // Observe before command setup or child spawn can correct the PTY.
+        #[cfg(unix)]
+        let startup_geometry =
+            crate::startup_geometry::Trace::start(pair.master.as_raw_fd(), recording_start_ns);
 
         let mut cmd = match argv.split_first() {
             Some((prog, rest)) => {
@@ -8014,6 +8022,8 @@ impl Terminal {
             scrollback_line_limit: scrollback,
             scrollback_byte_limit: scrollback_bytes,
             master: Some(pair.master),
+            #[cfg(unix)]
+            startup_geometry,
             #[cfg(windows)]
             pty_close: None,
             writer: Arc::new(Mutex::new(writer)),
@@ -9193,6 +9203,7 @@ impl Terminal {
         let local_changed = current != desired;
         let resize_native = native_resize_required(self.applied_pty_geometry, desired);
         if !local_changed && !resize_native {
+            self.record_startup_resize(desired, false, &Ok(()));
             return Ok(());
         }
 
@@ -9204,6 +9215,7 @@ impl Terminal {
         } else {
             Ok(())
         };
+        self.record_startup_resize(desired, resize_native, &native_result);
         if native_result.is_ok() {
             // On Windows a pixel-only update deliberately skips
             // ResizePseudoConsole; recording the desired pixels here is safe
@@ -9274,6 +9286,68 @@ impl Terminal {
         self.cols = desired.columns;
         self.rows = desired.rows;
         native_result
+    }
+
+    fn record_startup_resize(&mut self, desired: PtyGeometry, resized: bool, result: &Result<()>) {
+        #[cfg(unix)]
+        if let Some(trace) = self.startup_geometry.as_mut() {
+            use crate::startup_geometry::Outcome;
+            let outcome = if result.is_err() {
+                Outcome::Error
+            } else if resized {
+                Outcome::Ok
+            } else {
+                Outcome::Noop
+            };
+            // The vendored Unix backend formats ioctl errors into anyhow.
+            // -1 means unavailable; never log the free-form error text here.
+            let native_error = result.as_ref().err().map(|error| {
+                error
+                    .downcast_ref::<std::io::Error>()
+                    .and_then(std::io::Error::raw_os_error)
+                    .unwrap_or(-1)
+            });
+            trace.record(
+                self.master.as_ref().and_then(|m| m.as_raw_fd()),
+                native_pty_size(desired),
+                outcome,
+                native_error,
+            );
+        }
+        #[cfg(not(unix))]
+        let _ = (desired, resized, result);
+    }
+
+    /// Link the optional startup diagnostic to the owning UI pane.
+    pub fn link_startup_geometry(&mut self, pane_id: u64) {
+        #[cfg(unix)]
+        if let Some(trace) = self.startup_geometry.as_mut() {
+            trace.link(pane_id, self.child_pid);
+        }
+        #[cfg(not(unix))]
+        let _ = pane_id;
+    }
+
+    /// Finish a diagnostic interval, or return its one remaining wait budget.
+    /// Called before reaping, including for hidden windows. No extra thread.
+    pub fn poll_startup_geometry(&mut self) -> Option<std::time::Duration> {
+        #[cfg(unix)]
+        if let Some(trace) = self.startup_geometry.as_ref() {
+            let wait = trace.remaining();
+            if !wait.is_zero() {
+                return Some(wait);
+            }
+            let alive = self
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.try_wait().ok())
+                .is_some_and(|status| status.is_none());
+            if let Some(mut trace) = self.startup_geometry.take() {
+                trace.finish(self.master.as_ref().and_then(|m| m.as_raw_fd()), alive);
+            }
+        }
+        None
     }
 
     /// Exact text-area pixel dimensions last published to the PTY.
@@ -9471,6 +9545,10 @@ impl Drop for Terminal {
     /// it is sound for it to outlive this `Drop`. Unix uses the same ordering
     /// (master fd close → reader stop) without a platform-specific branch.
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(mut trace) = self.startup_geometry.take() {
+            trace.finish(self.master.as_ref().and_then(|m| m.as_raw_fd()), false);
+        }
         // 1. Let the pump bypass a full parser queue and drain/discard conout
         //    directly for the remainder of teardown.
         self.drain_output.store(true, Ordering::Release);

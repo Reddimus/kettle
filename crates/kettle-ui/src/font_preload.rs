@@ -3,8 +3,8 @@
 //! Enumerating the system fonts is most of the font work before the first
 //! pane can start, and none of it needs a display: only measuring the cell
 //! needs the monitor's scale. `run_with` starts this thread before it builds
-//! the event loop, and the first window joins it in `resumed`, where it only
-//! measures the cell. When the thread cannot start or does not finish, the
+//! the event loop. Window 1 joins it before its pane spawns, before `run_app`
+//! on eligible macOS launches and in `resumed` otherwise. When it fails, the
 //! first window loads the fonts itself, as every later window does.
 
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
