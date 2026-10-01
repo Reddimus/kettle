@@ -527,8 +527,34 @@ compatibility should compare results, analysis, summary and combined JSON and
 Markdown across schemas 1, 2 and 3 when typing memory is absent, with explicit
 checks that still run under `python3 -O`.
 
-The excluded observer pilot is described in the standing README. Reserve an
-owner measurement window; it uses ten balanced on/off pairs per terminal with
+The excluded observer pilot is described in the standing README.
+`--observer-pilot typing|printing|blink --observer-pairs 10` rotates peers and
+balances consecutive arm order. Typing off starts no observer; printing off
+uses readiness, a 5900..6500 ms burst and one query after done; blink off uses
+only boundary queries.
+Off arms alone waive timeline coverage. Equivalence uses only paired Student-t
+95% intervals: +/-1 ms typing, +/-0.5 MiB printing, and both +/-0.01 percentage
+points CPU and +/-0.1/s wakeups for blink. All declared pairs and terminals
+must pass. `--observer-control` reports pilots; combine and A/A refuse them.
+
+`ObserverPilot` fixtures check CLI conflicts, rotation/order/seeds, real
+entry-point metadata with mocked collectors, retained failures/cancellation
+without retries, missing-observer on-arm refusal,
+typing observer omission, sparse observer requests, boundary/query focus and
+lateness, numeric self-cost allowlists, interval bounds, incomplete pairs,
+failed arms, report dispatch and privacy. The native offset parser fixture
+compiles `observer.m` using the existing macOS skip policy and runs only its
+pure `--self-test-offsets` entry. Owned native scratch fixtures also verify
+the pilot self-cost sidecar and sparse launch requests. The parser checks
+strict increasing integers, count
+agreement, the 60000 ms limit and the 64-entry limit.
+`GhosttyUserConfig` checks absent/empty Application Support files, nonempty
+files, symlinks/specials, sealed-state changes, unmeasured peers and fixed
+public refusals. Local paths and content sentinels cannot reach results,
+summary or equivalence output. The Kettle runtime-spool fixture allows only
+empty regular `remote.cmd` and `remote.cmd.lock` files.
+
+For live acceptance, reserve an owner measurement window; it uses ten balanced on/off pairs per terminal with
 the same verified artifact, sealed config and seeds. Both arms are diagnostic.
 The entire 95% paired launch-mean difference interval must fit within +/-1 ms.
 Retain observer/target counters, query durations and every failed attempt. A

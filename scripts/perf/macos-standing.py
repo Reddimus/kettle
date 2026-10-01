@@ -80,6 +80,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -845,6 +846,11 @@ def write_configs(work: Path, kettle_configs: Optional[Dict[str, str]] = None) -
 # and font families are names, not files. record-dir is an output directory.
 CONFIG_RESOLVER = "kettle-declarative-v1"
 CONFIG_MAX_BYTES = 1024 * 1024
+# Kettle creates its remote-command spool and that spool's lock beside its
+# config at startup (kettle-ui app.rs remote watcher, kettle-state
+# remote_command_lock_path). They are runtime state, not configuration. Empty
+# regular files queue no command; anything else could feed one into the pane.
+KETTLE_RUNTIME_FILES = frozenset({"remote.cmd", "remote.cmd.lock"})
 ASSET_MAX_BYTES = 64 * 1024 * 1024
 CONFIG_FILE_KEYS = {"background-image": "asset", "record-dir": "output-directory"}
 # Canonical top-level parse_collect arms. Reject new nonempty keys until their
@@ -1008,13 +1014,23 @@ class ConfigClosure:
     exact files and config bypass arguments are part of this resolver contract.
     User-supplied peer files are not accepted by this harness.
     """
-    def __init__(self, work: Path, configs: Dict[str, str], cwd: Path, environ: Optional[dict] = None):
+    def __init__(self, work: Path, configs: Dict[str, str], cwd: Path, environ: Optional[dict] = None, measured: Sequence[str] = ()):
         self.work, self.cwd = work.resolve(), cwd.resolve()
         if any(c in str(self.work) for c in ("\n", "\r", "\x00")):
             raise ConfigClosureError("config closure: unsupported private path")
         self.environ = dict(os.environ if environ is None else environ)
         self.public, self.local, self.sealed = {}, {}, {}
         self.sources = []
+        self.ghostty_user_state = {}
+        if "ghostty" in measured:
+            home = self.environ.get("HOME")
+            if not home:
+                raise ConfigClosureError("config closure: Ghostty user config would apply")
+            root = Path(home) / "Library/Application Support/com.mitchellh.ghostty"
+            self.ghostty_user_state = {root / name: self._ghostty_state(root / name)
+                                       for name in ("config", "config.ghostty")}
+            self.local["ghostty_user_config"] = {str(path): state
+                                                for path, state in self.ghostty_user_state.items()}
         self.work.chmod(0o700)
         # XDG_CONFIG_HOME also controls Kettle's automatic init.lua discovery.
         self.xdg = self.work / "xdg"
@@ -1087,6 +1103,23 @@ class ConfigClosure:
         self.local["launch"] = {"cwd": str(self.cwd), "xdg": str(self.xdg)}
         self.check()
 
+    @staticmethod
+    def _ghostty_state(path: Path) -> dict:
+        reason = "config closure: Ghostty user config would apply"
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return {"present": False, "size": None, "sha256": None}
+        except OSError:
+            raise ConfigClosureError(reason) from None
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+            raise ConfigClosureError(reason)
+        try:
+            data, _ = config_file_bytes(path, 0)
+        except (OSError, ConfigClosureError):
+            raise ConfigClosureError(reason) from None
+        return {"present": True, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
     def _seal(self, path: Path, limit: int, expected_digest: Optional[str] = None) -> None:
         data, _ = config_file_bytes(path, limit)
         digest = hashlib.sha256(data).hexdigest()
@@ -1101,6 +1134,9 @@ class ConfigClosure:
         return env
 
     def check(self) -> None:
+        for path, sealed in self.ghostty_user_state.items():
+            if self._ghostty_state(path) != sealed:
+                raise ConfigClosureError("config closure: Ghostty user config would apply")
         try:
             # No declared include grammar exists in these generated layouts.
             # Refuse all added entries, including dangling links, before reading.
@@ -1108,8 +1144,16 @@ class ConfigClosure:
             if {p.name for p in self.xdg.iterdir()} != {"kettle", "ghostty"}:
                 raise ConfigClosureError("config closure: undeclared config root")
             for directory, names in expected.items():
-                if directory.is_symlink() or {p.name for p in directory.iterdir()} != names:
+                if directory.is_symlink():
                     raise ConfigClosureError("config closure: undeclared include or init script")
+                present = {p.name for p in directory.iterdir()}
+                runtime = present - names if directory == self.xdg / "kettle" else set()
+                if present - runtime != names or not runtime <= KETTLE_RUNTIME_FILES:
+                    raise ConfigClosureError("config closure: undeclared include or init script")
+                for name in runtime:
+                    info = (directory / name).lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_size:
+                        raise ConfigClosureError("config closure: remote command spool not empty")
             if (self.work / "init.lua").exists() or (self.work / "init.lua").is_symlink():
                 raise ConfigClosureError("config closure: undeclared init script")
             if self.xdg.is_symlink() or self.assets.is_symlink():
@@ -1162,8 +1206,9 @@ def config_campaign_row(closure: ConfigClosure, results: dict, recorder, collect
         row = collect()
         closure.check()
         return row
-    except ConfigClosureError:
-        reason = "config closure: campaign inputs changed"
+    except ConfigClosureError as error:
+        reason = (str(error) if str(error) == "config closure: Ghostty user config would apply"
+                  else "config closure: campaign inputs changed")
         results["meta"]["refusals"].append(reason)
         results["meta"]["countable"] = False
         if row is not None:
@@ -1712,7 +1757,10 @@ class Runner:
         stderr_path = self.work / "terminal.stderr"
         stderr_path.unlink(missing_ok=True)
         stamped = phases and name in self.phases
-        env = {key: value for key, value in os.environ.items() if key != "RUST_LOG"}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("RUST_LOG", "KETTLE_HC_OBSERVER_SELF_COST")}
+        if getattr(self, "observer_pilot", False):
+            env["KETTLE_HC_OBSERVER_SELF_COST"] = "1"
         if self.config_closure is not None:
             env = self.config_closure.launch_environment(env)
         if self.observation_context is not None:
@@ -1748,6 +1796,7 @@ class Runner:
         context, timeline = self.work / "typing-launch.json", self.work / "typing-memory.jsonl"
         floor_mode = name.startswith("floor-")
         cursor_mode = options.get("payload") == "cursor"
+        observer_off = options.get("observer_arm") == "off"
         enable, ack = self.work / "cursor.control", self.work / "cursor.ack"
         exit_context = self.work / "cursor-exit-context.json"
         launch_id = os.urandom(16).hex() if cursor_mode else None
@@ -1759,12 +1808,15 @@ class Runner:
                 "calibration_keys": 6, "warmup": options["warmup"], "keys": options["keys"]})
         receipts = [Path(str(context) + ".observer-" + suffix)
                     for suffix in ("request", "started", "stop", "reaped")]
-        for stale in (log, out, context, timeline, *receipts):
+        for stale in (log, out, context, timeline, Path(str(timeline) + ".self.json"), *receipts):
             stale.unlink(missing_ok=True)
         pending_result = None
         def linked_result(value):
             nonlocal pending_result
             pending_result = value
+            if observer_off and not floor_mode and not cursor_mode and "typing_memory_valid" not in value:
+                value.update(hc.typing_memory_row({}, [], None, None, options.get("sample_ms", 100), {},
+                                                 "observer off (pilot arm)"))
             if cursor_mode and keep:
                 value["cursor_artifacts"] = {kind: {"name": path.name, "sha256": file_sha256(path)}
                     for kind, path in (("probe", keep), ("keyblock", keep.with_suffix(".keyblock.log")),
@@ -1803,12 +1855,12 @@ class Runner:
                         raise ValueError("typing launch window identity mismatch")
                     info = launch_info
                     sample_ms = options.get("sample_ms", 100)
-                    if not cursor_mode:
+                    if not cursor_mode and not observer_off:
                         observer = hc.start_observer(self, process, context, [str(self.probes["observer"]),
                             str(pid), str(info["window_id"]), str(timeline), str(hc.now_ns()),
                             str(sample_ms), str(math.ceil(deadlines["launch_s"] * 1000 / sample_ms))])
                     # Confirm a native query before any probe calibration.
-                    if not cursor_mode and (not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2)):
+                    if not cursor_mode and not observer_off and (not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2)):
                         observer_reason = "typing observer readiness missing"
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     observer_reason = "typing launch context unavailable or invalid"
@@ -1892,9 +1944,11 @@ class Runner:
                     options["warmup"], options["keys"], percentile))
         if not floor_mode and not cursor_mode:
             try:
-                samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
+                samples = [] if observer_off else hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
             except (OSError, ValueError, TypeError) as exc:
                 samples, observer_reason = [], "typing timeline unavailable or invalid"
+            if observer_off:
+                observer_reason = "observer off (pilot arm)"
             row.update(hc.typing_memory_row(probe, samples, pid, info.get("window_id"),
                        options.get("sample_ms", 100), row["tool_artifact"], observer_reason))
             if keep:
@@ -3429,6 +3483,8 @@ def workload_metrics(workload: str, rows: Dict[str, List[dict]],
 
 def analyze(results: dict, names: List[str], ab: bool) -> dict:
     """Per-workload estimates, intervals and comparisons for one session."""
+    if results.get("meta", {}).get("kind") == "observer-pilot":
+        raise ValueError("observer pilot (diagnostic); use --observer-control")
     analysis: Dict[str, dict] = {}
     kettle = names[0]
     unranked = set(results.get("unranked", []))
@@ -4694,6 +4750,96 @@ def start_caffeinate(cleanup: contextlib.ExitStack) -> subprocess.Popen:
     return process
 
 
+def configure_observer_pilot(parser, args, argv):
+    explicit = {item.split("=", 1)[0] for item in argv if item.startswith("--")}
+    if args.observer_pairs < 2:
+        parser.error("--observer-pairs must be at least 2")
+    if not args.observer_pilot:
+        if "--observer-pairs" in explicit:
+            parser.error("--observer-pairs requires --observer-pilot")
+        return
+    workload = {"typing": "latency", "printing": "output-memory", "blink": "blink-window"}[args.observer_pilot]
+    if (args.kettle_b or args.kettle_b_config or args.kettle_variant or args.latency_payload != "block"
+            or args.combine or args.aa or args.observer_control or args.make_bundle or args.latency_check
+            or args.preflight_only or args.rebuild_latency_probe or args.blink_validate_only
+            or args.startup_phases or args.cursor_exit_logs
+            or any((args.startup_input, args.startup_phase_input, args.native_layer_input, args.trace_input))):
+        parser.error("observer pilot is a standalone peer diagnostic with block payload")
+    if "--workloads" in explicit and args.workloads != workload:
+        parser.error("observer pilot requires workload " + workload)
+    round_flags = {"--latency-rounds": args.latency_rounds,
+                   "--output-memory-rounds": args.output_memory_rounds, "--blink-rounds": args.blink_rounds,
+                   "--startup-rounds": args.startup_rounds, "--idle-rounds": args.idle_rounds,
+                   "--flood-rounds": args.flood_rounds, "--vtebench-rounds": args.vtebench_rounds,
+                   "--cursor-rounds": args.cursor_rounds}
+    if args.rounds is not None and args.rounds != args.observer_pairs * 2:
+        parser.error("observer pilot --rounds must equal twice --observer-pairs")
+    if any(flag in explicit for flag in round_flags):
+        parser.error("observer pilot uses --observer-pairs, not per-workload rounds")
+    args.workloads, args.rounds = workload, args.observer_pairs * 2
+    args.latency_floors, args.latency_kettle_opaque = "", False
+
+
+def observer_plan(entries, pairs):
+    for pair in range(pairs):
+        for name in rotated(entries, pair):
+            for order, arm in enumerate(("on", "off") if pair % 2 == 0 else ("off", "on")):
+                yield name, arm, pair, order, SEED * 1000 + pair
+
+
+def run_observer_pilot(results, entries, pairs, collect, closure, recorder, work, out_dir):
+    workload = next(iter(results["meta"]["rounds"]))
+    rows = results["workloads"][workload] = {name: [] for name in entries}
+    for name, arm, pair, order, seed in observer_plan(entries, pairs):
+        timeline = work / ("typing-memory.jsonl" if workload == "latency" else "hc-timeline.jsonl")
+        for stale in (work / "stamp", work / "grid", timeline, Path(str(timeline) + ".self.json")):
+            stale.unlink(missing_ok=True)
+        cancelled = None
+        def attempt():
+            nonlocal cancelled
+            try:
+                row = collect(name, arm, pair, seed)
+            except Exception:
+                row = {"error": "observer pilot collection failed"}
+                # The cause stays private beside the session, never in a row.
+                try:
+                    with (out_dir / f"{workload}-{name}-p{pair}-{arm}.error.txt").open("x") as trace:
+                        traceback.print_exc(file=trace)
+                except OSError:
+                    pass
+            except (KeyboardInterrupt, SystemExit) as error:
+                cancelled = error
+                row = {"error": "observer pilot collection cancelled"}
+            if (workload == "latency" and arm == "on" and row.get("typing_memory_reason") in
+                    ("typing observer readiness missing", "typing timeline unavailable or invalid",
+                     "typing launch context unavailable or invalid")):
+                row["error"] = "observer pilot on arm unavailable"
+            grid, initial = round_grid(work)
+            row = check_grid(row, grid, initial)
+            if grid is None and "error" not in row:
+                row["error"] = "launch/window/grid readiness missing"
+            row.update(observer_arm=arm, observer_pair=pair, observer_order=order,
+                       at=datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+            timeline = work / ("typing-memory.jsonl" if workload == "latency" else "hc-timeline.jsonl")
+            row["observer_cost"] = hc.observer_cost(timeline, arm == "off" and workload == "latency")
+            cost = row["observer_cost"]
+            fields = ("cpu_ns", "wakeups", "query_count")
+            if not (workload == "latency" and arm == "off") and all(cost[k] is not None for k in fields):
+                try:
+                    private_json(out_dir / f"{workload}-{name}-p{pair}-{arm}.self.json", {k: cost[k] for k in fields})
+                except OSError:
+                    pass  # The counters remain in the retained row.
+            return row
+        row = config_campaign_row(closure, results, recorder, attempt)
+        rows[name].append(row)
+        recorder.write()
+        print(f"observer pilot pair {pair} {name} {arm}", flush=True)
+        if cancelled is not None:
+            raise cancelled
+        # The same pause the ordinary loop takes between launches.
+        time.sleep(1.0)
+
+
 def main() -> int:
     with contextlib.ExitStack() as cleanup:
         try:
@@ -4728,8 +4874,10 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--blink-window", type=float, default=6.0, help="blink observation seconds")
     parser.add_argument("--blink-validate-only", action="store_true",
                         help="separate cursor-area capture, no keys or performance session")
-    parser.add_argument("--blink-validation", help="same binary/config/display validation JSON")
-    parser.add_argument("--blink-validation-before", help="prior validation JSON to link a post-set check")
+    parser.add_argument("--blink-validation", action="append", metavar="FILE",
+                        help="same binary/config/display validation JSON; repeat once per A/B side")
+    parser.add_argument("--blink-validation-before", action="append", metavar="FILE",
+                        help="prior validation JSON to link a post-set check; repeat once per A/B side")
     parser.add_argument("--blink-cursor-rect", help="validation crop x,y,width,height in window points")
     parser.add_argument("--blink-shape", help="shipped cursor shape recorded by the owner pilot")
     parser.add_argument("--blink-timeout", type=float, help="shipped blink timeout seconds, 0 for none")
@@ -4792,8 +4940,12 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                         help="put a Kettle binary in an ad-hoc signed copy of the installed app and exit")
     parser.add_argument("--combine", nargs="+", metavar="DIR", help="merge session directories and exit")
     parser.add_argument("--aa", metavar="DIR", help="with --combine: ordinary shared A/A, checked metric by metric")
+    parser.add_argument("--observer-pilot", choices=("typing", "printing", "blink"),
+                        help="diagnostic paired observer on/off launches; never standings or A/A")
+    parser.add_argument("--observer-pairs", type=int, default=10,
+                        help="observer pilot pairs per terminal (default 10, minimum 2)")
     parser.add_argument("--observer-control", metavar="DIR",
-                        help="analyze a complete 30-pair stamp on/off diagnostic; launch nothing")
+                        help="analyze an observer pilot or complete 30-pair stamp diagnostic; launch nothing")
     parser.add_argument("--startup-input", nargs="+", metavar="FILE",
                         help="postprocess retained startup results JSON; launch no app")
     parser.add_argument("--startup-grid-policy", choices=("settled", "child", "native"),
@@ -4813,6 +4965,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--trace-input", nargs="+", metavar="FILE",
                         help="report retained private echo trace capability; launch no app")
     args = parser.parse_args()
+    configure_observer_pilot(parser, args, sys.argv[1:])
     if args.observer_control:
         if args.combine or args.aa or args.make_bundle or args.latency_check or args.preflight_only or args.rebuild_latency_probe or any((args.startup_input, args.startup_phase_input, args.native_layer_input, args.trace_input)):
             parser.error("--observer-control is standalone postprocessing")
@@ -4822,7 +4975,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
             parser.error(str(error))
         out = claim_out_dir(Path(args.out_dir) if args.out_dir else default_out_dir(REPO / "target" / "perf-results" / "observer-control"))
         (out / "observer-equivalence.json").write_text(publication.canonical(report))
-        return 0 if report["phase_attribution_allowed"] else 1
+        return 0 if report.get("equivalent", report.get("phase_attribution_allowed", False)) else 1
     if args.aa and not args.combine:
         parser.error("--aa requires --combine")
     diagnostic = any((args.startup_input, args.startup_phase_input,
@@ -4843,7 +4996,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                                      ("--latency-censor-ms", args.latency_censor_ms, 1, 5000),
                                      ("--latency-warmup", args.latency_warmup, 0, 200),
                                      ("--rounds", args.rounds, 1, 1000)):
-        if value is None:
+        if value is None or (flag == "--rounds" and args.observer_pilot):
             continue
         if value < least:
             parser.error(f"{flag} must be at least {least}")
@@ -4872,6 +5025,19 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         parser.error("--blink-validate-only requires --blink-cursor-rect, --blink-shape and --blink-timeout")
     if args.blink_validation_before and not args.blink_validate_only:
         parser.error("--blink-validation-before requires --blink-validate-only")
+    # A mistyped name would otherwise leave its side quietly unproven.
+    for flag, paths in (("--blink-validation", args.blink_validation),
+                        ("--blink-validation-before", args.blink_validation_before)):
+        for path in paths or []:
+            try:
+                info = Path(path).stat()
+                if stat.S_ISREG(info.st_mode) and info.st_size <= 1024 * 1024:
+                    with open(path, "rb") as stream:
+                        stream.read(1024 * 1024 + 1)
+            except OSError:
+                parser.error(f"{flag} file is unreadable")
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                parser.error(f"{flag} must name a regular file of at most 1 MiB")
     if args.blink_validate_only and (args.combine or args.latency_check or args.make_bundle):
         parser.error("blink validation is a separate preparation invocation")
     if args.combine:
@@ -4902,6 +5068,8 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     if set(floors) - set(LATENCY_FLOORS):
         parser.error(f"unknown latency floors: {', '.join(sorted(set(floors) - set(LATENCY_FLOORS)))}")
     rounds = resolve_rounds(args)
+    if args.observer_pilot:
+        rounds = {workloads[0]: args.observer_pairs * 2}
     offsets = [float(value) for value in args.flood_offsets.split(",") if value]
     unranked: List[str] = []
 
@@ -5034,7 +5202,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         "terminals": names, "skipped": skipped, "unranked": unranked,
         "meta": {
             "statistics_policy": "current",
-            "kind": "observer-control" if args.startup_phases == "b" and workloads == ["startup"] and is_ab(kettle) else "ordinary",
+            "kind": "observer-pilot" if args.observer_pilot else "observer-control" if args.startup_phases == "b" and workloads == ["startup"] and is_ab(kettle) else "ordinary",
             "label": args.label or out_dir.name, "mode": "ab" if is_ab(kettle) else "standing",
             "started": started.isoformat(timespec="seconds"), "date": started.date().isoformat(),
             # countable is final only once every round has run (see
@@ -5068,6 +5236,10 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
             **methods["latency-cursor"], "exit_logs": args.cursor_exit_logs, "exit_contract": cursor.CONTRACT}
     if "latency" in workloads and (args.latency_gap_ms is not None or args.latency_first_gap_ms is not None):
         results["meta"]["latency"].update(methods["latency"])
+    if args.observer_pilot:
+        results["meta"]["observer_pilot"] = {"kind": args.observer_pilot, "pairs": args.observer_pairs,
+                                            "bounds": publication.PILOT_BOUNDS[args.observer_pilot]}
+        results["meta"]["refusals"].append("observer pilot (diagnostic)")
     local_manifest = {"configs": config_record(kettle_configs)[1]}
     if tool_artifacts:
         local_manifest["latency_probe"] = json.loads((tools / "KettleLatencyProbe.build.json").read_text())
@@ -5084,7 +5256,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     with config_work_directory(out_dir) as work:
         write_configs(work, kettle_configs)
         try:
-            closure = ConfigClosure(work, kettle_configs, Path.cwd())
+            closure = ConfigClosure(work, kettle_configs, Path.cwd(), measured=names)
         except ConfigClosureError as error:
             results["meta"]["refusals"].append(str(error))
             recorder.write()
@@ -5095,13 +5267,12 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         recorder.write()
         runner = Runner(probes, work, kettle)
         runner.config_closure = closure
+        runner.observer_pilot = bool(args.observer_pilot)
         runner.phases = stamped
         optional_options = {"activate": not args.no_activate, "settle": args.blink_settle,
                             "window": args.blink_window, "validation": args.blink_validation,
                             "validate_only": args.blink_validate_only, "rect": args.blink_cursor_rect,
                             "before_path": args.blink_validation_before, "sample_ms": args.memory_sample_ms}
-        if args.blink_validation_before:
-            optional_options["before_sha256"] = file_sha256(Path(args.blink_validation_before))
         if set(workloads) & {"output-memory", "blink-window"}:
             results["meta"]["output_blink"] = {"contract": hc.CONTRACT, "sample_ms": args.memory_sample_ms,
                 "settle_s": args.blink_settle, "window_s": args.blink_window,
@@ -5130,7 +5301,24 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         with frame:
             runner.ghostty_frame = frame if isinstance(frame, GhosttyFrame) else None
             try:
-                for workload in workloads:
+                if args.observer_pilot:
+                    workload = workloads[0]
+                    def pilot_collect(name, arm, pair, seed):
+                        options = {"observer_arm": arm}
+                        if workload == "latency":
+                            return runner.latency(name, {**latency_options, **options}, seed,
+                                out_dir / f"{workload}-{name}-p{pair}-{arm}.json")
+                        setup = {"binary_sha256": file_sha256(Path(kettle.get(name) or APPS[name])),
+                            "config_sha256": hashlib.sha256(dumps(closure.public[name]).encode()).hexdigest(),
+                            "display": state["display"], "settle_s": args.blink_settle,
+                            "window_s": args.blink_window, "cursor_rect": args.blink_cursor_rect,
+                            "shape": args.blink_shape, "timeout_s": args.blink_timeout}
+                        return hc.collect(runner, name, workload,
+                            {**optional_options, **options, "disabled": name in args.blink_disabled_default.split(",")},
+                            out_dir / f"{workload}-{name}-p{pair}-{arm}", setup)
+                    run_observer_pilot(results, names, args.observer_pairs, pilot_collect, closure,
+                                       recorder, work, out_dir)
+                for workload in ([] if args.observer_pilot else workloads):
                     entries = workload_entries(workload, names, latency_names, cursor_names)
                     rows: Dict[str, List[dict]] = {name: [] for name in entries}
                     results["workloads"][workload] = rows
@@ -5212,6 +5400,14 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         return 0 if all(not row.get("error") for runs in results["workloads"]["blink-window"].values() for row in runs) else 1
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
+    if args.observer_pilot:
+        recorder.write()
+        report = publication.observer_control(_publication_host(), out_dir)
+        (out_dir / "observer-equivalence.json").write_text(publication.canonical(report))
+        summary = "Observer pilot (diagnostic). Equivalent: " + str(report["equivalent"]).lower()
+        (out_dir / "summary.md").write_text(summary + "\n")
+        print(summary)
+        return 0
     results["meta"]["workload_countable"] = workload_countable(results, results["meta"])
     analysis = analyze(results, names, is_ab(kettle))
     results["meta"]["metric_countable"] = {entry["descriptor"]["id"]: entry["metric_countable"]

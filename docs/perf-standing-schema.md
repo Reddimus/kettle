@@ -164,3 +164,29 @@ or pane/launch mismatch invalidates the stream. Raw input records remain in
 the stderr artifact; `cursor_exit_records` and statistics contain exits only.
 A legacy stream without capability remains unavailable. A capable empty or
 partial stream fails.
+
+## Observer pilots
+
+Diagnostic sessions use `meta.kind = "observer-pilot"`, `countable: false` and
+`meta.observer_pilot = {kind, pairs, bounds}`. `kind` is typing, printing or
+blink. Rows carry `observer_arm` on/off, zero-based `observer_pair`, and
+`observer_order` 0/1 within that terminal's pair. Every attempt is retained.
+Off printing/blink rows carry `coverage_waived: "observer-pilot off arm"`;
+query lateness, focus and boundary checks still apply. Typing off memory is
+unavailable with reason "observer off (pilot arm)".
+
+Pilot rows alone carry `observer_cost`: observer `cpu_ns`, `wakeups`,
+`query_count`, `query_duration_median_ms`, `query_duration_max_ms`,
+`deadline_lateness_max_ms`, `target_cpu_delta_ns` and `target_wakeups_delta`.
+Unavailable counters are null; typing off observer counters/count are zero.
+The native observer writes a bounded `.self.json` sidecar only in pilot mode.
+
+`observer-equivalence.json` reports per-terminal metric differences on minus
+off with paired Student-t 95% intervals, valid-pair counts, invalid-pair
+counts by public reason, descriptive per-arm medians and self-cost/query
+summaries. Bounds are +/-1 ms launch mean for typing, +/-0.5 MiB
+`printing_mib`, and both +/-0.01 percentage points `cpu_percent` and +/-0.1/s
+`wakeups_per_second` for blink. Fewer valid pairs than declared means
+"insufficient valid pairs". Overall equivalence needs every terminal to pass.
+Ordinary analysis, combine and A/A cannot consume these sessions. The startup
+stamp observer-control report retains its existing contract.
