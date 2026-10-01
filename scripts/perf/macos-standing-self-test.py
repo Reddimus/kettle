@@ -6978,8 +6978,12 @@ class ObserverPilot(unittest.TestCase):
         class Prepared(Exception): pass
         for kind, workload in [('typing', 'latency'), ('printing', 'output-memory'), ('blink', 'blink-window')]:
             args = ['standing', '--observer-pilot', kind, '--no-build', '--peers', '', '--kettle', 'fixture', '--allow-bare']
+            # The typing pilot checks the prepared probe first; a runner
+            # without one (CI) must still reach the selection under test.
             with patch.object(sys, 'argv', args), patch.object(sys, 'platform', 'darwin'), \
                  patch.object(standing, 'require_bundles'), \
+                 patch.object(standing, 'probe_lock', return_value=contextlib.nullcontext()), \
+                 patch.object(standing, 'validate_latency_probe'), \
                  patch.object(standing, 'resolve_rounds', wraps=standing.resolve_rounds) as resolve, \
                  patch.object(standing, 'latency_entries', wraps=standing.latency_entries) as entries, \
                  patch.object(standing, 'build_probes', side_effect=Prepared), contextlib.redirect_stderr(io.StringIO()):
