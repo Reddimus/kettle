@@ -29,8 +29,18 @@ answer confirm dialogs. Text-input overlays with a selection (palette, search,
 layout picker) step with `Ctrl+j`/`Ctrl+k` (or `Ctrl+n`/`Ctrl+p`) so plain
 letters keep typing. Turn it off with `vim-menu-nav = false`.
 
-Every change applies **immediately** and is written to your config file (shown
-by `kettle --config-path`), so it survives restarts. There's nothing to "save".
+Changes are written to your config file, shown by `kettle --config-path`. Most
+apply immediately. GPU changes apply after restarting Kettle. Completion changes
+apply to new shells. Opacity, background type, and blur may need a new window.
+The footer shows dependencies for the focused row and pending changes. Notes
+keep reserved space below scrolling fields in short windows.
+
+Labels and display values use sentence case. Theme and GPU names retain their
+spelling. Quantities use a space before the unit, for example `13 pt`, `6 px`,
+`120 MB`, `24 h`, and `10 s`. Percentages use `99%`. Config tokens do not change.
+All categories share a label column with a two-cell gap before values. Narrow
+panels shorten labels and values separately with an ellipsis. Category names
+have two spaces between them; an underline marks the selected category.
 
 ## What's in the panel
 
@@ -43,10 +53,10 @@ by `kettle --config-path`), so it survives restarts. There's nothing to "save".
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
 | Window padding | `window-padding-x` | 0–40 px |
-| Cursor shape | `cursor-style` | block · beam · underline |
-| Cursor blink | `cursor-blink` | on / off |
+| Cursor shape | `cursor-style` | Block · Bar · Underline |
+| Cursor blink | `cursor-blink` | On / Off |
 | Stop blinking after | `cursor-blink-timeout` | 0–3600 s in 5 s steps; `0` never stops. Dimmed while blink is off |
-| Show pane titlebars | `show-titlebar` | on / off |
+| Show pane titlebars | `show-titlebar` | On / Off |
 
 **Background** — options that don't apply to the chosen type are dimmed
 and skipped; the page dims its backdrop so the **live** wallpaper previews around
@@ -54,35 +64,35 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 
 | Option | Config key | Notes |
 |---|---|---|
-| Background | `background-type` | solid color · image · **starfield** (zero-config animated) · transparent |
+| Background | `background-type` | Solid color · Image · Starfield (animated) · Transparent |
 | Image file | `background-image` | the wallpaper path — **editable inline** here (Enter to open the prompt, type a path, Enter to save). Only for `image` |
-| Animation | `background-animation` | always (default) · when focused · off — how a starfield / animated image plays |
-| Chrome bar color | `chrome-background` | theme · auto (from wallpaper) · black · white |
+| Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays |
+| Interface bar color | `chrome-background` | Theme · Automatic (from wallpaper) · Black · White |
 
 **Behavior**
 
 | Option | Config key | Notes |
 |---|---|---|
-| Scrollbar | `scrollbar` | hidden · auto · always |
-| Completion overlay (new shells) | `completion-overlay` | automatic · off; applies to shells started afterwards |
+| Scrollbar | `scrollbar` | Hidden · Automatic · Always |
+| Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |
-| Bell | `bell` | off · visual · attention · both |
+| Bell | `bell` | Off · Visual flash · Attention · Visual flash and attention |
 | Scrollback lines | `scrollback` | 0–100000 |
-| Scrollback MB | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
-| Copy on select | `copy-on-select` | on / off |
-| Hide mouse while typing | `mouse-hide-while-typing` | on / off |
-| Focus mode | `focus` | click · follows-mouse · system |
-| Updates | `update-policy` | off · notify · install automatically (default: auto) |
-| Update check (hours) | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
-| Vim menu navigation | `vim-menu-nav` | on / off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
+| Scrollback memory | `scrollback-bytes` | 0–1024 MB; 0 disables the byte cap |
+| Copy on selection | `copy-on-select` | On / Off |
+| Hide mouse while typing | `mouse-hide-while-typing` | On / Off |
+| Focus mode | `focus` | Click to focus · Follows mouse · System default |
+| Updates | `update-policy` | Off · Notify · Install automatically (config default: `auto`) |
+| Update check interval | `update-check-interval-hours` | 1–720 h — how often the background check runs (default 24 = daily) |
+| Vim menu navigation | `vim-menu-nav` | On / Off — hjkl & friends in menus/overlays (see [Navigating](#navigating)) |
 
 **Search**
 
 | Option | Config key | Notes |
 |---|---|---|
-| Wrap at boundaries | `search-wrap` | on / off — when on, Next after the last result wraps to the first (and Previous wraps in reverse) |
+| Wrap at boundaries | `search-wrap` | On / Off — when on, Next after the last result wraps to the first (and Previous wraps in reverse) |
 | Case mode | `search-case-sensitive` | **Smart** (ignore case until uppercase) · **Match** (always case-sensitive) · **Ignore** (always case-insensitive) |
-| Invert default direction | `invert-search` | on / off — flips `Enter` to backward and `Shift+Enter` to forward; explicit Next / Previous do not change |
+| Invert default direction | `invert-search` | On / Off — flips `Enter` to backward and `Shift+Enter` to forward; explicit Next / Previous do not change |
 
 These are the same persistent controls shown in the `Ctrl+Shift+F` bottom bar.
 The bar also has Previous, Next, and Close controls and a grapheme-aware editor.
@@ -99,26 +109,28 @@ history-scan bounds, and TUI behavior.
 
 | Option | Config key | Notes |
 |---|---|---|
-| Tab bar | `tab-bar` | off · auto (only with >1 tab) · always |
-| Tab bar position | `tab-bar-position` | top · bottom (left/right vertical bars are config-only for now) |
-| Min tab width | `tab-min-width` | 40–600 px — tabs fill the bar evenly; below this the bar overflows and scrolls |
-| Scrollable tab bar | `scroll-tabbar` | on / off — `‹ ›` arrows + wheel scroll when tabs overflow |
-| Close button on tabs | `close-button-on-tab` | on / off |
-| Detachable tabs | `detachable-tabs` | on / off — drag a tab out into its own window |
+| Tab bar | `tab-bar` | Hidden · Automatic (multiple tabs) · Always |
+| Tab bar position | `tab-bar-position` | Top · Bottom (Left/Right vertical bars are config-only for now) |
+| Minimum tab width | `tab-min-width` | 40–600 px — tabs fill the bar evenly; below this the bar overflows and scrolls |
+| Scrollable tab bar | `scroll-tabbar` | On / Off — `‹ ›` arrows + wheel scroll when tabs overflow |
+| Close button on tabs | `close-button-on-tab` | On / Off |
+| Detachable tabs | `detachable-tabs` | On / Off — drag a tab out into its own window |
 
 **Graphics**
 
 | Option | Config key | Notes |
 |---|---|---|
-| GPU preference | `gpu-power-preference` | automatic · low power / integrated · high performance. **Default: automatic** (platform/wgpu chooses). Pick `high` only when you want dedicated-GPU render headroom on hybrid hardware |
+| GPU preference | `gpu-power-preference` | Automatic · Low power (integrated) · High performance. **Default: Automatic** (platform/wgpu chooses). Pick `high` only when you want dedicated-GPU render headroom on hybrid hardware |
 | GPU device | `gpu-device-id` + `gpu-vendor-id` + `gpu-name` | Pin a *specific* detected GPU, or **Automatic**. The list is the GPUs found on this machine |
-| GPU backend | `gpu-backend` | automatic · DirectX 12 · Vulkan · Metal · OpenGL |
-| Force software rendering | `gpu-force-software` | on / off — debugging fallback (slow) |
+| GPU backend | `gpu-backend` | Automatic · DirectX 12 · Vulkan · Metal · OpenGL |
+| Force software rendering | `gpu-force-software` | On / Off — debugging fallback (slow) |
 
 A footer line shows the **Active GPU** in use right now. GPU changes take effect
 on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
-a *"⚠ restart kettle to apply"* hint after you change one. This is kettle's
-cross-platform answer to the OS GPU picker, and unlike it, it persists per-app.
+"Restart Kettle or open a new window to apply pending changes." after an edit
+that requires a restart or new window. The pending flag does not record the
+cause, so selecting Graphics does not change that wording. GPU edits require a
+full restart. The GPU picker persists the selection per application.
 
 **Keybinds** — rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new

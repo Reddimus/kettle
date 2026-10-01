@@ -14564,9 +14564,12 @@ impl App {
         let cats = crate::settings::categories(&self.gpu_choices);
         let cat = nav.category.min(cats.len().saturating_sub(1));
         let active = &cats[cat];
+        let (label_cols, value_cols) = crate::settings::column_widths(&self.cfg, &cats);
         let fld = nav.field.min(active.fields.len().saturating_sub(1));
         Some(kettle_render::SettingsOverlay {
             categories: cats.iter().map(|c| c.name.to_string()).collect(),
+            label_cols,
+            value_cols,
             active_category: cat,
             rows: active
                 .fields
@@ -14584,7 +14587,7 @@ impl App {
                         format!("{input}\u{258f}")
                     } else if i == fld && nav.capturing {
                         // Capture prompt on the focused keybind row.
-                        "‹press a chord — Esc to cancel›".to_string()
+                        "Press a chord, Esc to cancel".to_string()
                     } else {
                         crate::settings::read(&self.cfg, f)
                     };
@@ -14597,32 +14600,26 @@ impl App {
                 .collect(),
             focused_row: fld,
             vim_nav: self.cfg.vim_menu_nav,
-            // On the Graphics tab, show which GPU is LIVE right now
-            // (from the shared adapter) plus a restart hint when a GPU setting
-            // was changed this session (it applies on next launch).
-            footer_note: if active.name == "Graphics" {
-                let active_line = self
-                    .gpu
-                    .as_ref()
-                    .map(|g| {
-                        let i = g.adapter_info();
-                        format!("Active GPU: {} ({}, {})", i.name, i.kind, i.backend)
-                    })
-                    .unwrap_or_else(|| "Active GPU: (initializing)".to_string());
-                if ws.settings_restart_pending {
-                    Some(format!("{active_line}    •    ⚠ restart kettle to apply"))
-                } else {
-                    Some(active_line)
-                }
-            } else if active.name == "Appearance" {
-                Some(
-                    "Blur: enable Window blur; alpha backgrounds need opacity below 100% (new windows)"
-                        .to_string(),
+            footer_note: {
+                let active_gpu = (active.name == "Graphics").then(|| {
+                    self.gpu
+                        .as_ref()
+                        .map(|g| {
+                            let i = g.adapter_info();
+                            let backend = match i.backend {
+                                "DX12" => "DirectX 12",
+                                "GL" => "OpenGL",
+                                backend => backend,
+                            };
+                            format!("Active GPU: {} ({}, {})", i.name, i.kind, backend)
+                        })
+                        .unwrap_or_else(|| "Active GPU: Initializing".to_string())
+                });
+                settings_footer_note(
+                    active_gpu.as_deref(),
+                    active.fields.get(fld).map(|f| f.key),
+                    ws.settings_restart_pending,
                 )
-            } else if ws.settings_restart_pending {
-                Some("Restart Kettle or open a new window to apply pending changes".to_string())
-            } else {
-                None
             },
         })
     }
@@ -24209,6 +24206,30 @@ fn to_mods(m: ModifiersState) -> Mods {
     out
 }
 
+/// A row hint adds dependencies or timing, rather than repeating the control.
+fn settings_footer_note(
+    active_gpu: Option<&str>,
+    focused_key: Option<&str>,
+    restart_pending: bool,
+) -> Option<String> {
+    let mut notes = Vec::new();
+    if let Some(gpu) = active_gpu {
+        notes.push(gpu);
+    }
+    match focused_key {
+        Some("window-blur" | "background-opacity") => {
+            notes.push("Blur requires background opacity below 100%. Applies to new windows.");
+        }
+        Some("completion-overlay") => notes.push("Applies to new shells."),
+        _ => {}
+    }
+    if restart_pending {
+        // The pending flag records no cause, even when Graphics is selected.
+        notes.push("Restart Kettle or open a new window to apply pending changes.");
+    }
+    (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
 /// How the in-settings text-edit buffer is shown in the value column. A short
 /// string shows whole; a long one shows an ellipsized tail, so a long path
 /// stays readable (the caret/end is what matters while typing) without
@@ -25640,6 +25661,9 @@ impl App {
         overlay.settings.is_some().hash(&mut hasher);
         if let Some(settings) = overlay.settings.as_ref() {
             settings.categories.hash(&mut hasher);
+            settings.label_cols.hash(&mut hasher);
+            settings.value_cols.hash(&mut hasher);
+            settings.footer_note.hash(&mut hasher);
             settings.active_category.hash(&mut hasher);
             settings.focused_row.hash(&mut hasher);
             for row in &settings.rows {
@@ -43590,5 +43614,60 @@ mod keyboard_selection_tests {
             src.contains("self.extend_selection_to_cursor(ws, area, bcode)"),
             "Shift+right-click must record the right button as gesture owner"
         );
+    }
+}
+
+#[cfg(test)]
+mod settings_footer_text_tests {
+    use super::settings_footer_note;
+
+    #[test]
+    fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
+        assert_eq!(settings_footer_note(None, Some("font-size"), false), None);
+        assert_eq!(
+            settings_footer_note(None, Some("completion-overlay"), false).as_deref(),
+            Some("Applies to new shells.")
+        );
+        assert_eq!(
+            settings_footer_note(None, Some("window-blur"), false).as_deref(),
+            Some("Blur requires background opacity below 100%. Applies to new windows.")
+        );
+    }
+
+    #[test]
+    fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
+        let pending = "Restart Kettle or open a new window to apply pending changes.";
+        for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
+            let note = settings_footer_note(None, Some(key), true).unwrap();
+            assert_eq!(note.lines().last(), Some(pending));
+            // A blur/opacity edit followed by a switch to Graphics has the
+            // same pending flag; an active adapter does not identify its cause.
+            let gpu_note = settings_footer_note(
+                Some("Active GPU: Test (Integrated, Vulkan)"),
+                Some(key),
+                true,
+            )
+            .unwrap();
+            assert_eq!(gpu_note.lines().last(), Some(pending));
+            assert!(!gpu_note.contains("GPU changes"));
+        }
+        assert_eq!(
+            settings_footer_note(Some("Active GPU: Test"), Some("gpu"), false).as_deref(),
+            Some("Active GPU: Test")
+        );
+    }
+
+    #[test]
+    fn pending_changes_are_never_hidden_by_an_appearance_hint() {
+        let note = settings_footer_note(None, Some("window-blur"), true).unwrap();
+        assert!(note.contains("below 100%"));
+        assert!(note.contains("pending changes"));
+        let note = settings_footer_note(
+            Some("Active GPU: Test (Integrated, Vulkan)"),
+            Some("gpu"),
+            true,
+        )
+        .unwrap();
+        assert!(note.contains("Restart Kettle or open a new window to apply pending changes."));
     }
 }

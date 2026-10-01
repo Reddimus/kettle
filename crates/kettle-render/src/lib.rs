@@ -1146,6 +1146,9 @@ pub struct ConfirmDialogButton {
 pub struct SettingsOverlay {
     /// Category tab names, in order.
     pub categories: Vec<String>,
+    /// Longest label and display value across all settings categories.
+    pub label_cols: usize,
+    pub value_cols: usize,
     /// Index of the active category (its tab is highlighted, its rows shown).
     pub active_category: usize,
     /// The active category's fields as (label, current-value) pairs.
@@ -1156,7 +1159,7 @@ pub struct SettingsOverlay {
     /// when the setting is on.
     pub vim_nav: bool,
     /// An optional contextual note shown below the keybind footer, e.g. the
-    /// Graphics category's "Active GPU: … • ⚠ restart kettle to apply". `None`
+    /// Graphics category's active GPU and pending restart. `None`
     /// on categories that don't need it.
     pub footer_note: Option<String>,
 }
@@ -7787,13 +7790,13 @@ impl Renderer {
             // Panel width fits the content but never exceeds the surface
             // (so it stays usable in a small window); see the matching clamp
             // in the quad/area pass below.
-            let panel_w = (settings_panel_cols(lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+            let panel_w = (settings_panel_cols(set, lines) * cw + 48.0).min((sw - 40.0).max(120.0));
             let row_h = ch + 6.0;
             for (i, line) in lines.iter().enumerate() {
                 let buf = &mut self.settings_buffers[i];
                 buf.set_metrics(metrics);
                 let text_w = (panel_w - 32.0).max(cw);
-                let fitted = settings_fit_line(line, panel_w, cw);
+                let fitted = settings_fit_display_line(set, i, line, panel_w, cw);
                 buf.set_size(Some(text_w), Some(row_h));
                 buf.set_wrap(Wrap::None);
                 // Moving the focused row only changes 2 of N lines (the old/new
@@ -8898,6 +8901,26 @@ impl Renderer {
             menu_q.push(rect(px, py + panel_h - 2.0, panel_w, 2.0, acc, 1.0));
             menu_q.push(rect(px, py, 2.0, panel_h, acc, 1.0));
             menu_q.push(rect(px + panel_w - 2.0, py, 2.0, panel_h, acc, 1.0));
+            if layout.first_line <= 1 && 1 < layout.first_line + layout.visible_lines {
+                let strip_cols = ((panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
+                let visible_cols = if display_width(&lines[1]) > strip_cols {
+                    strip_cols.saturating_sub(1)
+                } else {
+                    strip_cols
+                };
+                let (col, width) = settings_tab_span(set, set.active_category);
+                let visible_width = (col + width).min(visible_cols).saturating_sub(col);
+                if visible_width > 0 {
+                    menu_q.push(rect(
+                        px + 16.0 + col as f32 * cw,
+                        py + 12.0 + (1 - layout.first_line) as f32 * row_h + row_h - 2.0,
+                        visible_width as f32 * cw,
+                        2.0,
+                        acc,
+                        1.0,
+                    ));
+                }
+            }
             // Focused field-row highlight.
             let hi_line = SETTINGS_FIELD_START + set.focused_row;
             let hi_y = py + 12.0 + (hi_line - layout.first_line) as f32 * row_h;
@@ -8906,13 +8929,7 @@ impl Renderer {
             // A disabled field row (inapplicable to the current state) renders
             // dimmed, blended halfway toward the panel background.
             let dim = color::dim(sfg, theme.background);
-            for (visible_index, (i, _line)) in lines
-                .iter()
-                .enumerate()
-                .skip(layout.first_line)
-                .take(layout.visible_lines)
-                .enumerate()
-            {
+            for (visible_index, i) in settings_painted_lines(&layout) {
                 if i >= self.settings_buffers.len() {
                     break;
                 }
@@ -8946,8 +8963,10 @@ impl Renderer {
             if layout.first_line > 0 {
                 menu_q.push(rect(cue_x, py + 2.0, cue_w, 3.0, acc, 0.85));
             }
-            if layout.first_line + layout.visible_lines < lines.len() {
-                menu_q.push(rect(cue_x, py + panel_h - 5.0, cue_w, 3.0, acc, 0.85));
+            let content_end = SETTINGS_FIELD_START + set.rows.len() + 2;
+            if layout.first_line + layout.visible_lines < content_end {
+                let content_bottom = py + 12.0 + layout.visible_lines as f32 * row_h;
+                menu_q.push(rect(cue_x, content_bottom - 3.0, cue_w, 3.0, acc, 0.85));
             }
         }
 
@@ -11778,7 +11797,7 @@ async fn resolve_adapter(
 const SETTINGS_FIELD_START: usize = 3;
 
 /// Build the settings panel's display lines from its renderer-side
-/// projection — title, a category-tab strip (active category bracketed), a
+/// projection — title, a category-tab strip (active category underlined), a
 /// blank, one `"▸ label        value"` line per field (focused row marked),
 /// a blank, then the keybind footer. Shared by the buffer-text pass and the
 /// quad/area pass so they stay in lockstep (same row count + ordering).
@@ -11790,23 +11809,11 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
         .map(|s| s.as_str())
         .unwrap_or("");
     lines.push(format!("⚙  Settings — {cat}"));
-    let tabs: Vec<String> = set
-        .categories
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            if i == set.active_category {
-                format!("[ {c} ]")
-            } else {
-                format!("  {c}  ")
-            }
-        })
-        .collect();
-    lines.push(tabs.join(" "));
+    lines.push(set.categories.join("  "));
     lines.push(String::new());
     for (i, row) in set.rows.iter().enumerate() {
         let mark = if i == set.focused_row { "▸ " } else { "  " };
-        lines.push(format!("{mark}{:<26}{}", row.label, row.value));
+        lines.push(settings_row_line(set, row, mark, usize::MAX));
     }
     lines.push(String::new());
     // Advertise the vim keys when `vim-menu-nav` is on.
@@ -11815,30 +11822,104 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
     } else {
         "↑↓ field    ←→ change    Tab category    Esc close".to_string()
     });
-    // Contextual note (e.g. the Graphics "Active GPU … • restart to apply"
-    // line). Appended last so it never shifts the focused-row highlight.
+    // Notes follow navigation in the buffer list. The vertical layout pins
+    // them below the scrolling content, keeping pending changes visible.
     if let Some(note) = &set.footer_note {
-        lines.push(note.clone());
+        lines.extend(note.lines().map(str::to_string));
     }
     lines
 }
 
-/// The settings panel's width in character cells — the widest
-/// display line, so the panel grows to fit its content. Both render passes
-/// (buffer-text + quad/highlight) call this off the same `settings_display_lines`
-/// output, keeping them in lockstep. Fitting the widest line keeps the ~50-cell
-/// footer hint and the in-capture "‹press a chord — Esc to cancel›" prompt (~59
-/// cells with its 26-col label) from clipping or wrapping. A 44-col floor keeps
-/// a sparse category from rendering as a cramped panel.
-fn settings_panel_cols(lines: &[String]) -> f32 {
-    use unicode_width::UnicodeWidthStr;
-    lines.iter().map(|l| l.width()).max().unwrap_or(44).max(44) as f32
+/// Stable panel width from all-category column budgets and category names.
+/// Contextual notes and capture prompts fit to it instead of moving the panel.
+fn settings_panel_cols(set: &SettingsOverlay, lines: &[String]) -> f32 {
+    let columns = 2 + set.label_cols + SETTINGS_COLUMN_GAP + set.value_cols;
+    let tabs = lines.get(1).map_or(0, |line| display_width(line));
+    let footer = if set.vim_nav {
+        "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close"
+    } else {
+        "↑↓ field    ←→ change    Tab category    Esc close"
+    };
+    columns.max(tabs).max(display_width(footer)).max(44) as f32
 }
 
 fn settings_fit_line(line: &str, panel_w: f32, cell_w: f32) -> String {
     let text_w = (panel_w - 32.0).max(cell_w);
     let text_cols = (text_w / cell_w).floor().max(1.0) as usize;
     fit_single_line_label(line, text_cols)
+}
+
+const SETTINGS_COLUMN_GAP: usize = 2;
+const SETTINGS_TAB_GAP: usize = 2;
+
+fn settings_row_line(
+    set: &SettingsOverlay,
+    row: &SettingsRow,
+    mark: &str,
+    text_cols: usize,
+) -> String {
+    let fixed_cols = display_width(mark) + SETTINGS_COLUMN_GAP;
+    if text_cols <= fixed_cols + 1 {
+        return fit_single_line_label(&format!("{mark}{}", row.value), text_cols);
+    }
+    let available = text_cols - fixed_cols;
+    // Keep at least half the remaining cells for a long value. Labels shrink
+    // first when the longest value fits, then both columns ellipsize.
+    let reserved_value = set.value_cols.max(1).min(available / 2);
+    let label_cols = set.label_cols.min(available - reserved_value);
+    let value_cols = available - label_cols;
+    let label = fit_single_line_label(&row.label, label_cols);
+    let value = settings_fit_value(&row.value, value_cols);
+    format!(
+        "{mark}{label}{}{value}",
+        " ".repeat(label_cols - display_width(&label) + SETTINGS_COLUMN_GAP),
+    )
+}
+
+fn settings_fit_value(value: &str, cols: usize) -> String {
+    if value.ends_with('▏') && display_width(value) > cols {
+        if cols <= 1 {
+            return take_cols_back(value, cols);
+        }
+        // An inline editor must retain the current input end and its caret.
+        format!("…{}", take_cols_back(value, cols - 1))
+    } else {
+        fit_single_line_label(value, cols)
+    }
+}
+
+fn settings_fit_display_line(
+    set: &SettingsOverlay,
+    line_index: usize,
+    line: &str,
+    panel_w: f32,
+    cell_w: f32,
+) -> String {
+    if let Some(row) = line_index
+        .checked_sub(SETTINGS_FIELD_START)
+        .and_then(|i| set.rows.get(i))
+    {
+        let text_cols = ((panel_w - 32.0).max(cell_w) / cell_w).floor().max(1.0) as usize;
+        let mark = if line_index == SETTINGS_FIELD_START + set.focused_row {
+            "▸ "
+        } else {
+            "  "
+        };
+        settings_row_line(set, row, mark, text_cols)
+    } else {
+        settings_fit_line(line, panel_w, cell_w)
+    }
+}
+
+fn settings_tab_span(set: &SettingsOverlay, index: usize) -> (usize, usize) {
+    let start = set
+        .categories
+        .iter()
+        .take(index)
+        .map(|c| display_width(c) + SETTINGS_TAB_GAP)
+        .sum();
+    let width = set.categories.get(index).map_or(0, |c| display_width(c));
+    (start, width)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -11850,6 +11931,8 @@ struct SettingsPanelLayout {
     row_h: f32,
     first_line: usize,
     visible_lines: usize,
+    note_first: usize,
+    note_lines: usize,
 }
 
 /// Live settings geometry shared with `ui_geometry` diagnostics. The renderer
@@ -11860,7 +11943,16 @@ pub struct SettingsPanelGeometry {
     pub rect: Rect4,
     pub focused_rect: Rect4,
     pub first_line: usize,
+    /// Visible scrolling content lines, excluding the pinned notes.
     pub visible_lines: usize,
+}
+
+/// The text-area pass and hit testing share this mapping from painted slots
+/// to buffer indices. Notes occupy the last slots, outside field scrolling.
+fn settings_painted_lines(layout: &SettingsPanelLayout) -> impl Iterator<Item = (usize, usize)> {
+    (layout.first_line..layout.first_line + layout.visible_lines)
+        .chain(layout.note_first..layout.note_first + layout.note_lines)
+        .enumerate()
 }
 
 fn settings_panel_layout(
@@ -11872,14 +11964,21 @@ fn settings_panel_layout(
     surface_h: f32,
 ) -> SettingsPanelLayout {
     let row_h = cell_h + 6.0;
-    let panel_w = (settings_panel_cols(lines) * cell_w + 48.0).min((surface_w - 40.0).max(120.0));
+    let panel_w =
+        (settings_panel_cols(set, lines) * cell_w + 48.0).min((surface_w - 40.0).max(120.0));
     let panel_h = (lines.len() as f32 * row_h + 24.0).min((surface_h - 40.0).max(80.0));
     let px = ((surface_w - panel_w) * 0.5).max(0.0);
     let py = ((surface_h - panel_h) * 0.5).max(0.0);
-    let visible_lines =
+    let capacity =
         (((panel_h - 24.0).max(row_h) / row_h).floor() as usize).clamp(1, lines.len().max(1));
-    let focused_line = (SETTINGS_FIELD_START + set.focused_row).min(lines.len().saturating_sub(1));
-    let max_first = lines.len().saturating_sub(visible_lines);
+    let content_end = (SETTINGS_FIELD_START + set.rows.len() + 2).min(lines.len());
+    // Keep one slot for the focused field. At extreme heights, retain the
+    // last notes first because the pending notice is appended last.
+    let note_lines = (lines.len() - content_end).min(capacity.saturating_sub(1));
+    let note_first = lines.len() - note_lines;
+    let visible_lines = (capacity - note_lines).min(content_end);
+    let focused_line = (SETTINGS_FIELD_START + set.focused_row).min(content_end.saturating_sub(1));
+    let max_first = content_end.saturating_sub(visible_lines);
     let first_line = focused_line
         .saturating_add(1)
         .saturating_sub(visible_lines)
@@ -11892,6 +11991,8 @@ fn settings_panel_layout(
         row_h,
         first_line,
         visible_lines,
+        note_first,
+        note_lines,
     }
 }
 
@@ -11965,30 +12066,26 @@ pub fn settings_hit_test(
     if rel < 0.0 {
         return SettingsHit::Inert;
     }
-    let line = layout.first_line + (rel / row_h) as usize;
-    if line >= layout.first_line + layout.visible_lines {
+    let slot = (rel / row_h) as usize;
+    let Some((_, line)) = settings_painted_lines(&layout).nth(slot) else {
         return SettingsHit::Inert;
-    }
-    if line >= lines.len() {
-        return SettingsHit::Inert;
-    }
+    };
     // Line 1 is the category-tab strip.
     if line == 1 {
         let text_left = px + 16.0;
-        let mut col = 0usize;
-        for (i, c) in set.categories.iter().enumerate() {
-            let seg = if i == set.active_category {
-                format!("[ {c} ]")
-            } else {
-                format!("  {c}  ")
-            };
-            let w = display_width(&seg);
+        let strip_cols = ((panel_w - 32.0).max(cw) / cw).floor().max(1.0) as usize;
+        let visible_cols = if display_width(&lines[1]) > strip_cols {
+            strip_cols.saturating_sub(1) // the ellipsis is inert
+        } else {
+            strip_cols
+        };
+        for i in 0..set.categories.len() {
+            let (col, width) = settings_tab_span(set, i);
             let start = text_left + col as f32 * cw;
-            let end = text_left + (col + w) as f32 * cw;
+            let end = text_left + (col + width).min(visible_cols) as f32 * cw;
             if cursor_x >= start && cursor_x < end {
                 return SettingsHit::Category(i);
             }
-            col += w + 1; // + the joining space
         }
         return SettingsHit::Inert;
     }
@@ -20986,6 +21083,8 @@ mod settings_hit_test_tests {
     fn overlay() -> SettingsOverlay {
         SettingsOverlay {
             categories: vec!["Appearance".into(), "Graphics".into(), "Behavior".into()],
+            label_cols: 31,
+            value_cols: 25,
             active_category: 0,
             rows: vec![
                 SettingsRow {
@@ -21010,11 +21109,215 @@ mod settings_hit_test_tests {
     fn geom(set: &SettingsOverlay, cw: f32, ch: f32, sw: f32, sh: f32) -> (f32, f32, f32) {
         let lines = settings_display_lines(set);
         let row_h = ch + 6.0;
-        let panel_w = (settings_panel_cols(&lines) * cw + 48.0).min((sw - 40.0).max(120.0));
+        let panel_w = (settings_panel_cols(set, &lines) * cw + 48.0).min((sw - 40.0).max(120.0));
         let panel_h = (lines.len() as f32 * row_h + 24.0).min((sh - 40.0).max(80.0));
         let px = ((sw - panel_w) * 0.5).max(0.0);
         let py = ((sh - panel_h) * 0.5).max(0.0);
         (px, py, row_h)
+    }
+
+    #[test]
+    fn long_labels_have_a_fixed_gap_and_columns_do_not_shift_with_categories() {
+        let mut set = overlay();
+        set.rows[0].label = "Completion overlay (new shells)".into();
+        set.rows[0].value = "Automatic".into();
+        let lines = settings_display_lines(&set);
+        assert!(lines[SETTINGS_FIELD_START].contains("(new shells)  Automatic"));
+        let value_col = super::display_width(
+            lines[SETTINGS_FIELD_START]
+                .split("Automatic")
+                .next()
+                .unwrap(),
+        );
+        set.active_category = 1;
+        set.rows[0].label = "GPU device".into();
+        let lines = settings_display_lines(&set);
+        assert_eq!(
+            super::display_width(
+                lines[SETTINGS_FIELD_START]
+                    .split("Automatic")
+                    .next()
+                    .unwrap()
+            ),
+            value_col
+        );
+    }
+
+    #[test]
+    fn narrow_rows_keep_label_gap_and_value_with_unicode_ellipsis() {
+        let mut set = overlay();
+        set.rows[0].label = "Completion overlay (new shells)".into();
+        set.rows[0].value = "Automatic".into();
+        let line = super::settings_fit_display_line(&set, SETTINGS_FIELD_START, "", 208.0, 8.0);
+        assert!(line.contains("…  Automatic"), "{line}");
+        assert!(super::display_width(&line) <= 22);
+        set.rows[0].label = "界界界界界界界界界界界界界界界界".into();
+        set.rows[0].value = "A very long value with 界".into();
+        for cols in 1..70 {
+            let line = super::settings_row_line(&set, &set.rows[0], "▸ ", cols);
+            assert!(super::display_width(&line) <= cols, "{cols}: {line}");
+        }
+    }
+
+    #[test]
+    fn tab_text_and_hit_regions_are_stable_and_clipped_tabs_are_inert() {
+        let mut set = overlay();
+        let text = settings_display_lines(&set)[1].clone();
+        assert_eq!(text, "Appearance  Graphics  Behavior");
+        set.active_category = 1;
+        assert_eq!(settings_display_lines(&set)[1], text);
+        let (px, py, row_h) = geom(&set, 8.0, 16.0, 208.0, 600.0);
+        let y = py + 12.0 + row_h * 1.5;
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 208.0, 600.0, px + 16.0 + 9.5 * 8.0, y),
+            SettingsHit::Category(0)
+        );
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 208.0, 600.0, px + 16.0 + 11.0 * 8.0, y),
+            SettingsHit::Inert
+        );
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 208.0, 600.0, px + 16.0 + 16.5 * 8.0, y),
+            SettingsHit::Inert
+        );
+    }
+
+    #[test]
+    fn switching_categories_with_long_notes_keeps_the_panel_x_and_width() {
+        let mut set = overlay();
+        let before = settings_panel_geometry(&set, 8.0, 16.0, 1200.0, 900.0).rect;
+        set.active_category = 1;
+        set.footer_note = Some("Active GPU: A much longer GPU name than the old Appearance footer (Integrated, Vulkan)\nRestart Kettle or open a new window to apply pending changes.".into());
+        let after = settings_panel_geometry(&set, 8.0, 16.0, 1200.0, 900.0).rect;
+        assert_eq!((before.0, before.2), (after.0, after.2));
+        let lines = settings_display_lines(&set);
+        assert_eq!(
+            lines.last().unwrap(),
+            "Restart Kettle or open a new window to apply pending changes."
+        );
+    }
+
+    #[test]
+    fn pending_notice_is_painted_in_a_284_pixel_graphics_window() {
+        let mut set = overlay();
+        set.active_category = 1;
+        set.rows = (0..4)
+            .map(|i| SettingsRow {
+                label: format!("Graphics {i}"),
+                value: "Automatic".into(),
+                disabled: false,
+            })
+            .collect();
+        let pending = "Restart Kettle or open a new window to apply pending changes.";
+        set.footer_note = Some(format!("Active GPU: Test (Integrated, Vulkan)\n{pending}"));
+        for focused in 0..4 {
+            set.focused_row = focused;
+            assert_notes_are_painted(&set, 284.0, &["Active GPU: Test", pending]);
+        }
+    }
+
+    #[test]
+    fn contextual_and_pending_notes_are_painted_while_fields_scroll() {
+        let mut set = overlay();
+        set.rows = (0..12)
+            .map(|i| SettingsRow {
+                label: format!("Appearance {i}"),
+                value: "On".into(),
+                disabled: false,
+            })
+            .collect();
+        let context = "Blur requires background opacity below 100%. Applies to new windows.";
+        let pending = "Restart Kettle or open a new window to apply pending changes.";
+        set.footer_note = Some(format!("{context}\n{pending}"));
+        for focused in 0..12 {
+            set.focused_row = focused;
+            assert_notes_are_painted(
+                &set,
+                200.0,
+                &["Blur requires background opacity below 100%.", pending],
+            );
+        }
+    }
+
+    fn assert_notes_are_painted(set: &SettingsOverlay, surface_h: f32, notes: &[&str]) {
+        let lines = settings_display_lines(set);
+        let layout = settings_panel_layout(set, &lines, 8.0, 16.0, 1200.0, surface_h);
+        // This is the iterator used by the live TextArea pass, not a search
+        // of all display strings. Check glyph placement against its clip.
+        let painted: Vec<_> = super::settings_painted_lines(&layout).collect();
+        for note in notes {
+            let &(slot, index) = painted
+                .iter()
+                .find(|&&(_, index)| lines[index].starts_with(note))
+                .unwrap_or_else(|| panic!("notice not painted at height {surface_h}: {note}"));
+            let y = layout.py + 12.0 + slot as f32 * layout.row_h;
+            assert!(y + 3.0 + 16.0 <= layout.py + layout.panel_h);
+            assert!(y + 3.0 + 16.0 <= surface_h);
+            let fitted =
+                super::settings_fit_display_line(set, index, &lines[index], layout.panel_w, 8.0);
+            assert!(fitted.starts_with(note), "notice clipped: {fitted}");
+            assert_eq!(
+                settings_hit_test(
+                    set,
+                    8.0,
+                    16.0,
+                    1200.0,
+                    surface_h,
+                    layout.px + 40.0,
+                    y + 11.0
+                ),
+                SettingsHit::Inert
+            );
+        }
+        let focused = SETTINGS_FIELD_START + set.focused_row;
+        let &(slot, _) = painted
+            .iter()
+            .find(|&&(_, i)| i == focused)
+            .expect("focused field painted");
+        let y = layout.py + 12.0 + slot as f32 * layout.row_h;
+        assert!(y + layout.row_h <= layout.py + layout.panel_h);
+        assert_eq!(
+            settings_hit_test(
+                set,
+                8.0,
+                16.0,
+                1200.0,
+                surface_h,
+                layout.px + 40.0,
+                y + 11.0
+            ),
+            SettingsHit::Field(set.focused_row)
+        );
+    }
+
+    #[test]
+    fn inline_edits_keep_the_tail_and_caret_when_the_value_is_ellipsized() {
+        let mut set = overlay();
+        set.rows[0].label = "Image file".into();
+        set.rows[0].value = "/a/very/long/path/with/a/wide/界/wallpaper.png▏".into();
+        for cols in 6..70 {
+            let line = super::settings_row_line(&set, &set.rows[0], "▸ ", cols);
+            assert!(line.ends_with('▏'), "{cols}: {line}");
+            assert!(super::display_width(&line) <= cols);
+        }
+    }
+
+    #[test]
+    fn a_clipped_tab_ellipsis_cannot_switch_categories() {
+        let set = overlay();
+        let (px, py, row_h) = geom(&set, 8.0, 16.0, 208.0, 600.0);
+        assert_eq!(
+            settings_hit_test(
+                &set,
+                8.0,
+                16.0,
+                208.0,
+                600.0,
+                px + 16.0 + 16.5 * 8.0,
+                py + 12.0 + row_h * 1.5
+            ),
+            SettingsHit::Inert,
+        );
     }
 
     #[test]
@@ -21058,11 +21361,16 @@ mod settings_hit_test_tests {
         let set = overlay();
         let (px, py, row_h) = geom(&set, 8.0, 16.0, 800.0, 600.0);
         let y = py + 12.0 + row_h * 1.5; // line 1 = tab strip
-        // Tab 0 "[ Appearance ]" starts at text_left = px + 16.
+        // Tab 0 "Appearance" starts at text_left = px + 16.
         let hit0 = settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, px + 16.0 + 4.0, y);
         assert_eq!(hit0, SettingsHit::Category(0));
-        // Tab 1 "  Graphics  " begins after tab0 (14 cols) + 1 separator = col 15.
-        let x1 = px + 16.0 + (15.0 + 3.0) * 8.0;
+        // The two-space gap must stay inert rather than selecting a tab.
+        assert_eq!(
+            settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, px + 16.0 + 11.0 * 8.0, y),
+            SettingsHit::Inert
+        );
+        // Tab 1 "Graphics" begins after tab0 (10 cols) + 2 spaces = col 12.
+        let x1 = px + 16.0 + (12.0 + 3.0) * 8.0;
         assert_eq!(
             settings_hit_test(&set, 8.0, 16.0, 800.0, 600.0, x1, y),
             SettingsHit::Category(1)
@@ -22120,45 +22428,28 @@ mod run_attrs_tests {
 
 #[cfg(test)]
 mod settings_panel_cols_tests {
-    use super::settings_panel_cols;
-    use unicode_width::UnicodeWidthStr;
-
-    // The settings panel must be wide enough for its two widest lines, the
-    // footer hint and the in-capture chord prompt. Both exceed the 44-col
-    // floor, so a panel fixed at 44 cols would cut off "Esc close" and the end
-    // of the capture prompt.
-    #[test]
-    fn settings_panel_fits_footer_and_capture_prompt() {
-        let footer = "↑↓ field    ←→ change    Tab category    Esc close";
-        // 26-col left-padded label + the capture-mode value (see app.rs).
-        let capture = format!(
-            "▸ {:<26}{}",
-            "Split right", "‹press a chord — Esc to cancel›"
-        );
-        let cols = settings_panel_cols(&[
-            footer.to_string(),
-            capture.clone(),
-            "  Font size".to_string(),
-        ]);
-        assert!(
-            cols as usize >= footer.width(),
-            "panel ({cols}) clips footer ({})",
-            footer.width()
-        );
-        assert!(
-            cols as usize >= capture.width(),
-            "panel ({cols}) clips capture prompt ({})",
-            capture.width()
-        );
-        // The footer alone already exceeds the 44-col floor.
-        assert!(footer.width() > 44, "regression-guard premise broke");
-    }
+    use super::{SettingsOverlay, settings_display_lines, settings_panel_cols};
 
     #[test]
-    fn settings_panel_has_a_floor() {
-        // A hypothetical sparse category never renders narrower than 44 cols.
-        assert_eq!(settings_panel_cols(&["x".to_string()]) as usize, 44);
-        assert_eq!(settings_panel_cols(&[]) as usize, 44);
+    fn contextual_notes_do_not_move_the_panel() {
+        let mut set = SettingsOverlay {
+            categories: vec!["Appearance".into(), "Graphics".into()],
+            label_cols: 31,
+            value_cols: 40,
+            active_category: 0,
+            rows: vec![],
+            focused_row: 0,
+            vim_nav: false,
+            footer_note: None,
+        };
+        let cols = settings_panel_cols(&set, &settings_display_lines(&set));
+        assert_eq!(cols as usize, 75);
+        set.active_category = 1;
+        set.footer_note = Some("A very long active GPU note that must fit without moving the value column across category switches".into());
+        assert_eq!(
+            settings_panel_cols(&set, &settings_display_lines(&set)),
+            cols
+        );
     }
 }
 

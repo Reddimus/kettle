@@ -211,12 +211,12 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     // key (CONFIG.md's authoritative spelling) rather than the
                     // `cursor-shape` back-compat alias, so the overlay persists
                     // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
-                    // agree. `beam` stays as the user-facing value (accepted as
-                    // the legacy alias for `bar`).
+                    // agree. Persist `beam`, the legacy alias for `bar`, while
+                    // the display label is `Bar`.
                     "Cursor shape",
                     "cursor-style",
                     &["block", "beam", "underline"],
-                    &["block", "beam (bar)", "underline"],
+                    &["Block", "Bar", "Underline"],
                 ),
                 toggle("Cursor blink", "cursor-blink"),
                 // Seconds without typing before the blink rests on a visible
@@ -244,29 +244,25 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "background-type",
                     &["solid", "image", "starfield", "transparent"],
                     &[
-                        "solid color",
-                        "image",
-                        "starfield (animated)",
-                        "transparent",
+                        "Solid color",
+                        "Image",
+                        "Starfield (animated)",
+                        "Transparent",
                     ],
                 ),
-                text(
-                    "Image file",
-                    "background-image",
-                    "(set a path — e.g. ~/wall.png)",
-                ),
+                text("Image file", "background-image", "Enter an image path"),
                 choice(
                     // `always` is listed first because it is the default.
                     "Animation",
                     "background-animation",
                     &["always", "when-focused", "off"],
-                    &["always", "when focused", "off"],
+                    &["Always", "When focused", "Off"],
                 ),
                 choice(
-                    "Chrome bar color",
+                    "Interface bar color",
                     "chrome-background",
                     &["theme", "auto", "black", "white"],
-                    &["theme", "auto (from wallpaper)", "black", "white"],
+                    &["Theme", "Automatic (from wallpaper)", "Black", "White"],
                 ),
             ],
         },
@@ -277,13 +273,13 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "Scrollbar",
                     "scrollbar",
                     &["never", "auto", "always"],
-                    &["hidden", "auto", "always"],
+                    &["Hidden", "Automatic", "Always"],
                 ),
                 choice(
-                    "Completion overlay (new shells)",
+                    "Completion overlay",
                     "completion-overlay",
                     &["auto", "off"],
-                    &["automatic", "off"],
+                    &["Automatic", "Off"],
                 ),
                 // Width of the pronounced overlay scrollbar.
                 number("Scrollbar width", "scrollbar-width", 2, 40, 2, "px"),
@@ -291,20 +287,25 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "Bell",
                     "bell",
                     &["off", "visual", "attention", "both"],
-                    &["off", "visual flash", "attention", "visual + attention"],
+                    &[
+                        "Off",
+                        "Visual flash",
+                        "Attention",
+                        "Visual flash and attention",
+                    ],
                 ),
                 number("Scrollback lines", "scrollback", 0, 100_000, 1_000, ""),
-                number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB"),
-                toggle("Copy on select", "copy-on-select"),
+                number("Scrollback memory", "scrollback-bytes", 0, 1024, 10, "MB"),
+                toggle("Copy on selection", "copy-on-select"),
                 toggle("Hide mouse while typing", "mouse-hide-while-typing"),
                 choice(
                     "Updates",
                     "update-policy",
                     &["off", "notify", "auto"],
-                    &["off", "notify", "install automatically"],
+                    &["Off", "Notify", "Install automatically"],
                 ),
                 number(
-                    "Update check (hours)",
+                    "Update check interval",
                     "update-check-interval-hours",
                     1,
                     720,
@@ -317,7 +318,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "Focus mode",
                     "focus",
                     &["click", "sloppy", "system"],
-                    &["click to focus", "follows mouse", "system default"],
+                    &["Click to focus", "Follows mouse", "System default"],
                 ),
             ],
         },
@@ -343,15 +344,15 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "Tab bar",
                     "tab-bar",
                     &["off", "auto", "always"],
-                    &["off", "auto (>1 tab)", "always"],
+                    &["Hidden", "Automatic (multiple tabs)", "Always"],
                 ),
                 choice(
                     "Tab bar position",
                     "tab-bar-position",
                     &["top", "bottom"],
-                    &["top", "bottom"],
+                    &["Top", "Bottom"],
                 ),
-                number("Min tab width", "tab-min-width", 40, 600, 10, "px"),
+                number("Minimum tab width", "tab-min-width", 40, 600, 10, "px"),
                 toggle("Scrollable tab bar", "scroll-tabbar"),
                 toggle("Close button on tabs", "close-button-on-tab"),
                 toggle("Detachable tabs", "detachable-tabs"),
@@ -366,7 +367,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "GPU preference",
                     "gpu-power-preference",
                     &["auto", "low", "high"],
-                    &["automatic", "low power / integrated", "high performance"],
+                    &["Automatic", "Low power (integrated)", "High performance"],
                 ),
                 // Tier B: pin a specific detected GPU (or Automatic).
                 choice_owned("GPU device", "gpu", gpu_values, gpu_labels),
@@ -375,7 +376,7 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "GPU backend",
                     "gpu-backend",
                     &["auto", "dx12", "vulkan", "metal", "gl"],
-                    &["automatic", "DirectX 12", "Vulkan", "Metal", "OpenGL"],
+                    &["Automatic", "DirectX 12", "Vulkan", "Metal", "OpenGL"],
                 ),
                 toggle("Force software rendering", "gpu-force-software"),
             ],
@@ -401,16 +402,16 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
 }
 
 /// Read a field's current value from `cfg`, formatted for display next to its
-/// label (e.g. `"14pt"`, `"auto"`, `"on"`). Returns a best-effort string; an
-/// unknown key (catalogue/Config drift) yields a fallback such as `"off"`, `""`,
+/// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`). Returns a best-effort string; an
+/// unknown key (catalogue/Config drift) yields a fallback such as `"Off"`, `""`,
 /// or `"—"` rather than panicking.
 pub fn read(cfg: &Config, field: &Field) -> String {
     match &field.kind {
         FieldKind::Toggle => {
             if read_bool(cfg, field.key) {
-                "on".to_string()
+                "On".to_string()
             } else {
-                "off".to_string()
+                "Off".to_string()
             }
         }
         FieldKind::Choice { values, labels } => {
@@ -423,7 +424,11 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                 .position(|v| *v == cur)
                 .and_then(|i| labels.get(i))
                 .map(|label| label.to_string())
-                .unwrap_or_else(|| cur.clone())
+                .unwrap_or_else(|| match (field.key, cur.as_str()) {
+                    ("tab-bar-position", "left") => "Left".to_string(),
+                    ("tab-bar-position", "right") => "Right".to_string(),
+                    _ => cur.clone(),
+                })
         }
         FieldKind::ChoiceOwned { values, labels } => {
             let cur = read_choice(cfg, field.key);
@@ -448,28 +453,28 @@ pub fn read(cfg: &Config, field: &Field) -> String {
             // quantity invites users to impose a finite cap without realising
             // what they give up.
             if field.key == "scrollback" && value == 0 {
-                "infinite".to_string()
+                "Infinite".to_string()
             } else if field.key == "cursor-blink-timeout" && value == 0 {
-                "never".to_string()
+                "Never".to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes == 0 {
-                "no cap".to_string()
+                "No cap".to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes < 1_000_000 {
-                "<1MB".to_string()
+                "<1 MB".to_string()
             } else {
-                format!("{value}{suffix}")
+                format_number(value, suffix)
             }
         }
         FieldKind::Keybind { action } => {
             // Reverse-look-up the chord currently bound to this action in the
             // effective keymap. Shows the first match (an action may have
-            // several bindings); "unbound" if none.
+            // several bindings); "Unbound" if none.
             match kettle_config::Action::from_name(action) {
                 Some(a) => cfg
                     .keybinds
                     .iter()
                     .find(|(_, v)| **v == a)
                     .map(|(t, _)| t.label())
-                    .unwrap_or_else(|| "unbound".to_string()),
+                    .unwrap_or_else(|| "Unbound".to_string()),
                 None => "—".to_string(),
             }
         }
@@ -484,6 +489,42 @@ pub fn read(cfg: &Config, field: &Field) -> String {
     }
 }
 
+fn format_number(value: i64, suffix: &str) -> String {
+    if suffix.is_empty() || suffix == "%" {
+        format!("{value}{suffix}")
+    } else {
+        format!("{value} {suffix}")
+    }
+}
+
+/// Stable column widths from every category, including unselected choices.
+pub fn column_widths(cfg: &Config, cats: &[Category]) -> (usize, usize) {
+    use unicode_width::UnicodeWidthChar;
+    let width = |text: &str| text.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    let mut label_cols = 0;
+    let mut value_cols = width("Press a chord, Esc to cancel");
+    for field in cats.iter().flat_map(|cat| &cat.fields) {
+        label_cols = label_cols.max(width(field.label));
+        value_cols = value_cols.max(width(&read(cfg, field)));
+        match &field.kind {
+            FieldKind::Choice { labels, .. } => {
+                for label in *labels {
+                    value_cols = value_cols.max(width(label));
+                }
+            }
+            FieldKind::ChoiceOwned { labels, .. } => {
+                for label in labels {
+                    value_cols = value_cols.max(width(label));
+                }
+            }
+            FieldKind::Number { max, suffix, .. } => {
+                value_cols = value_cols.max(width(&format_number(*max, suffix)));
+            }
+            _ => {}
+        }
+    }
+    (label_cols, value_cols)
+}
 /// Compute the new on-disk value when the user nudges `field` by `dir`
 /// (`+1` = right/increase, `-1` = left/decrease, `0` = toggle/activate).
 /// Returns the string to hand to `persist_pref(field.key, _)`.
@@ -791,6 +832,122 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn display_choices_use_sentence_case_without_changing_tokens() {
+        let mut cfg = Config::default();
+        cfg.window_blur = false;
+        for cat in categories(&[]) {
+            for field in &cat.fields {
+                if let FieldKind::Choice { values, labels } = &field.kind {
+                    assert_eq!(values.len(), labels.len());
+                    for label in labels.iter().filter(|_| field.key != "theme") {
+                        assert!(
+                            label.chars().next().is_some_and(char::is_uppercase),
+                            "{label}"
+                        );
+                    }
+                    if field.key != "theme" {
+                        for (token, label) in values.iter().zip(*labels) {
+                            if *token == "auto" && field.key != "update-policy" {
+                                assert!(label.starts_with("Automatic"), "{}: {label}", field.key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(read(&cfg, &toggle("Window blur", "window-blur")), "Off");
+        assert_eq!(
+            next_value(&cfg, &toggle("Window blur", "window-blur"), 0),
+            "true"
+        );
+    }
+
+    #[test]
+    fn display_units_have_spaces_and_keep_config_serialization() {
+        for (suffix, expected) in [
+            ("pt", "13 pt"),
+            ("px", "13 px"),
+            ("MB", "13 MB"),
+            ("h", "13 h"),
+            ("s", "13 s"),
+            ("%", "13%"),
+            ("", "13"),
+        ] {
+            assert_eq!(format_number(13, suffix), expected);
+        }
+        assert_eq!(write_number("scrollback-bytes", 120, "MB"), "120MB");
+        assert_eq!(write_number("background-opacity", 99, "%"), "0.99");
+    }
+
+    #[test]
+    fn column_widths_include_every_category_choice_and_gpu_name() {
+        let gpus = [(
+            "8086:9a49:GPU".into(),
+            "An unusually long detected GPU name (Integrated)".into(),
+        )];
+        let cats = categories(&gpus);
+        let (labels, values) = column_widths(&Config::default(), &cats);
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(
+            labels,
+            cats.iter()
+                .flat_map(|c| &c.fields)
+                .map(|f| f.label.width())
+                .max()
+                .unwrap()
+        );
+        assert!(values >= gpus[0].1.width());
+        let mut cats = cats;
+        cats[0].fields.push(toggle(
+            "A future label longer than every existing label",
+            "window-blur",
+        ));
+        assert!(column_widths(&Config::default(), &cats).0 > labels);
+    }
+
+    #[test]
+    fn formatted_values_keep_sentinels_and_saved_gpu_names() {
+        let mut cfg = Config::default();
+        let cats = categories(&[]);
+        let field = |key| {
+            cats.iter()
+                .flat_map(|cat| &cat.fields)
+                .find(|f| f.key == key)
+                .unwrap()
+        };
+        cfg.font_size = 13.0;
+        cfg.background_opacity = 0.99;
+        cfg.scrollback_bytes = 120_000_000;
+        cfg.cursor_blink_timeout = 10;
+        cfg.update_check_interval_hours = 24;
+        assert_eq!(read(&cfg, field("font-size")), "13 pt");
+        assert_eq!(read(&cfg, field("background-opacity")), "99%");
+        assert_eq!(read(&cfg, field("scrollback-bytes")), "120 MB");
+        assert_eq!(read(&cfg, field("cursor-blink-timeout")), "10 s");
+        assert_eq!(read(&cfg, field("update-check-interval-hours")), "24 h");
+        cfg.scrollback = kettle_config::INFINITE_SCROLLBACK;
+        cfg.scrollback_bytes = 0;
+        cfg.cursor_blink_timeout = 0;
+        assert_eq!(read(&cfg, field("scrollback")), "Infinite");
+        assert_eq!(read(&cfg, field("scrollback-bytes")), "No cap");
+        assert_eq!(read(&cfg, field("cursor-blink-timeout")), "Never");
+        cfg.scrollback_bytes = 500_000;
+        assert_eq!(read(&cfg, field("scrollback-bytes")), "<1 MB");
+        cfg.gpu_name = "llvmpipe (LLVM 19.1.7)".into();
+        assert_eq!(
+            read(&cfg, field("gpu")),
+            "llvmpipe (LLVM 19.1.7) (not detected)"
+        );
+        cfg.tab_bar = kettle_config::TabBarMode::Off;
+        cfg.scrollbar = ScrollbarMode::Never;
+        assert_eq!(read(&cfg, field("tab-bar")), "Hidden");
+        assert_eq!(read(&cfg, field("scrollbar")), "Hidden");
+        assert_eq!(next_value(&cfg, field("tab-bar"), 1), "auto");
+        cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
+        assert_eq!(read(&cfg, field("tab-bar-position")), "Left");
+    }
+
     /// The Scrollback row edits a value stored RESOLVED, so infinite reads back
     /// as `INFINITE_SCROLLBACK` (10 M) against a row whose ceiling is 100 000.
     /// A single ←/→ press must not clamp that to 100 000 and persist it,
@@ -809,7 +966,7 @@ mod tests {
         );
         assert_eq!(
             read(&cfg, &field),
-            "infinite",
+            "Infinite",
             "a bare 0 would invite stepping off infinite without realising it"
         );
         // Stepping DOWN from infinite must stay infinite rather than land on
@@ -827,12 +984,12 @@ mod tests {
 
         let bytes = number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB");
         cfg.scrollback_bytes = 0;
-        assert_eq!(read(&cfg, &bytes), "no cap");
+        assert_eq!(read(&cfg, &bytes), "No cap");
         assert_eq!(next_value(&cfg, &bytes, -1), "0MB");
         assert_eq!(next_value(&cfg, &bytes, 1), "10MB");
 
         cfg.scrollback_bytes = 500_000;
-        assert_eq!(read(&cfg, &bytes), "<1MB");
+        assert_eq!(read(&cfg, &bytes), "<1 MB");
     }
 
     #[test]
@@ -940,11 +1097,11 @@ mod tests {
             .find(|f| f.key == "gpu-power-preference")
             .expect("gpu-power-preference field");
 
-        assert_eq!(read(&Config::default(), pref), "automatic");
+        assert_eq!(read(&Config::default(), pref), "Automatic");
         match &pref.kind {
             FieldKind::Choice { values, labels, .. } => {
                 assert_eq!(values.first().copied(), Some("auto"));
-                assert_eq!(labels.first().copied(), Some("automatic"));
+                assert_eq!(labels.first().copied(), Some("Automatic"));
             }
             other => panic!("expected GPU preference choice field, got {other:?}"),
         }
@@ -1019,11 +1176,11 @@ mod tests {
             .expect("timeout row");
         assert_eq!(
             read(&Config::parse_text("cursor-blink-timeout = 10"), row),
-            "10s"
+            "10 s"
         );
         assert_eq!(
             read(&Config::parse_text("cursor-blink-timeout = 0"), row),
-            "never"
+            "Never"
         );
     }
 
@@ -1118,7 +1275,7 @@ mod tests {
             "vim-menu-nav defaults ON; the settings row must show it"
         );
         let f = toggle("Vim menu navigation", "vim-menu-nav");
-        assert_eq!(read(&cfg, &f), "on");
+        assert_eq!(read(&cfg, &f), "On");
         assert_eq!(next_value(&cfg, &f, 0), "false");
     }
 
@@ -1144,7 +1301,7 @@ mod tests {
         let f = number("Font size", "font-size", 6, 72, 1, "pt");
         assert_eq!(next_value(&cfg, &f, 1), "15");
         assert_eq!(next_value(&cfg, &f, -1), "13");
-        assert_eq!(read(&cfg, &f), "14pt");
+        assert_eq!(read(&cfg, &f), "14 pt");
         // clamp at ceiling
         cfg.font_size = 72.0;
         assert_eq!(next_value(&cfg, &f, 1), "72");

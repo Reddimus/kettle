@@ -25,6 +25,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Settings use consistent display text and unit spacing, stable label columns,
+  separate label/value ellipses in narrow panels, evenly spaced category names,
+  and contextual dependency and timing notes.
+
 - A blinking cursor no longer re-uploads the window's shapes or re-prepares its
   text on each blink; the blink only changes what is drawn.
 - A window whose content is not changing writes nothing to the GPU, a
