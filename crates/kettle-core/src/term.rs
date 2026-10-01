@@ -8066,6 +8066,18 @@ impl Terminal {
         self.out_gen.load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Monotone counter of this pane's geometry commits: every resize,
+    /// including the reflow a column change causes. Output never changes it,
+    /// so a cache of positions in the visible grid (detected links, for one)
+    /// keys on it alongside [`Self::output_generation`]: a resize moves text
+    /// without any output.
+    pub fn geometry_generation(&self) -> u64 {
+        self.geometry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
     /// Parse `bytes` as terminal output without sending them to the child.
     ///
     /// Reset (RIS) and Clear Scrollback (CSI 3 J) change the terminal, not
@@ -14115,6 +14127,59 @@ mod teardown_tests {
             }
             assert_eq!(reply.as_deref(), expected, "seed {seed:?}");
         }
+    }
+
+    /// A resize moves text without output, so caches of grid positions need a
+    /// counter that changes with every geometry commit, and only then.
+    #[cfg(unix)]
+    #[test]
+    fn the_geometry_generation_counts_resizes_not_output() {
+        let argv: Vec<String> = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf hello; sleep 5".to_string(),
+        ]
+        .to_vec();
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let waker: Waker = std::sync::Arc::new(|| {});
+        let mut term = match Terminal::new(
+            &argv,
+            None,
+            1000,
+            80,
+            24,
+            8,
+            16,
+            false,
+            CursorShape::Block,
+            None,
+            tx,
+            waker,
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping geometry generation: no PTY ({e})");
+                return;
+            }
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while term.output_generation() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(term.output_generation() > 0, "the shell printed");
+        let start = term.geometry_generation();
+        // The same geometry again is a no-op.
+        term.resize(80, 24, 8, 16).unwrap();
+        assert_eq!(term.geometry_generation(), start);
+        // A column change reflows; a row change moves the viewport.
+        term.resize(60, 24, 8, 16).unwrap();
+        let reflowed = term.geometry_generation();
+        assert!(reflowed > start, "a column change counts");
+        term.resize(60, 30, 8, 16).unwrap();
+        assert!(term.geometry_generation() > reflowed, "a row change counts");
+        // Back to the first size: still a new generation, not the old one.
+        term.resize(80, 24, 8, 16).unwrap();
+        assert!(term.geometry_generation() > reflowed + 1);
     }
 
     /// A program that turned on DEC mode 2031 hears each colour change from
