@@ -6057,11 +6057,57 @@ fn scale_context_menu_anchor(
 /// `(active-tab-index, focused-leaf-id)` — the value `App::focus_key` returns.
 pub(crate) type FocusKey = (usize, Option<u64>);
 /// Cache key for the viewport link re-scan: `(focus, focused pane's
-/// output_generation, scroll display_offset, focused cwd)`. It uses the
-/// focused pane's generation, not the tab's `last_output_at`, because the
-/// activity latch updates that only for background tabs, so active-tab output
-/// would never invalidate the scan.
-pub(crate) type LinksScanKey = (FocusKey, Option<u64>, Option<usize>, Option<String>);
+/// output_generation, its geometry_generation, scroll display_offset,
+/// focused cwd)`. It uses the focused pane's generation, not the tab's
+/// `last_output_at`, because the activity latch updates that only for
+/// background tabs, so active-tab output would never invalidate the scan. The
+/// geometry generation covers a resize, which reflows text with no output:
+/// zooming a pane, splitting next to it, or resizing the window.
+pub(crate) type LinksScanKey = (
+    FocusKey,
+    Option<u64>,
+    Option<u64>,
+    Option<usize>,
+    Option<String>,
+);
+
+/// Re-scan the focused pane's visible links into `ws.links` unless the key
+/// shows nothing they depend on has changed. The brief lock to read
+/// display_offset is cheap; the avoided work is `kettle_core::links`'
+/// per-cell regex pass.
+fn scan_links(ws: &mut WindowState) {
+    let key: LinksScanKey = {
+        let focus = (ws.mux.active, ws.mux.active_focus());
+        let focused = ws.mux.focused().map(|pane| &*pane);
+        (
+            focus,
+            // Cheap atomic and short-lock reads.
+            focused.map(|p| p.term.output_generation()),
+            focused.map(|p| p.term.geometry_generation()),
+            focused.and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset())),
+            focused.and_then(|p| p.term.current_dir_or_native()),
+        )
+    };
+    if ws.links_scan_key.as_ref() == Some(&key) {
+        return;
+    }
+    // Focused interactive apps like `less -R` redraw visible text by writing
+    // output, not by changing terminal scrollback display_offset, and a
+    // resize reflows it with no output at all. Re-scan on either so path and
+    // URL underline rects stay attached to the current text.
+    ws.links = ws
+        .mux
+        .focused()
+        .and_then(|p| {
+            p.term
+                .term
+                .lock()
+                .ok()
+                .map(|t| kettle_core::links::links_with_cwd(&t, key.4.as_deref()))
+        })
+        .unwrap_or_default();
+    ws.links_scan_key = Some(key);
+}
 
 /// How long the transient `cols×rows` chip stays up after the last resize
 /// event. Ghostty `resize-overlay` parity, using Ghostty's
@@ -12873,44 +12919,7 @@ impl App {
     }
 
     fn update_links(&mut self, ws: &mut WindowState) {
-        // Build a cheap key (focus + output generation + scroll offset + cwd)
-        // and skip the viewport URL re-scan when the visible content can't
-        // have changed. The brief lock to read display_offset is cheap; the
-        // avoided work is `kettle_core::links`' per-cell regex pass.
-        let key = {
-            // The focused pane's output generation is a cheap atomic read.
-            // The tab's `last_output_at` would miss active-tab output, since
-            // the activity latch skips the active tab.
-            let out_gen = ws.mux.focused().map(|p| p.term.output_generation());
-            let off = ws
-                .mux
-                .focused()
-                .and_then(|p| p.term.term.lock().ok().map(|t| t.grid().display_offset()));
-            let cwd = ws
-                .mux
-                .focused()
-                .and_then(|p| p.term.current_dir_or_native());
-            (self.focus_key(ws), out_gen, off, cwd)
-        };
-        if ws.links_scan_key.as_ref() == Some(&key) {
-            return;
-        }
-        // Focused interactive apps like `less -R` redraw visible text by
-        // writing output, not by changing terminal scrollback display_offset.
-        // Re-scan immediately on focused output_generation changes so path/
-        // URL underline overlay rects stay attached to the current text.
-        ws.links = ws
-            .mux
-            .focused()
-            .and_then(|p| {
-                p.term
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|t| kettle_core::links::links_with_cwd(&t, key.3.as_deref()))
-            })
-            .unwrap_or_default();
-        ws.links_scan_key = Some(key);
+        scan_links(ws);
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
@@ -37123,6 +37132,107 @@ mod tests {
                 "{modal:?} {key:?} ctrl={ctrl}"
             );
         }
+    }
+
+    /// Zooming a pane, splitting next to it or resizing the window reflows
+    /// the focused pane's text with no output. The detected links must follow
+    /// the reflowed text, or their underlines are painted over the wrong
+    /// cells (grep output whose path underlines went out of sync after a
+    /// zoom).
+    #[cfg(unix)]
+    #[test]
+    fn detected_links_follow_a_resize_that_reflows_the_text() {
+        use kettle_config::Config;
+        use kettle_core::{PtyGeometry, Waker};
+        use std::sync::Arc;
+
+        // Absolute paths, so detection needs no reported cwd.
+        let line = "/srv/virtual-rack-api-tests/behave/features/contract/flight-data.contract.feature:1395:  \
+                    When I send GET /flight-data/v1/time-of-departure request";
+        let cfg = Config {
+            shell: Some("/bin/sh".into()),
+            ..Config::default()
+        };
+        let waker: Waker = Arc::new(|| {});
+        let mut mux = Mux::new();
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("printf '%s\\n' '{line}'; sleep 30"),
+        ];
+        if let Err(e) = mux.new_tab_with_geometry(
+            &cfg,
+            PtyGeometry::from_cell_size(160, 10, 8, 16),
+            waker,
+            &argv,
+            None,
+        ) {
+            eprintln!("skipping: no PTY ({e})");
+            return;
+        }
+        let mut ws = WindowState::new(1, false, mux);
+        let pane = ws.mux.active_focus().expect("a focused pane");
+        let spans = |links: &[kettle_core::Link]| -> Vec<(usize, usize, usize, String)> {
+            links
+                .iter()
+                .map(|link| (link.row, link.start_col, link.end_col, link.uri.clone()))
+                .collect()
+        };
+        let detected_now = |ws: &WindowState| {
+            let term = ws.mux.panes[&pane].term.term.lock().expect("term lock");
+            kettle_core::links::links_with_cwd(
+                &term,
+                ws.mux.panes[&pane].term.current_dir_or_native().as_deref(),
+            )
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !detected_now(&ws)
+            .iter()
+            .any(|link| link.uri.contains("flight-data.contract.feature"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell never printed the path"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // The reader publishes the output generation after it releases the
+        // terminal, so the text can show before its read is counted. Prime the
+        // cache only once the count has settled; otherwise a late count would
+        // force the second scan by itself and hide a missing geometry key.
+        let mut settled = ws.mux.panes[&pane].term.output_generation();
+        let mut since = std::time::Instant::now();
+        while since.elapsed() < std::time::Duration::from_millis(200) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the output never settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let now = ws.mux.panes[&pane].term.output_generation();
+            if now != settled {
+                (settled, since) = (now, std::time::Instant::now());
+            }
+        }
+
+        super::scan_links(&mut ws);
+        let wide = spans(&ws.links);
+        assert_eq!(wide, spans(&detected_now(&ws)));
+
+        // Narrower: the line wraps and every span after the first row moves.
+        // No output follows.
+        let output = ws.mux.panes[&pane].term.output_generation();
+        ws.mux
+            .panes
+            .get_mut(&pane)
+            .expect("pane")
+            .term
+            .resize(60, 10, 8, 16)
+            .expect("resize");
+        assert_eq!(ws.mux.panes[&pane].term.output_generation(), output);
+        super::scan_links(&mut ws);
+        let narrow = spans(&detected_now(&ws));
+        assert_ne!(narrow, wide, "the reflow moved the links");
+        assert_eq!(spans(&ws.links), narrow, "the scan followed the reflow");
     }
 
     /// The key whose press closed or replaced a modal is remembered, so its
