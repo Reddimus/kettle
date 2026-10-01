@@ -1,0 +1,24 @@
+# Combined macOS sessions
+
+| session | date | countable |
+|---|---|---|
+| session | 2027-01-29 | no |
+
+| row | A | B | sessions (B/A, 95% CI) | verdict |
+|---|---:|---:|---|---|
+| startup window_ms | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| startup child_ms | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| idle cpu_percent | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| idle wakeups_per_second | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| idle footprint_mib | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory peak_mib | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory done3_mib | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| flood-memory done20_mib | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| vtebench geometric mean | None | None |  | insufficient sessions |
+| latency mean_ms | None | None | 1.000 (1.000-1.000) | insufficient sessions |
+| latency median_ms | None | None |  | insufficient sessions |
+| latency p95_ms | None | None |  | insufficient sessions |
+| latency p99_ms | None | None |  | insufficient sessions |
+| latency input_ms | None | None |  | insufficient sessions |
+| latency output_ms | None | None |  | insufficient sessions |
+

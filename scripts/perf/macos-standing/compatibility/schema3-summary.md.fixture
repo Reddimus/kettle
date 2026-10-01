@@ -1,0 +1,86 @@
+# macOS standing
+
+compatibility fixture
+
+## startup
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| window_ms | 21.00 | 21.00 |
+| child_ms | 31.00 | 31.00 |
+
+window_ms: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3; B-A +0.0 ms, 95% CI +0.0 to +0.0)
+child_ms: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3; B-A +0.0 ms, 95% CI +0.0 to +0.0)
+
+## idle
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| cpu_percent | 0.21 | 0.21 |
+| wakeups_per_second | 0.41 | 0.41 |
+| footprint_mib | 17.00 | 17.00 |
+| frontmost rounds | 3/3 | 3/3 |
+
+cpu_percent: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+wakeups_per_second: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+footprint_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## flood-memory
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| peak_mib | 101.00 | 101.00 |
+| done3_mib | 81.00 | 81.00 |
+| done20_mib | 17.00 | 17.00 |
+
+peak_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+done3_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+done20_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## vtebench
+
+| benchmark | kettle-a | kettle-b |
+|---|---:|---:|
+| dense | 21.0 | 21.0 |
+| scrolling | 11.0 | 11.0 |
+| **geometric mean** | 15.2 | 15.2 |
+
+dense: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+scrolling: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+geometric mean: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## latency
+
+| entry | mean (95% CI) | median | p95 | p99 | input half | output half | censored | rounds |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| kettle-a | 15.0 (15.0-15.0) | 15.0 | 20.0 | 20.0 | 2.0 | 3.0 | 0/6 | 3 |
+| kettle-b | 15.0 (15.0-15.0) | 15.0 | 20.0 | 20.0 | 2.0 | 3.0 | 0/6 | 3 |
+
+mean_ms: B/A 1.000 (95% CI 1.000-1.000), difference +0.00 ms (+0.00 to +0.00), lower in 0/3 rounds
+no regression (difference interval tops out at +1 ms or less): not decided, since this session does not count for latency
+
+## Statistical contracts
+
+statistics.current is authoritative.
+
+| metric | unit | direction | analysis kind | estimate / comparison | mean difference (Student-t CI) |
+|---|---|---|---|---|---|
+| startup.window_ms | ms | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| startup.child_ms | ms | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| idle.cpu_percent | percentage points | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| idle.wakeups_per_second | /s | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| idle.footprint_mib | MiB | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| flood-memory.peak_mib | MiB | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| flood-memory.done3_mib | MiB | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| flood-memory.done20_mib | MiB | lower | scalar | median with distribution-free sign-test interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| vtebench.dense | ms | lower | benchmark | arithmetic mean of round means with Student-t interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| vtebench.scrolling | ms | lower | benchmark | arithmetic mean of round means with Student-t interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| vtebench.geometric mean | ms | lower | benchmark | arithmetic mean of round means with Student-t interval / geometric mean of paired ratios with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| latency.mean_ms | ms | lower | latency | arithmetic mean of launch means with Student-t interval / mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval | +0.000 (+0.000 to +0.000) |
+| latency.median_ms | ms | lower | distribution | pooled key quantile / none | not available |
+| latency.p95_ms | ms | lower | distribution | pooled key quantile / none | not available |
+| latency.p99_ms | ms | lower | distribution | pooled key quantile / none | not available |
+| latency.input_ms | ms | lower | distribution | pooled key quantile / none | not available |
+| latency.output_ms | ms | lower | distribution | pooled key quantile / none | not available |
+
+

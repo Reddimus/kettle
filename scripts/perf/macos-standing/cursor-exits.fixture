@@ -1,0 +1,11 @@
+cursor_exit_v1 {"event": "capability", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "window_id": 9, "clock": "CLOCK_UPTIME_RAW", "first_key_seq": 7}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 1}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 2}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 3}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 4}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 5}
+cursor_exit_v1 {"event": "input", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 6}
+cursor_exit_v1 {"event": "exit", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 7, "t_start_ns": 1000003000, "t_end_ns": 1009003000, "total_frame_us": 9000, "layer_active": true}
+cursor_exit_v1 {"event": "exit", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 8, "t_start_ns": 4000003000, "t_end_ns": 4001003000, "total_frame_us": 1000, "layer_active": true}
+cursor_exit_v1 {"event": "exit", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 9, "t_start_ns": 7000003000, "t_end_ns": 7002003000, "total_frame_us": 2000, "layer_active": true}
+cursor_exit_v1 {"event": "exit", "launch_id": "0123456789abcdef0123456789abcdef", "pane_id": 2, "key_seq": 10, "t_start_ns": 10000003000, "t_end_ns": 10003003000, "total_frame_us": 3000, "layer_active": true}

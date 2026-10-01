@@ -1,0 +1,61 @@
+# macOS standing
+
+compatibility fixture
+
+## startup
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| window_ms | 21.00 | 21.00 |
+| child_ms | 31.00 | 31.00 |
+
+window_ms: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3; B-A +0.0 ms, 95% CI +0.0 to +0.0)
+child_ms: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3; B-A +0.0 ms, 95% CI +0.0 to +0.0)
+
+## idle
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| cpu_percent | 0.21 | 0.21 |
+| wakeups_per_second | 0.41 | 0.41 |
+| footprint_mib | 17.00 | 17.00 |
+| frontmost rounds | 3/3 | 3/3 |
+
+cpu_percent: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+wakeups_per_second: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+footprint_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## flood-memory
+
+| metric | kettle-a | kettle-b |
+|---|---:|---:|
+| peak_mib | 101.00 | 101.00 |
+| done3_mib | 81.00 | 81.00 |
+| done20_mib | 17.00 | 17.00 |
+
+peak_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+done3_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+done20_mib: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## vtebench
+
+| benchmark | kettle-a | kettle-b |
+|---|---:|---:|
+| dense | 21.0 | 21.0 |
+| scrolling | 11.0 | 11.0 |
+| **geometric mean** | 15.2 | 15.2 |
+
+dense: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+scrolling: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+geometric mean: B/A 1.000 (95% CI 1.000-1.000, n=3, B lower in 0/3)
+
+## latency
+
+| entry | mean (95% CI) | median | p95 | p99 | input half | output half | censored | rounds |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| kettle-a | 15.0 (15.0-15.0) | 15.0 | 20.0 | 20.0 | 2.0 | 3.0 | 0/6 | 3 |
+| kettle-b | 15.0 (15.0-15.0) | 15.0 | 20.0 | 20.0 | 2.0 | 3.0 | 0/6 | 3 |
+
+mean_ms: B/A 1.000 (95% CI 1.000-1.000), difference +0.00 ms (+0.00 to +0.00), lower in 0/3 rounds
+no regression (difference interval tops out at +1 ms or less): not decided, since this session does not count for latency
+

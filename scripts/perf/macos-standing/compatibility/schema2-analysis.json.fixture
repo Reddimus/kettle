@@ -1,0 +1,1726 @@
+{
+ "startup": {
+  "metrics": {
+   "window_ms": {
+    "kind": "median",
+    "descriptor": {
+     "id": "startup.window_ms",
+     "unit": "ms",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 21.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 21.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      20.0,
+      21.0,
+      22.0
+     ],
+     "kettle-b": [
+      20.0,
+      21.0,
+      22.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 21.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 21.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "child_ms": {
+    "kind": "median",
+    "descriptor": {
+     "id": "startup.child_ms",
+     "unit": "ms",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 31.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 31.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      30.0,
+      31.0,
+      32.0
+     ],
+     "kettle-b": [
+      30.0,
+      31.0,
+      32.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 31.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 31.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   }
+  }
+ },
+ "idle": {
+  "metrics": {
+   "cpu_percent": {
+    "kind": "median",
+    "descriptor": {
+     "id": "idle.cpu_percent",
+     "unit": "percentage points",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 0.21000000000000002,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 0.21000000000000002,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      0.2,
+      0.21000000000000002,
+      0.22
+     ],
+     "kettle-b": [
+      0.2,
+      0.21000000000000002,
+      0.22
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 0.21000000000000002,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 0.21000000000000002,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "wakeups_per_second": {
+    "kind": "median",
+    "descriptor": {
+     "id": "idle.wakeups_per_second",
+     "unit": "/s",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 0.41000000000000003,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 0.41000000000000003,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      0.4,
+      0.41000000000000003,
+      0.42000000000000004
+     ],
+     "kettle-b": [
+      0.4,
+      0.41000000000000003,
+      0.42000000000000004
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 0.41000000000000003,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 0.41000000000000003,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "footprint_mib": {
+    "kind": "median",
+    "descriptor": {
+     "id": "idle.footprint_mib",
+     "unit": "MiB",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 17.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 17.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      16.0,
+      17.0,
+      18.0
+     ],
+     "kettle-b": [
+      16.0,
+      17.0,
+      18.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 17.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 17.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   }
+  },
+  "frontmost": {
+   "kettle-a": [
+    3,
+    3
+   ],
+   "kettle-b": [
+    3,
+    3
+   ]
+  }
+ },
+ "flood-memory": {
+  "metrics": {
+   "peak_mib": {
+    "kind": "median",
+    "descriptor": {
+     "id": "flood-memory.peak_mib",
+     "unit": "MiB",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 101.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 101.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      100.0,
+      101.0,
+      102.0
+     ],
+     "kettle-b": [
+      100.0,
+      101.0,
+      102.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 101.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 101.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "done3_mib": {
+    "kind": "median",
+    "descriptor": {
+     "id": "flood-memory.done3_mib",
+     "unit": "MiB",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 81.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 81.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      80.0,
+      81.0,
+      82.0
+     ],
+     "kettle-b": [
+      80.0,
+      81.0,
+      82.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 81.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 81.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "done20_mib": {
+    "kind": "median",
+    "descriptor": {
+     "id": "flood-memory.done20_mib",
+     "unit": "MiB",
+     "kind": "scalar",
+     "direction": "lower",
+     "analysis_kind": "scalar",
+     "extract": "field",
+     "eligibility": "legacy",
+     "estimate": "median with distribution-free sign-test interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 17.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 17.0,
+      "low": "-inf",
+      "high": "inf",
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      16.0,
+      17.0,
+      18.0
+     ],
+     "kettle-b": [
+      16.0,
+      17.0,
+      18.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "median with distribution-free sign-test interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 17.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 17.0,
+        "low": "-inf",
+        "high": "inf",
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   }
+  }
+ },
+ "vtebench": {
+  "metrics": {
+   "dense": {
+    "kind": "mean",
+    "descriptor": {
+     "id": "vtebench.dense",
+     "unit": "ms",
+     "kind": "benchmark",
+     "direction": "lower",
+     "analysis_kind": "benchmark",
+     "extract": "benchmark-means",
+     "eligibility": "legacy",
+     "estimate": "arithmetic mean of round means with Student-t interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 21,
+      "low": 18.515862288249675,
+      "high": 23.484137711750325,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 21,
+      "low": 18.515862288249675,
+      "high": 23.484137711750325,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      20,
+      21,
+      22
+     ],
+     "kettle-b": [
+      20,
+      21,
+      22
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3,
+     "family": 2,
+     "family_low": 1.0,
+     "family_high": 1.0
+    },
+    "ab_diff": {
+     "diff": 0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "arithmetic mean of round means with Student-t interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 21,
+        "low": 18.515862288249675,
+        "high": 23.484137711750325,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 21,
+        "low": 18.515862288249675,
+        "high": 23.484137711750325,
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3,
+       "family": 2,
+       "family_low": 1.0,
+       "family_high": 1.0
+      },
+      "ab_diff": {
+       "diff": 0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "scrolling": {
+    "kind": "mean",
+    "descriptor": {
+     "id": "vtebench.scrolling",
+     "unit": "ms",
+     "kind": "benchmark",
+     "direction": "lower",
+     "analysis_kind": "benchmark",
+     "extract": "benchmark-means",
+     "eligibility": "legacy",
+     "estimate": "arithmetic mean of round means with Student-t interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 11,
+      "low": 8.515862288249673,
+      "high": 13.484137711750327,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 11,
+      "low": 8.515862288249673,
+      "high": 13.484137711750327,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      10,
+      11,
+      12
+     ],
+     "kettle-b": [
+      10,
+      11,
+      12
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3,
+     "family": 2,
+     "family_low": 1.0,
+     "family_high": 1.0
+    },
+    "ab_diff": {
+     "diff": 0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "arithmetic mean of round means with Student-t interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 11,
+        "low": 8.515862288249673,
+        "high": 13.484137711750327,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 11,
+        "low": 8.515862288249673,
+        "high": 13.484137711750327,
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3,
+       "family": 2,
+       "family_low": 1.0,
+       "family_high": 1.0
+      },
+      "ab_diff": {
+       "diff": 0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "geometric mean": {
+    "kind": "mean",
+    "descriptor": {
+     "id": "vtebench.geometric mean",
+     "unit": "ms",
+     "kind": "benchmark",
+     "direction": "lower",
+     "analysis_kind": "benchmark",
+     "extract": "benchmark-means",
+     "eligibility": "legacy",
+     "estimate": "arithmetic mean of round means with Student-t interval",
+     "comparison": "geometric mean of paired ratios with log Student-t interval",
+     "aa_kind": "ratio",
+     "claim_kind": "ratio",
+     "publication_role": "standing"
+    },
+    "terminals": {
+     "kettle-a": {
+      "estimate": 15.196298862191178,
+      "low": 12.580569869790235,
+      "high": 17.81202785459212,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 15.196298862191178,
+      "low": 12.580569869790235,
+      "high": 17.81202785459212,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      14.142135623730955,
+      15.198684153570662,
+      16.248076809271918
+     ],
+     "kettle-b": [
+      14.142135623730955,
+      15.198684153570662,
+      16.248076809271918
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    },
+    "ab_diff": {
+     "diff": 0.0,
+     "low": 0.0,
+     "high": 0.0,
+     "n": 3
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "arithmetic mean of round means with Student-t interval",
+      "comparison": "geometric mean of paired ratios with log Student-t interval",
+      "difference_estimator": "mean of paired differences/Student-t",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 15.196298862191178,
+        "low": 12.580569869790235,
+        "high": 17.81202785459212,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 15.196298862191178,
+        "low": 12.580569869790235,
+        "high": 17.81202785459212,
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "wins": 0,
+       "n": 3
+      },
+      "ab_diff": {
+       "diff": 0.0,
+       "low": 0.0,
+       "high": 0.0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   }
+  }
+ },
+ "latency": {
+  "metrics": {
+   "mean_ms": {
+    "kind": "mean",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 15.0,
+      "low": 15.0,
+      "high": 15.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 15.0,
+      "low": 15.0,
+      "high": 15.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      15.0,
+      15.0,
+      15.0
+     ],
+     "kettle-b": [
+      15.0,
+      15.0,
+      15.0
+     ]
+    },
+    "ab": {
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "diff": 0.0,
+     "diff_low": 0.0,
+     "diff_high": 0.0,
+     "wins": 0,
+     "n": 3
+    },
+    "descriptor": {
+     "id": "latency.mean_ms",
+     "unit": "ms",
+     "kind": "latency",
+     "direction": "lower",
+     "analysis_kind": "latency",
+     "extract": "censored-keys",
+     "eligibility": "latency-standing",
+     "estimate": "arithmetic mean of launch means with Student-t interval",
+     "comparison": "mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval",
+     "aa_kind": "latency-difference",
+     "claim_kind": "latency",
+     "publication_role": "standing"
+    },
+    "pairwise": [
+     {
+      "base": "kettle-a",
+      "test": "kettle-b",
+      "current": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "diff": 0.0,
+       "diff_low": 0.0,
+       "diff_high": 0.0,
+       "wins": 0,
+       "n": 3
+      }
+     }
+    ],
+    "adjacent": [
+     {
+      "base": "kettle-a",
+      "test": "kettle-b",
+      "order": "tied"
+     }
+    ],
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "arithmetic mean of launch means with Student-t interval",
+      "comparison": "mean paired launch difference with Student-t interval and geometric mean paired ratio with log Student-t interval",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 15.0,
+        "low": 15.0,
+        "high": 15.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 15.0,
+        "low": 15.0,
+        "high": 15.0,
+        "n": 3
+       }
+      },
+      "ab": {
+       "ratio": 1.0,
+       "low": 1.0,
+       "high": 1.0,
+       "diff": 0.0,
+       "diff_low": 0.0,
+       "diff_high": 0.0,
+       "wins": 0,
+       "n": 3
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "median_ms": {
+    "kind": "median",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 15.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 15.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      15.0,
+      15.0,
+      15.0
+     ],
+     "kettle-b": [
+      15.0,
+      15.0,
+      15.0
+     ]
+    },
+    "descriptor": {
+     "id": "latency.median_ms",
+     "unit": "ms",
+     "kind": "distribution",
+     "direction": "lower",
+     "analysis_kind": "distribution",
+     "extract": "pooled-keys",
+     "eligibility": "latency-standing",
+     "estimate": "pooled key quantile",
+     "comparison": "none",
+     "aa_kind": "none",
+     "claim_kind": "none",
+     "publication_role": "descriptive"
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "pooled key quantile",
+      "comparison": "none",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 15.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 15.0,
+        "n": 3
+       }
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "p95_ms": {
+    "kind": "median",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 20.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 20.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      19.5,
+      19.5,
+      19.5
+     ],
+     "kettle-b": [
+      19.5,
+      19.5,
+      19.5
+     ]
+    },
+    "descriptor": {
+     "id": "latency.p95_ms",
+     "unit": "ms",
+     "kind": "distribution",
+     "direction": "lower",
+     "analysis_kind": "distribution",
+     "extract": "pooled-keys",
+     "eligibility": "latency-standing",
+     "estimate": "pooled key quantile",
+     "comparison": "none",
+     "aa_kind": "none",
+     "claim_kind": "none",
+     "publication_role": "descriptive"
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "pooled key quantile",
+      "comparison": "none",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 20.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 20.0,
+        "n": 3
+       }
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "p99_ms": {
+    "kind": "median",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 20.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 20.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      19.9,
+      19.9,
+      19.9
+     ],
+     "kettle-b": [
+      19.9,
+      19.9,
+      19.9
+     ]
+    },
+    "descriptor": {
+     "id": "latency.p99_ms",
+     "unit": "ms",
+     "kind": "distribution",
+     "direction": "lower",
+     "analysis_kind": "distribution",
+     "extract": "pooled-keys",
+     "eligibility": "latency-standing",
+     "estimate": "pooled key quantile",
+     "comparison": "none",
+     "aa_kind": "none",
+     "claim_kind": "none",
+     "publication_role": "descriptive"
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "pooled key quantile",
+      "comparison": "none",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 20.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 20.0,
+        "n": 3
+       }
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "input_ms": {
+    "kind": "median",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 2.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 2.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      2.0,
+      2.0,
+      2.0
+     ],
+     "kettle-b": [
+      2.0,
+      2.0,
+      2.0
+     ]
+    },
+    "descriptor": {
+     "id": "latency.input_ms",
+     "unit": "ms",
+     "kind": "distribution",
+     "direction": "lower",
+     "analysis_kind": "distribution",
+     "extract": "pooled-keys",
+     "eligibility": "latency-standing",
+     "estimate": "pooled key quantile",
+     "comparison": "none",
+     "aa_kind": "none",
+     "claim_kind": "none",
+     "publication_role": "descriptive"
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "pooled key quantile",
+      "comparison": "none",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 2.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 2.0,
+        "n": 3
+       }
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   },
+   "output_ms": {
+    "kind": "median",
+    "terminals": {
+     "kettle-a": {
+      "estimate": 3.0,
+      "n": 3
+     },
+     "kettle-b": {
+      "estimate": 3.0,
+      "n": 3
+     }
+    },
+    "values": {
+     "kettle-a": [
+      3.0,
+      3.0,
+      3.0
+     ],
+     "kettle-b": [
+      3.0,
+      3.0,
+      3.0
+     ]
+    },
+    "descriptor": {
+     "id": "latency.output_ms",
+     "unit": "ms",
+     "kind": "distribution",
+     "direction": "lower",
+     "analysis_kind": "distribution",
+     "extract": "pooled-keys",
+     "eligibility": "latency-standing",
+     "estimate": "pooled key quantile",
+     "comparison": "none",
+     "aa_kind": "none",
+     "claim_kind": "none",
+     "publication_role": "descriptive"
+    },
+    "statistics": {
+     "authoritative": "current",
+     "current": {
+      "estimate": "pooled key quantile",
+      "comparison": "none",
+      "terminals": {
+       "kettle-a": {
+        "estimate": 3.0,
+        "n": 3
+       },
+       "kettle-b": {
+        "estimate": 3.0,
+        "n": 3
+       }
+      }
+     }
+    },
+    "metric_countable": {
+     "kettle-a": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     },
+     "kettle-b": {
+      "countable": true,
+      "n": 3,
+      "planned": 3,
+      "failed": 0,
+      "reasons": []
+     }
+    }
+   }
+  },
+  "entries": [
+   "kettle-a",
+   "kettle-b"
+  ],
+  "standing": {
+   "kettle-a": {
+    "measured": true,
+    "failed": 0,
+    "censored": 0,
+    "keys": 6,
+    "lead_out_of_range": 0,
+    "ranked": true
+   },
+   "kettle-b": {
+    "measured": true,
+    "failed": 0,
+    "censored": 0,
+    "keys": 6,
+    "lead_out_of_range": 0,
+    "ranked": true
+   }
+  }
+ }
+}

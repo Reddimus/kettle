@@ -1,0 +1,316 @@
+{
+ "schema": 1,
+ "context": "compatibility fixture",
+ "terminals": [
+  "kettle-a",
+  "kettle-b"
+ ],
+ "workloads": {
+  "startup": {
+   "kettle-a": [
+    {
+     "window_ms": 20,
+     "child_ms": 30
+    },
+    {
+     "window_ms": 21,
+     "child_ms": 31
+    },
+    {
+     "window_ms": 22,
+     "child_ms": 32
+    }
+   ],
+   "kettle-b": [
+    {
+     "window_ms": 20,
+     "child_ms": 30
+    },
+    {
+     "window_ms": 21,
+     "child_ms": 31
+    },
+    {
+     "window_ms": 22,
+     "child_ms": 32
+    }
+   ]
+  },
+  "idle": {
+   "kettle-a": [
+    {
+     "frontmost": true,
+     "cpu_percent": 0.2,
+     "wakeups_per_second": 0.4,
+     "footprint_mib": 16
+    },
+    {
+     "frontmost": true,
+     "cpu_percent": 0.21000000000000002,
+     "wakeups_per_second": 0.41000000000000003,
+     "footprint_mib": 17
+    },
+    {
+     "frontmost": true,
+     "cpu_percent": 0.22,
+     "wakeups_per_second": 0.42000000000000004,
+     "footprint_mib": 18
+    }
+   ],
+   "kettle-b": [
+    {
+     "frontmost": true,
+     "cpu_percent": 0.2,
+     "wakeups_per_second": 0.4,
+     "footprint_mib": 16
+    },
+    {
+     "frontmost": true,
+     "cpu_percent": 0.21000000000000002,
+     "wakeups_per_second": 0.41000000000000003,
+     "footprint_mib": 17
+    },
+    {
+     "frontmost": true,
+     "cpu_percent": 0.22,
+     "wakeups_per_second": 0.42000000000000004,
+     "footprint_mib": 18
+    }
+   ]
+  },
+  "flood-memory": {
+   "kettle-a": [
+    {
+     "done_ok": true,
+     "peak_mib": 100,
+     "done3_mib": 80,
+     "done20_mib": 16
+    },
+    {
+     "done_ok": true,
+     "peak_mib": 101,
+     "done3_mib": 81,
+     "done20_mib": 17
+    },
+    {
+     "done_ok": true,
+     "peak_mib": 102,
+     "done3_mib": 82,
+     "done20_mib": 18
+    }
+   ],
+   "kettle-b": [
+    {
+     "done_ok": true,
+     "peak_mib": 100,
+     "done3_mib": 80,
+     "done20_mib": 16
+    },
+    {
+     "done_ok": true,
+     "peak_mib": 101,
+     "done3_mib": 81,
+     "done20_mib": 17
+    },
+    {
+     "done_ok": true,
+     "peak_mib": 102,
+     "done3_mib": 82,
+     "done20_mib": 18
+    }
+   ]
+  },
+  "vtebench": {
+   "kettle-a": [
+    {
+     "means_ms": {
+      "dense": 20,
+      "scrolling": 10
+     }
+    },
+    {
+     "means_ms": {
+      "dense": 21,
+      "scrolling": 11
+     }
+    },
+    {
+     "means_ms": {
+      "dense": 22,
+      "scrolling": 12
+     }
+    }
+   ],
+   "kettle-b": [
+    {
+     "means_ms": {
+      "dense": 20,
+      "scrolling": 10
+     }
+    },
+    {
+     "means_ms": {
+      "dense": 21,
+      "scrolling": 11
+     }
+    },
+    {
+     "means_ms": {
+      "dense": 22,
+      "scrolling": 12
+     }
+    }
+   ]
+  },
+  "latency": {
+   "kettle-a": [
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    },
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    },
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    }
+   ],
+   "kettle-b": [
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    },
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    },
+    {
+     "samples_ms": [
+      10.0,
+      20.0
+     ],
+     "keys": 2,
+     "censored": 0,
+     "seq_mismatch": 0,
+     "mean_ms": 15.0,
+     "median_ms": 15.0,
+     "p95_ms": 19.5,
+     "p99_ms": 19.9,
+     "input_ms": 2.0,
+     "output_ms": 3.0,
+     "inputs_ms": [
+      2.0,
+      2.0
+     ],
+     "outputs_ms": [
+      3.0,
+      3.0
+     ],
+     "refresh_hz": 60
+    }
+   ]
+  }
+ }
+}

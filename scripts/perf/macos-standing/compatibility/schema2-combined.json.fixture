@@ -1,0 +1,750 @@
+{
+ "sessions": [
+  {
+   "dir": "session",
+   "label": "session",
+   "date": "2027-01-30",
+   "countable": true,
+   "schema": 2
+  }
+ ],
+ "rows": {
+  "startup.window_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      21.0
+     ],
+     "published": 21.0,
+     "min": 21.0,
+     "max": 21.0
+    },
+    "kettle-b": {
+     "estimates": [
+      21.0
+     ],
+     "published": 21.0,
+     "min": 21.0,
+     "max": 21.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 21.0,
+      "kettle-b": 21.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "startup.child_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      31.0
+     ],
+     "published": 31.0,
+     "min": 31.0,
+     "max": 31.0
+    },
+    "kettle-b": {
+     "estimates": [
+      31.0
+     ],
+     "published": 31.0,
+     "min": 31.0,
+     "max": 31.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 31.0,
+      "kettle-b": 31.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.cpu_percent": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      0.21000000000000002
+     ],
+     "published": 0.21000000000000002,
+     "min": 0.21000000000000002,
+     "max": 0.21000000000000002
+    },
+    "kettle-b": {
+     "estimates": [
+      0.21000000000000002
+     ],
+     "published": 0.21000000000000002,
+     "min": 0.21000000000000002,
+     "max": 0.21000000000000002
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 0.21000000000000002,
+      "kettle-b": 0.21000000000000002
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.wakeups_per_second": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      0.41000000000000003
+     ],
+     "published": 0.41000000000000003,
+     "min": 0.41000000000000003,
+     "max": 0.41000000000000003
+    },
+    "kettle-b": {
+     "estimates": [
+      0.41000000000000003
+     ],
+     "published": 0.41000000000000003,
+     "min": 0.41000000000000003,
+     "max": 0.41000000000000003
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 0.41000000000000003,
+      "kettle-b": 0.41000000000000003
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "idle.footprint_mib": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      17.0
+     ],
+     "published": 17.0,
+     "min": 17.0,
+     "max": 17.0
+    },
+    "kettle-b": {
+     "estimates": [
+      17.0
+     ],
+     "published": 17.0,
+     "min": 17.0,
+     "max": 17.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 17.0,
+      "kettle-b": 17.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.peak_mib": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      101.0
+     ],
+     "published": 101.0,
+     "min": 101.0,
+     "max": 101.0
+    },
+    "kettle-b": {
+     "estimates": [
+      101.0
+     ],
+     "published": 101.0,
+     "min": 101.0,
+     "max": 101.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 101.0,
+      "kettle-b": 101.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.done3_mib": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      81.0
+     ],
+     "published": 81.0,
+     "min": 81.0,
+     "max": 81.0
+    },
+    "kettle-b": {
+     "estimates": [
+      81.0
+     ],
+     "published": 81.0,
+     "min": 81.0,
+     "max": 81.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 81.0,
+      "kettle-b": 81.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "flood-memory.done20_mib": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      17.0
+     ],
+     "published": 17.0,
+     "min": 17.0,
+     "max": 17.0
+    },
+    "kettle-b": {
+     "estimates": [
+      17.0
+     ],
+     "published": 17.0,
+     "min": 17.0,
+     "max": 17.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 17.0,
+      "kettle-b": 17.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "vtebench.dense": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      21
+     ],
+     "published": 21,
+     "min": 21,
+     "max": 21
+    },
+    "kettle-b": {
+     "estimates": [
+      21
+     ],
+     "published": 21,
+     "min": 21,
+     "max": 21
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3,
+     "family": 2,
+     "family_low": 1.0,
+     "family_high": 1.0
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 21,
+      "kettle-b": 21
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "vtebench.scrolling": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      11
+     ],
+     "published": 11,
+     "min": 11,
+     "max": 11
+    },
+    "kettle-b": {
+     "estimates": [
+      11
+     ],
+     "published": 11,
+     "min": 11,
+     "max": 11
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3,
+     "family": 2,
+     "family_low": 1.0,
+     "family_high": 1.0
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 11,
+      "kettle-b": 11
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "vtebench.geometric mean": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      15.196298862191178
+     ],
+     "published": 15.196298862191178,
+     "min": 15.196298862191178,
+     "max": 15.196298862191178
+    },
+    "kettle-b": {
+     "estimates": [
+      15.196298862191178
+     ],
+     "published": 15.196298862191178,
+     "min": 15.196298862191178,
+     "max": 15.196298862191178
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 15.196298862191178,
+      "kettle-b": 15.196298862191178
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions"
+   }
+  },
+  "latency.mean_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      15.0
+     ],
+     "published": 15.0,
+     "min": 15.0,
+     "max": 15.0
+    },
+    "kettle-b": {
+     "estimates": [
+      15.0
+     ],
+     "published": 15.0,
+     "min": 15.0,
+     "max": 15.0
+    }
+   },
+   "sessions": [
+    {
+     "label": "session",
+     "date": "2027-01-30",
+     "started": "2027-01-30",
+     "countable": true,
+     "ratio": 1.0,
+     "low": 1.0,
+     "high": 1.0,
+     "diff": 0.0,
+     "diff_low": 0.0,
+     "diff_high": 0.0,
+     "wins": 0,
+     "n": 3
+    }
+   ],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 15.0,
+      "kettle-b": 15.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": true
+   }
+  },
+  "latency.median_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      15.0
+     ],
+     "published": 15.0,
+     "min": 15.0,
+     "max": 15.0
+    },
+    "kettle-b": {
+     "estimates": [
+      15.0
+     ],
+     "published": 15.0,
+     "min": 15.0,
+     "max": 15.0
+    }
+   },
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 15.0,
+      "kettle-b": 15.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.p95_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      20.0
+     ],
+     "published": 20.0,
+     "min": 20.0,
+     "max": 20.0
+    },
+    "kettle-b": {
+     "estimates": [
+      20.0
+     ],
+     "published": 20.0,
+     "min": 20.0,
+     "max": 20.0
+    }
+   },
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 20.0,
+      "kettle-b": 20.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.p99_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      20.0
+     ],
+     "published": 20.0,
+     "min": 20.0,
+     "max": 20.0
+    },
+    "kettle-b": {
+     "estimates": [
+      20.0
+     ],
+     "published": 20.0,
+     "min": 20.0,
+     "max": 20.0
+    }
+   },
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 20.0,
+      "kettle-b": 20.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.input_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      2.0
+     ],
+     "published": 2.0,
+     "min": 2.0,
+     "max": 2.0
+    },
+    "kettle-b": {
+     "estimates": [
+      2.0
+     ],
+     "published": 2.0,
+     "min": 2.0,
+     "max": 2.0
+    }
+   },
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 2.0,
+      "kettle-b": 2.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  },
+  "latency.output_ms": {
+   "terminals": {
+    "kettle-a": {
+     "estimates": [
+      3.0
+     ],
+     "published": 3.0,
+     "min": 3.0,
+     "max": 3.0
+    },
+    "kettle-b": {
+     "estimates": [
+      3.0
+     ],
+     "published": 3.0,
+     "min": 3.0,
+     "max": 3.0
+    }
+   },
+   "sessions": [],
+   "per_session": [
+    {
+     "label": "session",
+     "countable": true,
+     "estimates": {
+      "kettle-a": 3.0,
+      "kettle-b": 3.0
+     }
+    }
+   ],
+   "verdict": {
+    "verdict": "insufficient sessions",
+    "no_regression": null
+   }
+  }
+ }
+}

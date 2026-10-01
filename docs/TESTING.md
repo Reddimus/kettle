@@ -2661,3 +2661,49 @@ The 4.9.0 cut's appearance gate must inspect this new Settings text and layout
 in the exact release bundle. Existing appearance captures do not verify these
 changes. Historical appearance, audit, and changelog records remain as written.
 Run the normal format and gauntlet gates before merging.
+
+### Cursor latency and exit evidence
+
+The standing self-test covers both latency namespaces, Kettle-only cursor
+rotation, long-gap budgets at maximum key counts, duplicate CLI selection,
+and separate cursor A/A method identity. Native synthetic campaigns use the
+production calibration and measurement loops with virtual frames and time.
+They check the acknowledgment-based initial delay, seeded long gaps, typing
+epoch boundaries and post-query lease/deadline refusal. Cursor frames have
+independent byte hashes. Block payload bytes and the classifier retain their
+existing regression checks.
+
+`cursor-exits.fixture` documents the `cursor_exit_v1` capability and per-key
+JSONL format. Tests join launch, pane, window, sequence and clock-converted
+key intervals. They reject missing/excess/duplicate/shifted/calibration exits,
+wrong identities, inactive layers, negative or nonfinite costs, inconsistent
+endpoints, torn JSONL and torn/duplicate payload records. A mocked complete
+cursor round verifies retained artifact names and digests, catches changed raw
+bytes, and clears an interrupted acknowledgment before reuse. Tests distinguish
+legacy absence from capable empty evidence, exclude only warmup keys, pool
+measured durations and test both sides of the 4000 us limit. Every counted
+round must have complete exits before a pooled exit gate is available.
+
+Native macOS scratch tests compile `keyblock.c` and exercise its real control,
+poll, read and binary-log loop on a private socket replacing the tty device.
+They check all six hidden calibration frames, ENABLE without a key or sequence,
+ack timing, parked cursor bytes, early/duplicate/torn requests and bounded
+missing control. Every spawned child is reaped. These tests use no GUI or
+input-event posting. The dedicated probe's pure `--self-test` checks gap parsing,
+ack validation and the existing synthetic capture classifier without grants.
+`--self-test-cursor OUTPUT SCENARIO LEASE` exercises the shared cursor loops and
+posting gate before AppKit or permission checks. Its lease belongs to a separate
+owned test process; a lock held by the probe itself cannot model that lifetime.
+
+The `compatibility/` fixtures pin complete schema-1/2/3 result, analysis,
+summary and combined output files with cursor latency absent. Comparisons use
+explicit unittest checks, including under `python3 -O`; optimization cannot
+remove them. Fixture data is method-neutral and excluded from the runtime
+hash by the existing `.fixture` rule. Snapshot tests use `snapshot.gitignore`
+beside the self-test and keep temporary files inside that snapshot.
+
+Live acceptance remains separate. The owner runs an excluded 4.8.0 cursor
+pilot for calibration, focus guards and completion, then a C2 integration for
+actual layer handoffs and exactly one complete exit frame per stream key.
+Do not infer native capability, permissions, an A/A pass or numeric acceptance
+from the parser fixtures.

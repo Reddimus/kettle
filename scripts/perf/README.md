@@ -757,3 +757,71 @@ precede its observation by at most 250 ms. Linkage IDs contain decimal digits;
 linkage digests are null or 64 lowercase hexadecimal digits. Public evidence
 projects only these validated fields. Trace read failures use logical errors;
 trace paths and files remain in the private session directory.
+
+### Cursor-exit latency
+
+`--workloads latency-cursor` measures Kettle A/B with a visible blinking block
+cursor at row 2, column 3. `--latency-payload cursor` maps selected `latency`
+to this workload. Select `latency,latency-cursor` with the default block payload
+to collect both once. Duplicate selection is refused. Cursor rounds rotate
+only Kettle entries; floors, opaque variants and peers remain block-only.
+The cursor row is diagnostic and unranked. Ranked latency keeps its hidden,
+steady cursor and existing block bytes, classifier and timing guards.
+
+The first six calibration flips stay hidden and steady. After accepting the
+sixth after-image, the probe sends `ENABLE\n` through a private mode-0600 FIFO.
+The payload enables the cursor without reading another key or consuming a
+sequence, then atomically acknowledges `ENABLED <cursor_enabled_ns>\n` in
+`CLOCK_UPTIME_RAW`. The handshake has a five-second limit inside the common
+probe deadline. Early, missing, changed or duplicate acknowledgments fail.
+The first stream key waits 2000 ms after that timestamp. Subsequent warmup and
+measured keys use seeded uniform 2000..2400 ms gaps after stable completion.
+
+`--cursor-rounds` defaults to 10, with 20 warmup and 100 measured keys per
+round. `--rounds` also overrides cursor rounds. `--latency-gap-ms MIN:MAX` and
+`--latency-first-gap-ms` override the selected latency methods. Cursor gaps
+must be at least 1500 ms and at most 5000 ms; the first gap is bounded by
+10000 ms. Block defaults remain 100..300 ms and zero initial delay. The common
+budget includes setup, calibration, first delay, maximum gaps, censoring and
+frame confirmation. Python waits 15 seconds past the probe deadline; the
+launch helper has at least 60 seconds more than that deadline. Posting still
+checks the invocation lease and deadline under its gate after native queries.
+The cursor mode starts no typing-memory observer.
+
+`--cursor-exit-logs` is legal only with cursor latency. It captures diagnostic
+stderr under `warn,kettle::cursor_blink=info`. A capable producer emits bare
+newline-terminated `cursor_exit_v1` JSON records. Its capability record binds
+a launch token, pane, target window and `CLOCK_UPTIME_RAW`; each exit binds
+that launch/pane to a post-calibration key sequence and complete-frame start,
+end and microseconds. A key that does not request an active-layer exit, or
+whose exit ticket is cancelled, emits an input record with exactly `event`,
+`launch_id`, `pane_id` and `key_seq`. Calibration sequences 1..6 must each be
+an input. Exactly W+N exits for sequences 7..6+W+N must join the probe and
+payload, with `layer_active` true. Every sequence from 1 through the highest
+seen must occur exactly once across inputs and exits. An input at sequence 7
+or later, any sequence beyond 6+W+N, a gap, duplicate, or pane/launch mismatch
+invalidates the stream. Coalescing can log a later input before an earlier
+exit completes; coverage does not depend on input line order. The endpoint
+includes the complete exit render, present, hide, transaction commit and
+flush. A renderer subphase or aggregate `ui_geometry` counter cannot replace
+this endpoint.
+
+Missing capability on a legacy binary means unavailable timings. A capable
+empty or partial stream fails, as do duplicate, excess, shifted, wrong-pane,
+wrong-launch, torn and invalid-duration records. Warmup records stay raw but
+only measured keys contribute to p50/p95/max. Summary and combine pool keys,
+never per-round p95s. Any incomplete counted round leaves the pooled exit gate
+unavailable. The C2 gate requires the cursor latency difference CI upper bound
+at most +1 ms and complete measured total-frame p95 at most 4000 us. Legacy
+unavailable exits cannot pass that gate. Cursor A/A uses its own namespace and
+gap method; block A/A cannot supply its control.
+
+Each cursor row, including returned error rows, links retained files by relative
+basename and SHA-256 in `cursor_artifacts`. Raw artifacts retain the probe JSON,
+binary keyblock log, launch identity,
+cursor acknowledgment, private producer context and captured exit JSONL.
+Cursor results carry `latency_payload`, gap settings, capability, expected,
+stream and measured counts, raw exit records, microsecond percentiles and
+`cursor_exit_valid`. The JSONL fixtures and fixed output fixtures under
+`macos-standing/` document parser examples. Native C2 integration and excluded
+4.8.0 focus/calibration pilots must pass before measurement claims.
