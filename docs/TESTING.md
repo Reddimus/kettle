@@ -477,6 +477,41 @@ no standing or A/A acceptance follows from these tests. Run the repository
 format, standing self-test, gauntlet and tracked-audit gates in an authorized
 checkout before merge, then freeze the combined HC method before calibration.
 
+The portable typing-memory fixtures pin measured-epoch selection, both
+boundary-straddling queries, asymmetric current-footprint medians and lifetime
+maxima. Calibration, warmup and hold samples cannot change the median.
+Censored keys remain at their bound in timing statistics and inside the epoch.
+Coverage failures preserve latency and leave only memory unavailable. Tests
+check the five-sample, 80% coverage and 250 ms gap rules independently, reject
+clock/cadence/bundle mismatches as calibration evidence, and retain scalar MiB
+ratios and differences through summary and combined publication input. Floors
+have no typing-memory row; opaque remains unranked.
+
+Mocked capture, calibration failure, timeout and cancellation verify observer
+reaping before target cleanup and retention of probe, timeline, key log and
+launch context. Retained artifacts have relative names and SHA-256 digests.
+Native synthetic probe tests run the shared calibration and measured-key loops
+with virtual time and frames. They check six calibration posts, 20 warmups,
+seeded gaps, the 95% classifier, final censoring and the guarded epoch bounds.
+The `--self-test-typing` entry runs before AppKit setup or permission checks;
+`--fail-guard` verifies refusal after synthetic focus loss. A native payload
+fixture executes the unchanged block main with fake terminal I/O and checks
+initialization bytes, all three toggles and log records. These tests require
+macOS compilers and never capture a screen or post input. Malformed launch
+context fixtures verify that valid timing survives with memory unavailable. Whole-file output
+compatibility should compare results, analysis, summary and combined JSON and
+Markdown across schemas 1, 2 and 3 when typing memory is absent, with explicit
+checks that still run under `python3 -O`.
+
+The excluded observer pilot is described in the standing README. Reserve an
+owner measurement window; it uses ten balanced on/off pairs per terminal with
+the same verified artifact, sealed config and seeds. Both arms are diagnostic.
+The entire 95% paired launch-mean difference interval must fit within +/-1 ms.
+Retain observer/target counters, query durations and every failed attempt. A
+zero-containing interval alone does not pass equivalence. This pilot, native
+focus/capture acceptance and the ordinary shared A/A remain separate from the
+GUI-free suite. Repository-wide gates still run in an authorized checkout.
+
 See [the standing analysis schema](perf-standing-schema.md) for the current
 statistical contract, units, eligibility fields and preserved legacy reads.
 

@@ -43,6 +43,19 @@ func machToNs(_ ticks: UInt64) -> UInt64 {
 
 func nowNs() -> UInt64 { machToNs(mach_absolute_time()) }
 
+// Bracket the Mach epoch in the observer clock without changing timing samples.
+func typingClockCheck() -> [String: UInt64] {
+    let before = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+    let mach = nowNs()
+    let after = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+    return ["raw_before_ns": before, "mach_ns": mach, "raw_after_ns": after]
+}
+
+func typingRawNs(_ mach: UInt64, _ check: [String: UInt64]) -> UInt64 {
+    let midpoint = check["raw_before_ns"]! + (check["raw_after_ns"]! - check["raw_before_ns"]!) / 2
+    return UInt64(Int64(mach) + Int64(midpoint) - Int64(check["mach_ns"]!))
+}
+
 // MARK: - Pure logic (covered by --self-test)
 
 /// Rec. 709 luma of an 8-bit BGRA pixel.
@@ -288,6 +301,8 @@ func selfTest() -> Int32 {
           "the first frame after the post with 95 % flipped wins; earlier ones are ignored")
     check(pickSample(frames, postNs: 1_000, censorNs: 40).censored, "nothing within the limit is censored")
 
+    check(typingRawNs(900, ["raw_before_ns": 100, "raw_after_ns": 300, "mach_ns": 500]) == 600,
+          "typing clock conversion retains the measured Mach epoch")
     check(machToNs(0) == 0, "mach zero")
     check(machToNs(UInt64(timebase.denom)) == UInt64(timebase.numer), "mach ticks convert with the timebase")
 
@@ -597,6 +612,81 @@ func secondsSince(_ type: CGEventType) -> Double {
     CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: type)
 }
 
+// Shared campaign loops let synthetic checks use the production ordering.
+func calibrateBlock(_ options: Options, guardedPost: () throws -> UInt64,
+                    latestFrame: () async throws -> Frame,
+                    sleep: (UInt64) async throws -> Void) async throws -> (PixelRect, Calibration) {
+    // Six toggles: off->on, on->off, ... The block ends where it started.
+    var box: PixelRect?
+    var onLumas: [Double] = [], offLumas: [Double] = []
+    var before = try await latestFrame()
+    for toggle in 0..<6 {
+        _ = try guardedPost()
+        try await sleep(250_000_000)
+        let after = try await latestFrame()
+        if box == nil {
+            do {
+                box = try changedBox(before, after)
+            } catch {
+                // Keep the pair for diagnosis: the raw BGRA frames beside the result.
+                for (name, f) in [("before", before), ("after", after)] {
+                    FileManager.default.createFile(atPath: options.out + ".\(name)-\(f.width)x\(f.height)-\(f.bytesPerRow).bgra",
+                                                   contents: Data(f.pixels))
+                }
+                throw error
+            }
+        }
+        let region = box!.inset(fraction: 0.25)
+        let nowOn = toggle % 2 == 0
+        (nowOn ? { onLumas.append(regionStats(after, region, threshold: 0).mean) }
+               : { offLumas.append(regionStats(after, region, threshold: 0).mean) })()
+        (nowOn ? { offLumas.append(regionStats(before, region, threshold: 0).mean) }
+               : { onLumas.append(regionStats(before, region, threshold: 0).mean) })()
+        before = after
+    }
+    let calibration = try calibrate(on: onLumas, off: offLumas)
+    return (box!, calibration)
+}
+
+func measureKeys(_ options: Options, guardedPost: () throws -> UInt64, expect: (Bool) -> Void,
+                 frames: () -> [Observed], now: () -> UInt64,
+                 sleep: (UInt64) async throws -> Void,
+                 sampleGuard: () throws -> Void) async throws -> ([[String: Any]], UInt64, UInt64) {
+    var rng = Rng(state: options.seed)
+    var on = false
+    var samples: [[String: Any]] = []
+    var typingStartMach: UInt64 = 0, typingEndMach: UInt64 = 0
+    let censorNs = UInt64(options.censorMs) * 1_000_000
+    for seq in 1...(options.warmup + options.keys) {
+        on.toggle()
+        expect(on)
+        let postNs = try guardedPost()
+        if seq == options.warmup + 1 { typingStartMach = postNs }
+        // Poll until a flipped frame is in, or the censor limit passes. The
+        // sample's time is the frame's display time, so the poll interval
+        // does not enter the result.
+        var sample = Sample(displayNs: nil, arrivalNs: nil, mixedFrames: 0, censored: true)
+        while now() - postNs < censorNs + 50_000_000 {
+            try await sleep(2_000_000)
+            sample = pickSample(frames(), postNs: postNs, censorNs: censorNs)
+            if !sample.censored { break }
+        }
+        // No revert over the next two frame intervals.
+        try await sleep(40_000_000)
+        let after = frames()
+        let reverted = !sample.censored && after.contains { $0.displayNs > sample.displayNs! && $0.share < 0.5 }
+        try sampleGuard()
+        if seq == options.warmup + options.keys { typingEndMach = now() }
+        samples.append(["seq": seq + 6, "warmup": seq <= options.warmup, "t_post": postNs,
+                        "display": sample.displayNs.map { $0 as Any } ?? NSNull(),
+                        "arrival": sample.arrivalNs.map { $0 as Any } ?? NSNull(),
+                        "mixed": sample.mixedFrames, "censored": sample.censored, "reverted": reverted])
+        try await sleep(UInt64(rng.uniform(options.gapMs.0, options.gapMs.1)) * 1_000_000)
+    }
+
+    return (samples, typingStartMach, typingEndMach)
+}
+
 func run(_ options: Options) async throws -> [String: Any] {
     if options.selfTestDispatch { return ["posts": 1, "captures": 0] }
     guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
@@ -718,35 +808,11 @@ func run(_ options: Options) async throws -> [String: Any] {
         return postNs
     }
 
-    // Six toggles: off->on, on->off, ... The block ends where it started.
-    var box: PixelRect?
-    var onLumas: [Double] = [], offLumas: [Double] = []
-    var before = try await latestFrame()
-    for toggle in 0..<6 {
-        _ = try guardedPost()
-        try await Task.sleep(nanoseconds: 250_000_000)
-        let after = try await latestFrame()
-        if box == nil {
-            do {
-                box = try changedBox(before, after)
-            } catch {
-                // Keep the pair for diagnosis: the raw BGRA frames beside the result.
-                for (name, f) in [("before", before), ("after", after)] {
-                    FileManager.default.createFile(atPath: options.out + ".\(name)-\(f.width)x\(f.height)-\(f.bytesPerRow).bgra",
-                                                   contents: Data(f.pixels))
-                }
-                throw error
-            }
-        }
-        let region = box!.inset(fraction: 0.25)
-        let nowOn = toggle % 2 == 0
-        (nowOn ? { onLumas.append(regionStats(after, region, threshold: 0).mean) }
-               : { offLumas.append(regionStats(after, region, threshold: 0).mean) })()
-        (nowOn ? { offLumas.append(regionStats(before, region, threshold: 0).mean) }
-               : { onLumas.append(regionStats(before, region, threshold: 0).mean) })()
-        before = after
-    }
-    let calibration = try calibrate(on: onLumas, off: offLumas)
+    let typingClockBefore = typingClockCheck()
+
+    let (calibratedBox, calibration) = try await calibrateBlock(options, guardedPost: guardedPost,
+        latestFrame: latestFrame, sleep: { try await Task.sleep(nanoseconds: $0) })
+    let box: PixelRect? = calibratedBox
     result["calibration"] = ["on": calibration.on, "off": calibration.off, "box_px": [box!.x, box!.y, box!.width, box!.height]]
 
     // Measuring stream: just the block and a 4 pt margin.
@@ -767,37 +833,14 @@ func run(_ options: Options) async throws -> [String: Any] {
     let vsync = VsyncLog()
     await MainActor.run { vsync.start() }
 
-    var rng = Rng(state: options.seed)
-    var on = false
-    var samples: [[String: Any]] = []
-    let censorNs = UInt64(options.censorMs) * 1_000_000
-    for seq in 1...(options.warmup + options.keys) {
-        on.toggle()
-        capture.expect(on: on)
-        let postNs = try guardedPost()
-        // Poll until a flipped frame is in, or the censor limit passes. The
-        // sample's time is the frame's display time, so the poll interval
-        // does not enter the result.
-        var sample = Sample(displayNs: nil, arrivalNs: nil, mixedFrames: 0, censored: true)
-        while nowNs() - postNs < censorNs + 50_000_000 {
-            try await Task.sleep(nanoseconds: 2_000_000)
-            sample = pickSample(capture.frames(), postNs: postNs, censorNs: censorNs)
-            if !sample.censored { break }
-        }
-        // No revert over the next two frame intervals.
-        try await Task.sleep(nanoseconds: 40_000_000)
-        let after = capture.frames()
-        let reverted = !sample.censored && after.contains { $0.displayNs > sample.displayNs! && $0.share < 0.5 }
+    let (samples, typingStartMach, typingEndMach) = try await measureKeys(options,
+        guardedPost: guardedPost, expect: { capture.expect(on: $0) }, frames: { capture.frames() },
+        now: nowNs, sleep: { try await Task.sleep(nanoseconds: $0) }, sampleGuard: {
         guard mayPost(frontmost: frontmostPid(), topWindow: topWindow(), target: options.pid, window: measured),
               obscuring(onScreenWindows(), window: measured, rect: watched) == nil else {
             throw Failure(reason: "focus changed or a window covered the block during a sample")
         }
-        samples.append(["seq": seq + 6, "warmup": seq <= options.warmup, "t_post": postNs,
-                        "display": sample.displayNs.map { $0 as Any } ?? NSNull(),
-                        "arrival": sample.arrivalNs.map { $0 as Any } ?? NSNull(),
-                        "mixed": sample.mixedFrames, "censored": sample.censored, "reverted": reverted])
-        try await Task.sleep(nanoseconds: UInt64(rng.uniform(options.gapMs.0, options.gapMs.1)) * 1_000_000)
-    }
+        })
 
     await MainActor.run { vsync.stop() }
     let ticks = vsync.snapshot()
@@ -808,6 +851,12 @@ func run(_ options: Options) async throws -> [String: Any] {
                        "phase_spread_ns": phaseSpread(shown, vsyncNs: ticks.first ?? 0, periodNs: period)]
     result["samples"] = samples
     result["calibration_keys"] = 6
+    result["typing_epoch"] = ["contract": "hc-typing-memory-v1", "clock": "CLOCK_UPTIME_RAW",
+        "probe_clock": "mach_absolute_time_ns", "clock_before": typingClockBefore,
+        "clock_after": typingClockCheck(), "start_mach_ns": typingStartMach, "end_mach_ns": typingEndMach,
+        "typing_start_ns": typingRawNs(typingStartMach, typingClockBefore),
+        "typing_end_ns": typingRawNs(typingEndMach, typingClockBefore),
+        "pid": options.pid, "window_id": measured, "guards_ok": true] as [String: Any]
     return result
 }
 
@@ -964,11 +1013,75 @@ func blinkCheck(_ options: Options) async throws -> [String: Any] {
             "display": displayContext(), "cursor_rect": [crop.minX, crop.minY, crop.width, crop.height]]
 }
 
+// A virtual clock and frames exercise both loops without AppKit or input.
+func typingFixture(failGuard: Bool) async throws -> [String: Any] {
+    var options = Options()
+    options.keys = 2
+    var clock: UInt64 = 1_000_000_000
+    var events: [[String: Any]] = []
+    var posts = 0
+    func record(_ kind: String, _ extra: [String: Any] = [:]) {
+        events.append(extra.merging(["kind": kind, "at": clock]) { _, new in new })
+    }
+    func guardedPost() -> UInt64 {
+        posts += 1
+        record("post", ["number": posts])
+        return clock
+    }
+    func sleep(_ ns: UInt64) async {
+        record("sleep", ["ns": ns]); clock += ns
+    }
+    func frame() -> Frame {
+        var pixels = [UInt8](repeating: 20, count: 200 * 100 * 4)
+        if posts % 2 == 1 {
+            for y in 30..<98 { for x in 40..<168 {
+                let i = (y * 200 + x) * 4
+                pixels[i] = 230; pixels[i + 1] = 230; pixels[i + 2] = 230
+            } }
+        }
+        return Frame(width: 200, height: 100, bytesPerRow: 800, pixels: pixels)
+    }
+    let (box, calibration) = try await calibrateBlock(options, guardedPost: guardedPost,
+        latestFrame: { frame() }, sleep: sleep)
+    let calibrationPosts = posts
+    var currentPost: UInt64 = 0
+    let (samples, start, end) = try await measureKeys(options, guardedPost: {
+        currentPost = guardedPost(); return currentPost
+    }, expect: { record("expect", ["on": $0]) }, frames: {
+        // First measured key has a 94% frame then a 96% frame; last censors.
+        if posts == calibrationPosts + options.warmup + options.keys { return [] }
+        return [Observed(displayNs: currentPost + 1_000_000, arrivalNs: currentPost + 1_500_000, share: 0.94),
+                Observed(displayNs: currentPost + 2_000_000, arrivalNs: currentPost + 2_500_000, share: 0.96)]
+    }, now: { clock }, sleep: sleep, sampleGuard: {
+        record("guard")
+        if failGuard && posts == calibrationPosts + options.warmup + options.keys {
+            throw Failure(reason: "synthetic focus loss")
+        }
+    })
+    let check: [String: UInt64] = ["raw_before_ns": 100, "raw_after_ns": 300, "mach_ns": 500]
+    return ["calibration_posts": calibrationPosts, "box": [box.x, box.y, box.width, box.height],
+            "calibration": [calibration.on, calibration.off], "events": events, "samples": samples,
+            "start_mach_ns": start, "end_mach_ns": end,
+            "typing_start_ns": typingRawNs(start, check), "typing_end_ns": typingRawNs(end, check)]
+}
+
 // MARK: - Entry
 
 let probeStartNs = nowNs()
 let args = CommandLine.arguments
 if args.contains("--self-test") { exit(selfTest()) }
+if let typingIndex = args.firstIndex(of: "--self-test-typing"), typingIndex + 1 < args.count {
+    let output = args[typingIndex + 1]
+    Task.detached {
+        do {
+            let result = try await typingFixture(failGuard: args.contains("--fail-guard"))
+            finish(result, to: output, code: 0)
+        } catch {
+            finish(["error": "typing fixture failed: \(error)"], to: output, code: 1)
+        }
+    }
+    dispatchMain()
+}
 let leaseIndex = args.firstIndex(of: "--lease-file")
 let invocationLease = leaseIndex.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
 let leaseTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())

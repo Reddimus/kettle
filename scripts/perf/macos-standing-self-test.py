@@ -3486,8 +3486,19 @@ class MetricContracts(unittest.TestCase):
                                "child_ms": 10., "window_ms": 10., "footprint_mib": 10., field: v,
                                **({"metric_validity": {field: self.validity()}} if optional else {})} for v in values]
         meta = {"date": "2026-01-01", "complete": True, "mode": "ab", "rounds": {workload: 3}, "warmup": 0}
-        return {"schema": 3, "context": "fixture", "meta": meta, "terminals": ["kettle-a", "kettle-b"],
-                "workloads": {workload: {"kettle-a": runs(a), "kettle-b": runs(b)}}}
+        results = {"schema": 3, "context": "fixture", "meta": meta, "terminals": ["kettle-a", "kettle-b"],
+                   "workloads": {workload: {"kettle-a": runs(a), "kettle-b": runs(b)}}}
+        if field.startswith("typing_"):
+            # Typing values count only with the verified probe and method.
+            artifact = {key: char * 64 for key, char in (
+                ("source_sha256", "a"), ("bundle_sha256", "b"), ("executable_sha256", "c"))}
+            meta["latency"] = {"typing_memory": standing.hc.typing_method()}
+            meta["tool_artifacts"] = {"latency-probe": artifact}
+            meta["tool_hashes"] = {"latency-probe": artifact["bundle_sha256"]}
+            for rows in results["workloads"][workload].values():
+                for row in rows:
+                    row.update(tool_artifact=artifact, typing_tool_artifact=artifact)
+        return results
 
     def store(self, results, name="fixture"):
         folder = self.root / name
@@ -3572,10 +3583,14 @@ class MetricContracts(unittest.TestCase):
         descriptor = standing.metric_descriptor("latency", "typing_footprint_mib")
         field = "typing_footprint_mib"
         self.assertIsNone(standing.metric_value(descriptor, "latency", {field: 0.}))
-        good = {field: 0., "metric_validity": {field: self.validity()}}
+        # Typing values also need valid latency guards and the verified probe.
+        artifact = {key: char * 64 for key, char in (
+            ("source_sha256", "a"), ("bundle_sha256", "b"), ("executable_sha256", "c"))}
+        context = {**latency_run([10., 10.]), "tool_artifact": artifact, "typing_tool_artifact": artifact}
+        good = {field: 0., "metric_validity": {field: self.validity()}, **context}
         self.assertEqual(standing.metric_value(descriptor, "latency", good), 0.)
         for change in ({"capability_version": None}, {"observed": 4}, {"expected": None}, {"valid": False}):
-            bad = {field: 0., "metric_validity": {field: self.validity(**change)}}
+            bad = {field: 0., "metric_validity": {field: self.validity(**change)}, **context}
             self.assertIsNone(standing.metric_value(descriptor, "latency", bad))
 
     def test_nonfinite_samples_never_enter_analysis(self):
@@ -5108,6 +5123,403 @@ class RebaseOwnership(unittest.TestCase):
                     process.terminate()
                 standing.reap_owned_child(process, 15)
             self.assertIsNotNone(process.returncode)
+
+
+class TypingMemory(unittest.TestCase):
+    def fixture(self):
+        hc = standing.hc
+        start, end, offset = 1_000_000_000, 2_000_000_000, 1000
+        artifact = {key: char * 64 for key, char in (
+            ('source_sha256', 'a'), ('bundle_sha256', 'b'), ('executable_sha256', 'c'))}
+        epoch = dict(contract=hc.TYPING_CONTRACT, clock='CLOCK_UPTIME_RAW',
+            probe_clock='mach_absolute_time_ns', typing_start_ns=start, typing_end_ns=end,
+            start_mach_ns=start-offset, end_mach_ns=end-offset, pid=42, window_id=7, guards_ok=True)
+        for key, at in (('clock_before', start-500_000_000), ('clock_after', end+500_000_000)):
+            epoch[key] = dict(raw_before_ns=at, raw_after_ns=at+100,
+                              mach_ns=at+50-offset)
+        probe = dict(typing_epoch=epoch, samples=[dict(seq=27, warmup=False, t_post=start-offset,
+                     display=start-offset+10_000_000, arrival=start-offset+5_000_000),
+                     dict(seq=28, warmup=False, t_post=end-offset-550_000_000,
+                          display=None, censored=True)], display={'refresh_hz':60})
+        samples = []
+        # Both boundary-straddling queries have huge footprints. Query cadence
+        # remains regular even though they cannot enter the measured median.
+        for i in range(13):
+            a = start-101_000_000 + i*100_000_000
+            b = a+2_000_000
+            value = 9000 if i in (0,1,11,12) else 100 if i == 10 else 10+i
+            def focus(at):
+                return dict(t_ns=at, known=True, valid=True, frontmost_pid=42,
+                            top_window=7, target_window=7)
+            samples.append(dict(query_start_ns=a, query_end_ns=b, t_ns=b, scheduled_ns=a,
+                pid=42, process_start_identity='owned:42', rss=value*hc.MIB,
+                footprint=value*hc.MIB, max_footprint=9999*hc.MIB, cpu_ns=i*1000,
+                wakeups=i, status='ok', focus_before=focus(a-100), focus_after=focus(b+100),
+                focus_changes=[]))
+        return probe, samples, artifact
+
+    def memory(self, probe=None, samples=None, artifact=None, sample_ms=100):
+        p,s,a = self.fixture()
+        return standing.hc.typing_memory_row(p if probe is None else probe,
+            s if samples is None else samples, 42, 7, sample_ms, a if artifact is None else artifact)
+
+    def test_measured_median_and_boundary_exclusion(self):
+        p,s,a = self.fixture()
+        row = self.memory(p,s,a)
+        self.assertTrue(row['typing_memory_valid'], row['typing_memory_reason'])
+        self.assertEqual(row['typing_sample_count'], 9)
+        self.assertEqual(row['typing_expected_samples'], 10)
+        self.assertEqual(row['typing_coverage'], .9)
+        self.assertEqual(row['typing_footprint_mib'], 16.)
+        self.assertEqual(row['typing_observed_peak_mib'], 100.)
+        self.assertEqual(row['typing_max_footprint_mib'], 9999.)
+        for i in (0,1,11,12): s[i]['footprint'] = 123456*standing.hc.MIB
+        self.assertEqual(self.memory(p,s,a)['typing_footprint_mib'], 16.)
+
+    def test_censored_key_and_guards_keep_the_epoch(self):
+        p,s,a = self.fixture()
+        # 26 warmup/calibration records and two measured keys.
+        records = {i:(1, 1_000_000_000, 1_000_000_000) for i in range(1,29)}
+        p['samples'] = [dict(seq=i, warmup=True, t_post=800_000_000, display=810_000_000)
+                        for i in range(7,27)] + p['samples']
+        row = standing.latency_row(p, records, 500.)
+        self.assertEqual((row['keys'], row['censored'], row['mean_ms']), (2,1,255.))
+        self.assertEqual(standing.latency_keys(row,500), [10.,500.])
+        memory = self.memory(p,s,a)
+        self.assertTrue(memory['typing_memory_valid'])
+        self.assertEqual(memory['typing_end_ns'],2_000_000_000)
+        p['typing_epoch']['guards_ok'] = False
+        self.assertFalse(self.memory(p,s,a)['typing_memory_valid'])
+
+    def test_missing_coverage_is_metric_local(self):
+        self.assertEqual(standing.hc.coverage_reason([{'query_end_ns':150_000_000+i*100_000_000}
+            for i in range(7)],0,1_000_000_000),'insufficient timeline coverage')
+        self.assertEqual(standing.hc.coverage_reason([{'query_end_ns':v} for v in
+            (1_000_000,101_000_000,201_000_000,301_000_000,401_000_000,501_000_000,601_000_000,701_000_000,999_000_000)],
+            0,1_000_000_000),'timeline gap exceeds 250 ms')
+        p,s,a = self.fixture()
+        for broken in ([], s[:4], s[:5]+s[8:], [r for i,r in enumerate(s) if i%2]):
+            row = dict(samples_ms=[10.,20.], keys=2, censored=0, seq_mismatch=0, refresh_hz=60,
+                       tool_artifact=a, **self.memory(p,broken,a))
+            self.assertFalse(row['typing_memory_valid'])
+            self.assertIsNone(standing.metric_value(standing.metric_descriptor('latency','typing_footprint_mib'),'latency',row))
+            self.assertEqual(standing.latency_keys(row,500),[10.,20.])
+            self.assertTrue(standing.round_ok('latency',row))
+        tiny = self.fixture()[0]
+        tiny['typing_epoch']['typing_end_ns'] = 1_200_000_000
+        tiny['typing_epoch']['end_mach_ns'] = 1_199_999_000
+        tiny['samples'][-1]['t_post'] = 1_149_999_000
+        self.assertIn('duration',self.memory(tiny,s,a)['typing_memory_reason'])
+
+    def results(self):
+        _,_,artifact = self.fixture()
+        row = dict(samples_ms=[10.,20.], keys=2, censored=0, seq_mismatch=0, refresh_hz=60,
+                   tool_artifact=artifact, **self.memory())
+        return dict(schema=3,context='fixture',terminals=['kettle-a','kettle-b'],
+            meta=dict(date='2026-09-30',mode='ab',complete=True,rounds={'latency':3},
+                latency=dict(censor_ms=500,typing_memory=standing.hc.typing_method()),
+                tool_hashes={'latency-probe':artifact['bundle_sha256']},tool_artifacts={'latency-probe':artifact}),
+            workloads={'latency':{'kettle-a':[dict(row) for _ in range(3)],
+                                   'kettle-b':[dict(row,typing_footprint_mib=8.) for _ in range(3)]}})
+
+
+    def test_unmarked_typing_values_still_need_verified_provenance(self):
+        # Dropping the typing_memory_valid marker must not skip the method,
+        # artifact and bundle checks while typing values remain.
+        import tempfile
+        result = self.results()
+        source_only = {"source_sha256": "a" * 64}
+        for rows in result["workloads"]["latency"].values():
+            for row in rows:
+                row.pop("typing_memory_valid", None)
+                row["typing_footprint_mib"] = 16.0
+                row["tool_artifact"] = source_only
+                row["typing_tool_artifact"] = source_only
+        result["meta"]["tool_artifacts"]["latency-probe"] = source_only
+        result["meta"]["tool_hashes"]["latency-probe"] = "a" * 64
+        info = standing.analyze(result, result["terminals"], True)["latency"]["metrics"]["typing_footprint_mib"]
+        self.assertFalse(any(cell.get("countable") for cell in info["metric_countable"].values()),
+                         info["metric_countable"])
+        # Both the per-row and the per-session checks must fire.
+        for cell in info["metric_countable"].values():
+            self.assertIn("verified typing probe artifact mismatch", cell["reasons"])
+            self.assertIn("typing memory method/artifact mismatch", cell["reasons"])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder)
+            (path / "results.json").write_text(_json.dumps(result))
+            cell = standing.combine([path], aa=str(path))["rows"]["latency.typing_footprint_mib"]
+            self.assertNotIn("aa", cell)
+    def test_scalar_summary_combine_and_fill_input(self):
+        import tempfile
+        r = self.results()
+        info = standing.analyze(r,r['terminals'],True)['latency']['metrics']['typing_footprint_mib']
+        self.assertEqual(info['ab']['ratio'],.5)
+        self.assertEqual(info['ab_diff']['diff'],-8.)
+        self.assertEqual(info['descriptor']['unit'],'MiB')
+        self.assertEqual(info['descriptor']['aa_kind'],'ratio')
+        self.assertEqual(info['terminals']['kettle-a']['n'],3)
+        self.assertIn('typing_footprint_mib (MiB)',standing.summarize(r,r['terminals'],True))
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp);(folder/'results.json').write_text(_json.dumps(r))
+            result = standing.combine([folder],aa=str(folder))
+            # This typed combined row is the deterministic publication/fill
+            # input. The generic fill command is a later freeze PR.
+            cell = result['rows']['latency.typing_footprint_mib']
+            self.assertEqual(cell['descriptor']['unit'],'MiB')
+            self.assertEqual(cell['per_session'][0]['ab_diff']['diff'],-8.)
+            self.assertNotIn('gate_ms',cell)
+            self.assertTrue(cell['per_session'][0]['metric_countable']['kettle-a']['countable'])
+            self.assertEqual(cell['aa']['gate'], .03)
+        # A floor has no memory row; opaque remains unranked for memory.
+        r['terminals']=['kettle','kitty'];r['unranked']=['kettle-opaque','floor-layer']
+        a,b = r['workloads']['latency'].values()
+        r['workloads']['latency']={'kettle':a,'kitty':b,'kettle-opaque':a,'floor-layer':[
+            dict(samples_ms=[10.],keys=1,refresh_hz=60) for _ in range(3)]}
+        info=standing.analyze(r,r['terminals'],False)['latency']['metrics']['typing_footprint_mib']
+        self.assertNotIn('floor-layer',info['terminals'])
+        self.assertTrue(all('kettle-opaque' not in (c['base'],c['test']) for c in info['pairwise']))
+
+    def test_clock_interval_and_bundle_reject_calibration(self):
+        import copy,tempfile
+        p,s,a = self.fixture()
+        for field,value in (('clock','wall'),('probe_clock','CLOCK_UPTIME_RAW'),('typing_start_ns',999),('window_id',8)):
+            changed=copy.deepcopy(p);changed['typing_epoch'][field]=value
+            self.assertFalse(self.memory(changed,s,a)['typing_memory_valid'])
+        for delta in (2_000_000,-2_000_000):
+            changed=copy.deepcopy(p);changed['typing_epoch']['clock_after']['mach_ns']+=delta
+            self.assertFalse(self.memory(changed,s,a)['typing_memory_valid'])
+        changed=copy.deepcopy(p);changed['typing_epoch']['clock_before']['raw_after_ns']+=2_000_000
+        changed['typing_epoch']['clock_before']['raw_before_ns']-=2_000_000
+        self.assertFalse(self.memory(changed,s,a)['typing_memory_valid'])
+        changed=copy.deepcopy(s);changed[4]['scheduled_ns']-=1
+        self.assertIn('interval',self.memory(p,changed,a)['typing_memory_reason'])
+        self.assertFalse(self.memory(sample_ms=50)['typing_memory_valid'])
+        self.assertFalse(self.memory(artifact={'source_sha256':'a'*64})['typing_memory_valid'])
+        for mutate in ('method','bundle','source-only'):
+            r=self.results()
+            if mutate=='method':r['meta']['latency']['typing_memory']['clock']='wall'
+            elif mutate=='bundle':r['meta']['tool_hashes']['latency-probe']='a'*64
+            else:r['meta']['tool_artifacts']['latency-probe']={'source_sha256':'a'*64}
+            info=standing.analyze(r,r['terminals'],True)['latency']['metrics']['typing_footprint_mib']
+            self.assertFalse(info['metric_countable']['kettle-a']['countable'])
+            with tempfile.TemporaryDirectory() as tmp:
+                folder=Path(tmp);(folder/'results.json').write_text(_json.dumps(r))
+                self.assertNotIn('aa',standing.combine([folder],aa=str(folder))['rows']['latency.typing_footprint_mib'])
+
+    def test_probe_epoch_placement_and_classifier_preserved(self):
+        import tempfile
+        if sys.platform != 'darwin' or not shutil.which('swiftc'):
+            self.skipTest('typing campaign fixture needs macOS swiftc')
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp)/'latency-probe'
+            build = subprocess.run(['swiftc', '-O', str(HERE/'macos-standing/latency-probe.swift'),
+                                    '-o', str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            output = Path(tmp)/'typing.json'
+            run = subprocess.run([str(binary), '--self-test-typing', str(output)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            row = _json.loads(output.read_text())
+            self.assertEqual(row['calibration_posts'], 6)
+            self.assertEqual(row['box'], [40,30,128,68])
+            self.assertAlmostEqual(row['calibration'][0],230)
+            self.assertAlmostEqual(row['calibration'][1],20)
+            samples, events = row['samples'], row['events']
+            self.assertEqual([s['seq'] for s in samples], list(range(7,29)))
+            self.assertEqual([s['warmup'] for s in samples], [True]*20+[False]*2)
+            self.assertEqual(row['start_mach_ns'], samples[20]['t_post'])
+            self.assertEqual(row['typing_start_ns'], samples[20]['t_post']-300)
+            self.assertEqual(samples[20]['display']-samples[20]['t_post'], 2_000_000)
+            self.assertEqual(samples[20]['mixed'], 1)
+            self.assertTrue(samples[21]['censored'])
+            self.assertIsNone(samples[21]['display'])
+            guard = [e for e in events if e['kind']=='guard'][-1]
+            self.assertEqual(row['end_mach_ns'], guard['at'])
+            self.assertEqual(row['typing_end_ns'], guard['at']-300)
+            self.assertEqual(guard['at']-samples[21]['t_post'], 590_000_000)
+            self.assertEqual(events[-2]['kind'], 'guard')
+            self.assertEqual(events[-1]['kind'], 'sleep')
+            self.assertEqual(events[-1]['at'], row['end_mach_ns'])
+            # Independent SplitMix64 sequence fixes all 22 post-key gaps.
+            state, gaps = 7, []
+            mask = (1<<64)-1
+            for _ in range(22):
+                state = (state+0x9E3779B97F4A7C15)&mask
+                z = ((state^(state>>30))*0xBF58476D1CE4E5B9)&mask
+                z = ((z^(z>>27))*0x94D049BB133111EB)&mask
+                gaps.append((100+((z^(z>>31))%201))*1_000_000)
+            actual = [events[i+1]['ns'] for i,e in enumerate(events) if e['kind']=='guard']
+            self.assertEqual(actual, gaps)
+            failed = subprocess.run([str(binary),'--self-test-typing',str(output),'--fail-guard'],
+                                    capture_output=True,text=True,timeout=10)
+            self.assertEqual(failed.returncode,1)
+            self.assertEqual(failed.stdout,'')
+            rejected = _json.loads(output.read_text())
+            self.assertEqual(set(rejected),{'error'})
+            self.assertIn('synthetic focus loss',rejected['error'])
+
+    def test_payload_initialization_and_frames(self):
+        import tempfile
+        if sys.platform != 'darwin' or not shutil.which('clang'):
+            self.skipTest('payload fixture needs macOS clang')
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp); fixture=work/'payload.c'; binary=work/'payload'
+            # Replace only OS calls, then execute the unchanged payload main.
+            # The fake tty writes stdout; input is three scratch bytes then EOF.
+            fixture.write_text(r'''#include <fcntl.h>
+#include <signal.h>
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+static int fixture_open(const char *path, int flags, ...) {
+    return strcmp(path, "/dev/tty") == 0 ? 100 : open(path, flags, 0600);
+}
+static ssize_t fixture_read(int fd, void *buf, size_t n) {
+    static int count=0;
+    if (count++ == 3) return 0;
+    *(char *)buf='j'; return 1;
+}
+static ssize_t fixture_write(int fd, const void *buf, size_t n) {
+    return write(fd == 100 ? 1 : fd, buf, n);
+}
+static int fixture_tcgetattr(int fd, struct termios *t) { memset(t,0,sizeof *t); return 0; }
+static int fixture_tcsetattr(int fd, int action, const struct termios *t) { return 0; }
+static void (*fixture_signal(int sig, void (*handler)(int)))(int) { return handler; }
+#define open fixture_open
+#define read fixture_read
+#define write fixture_write
+#define tcgetattr fixture_tcgetattr
+#define tcsetattr fixture_tcsetattr
+#define signal fixture_signal
+#define main payload_main
+#include "''' + str(HERE/'macos-standing/keyblock.c') + r'''"
+#undef main
+int main(int argc, char **argv) { return payload_main(argc,argv); }
+''')
+            build=subprocess.run(['clang','-O','-o',str(binary),str(fixture)],capture_output=True,text=True,timeout=30)
+            self.assertEqual(build.returncode,0,build.stderr)
+            log=work/'log'
+            run=subprocess.run([str(binary),str(log)],capture_output=True,timeout=10)
+            self.assertEqual(run.returncode,0,run.stderr)
+            def frame(on):
+                return b''.join(f'\x1b[{r};53H\x1b[{7 if on else 27}m'.encode()+b' '*16
+                                for r in range(17,21))+b'\x1b[0m'
+            self.assertEqual(run.stdout,b'\x1b[?25l\x1b[2 q\x1b[0m\x1b[2J\x1b[H'+
+                             frame(False)+frame(True)+frame(False)+frame(True))
+            records=standing.read_keyblock_log(log)
+            self.assertEqual(sorted(records),[1,2,3])
+            for seq,(count,before,after) in records.items():
+                self.assertEqual(count,1)
+                self.assertLessEqual(before,after)
+
+    def test_floor_has_no_observer_or_memory(self):
+        import tempfile,contextlib
+        from unittest.mock import Mock,patch
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);runner=standing.Runner({k:work/k for k in ('latency-floor','observer','latency-probe')},work,{})
+            runner.launch=Mock(return_value=Mock());runner.wait_for=Mock(return_value=True)
+            runner.pid=Mock(return_value=42);runner.stop=Mock(return_value=True)
+            p,_,a=self.fixture()
+            p['samples'] = [dict(seq=i,warmup=True,t_post=800_000_000,display=810_000_000) for i in range(7,27)] + p['samples']
+            def probe(*args):(work/'latency.json').write_text(_json.dumps(p))
+            @contextlib.contextmanager
+            def verified(*args):yield a
+            with patch.object(standing.hc,'start_observer') as start,patch.object(standing,'run_latency_probe',side_effect=probe),\
+                 patch.object(standing,'verified_probe_use',verified),patch.object(standing,'wait_for_text',return_value=True),\
+                 patch.object(standing.time,'sleep'),patch.object(standing,'read_keyblock_log',return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
+                row=runner.latency('floor-layer',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7,work/'keep.json')
+            start.assert_not_called()
+            self.assertTrue(runner.launch.call_args.kwargs['argv'])
+            self.assertIsNone(runner.observation_context)
+            self.assertEqual(standing.latency_keys(row,500),[10.,500.])
+            self.assertFalse(any(k.startswith('typing_') for k in row))
+
+    def test_invalid_launch_context_is_metric_local(self):
+        import tempfile, contextlib
+        from unittest.mock import Mock, patch
+        for context in (None, [], 42, "path-private", {}, {'pid':42,'window_id':0}):
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as tmp:
+                work=Path(tmp)
+                runner=standing.Runner({k:work/k for k in ('keyblock','observer','latency-probe')},work,{})
+                def launch(*args,**kwargs):
+                    (work/'typing-launch.json').write_text(_json.dumps(context))
+                    return Mock()
+                runner.launch=Mock(side_effect=launch);runner.wait_for=Mock(return_value=True)
+                runner.pid=Mock(return_value=42);runner.stop=Mock(return_value=True)
+                runner.end_sampler=Mock()
+                p,_,artifact=self.fixture()
+                p['samples'] = [dict(seq=i,warmup=True,t_post=800_000_000,display=810_000_000)
+                                for i in range(7,27)]+p['samples']
+                def probe(*args):(work/'latency.json').write_text(_json.dumps(p))
+                @contextlib.contextmanager
+                def verified(*args):yield artifact
+                with patch.object(standing.hc,'start_observer') as observer,\
+                     patch.object(standing,'run_latency_probe',side_effect=probe),\
+                     patch.object(standing,'verified_probe_use',verified),\
+                     patch.object(standing,'wait_for_text',return_value=True),\
+                     patch.object(standing.time,'sleep'),\
+                     patch.object(standing,'read_keyblock_log',return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
+                    row=runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7)
+                observer.assert_not_called();runner.end_sampler.assert_not_called()
+                runner.stop.assert_called_once()
+                self.assertNotIn('error',row)
+                self.assertEqual(standing.latency_keys(row,500),[10.,500.])
+                self.assertFalse(row['typing_memory_valid'])
+                self.assertIsNone(row['typing_footprint_mib'])
+                self.assertIsNone(runner.observation_context)
+
+    def test_owned_observer_probe_failures_and_artifact_retention(self):
+        import tempfile,contextlib
+        from unittest.mock import Mock,patch
+        for failure in (None,subprocess.TimeoutExpired('probe',1),RuntimeError('calibration failed'),KeyboardInterrupt()):
+            with tempfile.TemporaryDirectory() as tmp:
+                work=Path(tmp);runner=standing.Runner({k:work/k for k in ('keyblock','observer','latency-probe')},work,{})
+                process,observer=Mock(),Mock();events=[]
+                p,s,a=self.fixture()
+                if failure is not None: p['error']='calibration failed'
+                p['samples'] = [dict(seq=i,warmup=True,t_post=800_000_000,display=810_000_000) for i in range(7,27)] + p['samples']
+                def launch(*args,**kwargs):
+                    (work/'typing-launch.json').write_text(_json.dumps(dict(pid=42,window_id=7)))
+                    return process
+                runner.launch=Mock(side_effect=launch);runner.wait_for=Mock(return_value=True);runner.pid=Mock(return_value=42)
+                runner.stop=Mock(side_effect=lambda *args:events.append('target') or True)
+                runner.end_sampler=Mock(side_effect=lambda *args:events.append('observer'))
+                def start(*args):
+                    events.append('start');(work/'typing-memory.jsonl').write_text(''.join(_json.dumps(x)+'\n' for x in s))
+                    return observer
+                def probe(*args):
+                    events.append('probe');(work/'latency.json').write_text(_json.dumps(p));(work/'keyblock.log').write_text('raw')
+                    if failure:raise failure
+                @contextlib.contextmanager
+                def verified(*args):
+                    events.append('verify-before')
+                    try:yield a
+                    finally:events.append('verify-after')
+                with patch.object(standing.hc,'start_observer',side_effect=start),patch.object(standing,'run_latency_probe',side_effect=probe),\
+                     patch.object(standing,'verified_probe_use',verified),patch.object(standing,'wait_for_text',return_value=True),\
+                     patch.object(standing.time,'sleep'),patch.object(standing,'read_keyblock_log',return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
+                    if failure and not isinstance(failure,subprocess.TimeoutExpired):
+                        with self.assertRaises(type(failure)):runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7,work/'keep.json')
+                    else:
+                        row=runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7,work/'keep.json')
+                        if failure is None:
+                            self.assertNotIn('error',row)
+                            self.assertEqual(standing.latency_keys(row,500),[10.,500.])
+                            self.assertEqual(row['typing_footprint_mib'],16.)
+                            self.assertEqual(row['keys'],2)
+                            self.assertEqual(row['censored'],1)
+                            import hashlib
+                            self.assertEqual(row['typing_timeline_sha256'],hashlib.sha256((work/'keep.memory.jsonl').read_bytes()).hexdigest())
+                            self.assertEqual(set(row['typing_artifacts']),{'probe','memory','keyblock','launch'})
+                            self.assertTrue(all('/' not in v['name'] for v in row['typing_artifacts'].values()))
+                        else:self.assertIn('error',row)
+                self.assertEqual(events[-2:],['observer','target'])
+                self.assertLess(events.index('start'),events.index('probe'))
+                self.assertIn('verify-after',events)
+                self.assertIsNone(runner.observation_context)
+                self.assertTrue((work/'keep.memory.jsonl').is_file())
+                self.assertTrue((work/'keep.keyblock.log').is_file())
+                self.assertTrue((work/'keep.json').is_file())
+                self.assertTrue((work/'keep.launch.json').is_file())
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])

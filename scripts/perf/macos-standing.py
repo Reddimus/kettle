@@ -1734,53 +1734,101 @@ class Runner:
         is its own window), the probe measures its window, and the payload's
         log splits every key into its input and output halves. The terminal
         is stopped through its launch probe whatever the probe reports."""
-        log = self.work / "keyblock.log"
-        out = self.work / "latency.json"
-        for stale in (log, out):
+        log, out = self.work / "keyblock.log", self.work / "latency.json"
+        context, timeline = self.work / "typing-launch.json", self.work / "typing-memory.jsonl"
+        floor_mode = name.startswith("floor-")
+        receipts = [Path(str(context) + ".observer-" + suffix)
+                    for suffix in ("request", "started", "stop", "reaped")]
+        for stale in (log, out, context, timeline, *receipts):
             stale.unlink(missing_ok=True)
-        if name.startswith("floor-"):
-            floor = [str(self.probes["latency-floor"]), name[len("floor-"):], str(log)]
-            process = self.launch(name, "", 600, argv=floor)
-            ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
-        else:
-            process = self.launch(name, f'exec "{self.probes["keyblock"]}" "{log}"', 600)
-            ready = self.wait_for(self.work / "grid", 30 + SETTLE_SECONDS)
-        pid = self.pid()
-        if not ready or pid is None:
-            self.stop(process, 30)
-            return {"error": "the terminal never ran its payload"}
-        time.sleep(1.0)
-        # The probe posts nothing after its deadline and exits there, and
-        # this waits longer than that, so no probe outlives its round.
+        process, observer = None, None
+        # The probe posts nothing after its deadline. Keep the existing timing
+        # budget; the observer is bounded by the launch owner's 600 s lifetime.
         budget = 120 + (LATENCY_CALIBRATION_KEYS + options["warmup"] + options["keys"]) * (
             0.3 + options["censor_ms"] / 1000 + 0.2)
-        args = ["--pid", str(pid), "--out", str(out), "--keys", str(options["keys"]),
-                "--warmup", str(options["warmup"]), "--censor-ms", str(options["censor_ms"]),
-                "--seed", str(seed), "--inject", options["inject"], "--deadline-ms", str(int(budget * 1000))]
-        started = time.monotonic()
         try:
-            run_latency_probe(self.probes["latency-probe"], args, self.work, budget + 15)
-        except subprocess.TimeoutExpired:
-            pass
-        # The probe writes its result last, even when it fails or its
-        # deadline passes, and atomically, so the file appears whole.
-        finished = wait_for_text(out, "}", max(1.0, budget + 15 - (time.monotonic() - started)))
-        clean = self.stop(process, 30)
+            self.observation_context = None if floor_mode else context
+            if floor_mode:
+                floor = [str(self.probes["latency-floor"]), name[len("floor-"):], str(log)]
+                process = self.launch(name, "", 600, argv=floor)
+                ready = self.wait_for(Path(str(self.work / "stamp") + ".pid"), 20)
+            else:
+                process = self.launch(name, f'exec "{self.probes["keyblock"]}" "{log}"', 600)
+                ready = self.wait_for(self.work / "grid", 30 + SETTLE_SECONDS)
+            pid = self.pid()
+            if not ready or pid is None:
+                return {"error": "the terminal never ran its payload"}
+            time.sleep(1.0)
+            info, observer_reason = {}, None
+            if not floor_mode:
+                try:
+                    if not self.wait_for(context, 2):
+                        raise ValueError("typing launch context missing")
+                    launch_info = json.loads(context.read_text())
+                    if (not isinstance(launch_info, dict) or launch_info.get("pid") != pid
+                            or not hc.integer(launch_info.get("window_id")) or launch_info["window_id"] == 0):
+                        raise ValueError("typing launch window identity mismatch")
+                    info = launch_info
+                    sample_ms = options.get("sample_ms", 100)
+                    observer = hc.start_observer(self, process, context, [str(self.probes["observer"]),
+                        str(pid), str(info["window_id"]), str(timeline), str(hc.now_ns()),
+                        str(sample_ms), str(math.ceil(600_000 / sample_ms))])
+                    # Confirm a native query before any probe calibration.
+                    if not self.wait_for(timeline, 2) or not wait_for_text(timeline, "\n", 2):
+                        observer_reason = "typing observer readiness missing"
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    observer_reason = "typing launch context unavailable or invalid"
+            args = ["--pid", str(pid), "--out", str(out), "--keys", str(options["keys"]),
+                    "--warmup", str(options["warmup"]), "--censor-ms", str(options["censor_ms"]),
+                    "--seed", str(seed), "--inject", options["inject"], "--deadline-ms", str(int(budget * 1000))]
+            started = time.monotonic()
+            try:
+                with verified_probe_use(self.probes["latency-probe"]) as artifact:
+                    run_latency_probe(self.probes["latency-probe"], args, self.work, budget + 15)
+            except subprocess.TimeoutExpired:
+                pass
+            finished = wait_for_text(out, "}", max(1.0, budget + 15 - (time.monotonic() - started)))
+        finally:
+            try:
+                if observer is not None:
+                    self.end_sampler(observer)
+            finally:
+                try:
+                    if process is not None:
+                        clean = self.stop(process, 30)
+                finally:
+                    self.observation_context = None
+                    if keep:
+                        for source, dest in ((out, keep), (timeline, keep.with_suffix(".memory.jsonl")),
+                                             (log, keep.with_suffix(".keyblock.log")),
+                                             (context, keep.with_suffix(".launch.json"))):
+                            if source.exists():
+                                shutil.copyfile(source, dest)
         if not finished:
             return {"error": "the latency probe never finished"}
         try:
             probe = json.loads(out.read_text())
         except (OSError, json.JSONDecodeError):
             return {"error": "the latency probe wrote no result"}
-        if keep:
-            # Every sample, for checks results.json does not carry.
-            shutil.copyfile(out, keep)
         if "error" in probe:
             return {"error": f"latency probe: {probe['error']}"}
         row = latency_row(probe, read_keyblock_log(log), options["censor_ms"])
-        with verified_probe_use(self.probes["latency-probe"]) as artifact:
-            row["tool_artifact"] = artifact
-
+        row["tool_artifact"] = artifact
+        if not floor_mode:
+            try:
+                samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
+            except (OSError, ValueError, TypeError) as exc:
+                samples, observer_reason = [], "typing timeline unavailable or invalid"
+            row.update(hc.typing_memory_row(probe, samples, pid, info.get("window_id"),
+                       options.get("sample_ms", 100), row["tool_artifact"], observer_reason))
+            if keep:
+                row["typing_artifacts"] = {kind: {"name": path.name, "sha256": file_sha256(path)}
+                    for kind, path in (("probe", keep), ("memory", keep.with_suffix(".memory.jsonl")),
+                                       ("keyblock", keep.with_suffix(".keyblock.log")),
+                                       ("launch", keep.with_suffix(".launch.json"))) if path.is_file()}
+                if "memory" in row["typing_artifacts"]:
+                    row["typing_timeline_artifact"] = row["typing_artifacts"]["memory"]["name"]
+                    row["typing_timeline_sha256"] = row["typing_artifacts"]["memory"]["sha256"]
         if not clean:
             row["killed"] = True
         return row
@@ -2980,6 +3028,13 @@ def metric_descriptor(workload: str, field: str) -> Metric:
     raise ValueError(f"no metric contract for {key}")
 
 
+def typing_memory_present(run: dict) -> bool:
+    """Whether a latency row carries typing-memory evidence. Any typing value
+    needs the provenance checks, so removing the marker cannot skip them."""
+    return "typing_memory_valid" in run or any(
+        key.startswith("typing_") and value is not None for key, value in run.items())
+
+
 def metric_reason(descriptor: Metric, workload: str, run: dict) -> Optional[str]:
     if run.get("warmup"):
         return "warmup"
@@ -2990,6 +3045,12 @@ def metric_reason(descriptor: Metric, workload: str, run: dict) -> Optional[str]
     field = descriptor.id.split(".", 1)[1]
     if workload == "blink-window" and descriptor.publication_role != "diagnostic" and run.get("blink_activity") != "verified":
         return "active blink " + run.get("blink_activity", "unproven")
+    if workload == "latency" and field.startswith("typing_") and typing_memory_present(run):
+        if latency_keys(run, 500) is None:
+            return "latency guards invalid"
+        artifact = run.get("tool_artifact") or {}
+        if artifact != run.get("typing_tool_artifact") or not hc.typing_artifact_valid(artifact):
+            return "verified typing probe artifact mismatch"
     if descriptor.eligibility == "metric-validity":
         validity = (run.get("metric_validity") or {}).get(field)
         if not isinstance(validity, dict):
@@ -3487,6 +3548,7 @@ def workload_countable(results: dict, meta: dict) -> Dict[str, bool]:
 
 
 def metric_countability(results: dict, workload: str, metric: str, entry: dict, counts: bool) -> dict:
+    meta = results.get("meta") or {}
     descriptor = metric_descriptor(workload, metric)
     planned = ((results.get("meta") or {}).get("rounds") or {}).get(workload, 0)
     rows = results["workloads"].get(workload, {})
@@ -3498,6 +3560,15 @@ def metric_countability(results: dict, workload: str, metric: str, entry: dict, 
         reasons = []
         if not counts:
             reasons.append("session/workload not countable")
+        if workload == "latency" and descriptor.id.startswith("latency.typing_") and any(
+                typing_memory_present(r) for r in runs):
+            method = ((meta.get("latency") or {}).get("typing_memory"))
+            artifact = (meta.get("tool_artifacts") or {}).get("latency-probe")
+            if method != hc.typing_method() or not hc.typing_artifact_valid(artifact):
+                reasons.append("typing memory method/artifact mismatch")
+            elif ((meta.get("tool_hashes") or {}).get("latency-probe") != artifact["bundle_sha256"]
+                  or any(r.get("typing_tool_artifact") != artifact for r in runs)):
+                reasons.append("typing memory bundle identity mismatch")
         if descriptor.eligibility == "metric-validity":
             for run in runs:
                 reason = metric_reason(descriptor, workload, run)
@@ -3600,7 +3671,7 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
                          and control["setup"][key] != reference["setup"][key])
         # Latency's knobs must match when both ran it; its entries differ by
         # design (a standing adds floors).
-        knobs = ("keys", "warmup", "censor_ms", "inject", "signed")
+        knobs = ("keys", "warmup", "censor_ms", "inject", "signed", "typing_memory")
         latency_a, latency_b = control["setup"].get("latency"), reference["setup"].get("latency")
         if latency_a and latency_b and any(latency_a.get(k) != latency_b.get(k) for k in knobs):
             differs.append("latency")
@@ -4572,7 +4643,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     # Build every tool first: compiling right before measuring adds load and
     # heat, so the preflight that decides the session runs after it.
     probes = build_probes(tools, latency="latency" in workloads or args.blink_validate_only, sign_identity=args.latency_sign_identity)
-    if set(workloads) & {"output-memory", "blink-window"}:
+    if set(workloads) & {"latency", "output-memory", "blink-window"}:
         probes.update(hc.build_helpers(PROBES, tools))
     vtebench = build_vtebench(tools) if "vtebench" in workloads else None
     tool_hashes, tool_artifacts = probe_tool_identity(probes, args.latency_sign_identity)
@@ -4637,6 +4708,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
             "startup_phases": args.startup_phases,
             "latency": {"keys": args.latency_keys, "warmup": args.latency_warmup,
                         "censor_ms": args.latency_censor_ms, "inject": args.latency_inject,
+                        "typing_memory": hc.typing_method(args.memory_sample_ms),
                         "entries": latency_names, "signed": "identity" if args.latency_sign_identity else "ad hoc",
                         } if "latency" in workloads else None,
             "identity": {},
@@ -4684,13 +4756,16 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                 "printing_payload_sha256": hc.PRINT_SHA256}
             if args.memory_sample_ms != 100 or args.blink_settle != 2.5 or args.blink_window != 6.0 or args.blink_validate_only:
                 results["meta"]["refusals"].append("diagnostic blink interval or validation-only capture")
+        if "latency" in workloads and args.memory_sample_ms != 100:
+            results["meta"]["refusals"].append("diagnostic typing memory interval")
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
             write_flood(flood)
         if vtebench:
             benchmarks = prepare_benchmarks(vtebench.parents[2] / "benchmarks", work / "benchmarks")
         latency_options = {"keys": args.latency_keys, "warmup": args.latency_warmup,
-                           "censor_ms": args.latency_censor_ms, "inject": args.latency_inject}
+                           "censor_ms": args.latency_censor_ms, "inject": args.latency_inject,
+                           "sample_ms": args.memory_sample_ms}
         measured = set(names) | set(latency_names if "latency" in workloads else ())
         frame = (GhosttyFrame(recovery=out_dir / "ghostty-frame-restore.txt") if "ghostty" in measured
                  else contextlib.nullcontext())

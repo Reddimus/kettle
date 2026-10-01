@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
         pid_t pid = atoi(argv[1]); CGWindowID window = (CGWindowID)strtoul(argv[2], NULL, 10);
         uint64_t origin = strtoull(argv[4], NULL, 10);
         int interval = atoi(argv[5]), count = atoi(argv[6]);
-        if (pid <= 0 || interval < 50 || interval > 1000 || count <= 0 || count > 2000) return 2;
+        if (pid <= 0 || interval < 50 || interval > 1000 || count <= 0 || count > 12000) return 2;
         FILE *out = fopen(argv[3], "wx"); if (!out) return 2;
         signal(SIGTERM, stop); signal(SIGINT, stop);
         NSString *initial = identity(pid);
