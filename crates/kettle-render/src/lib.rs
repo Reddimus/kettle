@@ -11,6 +11,7 @@
 
 mod bg_image;
 mod color;
+mod cursor_patch;
 mod cursor_policy;
 mod glyphpipe;
 #[cfg(test)]
@@ -23,6 +24,7 @@ mod snapshot;
 mod starfield;
 mod upload;
 
+pub use cursor_patch::{CursorPatchFailure, CursorPatchIneligible, CursorPatchOutcome, PatchRect};
 pub use upload::{RenderUploads, UploadCounts};
 
 pub use bg_image::{
@@ -2644,6 +2646,16 @@ pub struct Renderer {
     text_prepares: u64,
     /// Frames presented to the window so far.
     frames_presented: u64,
+    /// What the frame on screen drew, so `present_cursor_patch` can encode
+    /// the same scene again. `None` from the start of every frame until it
+    /// is presented. Headless tests record the capture in place of a present.
+    last_scene: Option<cursor_patch::SceneFacts>,
+    /// The cursor patch's combine pipeline and on/off targets, built at the
+    /// first hand-off and freed on detach.
+    cursor_patch: Option<cursor_patch::PatchPipeline>,
+    /// The Core Animation layer the UI placed over the cursor.
+    #[cfg(target_os = "macos")]
+    cursor_layer: Option<cursor_patch::CursorLayerSurface>,
     /// Terminator parity, per-pane-titlebar: one TextBuffer per pane
     /// for the title text drawn in the titlebar quad (see
     /// `pick_titlebar_bg`). Reused across redraws to amortize
@@ -4921,6 +4933,20 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Result<Option<Renderer>> {
+        Self::headless_for_tests_with(cfg, width, height, 1.0, false)
+    }
+
+    /// [`Self::headless_for_tests`] at `scale`. With `translucent_surface`
+    /// the pretend surface also offers PostMultiplied, as a macOS window does,
+    /// so a translucent config takes the translucent path.
+    #[cfg(test)]
+    pub(crate) fn headless_for_tests_with(
+        cfg: &Config,
+        width: u32,
+        height: u32,
+        scale: f32,
+        translucent_surface: bool,
+    ) -> Result<Option<Renderer>> {
         pollster::block_on(async {
             let Ok((instance, adapter)) = resolve_headless_adapter(cfg, "headless-renderer").await
             else {
@@ -4943,14 +4969,18 @@ impl Renderer {
                 gpu_fault: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 recovery_wake: std::sync::Arc::new(std::sync::Mutex::new(None)),
             };
+            let mut alpha_modes = vec![wgpu::CompositeAlphaMode::Opaque];
+            if translucent_surface {
+                alpha_modes.push(wgpu::CompositeAlphaMode::PostMultiplied);
+            }
             Self::with_gpu(
                 gpu,
                 None,
                 wgpu::TextureFormat::Rgba8UnormSrgb,
-                vec![wgpu::CompositeAlphaMode::Opaque],
+                alpha_modes,
                 width,
                 height,
-                1.0,
+                scale,
                 cfg,
                 None,
             )
@@ -5140,6 +5170,10 @@ impl Renderer {
             cursor_quad_range: None,
             text_prepares: 0,
             frames_presented: 0,
+            last_scene: None,
+            cursor_patch: None,
+            #[cfg(target_os = "macos")]
+            cursor_layer: None,
             span_breaks_scratch: Vec::new(),
             minimum_contrast_cache: MinimumContrastCache::default(),
             pane_line_keys: Vec::new(),
@@ -5272,6 +5306,7 @@ impl Renderer {
     /// unavailable (for example, after moving the window to another monitor).
     /// All font-derived metrics are recomputed once at that current scale.
     pub fn restore_recovery_state(&mut self, state: &RendererRecoveryState) {
+        self.last_scene = None;
         self.font_family = state.font_family.clone();
         self.font_size = clamp_font_size(state.font_size);
         self.cell_scale_w = state.cell_scale_w.max(0.01);
@@ -5296,6 +5331,7 @@ impl Renderer {
     }
 
     pub fn set_live_background_opacity_floor(&mut self, floor: Option<f32>) {
+        self.last_scene = None;
         self.live_background_opacity_floor = floor.map(|value| value.clamp(0.0, 1.0));
     }
 
@@ -5309,6 +5345,7 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        self.last_scene = None;
         // Terminator parity, bg-image (phase 8 of
         // docs/TERMINATOR-BG-IMAGE-DESIGN.md): no texture work is needed here.
         // `bg_image_cache` stores the DECODED image, not a window-sized
@@ -5347,6 +5384,7 @@ impl Renderer {
         if self.config.alpha_mode == alpha_mode {
             return;
         }
+        self.last_scene = None;
         self.config.alpha_mode = alpha_mode;
         self.configure_surface();
     }
@@ -5390,6 +5428,7 @@ impl Renderer {
     }
 
     pub fn set_font_size(&mut self, size: f32) {
+        self.last_scene = None;
         self.font_size = clamp_font_size(size);
         // Re-derive physical metrics at the current DPI scale so a
         // font-size change (zoom, reload) keeps HiDPI scaling applied.
@@ -5424,6 +5463,7 @@ impl Renderer {
     /// unchanged. The caller must re-grid afterward (cell_w/cell_h change),
     /// e.g. via `App::resize_all`.
     pub fn set_scale(&mut self, scale: f32) {
+        self.last_scene = None;
         let s = if scale.is_finite() && scale > 0.0 {
             scale
         } else {
@@ -5441,6 +5481,7 @@ impl Renderer {
     /// `reload_config` so a `font-family = …` change in the user's config
     /// takes effect at runtime, not only the `font-size` part of a reload.
     pub fn set_font_family(&mut self, family: String) {
+        self.last_scene = None;
         if self.font_family.as_ref() == family.as_str() {
             return;
         }
@@ -5522,6 +5563,7 @@ impl Renderer {
     /// `cell-width` / `cell-height` value. No-op when the requested
     /// scale matches the current one.
     pub fn set_cell_scale(&mut self, w: f32, h: f32) {
+        self.last_scene = None;
         let w = w.max(0.01);
         let h = h.max(0.01);
         if (self.cell_scale_w - w).abs() < f32::EPSILON
@@ -5795,6 +5837,9 @@ impl Renderer {
     where
         F: FnOnce(),
     {
+        // Uploads below replace what the GPU holds before this frame reaches
+        // the screen, so no hand-off may re-encode the previous one.
+        self.last_scene = None;
         self.set_background_compositing(cfg);
         let theme = &cfg.theme;
         // OSC 11 (set default background) override from the focused pane.
@@ -9180,6 +9225,18 @@ impl Renderer {
         let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
         let needs_presentation =
             needs_postmultiplied_presentation(self.config.alpha_mode, scene_is_opaque);
+        // What this frame's scene pass draws, kept once the frame is on screen
+        // for a cursor-layer hand-off (`present_cursor_patch`).
+        let scene_facts = cursor_patch::SceneFacts {
+            target_size,
+            live_window: true,
+            cursor_on: overlay.cursor_visible,
+            translucent: self.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque
+                && !scene_is_opaque,
+            alpha_mode: self.config.alpha_mode,
+            background: cfg.theme.background,
+            background_type: cfg.background_type,
+        };
         let screenshot_request = self.pending_screenshot.take().and_then(|request| {
             if request.is_cancelled() {
                 Self::complete_screenshot_error(
@@ -9218,6 +9275,7 @@ impl Renderer {
                         cfg,
                         false,
                         overlay.cursor_visible,
+                        None,
                         &mut encoder,
                     ) {
                         Self::complete_screenshot_error(
@@ -9252,6 +9310,12 @@ impl Renderer {
             if need_prepare {
                 self.atlas.trim();
             }
+            // Test-only: a headless capture substitutes for a presented frame.
+            // A production Occluded frame never grants a hand-off.
+            self.last_scene = Some(cursor_patch::SceneFacts {
+                live_window: false,
+                ..scene_facts
+            });
             return Ok(FrameOutcome::Occluded);
         };
         let (frame, reconfigure_after_present) = match acquired {
@@ -9351,6 +9415,7 @@ impl Renderer {
             cfg,
             true,
             overlay.cursor_visible,
+            None,
             &mut encoder,
         )?;
         if needs_presentation {
@@ -9387,6 +9452,7 @@ impl Renderer {
             self.atlas.trim();
         }
         self.frames_presented += 1;
+        self.last_scene = Some(scene_facts);
         Ok(FrameOutcome::Presented)
     }
 
@@ -9453,6 +9519,11 @@ impl Renderer {
         }
     }
 
+    /// Encode the whole scene into `target`. With a `window`, `target` holds
+    /// only that rect of the `target_size` scene (a cursor patch pass): the
+    /// viewport maps the scene 1:1 with the window's top-left at the origin,
+    /// so every pipeline keeps its full-size screen uniform.
+    #[allow(clippy::too_many_arguments)]
     fn encode_scene_pass(
         &self,
         target: &wgpu::TextureView,
@@ -9460,6 +9531,7 @@ impl Renderer {
         cfg: &Config,
         live_window: bool,
         cursor_on: bool,
+        window: Option<PatchRect>,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
         let clear = live_underlay_clear_color(
@@ -9484,6 +9556,16 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some(window) = window {
+            pass.set_viewport(
+                -(window.x as f32),
+                -(window.y as f32),
+                target_size[0] as f32,
+                target_size[1] as f32,
+                0.0,
+                1.0,
+            );
+        }
         // Layering, back to front: wallpaper, then cell + chrome + border
         // quads opaquely on top, then inline kitty/sixel images over the cell
         // backgrounds, then text. Drawing the wallpaper after `quads` would
@@ -9518,8 +9600,18 @@ impl Renderer {
         // images and below chrome text (titlebars / menus) and the cursor
         // glyph. A no-op (count 0) in legacy mode, where pane text rides the
         // glyphon `text_renderer` below.
-        self.glyph_pipeline
-            .draw(&mut pass, &self.glyph_clips, target_size);
+        match window {
+            None => {
+                self.glyph_pipeline
+                    .draw(&mut pass, &self.glyph_clips, target_size);
+            }
+            Some(window) => self.glyph_pipeline.draw_in_window(
+                &mut pass,
+                &self.glyph_clips,
+                target_size,
+                [window.x, window.y, window.width, window.height],
+            ),
+        }
         self.text_renderer
             .render(&self.atlas, &self.viewport, &mut pass)?;
         // Dimming + scrollbar sit on top of glyphs.
@@ -10081,9 +10173,8 @@ impl Renderer {
                 color::cursor_block_color(theme, term_colors)
             };
             let cursor_start = quads.len() as u32;
-            // Hollow outline only when the running program requests
-            // `HollowBlock` through DECSCUSR. Window focus is a renderer gate
-            // above, so losing focus does not mutate or substitute DEC state.
+            // HollowBlock comes from vi mode. DECSCUSR selects block, beam
+            // or underline. Window focus gates drawing without changing DEC state.
             if shape == EShape::HollowBlock {
                 quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
                 quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));

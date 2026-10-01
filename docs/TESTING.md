@@ -762,6 +762,40 @@ screenshots, a blinking window, and a blinking window after 2 MiB of output.
 The window runs a plain `/bin/sh` with a fixed prompt, since a user's shell can
 redraw its prompt after the smoke has decided the window is steady.
 
+The cursor patch tests composite the patch over the off frame and require the
+on frame byte for byte, both rendered as the window shows them: an `Opaque`
+surface ignores alpha, a `PreMultiplied` one presents the scene's bytes, and a
+`PostMultiplied` one presents its straight-alpha pass. The matrix crosses block, beam and underline with
+opaque and 0.86 opacity with blur, scale 1 and 2, and cell widths 1.0 and
+1.07, with a glyph under the cursor. It also covers a blank block, wide CJK,
+OSC 12, cursor text equal to the background, opaque overhang at cell width
+0.6, a split with padding and a real scrollbar overlapping the cursor.
+Fixtures choose padding from font metrics and assert that cursor edges stay
+at least 1/64 px from pixel centres. Crop comparisons run on Apple Metal and
+lavapipe; WARP and other unmeasured adapters still run portable eligibility
+and combine tests, and cannot present cursor layers in production.
+
+A patch target must equal the crop of the full frame, compared in the full
+frame's straight-alpha screenshot convention, and the combine must return
+every byte for RGBA and BGRA. To make the combine test red, temporarily
+replace its shader's `return vec4<f32>(on.rgb, 1.0);` with
+`return vec4<f32>(on.rgb * 0.99, 1.0);`. Require a byte-equality assertion
+failure, then restore the shader and rerun green. Multiplying by `0.999`
+rounds back to the original bytes and cannot establish this red check.
+An adapter skip is not a passing run or red evidence.
+
+Translucent overhang (on `PreMultiplied` and `PostMultiplied` surfaces), an
+`Auto` or `Inherit` surface alpha convention, a convention changed since the
+frame, vi mode, the on phase, a snap-band edge, starfield and image overlap
+each report their ineligibility. Image overlap deliberately falls back to GPU blink rather
+than being an eligible parity case. Tests also cover missing or invalidated
+frame records, config changes, empty and oversized patches, rejected
+submissions and missing combine pipelines. Source guards protect the frame
+record and validation ordering. On Apple Metal a standalone `CAMetalLayer`
+takes one patch frame sized to the patch. That test runs in a child process
+with a 30-second deadline, since Metal drawable acquisition can block
+indefinitely. A timeout fails the test and reaps the child; it is not a pass.
+
 ### kettle-remote (50+ tests)
 
 Injected process-tree fixtures cover SSH and

@@ -275,6 +275,22 @@ impl QuadPipeline {
         self.count = data.len() as u32;
     }
 
+    /// The instances the last upload left in the GPU buffer, read back from
+    /// the retained copy. `None` when that copy does not cover them.
+    pub(crate) fn uploaded(&self) -> Option<impl Iterator<Item = QuadInstance> + '_> {
+        const SIZE: usize = std::mem::size_of::<QuadInstance>();
+        let bytes = self
+            .instances_held
+            .bytes()
+            .get(..self.count as usize * SIZE)?;
+        let (records, _) = bytes.as_chunks::<SIZE>();
+        Some(
+            records
+                .iter()
+                .map(|record| bytemuck::pod_read_unaligned(record)),
+        )
+    }
+
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         self.draw_hiding(pass, None);
     }

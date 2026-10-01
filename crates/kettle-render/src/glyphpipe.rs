@@ -104,6 +104,33 @@ pub struct GlyphClip {
     pub count: u32,
 }
 
+/// The scissor `[x, y, w, h]` that clips a pane `rect` on a `target_size`
+/// surface, or `None` when nothing of it is on the surface. `set_scissor_rect`
+/// requires x+w ≤ width and y+h ≤ height, in u32 physical pixels.
+fn pane_scissor(rect: [f32; 4], target_size: [u32; 2]) -> Option<[u32; 4]> {
+    let (sw, sh) = (target_size[0].max(1) as f32, target_size[1].max(1) as f32);
+    let x0 = rect[0].clamp(0.0, sw);
+    let y0 = rect[1].clamp(0.0, sh);
+    let x1 = (rect[0] + rect[2]).clamp(0.0, sw);
+    let y1 = (rect[1] + rect[3]).clamp(0.0, sh);
+    let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    (w != 0 && h != 0).then_some([x0 as u32, y0 as u32, w, h])
+}
+
+/// A scene `scissor` clipped to `window` and moved to the window's origin,
+/// or `None` when they do not overlap.
+fn window_scissor(scissor: [u32; 4], window: [u32; 4]) -> Option<[u32; 4]> {
+    let x0 = scissor[0].max(window[0]);
+    let y0 = scissor[1].max(window[1]);
+    let x1 = scissor[0]
+        .saturating_add(scissor[2])
+        .min(window[0].saturating_add(window[2]));
+    let y1 = scissor[1]
+        .saturating_add(scissor[3])
+        .min(window[1].saturating_add(window[3]));
+    (x1 > x0 && y1 > y0).then(|| [x0 - window[0], y0 - window[1], x1 - x0, y1 - y0])
+}
+
 /// Where a glyph lives in the atlas + the bearings needed to place its quad.
 #[derive(Clone, Copy)]
 pub struct GlyphSlot {
@@ -1123,6 +1150,21 @@ impl GlyphPipeline {
         clips: &[GlyphClip],
         target_size: [u32; 2],
     ) {
+        let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
+        self.draw_in_window(pass, clips, target_size, whole);
+    }
+
+    /// [`Self::draw`] into a target that holds only `window` (`[x, y, w, h]`
+    /// in pixels) of a `target_size` scene, which the caller maps onto it
+    /// with a matching viewport. Each pane scissor is the one `draw` would
+    /// set, clipped to the window and moved to its origin.
+    pub fn draw_in_window(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        clips: &[GlyphClip],
+        target_size: [u32; 2],
+        window: [u32; 4],
+    ) {
         if self.count == 0 {
             return;
         }
@@ -1133,27 +1175,21 @@ impl GlyphPipeline {
             pass.draw(0..4, 0..self.count);
             return;
         }
-        let (sw, sh) = (target_size[0].max(1) as f32, target_size[1].max(1) as f32);
         for c in clips {
             if c.count == 0 {
                 continue;
             }
-            // Clamp the pane rect to the surface — `set_scissor_rect` requires
-            // x+w ≤ width and y+h ≤ height, in u32 physical pixels.
-            let x0 = c.rect[0].clamp(0.0, sw);
-            let y0 = c.rect[1].clamp(0.0, sh);
-            let x1 = (c.rect[0] + c.rect[2]).clamp(0.0, sw);
-            let y1 = (c.rect[1] + c.rect[3]).clamp(0.0, sh);
-            let (swd, shd) = ((x1 - x0) as u32, (y1 - y0) as u32);
-            if swd == 0 || shd == 0 {
+            let Some([x, y, w, h]) =
+                pane_scissor(c.rect, target_size).and_then(|s| window_scissor(s, window))
+            else {
                 continue;
-            }
-            pass.set_scissor_rect(x0 as u32, y0 as u32, swd, shd);
+            };
+            pass.set_scissor_rect(x, y, w, h);
             pass.draw(0..4, c.start..c.start + c.count);
         }
-        // Restore the full-surface scissor so the following passes (chrome text,
+        // Restore the whole-target scissor so the following passes (chrome text,
         // menus, the cursor glyph) aren't clipped by the last pane's rect.
-        pass.set_scissor_rect(0, 0, sw as u32, sh as u32);
+        pass.set_scissor_rect(0, 0, window[2], window[3]);
     }
 
     /// Drop every cached glyph slot. Called when the font family / size / scale
@@ -1190,6 +1226,45 @@ mod tests {
             "the production slice retained a test-only item"
         );
         production
+    }
+
+    /// A pane scissor is the pane clamped to the surface, in whole pixels, as
+    /// `draw` always set it; an empty one draws nothing.
+    #[test]
+    fn a_pane_scissor_is_the_pane_clamped_to_the_surface() {
+        assert_eq!(
+            pane_scissor([10.5, 20.25, 100.0, 50.0], [320, 120]),
+            Some([10, 20, 100, 50])
+        );
+        assert_eq!(
+            pane_scissor([-5.0, 100.0, 400.0, 40.0], [320, 120]),
+            Some([0, 100, 320, 20])
+        );
+        assert_eq!(pane_scissor([320.0, 0.0, 10.0, 10.0], [320, 120]), None);
+        assert_eq!(pane_scissor([0.0, 0.0, 0.5, 10.0], [320, 120]), None);
+    }
+
+    /// Drawing into a window of the scene sets the scissors the whole scene
+    /// would, clipped to the window and moved to its origin; the whole-target
+    /// window leaves every scissor unchanged.
+    #[test]
+    fn a_window_clips_and_moves_each_scissor() {
+        let whole = [0, 0, 320, 120];
+        for rect in [[10.5, 20.25, 100.0, 50.0], [-5.0, 100.0, 400.0, 40.0]] {
+            let scissor = pane_scissor(rect, [320, 120]).expect("on the surface");
+            assert_eq!(window_scissor(scissor, whole), Some(scissor));
+        }
+        let window = [100, 40, 16, 24];
+        assert_eq!(
+            window_scissor([10, 20, 100, 50], window),
+            Some([0, 0, 10, 24]),
+            "the pane covers the window's left 10 columns"
+        );
+        assert_eq!(window_scissor([0, 0, 50, 50], window), None);
+        assert_eq!(
+            window_scissor([90, 50, 40, 5], window),
+            Some([0, 10, 16, 5])
+        );
     }
 
     #[test]

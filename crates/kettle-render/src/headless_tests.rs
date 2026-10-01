@@ -338,6 +338,46 @@ fn every_pipeline_skips_an_unchanged_upload() {
     );
 }
 
+/// A pipeline reports the instances its last upload left on the GPU, which
+/// the cursor patch reads to check the quads under it.
+#[test]
+fn a_pipeline_reports_what_it_uploaded() {
+    let _serialized = gpu_test_guard();
+    let cfg = gpu_test_config();
+    let Some((device, queue)) = pollster::block_on(async {
+        let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "uploaded-test")
+            .await
+            .ok()?;
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .ok()
+    }) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let quad = |x: f32| QuadInstance {
+        pos: [x, 1.0],
+        size: [4.0, 4.0],
+        color: [1.0, 0.0, 0.0, 1.0],
+    };
+    let positions = |quads: &QuadPipeline| -> Vec<f32> {
+        quads
+            .uploaded()
+            .expect("the retained copy covers the upload")
+            .map(|quad| quad.pos[0])
+            .collect()
+    };
+    let mut quads = QuadPipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    quads.upload(&device, &queue, [64.0, 32.0], &[quad(1.0), quad(2.5)]);
+    assert_eq!(positions(&quads), [1.0, 2.5]);
+    // A prefix writes nothing but draws, and reports, only the prefix.
+    quads.upload(&device, &queue, [64.0, 32.0], &[quad(1.0)]);
+    assert_eq!(positions(&quads), [1.0]);
+    quads.upload(&device, &queue, [64.0, 32.0], &[]);
+    assert!(positions(&quads).is_empty());
+}
+
 /// The off phase draws exactly what a cursor hidden with DECTCEM draws.
 #[test]
 fn the_off_phase_matches_a_hidden_cursor() {
@@ -421,9 +461,11 @@ fn the_blink_phase_reaches_only_the_draw() {
     );
     assert_eq!(
         src.matches("overlay.cursor_visible").count(),
-        2,
-        "only the live and the capture scene passes read the phase"
+        3,
+        "only the live and the capture scene passes read the phase, and the \
+         frame records it for a cursor-layer hand-off"
     );
+    assert!(src.contains("cursor_on: overlay.cursor_visible,"));
     let scene = src
         .split_once("    fn encode_scene_pass(")
         .expect("encode_scene_pass")

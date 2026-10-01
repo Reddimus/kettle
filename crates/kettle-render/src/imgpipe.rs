@@ -790,6 +790,28 @@ impl ImagePipeline {
         complete
     }
 
+    /// Whether the last upload left anything to draw.
+    pub(crate) fn has_draws(&self) -> bool {
+        !self.draws.is_empty()
+    }
+
+    /// Destination rects `[x, y, w, h]` of the images the last upload draws,
+    /// read back from the retained copy of the instances. `None` when that
+    /// copy does not cover them.
+    pub(crate) fn drawn_rects(&self) -> Option<Vec<[f32; 4]>> {
+        let size = std::mem::size_of::<Inst>();
+        let bytes = self.instances_held.bytes();
+        let mut rects = Vec::new();
+        for &(_, _, first, count) in &self.draws {
+            for index in first..first.saturating_add(count) {
+                let start = (index as usize).checked_mul(size)?;
+                let inst: Inst = bytemuck::pod_read_unaligned(bytes.get(start..start + size)?);
+                rects.push([inst.pos[0], inst.pos[1], inst.size[0], inst.size[1]]);
+            }
+        }
+        Some(rects)
+    }
+
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.draws.is_empty() {
             return;
