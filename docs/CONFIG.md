@@ -650,3 +650,12 @@ the default binding for that trigger — useful when a default like
 Example: `keybind = ctrl+shift+c=unbind`.
 
 See [`kettle.example.config`](kettle.example.config).
+
+## Settings display text
+
+The Settings panel uses sentence case for labels and display values. Config
+values keep their existing spelling. For example, `gpu-backend = auto` displays
+as **Automatic**, while `gpu-backend = dx12` displays as **DirectX 12**.
+`scrollback-bytes = 120MB` displays as **120 MB** under **Scrollback memory**.
+**Update check interval** displays hours as **24 h**. The panel also displays
+`13 pt`, `6 px`, `10 s`, and `99%`. See [SETTINGS.md](SETTINGS.md).

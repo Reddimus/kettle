@@ -2403,3 +2403,38 @@ submitted and no credentials are needed. CI downloads the fixed official release
 and checks its pinned SHA-256 before execution. `results.json` records the actual
 OS, render surface, grid, and outcomes; `codex-results.json` records the client
 version and attachment outcomes.
+
+## Settings text and column layout
+
+Run `cargo test -p kettle-ui settings` and
+`cargo test -p kettle-render settings` in a normal checkout. The regressions
+cover sentence case, unchanged config serialization, all-category column widths,
+long GPU names, a two-cell label/value gap, separate ellipsizing with wide
+characters, stable category text, and hit testing of clipped category names.
+Footer tests check that ordinary rows have no note, completion mentions new
+shells, blur mentions its opacity dependency, and pending wording stays neutral
+when Graphics is selected. Renderer regressions check the painted line selection
+and text bounds at a 284-pixel surface height with four Graphics rows and at a
+200-pixel height with scrolling fields. Pending and contextual notes must stay
+visible, footer clicks must be inert, and the focused field must remain visible.
+
+For live acceptance, open Settings on Linux with the Intel Iris Xe Vulkan
+adapter. Check Appearance, Behavior, and Graphics at a wide and a narrow window
+size. Confirm **Completion overlay** has a gap before **Automatic**, the value
+column stays aligned across categories, and an underline marks the active
+category. Set a long image path and inspect both its stored value and inline
+editor. Confirm `13 pt`, `6 px`, `120 MB`, `24 h`, `10 s`, and `99%` formatting.
+Check the **Window blur** row's dependency note, then move to **Font size** and
+confirm the dependency note disappears. Change a GPU setting and confirm the
+active adapter remains visible alongside "Restart Kettle or open a new window
+to apply pending changes." Change only opacity or blur, then switch to Graphics
+and confirm the notice uses the same neutral wording. Reduce the surface height
+to 284 pixels, focus each Graphics row, and check that the notice remains painted.
+In a 200-pixel-tall window, scroll Appearance fields and check that the blur and
+pending notes stay below them. Check arrow keys, Tab, Shift+Tab, mouse clicks,
+and Vim navigation.
+
+The 4.9.0 cut's appearance gate must inspect this new Settings text and layout
+in the exact release bundle. Existing appearance captures do not verify these
+changes. Historical appearance, audit, and changelog records remain as written.
+Run the normal format and gauntlet gates before merging.
