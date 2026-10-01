@@ -891,6 +891,11 @@ erase the selection.
 drives the same grid harness with Codex/Claude-style `path/to/file.rs:line:col`
 output and verifies that pane-cwd-relative paths become local `file://` links
 without splitting URL text into extra file links.
+`detected_links_follow_a_resize_that_reflows_the_text` (kettle-ui) prints
+grep-style paths in a real pane, scans its links, narrows the pane with no
+further output and requires the scan to match the reflowed grid: the link
+cache keys on the pane's geometry generation as well as its output, which
+`the_geometry_generation_counts_resizes_not_output` (kettle-core) pins.
 
 **Output coalescing.** Apps that repaint without DEC 2026
 synchronized output (Claude Code toggles `?25l/?25h` ~1750×/session and never

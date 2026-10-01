@@ -809,7 +809,8 @@ pub(crate) struct WindowState {
     /// each CursorMoved recomputes the addressed split's ratio from the cursor.
     pub(crate) dragging_split: Option<SplitDrag>,
     /// Cache key for the last viewport link-autodetect scan — see
-    /// app.rs (`update_links` re-scans only on output, scroll, or focus).
+    /// app.rs (`scan_links` re-scans only on output, resize, scroll, focus or
+    /// cwd).
     pub(crate) links_scan_key: Option<LinksScanKey>,
     pub(crate) mouse_btn: Option<u8>,
     /// Last `(pane, row, col)` reported to a mouse-tracking app, so

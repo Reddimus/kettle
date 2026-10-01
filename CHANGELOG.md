@@ -47,6 +47,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Underlines under detected paths and URLs stay on their text after a pane
+  changes size without new output: zooming a pane, splitting next to it or
+  resizing the window. They used to keep the old width's positions, so they
+  ran across the wrong words until something was printed.
 - A runtime diagnostic incident appears in `<cache>/kettle/diagnostics` only
   once it is complete; a reader could see one empty or half-written.
 - A key that closes or replaces one of Kettle's own modals (Enter in the
