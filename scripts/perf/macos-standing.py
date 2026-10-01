@@ -2011,6 +2011,319 @@ def parse_phases(text: str, started_ns: Optional[int]) -> dict:
     return phases
 
 
+# Diagnostic adapters are deliberately separate from parse_phases and Runner.
+# Their reports cannot change a historical row or make a session countable.
+STARTUP_PHASES = (
+    "main", "run_with", "event_loop_built", "config_loaded", "app_built",
+    "fonts_enumerated", "fonts_ready", "pane_spawned", "resumed",
+    "fonts_join_start", "fonts_joined", "window_created", "gpu_ready",
+    "window_revealed", "first_frame",
+)
+STARTUP_DURATIONS = {
+    "fonts_join_wait_ms": ("fonts_join_start", "fonts_joined", True),
+    "fonts_ready_to_resumed_ms": ("fonts_ready", "resumed", False),
+    "fonts_ready_after_config_ms": ("config_loaded", "fonts_ready", False),
+    "event_loop_build_ms": ("run_with", "event_loop_built", True),
+    "gpu_init_ms": ("window_created", "gpu_ready", True),
+}
+STARTUP_STAMP = re.compile(
+    r"startup phase=([a-z][a-z0-9_]{0,63}) t_ns=([0-9]+) "
+    r"since_main_ms=(?:[0-9]+(?:\.[0-9]+)?|-)"
+    r"(?: thread=(main|fonts))?$"
+)
+STARTUP_PATH = re.compile(r"startup path=(resumed_early|after_renderer|unknown)$")
+# The phase name alone, so a record whose timestamp is malformed still
+# invalidates its phase instead of leaving an earlier stamp in force.
+STARTUP_PHASE_NAME = re.compile(r"startup phase=([a-z][a-z0-9_]{0,63})\b")
+# struct winsize holds unsigned shorts, so no PTY geometry exceeds this.
+NATIVE_GEOMETRY_MAX = 65535
+
+
+def evidence_state(state: str, reason: str, **fields) -> dict:
+    return {"state": state, "reason": reason, **fields}
+
+
+def evidence_uint(value) -> bool:
+    return type(value) is int and 0 <= value < 2**64
+
+
+def evidence_number(value) -> bool:
+    return (type(value) is int and 0 <= value < 2**64) or (type(value) is float and math.isfinite(value) and value >= 0)
+
+
+def startup_phase_evidence(text: str, started_ns: Optional[int]) -> dict:
+    """Read S1/S2 stderr, preserving first raw stamps and explicit threads.
+
+    S2 emits no monitor_match or reported wait. These stay unavailable.
+    Duplicate conflicts invalidate the affected derived interval, never replace
+    the first stamp. Unknown stamps remain diagnostics, outside published phases.
+    """
+    stamps, threads, unknown, invalid = {}, {}, {}, set()
+    paths, malformed, duplicates, path_malformed = [], 0, 0, False
+    for line in text.splitlines():
+        if "startup phase=" in line:
+            found = STARTUP_STAMP.search(line.strip())
+            if not found or len(found[2]) > 20 or not evidence_uint(int(found[2])) or int(found[2]) == 0:
+                malformed += 1
+                phase = STARTUP_PHASE_NAME.search(line)
+                if phase and phase[1] in STARTUP_PHASES:
+                    invalid.add(phase[1])
+                continue
+            name, raw, thread = found[1], int(found[2]), found[3]
+            target = stamps if name in STARTUP_PHASES else unknown
+            if name in target:
+                duplicates += 1
+                if target[name] != raw or (name in stamps and threads.get(name) != thread):
+                    invalid.add(name)
+                continue
+            target[name] = raw
+            if name in stamps and thread is not None:
+                threads[name] = thread
+                expected = "fonts" if name in ("fonts_ready", "fonts_enumerated") else "main"
+                if thread != expected:
+                    invalid.add(name)
+        elif "startup path=" in line:
+            found = STARTUP_PATH.search(line.strip())
+            if found:
+                paths.append(found[1])
+            else:
+                malformed += 1
+                path_malformed = True
+    durations, validity = {}, {}
+    for field, (begin, end, ordered) in STARTUP_DURATIONS.items():
+        reason = None
+        if begin not in stamps or end not in stamps:
+            reason = "missing endpoints"
+        elif begin in invalid or end in invalid:
+            reason = "conflicting or malformed endpoints"
+        elif ordered and stamps[end] < stamps[begin]:
+            reason = "unordered endpoints"
+        elif field.startswith("fonts_") and (
+                not threads.get(begin) or not threads.get(end) or len(set(paths)) != 1
+                or paths[0] == "unknown" or path_malformed):
+            reason = "missing thread/path attribution"
+        durations[field] = None if reason else (stamps[end] - stamps[begin]) / 1e6
+        validity[field] = evidence_state("unavailable" if reason else "supported", reason or ("ordered raw stamps" if ordered else "signed raw stamps"))
+    return {
+        "capability": "startup-stamps-s1-s2", "startup_stamps_ns": stamps,
+        "startup_phase_threads": threads, "unknown_stamps_ns": unknown,
+        "startup_path": paths[0] if len(set(paths)) == 1 and not path_malformed else None,
+        "phase_ms": {name: (raw - started_ns) / 1e6 for name, raw in stamps.items()}
+                    if evidence_uint(started_ns) else {},
+        "durations": durations, "metric_validity": validity,
+        "malformed_lines": malformed, "duplicate_stamps": duplicates,
+        "invalid_phases": sorted(invalid),
+        "monitor_match": None, "reported_fonts_wait_ms": None,
+        "first_output_ms": None, "first_output_origin": None,
+        "first_output_endpoint": None, "first_output_capability": "unavailable",
+    }
+
+
+def startup_duration_summary(rows: List[dict]) -> dict:
+    """Derive each round first. Never subtract medians of cumulative endpoints."""
+    result = {}
+    for field in STARTUP_DURATIONS:
+        values = [row["durations"][field] for row in rows if row["durations"][field] is not None]
+        result[field] = {
+            "values": values, "n": len(values), "missing": len(rows) - len(values),
+            "median": statistics.median(values) if values else None,
+            "p95": percentile(values, 0.95) if values else None,
+            "max": max(values) if values else None,
+        }
+    result["thread_rows"] = sum(bool(row["startup_phase_threads"]) for row in rows)
+    result["path_counts"] = {path: sum(row["startup_path"] == path for row in rows)
+                             for path in ("resumed_early", "after_renderer", "unknown")}
+    return result
+
+
+def startup_grid_evidence(row: dict, policy: str = "settled", cols: int = COLS,
+                          rows: int = ROWS) -> dict:
+    """Validate retained observations only. No launch, wait, polling or repair."""
+    if policy not in ("settled", "child", "native"):
+        raise ValueError("unknown startup grid policy")
+    target = (cols, rows)
+    if any(type(value) is not int or value <= 0 for value in target):
+        raise ValueError("invalid target geometry")
+    if row.get("error"):
+        return evidence_state("incomplete", "startup row failed")
+    if any(type(row.get(k)) is not int for k in ("cols", "rows")) or (row.get("cols"), row.get("rows")) != target:
+        return evidence_state("incomplete", "missing or wrong settled grid")
+    if policy == "settled":
+        return evidence_state("supported", "settled grid")
+    # Absence of start_cols does not mean it matched: old check_grid elides it.
+    if any(type(row.get(k)) is not int for k in ("start_cols", "start_rows")) or (row.get("start_cols"), row.get("start_rows")) != target:
+        return evidence_state("incomplete", "missing or wrong explicit child grid")
+    if policy == "child":
+        return evidence_state("supported", "explicit child and settled grids")
+    return native_pty_evidence(row, cols, rows)
+
+
+def native_pty_evidence(row: dict, cols: int = COLS, rows: int = ROWS) -> dict:
+    """Provisional S3 v1. There is no app producer for this format yet."""
+    native = row.get("native_pty")
+    if native is None:
+        return evidence_state("unavailable", "native PTY recorder absent", provisional=True)
+    bad = lambda reason: evidence_state("incomplete", reason, provisional=True)
+    if not isinstance(native, dict) or native.get("version") != "native_pty_v1":
+        return evidence_state("malformed", "unknown native PTY format", provisional=True)
+    if native.get("clock") != "CLOCK_UPTIME_RAW":
+        return bad("native clock mismatch")
+    for key in ("launch_id", "pane_id"):
+        if not isinstance(row.get(key), str) or not row[key] or native.get(key) != row[key]:
+            return bad("native identity mismatch")
+    if native.get("complete") is not True or native.get("overflow") is not False or type(native.get("dropped")) is not int or native["dropped"] != 0:
+        return bad("native recording incomplete")
+    times = [row.get("started_ns"), native.get("recording_start_ns"),
+             native.get("created_ns"), native.get("initial", {}).get("t_ns")
+             if isinstance(native.get("initial"), dict) else None,
+             row.get("child_observed_ns"), native.get("recording_end_ns")]
+    if not all(evidence_uint(t) for t in times) or times != sorted(times) or times[-1] < times[1] + 2_000_000_000:
+        return bad("missing or short recording endpoints")
+    if native.get("initial_stage") != "after_create_before_correction":
+        return bad("initial observation stage unproven")
+    child = native.get("child_observation")
+    if not isinstance(child, dict) or any(child.get(key) != row.get(key) for key in
+            ("child_observed_ns", "start_cols", "start_rows")) or type(child.get("sigwinch_count")) is not int or child["sigwinch_count"] != 0:
+        return bad("child observation linkage or SIGWINCH failed")
+    def geometry(value):
+        keys = ("cols", "rows", "pixel_width", "pixel_height")
+        return isinstance(value, dict) and all(
+            type(value.get(k)) is int and 0 < value[k] <= NATIVE_GEOMETRY_MAX for k in keys)
+    initial = native.get("initial")
+    if not geometry(initial) or (initial["cols"], initial["rows"]) != (cols, rows):
+        return bad("wrong initial native geometry")
+    events = native.get("events")
+    if not isinstance(events, list) or len(events) > 4096 or type(native.get("event_count")) is not int or native["event_count"] != len(events):
+        return bad("missing or dropped native events")
+    previous, observed = times[3], initial
+    geometry_keys = ("cols", "rows", "pixel_width", "pixel_height")
+    for seq, event in enumerate(events, 1):
+        if not isinstance(event, dict) or type(event.get("seq")) is not int or event["seq"] != seq or not evidence_uint(event.get("t_ns")) or not previous < event["t_ns"] <= times[-1]:
+            return bad("native sequence/time gap")
+        if any(event.get(k) != row[k] for k in ("launch_id", "pane_id")):
+            return bad("native event identity mismatch")
+        if event.get("reason") not in ("initial", "window", "monitor", "config") or event.get("outcome") not in ("ok", "noop") or event.get("native_error") is not None:
+            return bad("failed or unrecorded resize")
+        if not geometry(event.get("requested")) or not geometry(event.get("observed")):
+            return bad("missing resize geometry")
+        if type(event.get("signal_sent")) is not bool or event["signal_sent"]:
+            return bad("startup resize sent SIGWINCH")
+        if any(event["requested"][k] != observed[k] or event["observed"][k] != observed[k] for k in geometry_keys):
+            return bad("geometry-changing startup resize")
+        previous, observed = event["t_ns"], event["observed"]
+    final = native.get("final")
+    if not geometry(final) or final.get("t_ns") != times[-1] or any(final[k] != observed[k] for k in geometry_keys):
+        return bad("missing or inconsistent final geometry")
+    return evidence_state("supported", "complete provisional native history", provisional=True, events=len(events))
+
+
+def cursor_layer_evidence(data: dict) -> dict:
+    """Read #418's analysis.json exactly, without inventing raw observations.
+
+    The producer checks its live samples and twenty geometry reads but exports
+    only aggregates and selected states. Those cannot prove the interval here.
+    """
+    if not isinstance(data, dict) or "contract" not in data:
+        return evidence_state("unavailable", "native layer smoke absent")
+    contract = data["contract"]
+    if not isinstance(contract, dict):
+        return evidence_state("malformed", "invalid native layer smoke")
+    numbers = {}
+    for key in ("handoff_after_s",):
+        if not evidence_number(contract.get(key)):
+            return evidence_state("malformed", "invalid handoff aggregate")
+        numbers[key] = contract[key]
+    idle = contract.get("idle")
+    if not isinstance(idle, dict) or any(not evidence_number(idle.get(k)) for k in
+            ("span_s", "peak_mib", "wakeups_per_s", "cpu_percent")):
+        return evidence_state("malformed", "invalid idle aggregates")
+    numbers["idle"] = {k: idle[k] for k in ("span_s", "peak_mib", "wakeups_per_s", "cpu_percent")}
+    states = {}
+    for label in ("handoff", "rested", "after_reload", "after_key"):
+        state = contract.get(label)
+        if not isinstance(state, dict) or state.get("renderer") not in ("layer", "gpu") or any(not evidence_uint(state.get(k)) for k in ("handoffs", "exits", "hides")):
+            return evidence_state("malformed", "invalid cursor_blink state")
+        frames = state.get("exit_frame_us")
+        if not isinstance(frames, dict) or not evidence_uint(frames.get("count")) or any(
+                frames.get(k) is not None and not evidence_number(frames[k]) for k in ("p50", "p95", "max")):
+            return evidence_state("malformed", "invalid exit frame aggregates")
+        if (frames["count"] == 0 and (frames.get("p50") is not None or frames.get("p95") is not None or frames.get("max") != 0)) or (frames["count"] > 0 and any(frames.get(k) is None for k in ("p50", "p95", "max"))):
+            return evidence_state("malformed", "inconsistent exit frame coverage")
+        states[label] = {"renderer": state["renderer"], **{k: state[k] for k in ("handoffs", "exits", "hides")},
+                         "exit_frame_us": {k: frames.get(k) for k in ("count", "p50", "p95", "max")}}
+    return evidence_state(
+        "incomplete", "producer omits raw sampling bounds, timeout and geometry-read history",
+        capability="cursor-layer-smoke-418", aggregates=numbers, states=states,
+        interval_peak_mib=None, geometry_polling_valid=None, acceptance=None,
+    )
+
+
+def renderer_trace_evidence(text: str) -> dict:
+    """No private echo trace format is present in the row-shaping producer.
+
+    Reject proposed JSONL and arbitrary logs alike. A made-up wire agreement
+    cannot attribute prepare/emit/upload, join echoes, or convert clock domains.
+    """
+    return evidence_state("unavailable", "producer echo trace wire format not supplied",
+                          capability=None, echo_durations=None, acceptance=None)
+
+
+def diagnostic_json(path: Path) -> dict:
+    # Bound inputs, reject duplicate JSON members and nonfinite numbers.
+    data, _ = config_file_bytes(path, 16 * 1024 * 1024, follow=True)
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate diagnostic JSON member")
+            result[key] = value
+        return result
+    def nonfinite(value):
+        raise ValueError("nonfinite diagnostic JSON number")
+    result = json.loads(data, object_pairs_hook=unique, parse_constant=nonfinite)
+    if not isinstance(result, dict):
+        raise ValueError("diagnostic input must be an object")
+    return result
+
+
+def run_evidence_postprocessing(args) -> int:
+    """Separate CLI exit path, before builds, platform checks or app launch."""
+    reports = []
+    try:
+        for path in args.startup_input or []:
+            data = diagnostic_json(Path(path))
+            workloads = data.get("workloads")
+            if not isinstance(workloads, dict) or not isinstance(workloads.get("startup"), dict):
+                raise ValueError("startup input needs workloads.startup")
+            for name, rows in workloads["startup"].items():
+                if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                    raise ValueError("invalid startup rows")
+                # Export no terminal names, paths, identities or private stderr.
+                if name not in ("kettle", "kettle-a", "kettle-b"):
+                    continue
+                reports.append({"kind": "startup", "rows": [
+                    startup_grid_evidence(row, args.startup_grid_policy) for row in rows
+                    if not row.get("warmup")]})
+        phase_rows = []
+        for path in args.startup_phase_input or []:
+            text = config_file_bytes(Path(path), 16 * 1024 * 1024, follow=True)[0].decode("utf-8")
+            phase_rows.append(startup_phase_evidence(text, args.startup_started_ns))
+        if phase_rows:
+            reports.append({"kind": "startup-phases", "rows": phase_rows,
+                            "summary": startup_duration_summary(phase_rows)})
+        for path in args.native_layer_input or []:
+            reports.append({"kind": "native-layer", "evidence": cursor_layer_evidence(diagnostic_json(Path(path)))})
+        for path in args.trace_input or []:
+            text = config_file_bytes(Path(path), 16 * 1024 * 1024, follow=True)[0].decode("utf-8")
+            reports.append({"kind": "renderer-trace", "evidence": renderer_trace_evidence(text)})
+    except (OSError, ValueError, RuntimeError) as error:
+        # Raw exceptions can contain owner-local paths or fragments of input.
+        print("diagnostic input refused: invalid or unreadable evidence", file=sys.stderr)
+        return 1
+    print(json.dumps({"diagnostic_only": True, "countable": False, "reports": reports}, indent=2, allow_nan=False))
+    return 0
+
+
 def read_keyblock_log(path: Path) -> Dict[int, Tuple[int, int, int]]:
     """keyblock's records, {seq: (bytes read, t_read, t_written)}. A torn last
     record (the payload killed mid-write) is dropped."""
@@ -4051,7 +4364,29 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                         help="put a Kettle binary in an ad-hoc signed copy of the installed app and exit")
     parser.add_argument("--combine", nargs="+", metavar="DIR", help="merge session directories and exit")
     parser.add_argument("--aa", metavar="DIR", help="with --combine: an A/A session whose intervals set the gates")
+    parser.add_argument("--startup-input", nargs="+", metavar="FILE",
+                        help="postprocess retained startup results JSON; launch no app")
+    parser.add_argument("--startup-grid-policy", choices=("settled", "child", "native"),
+                        default="settled", help="policy for --startup-input only")
+    parser.add_argument("--startup-phase-input", nargs="+", metavar="FILE",
+                        help="postprocess retained S1/S2 startup stderr, one file per round")
+    parser.add_argument("--startup-started-ns", type=int,
+                        help="optional launch clock origin for a single --startup-phase-input")
+    parser.add_argument("--native-layer-input", nargs="+", metavar="FILE",
+                        help="postprocess native cursor layer analysis.json aggregates")
+    parser.add_argument("--trace-input", nargs="+", metavar="FILE",
+                        help="report retained private echo trace capability; launch no app")
     args = parser.parse_args()
+    diagnostic = any((args.startup_input, args.startup_phase_input,
+                      args.native_layer_input, args.trace_input))
+    if diagnostic:
+        if args.combine or args.make_bundle or args.latency_check or args.preflight_only or args.rebuild_latency_probe:
+            parser.error("evidence postprocessing cannot be combined with execution modes")
+        if args.startup_started_ns is not None and (not args.startup_phase_input or len(args.startup_phase_input) != 1 or not evidence_uint(args.startup_started_ns)):
+            parser.error("--startup-started-ns needs one phase input and an unsigned clock value")
+        return run_evidence_postprocessing(args)
+    if args.startup_grid_policy != "settled" or args.startup_started_ns is not None:
+        parser.error("startup evidence options require a postprocessing input")
     # Practical bounds, checked before anything runs: a run stays finite, and
     # the probe's nanosecond arithmetic cannot overflow.
     for flag, value, least, most in (("--latency-keys", args.latency_keys, 1, 1000),

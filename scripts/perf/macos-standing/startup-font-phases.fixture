@@ -1,0 +1,20 @@
+# What `RUST_LOG=warn,kettle::startup=info kettle` prints on stderr after the
+# first frame. Both crates/kettle-ui/src/startup_trace.rs and
+# macos-standing-self-test.py test against this file, so the format cannot
+# change on one side only. Other log lines may be interleaved.
+2026-09-29T17:00:00.000000Z  INFO kettle::startup: startup phase=main t_ns=1000000000 since_main_ms=0.00 thread=main
+2026-09-29T17:00:00.000001Z  INFO kettle::startup: startup phase=run_with t_ns=1010000000 since_main_ms=10.00 thread=main
+2026-09-29T17:00:00.000002Z  INFO kettle::startup: startup phase=event_loop_built t_ns=1020000000 since_main_ms=20.00 thread=main
+2026-09-29T17:00:00.000003Z  INFO kettle::startup: startup phase=config_loaded t_ns=1030000000 since_main_ms=30.00 thread=main
+2026-09-29T17:00:00.000004Z  INFO kettle::startup: startup phase=app_built t_ns=1040000000 since_main_ms=40.00 thread=main
+2026-09-29T17:00:00.000005Z  INFO kettle::startup: startup phase=fonts_enumerated t_ns=1050000000 since_main_ms=50.00 thread=fonts
+2026-09-29T17:00:00.000006Z  INFO kettle::startup: startup phase=fonts_ready t_ns=1060000000 since_main_ms=60.00 thread=fonts
+2026-09-29T17:00:00.000007Z  INFO kettle::startup: startup phase=pane_spawned t_ns=1070000000 since_main_ms=70.00 thread=main
+2026-09-29T17:00:00.000008Z  INFO kettle::startup: startup phase=resumed t_ns=1080000000 since_main_ms=80.00 thread=main
+2026-09-29T17:00:00.000009Z  INFO kettle::startup: startup phase=fonts_join_start t_ns=1090000000 since_main_ms=90.00 thread=main
+2026-09-29T17:00:00.000010Z  INFO kettle::startup: startup phase=fonts_joined t_ns=1100000000 since_main_ms=100.00 thread=main
+2026-09-29T17:00:00.000011Z  INFO kettle::startup: startup phase=window_created t_ns=1110000000 since_main_ms=110.00 thread=main
+2026-09-29T17:00:00.000012Z  INFO kettle::startup: startup phase=gpu_ready t_ns=1120000000 since_main_ms=120.00 thread=main
+2026-09-29T17:00:00.000013Z  INFO kettle::startup: startup phase=window_revealed t_ns=1130000000 since_main_ms=130.00 thread=main
+2026-09-29T17:00:00.000014Z  INFO kettle::startup: startup phase=first_frame t_ns=1140000000 since_main_ms=140.00 thread=main
+2026-09-29T17:00:00.000015Z  INFO kettle::startup: startup path=resumed_early

@@ -483,3 +483,104 @@ cross-terminal claims unless the peer tools measure the same boundary.
 The former Windows PowerShell acquisition and scoring suite was removed when
 Kettle stopped distributing Windows builds in 4.0.0. Historical Windows
 measurements remain in `docs/PERFORMANCE.md` with their original scope.
+
+### Retained startup and native diagnostics
+
+Evidence postprocessing reads files and prints diagnostic JSON to stdout. It
+launches no application, builds no helper and posts no keys. Its output always
+has `diagnostic_only: true` and `countable: false`. It does not modify input
+rows, session results, ordinary logging or standing metrics.
+
+```sh
+python3 scripts/perf/macos-standing.py --startup-input results.json --startup-grid-policy child
+python3 scripts/perf/macos-standing.py --startup-phase-input startup.stderr
+python3 scripts/perf/macos-standing.py --native-layer-input analysis.json
+python3 scripts/perf/macos-standing.py --trace-input echo.log
+```
+
+`--startup-input FILE...` reads `workloads.startup` from retained results and
+checks measured `kettle`, `kettle-a` and `kettle-b` rows. Warmups are excluded.
+Peers keep their existing settled-grid policy. The default diagnostic policy is
+`settled`. `child` requires both `cols,rows` and explicit
+`start_cols,start_rows` to equal 120x36. Missing child fields are incomplete;
+old rows elide a matching initial grid, so a settled grid cannot reconstruct
+that observation. `native` also requires a complete native history. These
+policies apply only to postprocessing, not to an ordinary launch.
+
+The provisional `native_pty_v1` format has no application producer yet. A row
+supplies `launch_id`, `pane_id`, `started_ns`, `child_observed_ns` and its two
+explicit grids. Its optional `native_pty` object contains:
+
+- `version: native_pty_v1`, `clock: CLOCK_UPTIME_RAW`, matching `launch_id` and
+  `pane_id`, `complete: true`, `dropped: 0`, `overflow: false`.
+- `recording_start_ns`, `created_ns`, `initial.t_ns`, `recording_end_ns` and
+  `initial_stage: after_create_before_correction`. Recording starts before
+  creation, includes the initial observation before the child, spans at least
+  two actual seconds and ends no earlier than the child observation.
+- `initial` and `final` with positive integer `cols`, `rows`, `pixel_width`,
+  `pixel_height` and `t_ns`. The final timestamp equals the recording end.
+- `child_observation` with `child_observed_ns`, `start_cols`, `start_rows` and
+  `sigwinch_count: 0`, linked to the row.
+- `event_count` and `events`. Events have contiguous integer `seq` starting at
+  1, increasing `t_ns` inside the recording, matching launch/pane identities,
+  `requested` and `observed` geometry, `outcome: ok|error|noop`, `native_error`,
+  `reason: initial|window|monitor|config` and boolean `signal_sent`.
+
+Strict acceptance requires an exact initial native grid. Every event must
+preserve all four geometry values, report no native error and send no signal.
+Failed attempts, missing events or recording endpoints, changed geometry,
+wrong identities and overflow cannot prove zero resize. Missing native data
+is `unavailable`, never a legacy pass. A supported provisional fixture is not
+native runtime evidence. The producer owner must confirm the layout and prove
+recording covers every attempt before this can certify S3.
+
+`--startup-phase-input FILE...` accepts one retained stderr file per round.
+The S1/S2 lines are `startup phase=NAME t_ns=N since_main_ms=M thread=main|fonts`
+and `startup path=resumed_early|after_renderer|unknown`. `since_main_ms` may be
+`-`, and the optional thread suffix may be absent in older logs. Other log
+lines are ignored. Raw nanosecond stamps, threads, paths, duplicate conflicts
+and malformed-line counts remain diagnostics. The first valid stamp wins;
+a conflicting or malformed endpoint makes its derived interval unavailable.
+Unknown optional stamps stay outside the published phase list.
+
+Font join wait is `fonts_joined - fonts_join_start`. Signed font slack is
+`resumed - fonts_ready`, and config overlap is `fonts_ready - config_loaded`.
+Font intervals require explicit thread and known path attribution. GPU
+initialization is `gpu_ready - window_created`; event loop construction is
+`event_loop_built - run_with`. Ordered durations reject reversed endpoints.
+The report derives values per round, then reports median, interpolated p95,
+maximum, coverage and thread/path counts. It never subtracts endpoint medians.
+`--startup-started-ns N` optionally provides the launch origin for one phase
+file. Intervals need no launch origin because their endpoints share the
+producer clock. Historical `phase_*_ms` and `startup_path` remain unchanged.
+
+S2 emits no monitor agreement or reported font wait, so those fields remain
+null. S4 emits no device/pipeline subphase endpoints; only the GPU interval
+above is available. `first_output_ms`, its origin and endpoint remain null.
+A first-frame present or per-key `output_ms` cannot certify displayed first
+output.
+
+`--native-layer-input FILE...` reads the cursor layer smoke's `analysis.json`.
+It preserves numeric `contract.handoff_after_s`, `contract.idle` fields
+`span_s,peak_mib,wakeups_per_s,cpu_percent`, and the selected `cursor_blink`
+states `handoff,rested,after_reload,after_key`. Each state has `renderer`,
+`handoffs,exits,hides` and aggregate `exit_frame_us.count,p50,p95,max`.
+An empty exit history has null percentiles and maximum 0. These aggregates
+are descriptive. The producer does not export raw samples, actual sampling
+bounds, the timeout or the twenty geometry-read states/timestamps. Thus the
+adapter marks interval peak, geometry polling and acceptance incomplete.
+It cannot certify the handoff +1.5 seconds to timeout interval or a per-key
+exit join from aggregates or unsequenced `exit_frame_us` log lines.
+
+`--trace-input FILE...` reports private echo trace capability as unavailable.
+The row-shaping producer currently contains no emitted private trace format.
+The proposed `latency_trace_v1` JSONL layout is not an agreed producer format.
+An owner-provided wire sample and explicit event mapping are needed before
+parsing skipped prepares, actual `emit_pane_glyphs`, nested intervals or echo
+joins. Snapshot, flatten and upload events cannot stand in for glyph emission.
+Clock identity and echo/payload bounds must be supplied before any duration or
+savings can be reported. This mode never promotes traces to countable results.
+
+Inputs are bounded regular files. Diagnostic JSON rejects duplicate members
+and nonfinite constants. Reports exclude source paths, raw stderr, launch/pane
+identities and arbitrary payload text. Invalid input produces a generic refusal.
