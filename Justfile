@@ -969,3 +969,19 @@ underline-scroll-smoke:
 clean:
     cargo clean
     rm -f /tmp/kettle.png /tmp/kettle-menu.png /tmp/kettle-bench.png /tmp/kettle-bench-menu.png
+
+# Analysis only. The owner runs the ordinary shared A/A explicitly, in a
+# scheduled measurement window, after the standing-method freeze checklist.
+[unix]
+macos-standing-control-report control +sessions:
+    python3 scripts/perf/macos-standing.py --combine {{sessions}} --aa "{{control}}"
+
+# Diagnostic stamp-equivalence analysis; never launches a measured app.
+[unix]
+macos-standing-observer-report input output:
+    python3 scripts/perf/macos-standing.py --observer-control "{{input}}" --out-dir "{{output}}"
+
+# Explicit fill/factcheck only; both require raw sessions and a shared control.
+[unix]
+macos-standing-publication +args:
+    python3 scripts/perf/macos-standing-publication.py {{args}}

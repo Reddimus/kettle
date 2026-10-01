@@ -5991,5 +5991,455 @@ class CursorLatency(unittest.TestCase):
                 for name,text in artifacts.items():
                     self.assertEqual(text.encode()+b'\n',(fixture/f'schema{schema}-{name}.fixture').read_bytes(),name)
 
+class PublicationFreeze(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import copy, tempfile
+        cls.fixture = _json.loads((HERE/'macos-standing/publication-control.fixture').read_text())
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        cls.aa = cls.save('control', cls.fixture)
+        cls.ab = []
+        for i in range(2):
+            r=copy.deepcopy(cls.fixture)
+            r['meta'].update(date=f'2026-09-0{i+2}',started=f'2026-09-0{i+2}T12:00:00',label=f'ab-{i}')
+            cls.ab.append(cls.save(f'ab-{i}',r))
+        cls.combined = standing.combine(cls.ab,cls.aa)
+        cls.values = standing.publication.publication_values(cls.combined)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    @classmethod
+    def save(cls,name,result):
+        folder=cls.root/name;folder.mkdir(exist_ok=True)
+        (folder/'results.json').write_text(_json.dumps(result))
+        return folder
+
+    def control(self,reference=None,control=None):
+        import copy
+        a=copy.deepcopy(self.fixture) if control is None else control
+        b=copy.deepcopy(self.fixture) if reference is None else reference
+        aa=self.save('changed-control',a);ref=self.save('changed-reference',b)
+        return standing.publication.coverage(standing._publication_host(),[standing.load_session(ref)],aa)['metrics']
+
+    def test_full_control_units_and_metric_local_absence(self):
+        import copy
+        coverage=self.control()
+        for metric,unit in [('startup.child_ms','ms'),('idle.cpu_percent','percentage points'),
+             ('flood-memory.done3_mib','MiB'),('vtebench.dense','ms'),('latency.mean_ms','ms'),
+             ('latency.typing_footprint_mib','MiB'),('output-memory.printing_mib','MiB'),
+             ('blink-window.wakeups_per_second','/s'),('latency-cursor.mean_ms','ms')]:
+            self.assertEqual((coverage[metric]['status'],coverage[metric]['unit']),('passed',unit))
+        missing=copy.deepcopy(self.fixture)
+        for runs in missing['workloads']['latency'].values():
+            for row in runs:row.pop('typing_footprint_mib')
+        changed=self.control(control=missing)
+        self.assertEqual(changed['latency.typing_footprint_mib']['status'],'missing')
+        self.assertEqual(changed['latency.mean_ms']['status'],'passed')
+        self.assertEqual(changed['output-memory.printing_mib']['status'],'passed')
+
+    def test_scalar_memory_and_distribution_have_distinct_gates(self):
+        c=self.control()
+        self.assertIn('gate',c['latency.typing_footprint_mib']['gate'])
+        self.assertNotIn('gate_ms',c['latency.typing_footprint_mib']['gate'])
+        for metric in ('p95_ms','median_ms','p99_ms','input_ms','output_ms'):
+            self.assertIsNone(c['latency.'+metric]['gate'])
+            self.assertEqual(c['latency.'+metric]['aa_kind'],'none')
+            self.assertNotIn('no_regression',self.combined['rows']['latency.'+metric]['verdict'])
+        self.assertEqual(self.combined['rows']['latency.mean_ms']['verdict']['no_regression'],True)
+
+    def test_shared_control_subset_and_changed_contracts(self):
+        import copy
+        for mode in ('latency','latency-cursor'):
+            ref=copy.deepcopy(self.fixture)
+            ref['workloads']={mode:ref['workloads'][mode]}
+            ref['meta']['rounds']={mode:3}
+            ref['meta'].pop('latency-cursor' if mode=='latency' else 'latency')
+            c=self.control(reference=ref)
+            self.assertEqual(c[mode+'.mean_ms']['status'],'passed')
+            for field,value in [('gap_ms',[2100,2400]),('first_gap_ms',2200),('keys',3)]:
+                bad=copy.deepcopy(ref);bad['meta'][mode][field]=value
+                self.assertEqual(self.control(reference=bad)[mode+'.mean_ms']['status'],'missing')
+            for tool in ('latency-probe','keyblock'):
+                bad=copy.deepcopy(ref);bad['meta']['tool_hashes'][tool]='0'*64
+                self.assertEqual(self.control(reference=bad)[mode+'.mean_ms']['status'],'missing')
+        for mutation in ('sampler','clock','receipt'):
+            bad=copy.deepcopy(self.fixture)
+            if mutation=='sampler':bad['meta']['tool_hashes']['observer']='0'*64
+            elif mutation=='clock':bad['meta']['latency']['typing_memory']['clock']='wall'
+            else:bad['meta']['tool_artifacts']['latency-probe']['executable_sha256']='0'*64
+            self.assertEqual(self.control(reference=bad)['latency.typing_footprint_mib']['status'],'missing')
+
+    def test_control_config_sides_and_intentional_b(self):
+        import copy
+        bad=copy.deepcopy(self.fixture);bad['meta']['config_closures']['kettle-b']={'sha256':'0'*64,'assets':[]}
+        with self.assertRaises(SystemExit):self.control(control=bad)
+        bad=copy.deepcopy(self.fixture);bad['meta']['config_closures']['kettle-a']={'sha256':'0'*64,'assets':[]}
+        self.assertEqual(self.control(reference=bad)['startup.child_ms']['status'],'missing')
+        good=copy.deepcopy(self.fixture);good['meta']['config_closures']['kettle-b']={'sha256':'0'*64,'assets':[]}
+        self.assertEqual(self.control(reference=good)['startup.child_ms']['status'],'passed')
+
+    def test_native_exit_capability_and_pooled_p95(self):
+        import copy
+        h=standing._publication_host()
+        s=standing.load_session(self.aa)
+        frames=standing.publication.cursor_frames(h,[s])
+        self.assertIsNone(frames['kettle-b']['p95_us'])
+        self.assertFalse(frames['kettle-b']['calibrated_by_legacy_control'])
+        report=standing.publication.coverage(h,[s],self.aa)
+        self.assertEqual(report['capabilities']['native_pty'],'unavailable on legacy control')
+        self.assertEqual(report['capabilities']['renderer_trace'],'producer agreement required')
+        raw=copy.deepcopy(self.fixture)
+        for runs in raw['workloads']['latency-cursor'].values():
+            for i,row in enumerate(runs):
+                wire=CursorLatency()
+                header,exits,probe,payload=wire.fixture(measured=2,durations=[999999,100+i,1000+100*i])
+                parsed=wire.parse(header,exits,probe,payload,measured=2)
+                self.assertEqual([r['key_seq'] for r in parsed['cursor_exit_records']],[7,8,9])
+                self.assertEqual(parsed['cursor_exit_count'],3)
+                row.update(parsed)
+        session=standing.load_session(self.save('exit-frames',raw))
+        frames=standing.publication.cursor_frames(h,[session])['kettle-b']
+        self.assertAlmostEqual(frames['p95_us'],1175.)
+        self.assertEqual(frames['n'],6)
+        self.assertTrue(frames['p95_le_4000'])
+        raw['workloads']['latency-cursor']['kettle-b'][1]['cursor_exit_count']=2
+        frames=standing.publication.cursor_frames(h,[standing.load_session(self.save('exit-partial',raw))])['kettle-b']
+        self.assertIsNone(frames['p95_le_4000'])
+
+    def test_stamp_equivalence_explicit_path_and_no_countability(self):
+        import copy
+        raw=copy.deepcopy(self.fixture);raw['workloads']={'startup':raw['workloads']['startup']}
+        raw['meta'].update(kind='observer-control',startup_phases='b',rounds={'startup':30})
+        phases=('main','run_with','event_loop_built','config_loaded','app_built','pane_spawned','resumed','window_created','gpu_ready','window_revealed','first_frame')
+        def evidence(step):
+            # The collector's retained parser output, as it stores it.
+            text='\n'.join(f'startup phase={phase} t_ns={1_000_000_000+step*i*1_000_000} since_main_ms=0.0 thread=main'
+                            for i,phase in enumerate(phases))
+            return standing.startup_phase_evidence(text,900_000_000)
+        good=evidence(1)
+        for name,runs in raw['workloads']['startup'].items():
+            measured=[dict(runs[i%3+1],round_index=i) for i in range(30)]
+            if name=='kettle-b':
+                for row in measured:row.update(startup_stamps_ns=dict(good['startup_stamps_ns']),startup_stamp_evidence=copy.deepcopy(good))
+            raw['workloads']['startup'][name]=[runs[0]]+measured
+        path=self.save('stamp',raw)
+        # Descending stamps: the parser marks the ordered intervals
+        # unavailable, so they cannot authorize phase attribution.
+        backwards=copy.deepcopy(raw);bad=evidence(-1)
+        self.assertEqual(bad['metric_validity']['event_loop_build_ms']['reason'],'unordered endpoints')
+        for row in backwards['workloads']['startup']['kettle-b'][1:]:row.update(startup_stamps_ns=dict(bad['startup_stamps_ns']),startup_stamp_evidence=bad)
+        with self.assertRaises(ValueError):standing.publication.observer_control(standing._publication_host(),self.save('stamp-backwards',backwards))
+        # Zero stamps with no retained parser evidence.
+        zeros=copy.deepcopy(raw)
+        for row in zeros['workloads']['startup']['kettle-b'][1:]:
+            row['startup_stamps_ns']={phase:0 for phase in phases};row.pop('startup_stamp_evidence')
+        with self.assertRaises(ValueError):standing.publication.observer_control(standing._publication_host(),self.save('stamp-zeros',zeros))
+        self.assertFalse(standing.load_session(path)['countable'])
+        report=standing.publication.observer_control(standing._publication_host(),path)
+        self.assertTrue(report['phase_attribution_allowed'])
+        self.assertFalse(report['countable'])
+        invalid=copy.deepcopy(raw);invalid['workloads']['startup']['kettle-b'][1]['startup_stamps_ns']['first_frame']=None
+        with self.assertRaises(ValueError):standing.publication.observer_control(standing._publication_host(),self.save('stamp-invalid-data',invalid))
+        with self.assertRaises(SystemExit):self.control(control=raw)
+        for row in raw['workloads']['startup']['kettle-b'][1:]:row['child_ms']+=2
+        report=standing.publication.observer_control(standing._publication_host(),self.save('stamp-fail',raw))
+        self.assertFalse(report['phase_attribution_allowed'])
+        raw['meta']['complete']=False
+        with self.assertRaises(ValueError):standing.publication.observer_control(standing._publication_host(),self.save('stamp-partial',raw))
+
+    def test_all_zero_rates_are_uncalibrated(self):
+        import copy
+        raw=copy.deepcopy(self.fixture)
+        for runs in raw['workloads']['idle'].values():
+            for row in runs:row['wakeups_per_second']=0
+        self.assertEqual(self.control(control=raw)['idle.wakeups_per_second']['status'],'uncalibrated')
+        raw['workloads']['idle']['kettle-b'][0]['wakeups_per_second']=1
+        self.assertEqual(self.control(control=raw)['idle.wakeups_per_second']['status'],'uncalibrated')
+
+    def test_control_requires_every_pair_and_abs_latency_limit(self):
+        import copy
+        from unittest import mock
+        raw=copy.deepcopy(self.fixture)
+        raw['meta']['rounds']['latency']=10
+        for name,runs in raw['workloads']['latency'].items():
+            raw['workloads']['latency'][name]=[copy.deepcopy(runs[i%3]) for i in range(10)]
+        raw['workloads']['latency']['kettle-b'][0]={'error':'lost'}
+        self.assertEqual(self.control(control=raw)['latency.mean_ms']['status'],'missing')
+        raw=copy.deepcopy(self.fixture)
+        raw['meta']['rounds']['idle']=10
+        for name,runs in raw['workloads']['idle'].items():
+            raw['workloads']['idle'][name]=[copy.deepcopy(runs[i%3]) for i in range(10)]
+        raw['workloads']['idle']['kettle-b'][0]['frontmost']=False
+        self.assertEqual(self.control(control=raw)['idle.footprint_mib']['status'],'missing')
+        # A broad interval containing zero still cannot admit an absolute
+        # control shift greater than one millisecond.
+        stats={'diff':1.5,'diff_low':-1.,'diff_high':4.}
+        with mock.patch.object(standing,'latency_aa_gate',return_value=dict(contains_one=True,aa_diff_ms=1.5,gate_ms=3.)):
+            original=standing.publication.analyses
+            def changed(h,s):
+                a=original(h,s)
+                a['latency']['metrics']['mean_ms']['ab'].update(stats)
+                return a
+            with mock.patch.object(standing.publication,'analyses',side_effect=changed):
+                self.assertEqual(self.control()['latency.mean_ms']['status'],'failed')
+
+    def test_first_dates_and_partial_keys_do_not_become_full_n(self):
+        import copy
+        items=[dict(label='later',started='2026-09-01T13:00:00',date='2026-09-01',countable=True),
+               dict(label='first',started='2026-09-01T12:00:00',date='2026-09-01',countable=True),
+               dict(label='second',started='2026-09-02T12:00:00',date='2026-09-02',countable=True)]
+        self.assertEqual([s['label'] for s in standing.publication.selected(items,2)],['first','second'])
+        offsets=[dict(label='earlier',started='2026-09-01T11:00:00+02:00',date='2026-09-01',countable=True),
+                 dict(label='later',started='2026-09-01T10:00:00+00:00',date='2026-09-01',countable=True)]
+        self.assertEqual(standing.publication.selected(offsets,1)[0]['label'],'earlier')
+        raw=copy.deepcopy(self.fixture)
+        raw['meta']['latency']['keys']=100
+        path=self.save('partial-n',raw)
+        c=standing.combine([path],self.aa)
+        per=c['rows']['latency.mean_ms']['per_session'][0]['metric_countable']['kettle-a']
+        self.assertFalse(per['countable'])
+        self.assertIsNone(c['rows']['latency.mean_ms']['verdict'].get('no_regression'))
+        self.assertEqual(per['keys'],6)
+        cells=standing.publication.publication_values(c)['cells']
+        self.assertTrue(all(cell['status']!='available' for cell in cells if cell['source_metric']=='latency.mean_ms'))
+        self.assertEqual(self.combined['rows']['startup.child_ms']['terminals']['kettle-a']['published'],101)
+
+    def test_fill_unknown_duplicate_unit_unavailable_and_last_digit(self):
+        import copy
+        p=standing.publication
+        cell=next(c for c in self.values['cells'] if c['id']=='startup.child_ms:kettle-a:published')
+        self.assertEqual(cell['status'],'available')
+        token='{{cell:'+cell['id']+'|ms}}'
+        self.assertEqual(p.fill(token,self.values),'101.0')
+        for template in ('{{cell:unknown|ms}}',token+' '+token,token.replace('|ms','|MiB'), '{{unknown}}'):
+            with self.assertRaises(ValueError):p.fill(template,self.values)
+        values=copy.deepcopy(self.values);values['cells'].append(dict(cell))
+        with self.assertRaises(ValueError):p.fill(token,values)
+        values=copy.deepcopy(self.values)
+        next(c for c in values['cells'] if c['id']==cell['id'])['status']='unavailable'
+        with self.assertRaises(ValueError):p.fill(token,values)
+        values=copy.deepcopy(self.values)
+        next(c for c in values['cells'] if c['id']==cell['id'])['display']='101.1'
+        with self.assertRaises(ValueError):p.fill(token,values)
+
+    def test_independent_spots_and_wrong_typing_interval_pooled_percentile(self):
+        import copy,importlib.util
+        spec=importlib.util.spec_from_file_location('independent',HERE/'macos-standing/publication_factcheck.py')
+        facts=importlib.util.module_from_spec(spec);spec.loader.exec_module(facts)
+        raw=[standing.publication.strict_json(path/'results.json') for path in self.ab]
+        self.assertIn('latency.typing_footprint_mib',facts.spot_rows(raw))
+        self.assertTrue(facts.verify_estimates(raw,self.combined))
+        censored={'meta':{'label':'censored','latency':{'censor_ms':500}},'workloads':{'latency':{'kettle-a':[dict(samples_ms=[1.],censored=1)]}}}
+        checked={'rows':{'latency.mean_ms':{'per_session':[dict(label='censored',estimates={'kettle-a':250.5},metric_countable={'kettle-a':{'countable':True}})]}}}
+        self.assertTrue(facts.verify_estimates([censored],checked))
+        bad=copy.deepcopy(raw);bad[0]['workloads']['latency']['kettle-a'][0]['typing_sample_interval_ms']=50
+        with self.assertRaises(ValueError):facts.spot_rows(bad)
+        bad=copy.deepcopy(self.combined)
+        bad['rows']['latency.p95_ms']['per_session'][0]['estimates']['kettle-a']=12.9
+        with self.assertRaises(ValueError):facts.verify_estimates(raw,bad)
+
+    def test_current_intervals_are_the_only_publication_statistics(self):
+        import importlib.util
+        h=standing._publication_host()
+        for folder in self.ab:
+            session=standing.load_session(folder)
+            analysis=standing.analyze(session['results'],session['names'],True)
+            for workload,info in analysis.items():
+                for field,entry in info['metrics'].items():
+                    metric=entry['descriptor']['id']
+                    per=next(p for p in self.combined['rows'][metric]['per_session'] if p['label']==session['label'])
+                    self.assertEqual(set(per['statistics']),{'authoritative','current'})
+                    self.assertEqual(per['statistics'],entry['statistics'])
+        control_analysis=standing.analyze(self.fixture,self.fixture['terminals'],True)
+        for metric,coverage in self.combined['aa_coverage']['metrics'].items():
+            if coverage['status']=='passed':
+                workload,field=metric.split('.',1)
+                self.assertEqual(coverage['statistics'],control_analysis[workload]['metrics'][field]['statistics']['current'])
+        self.assertEqual(self.values,standing.publication.publication_values(standing.combine(self.ab,self.aa)))
+        # Verdicts must use the current paired launch-difference intervals.
+        row=self.combined['rows']['latency-cursor.mean_ms']
+        self.assertEqual(row['verdict'],standing.latency_ab_verdict(row['sessions'],row['coverage']['gate']['gate_ms']))
+        token='{{cell:latency-cursor.mean_ms:kettle-a:published|ms}}'
+        self.assertEqual(standing.publication.fill(token,self.values),'12.0')
+
+    def test_cursor_publication_and_control_are_metric_local(self):
+        import copy,importlib.util
+        p=standing.publication
+        row=self.combined['rows']['latency-cursor.mean_ms']
+        self.assertEqual(row['coverage']['status'],'passed')
+        self.assertEqual(row['coverage']['pairs'],3)
+        for per in row['per_session']:
+            self.assertEqual(per['metric_countable']['kettle-a']['keys'],6)
+        cursor_cells=[c for c in self.values['cells'] if c['source_metric']=='latency-cursor.mean_ms']
+        self.assertTrue(cursor_cells)
+        self.assertTrue(all(c['status']=='available' for c in cursor_cells))
+        self.assertNotIn('latency-cursor.typing_footprint_mib',self.combined['rows'])
+        self.assertEqual(p.fill('{{cell:latency-cursor.p95_ms:kettle-a:published|ms}}',self.values),'13.8')
+        for knob,value in [('gap_ms',[2000,2401]),('first_gap_ms',2001),
+                           ('exit_logs',True),('exit_contract','cursor_exit_v2')]:
+            raw=copy.deepcopy(self.fixture);raw['meta']['latency-cursor'][knob]=value
+            with self.subTest(knob=knob):
+                metrics=self.control(reference=raw)
+                self.assertEqual(metrics['latency-cursor.mean_ms']['status'],'missing')
+                self.assertEqual(metrics['latency.mean_ms']['status'],'passed')
+        raw=copy.deepcopy(self.fixture);raw['meta']['latency-cursor']['keys']=100
+        combined=standing.combine([self.save('cursor-partial',raw)],self.aa)
+        per=combined['rows']['latency-cursor.mean_ms']['per_session'][0]
+        self.assertFalse(per['metric_countable']['kettle-a']['countable'])
+        values=p.publication_values(combined)
+        with self.assertRaises(ValueError):p.fill('{{cell:latency-cursor.mean_ms:kettle-a:published|ms}}',values)
+        spec=importlib.util.spec_from_file_location('cursor_facts',HERE/'macos-standing/publication_factcheck.py')
+        facts=importlib.util.module_from_spec(spec);spec.loader.exec_module(facts)
+        raw=[p.strict_json(folder/'results.json') for folder in self.ab]
+        self.assertTrue(facts.verify_estimates(raw,self.combined))
+        changed=copy.deepcopy(self.combined)
+        changed['rows']['latency-cursor.p95_ms']['per_session'][0]['estimates']['kettle-a']=12.9
+        with self.assertRaises(ValueError):facts.verify_estimates(raw,changed)
+
+    def test_public_privacy_summary_combine_coverage_and_cells(self):
+        import copy
+        raw=copy.deepcopy(self.fixture);raw['context']='private /Users/sentinel-owner/file owner@sentinel.invalid'
+        with self.assertRaises(ValueError):standing.summarize(raw,raw['terminals'],True)
+        raw=copy.deepcopy(self.fixture);raw['meta']['label']='owner@sentinel.invalid'
+        with self.assertRaises(ValueError):standing.combine([self.save('privacy',raw)],self.aa)
+        for value in (self.combined,self.values,{'signing':'Developer ID Application: sentinel'}):
+            if 'signing' in value:
+                with self.assertRaises(ValueError):standing.publication.public(value)
+            else:self.assertNotIn('/Users/',standing.publication.canonical(value))
+
+    def test_missing_control_and_identity_cannot_fill(self):
+        import copy
+        raw=copy.deepcopy(self.fixture)
+        missing=standing.combine([self.save('no-control',raw)])
+        self.assertEqual(missing['rows']['startup.child_ms']['verdict']['verdict'],'A/A missing')
+        values=standing.publication.publication_values(missing)
+        with self.assertRaises(ValueError):standing.publication.fill('{{cell:startup.child_ms:kettle-a:published|ms}}',values)
+        raw['meta']['identity']['kettle-a']={}
+        self.assertEqual(self.control(reference=raw)['startup.child_ms']['status'],'missing')
+        raw=copy.deepcopy(self.fixture);raw['meta']['tool_artifacts']['latency-probe']={'source_sha256':'a'*64}
+        self.assertEqual(self.control(reference=raw)['latency.mean_ms']['status'],'missing')
+        with self.assertRaises(ValueError):standing.publication.publication_values({'rows':{}})
+
+    def test_caffeinate_interrupt_all_boundaries_and_repeated_cancel_reaps(self):
+        # start_caffeinate has two lifetime boundaries: an interrupt after the
+        # cleanup callback is registered, and one during registration. Both
+        # reap the owned child, and so does a repeated cancellation.
+        from unittest import mock
+        import contextlib
+        child=mock.Mock()
+        with mock.patch.object(standing.subprocess,'Popen',return_value=child):
+            try:
+                with contextlib.ExitStack() as cleanup:
+                    owned=standing.start_caffeinate(cleanup)
+                    self.assertIs(owned,child)
+                    raise KeyboardInterrupt('after registration')
+            except KeyboardInterrupt:pass
+        child.kill.assert_called_once();child.wait.assert_called_once()
+        child=mock.Mock()
+        cleanup=mock.Mock();cleanup.callback.side_effect=KeyboardInterrupt()
+        with mock.patch.object(standing.subprocess,'Popen',return_value=child):
+            with self.assertRaises(KeyboardInterrupt):standing.start_caffeinate(cleanup)
+        child.kill.assert_called_once();child.wait.assert_called_once()
+        child=mock.Mock();child.wait.side_effect=[KeyboardInterrupt(),None]
+        standing.reap_owned_child(child,0)
+        self.assertEqual(child.wait.call_count,2)
+
+    def test_production_signals_never_select_processes_by_name(self):
+        # This is the explicit source hygiene guard, separate from behavioral
+        # cancellation fixtures above and in the collector tests.
+        source=(HERE/'macos-standing.py').read_text()
+        for forbidden in ('pkill','killall','kill -t','kill --name'):
+            self.assertNotIn(forbidden,source)
+
+
+    def test_three_standing_dates_select_first_session_and_no_later_cherry_pick(self):
+        import copy
+        folders=[]
+        for i in range(5):
+            raw=copy.deepcopy(self.fixture)
+            raw['terminals']=['kettle','kitty'];raw['meta']['mode']='standing'
+            day=min(i+1,4)
+            hour=13 if i==1 else 12
+            if i==1:day=1
+            raw['meta'].update(label=f's-{i}',date=f'2026-09-0{day}',started=f'2026-09-0{day}T{hour}:00:00')
+            raw['workloads']={'startup':{'kettle':raw['workloads']['startup']['kettle-a'],'kitty':raw['workloads']['startup']['kettle-b']}}
+            raw['meta']['rounds']={'startup':3}
+            for field in ('configs','config_closures','identity'):
+                raw['meta'][field]={'kettle':raw['meta'][field]['kettle-a'],'kitty':raw['meta'][field]['kettle-b']}
+            if i in (1,4):
+                for row in raw['workloads']['startup']['kettle']:row['child_ms']=999
+            folders.append(self.save(f's-{i}',raw))
+        combined=standing.combine(folders,self.aa)
+        value=combined['rows']['startup.child_ms']['terminals']['kettle']
+        self.assertEqual(value['source_sessions'],['s-0','s-2','s-3'])
+        self.assertEqual(value['published'],101)
+        self.assertEqual(combined['rows']['startup.child_ms']['claim']['label'],'tied 1st')
+        self.assertEqual(standing.publication.publication_values(combined),standing.publication.publication_values(combined))
+
+    def test_publication_cli_refuses_tampered_data_and_checks_full_document(self):
+        import contextlib,io,importlib.util,copy
+        from unittest import mock
+        spec=importlib.util.spec_from_file_location('publication_cli',HERE/'macos-standing-publication.py')
+        cli=importlib.util.module_from_spec(spec);spec.loader.exec_module(cli)
+        template=self.root/'template.md';template.write_text('Measured {{cell:startup.child_ms:kettle-a:published|ms}} ms.\n')
+        values=self.root/'values.json';values.write_text(standing.publication.canonical(self.values))
+        doc=self.root/'rendered.md';doc.unlink(missing_ok=True)
+        def run(mode,extra=()):
+            argv=['publication',mode,'--template',str(template),'--values',str(values),'--document',str(doc),
+                  '--sessions',*[str(s) for s in self.ab],'--aa',str(self.aa),*extra]
+            with mock.patch.object(sys,'argv',argv),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                return cli.main()
+        self.assertEqual(run('fill'),0)
+        self.assertEqual(doc.read_text(),'Measured 101.0 ms.\n')
+        self.assertEqual(run('factcheck'),0)
+        doc.write_text('Measured 101.1 ms.\n')
+        with self.assertRaises(SystemExit) as error:run('factcheck')
+        self.assertEqual(error.exception.code,1)
+        doc.unlink()
+        tampered=copy.deepcopy(self.values);tampered['cells'][0]['value']=999
+        values.write_text(standing.publication.canonical(tampered))
+        with self.assertRaises(SystemExit):run('fill')
+        self.assertFalse(doc.exists())
+        # Fresh raw data changing underneath the frozen extractor is refused.
+        values.write_text(standing.publication.canonical(self.values))
+        raw=standing.publication.strict_json(self.ab[0]/'results.json')
+        raw['workloads']['startup']['kettle-a'][1]['child_ms']=300
+        original=(self.ab[0]/'results.json').read_bytes()
+        try:
+            (self.ab[0]/'results.json').write_text(_json.dumps(raw))
+            with self.assertRaises(SystemExit):run('fill')
+        finally:(self.ab[0]/'results.json').write_bytes(original)
+
+    def test_stamp_runtime_retains_evidence_without_changing_default_outputs(self):
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            runner=standing.Runner({},work,{})
+            (work/'launch.json').write_text(_json.dumps({'started_ns':900000000}))
+            (work/'terminal.stderr').write_text((HERE/'macos-standing/startup-phases.fixture').read_text())
+            process=mock.Mock();process.wait.return_value=0
+            row=runner.finish(process,1)
+            self.assertIn('first_frame',row['startup_stamps_ns'])
+            self.assertEqual(row['startup_stamp_evidence']['malformed_lines'],0)
+            process.wait.assert_called_once()
+
+
+    def test_historical_nonfinite_fixture_does_not_weaken_frozen_reader(self):
+        import copy
+        raw=copy.deepcopy(self.fixture)
+        raw['workloads']['vtebench']['kettle-a'][0]['means_ms']['dense']=float('nan')
+        path=self.save('nonfinite-frozen',raw)
+        with self.assertRaises(ValueError):standing.load_session(path)
+        raw.pop('evidence_contract',None);raw['meta'].pop('contracts',None)
+        path=self.save('nonfinite-historical',raw)
+        self.assertTrue(standing.load_session(path))
+        with self.assertRaises(ValueError):standing.publication.strict_json(path/'results.json')
+        overflow=self.root/'overflow.json';overflow.write_text('{"value":1e999}')
+        with self.assertRaises(ValueError):standing.publication.strict_json(overflow)
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])
