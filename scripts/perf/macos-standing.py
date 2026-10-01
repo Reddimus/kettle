@@ -156,7 +156,8 @@ BUSY_TOOLS = ("cargo", "rustc", "clang", "swiftc", "swift-frontend", "ld", "xcod
 BUSY_CPU_PERCENT = 10.0
 
 
-def build_probes(tools: Path, latency: bool = False, sign_identity: Optional[str] = None) -> Dict[str, Path]:
+def build_probes(tools: Path, latency: bool = False, sign_identity: Optional[str] = None,
+                 rebuild_latency: bool = False) -> Dict[str, Path]:
     """Compile the probes once into `tools`; rebuild when a source is newer.
     With `latency`, also the keyblock payload, the floor, and the signed
     KettleLatencyProbe.app."""
@@ -173,7 +174,7 @@ def build_probes(tools: Path, latency: bool = False, sign_identity: Optional[str
             subprocess.run(command, check=True)
         built[name] = binary
     if latency:
-        built["latency-probe"] = build_latency_probe(tools, sign_identity)
+        built["latency-probe"] = build_latency_probe(tools, sign_identity, rebuild_latency)
     return built
 
 
@@ -192,34 +193,291 @@ def latency_probe_plist() -> bytes:
     })
 
 
-def build_latency_probe(tools: Path, identity: Optional[str]) -> Path:
-    """Build and sign KettleLatencyProbe.app, only when its source or signing
-    identity changed: macOS keys the probe's Screen Recording and
-    Accessibility grants to its signature. Signed ad hoc, every rebuild needs
-    new grants; signed with a certificate (--latency-sign-identity), the
-    grants survive rebuilds."""
-    app = tools / "KettleLatencyProbe.app"
-    contents = app / "Contents"
-    source = PROBES / "latency-probe.swift"
-    wanted = {"source": file_sha256(source), "identity": identity or "-"}
-    # Beside the bundle: a file added inside it after signing breaks the seal.
-    record = tools / "KettleLatencyProbe.build.json"
+# The receipt is a local trust record for harness-owned builds. It protects
+# against accidental swaps, not a user able to replace both it and this script.
+_PROBE_LOCKS: dict = {}
+
+
+def probe_refusal(reason: str) -> RuntimeError:
+    return RuntimeError("latency probe: " + reason + "; prepare with --latency-check --rebuild-latency-probe")
+
+
+@contextlib.contextmanager
+def probe_lock(tools: Path):
+    import fcntl
+
+    key = str(tools.resolve())
+    held = _PROBE_LOCKS.get(key)
+    if held is not None:
+        yield held
+        return
     try:
-        if json.loads(record.read_text()) == wanted and (contents / "MacOS" / "latency-probe").exists():
+        tools.mkdir(parents=True, exist_ok=True)
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        fd = os.open(tools / "KettleLatencyProbe.lock", flags, 0o600)
+    except OSError:
+        raise probe_refusal("lock file unavailable") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise probe_refusal("lock is not a private regular file")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise probe_refusal("preparation or use is already locked") from None
+        held = {"digest": None, "identities": None}
+        _PROBE_LOCKS[key] = held
+        try:
+            yield held
+        finally:
+            del _PROBE_LOCKS[key]
+    finally:
+        os.close(fd)
+
+
+def probe_command(argv: List[str], timeout: float = 60) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(argv, check=True, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        # Compiler/signature diagnostics can contain private paths or identities.
+        raise probe_refusal("build or verification command failed") from None
+
+
+def probe_build_contract(identity: Optional[str]) -> dict:
+    compiler = shutil.which("swiftc")
+    if not compiler:
+        raise probe_refusal("compiler unavailable")
+    return {"source_sha256": file_sha256(PROBES / "latency-probe.swift"),
+            "plist_sha256": hashlib.sha256(latency_probe_plist()).hexdigest(),
+            "command": ["<compiler>", "-sdk", "<sdk>", "-O", "-o", "<executable>", "<source>"],
+            "compiler_path": str(Path(compiler).resolve()),
+            "compiler_version": probe_command(["swiftc", "--version"]).stdout.decode().strip(),
+            "sdk_path": probe_command(["xcrun", "--sdk", "macosx", "--show-sdk-path"]).stdout.decode().strip(),
+            "sdk_version": probe_command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]).stdout.decode().strip(),
+            "identity": identity or "-"}
+
+
+def probe_file_identity(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def probe_bundle_snapshot(app: Path) -> dict:
+    """Hash paths, modes and bytes without following links or opening devices.
+    Recheck the complete tree and every inode after hashing."""
+    def inventory() -> dict:
+        entries = {}
+        def visit(path: Path):
+            info = path.lstat()
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                raise probe_refusal("bundle contains a link or special file")
+            entries[path.relative_to(app).as_posix()] = probe_file_identity(info)
+            if stat.S_ISDIR(info.st_mode):
+                for child in sorted(path.iterdir()):
+                    visit(child)
+        visit(app)
+        return entries
+
+    try:
+        before = inventory()
+        digest = hashlib.sha256()
+        files = {}
+        for relative, info in sorted(before.items()):
+            mode = stat.S_IMODE(info[2])
+            digest.update(json.dumps([relative, mode], separators=(",", ":")).encode() + b"\0")
+            if stat.S_ISREG(info[2]):
+                fd = os.open(app / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, "rb") as stream:
+                    if probe_file_identity(os.fstat(stream.fileno())) != info:
+                        raise probe_refusal("bundle changed while hashing")
+                    data = stream.read()
+                    if probe_file_identity(os.fstat(stream.fileno())) != info:
+                        raise probe_refusal("bundle changed while hashing")
+                files[relative] = hashlib.sha256(data).hexdigest()
+                digest.update(len(data).to_bytes(8, "big") + data)
+        if inventory() != before:
+            raise probe_refusal("bundle changed while hashing")
+        return {"bundle_sha256": digest.hexdigest(), "files": files,
+                "tree": {p: stat.S_IMODE(i[2]) for p, i in before.items()}, "identities": before}
+    except OSError:
+        raise probe_refusal("bundle missing or unreadable") from None
+
+
+def probe_signature(app: Path) -> dict:
+    probe_command(["codesign", "--verify", "--strict", "--deep", str(app)])
+    details = probe_command(["codesign", "-d", "--verbose=4", str(app)]).stderr.decode()
+    requirement_output = probe_command(["codesign", "-d", "-r-", str(app)])
+    requirement_text = (requirement_output.stdout + requirement_output.stderr).decode()
+    requirement = re.search(r"^(?:# )?designated => (.+)$", requirement_text, re.M)
+    identifier = re.search(r"^Identifier=(.+)$", details, re.M)
+    cdhash = re.search(r"^CDHash=([0-9a-fA-F]+)$", details, re.M)
+    if not requirement or not identifier or identifier[1] != LATENCY_PROBE_ID or not cdhash:
+        raise probe_refusal("signature metadata is incomplete or unexpected")
+    entitlements = probe_command(["codesign", "-d", "--entitlements", "-", str(app)]).stdout
+    try:
+        entitlement_set = plistlib.loads(entitlements) if entitlements.strip() else {}
+    except (ValueError, plistlib.InvalidFileException):
+        raise probe_refusal("entitlements are malformed") from None
+    if entitlement_set != {}:
+        raise probe_refusal("unexpected entitlements")
+    probe_command(["codesign", "--verify", "--strict", "--deep", "-R", "=" + requirement[1], str(app)])
+    return {"identifier": identifier[1], "cdhash": cdhash[1].lower(),
+            "mode": "ad hoc" if "Signature=adhoc" in details else "certificate",
+            "requirement": requirement[1],
+            "authorities": re.findall(r"^Authority=(.+)$", details, re.M),
+            "team": re.findall(r"^TeamIdentifier=(.+)$", details, re.M), "entitlements": entitlement_set}
+
+
+def probe_artifact(app: Path) -> dict:
+    before = probe_bundle_snapshot(app)
+    # Compare the bytes the snapshot read through a checked descriptor;
+    # opening the path again could block on a substituted special file.
+    plist = before["files"].get("Contents/Info.plist")
+    if plist is None:
+        raise probe_refusal("Info.plist missing")
+    if plist != hashlib.sha256(latency_probe_plist()).hexdigest():
+        raise probe_refusal("Info.plist differs from the build contract")
+    executable = "Contents/MacOS/latency-probe"
+    if executable not in before["files"] or not before["tree"][executable] & 0o111:
+        raise probe_refusal("executable missing or not executable")
+    signature = probe_signature(app)
+    after = probe_bundle_snapshot(app)
+    if before != after:
+        raise probe_refusal("bundle changed during verification")
+    return {"bundle_sha256": before["bundle_sha256"], "executable_sha256": before["files"][executable],
+            "files": before["files"], "tree": before["tree"], "signature": signature}
+
+
+def probe_receipt(record: Path) -> Tuple[bytes, tuple]:
+    try:
+        fd = os.open(record, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 1024 * 1024:
+                raise probe_refusal("receipt is not a bounded private regular file")
+            raw = stream.read()
+            if probe_file_identity(info) != probe_file_identity(os.fstat(stream.fileno())):
+                raise probe_refusal("receipt changed while reading")
+        return raw, probe_file_identity(info)
+    except OSError:
+        raise probe_refusal("receipt missing or unreadable") from None
+
+
+def validate_latency_probe(app: Path, identity: Optional[str] = None) -> dict:
+    record = app.parent / "KettleLatencyProbe.build.json"
+    with probe_lock(app.parent) as held:
+        try:
+            raw, receipt_identity = probe_receipt(record)
+            receipt = json.loads(raw)
+            if not isinstance(receipt, dict) or receipt.get("version") != 2:
+                raise probe_refusal("cache has no version 2 build receipt")
+            if receipt.get("contract") != probe_build_contract(identity):
+                raise probe_refusal("build contract changed")
+            before = probe_bundle_snapshot(app)
+            artifact = probe_artifact(app)
+            if receipt.get("artifact") != artifact:
+                raise probe_refusal("artifact differs from the prepared build")
+            if (raw, receipt_identity) != probe_receipt(record) or receipt_identity != probe_file_identity(record.lstat()):
+                raise probe_refusal("receipt changed during verification")
+            digest = artifact["bundle_sha256"]
+            if held["digest"] is not None and held["digest"] != digest:
+                raise probe_refusal("artifact changed during use")
+            after = probe_bundle_snapshot(app)
+            if before != after or after["bundle_sha256"] != digest:
+                raise probe_refusal("bundle changed while validating the receipt")
+            identities = after["identities"]
+            if held["identities"] is not None and held["identities"] != identities:
+                raise probe_refusal("bundle replaced during use")
+            held["identities"] = identities
+            held["digest"] = digest
+            return {"source_sha256": receipt["contract"]["source_sha256"],
+                    "bundle_sha256": digest, "executable_sha256": artifact["executable_sha256"],
+                    **{key: artifact["signature"][key] for key in ("identifier", "cdhash", "mode")}}
+        except (OSError, ValueError, TypeError, KeyError):
+            raise probe_refusal("receipt missing or malformed") from None
+
+
+def build_latency_probe(tools: Path, identity: Optional[str], rebuild: bool = False) -> Path:
+    try:
+        return prepare_latency_probe(tools, identity, rebuild)
+    except OSError:
+        raise probe_refusal("preparation or publication failed") from None
+
+
+def prepare_latency_probe(tools: Path, identity: Optional[str], rebuild: bool) -> Path:
+    app = tools / "KettleLatencyProbe.app"
+    with probe_lock(tools) as held:
+        if not rebuild:
+            validate_latency_probe(app, identity)
             return app
-    except (OSError, json.JSONDecodeError):
-        pass
-    record.unlink(missing_ok=True)
-    if app.exists():
-        shutil.rmtree(app)
-    (contents / "MacOS").mkdir(parents=True)
-    subprocess.run(["swiftc", "-O", "-o", str(contents / "MacOS" / "latency-probe"), str(source)], check=True)
-    (contents / "Info.plist").write_bytes(latency_probe_plist())
-    subprocess.run(["codesign", "--force", "--sign", identity or "-", "--identifier", LATENCY_PROBE_ID, str(app)],
-                   check=True, capture_output=True)
-    # Written last: an interrupted build is rebuilt next time.
-    record.write_text(json.dumps(wanted))
-    return app
+        if held["digest"] is not None:
+            raise probe_refusal("cannot rebuild an artifact in use")
+        contract = probe_build_contract(identity)
+        with tempfile.TemporaryDirectory(prefix=".latency-build-", dir=tools) as tmp:
+            staging = Path(tmp) / app.name
+            executable = staging / "Contents" / "MacOS" / "latency-probe"
+            executable.parent.mkdir(parents=True)
+            source = Path(tmp) / "latency-probe.swift"
+            source.write_bytes((PROBES / "latency-probe.swift").read_bytes())
+            if file_sha256(source) != contract["source_sha256"]:
+                raise probe_refusal("source changed during preparation")
+            probe_command([contract["compiler_path"], "-sdk", contract["sdk_path"], "-O", "-o", str(executable), str(source)])
+            (staging / "Contents" / "Info.plist").write_bytes(latency_probe_plist())
+            probe_command(["codesign", "--force", "--sign", identity or "-", "--identifier", LATENCY_PROBE_ID, str(staging)])
+            artifact = probe_artifact(staging)
+            probe_command([str(executable), "--self-test"])
+            if probe_artifact(staging) != artifact or probe_build_contract(identity) != contract:
+                raise probe_refusal("build changed during preparation")
+            if artifact["signature"]["mode"] != ("certificate" if identity not in (None, "-") else "ad hoc"):
+                raise probe_refusal("unexpected signature mode")
+            receipt = Path(tmp) / "receipt.json"
+            receipt.write_text(json.dumps({"version": 2, "contract": contract, "artifact": artifact,
+                                           "local": {"app": str(app.resolve()), "source": str((PROBES / "latency-probe.swift").resolve())}},
+                                          sort_keys=True))
+            receipt.chmod(0o600)
+            # No portable atomic rename covers two paths. Invalidate the old
+            # receipt first and publish the new one last under the lock. A crash
+            # in between leaves a cache that all readers refuse.
+            record = tools / "KettleLatencyProbe.build.json"
+            record.unlink(missing_ok=True)
+            if app.exists() or app.is_symlink():
+                os.replace(app, Path(tmp) / "retired.app")
+            os.replace(staging, app)
+            os.replace(receipt, record)
+        validate_latency_probe(app, identity)
+        return app
+
+
+@contextlib.contextmanager
+def verified_probe_use(app: Path):
+    with probe_lock(app.parent):
+        # The identity is private in the receipt. It is never inferred from
+        # the cached signature to promote an unverified build.
+        try:
+            record = app.parent / "KettleLatencyProbe.build.json"
+            receipt = json.loads(probe_receipt(record)[0])
+            identity = receipt["contract"]["identity"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise probe_refusal("receipt missing or malformed") from None
+        public = validate_latency_probe(app, None if identity == "-" else identity)
+        try:
+            yield public
+        finally:
+            validate_latency_probe(app, None if identity == "-" else identity)
+
+
+def probe_tool_identity(probes: Dict[str, Path], identity: Optional[str]) -> Tuple[dict, dict]:
+    hashes = {name: file_sha256(path) for name, path in probes.items() if name != "latency-probe"}
+    artifacts = {}
+    if "latency-probe" in probes:
+        artifact = validate_latency_probe(probes["latency-probe"], identity)
+        hashes["latency-probe"] = artifact["bundle_sha256"]
+        artifacts["latency-probe"] = artifact
+    return hashes, artifacts
+
+
+def latency_probe_self_test(app: Path) -> int:
+    with verified_probe_use(app):
+        return probe_command([str(app / "Contents" / "MacOS" / "latency-probe"), "--self-test"]).returncode
 
 
 def wait_for_text(path: Path, marker: str, timeout: float) -> bool:
@@ -236,18 +494,74 @@ def wait_for_text(path: Path, marker: str, timeout: float) -> bool:
         time.sleep(0.1)
 
 
+@contextlib.contextmanager
+def probe_invocation_lease(work: Path):
+    import fcntl
+
+    fd, name = tempfile.mkstemp(prefix=".probe-use-", dir=work)
+    path = Path(name)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+        os.close(fd)
+
+
+def run_owned_probe_open(command: List[str], lease: Path, timeout: float) -> None:
+    """Own/reap only the open child. The probe watches the locked lease and
+    stops posting/exits when cancellation removes it or its owner dies."""
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        process.wait(timeout=timeout)
+    except BaseException:
+        lease.unlink(missing_ok=True)
+        reap_owned_child(process, 10)
+        raise
+
+
+def reap_owned_child(process: subprocess.Popen, grace: float) -> None:
+    """Wait up to `grace` seconds for an owned child, then kill and reap it.
+    A repeated cancellation (a second Ctrl-C) during the wait skips the rest
+    of the grace period but never abandons the child; the caller re-raises
+    the original exception once the child is reaped."""
+    deadline = time.monotonic() + grace
+    while True:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                process.wait(timeout=remaining)
+            else:
+                process.kill()
+                process.wait()
+            return
+        except BaseException:
+            deadline = 0.0
+
+
 def run_latency_probe(app: Path, args: List[str], work: Path, timeout: float) -> str:
     """Run the probe as its own app through `open`, so macOS holds the probe,
     not whatever launched this script, responsible for its grants, and it
     never becomes frontmost. Returns its stdout. `open -W` drops the exit
     status, and returns at once when the probe exits before `open` can
     attach to it, so callers wait for the probe's output instead."""
-    stdout, stderr = work / "probe.stdout", work / "probe.stderr"
-    for path in (stdout, stderr):
-        path.write_text("")
-    subprocess.run(["open", "-g", "-n", "-W", "--stdout", str(stdout), "--stderr", str(stderr), str(app),
-                    "--args", *args], check=False, timeout=timeout)
-    return stdout.read_text(errors="replace")
+    with verified_probe_use(app):
+        stdout, stderr = work / "probe.stdout", work / "probe.stderr"
+        for path in (stdout, stderr):
+            path.write_text("")
+        started = time.monotonic()
+        with probe_invocation_lease(work) as lease:
+            run_owned_probe_open(["open", "-g", "-n", "-W", "--stdout", str(stdout), "--stderr", str(stderr), str(app),
+                                  "--args", *args, "--lease-file", str(lease)], lease, timeout)
+            # open may attach after the app already exited. Verify after its final
+            # output, never while a measurement is still in flight.
+            if "--out" in args:
+                finished = wait_for_text(Path(args[args.index("--out") + 1]), "}", max(0.0, timeout - (time.monotonic() - started)))
+            else:
+                finished = wait_for_text(stdout, "post events:", 10)
+            if not finished:
+                raise probe_refusal("invocation did not finish")
+            return stdout.read_text(errors="replace")
 
 
 def latency_grants(app: Path, work: Path, request: bool = False) -> Dict[str, bool]:
@@ -1115,6 +1429,9 @@ class Runner:
         if "error" in probe:
             return {"error": f"latency probe: {probe['error']}"}
         row = latency_row(probe, read_keyblock_log(log), options["censor_ms"])
+        with verified_probe_use(self.probes["latency-probe"]) as artifact:
+            row["tool_artifact"] = artifact
+
         if not clean:
             row["killed"] = True
         return row
@@ -3281,20 +3598,22 @@ def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str])
     return names + (["kettle-opaque"] if opaque else []) + [f"floor-{mode}" for mode in floors]
 
 
-def run_latency_check(tools: Path, identity: Optional[str]) -> int:
+def run_latency_check(tools: Path, identity: Optional[str], rebuild: bool = False) -> int:
     """--latency-check: build the probe, ask macOS for its grants, report."""
-    probes = build_probes(tools, latency=True, sign_identity=identity)
-    with tempfile.TemporaryDirectory(prefix="kettle-latency-check-") as tmp:
-        grants = latency_grants(probes["latency-probe"], Path(tmp), request=True)
-        grants = latency_grants(probes["latency-probe"], Path(tmp))
-    for grant, held in grants.items():
-        print(f"{grant.replace('_', ' ')}: {'granted' if held else 'missing'}")
-    if not all(grants.values()):
-        print(f"grant both to {probes['latency-probe']} in System Settings > Privacy & Security, "
-              "then run --latency-check again", file=sys.stderr)
-        return 3
-    self_test = subprocess.run([str(probes["latency-probe"] / "Contents" / "MacOS" / "latency-probe"), "--self-test"])
-    return self_test.returncode
+    with probe_lock(tools):
+        probes = build_probes(tools, latency=True, sign_identity=identity, rebuild_latency=rebuild)
+        if rebuild:
+            print("latency probe prepared and verified; ad-hoc grants may need renewal")
+        with tempfile.TemporaryDirectory(prefix="kettle-latency-check-") as tmp:
+            grants = latency_grants(probes["latency-probe"], Path(tmp), request=True)
+            grants = latency_grants(probes["latency-probe"], Path(tmp))
+        for grant, held in grants.items():
+            print(f"{grant.replace('_', ' ')}: {'granted' if held else 'missing'}")
+        if not all(grants.values()):
+            print("grant both to KettleLatencyProbe in System Settings > Privacy & Security, "
+                  "then run --latency-check again", file=sys.stderr)
+            return 3
+        return latency_probe_self_test(probes["latency-probe"])
 
 
 def run_combine(args: argparse.Namespace) -> int:
@@ -3309,6 +3628,17 @@ def run_combine(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    with contextlib.ExitStack() as cleanup:
+        try:
+            return standing_main(cleanup)
+        except RuntimeError as error:
+            if not str(error).startswith("latency probe:"):
+                raise
+            print(str(error), file=sys.stderr)
+            return 1
+
+
+def standing_main(cleanup: contextlib.ExitStack) -> int:
     if len(sys.argv) == 5 and sys.argv[1] == KEEP_DEFAULT_ARG:
         return keep_default(sys.argv[2], sys.argv[3], sys.argv[4])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -3335,7 +3665,9 @@ def main() -> int:
     parser.add_argument("--latency-sign-identity",
                         help="codesign identity for KettleLatencyProbe.app, so its grants survive rebuilds")
     parser.add_argument("--latency-check", action="store_true",
-                        help="build the latency probe, ask for its grants, report them and exit")
+                        help="verify the latency probe, ask for its grants, report them and exit")
+    parser.add_argument("--rebuild-latency-probe", action="store_true",
+                        help="with --latency-check only: explicitly prepare a fresh verified probe")
     parser.add_argument("--vtebench-seconds", type=int, default=10, help="seconds per benchmark (upstream's default)")
     parser.add_argument("--idle-settle", type=float, default=20.0)
     parser.add_argument("--idle-window", type=float, default=30.0)
@@ -3387,6 +3719,8 @@ def main() -> int:
         if value > most:
             parser.error(f"{flag} must be at most {most}")
 
+    if args.rebuild_latency_probe and (not args.latency_check or args.combine or args.make_bundle or args.preflight_only):
+        parser.error("--rebuild-latency-probe requires --latency-check alone")
     if args.combine:
         return run_combine(args)
     if args.make_bundle:
@@ -3396,7 +3730,7 @@ def main() -> int:
         print("macos-standing.py: this benchmark requires macOS", file=sys.stderr)
         return 1
     if args.latency_check:
-        return run_latency_check(REPO / "target" / "perf-tools" / "macos-standing", args.latency_sign_identity)
+        return run_latency_check(REPO / "target" / "perf-tools" / "macos-standing", args.latency_sign_identity, args.rebuild_latency_probe)
     workloads = [w for w in args.workloads.split(",") if w]
     unknown = set(workloads) - set(WORKLOADS) - set(OPT_IN_WORKLOADS)
     if unknown:
@@ -3468,6 +3802,9 @@ def main() -> int:
         return 1 if refusals else 0
 
     tools = REPO / "target" / "perf-tools" / "macos-standing"
+    if "latency" in workloads:
+        cleanup.enter_context(probe_lock(tools))
+        validate_latency_probe(tools / "KettleLatencyProbe.app", args.latency_sign_identity)
     if needs_build(args.kettle, args.kettle_b, args.no_build):
         subprocess.run(["cargo", "build", "--locked", "--release", "-p", "kettle"], cwd=REPO, check=True)
     if not args.allow_bare and Path(args.kettle).resolve() == DEFAULT_KETTLE.resolve() and DEFAULT_KETTLE.exists():
@@ -3483,10 +3820,7 @@ def main() -> int:
     # heat, so the preflight that decides the session runs after it.
     probes = build_probes(tools, latency="latency" in workloads, sign_identity=args.latency_sign_identity)
     vtebench = build_vtebench(tools) if "vtebench" in workloads else None
-    # The probe app's signature changes with every signing, so its source
-    # stands for it.
-    tool_hashes = {name: file_sha256(PROBES / "latency-probe.swift" if name == "latency-probe" else path)
-                   for name, path in probes.items()}
+    tool_hashes, tool_artifacts = probe_tool_identity(probes, args.latency_sign_identity)
     if "latency" in workloads:
         with tempfile.TemporaryDirectory(prefix="kettle-latency-grants-") as tmp:
             grants = latency_grants(probes["latency-probe"], Path(tmp))
@@ -3535,6 +3869,7 @@ def main() -> int:
             # session_countable); an interrupted session never counts.
             "complete": False, "refusals": refusals, "bare": bool(bare), "countable": False,
             **harness_revision(), "tool_hashes": tool_hashes,
+            **({"tool_artifacts": tool_artifacts} if tool_artifacts else {}),
             "hw_model": command(["sysctl", "-n", "hw.model"]).strip(), "cpu": host, "macos": release,
             "macos_build": command(["sw_vers", "-buildVersion"]).strip(), "display": state["display"],
             "power": state["power"], "low_power": state["low_power"], "load_start": state["load"],
@@ -3554,13 +3889,17 @@ def main() -> int:
         "workloads": {},
     }
     local_manifest = {"configs": config_record(kettle_configs)[1]}
+    if tool_artifacts:
+        local_manifest["latency_probe"] = json.loads((tools / "KettleLatencyProbe.build.json").read_text())
     for name in names:
         public, local = terminal_identity(kettle.get(name) or APPS[name])
         results["meta"]["identity"][name] = public
         local_manifest[name] = local
     # Paths and signing teams identify this machine and its owner; they stay
     # beside the results and never go into anything published.
-    (out_dir / "local-manifest.json").write_text(dumps(local_manifest))
+    manifest_fd = os.open(out_dir / "local-manifest.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(manifest_fd, "w") as manifest:
+        manifest.write(dumps(local_manifest))
     recorder = Recorder(out_dir / "results.json", results)
     recorder.write()
 
@@ -3643,6 +3982,8 @@ def main() -> int:
                 # waits for it anyway (wait_for_round); this keeps that short.
                 runner.stop_current()
 
+    if tool_artifacts:
+        validate_latency_probe(probes["latency-probe"], args.latency_sign_identity)
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
     results["meta"]["workload_countable"] = workload_countable(results, results["meta"])

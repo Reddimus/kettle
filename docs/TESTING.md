@@ -363,6 +363,41 @@ A/A are part of this self-test.
 See [the standing analysis schema](perf-standing-schema.md) for the current
 statistical contract, units, eligibility fields and preserved legacy reads.
 
+The portable `ProbeIntegrity` fixtures use mocked compiler, signing and launch
+commands with real scratch files. They check source-only bogus caches,
+executable edits, validly signed substitutions with the same identifier,
+plist/entitlement/resource/extra-file changes, malformed and partial receipts,
+interrupted builds and publication, reuse without signing, artifact identity,
+compiler/SDK contract drift, receipt permissions, symlinks/FIFOs (including a
+plist swapped for a FIFO after the snapshot, which must refuse rather than
+block), hashing races, replacement during use, lock contention and
+cancellation cleanup. Every probe
+entry point must refuse an invalid cache before the launch mock is called.
+The success path verifies before and after invocation and passes the private
+lease; timeout/cancellation reaps only the child returned by its own spawn,
+and a second cancellation during that cleanup still reaps it.
+
+Receipt version 2 has `version`, `contract`, `artifact` and `local` objects.
+`contract` carries source/plist SHA-256, normalized command, compiler path and
+version, SDK path/version and the private signing choice. `artifact` carries
+executable and full bundle SHA-256, exact file hash/mode maps and verified
+signature metadata/requirements. `local` retains build source and app paths.
+The external receipt is mode 0600 and never becomes public report input.
+Public artifact objects contain only hashes, identifier, CDHash and signing
+mode. Receipt files are bounded regular files; bundle links and special files
+are rejected. A missing receipt after interrupted publication requires an
+explicit rebuild, not promotion of the partially published app.
+
+The native macOS scratch test needs `swiftc`, `xcrun` and `codesign`. It builds
+a fresh probe with explicit preparation, verifies the seal and receipt, runs
+only its pure synthetic self-test, reuses it without rebuilding, substitutes
+a different validly ad-hoc-signed bundle with the same identifier and confirms
+refusal, then rebuilds explicitly and tampers with executable bytes to confirm
+that preparation and the launch path both refuse it before spawning `open`. The pure Swift self-test also checks locked, unlocked and
+removed invocation leases. It opens no GUI app, posts no keys, calls no TCC
+API and never uses the real probe cache. The test does not certify owner
+grants, a native latency pilot, method calibration or a freeze.
+
 The PowerShell performance campaign and its self-tests retired with the final
 Windows-supported 3.3.0 line. The measurements and methodology remain in
 [PERFORMANCE.md](PERFORMANCE.md) as historical evidence. To reproduce that

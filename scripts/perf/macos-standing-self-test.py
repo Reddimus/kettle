@@ -2390,7 +2390,7 @@ class Latency(unittest.TestCase):
         self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency",))
         import inspect
 
-        source = inspect.getsource(standing.main)
+        source = inspect.getsource(standing.standing_main)
         self.assertIn('parser.add_argument("--workloads", default=",".join(WORKLOADS))', inspect.getsource(standing))
         self.assertIn('build_probes(tools, latency="latency" in workloads', source)
 
@@ -2662,7 +2662,9 @@ class Latency(unittest.TestCase):
         self.assertNotIn("compactMap", probe.split("func keyEvents()")[1].split("\n}\n")[0],
                          "a key-down is never posted without its key-up")
         self.assertEqual(order, sorted(order), "events built first; deadline checked and time taken under the gate")
-        self.assertEqual(probe.count("exit("), 4, "only finish() ends a run; the rest are the CLI modes")
+        self.assertEqual(probe.count("exit("), 5, "finish() and locked cancellation end runs; the rest are CLI modes")
+        cancellation = probe[probe.index("func cancelInvocation()"):probe.index("func secondsSince")]
+        self.assertIn("gate.lock()", cancellation)
         self.assertIn("gate.lock()\n    write(object, to: path)\n    exit(code)", probe)
 
     def test_keys_outside_the_arrival_window_unrank_a_row(self) -> None:
@@ -2764,7 +2766,7 @@ class Latency(unittest.TestCase):
     def test_the_probe_app_is_sealed_and_passes_its_self_test(self) -> None:
         import subprocess
 
-        app = standing.build_latency_probe(self.root, None)
+        app = standing.build_latency_probe(self.root, None, rebuild=True)
         sealed = subprocess.run(["codesign", "--verify", "--strict", "--deep", str(app)], capture_output=True, text=True)
         self.assertEqual(sealed.returncode, 0, "nothing may change inside the bundle after signing: " + sealed.stderr)
         self.assertTrue((self.root / "KettleLatencyProbe.build.json").exists())
@@ -2772,11 +2774,461 @@ class Latency(unittest.TestCase):
         standing.build_latency_probe(self.root, None)
         self.assertEqual((app / "Contents" / "MacOS" / "latency-probe").stat().st_mtime_ns, built,
                          "an unchanged source and identity reuse the signed probe")
-        done = subprocess.run([str(app / "Contents" / "MacOS" / "latency-probe"), "--self-test"],
-                              capture_output=True, text=True, timeout=60)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(standing.latency_probe_self_test(app), 0)
+        original_identity = standing.validate_latency_probe(app)
+        replacement = self.root / "replacement.app"
+        shutil.copytree(app, replacement)
+        (replacement / "Contents" / "Resources").mkdir(exist_ok=True)
+        (replacement / "Contents" / "Resources" / "substitute-resource").write_bytes(b"validly signed substitute")
+        subprocess.run(["codesign", "--force", "--sign", "-", "--identifier", standing.LATENCY_PROBE_ID,
+                        str(replacement)], check=True, capture_output=True)
+        standing.probe_signature(replacement)
+        shutil.rmtree(app)
+        replacement.rename(app)
+        with self.assertRaises(RuntimeError):
+            standing.validate_latency_probe(app)
+        # Explicitly prepare after refusal, then exercise executable tamper.
+        standing.build_latency_probe(self.root, None, rebuild=True)
+        self.assertEqual(original_identity["source_sha256"], standing.validate_latency_probe(app)["source_sha256"])
+        binary = app / "Contents" / "MacOS" / "latency-probe"
+        with binary.open("ab") as stream:
+            stream.write(b"tamper")
+        from unittest import mock
+        with self.assertRaises(RuntimeError):
+            standing.build_latency_probe(self.root, None)
+        # The real launch path refuses the tampered app before it spawns `open`.
+        with mock.patch.object(standing, "run_owned_probe_open") as launch:
+            with self.assertRaises(RuntimeError):
+                standing.run_latency_probe(app, ["--check"], self.root, 5)
+            launch.assert_not_called()
         subprocess.run(["swiftc", "-typecheck", str(HERE / "macos-standing" / "latency-floor.swift")],
                        check=True, capture_output=True)
+
+
+class ProbeIntegrity(unittest.TestCase):
+    """Portable filesystem/subprocess decisions. No invocation reaches macOS."""
+
+    def setUp(self):
+        import tempfile
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.app = self.root / "KettleLatencyProbe.app"
+        self.record = self.root / "KettleLatencyProbe.build.json"
+        self.entitlements = {}
+        self.seal_ok = True
+        self.fail_build = False
+        self.calls = []
+        self.contract = {"source_sha256": standing.file_sha256(standing.PROBES / "latency-probe.swift"), "plist_sha256": "plist",
+                         "command": ["compiler", "-O"], "compiler_path": "fixture-swiftc",
+                         "compiler_version": "fixture", "sdk_path": "fixture-sdk",
+                         "sdk_version": "fixture", "identity": "-"}
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(standing, "probe_build_contract", side_effect=lambda identity: {
+            **self.contract, "identity": identity or "-"}).start()
+        mock.patch.object(standing, "probe_command", side_effect=self.command).start()
+        self.prepare()
+
+    def command(self, argv, timeout=60):
+        import plistlib
+        self.calls.append(argv)
+        if argv[0] == "fixture-swiftc":
+            if self.fail_build:
+                raise RuntimeError("interrupted fixture build")
+            binary = Path(argv[argv.index("-o") + 1])
+            binary.write_bytes(b"fixture executable")
+            binary.chmod(0o755)
+        elif argv[0] == "codesign":
+            app = Path(argv[-1])
+            if "--sign" in argv:
+                resource = app / "Contents" / "_CodeSignature" / "CodeResources"
+                resource.parent.mkdir()
+                resource.write_bytes(b"fixture seal")
+            if "--verify" in argv and not self.seal_ok:
+                raise RuntimeError("invalid fixture seal")
+            if "--verbose=4" in argv:
+                return subprocess.CompletedProcess(argv, 0, b"", (
+                    "Identifier=" + standing.LATENCY_PROBE_ID + "\nCDHash=" + "a" * 40 +
+                    "\nSignature=adhoc\n").encode())
+            if "-r-" in argv:
+                return subprocess.CompletedProcess(argv, 0, b"", b'designated => identifier "fixture"\n')
+            if "--entitlements" in argv:
+                return subprocess.CompletedProcess(argv, 0, plistlib.dumps(self.entitlements), b"")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    def prepare(self):
+        return standing.build_latency_probe(self.root, None, rebuild=True)
+
+    def refuse_before_invocation(self):
+        from unittest import mock
+        for args in (["--check"], ["--request"], ["--self-test"], ["--out", str(self.root / "result")]):
+            with self.subTest(args=args), mock.patch.object(standing, "run_owned_probe_open") as run, \
+                    mock.patch.object(standing, "wait_for_text", return_value=True):
+                with self.assertRaises(RuntimeError):
+                    standing.run_latency_probe(self.app, args, self.root, 1)
+                run.assert_not_called()
+        with self.assertRaises(RuntimeError):
+            standing.latency_probe_self_test(self.app)
+
+    def test_legacy_bogus_cache_never_invokes(self):
+        self.record.write_text(_json.dumps({"source": "source", "identity": "-"}))
+        (self.app / "Contents/MacOS/latency-probe").write_bytes(b"bogus")
+        self.refuse_before_invocation()
+
+    def test_modified_executable_never_invokes(self):
+        (self.app / "Contents/MacOS/latency-probe").write_bytes(b"replacement")
+        self.refuse_before_invocation()
+
+    def test_validly_signed_same_identifier_substitute_never_invokes(self):
+        import shutil
+        alternate = self.root / "alternate"
+        alternate.mkdir()
+        with standing.probe_lock(alternate):
+            other = standing.build_latency_probe(alternate, None, rebuild=True)
+        (other / "Contents/MacOS/latency-probe").write_bytes(b"different valid fixture executable")
+        # The fixture codesign verifier accepts this substitute. Only the
+        # prepared artifact receipt can distinguish it from the owned build.
+        shutil.rmtree(self.app)
+        other.rename(self.app)
+        standing.probe_signature(self.app)
+        self.refuse_before_invocation()
+
+    def test_plist_entitlements_resources_and_extra_files_never_invoke(self):
+        mutations = (lambda: (self.app / "Contents/Info.plist").write_bytes(b"changed plist"),
+                     lambda: self.entitlements.update({"unexpected": True}),
+                     lambda: (self.app / "Contents/_CodeSignature/CodeResources").write_bytes(b"changed seal"),
+                     lambda: (self.app / "extra").write_bytes(b"unexpected"))
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.prepare()
+                self.entitlements = {}
+                mutate()
+                self.refuse_before_invocation()
+                self.entitlements = {}
+
+    def test_missing_malformed_old_and_partial_receipts_never_invoke(self):
+        for contents in (None, "{", "[]", '{"version":1}', '{"version":2}'):
+            with self.subTest(contents=contents):
+                self.prepare()
+                if contents is None:
+                    self.record.unlink()
+                else:
+                    self.record.write_text(contents)
+                self.refuse_before_invocation()
+        self.prepare()
+        (self.app / "Contents/MacOS/latency-probe").unlink()
+        self.refuse_before_invocation()
+
+    def test_no_automatic_repair_or_receipt_promotion(self):
+        self.record.write_text('{"source":"source","identity":"-"}')
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            standing.build_latency_probe(self.root, None)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.record.read_text(), '{"source":"source","identity":"-"}')
+
+    def test_unchanged_cache_reuses_artifact_without_build_or_sign(self):
+        first = standing.validate_latency_probe(self.app)
+        inode = (self.app / "Contents/MacOS/latency-probe").stat().st_ino
+        self.calls.clear()
+        self.assertEqual(standing.build_latency_probe(self.root, None), self.app)
+        self.assertEqual(first, standing.validate_latency_probe(self.app))
+        self.assertEqual(inode, (self.app / "Contents/MacOS/latency-probe").stat().st_ino)
+        self.assertFalse(any(c[0] == "fixture-swiftc" or "--sign" in c for c in self.calls))
+        self.assertEqual(first["bundle_sha256"], standing.probe_bundle_snapshot(self.app)["bundle_sha256"])
+        self.assertNotEqual(first["bundle_sha256"], first["source_sha256"])
+        self.assertEqual(self.record.stat().st_mode & 0o777, 0o600)
+
+    def test_build_contract_and_seal_mismatch_never_invoke(self):
+        for field in ("source_sha256", "plist_sha256", "command", "compiler_path", "compiler_version", "sdk_path", "sdk_version"):
+            with self.subTest(field=field):
+                receipt = _json.loads(self.record.read_text())
+                original = receipt["contract"][field]
+                receipt["contract"][field] = "changed"
+                self.record.write_text(_json.dumps(receipt))
+                self.refuse_before_invocation()
+                receipt["contract"][field] = original
+                self.record.write_text(_json.dumps(receipt))
+        self.seal_ok = False
+        self.refuse_before_invocation()
+
+    def test_interrupted_build_keeps_prior_artifact_and_no_partial_publish(self):
+        before = self.record.read_bytes()
+        self.fail_build = True
+        with self.assertRaises(RuntimeError):
+            self.prepare()
+        self.assertEqual(self.record.read_bytes(), before)
+        standing.validate_latency_probe(self.app)
+        self.assertFalse(list(self.root.glob(".latency-build-*")))
+
+    def test_partial_publication_is_refused_and_lock_released(self):
+        from unittest import mock
+        original = standing.os.replace
+        def fail_receipt(source, dest):
+            if Path(dest) == self.record:
+                raise OSError("interrupted publication")
+            original(source, dest)
+        with mock.patch.object(standing.os, "replace", side_effect=fail_receipt), self.assertRaises(RuntimeError):
+            self.prepare()
+        self.refuse_before_invocation()
+        self.assertEqual(standing._PROBE_LOCKS, {})
+        self.prepare()
+
+    def test_symlink_special_file_and_private_receipt_guards(self):
+        for kind in ("symlink", "fifo", "receipt-link", "receipt-fifo", "receipt-public"):
+            with self.subTest(kind=kind):
+                self.prepare()
+                extra = self.app / "extra"
+                if kind == "symlink":
+                    extra.symlink_to(self.record)
+                elif kind == "fifo":
+                    os.mkfifo(extra)
+                elif kind.startswith("receipt-"):
+                    if kind == "receipt-public":
+                        self.record.chmod(0o644)
+                    else:
+                        backup = self.root / "receipt-backup"
+                        backup.unlink(missing_ok=True)
+                        self.record.rename(backup)
+                        if kind == "receipt-link":
+                            self.record.symlink_to(backup)
+                        else:
+                            os.mkfifo(self.record)
+                self.refuse_before_invocation()
+
+    def test_plist_replaced_by_fifo_after_snapshot_never_blocks(self):
+        # The plist check uses the bytes the snapshot read through a checked
+        # descriptor. Reopening the path would block on a FIFO swapped in
+        # after the snapshot, with the preparation/use lock held.
+        import threading
+        from unittest import mock
+        plist = self.app / "Contents" / "Info.plist"
+        self.assertTrue(plist.is_file())
+        original = standing.probe_bundle_snapshot
+        swapped = []
+
+        def snapshot_then_swap(app):
+            result = original(app)
+            if not swapped:
+                plist.unlink()
+                os.mkfifo(plist)
+                swapped.append(True)
+            return result
+        outcome = []
+
+        def verify():
+            try:
+                standing.probe_artifact(self.app)
+                outcome.append("accepted")
+            except RuntimeError:
+                outcome.append("refused")
+        with mock.patch.object(standing, "probe_bundle_snapshot", side_effect=snapshot_then_swap):
+            worker = threading.Thread(target=verify, daemon=True)
+            worker.start()
+            worker.join(5)
+            blocked = worker.is_alive()
+            if blocked:
+                # Release the stuck reader so the test itself never hangs.
+                os.close(os.open(plist, os.O_WRONLY | os.O_NONBLOCK))
+                worker.join(5)
+        self.assertFalse(blocked, "verification blocked on a substituted FIFO")
+        self.assertEqual(outcome, ["refused"])
+
+    def test_mutation_during_hashing_is_refused(self):
+        from unittest import mock
+        original = standing.os.fstat
+        count = 0
+        def mutate(fd):
+            nonlocal count
+            count += 1
+            if count == 1:
+                (self.app / "Contents/MacOS/latency-probe").write_bytes(b"mutated while hashing")
+            return original(fd)
+        with mock.patch.object(standing.os, "fstat", side_effect=mutate), self.assertRaises(RuntimeError):
+            standing.probe_bundle_snapshot(self.app)
+
+    def test_same_bytes_replacement_during_use_is_refused(self):
+        binary = self.app / "Contents/MacOS/latency-probe"
+        with self.assertRaises(RuntimeError), standing.verified_probe_use(self.app):
+            replacement = self.root / "replacement"
+            replacement.write_bytes(binary.read_bytes())
+            replacement.chmod(0o755)
+            os.replace(replacement, binary)
+
+    def test_post_invocation_tamper_is_refused(self):
+        from unittest import mock
+        def invocation(*args, **kwargs):
+            (self.root / "probe.stdout").write_text("post events: granted")
+            (self.app / "Contents/MacOS/latency-probe").write_bytes(b"tampered during use")
+            return subprocess.CompletedProcess(args, 0)
+        with mock.patch.object(standing, "run_owned_probe_open", side_effect=invocation) as run:
+            with self.assertRaises(RuntimeError):
+                standing.run_latency_probe(self.app, ["--check"], self.root, 1)
+            self.assertEqual(run.call_count, 1)
+
+    def test_duplicate_preparation_fails_without_spawning_and_use_blocks_rebuild(self):
+        import fcntl
+        from unittest import mock
+        with mock.patch.object(standing, "probe_command") as command:
+            with mock.patch.object(fcntl, "flock", side_effect=BlockingIOError), self.assertRaises(RuntimeError):
+                self.prepare()
+            command.assert_not_called()
+        with standing.verified_probe_use(self.app), self.assertRaises(RuntimeError):
+            self.prepare()
+        self.assertEqual(standing._PROBE_LOCKS, {})
+
+    def test_cancellation_releases_lock_and_checks_artifact(self):
+        with self.assertRaises(KeyboardInterrupt), standing.verified_probe_use(self.app):
+            raise KeyboardInterrupt()
+        self.assertEqual(standing._PROBE_LOCKS, {})
+        standing.validate_latency_probe(self.app)
+
+    def test_rebuild_flag_is_checked_before_early_actions(self):
+        import contextlib
+        import io
+        from unittest import mock
+        for args in (["--rebuild-latency-probe"], ["--rebuild-latency-probe", "--combine", "none"],
+                     ["--rebuild-latency-probe", "--latency-check", "--preflight-only"]):
+            with mock.patch.object(sys, "argv", ["standing", *args]), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as error:
+                standing.main()
+            self.assertEqual(error.exception.code, 2)
+
+
+    def test_owned_open_timeout_and_cancellation_reap_only_spawned_child(self):
+        from unittest import mock
+        for error in (subprocess.TimeoutExpired("open", 1), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                child = mock.Mock()
+                child.wait.side_effect = [error, subprocess.TimeoutExpired("open", 10), 0]
+                with standing.probe_invocation_lease(self.root) as lease:
+                    with mock.patch.object(standing.subprocess, "Popen", return_value=child) as spawn:
+                        with self.assertRaises(type(error)):
+                            standing.run_owned_probe_open(["open", "fixture"], lease, 1)
+                        self.assertFalse(lease.exists())
+                    spawn.assert_called_once()
+                    child.kill.assert_called_once_with()
+                    self.assertEqual(child.wait.call_count, 3)
+                self.assertFalse(list(self.root.glob(".probe-use-*")))
+
+    def test_repeated_cancellation_during_cleanup_still_reaps_the_child(self):
+        # A real child: the first interrupt cancels the invocation, a second
+        # one lands in the cleanup wait. The child must still be reaped, and
+        # the first interrupt propagates.
+        from unittest import mock
+        interrupts = [KeyboardInterrupt("first"), KeyboardInterrupt("second")]
+        spawned = []
+
+        class Interrupted(subprocess.Popen):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                spawned.append(self)
+
+            def wait(self, timeout=None):
+                if interrupts:
+                    raise interrupts.pop(0)
+                return super().wait(timeout)
+
+        def reap_own_child():
+            for child in spawned:
+                if child.poll() is None:
+                    child.kill()
+                    subprocess.Popen.wait(child)
+        self.addCleanup(reap_own_child)
+        with standing.probe_invocation_lease(self.root) as lease:
+            with mock.patch.object(standing.subprocess, "Popen", Interrupted):
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    standing.run_owned_probe_open([sys.executable, "-c", "import time; time.sleep(30)"], lease, 30)
+            self.assertFalse(lease.exists())
+        self.assertEqual(str(raised.exception), "first")
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNotNone(spawned[0].returncode, "the cancelled child was abandoned")
+
+    def test_successful_owned_open_is_reaped_without_signal(self):
+        from unittest import mock
+        child = mock.Mock()
+        with standing.probe_invocation_lease(self.root) as lease:
+            with mock.patch.object(standing.subprocess, "Popen", return_value=child):
+                standing.run_owned_probe_open(["open", "fixture"], lease, 1)
+            child.wait.assert_called_once_with(timeout=1)
+            child.kill.assert_not_called()
+            self.assertTrue(lease.exists())
+        self.assertFalse(lease.exists())
+
+    def test_successful_invocation_passes_lease_and_revalidates(self):
+        from unittest import mock
+        validations = []
+        original = standing.validate_latency_probe
+        def validate(*args, **kwargs):
+            validations.append(args)
+            return original(*args, **kwargs)
+        def invoke(command, lease, timeout):
+            self.assertEqual(command[-2:], ["--lease-file", str(lease)])
+            self.assertTrue(lease.exists())
+            (self.root / "probe.stdout").write_text("post events: granted")
+        with mock.patch.object(standing, "run_owned_probe_open", side_effect=invoke), \
+                mock.patch.object(standing, "validate_latency_probe", side_effect=validate):
+            self.assertEqual(standing.run_latency_probe(self.app, ["--check"], self.root, 1), "post events: granted")
+        self.assertEqual(len(validations), 2)
+        self.assertFalse(list(self.root.glob(".probe-use-*")))
+
+    def test_public_artifact_excludes_private_build_and_signing_details(self):
+        private = _json.loads(self.record.read_text())
+        private["local"] = {"app": "/sentinel/private/home", "owner": "owner@sentinel.invalid"}
+        self.record.write_text(_json.dumps(private))
+        public = standing.validate_latency_probe(self.app)
+        self.assertEqual(set(public), {"source_sha256", "bundle_sha256", "executable_sha256", "identifier", "cdhash", "mode"})
+        self.assertNotIn("sentinel", _json.dumps(public))
+
+    def test_preparation_runs_self_test_before_publication(self):
+        from unittest import mock
+        original = self.command
+        def fail_test(argv, timeout=60):
+            if "--self-test" in argv:
+                raise RuntimeError("fixture self-test failed")
+            return original(argv, timeout)
+        receipt = self.record.read_bytes()
+        with mock.patch.object(standing, "probe_command", side_effect=fail_test), self.assertRaises(RuntimeError):
+            self.prepare()
+        self.assertEqual(self.record.read_bytes(), receipt)
+        standing.validate_latency_probe(self.app)
+
+
+    def test_tool_hash_identifies_prepared_artifact_and_tracks_rebuild(self):
+        first, artifacts = standing.probe_tool_identity({"latency-probe": self.app}, None)
+        self.assertEqual(first["latency-probe"], artifacts["latency-probe"]["bundle_sha256"])
+        self.assertNotEqual(first["latency-probe"], self.contract["source_sha256"])
+        original = self.command
+        def changed_build(argv, timeout=60):
+            result = original(argv, timeout)
+            if argv[0] == "fixture-swiftc":
+                Path(argv[argv.index("-o") + 1]).write_bytes(b"new artifact with unchanged source")
+            return result
+        from unittest import mock
+        with mock.patch.object(standing, "probe_command", side_effect=changed_build):
+            self.prepare()
+        second, _ = standing.probe_tool_identity({"latency-probe": self.app}, None)
+        self.assertNotEqual(first, second)
+
+
+    def test_replacement_between_artifact_check_and_identity_pin_is_refused(self):
+        from unittest import mock
+        original = standing.probe_artifact
+        def replace_after_verification(app):
+            artifact = original(app)
+            (app / "Contents/MacOS/latency-probe").write_bytes(b"replacement after artifact verification")
+            return artifact
+        with mock.patch.object(standing, "probe_artifact", side_effect=replace_after_verification):
+            with self.assertRaises(RuntimeError):
+                standing.validate_latency_probe(self.app)
+
+
+    def test_explicit_adhoc_identity_prepares_and_reuses(self):
+        app = standing.build_latency_probe(self.root, "-", rebuild=True)
+        artifact = standing.validate_latency_probe(app, "-")
+        self.assertEqual(artifact["mode"], "ad hoc")
+        self.assertEqual(standing.build_latency_probe(self.root, "-"), app)
 
 
 FLOOD_4K_SHA256 = "8f18d84dad9b7ab935be1aa827e9ce0d0cc97b0c2e75f08afaede576a8b08f5d"

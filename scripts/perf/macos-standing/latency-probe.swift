@@ -330,6 +330,21 @@ func selfTest() -> Int32 {
           "the measured window is topmost below the menu bar")
     check(windowAt(CGPoint(x: 480, y: 100), [alert, target])?.owner == 99, "an alert over the titlebar is topmost")
 
+    let lease = NSTemporaryDirectory() + UUID().uuidString + ".probe-lease"
+    let leaseFd = open(lease, O_CREAT | O_EXCL | O_RDWR, 0o600)
+    check(leaseFd >= 0, "create scratch invocation lease")
+    if leaseFd >= 0 {
+        flock(leaseFd, LOCK_EX | LOCK_NB)
+        check(invocationAlive(lease), "locked lease retains invocation ownership")
+        flock(leaseFd, LOCK_UN)
+        check(!invocationAlive(lease), "unlocked lease cancels after owner exit")
+        close(leaseFd)
+        unlink(lease)
+        check(!invocationAlive(lease), "removed lease cancels")
+    }
+    check(invocationAlive(""), "standalone self-test needs no lease")
+    check(!invocationAlive("/nonexistent-kettle-probe-lease"), "missing invocation lease cancels")
+
     check(phaseSpread([100, 16_767, 33_434], vsyncNs: 100, periodNs: 16_667) == 0, "on-grid times have no spread")
     check(phaseSpread([100, 16_867], vsyncNs: 100, periodNs: 16_667) == 100, "spread is the arc width")
     check(phaseSpread([16_600, 16_700], vsyncNs: 0, periodNs: 16_667) == 100, "spread wraps around the period")
@@ -340,6 +355,20 @@ func selfTest() -> Int32 {
     }
     failures.forEach { FileHandle.standardError.write("self-test failed: \($0)\n".data(using: .utf8)!) }
     return 1
+}
+
+// A locked private file binds this LaunchServices process to the invoking
+// harness lifetime. It requires no pid lookup or signal to a discovered app.
+func invocationAlive(_ path: String) -> Bool {
+    if path.isEmpty { return true }
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    guard fd >= 0 else { return false }
+    defer { close(fd) }
+    if flock(fd, LOCK_EX | LOCK_NB) == 0 {
+        flock(fd, LOCK_UN)
+        return false
+    }
+    return errno == EWOULDBLOCK
 }
 
 // MARK: - System state
@@ -464,6 +493,7 @@ struct Options {
     /// After this many ms the probe posts nothing more and exits (0: none),
     /// so it can never outlive the harness's wait for it.
     var deadlineMs = 0
+    var leaseFile = ""
 }
 
 struct Failure: Error { let reason: String }
@@ -526,11 +556,17 @@ func finish(_ object: [String: Any], to path: String, code: Int32) -> Never {
     exit(code)
 }
 
+func cancelInvocation() -> Never {
+    gate.lock()
+    exit(4)
+}
+
 func secondsSince(_ type: CGEventType) -> Double {
     CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: type)
 }
 
 func run(_ options: Options) async throws -> [String: Any] {
+    guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
     guard CGPreflightScreenCaptureAccess() && CGPreflightPostEventAccess() else { throw Failure(reason: "permission") }
     var result: [String: Any] = ["display": displayContext()]
 
@@ -566,7 +602,10 @@ func run(_ options: Options) async throws -> [String: Any] {
             throw Failure(reason: "not frontmost, and the titlebar is covered")
         }
         activation = "click"
-        click(at: titlebar)
+        try gate.withLock {
+            guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
+            click(at: titlebar)
+        }
         try await Task.sleep(nanoseconds: 1_000_000_000)
     }
     result["activation"] = activation
@@ -634,6 +673,7 @@ func run(_ options: Options) async throws -> [String: Any] {
         // deadline's finish takes: a guard query that stalls across the
         // deadline cannot let a key through.
         let postNs: UInt64 = try gate.withLock {
+            guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
             if options.deadlineMs > 0 && nowNs() - probeStartNs > UInt64(options.deadlineMs) * 1_000_000 {
                 throw Failure(reason: "deadline passed")
             }
@@ -756,6 +796,7 @@ func parse(_ args: [String]) -> Options? {
         case "--censor-ms": guard let v = value(), let n = Int(v) else { return nil }; o.censorMs = n
         case "--seed": guard let v = value(), let n = UInt64(v) else { return nil }; o.seed = n
         case "--inject": guard let v = value(), v == "hid" || v == "pid" else { return nil }; o.injectPid = v == "pid"
+        case "--lease-file": guard let v = value() else { return nil }; o.leaseFile = v
         case "--deadline-ms": guard let v = value(), let n = Int(v), n >= 0 else { return nil }; o.deadlineMs = n
         default: return nil
         }
@@ -775,6 +816,19 @@ func write(_ object: [String: Any], to path: String) {
 let probeStartNs = nowNs()
 let args = CommandLine.arguments
 if args.contains("--self-test") { exit(selfTest()) }
+let leaseIndex = args.firstIndex(of: "--lease-file")
+let invocationLease = leaseIndex.flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? ""
+let leaseTimer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+if !invocationLease.isEmpty {
+    guard invocationAlive(invocationLease) else { cancelInvocation() }
+    leaseTimer.schedule(deadline: .now(), repeating: .milliseconds(50))
+    leaseTimer.setEventHandler {
+        if !invocationAlive(invocationLease) {
+            cancelInvocation()
+        }
+    }
+    leaseTimer.resume()
+}
 if args.contains("--check") || args.contains("--request") {
     var screen = CGPreflightScreenCaptureAccess(), events = CGPreflightPostEventAccess()
     if args.contains("--request") {
