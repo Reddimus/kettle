@@ -457,7 +457,9 @@ Terminal and method identities remain separate.
 
 The managed `xdg/kettle` directory allows empty regular `remote.cmd` and
 `remote.cmd.lock` runtime spool files. Nonempty spools, links and other entries
-refuse. When Ghostty is measured, both `config` and `config.ghostty` under
+refuse. The managed XDG root may also hold an empty `kitty`, `wezterm` or
+`alacritty` directory, which those peers can create although their own config
+is bypassed (kitty does on every launch); anything inside one refuses. When Ghostty is measured, both `config` and `config.ghostty` under
 `$HOME/Library/Application Support/com.mitchellh.ghostty` must be absent or
 empty regular files. Ghostty 1.3 reads them after the managed XDG files and
 the macOS app cannot bypass them with CLI config flags. The closure seals
@@ -868,6 +870,10 @@ steady cursor and existing block bytes, classifier and timing guards.
 
 The first six calibration flips stay hidden and steady. After accepting the
 sixth after-image, the probe sends `ENABLE\n` through a private mode-0600 FIFO.
+The cursor payload waits on standard input, which must be its session's
+controlling terminal, because macOS `poll()` reports `POLLNVAL` for a
+`/dev/tty` descriptor; reads and writes still use `/dev/tty`, so the bytes are
+unchanged.
 The payload enables the cursor without reading another key or consuming a
 sequence, then atomically acknowledges `ENABLED <cursor_enabled_ns>\n` in
 `CLOCK_UPTIME_RAW`. The handshake has a five-second limit inside the common

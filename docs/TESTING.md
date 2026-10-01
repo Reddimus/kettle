@@ -552,7 +552,11 @@ agreement, the 60000 ms limit and the 64-entry limit.
 files, symlinks/specials, sealed-state changes, unmeasured peers and fixed
 public refusals. Local paths and content sentinels cannot reach results,
 summary or equivalence output. The Kettle runtime-spool fixture allows only
-empty regular `remote.cmd` and `remote.cmd.lock` files.
+empty regular `remote.cmd` and `remote.cmd.lock` files, and empty peer config
+directories only for kitty, WezTerm and Alacritty. Two native tests run the
+cursor payload on a real controlling terminal from `pty.fork()`: it waits,
+enables and parks the cursor, and it refuses a standard input that is not its
+terminal. The socket handshake fixture stubs the terminal calls instead.
 
 For live acceptance, reserve an owner measurement window; it uses ten balanced on/off pairs per terminal with
 the same verified artifact, sealed config and seeds. Both arms are diagnostic.

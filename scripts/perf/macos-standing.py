@@ -851,6 +851,11 @@ CONFIG_MAX_BYTES = 1024 * 1024
 # remote_command_lock_path). They are runtime state, not configuration. Empty
 # regular files queue no command; anything else could feed one into the pane.
 KETTLE_RUNTIME_FILES = frozenset({"remote.cmd", "remote.cmd.lock"})
+# Peers whose own config the launch bypasses (--config NONE, -n,
+# --config-file /dev/null) can still create their config directory under the
+# managed XDG root: kitty does on every launch. An empty directory feeds them
+# nothing; any entry inside it refuses.
+PEER_RUNTIME_DIRS = frozenset({"kitty", "wezterm", "alacritty"})
 ASSET_MAX_BYTES = 64 * 1024 * 1024
 CONFIG_FILE_KEYS = {"background-image": "asset", "record-dir": "output-directory"}
 # Canonical top-level parse_collect arms. Reject new nonempty keys until their
@@ -1141,8 +1146,13 @@ class ConfigClosure:
             # No declared include grammar exists in these generated layouts.
             # Refuse all added entries, including dangling links, before reading.
             expected = {self.xdg / "kettle": set(), self.xdg / "ghostty": {"config"}}
-            if {p.name for p in self.xdg.iterdir()} != {"kettle", "ghostty"}:
+            roots = {p.name for p in self.xdg.iterdir()}
+            if not {"kettle", "ghostty"} <= roots or not roots - {"kettle", "ghostty"} <= PEER_RUNTIME_DIRS:
                 raise ConfigClosureError("config closure: undeclared config root")
+            for name in roots - {"kettle", "ghostty"}:
+                directory = self.xdg / name
+                if directory.is_symlink() or not directory.is_dir() or any(directory.iterdir()):
+                    raise ConfigClosureError("config closure: undeclared config root")
             for directory, names in expected.items():
                 if directory.is_symlink():
                     raise ConfigClosureError("config closure: undeclared include or init script")

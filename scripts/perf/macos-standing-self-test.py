@@ -2361,7 +2361,7 @@ class StartupPhases(unittest.TestCase):
         self.assertIn("-29.0 ms", text)
 
 
-KEYBLOCK_SHA256 = "628ab3d3c1b5a265a1aa36d77c530ce80594ad65ca7feed4c445468a836e839e"
+KEYBLOCK_SHA256 = "57720778868c53a6aa982ebc5cc720ed7cd3092bd009b59ec0efb021d2333150"
 
 
 def latency_run(samples, censored=0, refresh=60, keys=None, **extra):
@@ -2444,6 +2444,99 @@ class Latency(unittest.TestCase):
             self.assertEqual(nbytes, 1)
             self.assertLessEqual(t_read, t_written)
         self.assertLess(records[1][2], records[2][1])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_keyblock_cursor_mode_waits_on_a_real_terminal(self) -> None:
+        # macOS poll() reports POLLNVAL for a /dev/tty descriptor; cursor mode
+        # once polled it and exited at once in every terminal, so no live
+        # cursor round could run.
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('controlling-terminal native test needs an unrestricted runner')
+        import os
+        import pty
+        import select
+        import subprocess
+        import time as clock
+
+        binary = self.root / "keyblock"
+        subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "keyblock.c")], check=True)
+        log, control, ack = self.root / "log", self.root / "control", self.root / "ack"
+        os.mkfifo(control, 0o600)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(str(binary), [str(binary), str(log), "cursor", str(control), str(ack), "20000"])
+
+        def read_until(marker: bytes, timeout: float = 5.0) -> bytes:
+            data = b""
+            deadline = clock.monotonic() + timeout
+            while marker not in data and clock.monotonic() < deadline:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        data += os.read(fd, 4096)
+                    except OSError:
+                        break
+            return data
+
+        try:
+            self.assertIn(b"\x1b[?25l\x1b[2 q", read_until(b"\x1b[0m"))
+            clock.sleep(1.0)
+            self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0), "cursor mode must keep waiting")
+            for _ in range(6):
+                os.write(fd, b"j")
+                self.assertIn(b"\x1b[0m", read_until(b"\x1b[0m"), "each calibration flip draws")
+            # Nonblocking: a payload that has gone has no reader, and this
+            # fails at once instead of waiting forever for one.
+            request = os.open(control, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(request, b"ENABLE\n")
+            finally:
+                os.close(request)
+            self.assertIn(b"\x1b[?25h\x1b[1 q\x1b[2;3H", read_until(b"\x1b[2;3H"))
+            deadline = clock.monotonic() + 5
+            while not ack.exists() and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+            self.assertRegex(ack.read_text(), r"^ENABLED [0-9]+\n$")
+            os.write(fd, b"j")
+            self.assertIn(b"\x1b[2;3H", read_until(b"\x1b[2;3H"), "a measured flip parks the visible cursor")
+            self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0))
+        finally:
+            os.close(fd)
+            os.waitpid(pid, 0)
+        records = standing.read_keyblock_log(log)
+        self.assertEqual(sorted(records), list(range(1, 8)))
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_keyblock_cursor_mode_refuses_a_stdin_that_is_not_its_terminal(self) -> None:
+        # It waits on standard input, so that must be the terminal it draws on.
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('controlling-terminal native test needs an unrestricted runner')
+        import os
+        import pty
+        import subprocess
+        import time as clock
+
+        binary = self.root / "keyblock"
+        subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "keyblock.c")], check=True)
+        control = self.root / "control"
+        os.mkfifo(control, 0o600)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+            os.execv(str(binary), [str(binary), str(self.root / "log"), "cursor", str(control),
+                                   str(self.root / "ack"), "20000"])
+        try:
+            deadline = clock.monotonic() + 5
+            status = (0, 0)
+            while status == (0, 0) and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+                status = os.waitpid(pid, os.WNOHANG)
+            self.assertNotEqual(status, (0, 0), "a non-terminal stdin must refuse at once")
+            self.assertEqual(os.waitstatus_to_exitcode(status[1]), 1)
+        finally:
+            os.close(fd)
+            if status == (0, 0):
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
 
     def test_a_torn_log_record_is_dropped(self) -> None:
         path = self.root / "log"
@@ -4081,6 +4174,33 @@ class ConfigClosureTests(unittest.TestCase):
         (closure.work / 'xdg/ghostty/remote.cmd').write_bytes(b'')
         with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared'):
             closure.check()
+
+    def test_peer_config_directories_may_exist_only_empty(self):
+        # kitty creates xdg/kitty even with --config NONE; the first live
+        # sweep refused every kitty row on it.
+        closure = self.capture()
+        for name in ('kitty', 'wezterm', 'alacritty'):
+            (closure.work / 'xdg' / name).mkdir()
+        closure.check()
+        (closure.work / 'xdg/kitty/kitty.conf').write_text('background #ff0000\n')
+        with self.assertRaisesRegex(standing.ConfigClosureError, '^config closure: undeclared config root$'):
+            closure.check()
+        (closure.work / 'xdg/kitty/kitty.conf').unlink()
+        closure.check()
+        (closure.work / 'xdg/wezterm').rmdir()
+        (closure.work / 'xdg/wezterm').write_text('')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/wezterm').unlink()
+        (closure.work / 'xdg/wezterm').symlink_to(closure.work / 'xdg/kitty')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/wezterm').unlink()
+        (closure.work / 'xdg/fish').mkdir()
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/fish').rmdir()
+        closure.check()
 
     def test_pr3_source_mutation_cannot_change_consumed_bytes(self):
         closure = self.capture()
@@ -6222,9 +6342,14 @@ class CursorLatency(unittest.TestCase):
             root=Path(tmp);source=root/'socket-payload.c';binary=root/'socket-payload'
             source.write_text('#include <fcntl.h>\n#include <termios.h>\n#include <unistd.h>\n'
                 'int scratch_open(const char*,int,...);\nint scratch_get(int,struct termios*);\nint scratch_set(int,int,const struct termios*);\n'
+                'int scratch_isatty(int);\npid_t scratch_sid(int);\n'
                 '#define open scratch_open\n#define tcgetattr scratch_get\n#define tcsetattr scratch_set\n'
+                '#define isatty scratch_isatty\n#define tcgetsid scratch_sid\n'
                 '#define main payload_main\n#include '+_json.dumps(str(HERE/'macos-standing/keyblock.c'))+
-                '\n#undef main\n#undef open\n#undef tcgetattr\n#undef tcsetattr\n#include <stdarg.h>\n'
+                '\n#undef main\n#undef open\n#undef tcgetattr\n#undef tcsetattr\n#undef isatty\n#undef tcgetsid\n#include <stdarg.h>\n'
+                # The socket stands in for this session's controlling terminal.
+                'int scratch_isatty(int fd){(void)fd;return 1;}'
+                'pid_t scratch_sid(int fd){(void)fd;return getsid(0);}'
                 'int scratch_open(const char *p,int flags,...){if(!strcmp(p,"/dev/tty"))return dup(0);'
                 'if(flags&O_CREAT){va_list ap;va_start(ap,flags);int mode=va_arg(ap,int);va_end(ap);return open(p,flags,mode);}return open(p,flags);}'
                 'int scratch_get(int fd,struct termios *t){(void)fd;memset(t,0,sizeof *t);return 0;}'
