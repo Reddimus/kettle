@@ -3744,5 +3744,447 @@ class MetricContracts(unittest.TestCase):
 
 
 
+class ConfigClosureTests(unittest.TestCase):
+    """PR 3 regression cases use frozen files, never a terminal or user config."""
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Resolved: macOS temp dirs sit under /var, a link to /private/var,
+        # and the closure records resolved private paths.
+        self.root = Path(self.tmp.name).resolve()
+        self.source = self.root / 'wallpaper.png'
+        self.source.write_bytes(b'wallpaper-one')
+        self.sequence = 0
+
+    def capture(self, configs=None, env=None):
+        self.sequence += 1
+        work = self.root / f'campaign-{self.sequence}'
+        work.mkdir()
+        configs = configs or {'kettle': 'background-image = wallpaper.png'}
+        standing.write_configs(work, configs)
+        return standing.ConfigClosure(work, configs, self.root, env or {'HOME': str(self.root)})
+
+    def session(self, closure, name):
+        folder = self.root / name
+        folder.mkdir()
+        names = ['kettle-a', 'kettle-b']
+        results = {'schema': 3, 'context': 'fixture', 'terminals': names,
+                   'meta': {'date': '2026-01-01', 'complete': True, 'mode': 'ab', 'label': name,
+                            'rounds': {'idle': 3}, 'configs': standing.config_record({'kettle-a': '', 'kettle-b': ''})[0],
+                            'config_closures': closure.public},
+                   'workloads': {'idle': {n: [{'footprint_mib': 10., 'cpu_percent': 0.,
+                                               'wakeups_per_second': 1.} for _ in range(3)] for n in names}}}
+        standing.Recorder(folder / 'results.json', results).write()
+        return folder
+
+    def test_pr3_same_text_changed_wallpaper_changes_closure(self):
+        text = {'kettle': 'background-image = wallpaper.png'}
+        first = self.capture(text)
+        legacy = standing.config_record(text)[0]
+        self.source.write_bytes(b'wallpaper-two')
+        second = self.capture(text)
+        self.assertEqual(legacy, standing.config_record(text)[0])
+        self.assertNotEqual(first.public['kettle']['sha256'], second.public['kettle']['sha256'])
+        self.assertEqual(first.public['kettle']['assets'][0]['sha256'], __import__('hashlib').sha256(b'wallpaper-one').hexdigest())
+
+    def test_pr3_b_only_change_preserves_a_and_calibration(self):
+        other = self.root / 'other.png'
+        other.write_bytes(b'b-one')
+        same = {'kettle-a': 'background-image = wallpaper.png', 'kettle-b': 'background-image = wallpaper.png'}
+        control = self.capture(same)
+        text = {**same, 'kettle-b': 'background-image = other.png'}
+        first = self.capture(text)
+        other.write_bytes(b'b-two')
+        second = self.capture(text)
+        self.assertEqual(first.public['kettle-a'], second.public['kettle-a'])
+        self.assertNotEqual(first.public['kettle-b'], second.public['kettle-b'])
+        self.assertTrue(standing.config_closure_match(control.public, second.public))
+        standing.combine([self.session(second, 'ab-b-change')], aa=self.session(control, 'aa'))
+
+    def test_pr3_changed_a_rejects_old_calibration(self):
+        text = {'kettle-a': 'background-image = wallpaper.png', 'kettle-b': 'background-image = wallpaper.png'}
+        control = self.capture(text)
+        self.source.write_bytes(b'changed-a')
+        reference = self.capture(text)
+        with self.assertRaisesRegex(SystemExit, 'baseline config'):
+            standing.combine([self.session(reference, 'new-a')], aa=self.session(control, 'old-aa'))
+        # A missing legacy closure cannot stand for captured bytes.
+        self.assertFalse(standing.config_closure_match({}, reference.public))
+
+    def test_pr3_aa_sides_must_have_same_closure(self):
+        other = self.root / 'other.png'
+        other.write_bytes(b'b')
+        same = self.capture({'kettle-a': '', 'kettle-b': ''})
+        unequal = self.capture({'kettle-a': '', 'kettle-b': 'background-image = other.png'})
+        with self.assertRaisesRegex(SystemExit, 'same build and config'):
+            standing.combine([self.session(same, 'reference')], aa=self.session(unequal, 'bad-aa'))
+
+    def test_pr3_private_snapshot_locations_do_not_change_identity(self):
+        first, second = self.capture(), self.capture()
+        self.assertNotEqual(first.local['kettle']['mapping'][0]['snapshot'], second.local['kettle']['mapping'][0]['snapshot'])
+        self.assertEqual(first.public, second.public)
+        self.assertNotEqual(first.local['kettle']['generated'], second.local['kettle']['generated'])
+        self.assertEqual(first.public['kettle']['assets'], [{'role': 'background-image', 'size': 13,
+                         'sha256': __import__('hashlib').sha256(b'wallpaper-one').hexdigest()}])
+
+    def test_pr3_alias_last_assignment_quotes_whitespace_and_empty(self):
+        # The tokenizer keeps whitespace inside quotes, but kettle-config trims
+        # background-image again after unquoting, so Kettle opens
+        # wallpaper.png, not a file named with the padding.
+        (self.root / '  wallpaper.png  ').write_bytes(b'padded name')
+        closure = self.capture({'kettle': '# ignored\nbackground-image = absent.png\n BACKGROUND_IMAGE = "  wallpaper.png  "'})
+        mapping = closure.local['kettle']['mapping']
+        self.assertEqual(mapping[0]['original'], 'wallpaper.png')
+        self.assertEqual(Path(mapping[0]['snapshot']).read_bytes(), b'wallpaper-one')
+        self.assertIn('background-image = absent.png', closure.local['kettle']['generated'])
+        # Only Rust's White_Space is trimmed: U+001C stays part of the name.
+        (self.root / 'wallpaper.png\x1c').write_bytes(b'separator name')
+        separator = self.capture({'kettle': 'background-image = "wallpaper.png\x1c"'})
+        self.assertEqual(Path(separator.local['kettle']['mapping'][0]['snapshot']).read_bytes(), b'separator name')
+        reset = self.capture({'kettle': "background-image = absent.png\nbackground_image = ''"})
+        self.assertEqual(reset.public['kettle']['assets'], [])
+        # A # inside a value is literal, and only one matched quote pair strips.
+        (self.root / '#asset').write_bytes(b'hash')
+        literal = self.capture({'kettle': "background_image = '#asset'"})
+        self.assertEqual(literal.public['kettle']['assets'][0]['sha256'], __import__('hashlib').sha256(b'hash').hexdigest())
+
+    def test_pr3_home_and_relative_resolution_match_renderer(self):
+        home = self.capture({'kettle': 'background-image = ~/wallpaper.png'})
+        relative = self.capture()
+        self.assertEqual(home.public, relative.public)
+        self.assertEqual(Path(home.local['kettle']['mapping'][0]['resolved']), self.source)
+        for env in ({'HOME': '', 'USERPROFILE': str(self.root)}, {'APPDATA': str(self.root)}):
+            fallback = self.capture({'kettle': 'background-image = ~/wallpaper.png'}, env)
+            self.assertEqual(fallback.public, relative.public)
+        with self.assertRaises(standing.ConfigClosureError):
+            standing.config_asset_path('~/wallpaper.png', self.root, {})
+
+    def test_pr3_tokenizer_matches_kettle_line_and_key_rules(self):
+        # Expected entries follow kettle-config parse.rs: only "\n" ends a
+        # line, str::trim strips Unicode White_Space (not \x1c-\x1f), keys
+        # lowercase ASCII letters only, and a value is unquoted once after
+        # trimming, with nothing trimmed inside the quotes.
+        for separator in ('\v', '\f', '\r', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029'):
+            with self.subTest(separator=repr(separator)):
+                text = f'background-image = wallpaper.png{separator}background_image = other.png'
+                self.assertEqual(standing.config_entries(text),
+                                 [(0, 'background-image', f'wallpaper.png{separator}background_image = other.png')])
+        self.assertEqual(standing.config_entries('background-image = wallpaper.png\x1c'),
+                         [(0, 'background-image', 'wallpaper.png\x1c')])
+        self.assertEqual(standing.config_entries('\u3000background_IMAGE\xa0=\u2003wallpaper.png\u3000\r\n'),
+                         [(0, 'background-image', 'wallpaper.png')])
+        self.assertEqual(standing.config_entries('background-image = " wallpaper.png "'),
+                         [(0, 'background-image', ' wallpaper.png ')])
+        # U+212A KELVIN SIGN lowercases to "k" in Unicode, not in ASCII: Kettle
+        # leaves this key unknown, so its nonempty value is refused.
+        with self.assertRaises(standing.ConfigClosureError):
+            standing.config_entries('bac\u212aground-image = wallpaper.png')
+        self.assertEqual(standing.config_lines('a\r\nb\n\nc'), ['a\r\n', 'b\n', '\n', 'c'])
+        self.assertEqual(''.join(standing.config_lines('a\u2028b\n')), 'a\u2028b\n')
+
+    def test_pr3_closure_captures_the_file_kettle_reads(self):
+        for separator in ('\u2028', '\v', '\x85'):
+            with self.subTest(separator=repr(separator)):
+                value = f'wallpaper.png{separator}background_image = wallpaper.png'
+                (self.root / value).write_bytes(b'intended image')
+                closure = self.capture({'kettle': f'background-image = {value}'})
+                snapshot = closure.local['kettle']['mapping'][0]['snapshot']
+                self.assertEqual(Path(snapshot).read_bytes(), b'intended image')
+                generated = closure.local['kettle']['generated']
+                images = [value for _, key, value in standing.config_entries(generated) if key == 'background-image']
+                self.assertEqual(images, [snapshot])
+
+    def test_pr3_launch_uses_the_canonical_directory_the_closure_seals(self):
+        from unittest import mock
+        for name in ('a', 'b'):
+            (self.root / name).mkdir()
+        alias = self.root / 'current'
+        alias.symlink_to(self.root / 'a', target_is_directory=True)
+        out_dir = standing.claim_out_dir(alias / 'run')
+        self.assertEqual(out_dir, self.root / 'a' / 'run')
+        with standing.config_work_directory(out_dir) as work:
+            standing.write_configs(work, {'kettle': ''})
+            closure = standing.ConfigClosure(work, {'kettle': ''}, self.root)
+            runner = standing.Runner({'launch': Path('/fixture-launch'), 'stamp': Path('/fixture-stamp')},
+                                     work, {'kettle': '/fixture-kettle'})
+            runner.config_closure = closure
+            # Retarget the alias at a copy whose config names an uncaptured image.
+            shutil.copytree(self.root / 'a' / 'run', self.root / 'b' / 'run')
+            alternate = self.root / 'b' / 'run' / 'private-config' / 'kettle.config'
+            alternate.chmod(0o600)
+            alternate.write_text('background-image = uncaptured.png\n')
+            alias.unlink()
+            alias.symlink_to(self.root / 'b', target_is_directory=True)
+            closure.check()
+            with mock.patch.object(standing.subprocess, 'Popen', return_value=mock.Mock()) as spawned:
+                runner.launch('kettle', 'true', 1)
+            argv = spawned.call_args.args[0]
+            launched = Path(argv[argv.index('--config') + 1])
+            self.assertEqual(launched, closure.work / 'kettle.config')
+            self.assertEqual(launched.read_text(), closure.local['kettle']['generated'])
+
+    def test_pr3_persistent_inputs_reject_every_parser_true_alias(self):
+        for key in ('restore-session', 'always_split_with_profile'):
+            for value in ('true', 'on', 'yes', '1', 'enabled', 'enable', 'y', 'ENABLED', '" true "', "' enabled '"):
+                with self.subTest(key=key, value=value), self.assertRaises(standing.ConfigClosureError):
+                    self.capture({'kettle': key + ' = ' + value})
+            for value in ('false', 'off', 'no', '0', 'disabled', 'disable', 'n'):
+                self.capture({'kettle': key + ' = ' + value})
+
+    def test_pr3_unresolved_environment_and_unknown_file_type_refuse(self):
+        # Even an existing literal $HOME filename cannot certify an unresolved
+        # environment reference as an ordinary declared asset.
+        (self.root / '$HOME').mkdir()
+        (self.root / '$HOME/wallpaper.png').write_bytes(b'literal-dollar')
+        for text in ('background-image = $HOME/wallpaper.png', 'font-file = private-font.ttf',
+                     'theme-file = private-theme', 'record-dir = recordings', 'shell = /bin/sh',
+                     'env = HOME=/private/sentinel', 'trigger = x :: read-file', 'lua-script = input.lua'):
+            with self.subTest(text=text), self.assertRaises(standing.ConfigClosureError):
+                self.capture({'kettle': text})
+        self.capture({'kettle': 'font-family = Family/Name\nhttp-proxy = https://example.invalid\nbackground-image = '})
+        self.assertEqual(standing.CONFIG_FILE_KEYS, {'background-image': 'asset', 'record-dir': 'output-directory'})
+
+    def test_pr3_symlink_capture_retarget_dangling_directory_fifo_unreadable(self):
+        from unittest.mock import patch
+        link = self.root / 'link.png'
+        link.symlink_to(self.source)
+        closure = self.capture({'kettle': 'background-image = link.png'})
+        self.assertEqual(closure.public['kettle']['assets'][0]['sha256'], __import__('hashlib').sha256(b'wallpaper-one').hexdigest())
+        second = self.root / 'second.png'
+        second.write_bytes(b'two')
+        real_open = standing.os.open
+        def retarget(path, flags, *args, **kw):
+            fd = real_open(path, flags, *args, **kw)
+            link.unlink()
+            link.symlink_to(second)
+            return fd
+        with patch.object(standing.os, 'open', side_effect=retarget), self.assertRaises(standing.ConfigClosureError):
+            standing.config_file_bytes(link, 100, follow=True)
+        dangling = self.root / 'dangling'
+        dangling.symlink_to(self.root / 'absent')
+        fifo = self.root / 'fifo'
+        os.mkfifo(fifo)
+        unreadable = self.root / 'unreadable'
+        unreadable.write_bytes(b'no')
+        unreadable.chmod(0)
+        self.addCleanup(unreadable.chmod, 0o600)
+        for source in (dangling, self.root, fifo, unreadable):
+            with self.subTest(kind=source.name), patch.object(standing.os, 'open', wraps=real_open) as opened:
+                with self.assertRaises(standing.ConfigClosureError):
+                    standing.config_file_bytes(source, 100, follow=True)
+                opened.assert_not_called()
+        with patch.object(standing.os, 'open', side_effect=PermissionError('private sentinel')):
+            with self.assertRaisesRegex(standing.ConfigClosureError, '^config closure: reference cannot be captured$'):
+                standing.config_file_bytes(self.source, 100, follow=True)
+
+    def test_pr3_unstable_reads_and_size_bounds(self):
+        from unittest.mock import patch
+        real = standing.os.fstat
+        count = 0
+        def changed(fd):
+            nonlocal count
+            count += 1
+            if count == 2:
+                self.source.write_bytes(b'changed-during-read')
+            return real(fd)
+        with patch.object(standing.os, 'fstat', side_effect=changed), self.assertRaises(standing.ConfigClosureError):
+            standing.config_file_bytes(self.source, 100, follow=True)
+        with self.assertRaises(standing.ConfigClosureError):
+            standing.config_file_bytes(self.source, 2, follow=True)
+        with self.assertRaises(standing.ConfigClosureError):
+            standing.config_entries('x' * (standing.CONFIG_MAX_BYTES + 1))
+
+    def test_pr3_include_cycle_and_undeclared_init_lua_refuse(self):
+        # Neither spelling is supported by Kettle. Do not invent include semantics.
+        (self.root / 'one').write_text('include = two\n')
+        (self.root / 'two').write_text('include = one\n')
+        with self.assertRaises(standing.ConfigClosureError):
+            self.capture({'kettle': 'include = one'})
+        for directory in ('xdg/kettle', '.'):
+            closure = self.capture()
+            script = closure.work / directory / 'init.lua'
+            script.write_text('return {}')
+            with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared'):
+                closure.check()
+
+    def test_pr3_source_mutation_cannot_change_consumed_bytes(self):
+        closure = self.capture()
+        snapshot = Path(closure.local['kettle']['mapping'][0]['snapshot'])
+        self.source.write_bytes(b'changed-after-capture')
+        closure.check()
+        self.assertEqual(snapshot.read_bytes(), b'wallpaper-one')
+        self.assertEqual(len(closure.source_changes()), 1)
+        self.assertIn(str(snapshot), (closure.work / 'kettle.config').read_text())
+        self.assertEqual(snapshot.stat().st_mode & 0o777, 0o400)
+        # The campaign retains these consumed bytes after its context exits.
+        output = self.root / 'output'
+        output.mkdir()
+        with standing.config_work_directory(output) as work:
+            standing.write_configs(work, {'kettle': 'background-image = wallpaper.png'})
+            retained = standing.ConfigClosure(work, {'kettle': ''}, self.root)
+            captured = Path(retained.local['kettle']['mapping'][0]['snapshot'])
+        self.assertTrue(captured.is_file())
+
+    def test_pr3_public_json_markdown_refusals_private_manifest(self):
+        sentinel_home = self.root / 'sentinel-home'
+        sentinel_home.mkdir()
+        secret = sentinel_home / 'private-owner@example.invalid Signing Identity.png'
+        secret.write_bytes(b'private-content')
+        closure = self.capture({'kettle-a': '', 'kettle-b': 'background-image = ' + str(secret)})
+        folder = self.session(closure, 'public')
+        result = _json.loads((folder / 'results.json').read_text())
+        public = (folder / 'results.json').read_text() + standing.summarize(result, result['terminals'], True)
+        missing = 'background-image = ' + str(secret) + '-missing'
+        try:
+            self.capture({'kettle': missing})
+        except standing.ConfigClosureError as error:
+            public += str(error)
+        for sentinel in (str(sentinel_home), 'private-owner@example.invalid', 'Signing Identity'):
+            self.assertNotIn(sentinel, public)
+            self.assertIn(sentinel, standing.dumps(closure.local))
+        manifest = self.root / 'local-manifest.json'
+        standing.private_json(manifest, closure.local)
+        self.assertEqual(manifest.stat().st_mode & 0o777, 0o600)
+        # Public report loading never opens the adjacent manifest.
+        (folder / 'local-manifest.json').write_text('not public JSON')
+        standing.load_session(folder)
+
+    def test_pr3_campaign_mutation_keeps_raw_and_prevents_countability(self):
+        for role in ('config', 'asset'):
+            with self.subTest(role=role):
+                closure = self.capture()
+                results = {'meta': {'complete': False, 'refusals': [], 'countable': False,
+                                    'rounds': {'idle': 1}}, 'workloads': {'idle': {'kettle': [{'footprint_mib': 10.}]}}}
+                recorder = standing.Recorder(self.root / f'{role}-results.json', results)
+                target = closure.work / 'kettle.config' if role == 'config' else next(closure.assets.iterdir())
+                def collect():
+                    target.chmod(0o600)
+                    target.write_bytes(b'changed')
+                    return {'footprint_mib': 12.}
+                with self.assertRaisesRegex(SystemExit, 'campaign inputs changed'):
+                    standing.config_campaign_row(closure, results, recorder, collect)
+                raw = _json.loads(recorder.path.read_text())
+                self.assertEqual(raw['workloads']['idle']['kettle'], [{'footprint_mib': 10.}])
+                self.assertEqual(raw['config_invalid_rows'][0]['footprint_mib'], 12.)
+                raw['meta']['complete'] = True
+                self.assertFalse(standing.session_countable(raw['meta']))
+                self.assertFalse(any(standing.workload_countable(raw, raw['meta']).values()))
+                from unittest.mock import Mock
+                subsequent = Mock()
+                with self.assertRaises(SystemExit):
+                    standing.config_campaign_row(closure, results, recorder, subsequent)
+                subsequent.assert_not_called()
+
+    def test_pr3_peer_layouts_and_launch_roots_are_isolated(self):
+        from unittest.mock import patch, Mock
+        closure = self.capture()
+        env = closure.launch_environment({'HOME': 'preserved-home', 'XDG_CONFIG_HOME': 'user-config',
+                     'GHOSTTY_CONFIG_DIR': 'user-ghostty', 'WEZTERM_CONFIG_FILE': 'user.lua', 'KITTY_CONFIG_DIRECTORY': 'user-kitty'})
+        self.assertEqual(env['XDG_CONFIG_HOME'], str(closure.xdg))
+        self.assertEqual(env['HOME'], 'preserved-home')
+        self.assertNotIn('WEZTERM_CONFIG_FILE', env)
+        self.assertNotIn('GHOSTTY_CONFIG_DIR', env)
+        self.assertNotIn('KITTY_CONFIG_DIRECTORY', env)
+        for name, flag, value in (('kitty', '--config', 'NONE'), ('alacritty', '--config-file', '/dev/null')):
+            argv = standing.terminal_argv(name, closure.work / 'payload', closure.work, {})
+            self.assertEqual(argv[argv.index(flag) + 1], value)
+        self.assertIn('-n', standing.terminal_argv('wezterm', closure.work / 'payload', closure.work, {}))
+        ghostty = standing.terminal_argv('ghostty', closure.work / 'payload', closure.work, {})
+        self.assertEqual(ghostty[1], 'XDG_CONFIG_HOME=' + str(closure.xdg))
+        runner = standing.Runner({'launch': Path('/fixture-launch'), 'stamp': Path('/fixture-stamp')}, closure.work, {'kettle': '/fixture-kettle'})
+        runner.config_closure = closure
+        with patch.object(standing.subprocess, 'Popen', return_value=Mock()) as spawn:
+            runner.launch('kettle', 'true', 1)
+        self.assertEqual(spawn.call_args.kwargs['cwd'], closure.cwd)
+        self.assertEqual(spawn.call_args.kwargs['env']['XDG_CONFIG_HOME'], str(closure.xdg))
+        (closure.xdg / 'ghostty' / 'extra').write_text('config-file = cycle')
+        with self.assertRaises(standing.ConfigClosureError):
+            closure.check()
+
+    def test_pr3_counted_campaign_brackets_actual_rows(self):
+        # Mock the app/environment at the entry point. A mutation in the real
+        # collection callback must retain earlier data and abort the campaign.
+        import contextlib
+        import io
+        from unittest.mock import patch, Mock
+        output = self.root / 'main-campaign'
+        args = ['standing', '--kettle', '/fixture/A.app/Contents/MacOS/kettle',
+                '--kettle-b-config', 'background-image = ' + str(self.source),
+                '--no-build', '--workloads', 'idle', '--rounds', '2', '--warmup', '0',
+                '--fd-limit', '0', '--out-dir', str(output)]
+        state = {'display': {}, 'power': {}, 'low_power': False, 'load': [0., 0.], 'procs': []}
+        completed = []
+        def idle(runner, name, *args):
+            row = {'footprint_mib': 10., 'cpu_percent': 0., 'wakeups_per_second': 1.}
+            completed.append(name)
+            if len(completed) == 2:
+                target = next(runner.config_closure.assets.iterdir())
+                target.chmod(0o600)
+                target.write_bytes(b'changed-in-actual-row')
+            return row
+        with contextlib.ExitStack() as stack:
+            for target, value in (('sys.argv', args), ('sys.platform', 'darwin')):
+                stack.enter_context(patch(target, value))
+            for name, value in (('require_bundles', None), ('build_probes', {}),
+                                ('collect_preflight', state), ('preflight_refusals', []),
+                                ('command', 'fixture'), ('host_terminal_of', None),
+                                ('harness_revision', {}), ('terminal_identity', ({'sha256': 'same'}, {}))):
+                stack.enter_context(patch.object(standing, name, return_value=value))
+            stack.enter_context(patch.object(standing.subprocess, 'Popen', return_value=Mock()))
+            stack.enter_context(patch.object(standing.Runner, 'idle', idle))
+            stack.enter_context(patch.object(standing.Runner, 'stop_current'))
+            stack.enter_context(patch.object(standing.time, 'sleep'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaisesRegex(SystemExit, 'campaign inputs changed'):
+                standing.main()
+        raw = _json.loads((output / 'results.json').read_text())
+        self.assertEqual(len(raw['workloads']['idle']['kettle-a']), 1)
+        self.assertEqual(len(completed), 2)
+        self.assertFalse(raw['meta']['complete'])
+        self.assertFalse(standing.session_countable(raw['meta']))
+        self.assertIn('config_closures', raw['meta'])
+        self.assertEqual(raw['config_invalid_rows'][0]['footprint_mib'], 10.)
+        local = _json.loads((output / 'local-manifest.json').read_text())
+        self.assertIn('config_closure', local)
+        self.assertTrue((output / 'private-config/assets').is_dir())
+
+    def test_pr3_existing_snapshot_must_match_addressed_bytes(self):
+        import hashlib
+        work = self.root / 'already-captured'
+        work.mkdir()
+        standing.write_configs(work, {'kettle': 'background-image = wallpaper.png'})
+        assets = work / 'assets'
+        assets.mkdir()
+        (assets / hashlib.sha256(b'wallpaper-one').hexdigest()).write_bytes(b'wrong-existing-bytes')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'captured asset changed'):
+            standing.ConfigClosure(work, {'kettle': ''}, self.root)
+
+    def test_pr3_variants_capture_assets_and_reject_private_role_names(self):
+        name = standing.variant_name('wallpaper')
+        closure = self.capture({'kettle': '', name: 'background_image = wallpaper.png',
+                                'kettle-opaque': standing.KETTLE_OPAQUE})
+        self.assertEqual(closure.public['kettle']['assets'], [])
+        self.assertEqual(closure.public['kettle-opaque']['assets'], [])
+        self.assertEqual(len(closure.public[name]['assets']), 1)
+        for label in ('../outside', 'private-owner@example.invalid', 'Signing Identity'):
+            with self.assertRaisesRegex(ValueError, '^--kettle-variant requires a nonreserved ASCII role name$'):
+                standing.variant_name(label)
+
+    def test_pr3_registry_matches_pinned_parser(self):
+        import re
+        parser = HERE.parents[1] / 'base/crates/kettle-config/src/lib.rs' if SNAPSHOT_LAYOUT else HERE.parents[1] / 'crates/kettle-config/src/lib.rs'
+        if not parser.exists():
+            self.skipTest('registry audit needs pinned config-parser source')
+        text = parser.read_text().split('pub fn parse_collect(text: &str)')[1].split('\n    }\n')[0]
+        text = re.sub(r'//[^\n]*', '', text)
+        keys = set()
+        for match in re.finditer(r'^ {16}("[a-z0-9_-]+"(?:\s*\|\s*"[a-z0-9_-]+")*)\s*=>', text, re.M):
+            keys.update(k.replace('_', '-') for k in re.findall(r'"([a-z0-9_-]+)"', match[1]))
+        self.assertEqual(standing.CONFIG_KEYS, keys)
+        self.assertIn('cfg.background_image = e.value.trim().to_string()', text)
+        self.assertIn('Some(PathBuf::from(dir))', text)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])

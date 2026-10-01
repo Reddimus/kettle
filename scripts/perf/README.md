@@ -305,6 +305,90 @@ reported. Flood fields accept every `:g` offset spelling, including
 analysis schema](../../docs/perf-standing-schema.md) for field names and
 absence rules.
 
+### Managed config closure and assets
+
+Each new campaign records `meta.config_closures` alongside the existing
+extra-text `meta.configs` digests. A closure contains a resolver version,
+a template digest, logical asset roles with byte sizes and SHA-256 digests,
+and a digest of that record. It covers each Kettle side and variant, the
+Ghostty managed file, and all peer config-bypass arguments and grid overrides.
+The extra-text digests and default generated config bytes remain unchanged.
+Existing schema-1/2/3 result files retain their report bytes when read.
+
+The Kettle registry comes from `kettle-config`'s parser. Its only consumed
+file-valued setting is `background-image`, including `background_image` and
+case variants. The last assignment wins, including an empty assignment.
+The tokenizer strips one matched pair of quotes and trims whitespace. Full-line
+comments are ignored; a `#` inside a value is literal. `record-dir` is an
+output directory and is refused when nonempty in a countable managed config.
+Theme and font settings select bundled themes and system font families; they
+are not paths. This closure does not snapshot OS fonts or the terminal app.
+Terminal and method identities remain separate.
+
+A leading `~/` resolves using the renderer's HOME, USERPROFILE, APPDATA order.
+Other relative references resolve against the pinned app launch cwd, which is
+the harness invocation directory. They do not resolve against the generated
+config directory. Environment substitutions are refused. The harness follows
+asset symlinks only to bounded, readable regular files, checks the opened inode
+and read stability, and captures the bytes under their full SHA-256 address.
+Dangling links, directories, FIFOs, oversized files and unstable reads refuse
+the campaign before any row runs. The v1 capture limit is 64 MiB per asset.
+This bound does not certify that an image decoder can render the asset.
+
+For example, with two explicit app bundles and an asset in the invocation
+folder:
+
+```sh
+python3 scripts/perf/macos-standing.py --no-build \
+  --kettle A.app/Contents/MacOS/kettle \
+  --kettle-b B.app/Contents/MacOS/kettle \
+  --kettle-b-config 'background-image = ./wallpaper.png' \
+  --out-dir CAMPAIGN
+```
+
+The generated B file points to its private captured asset. Changing the source
+file afterward does not change the consumed bytes. Source changes observed at
+cleanup are recorded privately. Changing B's captured asset in a later campaign
+is an intentional B-only difference. A must still match the A/A baseline.
+An A/A must have identical effective closure on both sides. Combined sessions
+must share every closure. A control without closure evidence cannot certify a
+new captured setup. The public digest normalizes generated asset paths to
+logical roles, so an identical setup in another campaign directory compares
+equally. Other settings and earlier overridden assignments remain hashed.
+
+Consumed inputs remain in `private-config/` beside raw results. Directories
+are private and sealed configs/assets are read-only. Every collection callback
+is bracketed by checks outside its measured interval. A changed sealed file or
+an added config dependency stops collection, preserves completed raw data and
+the invalid collected row, and prevents a countable final result. These checks
+cover accidental or concurrent persistent changes at the boundaries; they do
+not establish an adversarial same-user trust root.
+
+Countable Kettle extras are section-free declarative settings, bounded at
+1 MiB. Kettle has no include syntax, so includes, including recursive cycles,
+are refused rather than interpreted by a separate resolver. Nonempty unknown
+keys and dynamic settings such as commands, environment assignments, triggers,
+keybindings and scripts are refused. Session restoration and automatic profile
+splitting are also refused when enabled. New file-reference types require a
+parser audit before admission. Arbitrary Lua or dependency-bearing configs
+need a separate declared-input contract before they can count.
+
+Every launch pins an isolated XDG config root. This also blocks Kettle's
+automatic `init.lua` discovery, which uses its default config directory even
+with an explicit `--config`. Ghostty receives only the generated file. Alacritty
+uses `/dev/null`, kitty uses `NONE`, and WezTerm uses its config-skip flag.
+Peer config-directory/file environment overrides are removed. These generated
+peer layouts support no includes or user Lua; added files or changed contents
+fail the boundary check. Native peer isolation and background-image rendering
+still need an excluded functional pilot on the actual installed apps.
+
+`local-manifest.json` retains original/resolved paths, source identity, rewrite
+mappings and generated templates. It is written atomically with mode 0600.
+Public JSON and Markdown contain only digests, sizes and logical roles for
+these inputs. Closure refusals never print config text or source paths.
+The manifest and `private-config/` are private audit artifacts, never public
+report input. Review them before sharing a campaign directory.
+
 ### Sessions, preflight and labels
 
 A run first checks the machine and refuses battery power, Low Power Mode, a

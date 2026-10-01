@@ -115,7 +115,7 @@ MIN_PAIRED_SHARE = 0.8
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
-                "footprint_detail", "startup_phases", "latency")
+                "footprint_detail", "startup_phases", "latency", "config_closures")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -825,6 +825,338 @@ def write_configs(work: Path, kettle_configs: Optional[Dict[str, str]] = None) -
     )
 
 
+# Config closure follows kettle-config parse_collect/parse::parse and
+# kettle-render::bg_image at ac0c4fe3. Kettle has no include syntax. Themes
+# and font families are names, not files. record-dir is an output directory.
+CONFIG_RESOLVER = "kettle-declarative-v1"
+CONFIG_MAX_BYTES = 1024 * 1024
+ASSET_MAX_BYTES = 64 * 1024 * 1024
+CONFIG_FILE_KEYS = {"background-image": "asset", "record-dir": "output-directory"}
+# Canonical top-level parse_collect arms. Reject new nonempty keys until their
+# dependencies have been audited; a suffix/path-string heuristic misses inputs.
+CONFIG_KEYS = frozenset("""accent-color agent-badge agent-server allow-bold always-on-top always-split-with-profile
+ask-before-closing audible-bell autoclean-groups background background-animation background-blur
+background-color background-darkness background-image background-image-align-horiz
+background-image-align-vert background-image-mode background-opacity background-type
+backspace-binding bell bell-flash-intensity bold-is-bright borderless broadcast-default
+case-sensitive cell-height cell-width check-for-updates chrome-background clear-select-on-copy
+clipboard clipboard-paste-protection close-button-on-tab colorterm command command-notify-threshold
+command-notify-threshold-ms completion-overlay copy-on-select copy-on-selection cursor-bg-color
+cursor-blink cursor-blink-interval cursor-blink-timeout cursor-color cursor-color-default
+cursor-fg-color cursor-shape cursor-style cursor-style-blink custom-command custom-url-handler
+dark-theme delete-binding detachable-tabs disable-mouse-paste disable-mousewheel-zoom
+enabled-plugins env exit-action extra-styling focus focused-split-color font font-family
+font-family-bold font-family-bold-italic font-family-italic font-feature font-size force-no-bell
+foreground foreground-color full-screen geometry-hinting gpu-backend gpu-device-id
+gpu-force-software gpu-name gpu-power-preference gpu-vendor-id handle-size hide-from-taskbar
+hide-on-lose-focus http-proxy icon-bell inactive-bg-color-offset inactive-color-offset invert-search
+keybind keybind-yield light-theme link-single-click log-strip-ansi login-shell lua-sandbox
+macos-option-as-alt menu-item minimum-contrast modify-other-keys mouse-autohide mouse-hide
+mouse-hide-while-typing mouse-scroll-multiplier new-tab-after-current-tab osc52 padding-x padding-y
+palette paste-files paste-image paste-image-preview paste-images paste-video-preview
+putty-paste-style putty-paste-style-source-clipboard record record-dir record-max-bytes
+record-max-directory-bytes record-max-files record-raw-input resize-overlay restore-session
+scroll-multiplier scroll-on-input scroll-on-keystroke scroll-on-output scroll-tabbar scrollback
+scrollback-byte-limit scrollback-bytes scrollback-infinite scrollback-limit scrollback-lines
+scrollback-memory scrollbar scrollbar-width search-background search-case-sensitive
+search-foreground search-wrap selection-background selection-foreground selection-word-chars
+semantic-escape-chars shell shell-integration show-titlebar smart-copy split-divider-color
+split-divider-color-focused split-to-group ssh-host status-bar statusbar sticky tab-bar
+tab-bar-position tab-bar-width tab-format tab-min-width tab-position tab-silence-threshold
+tab-silence-threshold-ms tab-title-format term text-renderer theme theme-mode theme-schedule
+theme-schedule-lat theme-schedule-lon theme-schedule-long theme-schedule-longitude title-at-bottom
+title-font title-format title-hide-sizetext title-inactive-bg-color title-inactive-fg-color
+title-receive-bg-color title-receive-fg-color title-transmit-bg-color title-transmit-fg-color
+title-use-system-font trigger unfocused-split-opacity update-check update-check-interval-hours
+update-policy urgent-bell use-custom-command use-custom-url-handler use-system-font use-theme-colors
+vim-menu-nav visible-bell window-blur window-height window-padding-x window-padding-y
+window-position-x window-position-y window-state window-title-format window-width word-delimiters""".split())
+CONFIG_DYNAMIC_KEYS = frozenset(("env", "command", "shell", "custom-command", "trigger",
+                                 "menu-item", "keybind", "keybind-yield", "enabled-plugins",
+                                 "record-dir", "custom-url-handler"))
+
+
+class ConfigClosureError(ValueError):
+    """Public refusals contain fixed roles/reasons, never local paths or text."""
+
+
+# Kettle's tokenizer (kettle-config parse.rs `parse`): `str::lines` ends a
+# line only at "\n", `str::trim` strips Unicode White_Space, keys lowercase
+# ASCII letters only, and a value is unquoted once after trimming. Python's
+# splitlines, strip and lower differ on all four, so the closure mirrors Rust.
+RUST_WHITESPACE = ("\t\n\v\f\r \x85\xa0\u1680" + "".join(chr(c) for c in range(0x2000, 0x200B))
+                   + "\u2028\u2029\u202f\u205f\u3000")
+ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def config_lines(text: str) -> list:
+    """The template's lines as Kettle splits them, each keeping its "\n" so a
+    rewrite can replace one line in place."""
+    pieces = text.split("\n")
+    return [piece + "\n" for piece in pieces[:-1]] + ([pieces[-1]] if pieces[-1] else [])
+
+
+def config_unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] in ("'", '"') and value[-1] == value[0]:
+        return value[1:-1]
+    return value
+
+
+def config_entries(text: str) -> list:
+    if len(text.encode()) > CONFIG_MAX_BYTES:
+        raise ConfigClosureError("config closure: template exceeds size bound")
+    entries = []
+    # Countable managed configs are the section-free declarative subset.
+    for index, raw in enumerate(config_lines(text.removeprefix("\ufeff"))):
+        line = raw.strip(RUST_WHITESPACE)
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") or "=" not in line:
+            raise ConfigClosureError("config closure: unsupported structure or dependency")
+        key, value = line.split("=", 1)
+        key = key.strip(RUST_WHITESPACE).translate(ASCII_LOWER).replace("_", "-")
+        value = config_unquote(value.strip(RUST_WHITESPACE))
+        if key in ("include", "config-file", "lua-script") or not key:
+            raise ConfigClosureError("config closure: undeclared include or script")
+        if key in ("restore-session", "always-split-with-profile") and value.strip(RUST_WHITESPACE).translate(
+                ASCII_LOWER) in ("true", "on", "yes", "1", "enabled", "enable", "y"):
+            raise ConfigClosureError("config closure: undeclared persistent input")
+        if value.strip(RUST_WHITESPACE) and (key not in CONFIG_KEYS or key in CONFIG_DYNAMIC_KEYS):
+            raise ConfigClosureError("config closure: unsupported nonempty reference or dynamic setting")
+        # The value exactly as Kettle passes it on, untrimmed after unquoting.
+        entries.append((index, key, value))
+    return entries
+
+
+def config_asset_path(value: str, cwd: Path, environ: dict) -> Path:
+    # The app expands only a leading ~/. Environment expansion is unsupported.
+    if "$" in value or "\x00" in value or "\n" in value or "\r" in value:
+        raise ConfigClosureError("config closure: unresolved reference")
+    if value.startswith("~/"):
+        home = next((environ[k] for k in ("HOME", "USERPROFILE", "APPDATA") if environ.get(k)), None)
+        if home is None:
+            raise ConfigClosureError("config closure: unavailable home expansion")
+        value = home.rstrip("/\\") + "/" + value[2:]
+    path = Path(value)
+    return path if path.is_absolute() else cwd / path
+
+
+def config_file_bytes(path: Path, limit: int, *, follow: bool = False) -> tuple:
+    """Bounded nonblocking regular-file read, bound to the opened inode.
+
+    Leaf asset symlinks may resolve to a regular file. Resolve again afterward
+    to reject retargeting. O_NOFOLLOW/O_NONBLOCK close the FIFO swap window.
+    """
+    try:
+        resolved = path.resolve(strict=True) if follow else path
+        before = resolved.lstat()
+        if not stat.S_ISREG(before.st_mode) or not before.st_mode & 0o444 or before.st_size > limit:
+            raise ConfigClosureError("config closure: asset is not a readable bounded regular file")
+        fd = os.open(resolved, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_size > limit
+                    or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                raise ConfigClosureError("config closure: reference changed before read")
+            data = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+        if (not stat.S_ISREG(opened.st_mode) or len(data) > limit or len(data) != opened.st_size
+                or identity(before) != identity(opened) or identity(opened) != identity(after)
+                or identity(after) != identity(resolved.lstat())
+                or (follow and path.resolve(strict=True) != resolved)):
+            raise ConfigClosureError("config closure: unstable asset read")
+        return data, {"resolved": str(resolved), "dev": opened.st_dev, "ino": opened.st_ino,
+                      "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    except (OSError, RuntimeError, ValueError) as error:
+        if isinstance(error, ConfigClosureError):
+            raise
+        raise ConfigClosureError("config closure: reference cannot be captured") from None
+
+
+def private_json(path: Path, value: dict) -> None:
+    # Atomic and private from creation, including an existing legacy manifest.
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(dumps(value))
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+class ConfigClosure:
+    """Private frozen inputs and public, location-independent method identity.
+
+    Generated peer layouts contain no includes or executable configs. Their
+    exact files and config bypass arguments are part of this resolver contract.
+    User-supplied peer files are not accepted by this harness.
+    """
+    def __init__(self, work: Path, configs: Dict[str, str], cwd: Path, environ: Optional[dict] = None):
+        self.work, self.cwd = work.resolve(), cwd.resolve()
+        if any(c in str(self.work) for c in ("\n", "\r", "\x00")):
+            raise ConfigClosureError("config closure: unsupported private path")
+        self.environ = dict(os.environ if environ is None else environ)
+        self.public, self.local, self.sealed = {}, {}, {}
+        self.sources = []
+        self.work.chmod(0o700)
+        # XDG_CONFIG_HOME also controls Kettle's automatic init.lua discovery.
+        self.xdg = self.work / "xdg"
+        (self.xdg / "kettle").mkdir(parents=True, exist_ok=True)
+        self.assets = self.work / "assets"
+        self.assets.mkdir(mode=0o700, exist_ok=True)
+        for directory in (self.xdg, self.xdg / "kettle", self.xdg / "ghostty", self.assets):
+            directory.chmod(0o700)
+        for name in configs:
+            path = self.work / f"{name}.config"
+            template = config_file_bytes(path, CONFIG_MAX_BYTES)[0].decode("utf-8")
+            entries = config_entries(template)
+            effective = {key: (index, value) for index, key, value in entries}
+            lines = config_lines(template)
+            logical = list(lines)
+            assets, mapping = [], []
+            selected = effective.get("background-image")
+            # kettle-config trims this key's value again after unquoting
+            # (`cfg.background_image = e.value.trim()`), so quoted padding
+            # never reaches bg_image.rs, which ignores an empty path.
+            if selected and selected[1].strip(RUST_WHITESPACE):
+                index, value = selected[0], selected[1].strip(RUST_WHITESPACE)
+                source = config_asset_path(value, self.cwd, self.environ)
+                data, identity = config_file_bytes(source, ASSET_MAX_BYTES, follow=True)
+                digest = identity["sha256"]
+                snapshot = self.assets / digest
+                if not snapshot.exists():
+                    with snapshot.open("xb") as stream:
+                        stream.write(data)
+                    snapshot.chmod(0o400)
+                self._seal(snapshot, ASSET_MAX_BYTES, digest)
+                # Replace only the effective assignment. Earlier overridden
+                # references are not consumed and remain in the template hash.
+                prefix = lines[index].split("=", 1)[0] + "= "
+                lines[index] = prefix + str(snapshot) + "\n"
+                logical[index] = prefix + "@asset/background-image" + "\n"
+                assets.append({"role": "background-image", "size": len(data), "sha256": digest})
+                mapping.append({"role": "background-image", "original": value, "source": str(source),
+                                "snapshot": str(snapshot), **identity})
+                self.sources.append((source, digest, name))
+            # Without references, generated bytes are preserved exactly.
+            rendered = "".join(lines)
+            if rendered != template:
+                path.write_text(rendered)
+            path.chmod(0o400)
+            self._seal(path, CONFIG_MAX_BYTES)
+            normalized = "".join(logical)
+            record = {"resolver": CONFIG_RESOLVER, "template_sha256": hashlib.sha256(normalized.encode()).hexdigest(),
+                      "assets": assets}
+            record["sha256"] = hashlib.sha256(dumps(record).encode()).hexdigest()
+            self.public[name] = record
+            self.local[name] = {"template": template, "generated": rendered, "mapping": mapping}
+        ghostty = self.xdg / "ghostty" / "config"
+        data = config_file_bytes(ghostty, CONFIG_MAX_BYTES)[0]
+        expected = (f"window-width = {COLS}\nwindow-height = {ROWS}\nquit-after-last-window-closed = true\n").encode()
+        if data != expected:
+            raise ConfigClosureError("config closure: unsupported peer include or setting")
+        ghostty.chmod(0o400)
+        self._seal(ghostty, CONFIG_MAX_BYTES)
+        peer_templates = {"ghostty": data.decode(), "alacritty": "--config-file /dev/null",
+                          "kitty": "--config NONE", "wezterm": "-n"}
+        for name, template in peer_templates.items():
+            # Include every managed CLI override, with only generated locations
+            # replaced by logical placeholders. Executable identity is separate.
+            template += "\n" + dumps(terminal_argv(name, Path("@payload"), Path("@managed"), {}))
+            record = {"resolver": CONFIG_RESOLVER, "template_sha256": hashlib.sha256(template.encode()).hexdigest(),
+                      "assets": []}
+            record["sha256"] = hashlib.sha256(dumps(record).encode()).hexdigest()
+            self.public[name] = record
+        self.local["launch"] = {"cwd": str(self.cwd), "xdg": str(self.xdg)}
+        self.check()
+
+    def _seal(self, path: Path, limit: int, expected_digest: Optional[str] = None) -> None:
+        data, _ = config_file_bytes(path, limit)
+        digest = hashlib.sha256(data).hexdigest()
+        if expected_digest is not None and digest != expected_digest:
+            raise ConfigClosureError("config closure: captured asset changed")
+        self.sealed[path] = (digest, limit, path.stat().st_mode & 0o777)
+
+    def launch_environment(self, environ: dict) -> dict:
+        env = {k: v for k, v in environ.items() if k not in
+               ("WEZTERM_CONFIG_FILE", "GHOSTTY_CONFIG_DIR", "KITTY_CONFIG_DIRECTORY")}
+        env["XDG_CONFIG_HOME"] = str(self.xdg)
+        return env
+
+    def check(self) -> None:
+        try:
+            # No declared include grammar exists in these generated layouts.
+            # Refuse all added entries, including dangling links, before reading.
+            expected = {self.xdg / "kettle": set(), self.xdg / "ghostty": {"config"}}
+            if {p.name for p in self.xdg.iterdir()} != {"kettle", "ghostty"}:
+                raise ConfigClosureError("config closure: undeclared config root")
+            for directory, names in expected.items():
+                if directory.is_symlink() or {p.name for p in directory.iterdir()} != names:
+                    raise ConfigClosureError("config closure: undeclared include or init script")
+            if (self.work / "init.lua").exists() or (self.work / "init.lua").is_symlink():
+                raise ConfigClosureError("config closure: undeclared init script")
+            if self.xdg.is_symlink() or self.assets.is_symlink():
+                raise ConfigClosureError("config closure: replaced private root")
+            for path, (digest, limit, mode) in self.sealed.items():
+                data, _ = config_file_bytes(path, limit)
+                if hashlib.sha256(data).hexdigest() != digest or path.stat().st_mode & 0o777 != mode:
+                    raise ConfigClosureError("config closure: sealed input changed")
+        except OSError:
+            raise ConfigClosureError("config closure: sealed input unavailable") from None
+
+    def source_changes(self) -> list:
+        changes = []
+        for source, digest, name in self.sources:
+            try:
+                _, current = config_file_bytes(source, ASSET_MAX_BYTES, follow=True)
+                changed = current["sha256"] != digest
+            except ConfigClosureError:
+                changed = True
+            if changed:
+                changes.append({"entry": name, "source": str(source), "captured_sha256": digest})
+        return changes
+
+
+def config_closure_match(control: dict, reference: dict) -> bool:
+    """Old output has no closure proof; never reuse it for a captured asset."""
+    if not control and not reference:
+        return True
+    if not control or not reference:
+        return False
+    baseline = reference.get("kettle-a", reference.get("kettle"))
+    return (control.get("kettle-a") == baseline and
+            all(control[name] == reference[name] for name in control.keys() & reference.keys()
+                if name != "kettle-b"))
+
+
+@contextlib.contextmanager
+def config_work_directory(out_dir: Path):
+    # Retain consumed assets/configs with raw data, under a private directory.
+    work = out_dir / "private-config"
+    work.mkdir(mode=0o700)
+    yield work
+
+
+def config_campaign_row(closure: ConfigClosure, results: dict, recorder, collect: Callable) -> dict:
+    """Checks bracket collection, outside its measured epoch; retain old rows."""
+    row = None
+    try:
+        closure.check()
+        row = collect()
+        closure.check()
+        return row
+    except ConfigClosureError:
+        reason = "config closure: campaign inputs changed"
+        results["meta"]["refusals"].append(reason)
+        results["meta"]["countable"] = False
+        if row is not None:
+            results.setdefault("config_invalid_rows", []).append({**row, "error": reason})
+        recorder.write()
+        raise SystemExit("refused: " + reason) from None
+
+
 GHOSTTY_DOMAIN = "com.mitchellh.ghostty"
 # Ghostty 1.3 opens every new window at the last window's frame, which it
 # keeps in this user default, and ignores window-width/window-height when it
@@ -1314,6 +1646,7 @@ class Runner:
         # The launch probe of the round in flight, stopped if the session ends
         # while it runs.
         self.current: Optional[subprocess.Popen] = None
+        self.config_closure: Optional[ConfigClosure] = None
 
     def script(self, body: str) -> Path:
         """One script per distinct body, reused across launches. macOS assesses
@@ -1362,6 +1695,8 @@ class Runner:
         stderr_path.unlink(missing_ok=True)
         stamped = phases and name in self.phases
         env = {key: value for key, value in os.environ.items() if key != "RUST_LOG"}
+        if self.config_closure is not None:
+            env = self.config_closure.launch_environment(env)
         if stamped:
             env["RUST_LOG"] = "warn,kettle::startup=info"
         # Its own session, so the probe leads a process group holding only it
@@ -1370,6 +1705,7 @@ class Runner:
             self.current = subprocess.Popen(
                 [str(self.probes["launch"]), str(self.work / "launch.json"), str(stamp), str(timeout), "--", *argv],
                 stdout=subprocess.DEVNULL, stderr=stderr, start_new_session=True, env=env,
+                cwd=self.config_closure.cwd if self.config_closure else None,
             )
         if frame is not None:
             frame.track(self.current)
@@ -2913,7 +3249,9 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
             raise SystemExit(f"--aa {Path(aa).name} is not a countable, complete A/A session")
         identity = control["setup"]["identity"]
         if (identity.get("kettle-a") != identity.get("kettle-b")
-                or control["configs"].get("kettle-a", "") != control["configs"].get("kettle-b", "")):
+                or control["configs"].get("kettle-a", "") != control["configs"].get("kettle-b", "")
+                or (control["setup"].get("config_closures") or {}).get("kettle-a")
+                   != (control["setup"].get("config_closures") or {}).get("kettle-b")):
             raise SystemExit(f"--aa {Path(aa).name} does not run the same build and config on both sides")
         # The A/A calibrates the harness and the machine, not a build, so every
         # setting but the binaries and configs under test must match. Its round
@@ -2921,7 +3259,7 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
         # tools both ran are compared.
         reference = counted[0] if counted else sessions[0]
         differs = sorted(key for key in control["setup"]
-                         if key not in ("identity", "configs", "rounds", "tool_hashes", "latency")
+                         if key not in ("identity", "configs", "rounds", "tool_hashes", "latency", "config_closures")
                          and control["setup"][key] != reference["setup"][key])
         # Latency's knobs must match when both ran it; its entries differ by
         # design (a standing adds floors).
@@ -2935,7 +3273,9 @@ def combine(folders: List[Path], aa: Optional[Path] = None) -> dict:
         if differs:
             raise SystemExit(f"--aa {Path(aa).name} and {reference['label']} differ in {', '.join(differs)}")
         # Only what the A/B tests may differ: the B side's build or config.
-        if control["configs"].get("kettle-a", "") != reference["configs"].get("kettle-a", ""):
+        if (control["configs"].get("kettle-a", "") != reference["configs"].get("kettle-a", "")
+                or not config_closure_match(control["setup"].get("config_closures"),
+                                            reference["setup"].get("config_closures"))):
             raise SystemExit(f"--aa {Path(aa).name} and {reference['label']} differ in the baseline config")
         for workload, info in analyze(control["results"], control["names"], True).items():
             if not control["workload_countable"].get(workload, control["countable"]):
@@ -3563,8 +3903,8 @@ def is_ab(kettle: Dict[str, str]) -> bool:
 def variant_name(label: str) -> str:
     """The entry name for --kettle-variant LABEL; the A/B sides' names are
     reserved so a variant can never pass for one."""
-    if not label or label.lower() in ("a", "b"):
-        raise ValueError(f"--kettle-variant name {label!r} is reserved or empty")
+    if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", label) or label.lower() in ("a", "b")):
+        raise ValueError("--kettle-variant requires a nonreserved ASCII role name")
     return f"kettle-{label}"
 
 
@@ -3573,13 +3913,20 @@ def default_out_dir(root: Path) -> Path:
 
 
 def claim_out_dir(path: Path) -> Path:
-    """A session directory of its own: never one that already holds results."""
+    """A session directory of its own: never one that already holds results.
+
+    Returns the canonical path, so a parent symlink retargeted later cannot
+    send recording, the sealed config closure or a launch to another
+    directory than the one the closure checks."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.mkdir()
     except FileExistsError:
         raise SystemExit(f"{path} already exists; each session needs a new --out-dir") from None
-    return path
+    resolved = path.resolve(strict=True)
+    if not resolved.is_dir() or resolved.is_symlink() or any(resolved.iterdir()):
+        raise SystemExit(f"{path} changed while it was claimed")
+    return resolved
 
 
 def resolve_rounds(args: argparse.Namespace) -> Dict[str, int]:
@@ -3754,7 +4101,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         for variant in args.kettle_variant:
             label, _, lines = variant.partition("=")
             if not lines:
-                parser.error(f"--kettle-variant needs NAME=LINES, got {variant!r}")
+                parser.error("--kettle-variant needs NAME=LINES")
             try:
                 name = variant_name(label)
             except ValueError as error:
@@ -3779,6 +4126,11 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     if "latency" in workloads and "kettle-opaque" in latency_names:
         kettle["kettle-opaque"] = kettle["kettle"]
         kettle_configs["kettle-opaque"] = KETTLE_OPAQUE
+    try:
+        for extra in kettle_configs.values():
+            config_entries(extra)
+    except ConfigClosureError as error:
+        parser.error(str(error))
     if "latency" in workloads:
         unranked.extend(name for name in latency_names if name not in names)
     for workload in workloads:
@@ -3897,16 +4249,24 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         local_manifest[name] = local
     # Paths and signing teams identify this machine and its owner; they stay
     # beside the results and never go into anything published.
-    manifest_fd = os.open(out_dir / "local-manifest.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    with os.fdopen(manifest_fd, "w") as manifest:
-        manifest.write(dumps(local_manifest))
+    private_json(out_dir / "local-manifest.json", local_manifest)
     recorder = Recorder(out_dir / "results.json", results)
     recorder.write()
 
-    with tempfile.TemporaryDirectory(prefix="kettle-standing-") as tmp:
-        work = Path(tmp)
+    with config_work_directory(out_dir) as work:
         write_configs(work, kettle_configs)
+        try:
+            closure = ConfigClosure(work, kettle_configs, Path.cwd())
+        except ConfigClosureError as error:
+            results["meta"]["refusals"].append(str(error))
+            recorder.write()
+            raise SystemExit("refused: " + str(error)) from None
+        results["meta"]["config_closures"] = closure.public
+        local_manifest["config_closure"] = closure.local
+        private_json(out_dir / "local-manifest.json", local_manifest)
+        recorder.write()
         runner = Runner(probes, work, kettle)
+        runner.config_closure = closure
         runner.phases = stamped
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
@@ -3941,24 +4301,28 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                             # must not read the previous launch's grid.
                             for stale in (work / "stamp", work / "grid"):
                                 stale.unlink(missing_ok=True)
-                            if workload == "startup":
-                                row = runner.startup(name)
-                            elif workload == "idle":
-                                row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
-                            elif workload == "flood-memory":
-                                row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
-                            elif workload == "latency":
-                                if failures_in_a_row >= len(entries):
-                                    row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
+                            def collect_row():
+                                nonlocal failures_in_a_row
+                                if workload == "startup":
+                                    row = runner.startup(name)
+                                elif workload == "idle":
+                                    row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
+                                elif workload == "flood-memory":
+                                    row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
+                                elif workload == "latency":
+                                    if failures_in_a_row >= len(entries):
+                                        row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
+                                    else:
+                                        # A new gap sequence every round, the same for
+                                        # every entry in it.
+                                        row = runner.latency(name, latency_options, SEED * 1000 + round_index,
+                                                             out_dir / f"latency-{name}-r{round_index}.json")
+                                        failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
                                 else:
-                                    # A new gap sequence every round, the same for
-                                    # every entry in it.
-                                    row = runner.latency(name, latency_options, SEED * 1000 + round_index,
-                                                         out_dir / f"latency-{name}-r{round_index}.json")
-                                    failures_in_a_row = failures_in_a_row + 1 if "error" in row else 0
-                            else:
-                                row = runner.vtebench(name, vtebench, benchmarks,
-                                                      out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
+                                    row = runner.vtebench(name, vtebench, benchmarks,
+                                                          out_dir / f"{name}-r{round_index}.dat", args.vtebench_seconds)
+                                return row
+                            row = config_campaign_row(closure, results, recorder, collect_row)
                             if not name.startswith("floor-"):
                                 row = check_grid(row, *round_grid(work))
                                 reason = first_launch_refusal(name, row, launched)
@@ -3981,6 +4345,8 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                 # would write its own frame over the restored one. The keeper
                 # waits for it anyway (wait_for_round); this keeps that short.
                 runner.stop_current()
+                local_manifest["config_source_changes"] = closure.source_changes()
+                private_json(out_dir / "local-manifest.json", local_manifest)
 
     if tool_artifacts:
         validate_latency_probe(probes["latency-probe"], args.latency_sign_identity)
