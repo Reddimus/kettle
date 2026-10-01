@@ -639,16 +639,50 @@ A first-frame present or per-key `output_ms` cannot certify displayed first
 output.
 
 `--native-layer-input FILE...` reads the cursor layer smoke's `analysis.json`.
-It preserves numeric `contract.handoff_after_s`, `contract.idle` fields
-`span_s,peak_mib,wakeups_per_s,cpu_percent`, and the selected `cursor_blink`
-states `handoff,rested,after_reload,after_key`. Each state has `renderer`,
-`handoffs,exits,hides` and aggregate `exit_frame_us.count,p50,p95,max`.
-An empty exit history has null percentiles and maximum 0. These aggregates
-are descriptive. The producer does not export raw samples, actual sampling
-bounds, the timeout or the twenty geometry-read states/timestamps. Thus the
-adapter marks interval peak, geometry polling and acceptance incomplete.
-It cannot certify the handoff +1.5 seconds to timeout interval or a per-key
-exit join from aggregates or unsequenced `exit_frame_us` log lines.
+The top-level `contract` contains `handoff_after_s`, `idle` aggregates
+`span_s,peak_mib,wakeups_per_s,cpu_percent`, and `cursor_blink` states
+`handoff,rested,after_reload,after_key`. Each state has `renderer`,
+`handoffs,exits,hides`, `fallback` and aggregate `exit_frame_us.count,p50,p95,max`.
+An empty exit history has null percentiles and maximum 0.
+
+The raw format also contains `clock: "python-monotonic-s"`, `stamps`,
+`samples` and `geometry_reads`. Stamps are `wait_started,handoff_seen,interval_ms,
+timeout_s,measure_start,measure_end,sample_period_s,rest_read,reload_written,
+key_sent`. Each sample is `{t, footprint_mib, cpu_ns, wakeups}`. All time values
+except `interval_ms` use monotonic seconds; counters are cumulative. Each of the
+exactly twenty geometry reads is `{t, renderer, handoffs, exits, hides}`.
+
+Certification requires ordered stamps and samples wholly within
+`[handoff_seen + 1.5, wait_started + timeout_s]`. The first and last sample times
+must equal `measure_start` and `measure_end`, with at least 3.0 seconds of real
+span. Every adjacent gap must be at least the declared period, allowing 1 ns
+for subtraction rounding, and at most 1.5 times that period. At the producer's
+0.5-second cadence this allows at most 0.75 seconds between samples. Counter
+regressions fail. Peak and median use current footprint from these samples
+only. Wakeups/s and CPU percent use the first/last counter deltas divided by
+their actual timestamp span. Recomputed idle and handoff aggregates must match
+within relative and absolute tolerances of 1e-9; rounded replacements fail.
+
+Geometry polling must start strictly after measurement and finish before the
+rest read. Every read must retain the handoff's layer renderer and all three
+counters. The rest read must follow timeout plus two blink intervals, show the
+same counters, `phase_on: true` and `next_edge_ms: null`. Reload must add exactly
+one exit and one handoff; the subsequent key must add an exit, with no hide or
+fallback. Handoffs must equal exits plus hides, plus one while the layer is
+active, and exit-frame history counts must equal exits. A layer renderer after
+the key requires another handoff. The stamps
+bound these phases but do not supply individual reload/key observation times.
+
+Complete evidence reports `state: "supported"`, interval peak and median in
+MiB, span, cadence/gap bounds, CPU percent, wakeups/s and an `acceptance` object.
+Its verdict is `pass` only when all inclusive resource thresholds pass. The
+caller can override the smoke defaults of 80 MiB, 0.5 wakeups/s and 0.02 percent
+CPU with `--native-layer-max-footprint-mib`, `--native-layer-max-wakeups` and
+`--native-layer-max-cpu-percent`. Complete evidence over a threshold has verdict
+`fail`. Aggregate-only legacy files remain `unavailable`; partial or inconsistent
+raw evidence is `incomplete`, and invalid types, numbers or clocks are
+`malformed`. No missing sample is reconstructed. All verdicts remain diagnostic
+and noncountable. Aggregate exit times do not prove a per-key exit join.
 
 `--trace-input FILE...` reports private echo trace capability as unavailable.
 The row-shaping producer currently contains no emitted private trace format.

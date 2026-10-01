@@ -357,9 +357,8 @@ A malformed stamp (negative, non-numeric, missing or over 20 digits)
 invalidates its phase rather than leaving an earlier stamp in force, and a
 malformed path line voids font attribution. Native geometry components must lie
 in 1-65,535, the range of `struct winsize`; an isolated fixture checks the
-initial-grid refusal alone. First output stays unavailable. Native layer aggregate and private trace tests
-refuse to infer interval coverage, geometry-read controls or echo joins from
-unemitted data. CLI fixtures mock every spawn and helper build, exercise the
+initial-grid refusal alone. First output stays unavailable. Private trace tests
+refuse to infer echo joins from unemitted data. CLI fixtures mock every spawn and helper build, exercise the
 actual entry point and check private input redaction.
 
 `LegacyOutputBytes` compares all bytes of `results.json`, `summary.md`,
@@ -369,13 +368,38 @@ reconstruction. The checks use unittest equality, which remains active under
 `python3 -O`. The old S1 fixture is retained unchanged; the separate font fixture
 matches the font preload producer. Fixtures are inert harness-version inputs.
 
-These tests launch no GUI application. They do not prove a native PTY recorder,
-an actual delayed-child startup barrier, layer interval samples, twenty harmless
-geometry reads or a private echo trace integration. Those require producer wire
-agreement and separate native acceptance on an authorized runner. The current
-layer smoke exports only aggregates, and the row-shaping source exports no echo
-trace. Keep those capabilities incomplete or unavailable until the producers
-supply the needed evidence. See the retained diagnostic formats in
+`CursorLayerEvidence` uses `cursor-layer.fixture`, a full synthetic export of the
+cursor layer smoke's `run_contract`, including its raw monotonic stamps,
+rusage samples, geometry reads and selected cursor states. The positive case
+checks independently known peak, median, real span and counter rates. Refusal
+cases cover short span, a missing sample gap, samples outside the handoff/timeout
+interval, nonmonotonic sample/stamp times, changed geometry exits or renderer,
+aggregate mismatches, every missing stamp and aggregate-only legacy input.
+Additional cases cover geometry ordering/counts, hides/handoffs, declared
+cadence, counter regression/balance, exit-history counts, rested/reload/key
+states, invalid numeric types,
+clock mismatch, partial exports, threshold boundaries and CLI overrides.
+CLI checks forbid helper builds and process creation and check private-field
+redaction. These unittest checks, including whole-file comparisons, remain
+active with optimization:
+
+```sh
+python3 scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
+python3 -O scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
+TZ=Pacific/Kiritimati python3 -O scripts/perf/macos-standing-self-test.py CursorLayerEvidence NativeEvidence LegacyOutputBytes CursorLatency.test_existing_output_files_match_bytes_under_optimization
+```
+
+Per-file snapshots use the same directory layout, with `snapshot.gitignore`
+beside the self-test. The test runner places temporary files and compiler
+caches inside that snapshot. Targeted production reverts must make each
+refusal regression fail while the unchanged production candidate passes.
+
+These tests launch no GUI application. Synthetic raw samples prove parser
+behavior, not a real layer's footprint or observer cost. Native PTY recording,
+an actual delayed-child startup barrier, live layer measurement and harmless
+geometry polling still require separate native acceptance on an authorized
+runner. The row-shaping source exports no private echo trace, so that capability
+remains unavailable. See the retained diagnostic formats in
 [scripts/perf/README.md](../scripts/perf/README.md#retained-startup-and-native-diagnostics).
 
 For per-file review snapshots, put `macos-standing-self-test.py` beside the

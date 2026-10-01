@@ -4517,7 +4517,7 @@ class NativeEvidence(unittest.TestCase):
         for span in (2., 3.5):
             data = self.smoke(); data["contract"]["idle"]["span_s"] = span
             report = standing.cursor_layer_evidence(data)
-            self.assertEqual(report["state"], "incomplete")
+            self.assertEqual(report["state"], "unavailable")
             self.assertEqual(report["aggregates"]["idle"]["peak_mib"], 75.)
             self.assertIsNone(report["interval_peak_mib"])
             self.assertIsNone(report["geometry_polling_valid"])
@@ -4591,6 +4591,223 @@ class NativeEvidence(unittest.TestCase):
                 path.write_text(text)
                 with self.assertRaises(ValueError):
                     standing.diagnostic_json(path)
+
+
+class CursorLayerEvidence(unittest.TestCase):
+    @staticmethod
+    def fixture():
+        return _json.loads((HERE / "macos-standing/cursor-layer.fixture").read_text())
+
+    @staticmethod
+    def reaggregate(contract):
+        # The producer uses first/last cumulative counters and current footprint.
+        samples = contract["samples"]
+        a, b = samples[0], samples[-1]
+        span = b["t"] - a["t"]
+        contract["stamps"].update(measure_start=a["t"], measure_end=b["t"])
+        contract["idle"] = dict(span_s=span, peak_mib=max(s["footprint_mib"] for s in samples),
+            wakeups_per_s=(b["wakeups"]-a["wakeups"])/span,
+            cpu_percent=(b["cpu_ns"]-a["cpu_ns"])/(span*1e9)*100)
+
+    def refuse(self, data, reason, state="incomplete"):
+        report = standing.cursor_layer_evidence(data)
+        self.assertEqual(report["state"], state, report)
+        self.assertEqual(report["reason"], reason)
+        self.assertIsNone(report.get("acceptance"))
+
+    def test_positive_exact_producer_format(self):
+        data = self.fixture(); c = data["contract"]
+        report = standing.cursor_layer_evidence(data)
+        self.assertEqual(report["state"], "supported", report)
+        self.assertEqual(report["acceptance"]["verdict"], "pass")
+        self.assertEqual(report["acceptance"]["thresholds"],
+            dict(peak_mib=80.,wakeups_per_s=.5,cpu_percent=.02))
+        self.assertEqual(report["interval_peak_mib"], 75.)
+        self.assertEqual(report["interval_median_mib"], 72.5)
+        self.assertEqual(report["samples"], 8)
+        self.assertAlmostEqual(report["span_s"], 3.514)
+        self.assertAlmostEqual(report["wakeups_per_s"], 1/3.514)
+        self.assertAlmostEqual(report["cpu_percent"], .01)
+        # Only the window the samples span is certified, inside the allowed one.
+        self.assertEqual(report["covered_interval"], [c["samples"][0]["t"], c["samples"][-1]["t"]])
+        self.assertEqual(report["allowed_interval"], [c["stamps"]["handoff_seen"]+1.5, 112.001])
+        self.assertTrue(report["geometry_polling_valid"])
+        # Lifetime maxima and unrelated numeric fields cannot enter the peak.
+        for row in c["samples"]: row["max_footprint_mib"] = 99999.
+        c["idle"]["median_mib"] = 99999.
+        data["private"] = "private-sentinel"
+        self.assertEqual(standing.cursor_layer_evidence(data), report)
+
+    def test_short_span(self):
+        data=self.fixture();c=data["contract"];c["samples"]=c["samples"][:6]
+        self.reaggregate(c)
+        self.refuse(data, "idle sample span below 3 seconds")
+
+    def test_gap(self):
+        data=self.fixture();c=data["contract"];c["samples"].pop(1)
+        self.reaggregate(c)
+        self.refuse(data, "sample cadence or gap outside declared period")
+
+    def test_a_sample_outside_the_window_or_out_of_order_breaks_the_cadence(self):
+        # The endpoints are pinned to in-window stamps, so a stray or repeated
+        # sample time always breaks the fixed 0.5 s cadence.
+        for t in (102.100,112.002):
+            data=self.fixture();c=data["contract"];c["samples"][3]["t"]=t
+            with self.subTest(t=t):self.refuse(data,"sample cadence or gap outside declared period")
+        data=self.fixture();c=data["contract"];c["samples"][2]["t"]=c["samples"][1]["t"]
+        self.refuse(data,"sample cadence or gap outside declared period")
+
+    def test_geometry_exits(self):
+        data=self.fixture();data["contract"]["geometry_reads"][12]["exits"]+=1
+        self.refuse(data,"geometry polling changed renderer or counters")
+
+    def test_geometry_renderer(self):
+        data=self.fixture();data["contract"]["geometry_reads"][12]["renderer"]="gpu"
+        self.refuse(data,"geometry polling changed renderer or counters")
+
+    def test_aggregate_mismatch(self):
+        for field in ("span_s","peak_mib","wakeups_per_s","cpu_percent"):
+            data=self.fixture();data["contract"]["idle"][field]+=.01
+            with self.subTest(field=field):self.refuse(data,"idle aggregate mismatch")
+
+    def test_missing_stamp(self):
+        for field in self.fixture()["contract"]["stamps"]:
+            data=self.fixture();del data["contract"]["stamps"][field]
+            with self.subTest(field=field):self.refuse(data,"missing native layer stamp")
+
+    def test_legacy(self):
+        data=self.fixture()
+        for field in ("clock","stamps","samples","geometry_reads"):del data["contract"][field]
+        self.refuse(data,"legacy aggregate-only native layer smoke","unavailable")
+
+    def test_declared_period(self):
+        data=self.fixture();data["contract"]["stamps"]["sample_period_s"]=1.
+        self.refuse(data,"unexpected native layer sample period","malformed")
+        # Declaring a long period cannot hide dropped samples, here including
+        # the 75 MiB peak.
+        data=self.fixture();c=data["contract"];c["samples"]=[c["samples"][0],c["samples"][-1]]
+        c["stamps"]["sample_period_s"]=3.514;c["idle"]["peak_mib"]=74.
+        self.refuse(data,"unexpected native layer sample period","malformed")
+
+    def test_implausible_footprint_never_certifies(self):
+        data=self.fixture();c=data["contract"]
+        for row in c["samples"]:row["footprint_mib"]=1e308
+        c["idle"]["peak_mib"]=1e308
+        self.refuse(data,"implausible native layer footprint","malformed")
+
+    def test_exit_summaries_must_be_complete_and_ordered(self):
+        data=self.fixture();del data["contract"]["handoff"]["exit_frame_us"]["p50"]
+        self.refuse(data,"exit frame summaries incomplete or unordered")
+        data=self.fixture();data["contract"]["after_key"]["exit_frame_us"]=dict(count=2,p50=999,p95=1,max=0)
+        self.refuse(data,"exit frame summaries incomplete or unordered")
+
+    def test_measurement_stamps_and_bounds(self):
+        for fields,reason in [
+            ({"reload_written":112.},"unordered native layer stamps"),
+            ({"measure_start":102.},"measurement outside handoff-to-timeout interval"),
+            ({"timeout_s":5.},"measurement outside handoff-to-timeout interval"),
+            ({"measure_end":106.},"sample endpoints disagree with stamps"),
+            ({"rest_read":112.1},"rest read precedes timeout and last edge"),
+        ]:
+            data=self.fixture();data["contract"]["stamps"].update(fields)
+            with self.subTest(fields=fields):self.refuse(data,reason)
+
+    def test_geometry_order_and_count(self):
+        for mutate,reason in [
+            (lambda c:c["geometry_reads"].pop(),"expected twenty geometry reads"),
+            (lambda c:c["geometry_reads"][0].update(t=c["stamps"]["measure_end"]),
+                "geometry polling overlaps measurement or is unordered"),
+            (lambda c:c["geometry_reads"][12].update(t=c["geometry_reads"][11]["t"]),
+                "geometry polling overlaps measurement or is unordered"),
+            (lambda c:c["geometry_reads"][12].update(handoffs=2),
+                "geometry polling changed renderer or counters"),
+            (lambda c:c["geometry_reads"][12].update(hides=1),
+                "geometry polling changed renderer or counters"),
+        ]:
+            data=self.fixture();mutate(data["contract"])
+            with self.subTest(reason=reason):self.refuse(data,reason)
+
+    def test_states(self):
+        for label,fields,reason in [
+            ("handoff",{"fallback":"failed"},"layer handoff or fallback state unproven"),
+            ("rested",{"phase_on":False},"rested state inconsistent with timeout"),
+            ("rested",{"next_edge_ms":100},"rested state inconsistent with timeout"),
+            ("rested",{"exits":1},"rested state inconsistent with timeout"),
+            ("after_reload",{"exits":0},"reload state did not exit once and hand off again"),
+            ("after_reload",{"handoffs":1},"reload state did not exit once and hand off again"),
+            ("after_key",{"exits":1},"key state did not exit the reloaded layer"),
+            ("after_key",{"renderer":"layer"},"key state did not exit the reloaded layer"),
+        ]:
+            data=self.fixture();data["contract"][label].update(fields)
+            with self.subTest(label=label,fields=fields):self.refuse(data,reason)
+        data=self.fixture();data["contract"]["after_key"].update(renderer="layer",handoffs=3)
+        self.assertEqual(standing.cursor_layer_evidence(data)["state"],"supported")
+
+    def test_counter_balance(self):
+        for renderer in ("layer", "gpu"):
+            data=self.fixture();data["contract"]["after_key"].update(renderer=renderer,handoffs=100)
+            with self.subTest(renderer=renderer):
+                self.refuse(data,"cursor state counters or exit history inconsistent")
+
+    def test_exit_history_count(self):
+        data=self.fixture();data["contract"]["after_key"]["exit_frame_us"] = dict(
+            count=0,p50=None,p95=None,max=0)
+        self.refuse(data,"cursor state counters or exit history inconsistent")
+
+    def test_counters_and_handoff(self):
+        data=self.fixture();data["contract"]["samples"][2]["cpu_ns"]=1.
+        self.refuse(data,"nonmonotonic sample counters")
+        data=self.fixture();data["contract"]["handoff_after_s"]+=.01
+        self.refuse(data,"handoff aggregate mismatch")
+
+    def test_partial_and_malformed(self):
+        for field in ("clock","stamps","samples","geometry_reads"):
+            data=self.fixture();del data["contract"][field]
+            with self.subTest(field=field):self.refuse(data,"missing raw native layer evidence")
+        for field,value,reason in [("clock","wall","unknown native layer clock"),
+                ("stamps",[],"invalid native layer stamps"),
+                ("samples",{},"invalid native layer samples"),
+                ("geometry_reads",{},"invalid geometry reads")]:
+            data=self.fixture();data["contract"][field]=value
+            with self.subTest(field=field):self.refuse(data,reason,"malformed")
+        for value in (True,float("nan"),float("inf"),-1.,10**400):
+            data=self.fixture();data["contract"]["samples"][2]["cpu_ns"]=value
+            with self.subTest(value=str(value)):self.refuse(data,"invalid native layer sample","malformed")
+
+    def test_explicit_thresholds(self):
+        for limits in (dict(max_footprint_mib=74.),dict(max_wakeups=.1),dict(max_cpu_percent=.009)):
+            report=standing.cursor_layer_evidence(self.fixture(),**limits)
+            with self.subTest(limits=limits):
+                self.assertEqual(report["state"],"supported")
+                self.assertEqual(report["acceptance"]["verdict"],"fail")
+        c=self.fixture()["contract"];idle=c["idle"]
+        report=standing.cursor_layer_evidence({"contract":c},max_footprint_mib=idle["peak_mib"],
+            max_wakeups=idle["wakeups_per_s"],max_cpu_percent=idle["cpu_percent"])
+        self.assertEqual(report["acceptance"]["verdict"],"pass")
+        report=standing.cursor_layer_evidence(self.fixture(),max_footprint_mib=float("nan"))
+        self.assertEqual(report["state"],"malformed")
+
+    def test_postprocessing_thresholds_and_privacy(self):
+        import contextlib,io,tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"layer.json";data=self.fixture()
+            data["contract"]["stamps"]["private"]="private-sentinel"
+            path.write_text(_json.dumps(data))
+            out=io.StringIO()
+            argv=[str(HERE/"macos-standing.py"),"--native-layer-input",str(path),
+                  "--native-layer-max-footprint-mib","74","--native-layer-max-wakeups","0.1",
+                  "--native-layer-max-cpu-percent","0.009"]
+            with mock.patch.object(sys,"argv",argv),contextlib.redirect_stdout(out),\
+                    mock.patch.object(standing.subprocess,"Popen",side_effect=AssertionError("spawn")),\
+                    mock.patch.object(standing,"build_probes",side_effect=AssertionError("build")):
+                self.assertEqual(standing.main(),0)
+            report=_json.loads(out.getvalue());e=report["reports"][0]["evidence"]
+            self.assertTrue(report["diagnostic_only"]);self.assertFalse(report["countable"])
+            self.assertEqual(e["acceptance"]["verdict"],"fail")
+            self.assertEqual(e["acceptance"]["thresholds"],dict(peak_mib=74.,wakeups_per_s=.1,cpu_percent=.009))
+            self.assertNotIn("private-sentinel",out.getvalue())
+            self.assertNotIn(str(path),out.getvalue())
 
 
 class OutputBlink(unittest.TestCase):
@@ -6442,4 +6659,4 @@ class PublicationFreeze(unittest.TestCase):
         with self.assertRaises(ValueError):standing.publication.strict_json(overflow)
 
 if __name__ == "__main__":
-    unittest.main(argv=[sys.argv[0], "-v"])
+    unittest.main(argv=[sys.argv[0], "-v", *sys.argv[1:]])
