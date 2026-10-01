@@ -1545,15 +1545,28 @@ pub enum UserEvent {
 /// The OS downscales the source for the small title-bar icon and picks the
 /// right size for the taskbar and switcher. Best-effort: a decode failure
 /// leaves the icon unset rather than aborting startup. No-op on Wayland (uses
-/// the `.desktop` app_id) and macOS (uses the `.app` bundle icon); effective
-/// on Windows and X11.
+/// the `.desktop` app_id); effective on Windows and X11.
+///
+/// macOS returns `None` without decoding. An AppKit window has no icon of its
+/// own (the Dock and the app switcher use the bundle's), and winit's macOS
+/// backend drops whatever it is given, at creation and in `set_window_icon`,
+/// so the decode would only delay the first window.
 fn load_window_icon(dark: bool) -> Option<winit::window::Icon> {
-    const DARK_ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-256.png");
-    const LIGHT_ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-light-256.png");
-    let icon_png = if dark { DARK_ICON_PNG } else { LIGHT_ICON_PNG };
-    let img = image::load_from_memory(icon_png).ok()?.into_rgba8();
-    let (w, h) = img.dimensions();
-    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    #[cfg(target_os = "macos")]
+    {
+        let _ = dark;
+        None
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        const DARK_ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/kettle-256.png");
+        const LIGHT_ICON_PNG: &[u8] =
+            include_bytes!("../../../packaging/linux/kettle-light-256.png");
+        let icon_png = if dark { DARK_ICON_PNG } else { LIGHT_ICON_PNG };
+        let img = image::load_from_memory(icon_png).ok()?.into_rgba8();
+        let (w, h) = img.dimensions();
+        winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
+    }
 }
 
 /// macOS `sticky = true` — make the window appear on every Space
@@ -44400,6 +44413,16 @@ mod tests {
                 "the runtime icon loader must embed {asset}"
             );
         }
+    }
+
+    /// winit's macOS backend drops a window icon, so macOS never decodes one
+    /// on the way to the first window.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_skips_the_window_icon_decode() {
+        use super::load_window_icon;
+        assert!(load_window_icon(true).is_none(), "dark icon decoded");
+        assert!(load_window_icon(false).is_none(), "light icon decoded");
     }
 
     /// Drift guard: the winit dependency must enable Wayland CSD via

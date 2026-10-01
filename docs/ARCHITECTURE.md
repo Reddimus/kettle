@@ -475,6 +475,8 @@ colors exactly. The inset is 24 px in the 256 px macOS rendition and its 24 px
 radius follows the system mask instead of competing with it. Icon Composer
 owns the adaptive outer mask and lighting. Linux and Windows retain compatible
 pre-rounded assets; their live Windows/X11 icon switches with the active theme.
+macOS never decodes that icon: an AppKit window has no icon of its own, and
+winit's macOS backend drops whatever it is given.
 The 16 px raster uses a thicker optical-size version of the same two strokes.
 Xcode's asset compiler emits `Assets.car`, the `CFBundleIconName`
 metadata, and a loose previous-release `.icns` for the macOS 11 deployment

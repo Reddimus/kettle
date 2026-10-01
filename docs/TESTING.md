@@ -1010,7 +1010,10 @@ user-initiated QoS class. A source guard proves `run_with` starts the preload
 right after the trace guard, before the event loop is built and before any
 config read, sends the family after the command-line overrides, and that
 the first window joins it and keeps the fonts for the renderer before its
-pane spawns. Input-queue regressions fill both the
+pane spawns. On macOS `load_window_icon` returns `None`
+without decoding (`macos_skips_the_window_icon_decode`). The existing palette
+guard retains both icon assets and the Windows/X11 call sites.
+Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests
