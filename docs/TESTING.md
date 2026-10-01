@@ -948,6 +948,12 @@ truncated-source rejection. Separate file-policy regressions prove an
 explicit output succeeds beneath a public existing parent while the default
 private-state policy rejects the same tree. The native live smoke exercises
 the asynchronous readback path.
+A headless renderer holds exactly two distinct quad pipelines, one replacing
+and one blending, and one image pipeline; a source guard keeps `with_gpu`
+building its layers only from `SharedPipelines`, and replacing and blending
+layers draw the same pixels through shared and standalone pipelines. S4 also
+runs the latency A/B gate with `--kettle-b --workloads latency --rounds 5
+--latency-keys 100`; the difference CI upper bound must be at most +1 ms.
 
 ### kettle-ui (290+ tests)
 

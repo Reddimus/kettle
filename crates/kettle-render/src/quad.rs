@@ -93,6 +93,126 @@ fn grow_capacity(len: usize) -> Option<(usize, usize)> {
     Some((capacity, bytes))
 }
 
+/// Premultiplied-alpha blending: the shader returns premultiplied colour, so
+/// the blend must not apply alpha a second time (see `build_pipeline`).
+const BLEND: Option<wgpu::BlendState> = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+
+/// What every [`QuadPipeline`] a renderer builds for one surface format can
+/// share: the uniform's bind group layout and one render pipeline per blend
+/// mode, both compiled from one shader module. A renderer's five quad layers
+/// need only these two pipelines; each layer keeps its own uniform, bind group
+/// and instance buffer. Cloning a wgpu handle adds a reference, not a GPU
+/// object.
+pub(crate) struct QuadShared {
+    bind_group_layout: wgpu::BindGroupLayout,
+    blend: wgpu::RenderPipeline,
+    replace: wgpu::RenderPipeline,
+}
+
+impl QuadShared {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let bind_group_layout = screen_bind_group_layout(device);
+        let (shader, layout) = shader_and_layout(device, &bind_group_layout);
+        Self {
+            blend: build_pipeline(device, &shader, &layout, format, BLEND),
+            replace: build_pipeline(device, &shader, &layout, format, None),
+            bind_group_layout,
+        }
+    }
+
+    /// A layer that blends over what lies beneath it, as [`QuadPipeline::new`]
+    /// builds one.
+    pub(crate) fn blend(&self, device: &wgpu::Device) -> QuadPipeline {
+        QuadPipeline::with_pipeline(device, &self.bind_group_layout, self.blend.clone())
+    }
+
+    /// A layer that replaces the pixels it covers, alpha included.
+    pub(crate) fn replace(&self, device: &wgpu::Device) -> QuadPipeline {
+        QuadPipeline::with_pipeline(device, &self.bind_group_layout, self.replace.clone())
+    }
+}
+
+fn screen_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("kettle-quad-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+fn shader_and_layout(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+) -> (wgpu::ShaderModule, wgpu::PipelineLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("kettle-quad"),
+        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("kettle-quad-layout"),
+        bind_group_layouts: &[Some(bind_group_layout)],
+        immediate_size: 0,
+    });
+    (shader, layout)
+}
+
+fn build_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("kettle-quad-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<QuadInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                // This pipeline's fragment shader returns PREMULTIPLIED
+                // color (`rgb * a`), so the blend must not apply alpha a
+                // second time. `ALPHA_BLENDING` uses `SrcAlpha` for the
+                // source factor and would compute `rgb * a * a`, so a
+                // 50%-opaque surface would contribute 25% and every
+                // translucent image, panel, highlight, and separator would
+                // render too dark. (`glyphpipe` returns STRAIGHT alpha and
+                // keeps `ALPHA_BLENDING`.)
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 pub struct QuadPipeline {
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -106,14 +226,15 @@ pub struct QuadPipeline {
 }
 
 impl QuadPipeline {
+    /// A standalone blending layer that compiles its own pipeline, for paths
+    /// that draw one frame. A renderer builds its layers through
+    /// [`QuadShared`] instead.
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::new_with_blend(
-            device,
-            format,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        )
+        Self::new_with_blend(device, format, BLEND)
     }
 
+    /// A standalone replacing layer; see [`QuadPipeline::new`].
+    #[cfg(test)]
     pub fn new_replace(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         Self::new_with_blend(device, format, None)
     }
@@ -123,81 +244,32 @@ impl QuadPipeline {
         format: wgpu::TextureFormat,
         blend: Option<wgpu::BlendState>,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kettle-quad"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
+        let bind_group_layout = screen_bind_group_layout(device);
+        let (shader, layout) = shader_and_layout(device, &bind_group_layout);
+        let pipeline = build_pipeline(device, &shader, &layout, format, blend);
+        Self::with_pipeline(device, &bind_group_layout, pipeline)
+    }
+
+    /// A layer that draws with `pipeline`, whose layout holds
+    /// `bind_group_layout`, with its own uniform, bind group and instances.
+    fn with_pipeline(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        pipeline: wgpu::RenderPipeline,
+    ) -> Self {
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-quad-screen"),
             size: std::mem::size_of::<Screen>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("kettle-quad-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kettle-quad-bg"),
-            layout: &bgl,
+            layout: bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: screen_buf.as_entire_binding(),
             }],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kettle-quad-layout"),
-            bind_group_layouts: &[Some(&bgl)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kettle-quad-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<QuadInstance>() as u64,
-                    step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
-                })],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    // This pipeline's fragment shader returns PREMULTIPLIED
-                    // color (`rgb * a`), so the blend must not apply alpha a
-                    // second time. `ALPHA_BLENDING` uses `SrcAlpha` for the
-                    // source factor and would compute `rgb * a * a`, so a
-                    // 50%-opaque surface would contribute 25% and every
-                    // translucent image, panel, highlight, and separator would
-                    // render too dark. (`glyphpipe` returns STRAIGHT alpha and
-                    // keeps `ALPHA_BLENDING`.)
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
         });
         let capacity = 4096;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -217,6 +289,12 @@ impl QuadPipeline {
             instances_held: RetainedBytes::default(),
             counters: UploadCounters::default(),
         }
+    }
+
+    /// The render pipeline this layer draws with.
+    #[cfg(test)]
+    pub(crate) fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
     }
 
     /// What this pipeline has written to the GPU so far.

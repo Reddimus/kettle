@@ -341,56 +341,21 @@ fn retained_upload_key(screen: [f32; 2], items: &[ImageItem]) -> u64 {
     hash.finish()
 }
 
-pub struct ImagePipeline {
+/// What every [`ImagePipeline`] a renderer builds for one surface format can
+/// share: the render pipeline, both bind group layouts and both samplers. Each
+/// image layer keeps its own uniform, instance buffer, texture cache and
+/// graphics-budget reservations. Cloning a wgpu handle adds a reference, not a
+/// GPU object.
+pub(crate) struct ImageShared {
     pipeline: wgpu::RenderPipeline,
+    screen_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
-    screen_buf: wgpu::Buffer,
-    screen_bg: wgpu::BindGroup,
     clamp_sampler: wgpu::Sampler,
     repeat_sampler: wgpu::Sampler,
-    _screen_gpu: GraphicsReservation,
-    instances: wgpu::Buffer,
-    instance_gpu: GraphicsReservation,
-    cap: usize,
-    cache: HashMap<usize, CachedTexture>,
-    draws: Vec<(usize, bool, u32, u32)>, // (cache key, repeat, first instance, count)
-    budget: GraphicsBudget,
-    max_instances: usize,
-    epoch: u64,
-    /// Drop count from the last frame a "skipping N image placements"
-    /// warning fired, so `upload` logs once per exceedance transition
-    /// instead of every frame of a steady-state overflow. `None` once the
-    /// backlog clears (or on startup).
-    last_dropped_warn: Option<usize>,
-    retained_key: Option<u64>,
-    screen_held: RetainedBytes,
-    instances_held: RetainedBytes,
-    counters: UploadCounters,
 }
 
-impl ImagePipeline {
-    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Self> {
-        Self::new_with_budget(device, format, GraphicsBudget::default())
-    }
-
-    pub fn new_with_budget(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        budget: GraphicsBudget,
-    ) -> Option<Self> {
-        let max_instances = budget.limits().placements;
-        Self::new_with_budget_and_instance_limit(device, format, budget, max_instances)
-    }
-
-    pub(crate) fn new_with_budget_and_instance_limit(
-        device: &wgpu::Device,
-        format: wgpu::TextureFormat,
-        budget: GraphicsBudget,
-        max_instances: usize,
-    ) -> Option<Self> {
-        if max_instances == 0 {
-            return None;
-        }
+impl ImageShared {
+    pub(crate) fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kettle-img"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -477,22 +442,6 @@ impl ImagePipeline {
             multiview_mask: None,
             cache: None,
         });
-        let screen_bytes = std::mem::size_of::<Screen>();
-        let screen_gpu = budget.reserve_gpu(screen_bytes)?;
-        let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("img-screen"),
-            size: std::mem::size_of::<Screen>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let screen_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("img-screen-bg"),
-            layout: &screen_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: screen_buf.as_entire_binding(),
-            }],
-        });
         let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("img-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -507,6 +456,119 @@ impl ImagePipeline {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        Self {
+            pipeline,
+            screen_bgl,
+            tex_bgl,
+            clamp_sampler,
+            repeat_sampler,
+        }
+    }
+
+    /// An inline-image layer, allowed the budget's placements per frame.
+    pub(crate) fn layer(
+        &self,
+        device: &wgpu::Device,
+        budget: GraphicsBudget,
+    ) -> Option<ImagePipeline> {
+        let max_instances = budget.limits().placements;
+        self.layer_with_instance_limit(device, budget, max_instances)
+    }
+
+    /// A layer allowed `max_instances` placements per frame. `None` when it
+    /// may draw none or the budget cannot hold its buffers.
+    pub(crate) fn layer_with_instance_limit(
+        &self,
+        device: &wgpu::Device,
+        budget: GraphicsBudget,
+        max_instances: usize,
+    ) -> Option<ImagePipeline> {
+        ImagePipeline::with_shared(device, self, budget, max_instances)
+    }
+}
+
+pub struct ImagePipeline {
+    pipeline: wgpu::RenderPipeline,
+    tex_bgl: wgpu::BindGroupLayout,
+    screen_buf: wgpu::Buffer,
+    screen_bg: wgpu::BindGroup,
+    clamp_sampler: wgpu::Sampler,
+    repeat_sampler: wgpu::Sampler,
+    _screen_gpu: GraphicsReservation,
+    instances: wgpu::Buffer,
+    instance_gpu: GraphicsReservation,
+    cap: usize,
+    cache: HashMap<usize, CachedTexture>,
+    draws: Vec<(usize, bool, u32, u32)>, // (cache key, repeat, first instance, count)
+    budget: GraphicsBudget,
+    max_instances: usize,
+    epoch: u64,
+    /// Drop count from the last frame a "skipping N image placements"
+    /// warning fired, so `upload` logs once per exceedance transition
+    /// instead of every frame of a steady-state overflow. `None` once the
+    /// backlog clears (or on startup).
+    last_dropped_warn: Option<usize>,
+    retained_key: Option<u64>,
+    screen_held: RetainedBytes,
+    instances_held: RetainedBytes,
+    counters: UploadCounters,
+}
+
+impl ImagePipeline {
+    pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Option<Self> {
+        Self::new_with_budget(device, format, GraphicsBudget::default())
+    }
+
+    pub fn new_with_budget(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+    ) -> Option<Self> {
+        let max_instances = budget.limits().placements;
+        Self::new_with_budget_and_instance_limit(device, format, budget, max_instances)
+    }
+
+    /// A standalone layer that compiles its own pipeline, for paths that draw
+    /// one frame. A renderer builds its layers through [`ImageShared`] instead.
+    pub(crate) fn new_with_budget_and_instance_limit(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        budget: GraphicsBudget,
+        max_instances: usize,
+    ) -> Option<Self> {
+        if max_instances == 0 {
+            return None;
+        }
+        ImageShared::new(device, format).layer_with_instance_limit(device, budget, max_instances)
+    }
+
+    /// A layer drawing with `shared`, with its own uniform, instance buffer and
+    /// texture cache.
+    fn with_shared(
+        device: &wgpu::Device,
+        shared: &ImageShared,
+        budget: GraphicsBudget,
+        max_instances: usize,
+    ) -> Option<Self> {
+        if max_instances == 0 {
+            return None;
+        }
+        let screen_bytes = std::mem::size_of::<Screen>();
+        let screen_gpu = budget.reserve_gpu(screen_bytes)?;
+        let screen_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("img-screen"),
+            size: std::mem::size_of::<Screen>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let screen_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("img-screen-bg"),
+            layout: &shared.screen_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: screen_buf.as_entire_binding(),
+            }],
+        });
         let cap = 64.min(max_instances);
         let instance_bytes = cap.checked_mul(std::mem::size_of::<Inst>())?;
         let instance_gpu = budget.reserve_gpu(instance_bytes)?;
@@ -517,12 +579,12 @@ impl ImagePipeline {
             mapped_at_creation: false,
         });
         Some(Self {
-            pipeline,
-            tex_bgl,
+            pipeline: shared.pipeline.clone(),
+            tex_bgl: shared.tex_bgl.clone(),
             screen_buf,
             screen_bg,
-            clamp_sampler,
-            repeat_sampler,
+            clamp_sampler: shared.clamp_sampler.clone(),
+            repeat_sampler: shared.repeat_sampler.clone(),
             _screen_gpu: screen_gpu,
             instances,
             instance_gpu,
@@ -538,6 +600,12 @@ impl ImagePipeline {
             instances_held: RetainedBytes::default(),
             counters: UploadCounters::default(),
         })
+    }
+
+    /// The render pipeline this layer draws with.
+    #[cfg(test)]
+    pub(crate) fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
     }
 
     /// What this pipeline has written to the GPU so far.

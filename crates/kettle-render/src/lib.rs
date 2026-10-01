@@ -4616,6 +4616,25 @@ fn live_device_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     .or_worse_values_from(&adapter_limits)
 }
 
+/// The quad and image pipelines a renderer compiles once and hands to every
+/// layer that draws with them. Its five quad layers use two blend modes and
+/// its three image layers one, so a window compiles three render pipelines
+/// here instead of eight. The offscreen self-test and `--screenshot`, which
+/// draw one frame, keep the standalone constructors.
+struct SharedPipelines {
+    quads: quad::QuadShared,
+    images: imgpipe::ImageShared,
+}
+
+impl SharedPipelines {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        Self {
+            quads: quad::QuadShared::new(device, format),
+            images: imgpipe::ImageShared::new(device, format),
+        }
+    }
+}
+
 /// Clamp a window size into the range `Surface::configure` will accept.
 ///
 /// Zero panics, and anything above the device's announced
@@ -5101,12 +5120,13 @@ impl Renderer {
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
 
-        let pane_bases = QuadPipeline::new_replace(&device, format);
-        let live_pane_bases = QuadPipeline::new_replace(&device, format);
-        let quads = QuadPipeline::new(&device, format);
+        let shared = SharedPipelines::new(&device, format);
+        let pane_bases = shared.quads.replace(&device);
+        let live_pane_bases = shared.quads.replace(&device);
+        let quads = shared.quads.blend(&device);
         let pane_outlines = OutlinePipeline::new(&device, format);
-        let overlay_quads = QuadPipeline::new(&device, format);
-        let menu_quads = QuadPipeline::new(&device, format);
+        let overlay_quads = shared.quads.blend(&device);
+        let menu_quads = shared.quads.blend(&device);
         let menu_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_renderer =
@@ -5115,31 +5135,26 @@ impl Renderer {
         let graphics_budget = kettle_core::GraphicsBudget::default();
         let presentation =
             present::PresentationPipeline::new(&device, format, graphics_budget.clone());
-        let imgs =
-            imgpipe::ImagePipeline::new_with_budget(&device, format, graphics_budget.clone())
-                .ok_or_else(|| {
-                    anyhow!("GPU graphics budget exhausted while creating image pipeline")
-                })?;
-        let media_receipt_img = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
-            &device,
-            format,
-            graphics_budget.clone(),
-            1,
-        )
-        .ok_or_else(|| {
-            anyhow!("GPU graphics budget exhausted while creating image-receipt pipeline")
-        })?;
-        // Separate pipeline so the wallpaper draws behind cell/chrome quads
+        let imgs = shared
+            .images
+            .layer(&device, graphics_budget.clone())
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating image pipeline")
+            })?;
+        let media_receipt_img = shared
+            .images
+            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating image-receipt pipeline")
+            })?;
+        // Separate image layer so the wallpaper draws behind cell/chrome quads
         // (see the `bg_imgs` field docs).
-        let bg_imgs = imgpipe::ImagePipeline::new_with_budget_and_instance_limit(
-            &device,
-            format,
-            graphics_budget.clone(),
-            1,
-        )
-        .ok_or_else(|| {
-            anyhow!("GPU graphics budget exhausted while creating background image pipeline")
-        })?;
+        let bg_imgs = shared
+            .images
+            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating background image pipeline")
+            })?;
         // Procedural starfield wallpaper, same back-most slot.
         let starfield = starfield::StarfieldPipeline::new(&device, format);
         // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
@@ -16402,9 +16417,63 @@ mod gpu_tests {
         assert_eq!(covered[3], 255);
     }
 
+    /// Compare shared and standalone quad pixels for overlapping translucent
+    /// OSC 11 bases and for wallpaper dimmed at alpha 0.0 and 0.6.
+    /// The calling headless test holds the GPU test guard.
+    pub(crate) fn assert_shared_quad_pixels_match_standalone() {
+        let bases = [
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [8.0, 4.0],
+                color: [1.0, 0.0, 0.0, 0.5],
+            },
+            QuadInstance {
+                pos: [4.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 1.0, 0.5],
+            },
+        ];
+        let wallpaper = [QuadInstance {
+            pos: [0.0, 0.0],
+            size: [8.0, 4.0],
+            color: [1.0, 1.0, 1.0, 1.0],
+        }];
+        let dimmed = [
+            QuadInstance {
+                pos: [0.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 0.0, 0.0],
+            },
+            QuadInstance {
+                pos: [4.0, 0.0],
+                size: [4.0, 4.0],
+                color: [0.0, 0.0, 0.0, 0.6],
+            },
+        ];
+        for (replace, blend) in [(&bases[..], &[][..]), (&wallpaper[..], &dimmed[..])] {
+            let standalone = pollster::block_on(render_quad_layers_with(replace, blend, false))
+                .expect("pixel fixture renders after the headless adapter was available");
+            let shared = pollster::block_on(render_quad_layers_with(replace, blend, true))
+                .expect("the adapter that drew the standalone layers draws the shared ones");
+            assert_eq!(shared, standalone);
+        }
+    }
+
+    /// Draw `replace` then `blend` through standalone layers.
     async fn render_quad_layers(
         replace: &[QuadInstance],
         blend: &[QuadInstance],
+    ) -> Option<([u8; 4], [u8; 4])> {
+        render_quad_layers_with(replace, blend, false).await
+    }
+
+    /// Draw `replace` then `blend` into an 8x4 target and read back one pixel
+    /// from each half, through `SharedPipelines`' quad pipelines when `shared`
+    /// and through standalone ones otherwise.
+    async fn render_quad_layers_with(
+        replace: &[QuadInstance],
+        blend: &[QuadInstance],
+        shared: bool,
     ) -> Option<([u8; 4], [u8; 4])> {
         let cfg = gpu_test_config();
         let (_instance, adapter) = resolve_headless_adapter(&cfg, "pane_base_layers_test")
@@ -16418,8 +16487,18 @@ mod gpu_tests {
             .await
             .ok()?;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut replace_pipeline = QuadPipeline::new_replace(&device, format);
-        let mut blend_pipeline = QuadPipeline::new(&device, format);
+        let (mut replace_pipeline, mut blend_pipeline) = if shared {
+            let pipelines = SharedPipelines::new(&device, format);
+            (
+                pipelines.quads.replace(&device),
+                pipelines.quads.blend(&device),
+            )
+        } else {
+            (
+                QuadPipeline::new_replace(&device, format),
+                QuadPipeline::new(&device, format),
+            )
+        };
         replace_pipeline.upload(&device, &queue, [8.0, 4.0], replace);
         blend_pipeline.upload(&device, &queue, [8.0, 4.0], blend);
 
@@ -18526,10 +18605,11 @@ mod pane_buffer_lifecycle_tests {
     #[test]
     fn wallpaper_draws_behind_quads_in_its_own_pass() {
         let src = super::production_source();
-        // A dedicated pipeline exists and is constructed.
+        // A dedicated pipeline exists and is constructed. It draws with the
+        // image pipeline the renderer shares, but keeps its own layer.
         assert!(
             src.contains("bg_imgs: imgpipe::ImagePipeline,")
-                && src.contains("ImagePipeline::new_with_budget_and_instance_limit("),
+                && src.contains("let bg_imgs = shared"),
             "the wallpaper must have its own ImagePipeline field + construction"
         );
         // The wallpaper items go to bg_img_items, inline images stay in img_items.
@@ -18553,6 +18633,36 @@ mod pane_buffer_lifecycle_tests {
         assert!(
             bg < pane_bases && pane_bases < quads && quads < inline,
             "draw order must be wallpaper -> pane bases -> quads -> inline images"
+        );
+    }
+
+    /// A renderer compiles each distinct quad and image pipeline once, through
+    /// `SharedPipelines`; a layer built with a standalone constructor would
+    /// compile its own shader and pipeline again on the way to the first frame.
+    #[test]
+    fn a_renderer_builds_its_quad_and_image_layers_from_shared_pipelines() {
+        let src = super::production_source();
+        let with_gpu = src
+            .split_once("    fn with_gpu(\n")
+            .and_then(|(_, rest)| rest.split_once("        Ok(Renderer {"))
+            .map(|(body, _)| body)
+            .expect("with_gpu builds the renderer");
+        assert!(
+            with_gpu.contains("let shared = SharedPipelines::new(&device, format);"),
+            "with_gpu must compile the shared pipelines once"
+        );
+        for standalone in ["QuadPipeline::new", "ImagePipeline::new"] {
+            assert!(
+                !with_gpu.contains(standalone),
+                "with_gpu must build its layers from SharedPipelines, not {standalone}"
+            );
+        }
+        let layers = |call: &str| with_gpu.matches(call).count();
+        assert_eq!(layers("shared.quads."), 5, "five quad layers");
+        assert_eq!(
+            layers(".layer(") + layers(".layer_with_instance_limit("),
+            3,
+            "three image layers"
         );
     }
 

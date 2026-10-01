@@ -1280,6 +1280,17 @@ hold it. The render pool (about 168 MiB) stays while any frame draws.
 guard fails on any upload outside `upload.rs`. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
+The five quad layers (`pane_bases`, `live_pane_bases`, `quads`,
+`overlay_quads` and `menu_quads`) differ only in blending, and the three image
+layers (`bg_imgs`, `imgs` and `media_receipt_img`) not at all. A renderer
+therefore compiles one replacing and one blending quad pipeline and one image
+pipeline (`SharedPipelines`), and each layer keeps only its own uniform, bind
+group, instance buffer and, for images, texture cache and budget
+reservations. That is 3 quad and image pipelines per window instead of 8. The
+offscreen self-test and `--screenshot`, which draw one frame, keep the
+standalone constructors. glyphon already shares one pipeline between the
+three text renderers through its `Cache`.
+
 Pass 0 is the **background (wallpaper)** in its own pipeline, drawn at the very
 back so the cell/chrome quads (pass 1) composite *opaquely on top* of it, the
 standard kitty / WezTerm / Alacritty layering. The wallpaper lives in `bg_imgs`
