@@ -18777,6 +18777,60 @@ def macos_shift_arrow(key_code: int) -> None:
         time.sleep(0.05)
 
 
+ZOOMED_KEYS_RECORDER = r"""
+import os, sys, termios, tty
+
+# Own the keyboard as Codex does (alternate screen, kitty flags 7). On "l",
+# pop the kitty flags but stay on the alternate screen: still the owner, now
+# with legacy key encoding. Stop on "q".
+log = open(sys.argv[1], "ab", buffering=0)
+fd = sys.stdin.fileno()
+saved = termios.tcgetattr(fd)
+tty.setraw(fd)
+os.write(1, b"\x1b[?1049h\x1b[>7uZOOMKEYS-KITTY\r\n")
+try:
+    while True:
+        data = os.read(fd, 64)
+        if not data or data == b"q":
+            break
+        if data == b"l":
+            os.write(1, b"\x1b[<uZOOMKEYS-LEGACY\r\n")
+            log.write(b"<legacy>")
+            continue
+        log.write(data)
+finally:
+    os.write(1, b"\x1b[?1049l")
+    termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+"""
+
+
+def macos_chord(key_code: int, flags: int, label: str) -> None:
+    """Post one real key press and release at the HID tap with these
+    modifier flags (kCGEventFlagMask*)."""
+    import ctypes
+
+    core_graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    core_foundation = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
+    core_graphics.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+    core_graphics.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+    core_graphics.CGEventSetFlags.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    core_graphics.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    core_graphics.CGPreflightPostEventAccess.restype = ctypes.c_bool
+    core_foundation.CFRelease.argtypes = [ctypes.c_void_p]
+    if not core_graphics.CGPreflightPostEventAccess():
+        raise SystemExit(f"{label}: grant Accessibility access to the invoking terminal")
+    for down in (True, False):
+        event = core_graphics.CGEventCreateKeyboardEvent(None, key_code, down)
+        if not event:
+            raise SystemExit(f"{label}: CGEventCreateKeyboardEvent failed")
+        core_graphics.CGEventSetFlags(event, flags)
+        core_graphics.CGEventPost(0, event)
+        core_foundation.CFRelease(event)
+        time.sleep(0.05)
+
+
 COLOR_SCHEME_RECORDER = r"""
 import os, sys, termios, tty
 
@@ -18987,6 +19041,211 @@ def run_program_keys(kettle: str, root: Path) -> Path:
                 raise SystemExit("program-keys smoke: Shift+Left did not resize the split once the program let go")
         live.ctl("send_text", params={"pane": pane, "text": "q"})
     (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
+    return out
+
+
+def run_zoomed_layout_keys(kettle: str, root: Path) -> Path:
+    """Pane-focus chords with nowhere to go reach the program that owns the
+    keyboard, but only when its keyboard protocol sends them as themselves.
+
+    A recorder takes the keyboard in the right pane of a split (alternate
+    screen, kitty flags). Unzoomed, `Ctrl+Shift+N/P` (and on macOS
+    `Cmd+Opt+Left`, `Ctrl+Cmd+Left`) still move focus, while the directions
+    facing the window's edge reach the program. Zoomed, the split
+    shows only that pane, so the control route reports each chord as
+    `terminal_fallthrough` and focus stays put. Once the recorder pops its
+    kitty flags it still owns the keyboard, but `Ctrl+Shift+N` would reach it
+    as `Ctrl+N` and a Command chord as nothing, so the chords are Kettle's
+    again (and do nothing). `Ctrl+Shift+X`, the way out of zoom, is always
+    Kettle's. The control route never writes PTY bytes.
+    """
+    out = root / f"zoomed-layout-keys-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(
+            [
+                "agent-server = full",
+                "tab-bar = always",
+                "status-bar = off",
+                "restore-session = false",
+                "update-check = false",
+                "window-width = 120",
+                "window-height = 30",
+            ]
+        )
+        + "\n"
+    )
+    recorder = out / "recorder.py"
+    recorder.write_text(ZOOMED_KEYS_RECORDER)
+    log = out / "recorded.bin"
+    log.write_bytes(b"")
+    macos = platform.system() == "Darwin"
+    ctrl_shift = 0x40000 | 0x20000  # kCGEventFlagMaskControl | Shift
+    n_key = 45  # kVK_ANSI_N
+    focus_chords = [("n", "ctrl+shift", "FocusNext"), ("p", "ctrl+shift", "FocusPrev")]
+    if macos:
+        for mods in ("cmd+alt", "ctrl+cmd"):
+            for key, action in (
+                ("left", "FocusLeft"),
+                ("right", "FocusRight"),
+                ("up", "FocusUp"),
+                ("down", "FocusDown"),
+            ):
+                focus_chords.append((key, mods, action))
+
+    def focused(live: LiveKettle) -> object:
+        panes = [p for p in live.json_ctl("list_panes").get("panes", []) if isinstance(p, dict)]
+        hits = [p.get("id") for p in panes if p.get("focused")]
+        if len(hits) != 1:
+            raise SystemExit(f"zoomed-layout-keys smoke: expected one focused pane: {panes}")
+        return hits[0]
+
+    def visible_panes(live: LiveKettle) -> int:
+        # The active tab's visible layout: one pane while zoomed.
+        return len(live.json_ctl("ui_geometry").get("panes", []))  # type: ignore[arg-type]
+
+    def wait_screen(live: LiveKettle, pane: object, needle: str) -> None:
+        deadline = time.monotonic() + 15.0
+        while needle not in screen_text(live.json_ctl("read_screen", {"pane": pane})):
+            if time.monotonic() > deadline:
+                raise SystemExit(f"zoomed-layout-keys smoke: never saw {needle!r}")
+            time.sleep(0.1)
+
+    steps: List[Dict[str, object]] = []
+
+    def dispatch(live: LiveKettle, label: str, key: str, mods: str) -> Dict[str, object]:
+        result = live.json_ctl("dispatch_keybind", {"logical": key, "mods": mods})
+        steps.append({"label": label, "key": key, "mods": mods, "dispatch": result})
+        return result
+
+    def native_ctrl_shift_n(live: LiveKettle, label: str) -> bytes:
+        """A real Ctrl+Shift+N press; returns what the recorder read."""
+        if live.json_ctl("ui_geometry").get("window_focused") is not True:
+            live.screenshot(out / f"{label}-unfocused.png")
+            raise SystemExit(f"zoomed-layout-keys smoke: {label}: the window lost focus")
+        marker = len(log.read_bytes())
+        macos_chord(n_key, ctrl_shift, "zoomed-layout-keys smoke")
+        time.sleep(0.8)
+        return log.read_bytes()[marker:]
+
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        if macos:
+            focus_live_kettle_window(live)
+            deadline = time.monotonic() + 10.0
+            while live.json_ctl("ui_geometry").get("window_focused") is not True:
+                if time.monotonic() > deadline:
+                    live.screenshot(out / "focus-failed.png")
+                    raise SystemExit("zoomed-layout-keys smoke: the window never took focus")
+                time.sleep(0.1)
+        live.json_ctl("perform_action", {"action": "split_right"})
+        deadline = time.monotonic() + 10.0
+        while visible_panes(live) != 2:
+            if time.monotonic() > deadline:
+                raise SystemExit("zoomed-layout-keys smoke: the split never appeared")
+            time.sleep(0.1)
+        time.sleep(1.0)
+        owner = focused(live)
+        live.ctl("send_text", params={"pane": owner, "text": f"python3 '{recorder}' '{log}'\r"})
+        wait_screen(live, owner, "ZOOMKEYS-KITTY")
+        time.sleep(0.3)
+
+        # Unzoomed, the owner is the right pane: the cycling chords and the
+        # left chords have a pane to go to and move focus (then come back);
+        # right, up and down face the window's edge, so they reach the
+        # program just as in zoom.
+        for key, mods, action in focus_chords:
+            result = dispatch(live, f"split-{mods}-{key}", key, mods)
+            if key in ("right", "up", "down"):
+                if result.get("terminal_fallthrough") is not True or focused(live) != owner:
+                    raise SystemExit(f"zoomed-layout-keys smoke: edge {mods}+{key} must reach the program: {result}")
+                continue
+            if result.get("dispatched") is not True or result.get("action") != action:
+                raise SystemExit(f"zoomed-layout-keys smoke: unzoomed {mods}+{key} must run {action}: {result}")
+            if focused(live) != owner:
+                live.json_ctl("perform_action", {"action": "focus_next"})
+                if focused(live) != owner:
+                    live.json_ctl("perform_action", {"action": "focus_prev"})
+            if focused(live) != owner:
+                raise SystemExit("zoomed-layout-keys smoke: could not return focus to the owner")
+
+        live.json_ctl("perform_action", {"action": "toggle_zoom"})
+        deadline = time.monotonic() + 5.0
+        while visible_panes(live) != 1:
+            if time.monotonic() > deadline:
+                raise SystemExit("zoomed-layout-keys smoke: zoom did not hide the sibling")
+            time.sleep(0.1)
+
+        # Zoomed, kitty flags on: nowhere to go, so the program gets them.
+        for key, mods, action in focus_chords:
+            result = dispatch(live, f"zoomed-kitty-{mods}-{key}", key, mods)
+            if result.get("terminal_fallthrough") is not True or result.get("dispatched") is not False:
+                raise SystemExit(f"zoomed-layout-keys smoke: zoomed {mods}+{key} must reach the program: {result}")
+            if focused(live) != owner or visible_panes(live) != 1:
+                raise SystemExit(f"zoomed-layout-keys smoke: zoomed {mods}+{key} changed focus or zoom")
+
+        # The owner's report: Codex in a zoomed split shows "shift+← to
+        # answer". Shift+Arrow resize goes to a program that owns the keyboard
+        # in any layout, and a zoomed split must not swallow it.
+        result = dispatch(live, "zoomed-kitty-shift-left", "left", "shift")
+        if result.get("terminal_fallthrough") is not True or result.get("dispatched") is not False:
+            raise SystemExit(f"zoomed-layout-keys smoke: zoomed Shift+Left must reach the program: {result}")
+        if macos:
+            if live.json_ctl("ui_geometry").get("window_focused") is not True:
+                raise SystemExit("zoomed-layout-keys smoke: zoomed Shift+Left: the window lost focus")
+            marker = len(log.read_bytes())
+            macos_shift_arrow(123)
+            time.sleep(0.8)
+            got = log.read_bytes()[marker:]
+            steps.append({"label": "zoomed-kitty-shift-left-native", "recorded": got.hex()})
+            if b"\x1b[1;2D" not in got:
+                raise SystemExit(f"zoomed-layout-keys smoke: a real Shift+Left never reached the program: {got!r}")
+            if focused(live) != owner or visible_panes(live) != 1:
+                raise SystemExit("zoomed-layout-keys smoke: a native Shift+Left changed focus or zoom")
+
+        if macos:
+            # The real keyboard path: kitty flags 7 encode Ctrl+Shift+N as
+            # CSI 110(:78);6u, and the zoomed layout is untouched.
+            got = native_ctrl_shift_n(live, "zoomed-kitty-native")
+            steps.append({"label": "zoomed-kitty-native", "recorded": got.hex()})
+            if not re.search(rb"\x1b\[110(:78)?;6u", got):
+                raise SystemExit(f"zoomed-layout-keys smoke: Ctrl+Shift+N never reached the program: {got!r}")
+            if focused(live) != owner or visible_panes(live) != 1:
+                raise SystemExit("zoomed-layout-keys smoke: a native Ctrl+Shift+N changed focus or zoom")
+
+        # Zoomed, legacy encoding: the chords would arrive as other keys, so
+        # they stay Kettle's, and do nothing.
+        live.ctl("send_text", params={"pane": owner, "text": "l"})
+        wait_screen(live, owner, "ZOOMKEYS-LEGACY")
+        time.sleep(0.3)
+        for key, mods, action in focus_chords:
+            result = dispatch(live, f"zoomed-legacy-{mods}-{key}", key, mods)
+            if result.get("terminal_fallthrough") is not False or result.get("action") != action:
+                raise SystemExit(f"zoomed-layout-keys smoke: legacy {mods}+{key} must stay Kettle's: {result}")
+            if focused(live) != owner or visible_panes(live) != 1:
+                raise SystemExit(f"zoomed-layout-keys smoke: legacy {mods}+{key} changed focus or zoom")
+
+        if macos:
+            # Kettle keeps it and does nothing: no Ctrl+N (0x0e) reaches the
+            # program.
+            got = native_ctrl_shift_n(live, "zoomed-legacy-native")
+            steps.append({"label": "zoomed-legacy-native", "recorded": got.hex()})
+            if got:
+                raise SystemExit(f"zoomed-layout-keys smoke: legacy Ctrl+Shift+N leaked bytes: {got!r}")
+            if focused(live) != owner or visible_panes(live) != 1:
+                raise SystemExit("zoomed-layout-keys smoke: legacy Ctrl+Shift+N changed focus or zoom")
+
+        # The way out of zoom is always Kettle's.
+        result = dispatch(live, "unzoom", "x", "ctrl+shift")
+        if result.get("dispatched") is not True or result.get("action") != "ToggleZoom":
+            raise SystemExit(f"zoomed-layout-keys smoke: Ctrl+Shift+X must unzoom: {result}")
+        deadline = time.monotonic() + 5.0
+        while visible_panes(live) != 2:
+            if time.monotonic() > deadline:
+                raise SystemExit("zoomed-layout-keys smoke: Ctrl+Shift+X did not unzoom")
+            time.sleep(0.1)
+        live.ctl("send_text", params={"pane": owner, "text": "q"})
+    (out / "analysis.json").write_text(json.dumps({"steps": steps}, indent=2) + "\n")
     return out
 
 
@@ -19444,6 +19703,7 @@ def main() -> int:
             "zoom-keybind",
             "line-edit-chords",
             "alt-arrow-zoom",
+            "zoomed-layout-keys",
             "search-selection",
             "bell-flash",
             "default-window-size",
@@ -19600,6 +19860,9 @@ def main() -> int:
     if args.case in ("alt-arrow-zoom", "all"):
         out = run_alt_arrow_zoom(args.kettle, root)
         print(f"alt-arrow-zoom smoke: OK artifacts={out}")
+    if args.case in ("zoomed-layout-keys", "all"):
+        out = run_zoomed_layout_keys(args.kettle, root)
+        print(f"zoomed-layout-keys smoke: OK artifacts={out}")
     # macOS-only and driven through the real Dock via accessibility, so it is
     # deliberately out of "all".
     if args.case == "dock-menu":

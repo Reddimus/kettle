@@ -345,6 +345,17 @@ keyboard:
   prompt to jump to, nothing to scroll, one tab, no selection to extend. While
   the view is scrolled back into history they stay Kettle's, because a key
   sent to the program would snap the view to the bottom.
+- Pane focus (`Ctrl+Shift+N/P`, and `Cmd+Opt+Arrow` and `Ctrl+Cmd+Arrow` on
+  macOS) goes to the program when focus has nowhere to go: a zoomed split,
+  which shows only its focused pane, a tab with one pane, or no pane on that
+  side. It does so only while the program's keyboard protocol sends the chord
+  as itself: the kitty protocol for every one of them, or `modifyOtherKeys`
+  level 2 for `Ctrl+Shift+N/P`. Without either, `Ctrl+Shift+N` would arrive as
+  `Ctrl+N` and a Command chord as nothing, so they stay Kettle's. `Alt+Arrow`
+  on Linux and Windows falls through with nowhere to go for any program or
+  shell, unless you bind it yourself.
+- `Ctrl+Shift+X` (zoom) stays Kettle's: it is how a zoomed split comes back.
+  On a tab with one pane it does nothing.
 - Copy stays Kettle's: Codex reads `Ctrl+Shift+C` as `Ctrl+C`, which would
   discard its draft.
 - Every other chord stays Kettle's, and so do all of them while broadcast
