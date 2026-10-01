@@ -131,14 +131,40 @@ done+3 and done+20), and sessions with different offsets never combine.
 
 `--workloads latency` adds a keystroke-to-screen workload. It is never in the
 default list: it posts key presses, and it needs the machine to itself and two
-macOS grants for its probe. Run `--latency-check` once to build the probe, ask
-for the grants and check them. Pass `--latency-sign-identity` (for example
-`"Apple Development"`) to sign the probe with a certificate: macOS keys the
-grants to the probe's signature, so an ad hoc probe needs new grants after
-every rebuild. The probe rebuilds only when its source or identity changes. A
-rebuilt probe can also make macOS ask once more, on screen, to let it bypass
-the private window picker; the probe posts nothing while any window covers the
-measured block.
+macOS grants for its probe. Prepare it explicitly with
+`--latency-check --rebuild-latency-probe` before the grant/source freeze.
+This builds a scratch bundle, signs and verifies it, runs its pure self-test,
+then publishes it with a private version-2 build receipt outside the seal.
+`--rebuild-latency-probe` is valid only with `--latency-check`. Later checks
+reuse the verified app. Normal runs never rebuild, re-sign or request grants.
+An absent, legacy, malformed, incomplete or changed cache is refused before
+check, request, self-test or measurement. A legacy source-only receipt cannot
+be promoted from cached bytes. It needs one explicit trusted rebuild.
+
+The receipt binds the source and exact generated plist, compiler and SDK
+identities, build command, executable, bundle paths/modes/bytes, identifier,
+empty entitlement set, seal and signature requirement. A valid signature on
+a replacement app is insufficient. Preparation publishes the receipt last
+under a preparation/use lock, so interruption cannot accept a half-built app.
+A campaign holds that lock and revalidates outside each probe invocation's
+measured epoch. File identities around hashing also detect replacement during
+use. A private locked invocation lease lets the probe stop posting and exit
+on cancellation or owner exit; the harness reaps its own `open` child.
+
+`tool_hashes.latency-probe` identifies the verified bundle bytes.
+`tool_artifacts.latency-probe` and latency rows retain its bundle/executable
+hashes, separate source hash, identifier, CDHash and signing mode. Absolute
+paths, signing identity, team and certificate details remain in the private
+receipt and local manifest. These checks cover harness-owned builds and
+accidental or concurrent replacement. They do not attest against a same-user
+attacker who can replace both the receipt and the harness.
+
+macOS keys grants to the probe signature. An ad-hoc rebuild may require new
+grants, including the private window-picker approval. Freeze the producer
+before the owner grants it. `--latency-sign-identity` selects a local
+certificate as an explicit owner choice; use the same choice on subsequent
+checks and campaigns. Refusal does not repair a cache or prompt. The probe
+posts nothing while another window covers the measured block.
 
 - **The payload.** Every terminal runs the same `keyblock`, reading
   `/dev/tty` in raw mode with the cursor hidden and steady. Each byte it
