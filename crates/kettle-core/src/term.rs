@@ -917,6 +917,8 @@ impl PtyReadProgressState {
     }
 
     fn set_status(&self, status: PtyReadStatus) {
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        #[allow(deprecated)]
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -925,6 +927,8 @@ impl PtyReadProgressState {
     }
 
     fn mark_chunk_read(&self) -> u64 {
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        #[allow(deprecated)]
         let previous = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -940,6 +944,8 @@ impl PtyReadProgressState {
     }
 
     fn mark_chunk_handled(&self) {
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        #[allow(deprecated)]
         let _ = self
             .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {

@@ -391,14 +391,14 @@ impl PtyInputQueue {
             }
             return PaneInputResult::Oversize;
         }
-        if queued_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(bytes.len())
-                    .filter(|next| *next <= max_queued_bytes)
-            })
-            .is_err()
-        {
+        // Rust 1.99 renames fetch_update to try_update; the MSRV (1.89) predates it.
+        #[allow(deprecated)]
+        let reserved = queued_bytes.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(bytes.len())
+                .filter(|next| *next <= max_queued_bytes)
+        });
+        if reserved.is_err() {
             if fail_on_reject {
                 self.fail();
                 return PaneInputResult::Failed;
