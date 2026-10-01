@@ -2361,7 +2361,7 @@ class StartupPhases(unittest.TestCase):
         self.assertIn("-29.0 ms", text)
 
 
-KEYBLOCK_SHA256 = "628ab3d3c1b5a265a1aa36d77c530ce80594ad65ca7feed4c445468a836e839e"
+KEYBLOCK_SHA256 = "57720778868c53a6aa982ebc5cc720ed7cd3092bd009b59ec0efb021d2333150"
 
 
 def latency_run(samples, censored=0, refresh=60, keys=None, **extra):
@@ -2444,6 +2444,99 @@ class Latency(unittest.TestCase):
             self.assertEqual(nbytes, 1)
             self.assertLessEqual(t_read, t_written)
         self.assertLess(records[1][2], records[2][1])
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_keyblock_cursor_mode_waits_on_a_real_terminal(self) -> None:
+        # macOS poll() reports POLLNVAL for a /dev/tty descriptor; cursor mode
+        # once polled it and exited at once in every terminal, so no live
+        # cursor round could run.
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('controlling-terminal native test needs an unrestricted runner')
+        import os
+        import pty
+        import select
+        import subprocess
+        import time as clock
+
+        binary = self.root / "keyblock"
+        subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "keyblock.c")], check=True)
+        log, control, ack = self.root / "log", self.root / "control", self.root / "ack"
+        os.mkfifo(control, 0o600)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(str(binary), [str(binary), str(log), "cursor", str(control), str(ack), "20000"])
+
+        def read_until(marker: bytes, timeout: float = 5.0) -> bytes:
+            data = b""
+            deadline = clock.monotonic() + timeout
+            while marker not in data and clock.monotonic() < deadline:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        data += os.read(fd, 4096)
+                    except OSError:
+                        break
+            return data
+
+        try:
+            self.assertIn(b"\x1b[?25l\x1b[2 q", read_until(b"\x1b[0m"))
+            clock.sleep(1.0)
+            self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0), "cursor mode must keep waiting")
+            for _ in range(6):
+                os.write(fd, b"j")
+                self.assertIn(b"\x1b[0m", read_until(b"\x1b[0m"), "each calibration flip draws")
+            # Nonblocking: a payload that has gone has no reader, and this
+            # fails at once instead of waiting forever for one.
+            request = os.open(control, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(request, b"ENABLE\n")
+            finally:
+                os.close(request)
+            self.assertIn(b"\x1b[?25h\x1b[1 q\x1b[2;3H", read_until(b"\x1b[2;3H"))
+            deadline = clock.monotonic() + 5
+            while not ack.exists() and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+            self.assertRegex(ack.read_text(), r"^ENABLED [0-9]+\n$")
+            os.write(fd, b"j")
+            self.assertIn(b"\x1b[2;3H", read_until(b"\x1b[2;3H"), "a measured flip parks the visible cursor")
+            self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0))
+        finally:
+            os.close(fd)
+            os.waitpid(pid, 0)
+        records = standing.read_keyblock_log(log)
+        self.assertEqual(sorted(records), list(range(1, 8)))
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("clang"), "needs macOS and clang")
+    def test_keyblock_cursor_mode_refuses_a_stdin_that_is_not_its_terminal(self) -> None:
+        # It waits on standard input, so that must be the terminal it draws on.
+        if SNAPSHOT_LAYOUT:
+            self.skipTest('controlling-terminal native test needs an unrestricted runner')
+        import os
+        import pty
+        import subprocess
+        import time as clock
+
+        binary = self.root / "keyblock"
+        subprocess.run(["clang", "-O", "-o", str(binary), str(HERE / "macos-standing" / "keyblock.c")], check=True)
+        control = self.root / "control"
+        os.mkfifo(control, 0o600)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+            os.execv(str(binary), [str(binary), str(self.root / "log"), "cursor", str(control),
+                                   str(self.root / "ack"), "20000"])
+        try:
+            deadline = clock.monotonic() + 5
+            status = (0, 0)
+            while status == (0, 0) and clock.monotonic() < deadline:
+                clock.sleep(0.02)
+                status = os.waitpid(pid, os.WNOHANG)
+            self.assertNotEqual(status, (0, 0), "a non-terminal stdin must refuse at once")
+            self.assertEqual(os.waitstatus_to_exitcode(status[1]), 1)
+        finally:
+            os.close(fd)
+            if status == (0, 0):
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
 
     def test_a_torn_log_record_is_dropped(self) -> None:
         path = self.root / "log"
@@ -4052,6 +4145,63 @@ class ConfigClosureTests(unittest.TestCase):
             with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared'):
                 closure.check()
 
+    def test_kettle_runtime_spool_is_state_not_configuration(self):
+        # Kettle 4.8.0 creates both files in its config directory at startup;
+        # the first live pilot refused every row on them.
+        closure = self.capture()
+        kettle = closure.work / 'xdg/kettle'
+        for name in ('remote.cmd', 'remote.cmd.lock'):
+            (kettle / name).write_bytes(b'')
+        closure.check()
+        (kettle / 'remote.cmd').write_text('send-text-json "x"\n')
+        with self.assertRaisesRegex(standing.ConfigClosureError, '^config closure: remote command spool not empty$'):
+            closure.check()
+        (kettle / 'remote.cmd').unlink()
+        (kettle / 'remote.cmd').symlink_to(kettle / 'remote.cmd.lock')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'not empty'):
+            closure.check()
+        (kettle / 'remote.cmd').unlink()
+        (kettle / 'remote.cmd').mkdir()
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'not empty'):
+            closure.check()
+        (kettle / 'remote.cmd').rmdir()
+        # Only these names, only in Kettle's directory.
+        (kettle / 'session.json').write_bytes(b'')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared'):
+            closure.check()
+        (kettle / 'session.json').unlink()
+        closure.check()
+        (closure.work / 'xdg/ghostty/remote.cmd').write_bytes(b'')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared'):
+            closure.check()
+
+    def test_peer_config_directories_may_exist_only_empty(self):
+        # kitty creates xdg/kitty even with --config NONE; the first live
+        # sweep refused every kitty row on it.
+        closure = self.capture()
+        for name in ('kitty', 'wezterm', 'alacritty'):
+            (closure.work / 'xdg' / name).mkdir()
+        closure.check()
+        (closure.work / 'xdg/kitty/kitty.conf').write_text('background #ff0000\n')
+        with self.assertRaisesRegex(standing.ConfigClosureError, '^config closure: undeclared config root$'):
+            closure.check()
+        (closure.work / 'xdg/kitty/kitty.conf').unlink()
+        closure.check()
+        (closure.work / 'xdg/wezterm').rmdir()
+        (closure.work / 'xdg/wezterm').write_text('')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/wezterm').unlink()
+        (closure.work / 'xdg/wezterm').symlink_to(closure.work / 'xdg/kitty')
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/wezterm').unlink()
+        (closure.work / 'xdg/fish').mkdir()
+        with self.assertRaisesRegex(standing.ConfigClosureError, 'undeclared config root'):
+            closure.check()
+        (closure.work / 'xdg/fish').rmdir()
+        closure.check()
+
     def test_pr3_source_mutation_cannot_change_consumed_bytes(self):
         closure = self.capture()
         snapshot = Path(closure.local['kettle']['mapping'][0]['snapshot'])
@@ -4812,7 +4962,7 @@ class CursorLayerEvidence(unittest.TestCase):
 
 class OutputBlink(unittest.TestCase):
     """Portable PR 4 contracts; native fixture tests never launch a GUI."""
-    def native_fixture(self, name, data=None):
+    def native_fixture(self, name, data=None, offsets=False):
         """Compile the changed source and execute only its GUI-free entry."""
         import tempfile
         if sys.platform != 'darwin' or not shutil.which('clang') or not shutil.which('swiftc'):
@@ -4830,6 +4980,18 @@ class OutputBlink(unittest.TestCase):
             self.assertEqual(build.returncode, 0, build.stderr)
             result = subprocess.run([str(binary), '--self-test'], input=data, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
+            if offsets:
+                valid = [('0', 1), ('0,5900,6000,6100,6200,6300,6400,6500', 8), ('0,6000', 2),
+                         (','.join(map(str, range(64))), 64), ('1,60000', 2), ('000000,000001', 2)]
+                invalid = [('', 1), ('0,0', 2), ('1,0', 2), ('-1', 1), ('+1', 1), (' 1', 1),
+                           ('1 ', 1), ('1,', 1), (',1', 1), ('1,,2', 2), ('1.0', 1), ('60001', 1),
+                           ('999999999999999999999999999', 1), ('0,1', 1), ('0', 2),
+                           (','.join(map(str, range(65))), 65), ('0', '1junk')]
+                for text, count in valid + invalid:
+                    parsed = subprocess.run([str(binary), '--self-test-offsets', text, str(count)],
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertEqual(parsed.returncode, 0 if (text,count) in valid else 2, (text,count,parsed.stderr))
+                return result
             if name == 'latency-probe':
                 for blink, expected in [(True,dict(posts=0,captures=1)),(False,dict(posts=1,captures=0))]:
                     output=Path(tmp)/'dispatch.json'
@@ -5054,6 +5216,62 @@ class OutputBlink(unittest.TestCase):
             window_id=7,target_window_id=7,native_display={'width_pt':1920},cursor_rect=[1.,2.,3.,4.],
             frames=[dict(t_ns=12_500_000_000+i*100_000_000,arrival_ns=12_499_000_000+i*100_000_000,sha256=str(i//5%2)*64,visible=True,frame_status='complete') for i in range(61)])
 
+    def test_each_ab_side_takes_its_own_validation(self):
+        # A validation certifies one binary, so a Kettle A/B (the C2 gate,
+        # D2's 4.8.0 against 4.9.0) names one file per side.
+        import hashlib, tempfile
+        side_b = dict(self.setup(), binary_sha256='e'*64)
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp)/'a.json', Path(tmp)/'b.json'
+            a.write_text(_json.dumps(self.capture()))
+            b.write_text(_json.dumps(dict(self.capture(), setup=side_b)))
+            for setup, expected in ((self.setup(), a), (side_b, b)):
+                for order in ([str(a), str(b)], [str(b), str(a)]):
+                    path, activity, evidence = standing.hc.select_validation(order, setup)
+                    self.assertEqual((Path(path), activity), (expected, 'verified'))
+                    self.assertEqual(evidence['content_sha256'], hashlib.sha256(expected.read_bytes()).hexdigest())
+            path, activity, evidence = standing.hc.select_validation([str(a)], side_b)
+            self.assertEqual((path, activity), (None, 'unproven'))
+            self.assertIsNotNone(evidence['reason'])
+            self.assertEqual(standing.hc.select_validation(str(b), side_b)[1], 'verified')
+            self.assertEqual(standing.hc.select_validation(None, side_b), (None, 'unproven', None))
+            self.assertEqual(standing.hc.select_validation([], side_b), (None, 'unproven', None))
+
+    def test_an_unreadable_validation_file_refuses_before_launch(self):
+        import builtins, contextlib, io, tempfile
+        from unittest.mock import patch
+        real_open = builtins.open
+        with tempfile.TemporaryDirectory() as tmp:
+            locked = Path(tmp)/'locked.json'; locked.write_text('{}')
+            def denied(path, *args, **kwargs):
+                if str(path) == str(locked):
+                    raise PermissionError('denied')
+                return real_open(path, *args, **kwargs)
+            with patch.object(sys, 'argv', ['standing', '--no-build', '--blink-validation', str(locked)]), \
+                 patch.object(builtins, 'open', side_effect=denied), \
+                 patch.object(standing, 'build_probes') as build, contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as raised: standing.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn('--blink-validation file is unreadable', err.getvalue())
+            build.assert_not_called()
+
+    def test_validation_files_repeat_and_refuse_a_missing_name(self):
+        import contextlib, io, tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp)/'a.json'; real.write_text('{}')
+            for flags in (['--blink-validation', str(real), '--blink-validation', str(Path(tmp)/'missing.json')],
+                          ['--blink-validation', tmp],
+                          ['--blink-validate-only', '--blink-cursor-rect', '1,2,3,4', '--blink-shape', 'block',
+                           '--blink-timeout', '10', '--blink-validation-before', str(Path(tmp)/'missing.json')]):
+                with self.subTest(flags=flags), patch.object(sys, 'argv', ['standing', '--no-build', *flags]), \
+                     patch.object(standing, 'build_probes') as build, contextlib.redirect_stderr(io.StringIO()) as err:
+                    with self.assertRaises(SystemExit) as raised: standing.main()
+                    self.assertEqual(raised.exception.code, 2)
+                    self.assertIn('--blink-validation', err.getvalue())
+                    self.assertNotIn(tmp, err.getvalue())
+                    build.assert_not_called()
+
     def test_blink_peak_activity_evidence_and_noninjecting(self):
         import tempfile,copy
         samples=self.samples(origin=12_500_000_000,count=63)
@@ -5210,6 +5428,39 @@ class OutputBlink(unittest.TestCase):
                 time.sleep(1.6)
 
     @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_native_launch_accepts_sparse_observer_request(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);binary=work/'launch'
+            subprocess.run(['swiftc','-O','-o',str(binary),str(HERE/'macos-standing'/'launch.swift')],check=True)
+            context=work/'context';stamp=work/'stamp';env=dict(os.environ,KETTLE_HC_LAUNCH_CONTEXT=str(context))
+            fixture=work/'fixture'
+            code=work/'fixture.c';code.write_text('#include <unistd.h>\nint main(void){usleep(1500000);return 0;}\n')
+            subprocess.run(['clang','-O','-o',str(fixture),str(code)],check=True)
+            process=subprocess.Popen([str(binary),str(work/'result'),str(stamp),'3','--','/bin/sleep','.5'],env=env)
+            try:
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    pid_file=Path(str(stamp)+'.pid')
+                    if pid_file.exists() and pid_file.read_text().strip().isdigit():break
+                    time.sleep(.01)
+                pid=int(Path(str(stamp)+'.pid').read_text())
+                # A command-line fixture standing in for the observer. Its PID
+                # is owned by the same launch helper, which must reap it first.
+                request=Path(str(context)+'.observer-request')
+                request.write_text(_json.dumps([str(fixture),str(pid),'0','unused','0','100','5','0,100,200,300,400']))
+                receipt=Path(str(context)+'.observer-reaped')
+                process.wait(timeout=5)
+                self.assertTrue(receipt.exists(), 'target released before observer reap')
+                self.assertFalse(Path(str(stamp)+'.pid').exists())
+            finally:
+                if process.poll() is None:process.terminate()
+                process.wait(timeout=5)
+                # The deliberately reverted fixture observer exits by itself.
+                # Never signal an orphan after its owner released the PID.
+                time.sleep(1.6)
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
     def test_native_launch_parent_loss_before_observer_registration(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
@@ -5240,10 +5491,15 @@ class OutputBlink(unittest.TestCase):
                 target=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);children.append(target)
                 trace=work/'observer.jsonl'
                 observer=subprocess.Popen([str(helpers['observer']),str(target.pid),'0',str(trace),
-                    str(standing.hc.now_ns()+1_000_000_000),'100','5']);children.append(observer)
+                    str(standing.hc.now_ns()+1_000_000_000),'100','5'],
+                    env=dict(os.environ,KETTLE_HC_OBSERVER_SELF_COST='1'));children.append(observer)
                 observer.wait(timeout=5)
                 rows=standing.hc.read_jsonl(trace)
                 self.assertEqual(len(rows),5)
+                cost=_json.loads(Path(str(trace)+'.self.json').read_text())
+                self.assertEqual(set(cost),{'cpu_ns','wakeups','query_count'})
+                self.assertEqual(cost['query_count'],5)
+                self.assertTrue(all(type(v) is int and v >= 0 for v in cost.values()))
                 self.assertTrue(all(s['status']=='ok' and s['pid']==target.pid for s in rows))
                 self.assertIsNone(standing.hc.trace_reason(rows,target.pid,0))
                 self.assertTrue(all(not standing.hc.visible(s,target.pid,0) for s in rows))
@@ -6086,9 +6342,14 @@ class CursorLatency(unittest.TestCase):
             root=Path(tmp);source=root/'socket-payload.c';binary=root/'socket-payload'
             source.write_text('#include <fcntl.h>\n#include <termios.h>\n#include <unistd.h>\n'
                 'int scratch_open(const char*,int,...);\nint scratch_get(int,struct termios*);\nint scratch_set(int,int,const struct termios*);\n'
+                'int scratch_isatty(int);\npid_t scratch_sid(int);\n'
                 '#define open scratch_open\n#define tcgetattr scratch_get\n#define tcsetattr scratch_set\n'
+                '#define isatty scratch_isatty\n#define tcgetsid scratch_sid\n'
                 '#define main payload_main\n#include '+_json.dumps(str(HERE/'macos-standing/keyblock.c'))+
-                '\n#undef main\n#undef open\n#undef tcgetattr\n#undef tcsetattr\n#include <stdarg.h>\n'
+                '\n#undef main\n#undef open\n#undef tcgetattr\n#undef tcsetattr\n#undef isatty\n#undef tcgetsid\n#include <stdarg.h>\n'
+                # The socket stands in for this session's controlling terminal.
+                'int scratch_isatty(int fd){(void)fd;return 1;}'
+                'pid_t scratch_sid(int fd){(void)fd;return getsid(0);}'
                 'int scratch_open(const char *p,int flags,...){if(!strcmp(p,"/dev/tty"))return dup(0);'
                 'if(flags&O_CREAT){va_list ap;va_start(ap,flags);int mode=va_arg(ap,int);va_end(ap);return open(p,flags,mode);}return open(p,flags);}'
                 'int scratch_get(int fd,struct termios *t){(void)fd;memset(t,0,sizeof *t);return 0;}'
@@ -6657,6 +6918,646 @@ class PublicationFreeze(unittest.TestCase):
         with self.assertRaises(ValueError):standing.publication.strict_json(path/'results.json')
         overflow=self.root/'overflow.json';overflow.write_text('{"value":1e999}')
         with self.assertRaises(ValueError):standing.publication.strict_json(overflow)
+
+class ObserverPilot(unittest.TestCase):
+    def fixture(self, kind='typing', differences=None, names=None):
+        differences = [0.] * 10 if differences is None else differences
+        names = ['kettle', 'ghostty'] if names is None else names
+        p = standing.publication
+        fields = p.PILOT_BOUNDS[kind]
+        rows = {}
+        for name in names:
+            rows[name] = []
+            for pair, diff in enumerate(differences):
+                for order, arm in enumerate(('on', 'off') if pair % 2 == 0 else ('off', 'on')):
+                    row = dict(observer_pair=pair, observer_arm=arm, observer_order=order)
+                    for field in fields:
+                        value = 10. + (diff if arm == 'on' else 0.)
+                        if kind == 'typing':
+                            row.update(samples_ms=[value] * 2, censored=0, keys=2)
+                            # As collected: only the on arm runs the observer.
+                            row.update(typing_memory_valid=arm == 'on',
+                                       typing_memory_reason=None if arm == 'on' else 'observer off (pilot arm)')
+                        else:
+                            row[field] = value
+                            row.setdefault('metric_validity', {})[field] = dict(valid=True, reason=None,
+                                expected=1, observed=1, capability_version=standing.hc.CONTRACT)
+                            row['blink_activity'] = 'verified'
+                    row['observer_cost'] = dict(cpu_ns=100, wakeups=3, query_count=80,
+                        query_duration_median_ms=.001, query_duration_max_ms=.002,
+                        deadline_lateness_max_ms=.01, target_cpu_delta_ns=1000, target_wakeups_delta=10)
+                    rows[name].append(row)
+        return dict(schema=3, evidence_contract='hc-v1', terminals=names, context='fixture',
+            meta=dict(kind='observer-pilot', observer_pilot=dict(kind=kind, pairs=len(differences), bounds=fields),
+                      complete=True, countable=False, refusals=['observer pilot (diagnostic)'], date='2026-10-01',
+                      mode='standing', rounds={p.PILOT_WORKLOADS[kind]: len(differences)*2},
+                      latency=dict(keys=2, censor_ms=500)), workloads={p.PILOT_WORKLOADS[kind]: rows})
+
+    def report(self, raw):
+        return standing.publication.observer_pilot_report(standing._publication_host(), raw)
+
+    def test_typing_on_arm_counts_only_with_its_observer_through_the_epoch(self):
+        # Timing survives an observer that stopped after its readiness query;
+        # that arm no longer measures "observer on", so its pair cannot count.
+        for reason in ('insufficient typing memory duration', 'native query failed or target exited', None):
+            raw = self.fixture()
+            on = next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair'] == 3 and r['observer_arm'] == 'on')
+            on.update(typing_memory_valid=False, typing_memory_reason=reason)
+            report = self.report(raw)
+            metric = report['terminals']['kettle']['metrics']['mean_ms']
+            self.assertEqual(metric['invalid_pairs_by_reason'], {'on-arm observer evidence invalid': 1})
+            self.assertEqual((metric['valid_pairs'], metric['equivalent']), (9, False))
+            self.assertFalse(report['equivalent'])
+            self.assertTrue(report['terminals']['ghostty']['equivalent'])
+        # The off arm never runs an observer; its unavailable memory is expected.
+        self.assertTrue(self.report(self.fixture())['equivalent'])
+
+    def test_cli_selects_pilot_and_forces_block_entries(self):
+        import contextlib, io
+        from unittest.mock import patch
+        class Prepared(Exception): pass
+        for kind, workload in [('typing', 'latency'), ('printing', 'output-memory'), ('blink', 'blink-window')]:
+            args = ['standing', '--observer-pilot', kind, '--no-build', '--peers', '', '--kettle', 'fixture', '--allow-bare']
+            # The typing pilot checks the prepared probe first; a runner
+            # without one (CI) must still reach the selection under test.
+            with patch.object(sys, 'argv', args), patch.object(sys, 'platform', 'darwin'), \
+                 patch.object(standing, 'require_bundles'), \
+                 patch.object(standing, 'probe_lock', return_value=contextlib.nullcontext()), \
+                 patch.object(standing, 'validate_latency_probe'), \
+                 patch.object(standing, 'resolve_rounds', wraps=standing.resolve_rounds) as resolve, \
+                 patch.object(standing, 'latency_entries', wraps=standing.latency_entries) as entries, \
+                 patch.object(standing, 'build_probes', side_effect=Prepared), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(Prepared): standing.main()
+            options = resolve.call_args.args[0]
+            self.assertEqual(options.workloads, workload)
+            self.assertEqual(options.observer_pairs, 10)
+            self.assertEqual(options.rounds, 20)
+            self.assertEqual(options.latency_floors, '')
+            self.assertFalse(options.latency_kettle_opaque)
+            self.assertEqual(entries.call_args_list[0].args[2:4], (False, []))
+
+    def test_mocked_campaign_metadata_artifacts_and_public_privacy(self):
+        import contextlib, tempfile, io
+        from unittest.mock import patch
+        for kind in ('typing','printing','blink'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp).resolve();out=root/'pilot'
+                workload=standing.publication.PILOT_WORKLOADS[kind]
+                raw=self.fixture(kind, differences=[0.,0.], names=['kettle'])
+                calls=[]
+                def result(name,options,seed,keep):
+                    pair=len(calls)//2;order=len(calls)%2
+                    arm=options['observer_arm']
+                    calls.append((name,arm,seed,dict(options)))
+                    row=dict(raw['workloads'][workload]['kettle'][pair*2+order])
+                    keep.write_text('private raw artifact')
+                    (out/'private-config/grid').write_text('120 36\n')
+                    return row
+                def latency(runner,name,options,seed,keep):return result(name,options,seed,keep)
+                def optional(runner,name,mode,options,keep,setup):
+                    self.assertEqual(mode,workload)
+                    return result(name,options,None,keep.with_suffix('.jsonl'))
+                state=dict(display={'fixture':1},power={},low_power=False,load=[0.,0.],procs=[])
+                args=['standing','--observer-pilot',kind,'--observer-pairs','2','--peers','',
+                      '--kettle','/fixture/A.app/Contents/MacOS/kettle','--no-build','--fd-limit','0',
+                      '--latency-keys','2','--out-dir',str(out)]
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(sys,'argv',args))
+                    stack.enter_context(patch.object(sys,'platform','darwin'))
+                    stack.enter_context(patch.dict(os.environ,{'HOME':str(root)}))
+                    for name,value in [('require_bundles',None),('build_probes',{}),('probe_tool_identity',({},{})),
+                                       ('collect_preflight',state),('preflight_refusals',[]),('command','fixture'),
+                                       ('harness_revision',{}),('terminal_identity',({'sha256':'same'},dict(path='/Users/private-owner/private@email.test'))),
+                                       ('file_sha256','a'*64),('latency_grants',{'screen_recording':True,'accessibility':True}),
+                                       ('validate_latency_probe',{}),('start_caffeinate',None)]:
+                        stack.enter_context(patch.object(standing,name,return_value=value))
+                    stack.enter_context(patch.object(standing,'probe_lock',return_value=contextlib.nullcontext()))
+                    stack.enter_context(patch.object(standing.hc,'build_helpers',return_value={'latency-probe':Path('/fixture-probe')}))
+                    stack.enter_context(patch.object(standing.Runner,'latency',latency))
+                    stack.enter_context(patch.object(standing.hc,'collect',optional))
+                    stack.enter_context(patch.object(standing.Runner,'stop_current'))
+                    stack.enter_context(patch.object(standing.subprocess,'Popen',side_effect=AssertionError('no launches')))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    self.assertEqual(standing.main(),0)
+                measured=_json.loads((out/'results.json').read_text())
+                self.assertEqual(measured['meta']['kind'],'observer-pilot')
+                self.assertEqual(measured['meta']['observer_pilot'],raw['meta']['observer_pilot'])
+                self.assertFalse(measured['meta']['countable'])
+                self.assertTrue(measured['meta']['complete'])
+                self.assertEqual(measured['meta']['rounds'],{workload:4})
+                self.assertEqual(measured['terminals'],['kettle'])
+                self.assertEqual([c[1] for c in calls],['on','off','off','on'])
+                if kind=='typing':self.assertEqual([c[2] for c in calls],[standing.SEED*1000]*2+[standing.SEED*1000+1]*2)
+                for filename in ('results.json','summary.md','observer-equivalence.json'):
+                    text=(out/filename).read_text()
+                    self.assertNotIn('private-owner',text)
+                    self.assertNotIn('private@email.test',text)
+                    self.assertNotIn(str(root),text)
+                self.assertIn('private-owner',(out/'local-manifest.json').read_text())
+                self.assertTrue(_json.loads((out/'observer-equivalence.json').read_text())['equivalent'])
+
+    def test_self_cost_environment_is_pilot_only(self):
+        import tempfile
+        from unittest.mock import Mock, patch
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            runner=standing.Runner({'launch':work/'launch','stamp':work/'stamp'},work,{'kettle':'fixture'})
+            with patch.dict(os.environ,{'KETTLE_HC_OBSERVER_SELF_COST':'private-sentinel'}), \
+                 patch.object(standing.subprocess,'Popen',return_value=Mock()) as spawn:
+                runner.launch('kettle','true',1)
+                self.assertNotIn('KETTLE_HC_OBSERVER_SELF_COST',spawn.call_args.kwargs['env'])
+                runner.observer_pilot=True
+                runner.launch('kettle','true',1)
+                self.assertEqual(spawn.call_args.kwargs['env']['KETTLE_HC_OBSERVER_SELF_COST'],'1')
+
+    def test_cli_conflicts_refuse_before_side_effects(self):
+        import contextlib, io
+        from unittest.mock import patch
+        for extra in (['--observer-pairs', '1'], ['--observer-pairs', '0'], ['--kettle-b', 'B'],
+                      ['--kettle-b-config', 'opacity=1'], ['--workloads', 'latency-cursor'],
+                      ['--workloads', 'idle'], ['--latency-payload', 'cursor'], ['--rounds', '3'],
+                      ['--latency-rounds', '10'], ['--blink-validate-only'], ['--observer-control', 'x'],
+                      ['--combine', 'x'], ['--aa', 'x'], ['--startup-phases'], ['--latency-check']):
+            with self.subTest(extra=extra), patch.object(sys, 'argv', ['standing', '--observer-pilot', 'typing', *extra]), \
+                 patch.object(standing, 'build_probes') as build, contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as raised: standing.main()
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn('observer', err.getvalue())
+                self.assertNotIn('unrecognized arguments', err.getvalue())
+                build.assert_not_called()
+
+    def test_balanced_rotated_plan_and_identical_seeds(self):
+        plan = list(standing.observer_plan(['kettle', 'ghostty', 'kitty'], 10))
+        self.assertEqual(len(plan), 60)
+        for i in range(10):
+            batch = plan[i*6:(i+1)*6]
+            self.assertEqual([r[0] for r in batch[::2]], standing.rotated(['kettle', 'ghostty', 'kitty'], i))
+            for first, second in zip(batch[::2], batch[1::2]):
+                self.assertEqual([first[1], second[1]], ['on', 'off'] if i % 2 == 0 else ['off', 'on'])
+                self.assertEqual(first[2:], (i, 0, standing.SEED*1000+i))
+                self.assertEqual(second[2:], (i, 1, standing.SEED*1000+i))
+
+    def test_cancelled_attempt_is_retained_before_stopping(self):
+        import tempfile, contextlib, io
+        from unittest.mock import Mock, patch
+        for exception in (KeyboardInterrupt(),SystemExit('/Users/private-owner/sentinel')):
+            raw=self.fixture(names=['kettle'],differences=[0.,0.]);raw['workloads']={}
+            recorder=Mock();closure=Mock();collect=Mock(side_effect=exception)
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(standing,'round_grid',return_value=((120,36),(120,36))), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(type(exception)):
+                    standing.run_observer_pilot(raw,['kettle'],2,collect,closure,recorder,Path(tmp),Path(tmp))
+            rows=raw['workloads']['latency']['kettle']
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]['error'],'observer pilot collection cancelled')
+            self.assertEqual(rows[0]['observer_arm'],'on')
+            recorder.write.assert_called_once();collect.assert_called_once()
+            self.assertNotIn('private-owner',_json.dumps(raw))
+
+    def test_typing_on_observer_failure_cannot_pass_equivalence(self):
+        import tempfile, contextlib, io
+        from unittest.mock import Mock, patch
+        for reason in ('typing observer readiness missing','typing timeline unavailable or invalid',
+                       'typing launch context unavailable or invalid'):
+            raw=self.fixture(names=['kettle'],differences=[0.,0.]);raw['workloads']={}
+            def collect(name,arm,pair,seed):
+                return dict(samples_ms=[1.,1.],censored=0,keys=2,
+                    typing_memory_reason=reason if arm=='on' else 'observer off (pilot arm)')
+            with tempfile.TemporaryDirectory() as tmp, \
+                 patch.object(standing,'round_grid',return_value=((120,36),(120,36))), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                standing.run_observer_pilot(raw,['kettle'],2,collect,Mock(),Mock(),Path(tmp),Path(tmp))
+            report=self.report(raw)
+            metric=report['terminals']['kettle']['metrics']['mean_ms']
+            self.assertFalse(report['equivalent'])
+            self.assertEqual(metric['valid_pairs'],0)
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':2})
+            self.assertEqual(metric['reason'],'insufficient valid pairs')
+            self.assertEqual(sum('error' in r for r in raw['workloads']['latency']['kettle']),2)
+
+    def test_runner_keeps_failures_without_retries_or_cutoff(self):
+        import tempfile
+        from unittest.mock import Mock, patch
+        raw = self.fixture(names=['kettle', 'kitty'], differences=[0., 0.])
+        raw['workloads'] = {}
+        recorder, closure = Mock(), Mock()
+        calls = []
+        def collect(name, arm, pair, seed):
+            calls.append((name, arm, pair, seed))
+            (work/'typing-memory.jsonl.self.json').write_text(_json.dumps(dict(cpu_ns=10,wakeups=1,
+                query_count=1,path='/Users/private-owner/sentinel')))
+            if len(calls) == 1: raise RuntimeError('/Users/private-owner/sentinel')
+            return {'error': 'calibration failed'}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(standing, 'round_grid', return_value=((120, 36), (120, 36))):
+            work = Path(tmp)
+            standing.run_observer_pilot(raw, raw['terminals'], 2, collect, closure, recorder, work, work)
+            saved=list(work.glob('latency-*-p*-on.self.json'))
+            self.assertEqual(len(saved),4)
+            self.assertFalse(list(work.glob('latency-*-p*-off.self.json')))
+            for path in saved:
+                self.assertEqual(set(_json.loads(path.read_text())),{'cpu_ns','wakeups','query_count'})
+                self.assertNotIn('private-owner',path.read_text())
+        self.assertEqual(len(calls), 8)
+        self.assertEqual(closure.check.call_count, 16)
+        self.assertEqual(recorder.write.call_count, 8)
+        self.assertEqual(sum(map(len, raw['workloads']['latency'].values())), 8)
+        self.assertNotIn('private-owner', _json.dumps(raw))
+        for row in raw['workloads']['latency']['kettle']:
+            self.assertIn('observer_cost', row)
+            self.assertIn('observer_order', row)
+
+    def test_typing_off_failed_launch_keeps_memory_unavailable_reason(self):
+        import tempfile
+        from unittest.mock import Mock, patch
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            runner=standing.Runner({'keyblock':work/'keyblock'},work,{})
+            runner.launch=Mock(return_value=Mock());runner.wait_for=Mock(return_value=False)
+            runner.pid=Mock(return_value=None);runner.stop=Mock(return_value=True)
+            with patch.object(standing.hc,'start_observer') as observer:
+                row=runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid',observer_arm='off'),1)
+            observer.assert_not_called()
+            self.assertIn('error',row)
+            self.assertEqual(row['typing_memory_reason'],'observer off (pilot arm)')
+            self.assertIsNone(row['typing_footprint_mib'])
+
+    def test_analysis_counts_focus_reasons_and_redacts_private_evidence(self):
+        raw=self.fixture('printing',names=['kettle'])
+        rows=raw['workloads']['output-memory']['kettle']
+        rows[0]['metric_validity']['printing_mib'].update(valid=False,reason='known focus change during interval')
+        rows[2]['metric_validity']['printing_mib'].update(valid=False,reason='/Users/private-owner/private@email.test')
+        report=self.report(raw)
+        reasons=report['terminals']['kettle']['metrics']['printing_mib']['invalid_pairs_by_reason']
+        self.assertEqual(reasons,{'known focus change during interval':1,'invalid metric evidence':1})
+        self.assertNotIn('private-owner',_json.dumps(report))
+        self.assertFalse(report['equivalent'])
+
+    def test_typing_on_starts_observer_off_does_not(self):
+        import tempfile, contextlib
+        from unittest.mock import Mock, patch
+        for arm in ('on', 'off', None):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                runner = standing.Runner({k: work/k for k in ('keyblock', 'observer', 'latency-probe')}, work, {})
+                probe, samples, artifact = TypingMemory().fixture()
+                probe['samples'] = [dict(seq=i, warmup=True, t_post=800_000_000, display=810_000_000)
+                                    for i in range(7,27)] + probe['samples']
+                def launch(*args, **kwargs):
+                    (work/'typing-launch.json').write_text(_json.dumps(dict(pid=42, window_id=7)))
+                    return Mock()
+                def start(*args):
+                    (work/'typing-memory.jsonl').write_text(''.join(_json.dumps(s)+'\n' for s in samples))
+                    return Mock()
+                def run_probe(*args): (work/'latency.json').write_text(_json.dumps(probe))
+                @contextlib.contextmanager
+                def verified(*args): yield artifact
+                runner.launch = Mock(side_effect=launch)
+                runner.wait_for = Mock(return_value=True)
+                runner.pid = Mock(return_value=42)
+                runner.stop = Mock(return_value=True)
+                runner.end_sampler = Mock()
+                options = dict(keys=2, warmup=20, censor_ms=500, inject='hid')
+                if arm: options['observer_arm'] = arm
+                with patch.object(standing.hc, 'start_observer', side_effect=start) as observer, \
+                     patch.object(standing, 'run_latency_probe', side_effect=run_probe) as timing, \
+                     patch.object(standing, 'verified_probe_use', verified), \
+                     patch.object(standing, 'wait_for_text', return_value=True), \
+                     patch.object(standing.time, 'sleep'), \
+                     patch.object(standing, 'read_keyblock_log', return_value={i:(1,1_000_000_000,1_000_000_000) for i in range(1,29)}):
+                    row = runner.latency('kettle', options, 123, work/'keep.json')
+                self.assertEqual(observer.call_count, 0 if arm == 'off' else 1)
+                self.assertEqual(standing.latency_keys(row, 500), [10., 500.])
+                self.assertNotIn('observer_cost', row) # Attached by the pilot runner only.
+                self.assertEqual(timing.call_args.args[1][timing.call_args.args[1].index('--seed')+1], '123')
+                if arm == 'off':
+                    self.assertEqual(row['typing_memory_reason'], 'observer off (pilot arm)')
+                    self.assertIsNone(row['typing_footprint_mib'])
+                    self.assertFalse((work/'keep.memory.jsonl').exists())
+                else:
+                    self.assertTrue(row['typing_memory_valid'])
+
+    def test_sparse_printing_metric_designated_query_and_focus(self):
+        import copy
+        fixture = OutputBlink()
+        samples = fixture.samples()
+        sparse = [samples[0], *samples[59:66], samples[81]]
+        records = fixture.printing()
+        row = standing.hc.printing_row(records, sparse, 42, 7, observer_off=True)
+        self.assertTrue(row['printing_valid'], row)
+        self.assertEqual(row['printing_mib'], 160.)
+        self.assertEqual(row['coverage_waived'], 'observer-pilot off arm')
+        self.assertFalse(standing.hc.printing_row(records, sparse, 42, 7)['printing_valid'])
+        for defect in ('missing', 'late', 'change', 'boundary', 'readiness-focus', 'no-record-after-done', 'late-change'):
+            bad = copy.deepcopy(sparse)
+            if defect == 'missing': bad = bad[:2]
+            if defect == 'no-record-after-done': bad = bad[:-1]
+            # Lost at 7 s and restored before the record after done reports it.
+            if defect == 'late-change': bad[-1]['focus_changes'] = [dict(t_ns=17_000_000_000, valid=False)]
+            if defect == 'late': bad = [bad[0], bad[1], *bad[5:]]
+            if defect == 'change': bad[-1]['focus_changes'] = [dict(t_ns=12_000_000_000, valid=False)]
+            if defect == 'boundary': bad[2]['focus_after']['valid'] = False
+            if defect == 'readiness-focus': bad[0]['focus_before']['known'] = False
+            got = standing.hc.printing_row(records, bad, 42, 7, observer_off=True)
+            self.assertFalse(got['printing_valid'], defect)
+            if defect in ('missing', 'late'): self.assertIn('designated', got['printing_reason'])
+            if defect == 'no-record-after-done': self.assertEqual(got['printing_reason'], 'off-arm query after done missing')
+            if defect == 'late-change': self.assertEqual(got['printing_reason'], 'known focus change during interval')
+
+    def test_printing_off_arm_stops_its_observer_after_the_final_query(self):
+        import tempfile
+        from unittest.mock import patch
+        fixture = OutputBlink()
+        for arm, waits in (('off', True), ('on', False)):
+            with self.subTest(arm=arm), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                stopped = []
+                clock = iter([11_000_000_000, 15_000_000_000, 19_000_000_000, 21_000_000_000])
+                reads = []
+                def now():
+                    reads.append(1)
+                    return next(clock)
+                class Runner:
+                    def __init__(self): self.work=work; self.probes={'observer':'observer', 'printing':'printing'}
+                    def launch(self,*args):
+                        (work/'hc-launch.json').write_text(_json.dumps(dict(started_ns=10_000_000_000,pid=42,window_id=7)))
+                        return object()
+                    def wait_for(self,*args): return True
+                    def end_sampler(self,*args): stopped.append(len(reads))
+                    def stop(self,*args): return True
+                def observer(*args):
+                    (work/'hc-timeline.jsonl').write_text('ready')
+                    (work/'hc-printing.jsonl').write_text('done_ns')
+                    return object()
+                with patch.object(standing.hc, 'start_observer', side_effect=observer), \
+                     patch.object(standing.hc, 'now_ns', side_effect=now), \
+                     patch.object(standing.hc, 'read_jsonl', return_value=fixture.samples()):
+                    standing.hc.collect(Runner(), 'fixture', 'output-memory',
+                        dict(activate=False, settle=2.5, window=6., observer_arm=arm), work/'saved', fixture.setup())
+                # origin = 12 s; the last off-arm query is due at 20.6 s, so the
+                # observer may stop only once the clock reads past 20.85 s.
+                self.assertEqual(stopped, [4] if waits else [1])
+
+    def test_sparse_blink_boundaries_counters_and_focus(self):
+        import copy
+        samples = OutputBlink().samples(origin=12_500_000_000, count=61)
+        sparse = [samples[0], samples[-1]]
+        row = standing.hc.blink_row(sparse, 10_000_000_000, 11_000_000_000, 42, 7,
+                                   'verified', observer_off=True)
+        self.assertTrue(row['blink_valid'], row)
+        self.assertEqual(row['footprint_mib'], 160.)
+        self.assertAlmostEqual(row['cpu_percent'], .1)
+        self.assertAlmostEqual(row['wakeups_per_second'], 10.)
+        self.assertEqual(row['coverage_waived'], 'observer-pilot off arm')
+        self.assertFalse(standing.hc.blink_row(sparse, 10_000_000_000, 11_000_000_000, 42, 7, 'verified')['blink_valid'])
+        for defect in ('missing', 'late', 'change', 'first-focus', 'final-focus'):
+            bad = copy.deepcopy(sparse)
+            if defect == 'missing': bad.pop()
+            if defect == 'late': bad = [bad[0], OutputBlink().samples(origin=18_800_000_000, count=1)[0]]
+            if defect == 'change': bad[-1]['focus_changes'] = [dict(t_ns=15_000_000_000, valid=False)]
+            if defect == 'first-focus': bad[0]['focus_before']['valid'] = False
+            if defect == 'final-focus': bad[-1]['focus_after']['known'] = False
+            self.assertFalse(standing.hc.blink_row(bad, 10_000_000_000, 11_000_000_000, 42, 7,
+                                                 'verified', observer_off=True)['blink_valid'], defect)
+
+    def test_sparse_offsets_reach_owned_observer(self):
+        import tempfile
+        from unittest.mock import patch
+        fixture = OutputBlink()
+        for workload, expected in [('output-memory', '0,5900,6000,6100,6200,6300,6400,6500,8600'), ('blink-window', '0,6000')]:
+            with self.subTest(workload=workload), tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                class Runner:
+                    def __init__(self): self.work=work; self.probes={'observer':'observer', 'printing':'printing'}
+                    def launch(self,*args):
+                        (work/'hc-launch.json').write_text(_json.dumps(dict(started_ns=10_000_000_000,pid=42,window_id=7)))
+                        return object()
+                    def wait_for(self,*args): return True
+                    def end_sampler(self,*args): pass
+                    def stop(self,*args): return True
+                def observer(*args):
+                    (work/'hc-timeline.jsonl').write_text('ready')
+                    (work/'hc-printing.jsonl').write_text('done_ns')
+                    return object()
+                with patch.object(standing.hc, 'start_observer', side_effect=observer) as start, \
+                     patch.object(standing.hc, 'now_ns', side_effect=[11_000_000_000,19_000_000_000,21_000_000_000]), \
+                     patch.object(standing.hc, 'read_jsonl', return_value=fixture.samples()):
+                    standing.hc.collect(Runner(), 'fixture', workload, dict(activate=False, settle=2.5, window=6., observer_arm='off'), work/'saved', fixture.setup())
+                args = start.call_args.args[3]
+                self.assertEqual(args[-1], expected)
+                self.assertEqual(int(args[-2]), len(expected.split(',')))
+                source = (HERE/'macos-standing/launch.swift').read_text()
+                self.assertIn('args.count == 8', source)
+
+    def test_native_offset_parser(self):
+        # Reuse the existing macOS compiler/skip policy and pure native entry.
+        fixture = dict(pid=42, target=7, front=42, windows=[])
+        OutputBlink().native_fixture('observer', _json.dumps(fixture), offsets=True)
+
+    def test_self_cost_numeric_allowlist_bounds_and_off_zero(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Path(tmp)/'timeline'
+            samples = OutputBlink().samples(count=3)
+            timeline.write_text(''.join(_json.dumps(s)+'\n' for s in samples))
+            sidecar = Path(str(timeline)+'.self.json')
+            sidecar.write_text(_json.dumps(dict(cpu_ns=123, wakeups=4, query_count=3,
+                                                path='/Users/private-owner/sentinel', error='private@email.test')))
+            cost = standing.hc.observer_cost(timeline)
+            self.assertEqual(cost['cpu_ns'],123)
+            self.assertEqual(cost['query_count'],3)
+            self.assertEqual(cost['target_wakeups_delta'],2)
+            self.assertEqual(cost['target_cpu_delta_ns'],200_000)
+            self.assertEqual(cost['query_duration_median_ms'],.001)
+            self.assertEqual(cost['query_duration_max_ms'],.001)
+            self.assertEqual(cost['deadline_lateness_max_ms'],.001)
+            self.assertNotIn('private', _json.dumps(cost))
+            sidecar.write_text('x'*4097)
+            self.assertIsNone(standing.hc.observer_cost(timeline)['cpu_ns'])
+            for data in ('['*1500+'0'+']'*1500,
+                         _json.dumps(dict(cpu_ns=2**64,wakeups=0,query_count=1)),
+                         _json.dumps(dict(cpu_ns=1,wakeups=0,query_count=12001))):
+                sidecar.write_text(data)
+                self.assertIsNone(standing.hc.observer_cost(timeline)['cpu_ns'])
+            sidecar.unlink();sidecar.symlink_to(timeline)
+            self.assertIsNone(standing.hc.observer_cost(timeline)['cpu_ns'])
+            sidecar.unlink();os.mkfifo(sidecar)
+            self.assertIsNone(standing.hc.observer_cost(timeline)['cpu_ns'])
+            sidecar.unlink()
+            self.assertEqual(standing.hc.observer_cost(timeline, True)['query_count'],0)
+            self.assertEqual(standing.hc.observer_cost(timeline, True)['cpu_ns'],0)
+
+    def test_analysis_student_t_inside_straddling_outside_and_short(self):
+        for kind in ('typing', 'printing', 'blink'):
+            for case, diffs, equivalent in [('inside',[0.]*10,True), ('straddling',[-.1,.1]*5,kind != 'blink'),
+                                             ('outside',[2.]*10,False), ('short',[0.]*10,False)]:
+                raw=self.fixture(kind,diffs)
+                if case=='short': raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle'].pop()
+                report=self.report(raw)
+                self.assertEqual(report['equivalent'],equivalent,(kind,case,report))
+                for field, metric in report['terminals']['kettle']['metrics'].items():
+                    if case=='short':
+                        self.assertEqual(metric['reason'],'insufficient valid pairs')
+                        self.assertEqual(metric['valid_pairs'],9)
+                        self.assertEqual(metric['invalid_pairs_by_reason'],{'missing arm':1})
+                    if case=='inside':
+                        self.assertEqual(metric['difference'],dict(diff=0.,low=0.,high=0.,n=10))
+                    if case=='straddling':
+                        mean,low,high=standing.t_interval(diffs)
+                        self.assertAlmostEqual(metric['difference']['diff'],mean)
+                        self.assertAlmostEqual(metric['difference']['low'],low)
+                        self.assertAlmostEqual(metric['difference']['high'],high)
+
+    def test_analysis_straddles_every_bound_and_failed_arm(self):
+        import copy
+        for kind, fields in standing.publication.PILOT_BOUNDS.items():
+            for field, bounds in fields.items():
+                for direction in (-1,1):
+                    raw=self.fixture(kind, names=['kettle'])
+                    rows=raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle']
+                    diffs=[direction*bounds[1]+d for d in [-.02,.02]*5]
+                    for row in rows:
+                        if row['observer_arm']=='on':
+                            value=10+diffs[row['observer_pair']]
+                            if kind=='typing':row['samples_ms']=[value]*2
+                            else:row[field]=value
+                    metric=self.report(raw)['terminals']['kettle']['metrics'][field]
+                    self.assertFalse(metric['equivalent'])
+                    self.assertEqual(metric['reason'],'interval outside equivalence bounds')
+            raw=self.fixture(kind)
+            raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle'][0]['error']='/Users/private-owner/sentinel'
+            report=self.report(raw)
+            self.assertFalse(report['equivalent'])
+            self.assertTrue(report['terminals']['ghostty']['equivalent'])
+            for metric in report['terminals']['kettle']['metrics'].values():
+                self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':1})
+                self.assertEqual(metric['reason'],'insufficient valid pairs')
+            self.assertNotIn('private-owner',_json.dumps(report))
+
+    def test_pilot_dispatch_countability_combine_aa_and_analysis_refusal(self):
+        import tempfile
+        from unittest.mock import patch
+        raw=self.fixture()
+        self.assertFalse(standing.session_countable(raw['meta']))
+        with self.assertRaisesRegex(ValueError,'observer pilot'):standing.analyze(raw,raw['terminals'],False)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp)/'pilot';folder.mkdir()
+            standing.Recorder(folder/'results.json',raw).write()
+            (folder/'local-manifest.json').write_text('/Users/private-owner/private@email.test')
+            report=standing.publication.observer_control(standing._publication_host(),folder)
+            self.assertTrue(report['equivalent'])
+            self.assertEqual(report['interval_policy'],'paired Student-t 95%')
+            self.assertNotIn('private',_json.dumps(report))
+            with self.assertRaisesRegex(SystemExit,'observer pilot'):standing.combine([folder])
+            ordinary=Path(tmp)/'ordinary';ordinary.mkdir()
+            other=self.fixture();other['meta']['kind']='ordinary'
+            standing.Recorder(ordinary/'results.json',other).write()
+            with self.assertRaisesRegex(SystemExit,'observer pilot'):standing.combine([ordinary],folder)
+            out=Path(tmp)/'report'
+            with patch.object(sys,'argv',['standing','--observer-control',str(folder),'--out-dir',str(out)]), \
+                 patch.object(standing,'build_probes') as build:
+                self.assertEqual(standing.main(),0)
+            build.assert_not_called()
+            self.assertNotIn('private',(out/'observer-equivalence.json').read_text())
+
+    def test_invalid_evidence_duplicates_and_no_pair_replacement(self):
+        for kind in ('typing','printing','blink'):
+            raw=self.fixture(kind)
+            rows=raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle']
+            rows.append(dict(rows[0]))
+            for metric in self.report(raw)['terminals']['kettle']['metrics'].values():
+                self.assertEqual(metric['invalid_pairs_by_reason'],{'duplicate arm':1})
+                self.assertEqual(metric['valid_pairs'],9)
+            raw=self.fixture(kind)
+            row=raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle'][0]
+            if kind=='typing':row['samples_ms']=[1.]
+            else:
+                for evidence in row['metric_validity'].values():evidence['observed']=0
+            self.assertFalse(self.report(raw)['equivalent'])
+
+
+class GhosttyUserConfig(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name).resolve()
+        self.user=self.root/'Library/Application Support/com.mitchellh.ghostty'
+        self.user.mkdir(parents=True)
+        self.sequence=0
+
+    def capture(self, measured=('kettle','ghostty')):
+        self.sequence+=1
+        work=self.root/f'work-{self.sequence}';work.mkdir()
+        standing.write_configs(work,{'kettle':''})
+        return standing.ConfigClosure(work,{'kettle':''},self.root,{'HOME':str(self.root)},measured=measured)
+
+    def test_absent_empty_private_state_and_public_privacy(self):
+        closure=self.capture()
+        self.assertEqual(len(closure.local['ghostty_user_config']),2)
+        self.assertTrue(all(not s['present'] for s in closure.local['ghostty_user_config'].values()))
+        for name in ('config','config.ghostty'):(self.user/name).touch()
+        closure=self.capture();closure.check()
+        for state in closure.local['ghostty_user_config'].values():
+            self.assertEqual(state,dict(present=True,size=0,sha256=standing.hashlib.sha256(b'').hexdigest()))
+        self.assertNotIn(str(self.root),_json.dumps(closure.public))
+        self.assertNotIn('Application Support',_json.dumps(closure.public))
+
+    def test_nonempty_and_symlink_refuse_fixed_public_reason(self):
+        import contextlib,io
+        for name in ('config','config.ghostty'):
+            for defect in ('nonempty','symlink','directory','fifo'):
+                path=self.user/name
+                if defect=='nonempty':path.write_text('/Users/private-owner/private@email.test')
+                if defect=='symlink':path.symlink_to(self.root/'missing')
+                if defect=='directory':path.mkdir()
+                if defect=='fifo':os.mkfifo(path)
+                with self.subTest(name=name,defect=defect),self.assertRaises(standing.ConfigClosureError) as error:
+                    self.capture()
+                self.assertEqual(str(error.exception),'config closure: Ghostty user config would apply')
+                self.assertNotIn(str(self.root),str(error.exception))
+                if path.is_dir():path.rmdir()
+                else:path.unlink()
+
+    def test_mid_campaign_state_change_refuses(self):
+        for state in ('absent-to-empty','empty-to-absent','empty-to-nonempty','empty-to-symlink'):
+            path=self.user/'config'
+            path.unlink(missing_ok=True)
+            if state!='absent-to-empty':path.touch()
+            closure=self.capture()
+            if state=='absent-to-empty':path.touch()
+            if state=='empty-to-absent':path.unlink()
+            if state=='empty-to-nonempty':path.write_text('private@email.test')
+            if state=='empty-to-symlink':path.unlink();path.symlink_to(self.root/'missing')
+            with self.subTest(state=state),self.assertRaisesRegex(standing.ConfigClosureError,'Ghostty user config would apply'):
+                closure.check()
+
+    def test_unmeasured_ghostty_never_checked(self):
+        from unittest.mock import patch
+        (self.user/'config').write_text('sentinel')
+        with patch.object(standing.ConfigClosure,'_ghostty_state',side_effect=AssertionError('must not check')):
+            closure=self.capture(measured=('kettle','kitty'));closure.check()
+        self.assertNotIn('ghostty_user_config',closure.local)
+
+    def test_mid_campaign_refusal_outputs_no_private_data(self):
+        from unittest.mock import Mock
+        closure=self.capture()
+        raw=ObserverPilot().fixture(names=['kettle','ghostty'])
+        raw['meta']['complete']=False
+        recorder=standing.Recorder(self.root/'results.json',raw)
+        def collect():
+            (self.user/'config').write_text('/Users/private-owner/private@email.test')
+            return {'printing_mib':10.}
+        with self.assertRaisesRegex(SystemExit,'Ghostty user config would apply'):
+            standing.config_campaign_row(closure,raw,recorder,collect)
+        results=(self.root/'results.json').read_text()
+        summary=standing.summarize(raw,raw['terminals'],False,{})
+        report=_json.dumps(ObserverPilot().report(raw))
+        for output in (results,summary,report):
+            self.assertNotIn(str(self.root),output)
+            self.assertNotIn('private-owner',output)
+            self.assertNotIn('private@email.test',output)
+        self.assertEqual(raw['config_invalid_rows'][0]['printing_mib'],10.)
+
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v", *sys.argv[1:]])

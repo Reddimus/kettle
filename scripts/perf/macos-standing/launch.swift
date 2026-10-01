@@ -86,7 +86,7 @@ func serviceObserver() {
     }
     guard !observerStarted, let request = observerPath("request"),
           let data = try? Data(contentsOf: URL(fileURLWithPath: request)),
-          let args = try? JSONSerialization.jsonObject(with: data) as? [String], args.count == 7,
+          let args = try? JSONSerialization.jsonObject(with: data) as? [String], (args.count == 7 || args.count == 8),
           args[1] == String(pid), getppid() == parent, stopRequested == 0 else { return }
     observerStarted = true
     let cargs = args.map { strdup($0) } + [nil]

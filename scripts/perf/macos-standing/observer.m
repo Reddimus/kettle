@@ -1,4 +1,4 @@
-// observer PID WINDOW OUT ORIGIN_NS INTERVAL_MS COUNT
+// observer PID WINDOW OUT ORIGIN_NS INTERVAL_MS COUNT [OFFSETS_MS]
 // Window 0 is a scratch diagnostic only. It always reports invalid focus.
 // Never signals the target. The Python owner reaps this before its launch helper.
 #import <AppKit/AppKit.h>
@@ -73,10 +73,46 @@ static int selfTest(void) {
     fwrite(data.bytes, 1, data.length, stdout);
     return 0;
 }
+// Strict decimal grammar, bounded before any native or application setup.
+static int parseOffsets(const char *text, uint64_t offsets[64]) {
+    if (!text || !*text) return -1;
+    int count = 0;
+    const char *p = text;
+    for (;;) {
+        if (count == 64 || *p < '0' || *p > '9') return -1;
+        unsigned value = 0;
+        while (*p >= '0' && *p <= '9') {
+            value = value * 10 + (unsigned)(*p++ - '0');
+            if (value > 60000) return -1;
+        }
+        if (count && value <= offsets[count - 1]) return -1;
+        offsets[count++] = value;
+        if (!*p) return count;
+        if (*p++ != ',') return -1;
+    }
+}
+static int selfTestOffsets(int argc, char **argv) {
+    uint64_t offsets[64];
+    if (argc != 4) return 2;
+    int count = parseOffsets(argv[2], offsets);
+    char *end = NULL;
+    long expected = strtol(argv[3], &end, 10);
+    if (!*argv[3] || *end || expected < 1 || expected > 64 || count != expected) return 2;
+    printf("%d\n", count);
+    return 0;
+}
 int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return selfTest();
-        if (argc != 7) return 2;
+        if (argc >= 2 && strcmp(argv[1], "--self-test-offsets") == 0) return selfTestOffsets(argc, argv);
+        if (argc != 7 && argc != 8) return 2;
+        uint64_t offsets[64];
+        if (argc == 8) {
+            char *end = NULL;
+            long expected = strtol(argv[6], &end, 10);
+            if (!*argv[6] || *end || expected < 1 || expected > 64
+                || parseOffsets(argv[7], offsets) != expected) return 2;
+        }
         pid_t pid = atoi(argv[1]); CGWindowID window = (CGWindowID)strtoul(argv[2], NULL, 10);
         uint64_t origin = strtoull(argv[4], NULL, 10);
         int interval = atoi(argv[5]), count = atoi(argv[6]);
@@ -94,8 +130,9 @@ int main(int argc, char **argv) {
                 else changesOverflow = YES;
             }];
         mach_timebase_info_data_t base; mach_timebase_info(&base);
+        int queries = 0;
         for (int i = 0; i < count && !stopped && getppid() == parent; ++i) {
-            uint64_t deadline = origin + (uint64_t)i * interval * 1000000;
+            uint64_t deadline = origin + (argc == 8 ? offsets[i] : (uint64_t)i * interval) * 1000000;
             while (now() < deadline && !stopped && getppid() == parent) {
                 uint64_t at = now();
                 double seconds = at < deadline ? MIN((double)(deadline - at) / 1e9, .01) : 0;
@@ -123,6 +160,7 @@ int main(int argc, char **argv) {
                 @"status":ok ? @"ok" : @"target-exited-or-query-failed",
                 @"focus_before":before, @"focus_after":after, @"focus_changes":[changes copy],
                 @"focus_notifications_overflow":@(changesOverflow)};
+            ++queries;
             NSData *data = [NSJSONSerialization dataWithJSONObject:record options:NSJSONWritingSortedKeys error:nil];
             if (!data || fwrite(data.bytes, 1, data.length, out) != data.length || fputc('\n', out) == EOF || fflush(out)) break;
             [changes removeAllObjects]; changesOverflow = NO;
@@ -130,6 +168,19 @@ int main(int argc, char **argv) {
         }
         [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:token];
         fclose(out);
+        // Pilot-only sidecar. Ordinary six-argument invocations retain their I/O.
+        if (getenv("KETTLE_HC_OBSERVER_SELF_COST") && strcmp(getenv("KETTLE_HC_OBSERVER_SELF_COST"), "1") == 0) {
+            struct rusage_info_v4 usage = {0};
+            if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&usage) == 0) {
+                NSDictionary *cost = @{
+                    @"cpu_ns":@((uint64_t)((__uint128_t)(usage.ri_user_time + usage.ri_system_time) * base.numer / base.denom)),
+                    @"wakeups":@(usage.ri_pkg_idle_wkups + usage.ri_interrupt_wkups), @"query_count":@(queries)};
+                NSData *data = [NSJSONSerialization dataWithJSONObject:cost options:NSJSONWritingSortedKeys error:nil];
+                NSString *path = [[NSString stringWithUTF8String:argv[3]] stringByAppendingString:@".self.json"];
+                FILE *selfOut = fopen(path.fileSystemRepresentation, "wx");
+                if (selfOut) { if (data) fwrite(data.bytes, 1, data.length, selfOut); fclose(selfOut); }
+            }
+        }
     }
     return 0;
 }

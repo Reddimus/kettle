@@ -109,6 +109,14 @@ int main(int argc, char **argv) {
 	if (tty < 0 || log < 0) {
 		return 1;
 	}
+    // macOS poll() reports POLLNVAL for a /dev/tty descriptor, so the cursor
+    // loop waits on standard input instead. It must be this session's
+    // controlling terminal, the device /dev/tty reads and writes. Block mode
+    // never polls and is unchanged.
+    if (cursor && (!isatty(STDIN_FILENO) || tcgetsid(STDIN_FILENO) != getsid(0)
+                   || tcgetsid(tty) != getsid(0))) {
+        return 1;
+    }
 	struct termios raw;
 	if (tcgetattr(tty, &raw) != 0) {
 		return 1;
@@ -137,7 +145,7 @@ int main(int argc, char **argv) {
 	for (;;) {
         if (cursor) {
             if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline) return 1;
-            struct pollfd fds[] = {{control, POLLIN, 0}, {tty, POLLIN, 0}};
+            struct pollfd fds[] = {{control, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
             int rc = poll(fds, 2, 1000);
             if (rc < 0 && errno == EINTR) continue;
             if (rc < 0 || fds[0].revents & (POLLERR | POLLNVAL)

@@ -976,7 +976,7 @@ clean:
 macos-standing-control-report control +sessions:
     python3 scripts/perf/macos-standing.py --combine {{sessions}} --aa "{{control}}"
 
-# Diagnostic stamp-equivalence analysis; never launches a measured app.
+# Diagnostic stamp or typing/printing/blink observer equivalence; no app launch.
 [unix]
 macos-standing-observer-report input output:
     python3 scripts/perf/macos-standing.py --observer-control "{{input}}" --out-dir "{{output}}"

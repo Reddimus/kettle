@@ -314,6 +314,9 @@ def cursor_frames(h, sessions):
 
 def combine(h, folders, aa, legacy):
     sessions = [h.load_session(Path(p)) for p in folders]
+    candidates = sessions + ([h.load_session(Path(aa))] if aa else [])
+    if any(s['results'].get('meta', {}).get('kind') == 'observer-pilot' for s in candidates):
+        raise SystemExit('observer pilot (diagnostic) cannot enter --combine or --aa')
     if not any(modern(s['results']) for s in sessions):
         return legacy(folders, aa)
     if not all(modern(s['results']) for s in sessions):
@@ -412,9 +415,121 @@ def combine(h, folders, aa, legacy):
     return public(combined)
 
 
+PILOT_BOUNDS = {'typing': {'mean_ms': [-1., 1.]},
+                'printing': {'printing_mib': [-.5, .5]},
+                'blink': {'cpu_percent': [-.01, .01], 'wakeups_per_second': [-.1, .1]}}
+PILOT_WORKLOADS = {'typing': 'latency', 'printing': 'output-memory', 'blink': 'blink-window'}
+PILOT_INVALID_REASONS = frozenset({
+    'designated printing query missing or late', 'known focus change during interval',
+    'window not visible during interval', 'printing window not visible', 'designated query lost focus',
+    'blink window not visible', 'blink boundary missing or late', 'readiness missed launch boundary',
+    'native query late', 'native query failed or target exited', 'native focus notification overflow',
+    'process lifetime identity missing or changed', 'stale focus check', 'nonmonotonic native trace',
+    'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing'})
+COST_FIELDS = ('cpu_ns', 'wakeups', 'query_count', 'query_duration_median_ms',
+               'query_duration_max_ms', 'deadline_lateness_max_ms',
+               'target_cpu_delta_ns', 'target_wakeups_delta')
+
+
+def observer_pilot_report(h, results):
+    meta = results.get('meta') or {}
+    declaration = meta.get('observer_pilot') or {}
+    kind, planned = declaration.get('kind'), declaration.get('pairs')
+    if (kind not in PILOT_BOUNDS or type(planned) is not int or planned < 2
+            or declaration.get('bounds') != PILOT_BOUNDS[kind]
+            or set(results.get('workloads', {})) != {PILOT_WORKLOADS[kind]}):
+        raise ValueError('observer pilot declaration invalid')
+    workload, bounds = PILOT_WORKLOADS[kind], PILOT_BOUNDS[kind]
+    terminals = results.get('terminals')
+    rows = results['workloads'][workload]
+    if (not isinstance(terminals, list) or not terminals or len(set(terminals)) != len(terminals)
+            or set(rows) != set(terminals)):
+        raise ValueError('observer pilot terminals invalid')
+    public(terminals)
+    reports = {}
+    for terminal in terminals:
+        attempts = rows[terminal]
+        if not isinstance(attempts, list):
+            raise ValueError('observer pilot attempts invalid')
+        grouped = {i: {'on': [], 'off': []} for i in range(planned)}
+        for row in attempts:
+            if not isinstance(row, dict):
+                raise ValueError('observer pilot attempt invalid')
+            pair, arm = row.get('observer_pair'), row.get('observer_arm')
+            if type(pair) is not int or pair not in grouped or arm not in ('on', 'off'):
+                raise ValueError('observer pilot pair identity invalid')
+            grouped[pair][arm].append(row)
+        metrics = {}
+        for field, (low_bound, high_bound) in bounds.items():
+            values = {'on': [], 'off': []}
+            invalid = {}
+            for pair, arms in grouped.items():
+                reason = None
+                selected = {}
+                for arm in ('on', 'off'):
+                    launches = arms[arm]
+                    if len(launches) != 1:
+                        reason = reason or ('missing arm' if not launches else 'duplicate arm')
+                        continue
+                    row = launches[0]
+                    expected_order = int(arm != ('on' if pair % 2 == 0 else 'off'))
+                    if type(row.get('observer_order')) is not int or row['observer_order'] != expected_order:
+                        reason = reason or 'invalid arm order'
+                    if 'error' in row or row.get('killed') or row.get('warmup') or row.get('seq_mismatch'):
+                        reason = reason or 'failed arm'
+                    if kind == 'typing':
+                        options = meta.get('latency') or {}
+                        keys = h.latency_keys(row, options.get('censor_ms', 500))
+                        value = statistics.mean(keys) if keys else None
+                        if keys is None or len(keys) != options.get('keys'):
+                            reason = reason or 'incomplete typing keys'
+                        # An on arm counts only if its observer ran through
+                        # the whole typing epoch, not just its readiness query.
+                        if arm == 'on' and row.get('typing_memory_valid') is not True:
+                            reason = reason or 'on-arm observer evidence invalid'
+                    else:
+                        evidence = (row.get('metric_validity') or {}).get(field) or {}
+                        value = row.get(field)
+                        failure = h.metric_reason(h.metric_descriptor(workload, field), workload, row)
+                        if evidence.get('valid') is not True or failure is not None:
+                            reason = reason or (failure if failure in PILOT_INVALID_REASONS else 'invalid metric evidence')
+                    if not number(value) or value < 0:
+                        reason = reason or 'metric unavailable'
+                    selected[arm] = value
+                if reason:
+                    invalid[reason] = invalid.get(reason, 0) + 1
+                    continue
+                for arm in ('on', 'off'):
+                    values[arm].append(selected[arm])
+            n = len(values['on'])
+            difference = h.paired_difference(values['off'], values['on']) if n >= 2 else {}
+            complete = n == planned and meta.get('complete') is True
+            inside = bool(difference) and low_bound <= difference['low'] <= difference['high'] <= high_bound
+            metrics[field] = {'bounds': [low_bound, high_bound], 'valid_pairs': n,
+                'invalid_pairs_by_reason': invalid, 'difference': difference,
+                'arm_medians': {arm: statistics.median(v) if v else None for arm, v in values.items()},
+                'equivalent': complete and inside,
+                'reason': None if complete and inside else 'insufficient valid pairs' if not complete else 'interval outside equivalence bounds'}
+        costs = {}
+        for arm in ('on', 'off'):
+            costs[arm] = {}
+            for field in COST_FIELDS:
+                v = [(r.get('observer_cost') or {}).get(field) for r in attempts if r.get('observer_arm') == arm]
+                v = [x for x in v if number(x) and x >= 0]
+                costs[arm][field] = {'n': len(v), 'median': statistics.median(v) if v else None,
+                                     'max': max(v) if v else None}
+        reports[terminal] = {'metrics': metrics, 'observer_cost': costs,
+                             'equivalent': all(m['equivalent'] for m in metrics.values())}
+    return public({'schema': 1, 'kind': 'observer-pilot', 'countable': False,
+                   'pilot': kind, 'pairs': planned, 'interval_policy': 'paired Student-t 95%',
+                   'terminals': reports, 'equivalent': all(r['equivalent'] for r in reports.values())})
+
+
 def observer_control(h, folder):
     session = h.load_session(Path(folder))
     meta = session['results'].get('meta') or {}
+    if meta.get('kind') == 'observer-pilot':
+        return observer_pilot_report(h, session['results'])
     if (meta.get('kind') != 'observer-control' or meta.get('startup_phases') != 'b'
             or not session['ab'] or session['names'] != ['kettle-a', 'kettle-b']
             or set(session['results']['workloads']) != {'startup'} or meta.get('rounds', {}).get('startup') != 30

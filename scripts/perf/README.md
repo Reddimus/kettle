@@ -286,7 +286,36 @@ warmups, with paired order balanced between observer on and off. Retain every
 attempt and failure; do not select favorable launches or pool terminals. The
 diagnostic runner omits only the observer request on its off arm and marks
 both arms as observer-control data, never as standings or ordinary A/A.
-No countable invocation offers a sampler-off option.
+Sessions use `meta.kind = "observer-pilot"` and remain noncountable.
+`--combine` and `--aa` refuse them; `--observer-control` dispatches them to
+`observer-equivalence.json` without changing the startup stamp-control path.
+
+```sh
+python3 scripts/perf/macos-standing.py --no-build \
+  --kettle /Applications/kettle.app/Contents/MacOS/kettle --peers ghostty,kitty \
+  --observer-pilot typing --observer-pairs 10 --out-dir TYPING-PILOT
+python3 scripts/perf/macos-standing.py --no-build \
+  --kettle /Applications/kettle.app/Contents/MacOS/kettle --peers ghostty,kitty \
+  --observer-pilot printing --observer-pairs 10 --out-dir PRINTING-PILOT
+python3 scripts/perf/macos-standing.py --no-build \
+  --kettle /Applications/kettle.app/Contents/MacOS/kettle --peers ghostty,kitty \
+  --observer-pilot blink --observer-pairs 10 --blink-validation BLINK.json \
+  --blink-cursor-rect 1,2,3,4 --blink-shape block --blink-timeout 0 \
+  --out-dir BLINK-PILOT
+python3 scripts/perf/macos-standing.py --observer-control TYPING-PILOT \
+  --out-dir TYPING-REPORT
+```
+
+Use validation evidence matching each terminal/setup for blink, as described
+below. `--observer-pairs` defaults to 10 and requires at least 2. Pair i rotates
+the terminal list by i, with consecutive on/off launches on even pairs and
+off/on on odd pairs. Both arms use seed `SEED*1000+i`. Typing forces block
+latency without floors or Kettle opaque. A/B, cursor/other workloads and
+conflicting round counts refuse. `--rounds`, if supplied, must equal twice
+`--observer-pairs`; per-workload round overrides refuse.
+Cancellation retains the attempted row before stopping. A typing on arm
+whose observer/context never became available is a failed arm, even if timing
+survived. No countable invocation offers a sampler-off option.
 
 For each terminal, compute the paired launch-mean timing difference with the
 current Student-t 95% interval. Its entire interval must lie within -1 to
@@ -295,10 +324,33 @@ CPU/wakeup deltas, query durations, deadline lateness, coverage, clock checks
 and all raw files. Both arms use the same SCK capture. Observer-off memory is
 unavailable and cannot enter a memory comparison. Fix a failed method and
 repeat the excluded pilot before freeze; do not change cadence after A/A.
-The companion printing pilot requires its median memory-shift interval within
-+/-0.5 MiB; blink requires target CPU within +/-0.01 percentage point and
-wakeups within +/-0.1/s. These are separate perturbation checks, not product
-gates or proof of unchanged noise on later dates.
+The companion printing pilot uses paired `printing_mib` on-minus-off differences
+with the same Student-t 95% interval, bounded by +/-0.5 MiB. Blink requires
+both paired intervals within +/-0.01 percentage points for `cpu_percent` and
++/-0.1/s for `wakeups_per_second`. Descriptive per-arm medians do not gate
+equivalence. Every predeclared pair must be valid; fewer yield "insufficient
+valid pairs". Every terminal must pass for overall equivalence. A typing pair
+counts only if its on arm's observer covered the whole typing epoch
+(`typing_memory_valid`); timing that survives an observer that stopped early
+does not measure the observer-on condition.
+
+Printing off arms retain the readiness query at origin, then query at
+5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus
+change late in the output still reaches a record. The off arm stops its
+observer only after that query, and an off arm without a record after done
+is invalid. The first whole query
+starting at or after began+6 s must end by began+6.25 s and before done. Blink off arms retain
+only the two counter boundaries, at started+settle and that origin+window.
+Both use the same native observer, which drains activation notifications
+between sparse deadlines. Every retained query needs valid exact-window
+focus, with no known focus change during the interval. Only off arms waive
+the 80% coverage and 250 ms gap rule, recorded as
+`coverage_waived: "observer-pilot off arm"`. Boundary/query lateness still
+refuses. On arms use ordinary collectors. Pilot-only `observer_cost` retains
+observer CPU/wakeups/query count, query duration median/max, maximum deadline
+lateness and available target counter deltas. Typing off arms start no
+observer and mark memory unavailable as "observer off (pilot arm)".
+These are separate perturbation checks, not product gates or proof of unchanged noise on later dates.
 
 ### Statistics
 
@@ -402,6 +454,18 @@ output directory and is refused when nonempty in a countable managed config.
 Theme and font settings select bundled themes and system font families; they
 are not paths. This closure does not snapshot OS fonts or the terminal app.
 Terminal and method identities remain separate.
+
+The managed `xdg/kettle` directory allows empty regular `remote.cmd` and
+`remote.cmd.lock` runtime spool files. Nonempty spools, links and other entries
+refuse. The managed XDG root may also hold an empty `kitty`, `wezterm` or
+`alacritty` directory, which those peers can create although their own config
+is bypassed (kitty does on every launch); anything inside one refuses. When Ghostty is measured, both `config` and `config.ghostty` under
+`$HOME/Library/Application Support/com.mitchellh.ghostty` must be absent or
+empty regular files. Ghostty 1.3 reads them after the managed XDG files and
+the macOS app cannot bypass them with CLI config flags. The closure seals
+their state and rechecks every row. Any unsafe file or change refuses with
+"config closure: Ghostty user config would apply". Presence, size and SHA-256
+stay in the private local manifest. Unmeasured Ghostty is not checked.
 
 A leading `~/` resolves using the renderer's HOME, USERPROFILE, APPDATA order.
 Other relative references resolve against the pinned app launch cwd, which is
@@ -770,9 +834,13 @@ the rule after seeing results.
 Pass the resulting JSON with `--blink-validation FILE` for a counted
 invocation, using the same crop/shape/timeout flags. Binary bytes, sealed
 location-independent configuration closure, display, interval and native
-display identity must match. A post-set validation uses
-`--blink-validation-before FILE` to retain the prior content hash. Both
-validation artifacts and their linkage must be inspected before publication.
+display identity must match. A validation certifies one build, so a Kettle A/B
+repeats the flag once per side; each row takes the first named file that
+verifies its own setup, and a row no file verifies stays unproven. A post-set
+validation uses `--blink-validation-before FILE`, repeated the same way, to
+retain each side's prior content hash. A named file that cannot be read stops
+the invocation before any launch. Both validation artifacts and their linkage
+must be inspected before publication.
 Separate validation supports the unchanged setup, not continuous phase
 observation in every counted round. Counted runs never capture pixels. No A/A,
 gate or live pilot has been established by synthetic fixtures.
@@ -802,6 +870,10 @@ steady cursor and existing block bytes, classifier and timing guards.
 
 The first six calibration flips stay hidden and steady. After accepting the
 sixth after-image, the probe sends `ENABLE\n` through a private mode-0600 FIFO.
+The cursor payload waits on standard input, which must be its session's
+controlling terminal, because macOS `poll()` reports `POLLNVAL` for a
+`/dev/tty` descriptor; reads and writes still use `/dev/tty`, so the bytes are
+unchanged.
 The payload enables the cursor without reading another key or consuming a
 sequence, then atomically acknowledges `ENABLED <cursor_enabled_ns>\n` in
 `CLOCK_UPTIME_RAW`. The handshake has a five-second limit inside the common

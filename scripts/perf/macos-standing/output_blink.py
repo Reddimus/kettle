@@ -2,8 +2,10 @@
 import hashlib
 import json
 import math
+import os
 import re
 import statistics
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -123,10 +125,12 @@ def validity(row, workload, fields, reason):
     return row
 
 
-def printing_row(records, samples, pid, window):
+def printing_row(records, samples, pid, window, observer_off=False):
     fields = ('printing_mib', 'printing_max_mib')
     row = {'lines_expected': 80, 'printing_payload_sha256': PRINT_SHA256,
            'timeline': samples, 'printing_log': records}
+    if observer_off:
+        row['coverage_waived'] = 'observer-pilot off arm'
     reason = trace_reason(samples, pid, window)
     try:
         began, done = records[0]['began_ns'], records[-1]['done_ns']
@@ -149,7 +153,12 @@ def printing_row(records, samples, pid, window):
         if reason:
             raise ValueError(reason)
         active = [s for s in samples if s['query_start_ns'] >= began and s['query_end_ns'] <= done]
-        reason = coverage_reason(active, began, done) or focus_reason(samples, began, done, pid, window)
+        reason = (None if observer_off else coverage_reason(active, began, done)) or focus_reason(samples, began, done, pid, window)
+        if observer_off and any(not visible(s, pid, window) for s in samples):
+            reason = reason or 'printing window not visible'
+        # Without a record after done, a late focus change would go unseen.
+        if observer_off and not any(s['query_start_ns'] >= done for s in samples):
+            reason = reason or 'off-arm query after done missing'
         # Designated query is selected before focus eligibility. Never shop
         # for a lower later sample after the designated query loses focus.
         sample = next((s for s in samples if s['query_start_ns'] >= began + 6_000_000_000), None)
@@ -168,13 +177,15 @@ def printing_row(records, samples, pid, window):
 
 
 def blink_row(samples, started, ready, pid, window, activity='unproven', evidence=None,
-              settle=2.5, duration=6.0):
+              settle=2.5, duration=6.0, observer_off=False):
     fields = ('footprint_mib', 'cpu_percent', 'wakeups_per_second',
               'blink_median_footprint_mib', 'blink_peak_mib')
     start, end = started + int(settle * 1e9), started + int((settle + duration) * 1e9)
     row = dict(started_ns=started, blink_start_ns=start, blink_end_ns=end, blink_origin='launch',
                settle_s=settle, window_s=duration, ready_ns=ready, timeline=samples,
                blink_activity=activity, blink_evidence=evidence)
+    if observer_off:
+        row['coverage_waived'] = 'observer-pilot off arm'
     reason = trace_reason(samples, pid, window)
     if ready >= start:
         reason = reason or 'readiness missed launch boundary'
@@ -185,9 +196,9 @@ def blink_row(samples, started, ready, pid, window, activity='unproven', evidenc
             reason = 'blink boundary missing or late'
         else:
             retained = [s for s in samples if first['query_start_ns'] <= s['query_start_ns'] <= final['query_start_ns']]
-            reason = (coverage_reason(retained, first['query_start_ns'], final['query_end_ns'])
+            reason = ((None if observer_off else coverage_reason(retained, first['query_start_ns'], final['query_end_ns']))
                       or focus_reason(samples, start, final['focus_after']['t_ns'], pid, window))
-            if any(not visible(s, pid, window) for s in retained):
+            if any(not visible(s, pid, window) for s in (samples if observer_off else retained)):
                 reason = reason or 'blink window not visible'
             span = (final['query_end_ns'] - first['query_end_ns']) / 1e9
             if span <= 0:
@@ -293,6 +304,22 @@ def blink_evidence(path, setup, disabled=False):
         return 'unproven', {'reason': 'blink validation unreadable'}
 
 
+def select_validation(paths, setup):
+    """The first named validation that verifies this row's own setup.
+
+    A validation certifies one binary/config/display setup, so a Kettle A/B
+    names one file per side and each row takes its own. Returns the chosen
+    path (None when nothing verified), the activity and its evidence."""
+    paths = [paths] if isinstance(paths, (str, Path)) else list(paths or [])
+    first = None
+    for path in paths:
+        activity, evidence = blink_evidence(path, setup)
+        if activity == 'verified':
+            return path, activity, evidence
+        first = first or (None, activity, evidence)
+    return first or (None, 'unproven', None)
+
+
 def build_helpers(probes, tools):
     tools.mkdir(parents=True, exist_ok=True)
     result = {}
@@ -362,7 +389,7 @@ def collect(runner, name, workload, options, keep, setup=None):
     work = runner.work
     context, barrier, log, timeline = [work / f'hc-{f}' for f in ('launch.json', 'barrier', 'printing.jsonl', 'timeline.jsonl')]
     receipts = [Path(str(context) + '.observer-' + suffix) for suffix in ('request','started','stop','reaped')]
-    for path in (context, barrier, log, timeline, *receipts):
+    for path in (context, barrier, log, timeline, Path(str(timeline) + ".self.json"), *receipts):
         path.unlink(missing_ok=True)
     body = (f'exec "{runner.probes["printing"]}" "{barrier}" "{log}"'
             if workload == 'output-memory' else 'exec /bin/sleep 30')
@@ -393,18 +420,22 @@ def collect(runner, name, workload, options, keep, setup=None):
                     '--cursor-rect', options['rect'], '--window-id', str(window), '--deadline-ms', '30000']
             runner.blink_probe(args, work, 35)
             result = json.loads(out.read_text())
+            before = select_validation(options.get('before_path'), setup)[0] if options.get('before_path') else None
             result.update(contract=CONTRACT, setup=setup, validation_id=str(started),
-                          before_sha256=options.get('before_sha256'), target_window_id=window)
+                          before_sha256=hashlib.sha256(Path(before).read_bytes()).hexdigest() if before else None,
+                          target_window_id=window)
             result['validation_reason'] = validation_reason(result, setup)
-            if options.get('before_path') and blink_evidence(options['before_path'], setup)[0] != 'verified':
+            if options.get('before_path') and before is None:
                 result['validation_reason'] = 'before-validation setup mismatch or invalid capture'
             if result['validation_reason']:
                 result['error'] = result['validation_reason']
             return result
         sample_ms = options.get('sample_ms', 100)
         count = math.ceil((11 if workload == 'output-memory' else options['window']) * 1000 / sample_ms) + 2
+        offsets = sparse_offsets(workload, options) if options.get('observer_arm') == 'off' else None
         observer = start_observer(runner, process, context, [str(runner.probes['observer']), str(pid),
-                    str(window), str(timeline), str(origin), str(sample_ms), str(count)])
+                    str(window), str(timeline), str(origin), str(sample_ms), str(len(offsets) if offsets else count)]
+                    + ([','.join(map(str, offsets))] if offsets else []))
         if workload == 'output-memory':
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -422,6 +453,13 @@ def collect(runner, name, workload, options, keep, setup=None):
                 if log.exists() and 'done_ns' in log.read_text():
                     break
                 time.sleep(.02)
+            if offsets:
+                # The off arm's last query follows done and carries any late
+                # focus notification; stop the observer only after it.
+                final = origin + offsets[-1] * 1_000_000 + LATENESS_NS
+                while now_ns() < final and (not timeline.exists()
+                                             or timeline.read_bytes().count(b'\n') < len(offsets)):
+                    time.sleep(.02)
         else:
             deadline = started + int((options['settle'] + options['window']) * 1e9) + 300_000_000
             while now_ns() < deadline:
@@ -446,10 +484,13 @@ def collect(runner, name, workload, options, keep, setup=None):
     try:
         raw = read_jsonl(timeline)
         if workload == 'output-memory':
-            result = printing_row(read_jsonl(log, 82), raw, pid, window)
+            result = printing_row(read_jsonl(log, 82), raw, pid, window, options.get('observer_arm') == 'off')
         else:
-            activity, evidence = blink_evidence(options.get('validation'), setup, options.get('disabled', False))
-            result = blink_row(raw, started, ready, pid, window, activity, evidence, options['settle'], options['window'])
+            if options.get('disabled', False):
+                activity, evidence = blink_evidence(None, setup, True)
+            else:
+                activity, evidence = select_validation(options.get('validation'), setup)[1:]
+            result = blink_row(raw, started, ready, pid, window, activity, evidence, options['settle'], options['window'], options.get('observer_arm') == 'off')
         if not clean:
             result['killed'] = True
         return result
@@ -524,6 +565,8 @@ def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer
                typing_tool_artifact=artifact, typing_window_id=window, typing_pid=pid)
     reason = observer_reason
     try:
+        if observer_reason == 'observer off (pilot arm)':
+            raise ValueError(observer_reason)
         epoch = typing_epoch(probe, pid, window)
         row.update(typing_start_ns=epoch['typing_start_ns'], typing_end_ns=epoch['typing_end_ns'],
                    typing_clock=epoch)
@@ -564,3 +607,57 @@ def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer
             capability_version=TYPING_CONTRACT,
             expected=max(5, math.ceil(row['typing_expected_samples'] * .8)), observed=row['typing_sample_count'])
     return row
+
+
+def sparse_offsets(workload, options):
+    # Printing: readiness, a burst that always holds the designated 6 s query,
+    # and one query after done whose record carries any focus notification
+    # from the rest of the output, as the dense arm's records would.
+    if workload == 'output-memory':
+        return [0, *range(5900, 6501, 100), 8600]
+    return [0, math.ceil(options['window'] * 1000)]
+
+
+def observer_cost(timeline, observer_off=False):
+    """Numeric allowlist only; native paths and error contents stay private."""
+    result = dict(cpu_ns=0 if observer_off else None, wakeups=0 if observer_off else None,
+                  query_count=0 if observer_off else None, query_duration_median_ms=None,
+                  query_duration_max_ms=None, deadline_lateness_max_ms=None,
+                  target_cpu_delta_ns=None, target_wakeups_delta=None)
+    if observer_off:
+        return result
+    try:
+        path = Path(str(timeline) + '.self.json')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 4096:
+                raise ValueError('self-cost is not a bounded regular file')
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise ValueError('self-cost exceeds bound')
+        data = json.loads(raw)
+        if not isinstance(data, dict) or any(not integer(data.get(k)) or data[k] > 2**64-1
+                for k in ('cpu_ns', 'wakeups', 'query_count')) or data.get('query_count', 0) > 12000:
+            raise ValueError('invalid self-cost')
+        result.update({k: data[k] for k in ('cpu_ns', 'wakeups', 'query_count')})
+    except (OSError, ValueError, TypeError, RecursionError, OverflowError):
+        pass
+    try:
+        samples = read_jsonl(timeline, 12000, 32 * 1024 * 1024)
+        durations, lateness = [], []
+        for sample in samples:
+            a, b, deadline = (sample[k] for k in ('query_start_ns', 'query_end_ns', 'scheduled_ns'))
+            if not all(integer(v) for v in (a, b, deadline)) or not deadline <= a <= b:
+                raise ValueError('invalid query')
+            durations.append((b-a)/1e6)
+            lateness.append((a-deadline)/1e6)
+        result.update(query_duration_median_ms=statistics.median(durations),
+                      query_duration_max_ms=max(durations), deadline_lateness_max_ms=max(lateness))
+        for source, dest in (('cpu_ns', 'target_cpu_delta_ns'), ('wakeups', 'target_wakeups_delta')):
+            values = [s.get(source) for s in samples]
+            if all(integer(v) for v in values) and all(a <= b for a, b in zip(values, values[1:])):
+                result[dest] = values[-1] - values[0] if len(values) >= 2 else None
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, statistics.StatisticsError):
+        pass
+    return result
