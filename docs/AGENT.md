@@ -393,6 +393,18 @@ A pane targeted by a control connection shows the `agent-badge` prefix (default
 `"[agent] "`) in its per-pane titlebar, and an `agent_attached` event fires. Set
 `agent-badge = ` (empty) to disable, or to any glyph you like (`agent-badge = 🤖 `).
 
+On macOS, the private performance harness can set `KETTLE_CURSOR_EXIT_CONTEXT`
+and select `RUST_LOG=warn,kettle::cursor_blink=info` to request bare
+`cursor_exit_v1` records on stderr. The context is a bounded JSON object with
+exactly `contract`, `launch_id`, `calibration_keys`, `warmup` and `keys`.
+`contract` is `cursor_exit_v1`, `launch_id` has 32 hexadecimal characters,
+`calibration_keys` is 6, `warmup` is an unsigned count and `keys` is positive.
+The file must be a regular file owned by the effective user, with one link and
+no group or other permissions. Final symlinks are refused. Read it once at
+launch; later edits do not affect the stream. This protocol uses no control
+polls. Without this opt-in, the existing duration log and
+`ui_geometry.cursor_blink` retain their format and meaning.
+
 ## `kettle mcp` — MCP server
 
 Expose all of the above as Model Context Protocol tools, so Claude Code/Codex get

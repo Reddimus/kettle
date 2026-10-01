@@ -978,6 +978,7 @@ pub(crate) struct WindowState {
     /// Who draws the blink, the GPU or the window server's layer, and
     /// whether the window has been quiet enough to hand it over.
     pub(crate) blink_layer: crate::cursor_blink::BlinkLayer,
+    pub(crate) cursor_exit_log: crate::cursor_exit_log::CursorExitLog,
     /// When each pane last rang the bell, for the per-pane visual flash.
     /// Entries are dropped by the idle loop once `BELL_FLASH_DURATION` has
     /// passed, so a pane that closes mid-flash cannot leak one.
@@ -1212,6 +1213,7 @@ impl WindowState {
             last_blink: std::time::Instant::now(),
             last_blink_activity: std::time::Instant::now(),
             blink_layer: crate::cursor_blink::BlinkLayer::default(),
+            cursor_exit_log: crate::cursor_exit_log::CursorExitLog::default(),
             bell_flashes: std::collections::HashMap::new(),
             last_paint: None,
             output_pacer: OutputPaintPacer::default(),

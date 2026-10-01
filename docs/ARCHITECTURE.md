@@ -1494,6 +1494,33 @@ Core Animation layer, with `macos-cursor-blink-layer` on by default.
   patch rect, the phase the screen shows and the layer's counters. Reading it
   draws no frame, so it can watch a layer blink without ending it.
 
+The private `cursor_exit_log` observer binds the launch's initial pane to its
+native NSWindow number before the first frame. It emits one capability line,
+then counts accepted nonmodifier native key-downs in that window from one.
+Calibration consumes sequences 1 through 6. Input routing retains the actual
+pane and sequence when that key requests an active-layer exit. Coalesced keys
+keep the first requester's identity; later keys still consume sequences.
+Other windows, key-up, PTY bytes, control requests and redraws never increment
+this counter. Every counted key gets exactly one record. A key that cannot
+end a layer blink (calibration, an inactive layer, an unknown pane) gets an
+`input` record at once. So does a key coalesced into another key's frame, a
+pending key whose layer is hidden without a frame, and a key whose frame
+presents untimed. An eligible key that asks for no frame is recorded at the
+next key or before the event loop waits. Extra input therefore stays visible
+to the harness even when it ends no blink.
+
+A successful joined exit records `CLOCK_UPTIME_RAW` at `redraw` entry, before
+phase materialization and scene preparation, and after `end_exit_frame` has
+restored synchronized presentation, committed and flushed the transaction.
+Formatting and the single stderr write follow that endpoint. Failed frames
+emit nothing and retain the requesting key for a retry. Exits no key caused
+emit no wire record. The observer does not change scheduling or layer ownership.
+Records retain duplicate submissions and extra keys for the harness to reject.
+`total_frame_us` rounds the complete frame duration up to microseconds; the
+existing aggregate still measures its original render/transaction region.
+The wire is inert off macOS. Disabled hooks check a cached boolean and perform
+no context reads, clock queries, formatting or writes.
+
 ## Threading model
 
 - **Main thread** — winit event loop, *all* GPU work, every window's

@@ -36,6 +36,7 @@ mod window_state;
 // The cursor blink's timeline, shared by the GPU scheduler and the macOS
 // Core Animation layer that can take the blink over.
 mod cursor_blink;
+mod cursor_exit_log;
 // In-process control server (agent-first A2). The accept/reader/
 // writer threads run kettle-ctl's transport; the App drains requests on the
 // main thread via `UserEvent::Ctl`. Always compiled (gated at runtime by the

@@ -7589,7 +7589,9 @@ impl App {
             m
         };
         let mut windows = std::collections::BTreeMap::new();
-        windows.insert(1, WindowState::new(1, start_fullscreen, mux));
+        let mut initial_window = WindowState::new(1, start_fullscreen, mux);
+        initial_window.cursor_exit_log = crate::cursor_exit_log::CursorExitLog::from_env(1);
+        windows.insert(1, initial_window);
         let remote_proxy = proxy.clone();
         let remote_scan_worker =
             match kettle_remote::RemoteScanWorker::spawn_with_notifier(move || {
@@ -13181,7 +13183,15 @@ impl App {
     fn redraw(&mut self, ws: &mut WindowState) {
         // A frame while the window server blinks the cursor ends that blink.
         // Bring the app's phase to where the animation is first, so the frame
-        // draws what the screen shows.
+        // draws what the screen shows. The harness timer includes this work.
+        let cursor_exit_frame = if ws.cursor_exit_log.enabled {
+            ws.cursor_exit_log.begin_frame(
+                ws.blink_layer.is_active(),
+                crate::cursor_exit_log::raw_now_ns(),
+            )
+        } else {
+            None
+        };
         Self::materialize_layer_blink(ws, std::time::Instant::now());
         // Flush any pending chrome-geometry change before painting. A title
         // edit materialises a chrome strip (see `tab_bar_h`), so opening or
@@ -13769,11 +13779,26 @@ impl App {
         if layer_exit && let Some(layer) = &ws.cursor_layer {
             layer.end_exit_frame();
         }
+        let cursor_exit_end = if cursor_exit_frame.is_some() && layer_exit_presented {
+            crate::cursor_exit_log::raw_now_ns()
+        } else {
+            None
+        };
         if layer_exit_presented {
             let exit_time = exit_started.elapsed();
             ws.blink_layer.exited(exit_time);
-            log::info!(target: CURSOR_BLINK_LOG, "exit_frame_us={} render_frame_us={}",
-                exit_time.as_micros(), frame_time.as_micros());
+            if ws.cursor_exit_log.enabled {
+                if let Some(line) = ws.cursor_exit_log.finish_frame(
+                    cursor_exit_frame,
+                    layer_exit_presented,
+                    cursor_exit_end,
+                ) {
+                    crate::cursor_exit_log::emit_line(&line);
+                }
+            } else {
+                log::info!(target: CURSOR_BLINK_LOG, "exit_frame_us={} render_frame_us={}",
+                    exit_time.as_micros(), frame_time.as_micros());
+            }
             if !self.cfg.macos_cursor_blink_layer {
                 Self::retire_cursor_layer(ws);
             }
@@ -15788,6 +15813,9 @@ impl App {
             layer.hide();
         }
         ws.blink_layer.hidden();
+        if ws.cursor_exit_log.enabled {
+            ws.cursor_exit_log.hidden();
+        }
     }
 
     /// Remove the cursor layer and the renderer's surface on it. A rebuilt
@@ -25374,6 +25402,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("about_to_wait");
+        // Opt-in cursor_exit_v1: a key that could have ended the layer blink
+        // but asked for no frame is recorded before the loop sleeps.
+        for ws in self.windows.values_mut() {
+            if ws.cursor_exit_log.enabled {
+                ws.cursor_exit_log.flush_unrequested();
+            }
+        }
         // Tear-off UX failsafe: torn-drag tracking that lost its
         // drop signal (an X11 release the WM swallowed, then no further
         // input) is abandoned after 120s of silence. The window is long
@@ -28073,6 +28108,12 @@ impl App {
             crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
             crate::startup_trace::note_path(crate::startup_trace::StartupPath::AfterRenderer);
         }
+        if ws.cursor_exit_log.enabled
+            && let Some(pane_id) = ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus)
+            && let Some(window) = ws.window.as_deref()
+        {
+            ws.cursor_exit_log.bind(ws.seq, pane_id, window);
+        }
         self.resize_all(ws);
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
@@ -30052,6 +30093,18 @@ impl App {
                         return;
                     }
                 }
+                let cursor_exit_key = if ws.cursor_exit_log.enabled {
+                    ws.cursor_exit_log.accepted_key(
+                        ws.seq,
+                        ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus),
+                        event.state,
+                        &event.logical_key,
+                        event.physical_key,
+                        ws.blink_layer.is_active(),
+                    )
+                } else {
+                    None
+                };
                 // Record the keystroke (redacted token) BEFORE any
                 // modal/early-return path consumes it, so the trace captures
                 // every key. Pasted content never reaches here — it's a `paste`
@@ -30080,6 +30133,9 @@ impl App {
                     // the terminal.
                     ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
+                        if cursor_exit_key.is_some() {
+                            ws.cursor_exit_log.request_exit(cursor_exit_key);
+                        }
                         w.request_redraw();
                     }
                     return;
@@ -30097,6 +30153,9 @@ impl App {
                     ws.tab_pressed_idx = None;
                     ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
+                        if cursor_exit_key.is_some() {
+                            ws.cursor_exit_log.request_exit(cursor_exit_key);
+                        }
                         w.request_redraw();
                     }
                     return;
@@ -30119,6 +30178,9 @@ impl App {
                 // user-driven blink-reset paths (Reset / focus changes /
                 // modal close / typing / tab close / window focus /
                 // DEC ?12 toggle) stay in lock-step.
+                if cursor_exit_key.is_some() {
+                    ws.cursor_exit_log.request_exit(cursor_exit_key);
+                }
                 self.reset_blink_phase(ws);
                 // Hide the OS mouse cursor (configurable; default on, like
                 // every modern terminal). Re-shown on the next CursorMoved.

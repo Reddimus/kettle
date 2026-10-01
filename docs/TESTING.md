@@ -1159,6 +1159,29 @@ carry render-only durations. The cursor-latency gate remains required. Its
 `--latency-payload cursor` implementation belongs to harness-completion PR 6
 and must be merged and frozen before those measurements. C2's smoke and helper
 checks run independently of that harness change.
+`cargo test -p kettle-ui cursor_exit_log` exercises strict context parsing,
+private-file metadata rules, exact capability/input/exit bytes, the 4096-byte
+limit, calibration and extra-key counting, modifier/release/window exclusions,
+input-to-exit joins, retry/hide handling, duplicate preservation, and an
+`input` record for every counted key that ends no layer blink: calibration
+keys, a key after the final exit, coalesced and hide-cancelled keys, untimed
+frames and eligible keys that ask for no frame. Source
+guards pin the native routing hook, startup binding and timestamps around
+scene preparation, rendering, layer hide, transaction commit and flush.
+These pure tests run on Linux and Windows too; protocol activation stays
+macOS-only. They do not establish native handoffs or clock/input correlation.
+
+For native acceptance, use HC PR 6's frozen cursor harness with a private
+context and `kettle::cursor_blink` info enabled. Require one capability even
+for a zero-exit launch, `input` records for keys 1-6 and no other key, exactly
+one exit for every warmup/measured key, actual
+initial pane/native-window identity, ordered raw-clock endpoints and byte
+agreement with its `cursor-exits.fixture`. The legacy duration line is
+suppressed only in this opt-in stream because HC refuses legacy records.
+Do not poll geometry during the campaign. Missing handoffs or coalesced,
+extra, duplicate or wrong-pane keys must fail coverage, never become synthetic
+zero-cost records. Complete-frame p95 must meet the harness's 4000 us gate.
+
 `just cursor-blink-layer-self-test` checks the wire geometry object, refuses
 idle samples shorter than 3 s, and verifies private capture cleanup on success
 and failure. It also checks delayed diagnostic replies, captures spanning two
