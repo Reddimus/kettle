@@ -347,6 +347,37 @@ keep every existing output file (`summary.md`, `combined.md`, `combined.json`
 and `results.json`) byte-identical for schema-1/2 sessions, compared as whole
 files rather than prefixes or selected JSON fields.
 
+The portable `NativeEvidence` tests cover retained startup child/native
+policies, both delayed-child grid corrections, provisional recorder completeness,
+failed/no-op resizes, event loss, wrong identities and overflow. Startup fixtures
+pin the S1 format and the S2 font-thread format separately. They check raw stamps,
+thread/path attribution, signed slack, per-round GPU/font intervals, missing and
+reversed endpoints, duplicate conflicts and diagnostic-only unknown stamps.
+A malformed stamp (negative, non-numeric, missing or over 20 digits)
+invalidates its phase rather than leaving an earlier stamp in force, and a
+malformed path line voids font attribution. Native geometry components must lie
+in 1-65,535, the range of `struct winsize`; an isolated fixture checks the
+initial-grid refusal alone. First output stays unavailable. Native layer aggregate and private trace tests
+refuse to infer interval coverage, geometry-read controls or echo joins from
+unemitted data. CLI fixtures mock every spawn and helper build, exercise the
+actual entry point and check private input redaction.
+
+`LegacyOutputBytes` compares all bytes of `results.json`, `summary.md`,
+`combined.json` and `combined.md` against fixed baseline outputs for schema 1,
+2 and 3, in both standing and A/B layouts. The schema-1 cases include `.dat`
+reconstruction. The checks use unittest equality, which remains active under
+`python3 -O`. The old S1 fixture is retained unchanged; the separate font fixture
+matches the font preload producer. Fixtures are inert harness-version inputs.
+
+These tests launch no GUI application. They do not prove a native PTY recorder,
+an actual delayed-child startup barrier, layer interval samples, twenty harmless
+geometry reads or a private echo trace integration. Those require producer wire
+agreement and separate native acceptance on an authorized runner. The current
+layer smoke exports only aggregates, and the row-shaping source exports no echo
+trace. Keep those capabilities incomplete or unavailable until the producers
+supply the needed evidence. See the retained diagnostic formats in
+[scripts/perf/README.md](../scripts/perf/README.md#retained-startup-and-native-diagnostics).
+
 For per-file review snapshots, put `macos-standing-self-test.py` beside the
 patched harness, retain the helper source snapshots under `macos-standing/`,
 and place the repository ignore-rule snapshot at `snapshot.gitignore`. Run

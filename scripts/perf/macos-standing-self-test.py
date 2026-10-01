@@ -4186,5 +4186,301 @@ class ConfigClosureTests(unittest.TestCase):
         self.assertIn('Some(PathBuf::from(dir))', text)
 
 
+def legacy_output_bytes(module, case, root):
+    """Replay fixed whole-file outputs through the repository's writers."""
+    import copy
+    result = copy.deepcopy(case["input"])
+    folder = root / "legacy"
+    folder.mkdir()
+    (folder / "results.json").write_text(module.dumps(result))
+    # Schema 1 dates a session by results.json's mtime in local time. Pin
+    # local noon on the fixtures' date so the bytes match in every time zone
+    # and on every day.
+    noon = time.mktime((2026, 9, 30, 12, 0, 0, 0, 0, -1))
+    os.utime(folder / "results.json", (noon, noon))
+    for name, data in case.get("dat", {}).items():
+        (folder / name).write_text(data)
+    names = result["terminals"]
+    ab = names == ["kettle-a", "kettle-b"]
+    summary = module.summarize(result, names, ab) + "\n"
+    combined = module.combine([folder])
+    markdown = combined.pop("markdown")
+    return {"results.json": (folder / "results.json").read_bytes(),
+            "summary.md": summary.encode(), "combined.json": module.dumps(combined).encode(),
+            "combined.md": markdown.encode()}
+
+
+class LegacyOutputBytes(unittest.TestCase):
+    def test_existing_whole_files_match_pinned_schema_1_2_3_outputs(self):
+        import tempfile
+        fixtures = _json.loads((HERE / "macos-standing" / "legacy-output-bytes.fixture").read_text())
+        for case in fixtures:
+            with self.subTest(case=case["name"]), tempfile.TemporaryDirectory() as tmp:
+                output = legacy_output_bytes(standing, case, Path(tmp))
+                for name, data in output.items():
+                    # unittest checks run under -O too; no Python assert.
+                    self.assertEqual(data, case["expected"][name].encode(), f"whole file {name}")
+
+
+class NativeEvidence(unittest.TestCase):
+    @staticmethod
+    def row(cols=120, rows=36):
+        geometry = {"cols": cols, "rows": rows, "pixel_width": 960, "pixel_height": 600}
+        return {"cols": cols, "rows": rows, "start_cols": cols, "start_rows": rows,
+                "launch_id": "launch-1", "pane_id": "pane-1", "started_ns": 10,
+                "child_observed_ns": 100,
+                "native_pty": {"version": "native_pty_v1", "clock": "CLOCK_UPTIME_RAW",
+                    "launch_id": "launch-1", "pane_id": "pane-1", "complete": True,
+                    "dropped": 0, "overflow": False, "recording_start_ns": 11,
+                    "created_ns": 12, "initial_stage": "after_create_before_correction",
+                    "initial": {**geometry, "t_ns": 13}, "recording_end_ns": 2_000_000_011,
+                    "events": [], "event_count": 0,
+                    "child_observation": {"child_observed_ns": 100, "start_cols": cols,
+                                          "start_rows": rows, "sigwinch_count": 0},
+                    "final": {**geometry, "t_ns": 2_000_000_011}}}
+
+    def test_child_rejects_initial_mismatch_and_missing_observation(self):
+        row = self.row(); row["start_cols"] = 119
+        self.assertEqual(standing.startup_grid_evidence(row)["state"], "supported")
+        self.assertEqual(standing.startup_grid_evidence(row, "child")["state"], "incomplete")
+        row.pop("start_cols")
+        self.assertEqual(standing.startup_grid_evidence(row, "child")["state"], "incomplete")
+        self.assertEqual(standing.startup_grid_evidence(self.row(), "child")["state"], "supported")
+
+    def test_delayed_child_rejects_native_initial_correction_for_both_sizes(self):
+        for cols, rows, initial_cols, initial_rows in ((100, 30, 99, 30), (120, 36, 119, 36)):
+            row = self.row(cols, rows)
+            row["native_pty"]["initial"].update(cols=initial_cols, rows=initial_rows)
+            corrected = dict(row["native_pty"]["final"])
+            row["native_pty"].update(event_count=1, events=[{
+                "seq": 1, "t_ns": 50, "launch_id": "launch-1", "pane_id": "pane-1",
+                "requested": corrected, "observed": corrected, "outcome": "ok",
+                "reason": "window", "native_error": None, "signal_sent": True}])
+            self.assertEqual(standing.startup_grid_evidence(row, "child", cols, rows)["state"], "supported")
+            self.assertEqual(standing.startup_grid_evidence(row, "native", cols, rows)["state"], "incomplete")
+
+    def test_native_requires_two_seconds_of_actual_recording(self):
+        row = self.row()
+        row["native_pty"].update(recording_start_ns=1_999_000_011, created_ns=1_999_000_012)
+        row["native_pty"]["initial"]["t_ns"] = 1_999_000_013
+        row["child_observed_ns"] = 1_999_000_014
+        row["native_pty"]["child_observation"]["child_observed_ns"] = row["child_observed_ns"]
+        self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "incomplete")
+
+    def test_native_complete_noop_and_legacy_absence(self):
+        row = self.row()
+        self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+        initial = row["native_pty"]["initial"]
+        row["native_pty"]["events"] = [{"seq": 1, "t_ns": 200, "launch_id": "launch-1", "pane_id": "pane-1",
+            "requested": initial, "observed": initial, "outcome": "noop", "reason": "window",
+            "native_error": None, "signal_sent": False}]
+        row["native_pty"]["event_count"] = 1
+        self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+        row.pop("native_pty")
+        self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "unavailable")
+
+    def test_native_missing_failed_dropped_wrong_pane_overflow_never_pass(self):
+        import copy
+        complete = self.row()["native_pty"]
+        event = {"seq": 1, "t_ns": 200, "launch_id": "launch-1", "pane_id": "pane-1",
+                 "requested": complete["initial"], "observed": complete["initial"],
+                 "outcome": "noop", "reason": "window", "native_error": None, "signal_sent": False}
+        for field in ("recording_start_ns", "recording_end_ns", "initial", "final", "child_observation", "event_count", "created_ns", "initial_stage"):
+            with self.subTest(missing=field):
+                row = self.row(); row["native_pty"].pop(field)
+                self.assertNotEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+        for field, value in (("dropped", 1), ("overflow", True), ("complete", False),
+                             ("pane_id", "other"), ("clock", "CLOCK_MONOTONIC"),
+                             ("event_count", 1), ("recording_end_ns", 200)):
+            with self.subTest(field=field):
+                row = self.row(); row["native_pty"][field] = value
+                self.assertNotEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+        for field, value in (("outcome", "error"), ("seq", 2), ("pane_id", "other"),
+                             ("signal_sent", True), ("native_error", 5), ("observed", None),
+                             ("t_ns", 12), ("reason", "unrecorded")):
+            row = self.row(); changed = copy.deepcopy(event); changed[field] = value
+            row["native_pty"].update(events=[changed], event_count=1)
+            self.assertNotEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+        row = self.row(); changed = copy.deepcopy(event); changed["requested"]["pixel_width"] += 1
+        row["native_pty"].update(events=[changed], event_count=1)
+        self.assertNotEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
+
+    def test_native_initial_grid_alone_refuses(self):
+        # Only the initial-grid check can refuse this: wrong initial and final
+        # native grids, no events, and a correct child grid.
+        row = self.row()
+        for record in ("initial", "final"):
+            row["native_pty"][record]["cols"] = 119
+        self.assertEqual(standing.startup_grid_evidence(row, "native"),
+                         {"state": "incomplete", "reason": "wrong initial native geometry", "provisional": True})
+
+    def test_native_geometry_is_bounded_by_winsize(self):
+        for width, state in ((65535, "supported"), (65536, "incomplete"), (10**400, "incomplete")):
+            with self.subTest(width=width):
+                row = self.row()
+                for record in ("initial", "final"):
+                    row["native_pty"][record]["pixel_width"] = width
+                self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], state)
+
+    def test_malformed_phase_or_path_records_invalidate_their_intervals(self):
+        good = self.phases({"window_created": 10, "gpu_ready": 20})
+        self.assertEqual(standing.startup_phase_evidence(good, None)["durations"]["gpu_init_ms"], 10.)
+        for record in ("startup phase=gpu_ready t_ns=-1", "startup phase=gpu_ready t_ns=oops",
+                       "startup phase=gpu_ready",
+                       "startup phase=gpu_ready t_ns=" + "9" * 5000 + " since_main_ms=0.00 thread=main"):
+            with self.subTest(record=record[:40]):
+                report = standing.startup_phase_evidence(good + "\n" + record, None)
+                self.assertIsNone(report["durations"]["gpu_init_ms"])
+                self.assertEqual(report["metric_validity"]["gpu_init_ms"]["state"], "unavailable")
+        fonts = self.phases({"fonts_join_start": 10, "fonts_joined": 20})
+        self.assertEqual(standing.startup_phase_evidence(fonts, None)["durations"]["fonts_join_wait_ms"], 10.)
+        broken = standing.startup_phase_evidence(fonts + "\nstartup path=garbage", None)
+        self.assertIsNone(broken["durations"]["fonts_join_wait_ms"])
+        self.assertIsNone(broken["startup_path"])
+
+    @staticmethod
+    def phases(stamps, path="resumed_early"):
+        return "\n".join(f"startup phase={name} t_ns={int(t * 1e6)} since_main_ms=0.00 thread={'fonts' if name in ('fonts_ready', 'fonts_enumerated') else 'main'}"
+                         for name, t in stamps.items()) + f"\nstartup path={path}"
+
+    def test_s2_preserves_raw_thread_path_and_leaves_unemitted_fields_unavailable(self):
+        text = (HERE / "macos-standing" / "startup-font-phases.fixture").read_text()
+        report = standing.startup_phase_evidence(text, 900_000_000)
+        self.assertEqual(report["startup_stamps_ns"]["fonts_join_start"], 1_090_000_000)
+        self.assertEqual(report["startup_phase_threads"]["fonts_ready"], "fonts")
+        self.assertEqual(report["startup_path"], "resumed_early")
+        self.assertEqual(report["durations"]["fonts_join_wait_ms"], 10.)
+        self.assertIsNone(report["monitor_match"])
+        self.assertIsNone(report["reported_fonts_wait_ms"])
+        self.assertEqual(report["phase_ms"]["first_frame"], 240.)
+
+    def test_font_and_gpu_durations_derive_per_round_before_medians(self):
+        # medians(end)-medians(begin)=5; median(end-begin)=10.
+        rounds = [standing.startup_phase_evidence(self.phases({"window_created": a, "gpu_ready": b,
+                   "fonts_join_start": a, "fonts_joined": b}), None)
+                  for a, b in ((1, 101), (101, 106), (201, 211))]
+        summary = standing.startup_duration_summary(rounds)
+        for field in ("fonts_join_wait_ms", "gpu_init_ms"):
+            self.assertEqual(summary[field]["values"], [100., 5., 10.])
+            self.assertEqual(summary[field]["median"], 10.)
+            self.assertEqual(summary[field]["max"], 100.)
+            self.assertAlmostEqual(summary[field]["p95"], 91.)
+        signed = standing.startup_phase_evidence(self.phases({"fonts_ready": 20, "resumed": 10, "config_loaded": 30}), None)
+        self.assertEqual(signed["durations"]["fonts_ready_to_resumed_ms"], -10.)
+        self.assertEqual(signed["durations"]["fonts_ready_after_config_ms"], -10.)
+
+    def test_missing_unordered_conflicting_and_malformed_endpoints_are_unavailable(self):
+        for stamps in ({"window_created": 10}, {"window_created": 20, "gpu_ready": 10}):
+            report = standing.startup_phase_evidence(self.phases(stamps), None)
+            self.assertIsNone(report["durations"]["gpu_init_ms"])
+        text = self.phases({"window_created": 10, "gpu_ready": 20})
+        conflict = text + "\nstartup phase=gpu_ready t_ns=30000000 since_main_ms=0.00 thread=main"
+        report = standing.startup_phase_evidence(conflict, None)
+        self.assertEqual(report["startup_stamps_ns"]["gpu_ready"], 20_000_000)
+        self.assertIsNone(report["durations"]["gpu_init_ms"])
+        self.assertEqual(report["duplicate_stamps"], 1)
+        malformed = text + "\nstartup phase=gpu_ready t_ns=30000000 since_main_ms=0.00 thread=bogus"
+        self.assertIsNone(standing.startup_phase_evidence(malformed, None)["durations"]["gpu_init_ms"])
+        no_threads = self.phases({"fonts_join_start": 10, "fonts_joined": 11}).replace(" thread=main", "")
+        self.assertIsNone(standing.startup_phase_evidence(no_threads, None)["durations"]["fonts_join_wait_ms"])
+
+    def test_s1_identical_and_unknown_optional_stamps_are_diagnostic_only(self):
+        s1 = StartupPhases.FIXTURE
+        expected = {f"phase_{name}_ms": 100. + index * 10. for index, name in enumerate(
+            ("main", "run_with", "event_loop_built", "config_loaded", "app_built", "pane_spawned", "resumed", "window_created", "gpu_ready", "window_revealed", "first_frame"))}
+        expected["startup_path"] = "resumed_early"
+        self.assertEqual(standing.parse_phases(s1, 900_000_000), expected)
+        report = standing.startup_phase_evidence(s1 + "\nstartup phase=future_device t_ns=1210000000 since_main_ms=210.00 thread=main", 900_000_000)
+        self.assertEqual(report["unknown_stamps_ns"], {"future_device": 1_210_000_000})
+        self.assertNotIn("future_device", report["phase_ms"])
+        self.assertNotIn("future_device", report["durations"])
+
+    @staticmethod
+    def smoke():
+        frames = {"count": 0, "p50": None, "p95": None, "max": 0}
+        state = {"renderer": "layer", "handoffs": 1, "exits": 0, "hides": 0, "exit_frame_us": frames}
+        return {"contract": {"handoff_after_s": .6, "idle": {"span_s": 3.5, "peak_mib": 75., "wakeups_per_s": 0., "cpu_percent": .01},
+                             **{key: dict(state) for key in ("handoff", "rested", "after_reload", "after_key")}}}
+
+    def test_native_layer_aggregates_cannot_certify_actual_interval_or_geometry_reads(self):
+        for span in (2., 3.5):
+            data = self.smoke(); data["contract"]["idle"]["span_s"] = span
+            report = standing.cursor_layer_evidence(data)
+            self.assertEqual(report["state"], "incomplete")
+            self.assertEqual(report["aggregates"]["idle"]["peak_mib"], 75.)
+            self.assertIsNone(report["interval_peak_mib"])
+            self.assertIsNone(report["geometry_polling_valid"])
+            self.assertIsNone(report["acceptance"])
+        self.assertEqual(standing.cursor_layer_evidence({})["state"], "unavailable")
+        data = self.smoke(); data["contract"]["idle"]["peak_mib"] = float("nan")
+        self.assertEqual(standing.cursor_layer_evidence(data)["state"], "malformed")
+
+    def test_unagreed_traces_cannot_invent_emit_or_echo_joins_or_clock_savings(self):
+        # The proposed design JSONL is not the actual private producer format.
+        for text in ("", '{"phase":"snapshot","clock":"CLOCK_UPTIME_RAW"}',
+                     '{"phase":"emit_pane_glyphs","echo_seq":1}\n' * 2,
+                     '{"phase":"main_prepare","status":"skipped"}',
+                     '{"clock":"CLOCK_MONOTONIC","phase":"upload"}'):
+            report = standing.renderer_trace_evidence(text)
+            self.assertEqual(report["state"], "unavailable")
+            self.assertIsNone(report["echo_durations"])
+            self.assertIsNone(report["acceptance"])
+
+    def test_first_output_never_promotes_first_frame_or_key_output(self):
+        report = standing.startup_phase_evidence(self.phases({"first_frame": 10}), 0)
+        self.assertEqual(report["phase_ms"]["first_frame"], 10.)
+        self.assertIsNone(report["first_output_ms"])
+        self.assertEqual(report["first_output_capability"], "unavailable")
+
+    def test_postprocessing_cli_launches_nothing_and_redacts_private_inputs(self):
+        import argparse
+        import io
+        import contextlib
+        import tempfile
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.json"
+            row = self.row(); row["owner"] = "/private/sentinel/person@example.test"
+            path.write_text(json_dumps({"workloads": {"startup": {"kettle": [row]}}}))
+            phase = Path(tmp) / "phase.log"; phase.write_text(self.phases({"gpu_ready": 10}))
+            layer = Path(tmp) / "layer.json"; layer.write_text(json_dumps(self.smoke()))
+            trace = Path(tmp) / "trace.log"; trace.write_text(row["owner"])
+            args = argparse.Namespace(startup_input=[str(path)], startup_grid_policy="native",
+                                      startup_phase_input=[str(phase)], startup_started_ns=None,
+                                      native_layer_input=[str(layer)], trace_input=[str(trace)])
+            out = io.StringIO()
+            with mock.patch.object(standing.subprocess, "Popen", side_effect=AssertionError("spawn")), contextlib.redirect_stdout(out):
+                self.assertEqual(standing.run_evidence_postprocessing(args), 0)
+            report = _json.loads(out.getvalue())
+            self.assertFalse(report["countable"])
+            self.assertNotIn("sentinel", out.getvalue())
+            self.assertNotIn("example.test", out.getvalue())
+            with mock.patch.object(sys, "argv", [str(HERE / "macos-standing.py"), "--startup-input", str(path), "--startup-grid-policy", "child"]), mock.patch.object(standing, "build_probes", side_effect=AssertionError("build")), mock.patch.object(standing.subprocess, "Popen", side_effect=AssertionError("spawn")), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(standing.main(), 0)
+
+    def test_oversized_native_numeric_input_is_malformed_without_a_traceback(self):
+        import io
+        import contextlib
+        import tempfile
+        from unittest import mock
+        data = self.smoke(); data["contract"]["idle"]["peak_mib"] = 10**400
+        self.assertEqual(standing.cursor_layer_evidence(data)["state"], "malformed")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "huge.json"; path.write_text(json_dumps(data))
+            out = io.StringIO()
+            with mock.patch.object(sys, "argv", [str(HERE / "macos-standing.py"), "--native-layer-input", str(path)]), contextlib.redirect_stdout(out):
+                self.assertEqual(standing.main(), 0)
+            self.assertEqual(_json.loads(out.getvalue())["reports"][0]["evidence"]["state"], "malformed")
+
+    def test_diagnostic_json_rejects_duplicate_nonfinite_and_wrong_top_level(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bad.json"
+            for text in ('{"a":1,"a":2}', '{"a":NaN}', '[]'):
+                path.write_text(text)
+                with self.assertRaises(ValueError):
+                    standing.diagnostic_json(path)
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])
