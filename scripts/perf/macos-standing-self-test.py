@@ -2387,7 +2387,7 @@ class Latency(unittest.TestCase):
     def test_the_default_workloads_never_post_keys(self) -> None:
         self.assertEqual(standing.WORKLOADS, ("startup", "idle", "flood-memory", "vtebench"))
         self.assertNotIn("latency", standing.WORKLOADS)
-        self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency",))
+        self.assertEqual(standing.OPT_IN_WORKLOADS, ("latency", "output-memory", "blink-window"))
         import inspect
 
         source = inspect.getsource(standing.standing_main)
@@ -3231,6 +3231,48 @@ class ProbeIntegrity(unittest.TestCase):
         self.assertEqual(standing.build_latency_probe(self.root, "-"), app)
 
 
+    def test_rebased_blink_uses_verified_invocation_and_lease(self):
+        from unittest import mock
+        import fcntl
+        validations = []
+        original = standing.validate_latency_probe
+        def validate(*args, **kwargs):
+            validations.append(args)
+            return original(*args, **kwargs)
+        out = self.root / 'blink.json'
+        def invoke(command, lease, timeout):
+            self.assertIn('--blink-check', command)
+            self.assertEqual(command[-2:], ['--lease-file', str(lease)])
+            fd = os.open(lease, os.O_RDONLY)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+            out.write_text('{}')
+        runner = standing.Runner({'latency-probe': self.app}, self.root, {})
+        with mock.patch.object(standing, 'validate_latency_probe', side_effect=validate), \
+                mock.patch.object(standing, 'run_owned_probe_open', side_effect=invoke) as spawn:
+            runner.blink_probe(['--blink-check', '--out', str(out)], self.root, 1)
+        self.assertEqual(len(validations), 2)
+        self.assertEqual(spawn.call_count, 1)
+        self.assertFalse(list(self.root.glob('.probe-use-*')))
+        binary = self.app / 'Contents/MacOS/latency-probe'
+        binary.write_bytes(b'changed')
+        with mock.patch.object(standing, 'run_owned_probe_open') as spawn:
+            with self.assertRaises(RuntimeError):
+                runner.blink_probe(['--blink-check', '--out', str(out)], self.root, 1)
+            spawn.assert_not_called()
+        self.prepare()
+        def mutate(command, lease, timeout):
+            invoke(command, lease, timeout)
+            binary.write_bytes(b'changed-during-blink')
+        with mock.patch.object(standing, 'run_owned_probe_open', side_effect=mutate):
+            with self.assertRaises(RuntimeError):
+                runner.blink_probe(['--blink-check', '--out', str(out)], self.root, 1)
+        self.assertFalse(list(self.root.glob('.probe-use-*')))
+
+
 FLOOD_4K_SHA256 = "8f18d84dad9b7ab935be1aa827e9ce0d0cc97b0c2e75f08afaede576a8b08f5d"
 
 
@@ -3341,6 +3383,7 @@ columns=$(tput cols < $tty)
 lines=$(tput lines < $tty)
 printf "%s %s" "$columns" "$lines"
 """
+
 
 
 def run_like_vtebench(script: Path, cols: int, rows: int) -> str:
@@ -3741,6 +3784,7 @@ class MetricContracts(unittest.TestCase):
             self.assertNotIn("difference", row["sessions"][0])
         self.assertNotIn("## Absolute differences", combined["markdown"])
         self.assertNotIn("Adjacent ", combined["markdown"])
+
 
 
 
@@ -4149,6 +4193,73 @@ class ConfigClosureTests(unittest.TestCase):
         self.assertIn('config_closure', local)
         self.assertTrue((output / 'private-config/assets').is_dir())
 
+    def test_rebased_optional_campaign_brackets_actual_rows(self):
+        for workload, validation in (('output-memory', False), ('blink-window', False), ('blink-window', True)):
+            with self.subTest(workload=workload, validation=validation):
+                self.optional_campaign(workload, validation)
+
+    def optional_campaign(self, workload, validation):
+        # Mock the app/environment at the entry point. A mutation in the real
+        # collection callback must retain earlier data and abort the campaign.
+        import contextlib
+        import io
+        from unittest.mock import patch, Mock
+        output = self.root / ('optional-' + workload + str(validation))
+        args = ['standing', '--kettle', '/fixture/A.app/Contents/MacOS/kettle',
+                '--kettle-b-config', 'background-image = ' + str(self.source),
+                '--no-build', '--workloads', workload, '--rounds', '2', '--warmup', '0',
+                '--fd-limit', '0', '--out-dir', str(output)]
+        if validation:
+            args += ['--blink-validate-only', '--blink-cursor-rect', '1,2,3,4', '--blink-shape', 'block', '--blink-timeout', '10']
+        state = {'display': {}, 'power': {}, 'low_power': False, 'load': [0., 0.], 'procs': []}
+        completed = []
+        def collect(runner, name, workload, options, keep, setup):
+            self.assertIn(workload, ("output-memory", "blink-window"))
+            self.assertEqual(runner.work, output.resolve() / "private-config")
+            self.assertTrue(str(keep).startswith(str(output.resolve())))
+            self.assertEqual(setup["config_sha256"], standing.hashlib.sha256(standing.dumps(runner.config_closure.public[name]).encode()).hexdigest())
+            runner.observation_context = runner.work / "hc-launch.json"
+            runner.launch(name, "true", 1)
+            self.assertEqual(spawn.call_args.kwargs["env"]["KETTLE_HC_LAUNCH_CONTEXT"], str(runner.observation_context))
+            self.assertEqual(spawn.call_args.kwargs["cwd"], runner.config_closure.cwd)
+            self.assertEqual(spawn.call_args.kwargs["env"]["XDG_CONFIG_HOME"], str(runner.config_closure.xdg))
+            row = {'footprint_mib': 10., 'cpu_percent': 0., 'wakeups_per_second': 1.}
+            completed.append(name)
+            if len(completed) == 2:
+                target = next(runner.config_closure.assets.iterdir())
+                target.chmod(0o600)
+                target.write_bytes(b'changed-in-actual-row')
+            return row
+        with contextlib.ExitStack() as stack:
+            for target, value in (('sys.argv', args), ('sys.platform', 'darwin')):
+                stack.enter_context(patch(target, value))
+            for name, value in (('require_bundles', None), ('build_probes', {'launch': Path('/fixture-launch'), 'stamp': Path('/fixture-stamp')}),
+                                ('collect_preflight', state), ('preflight_refusals', []),
+                                ('command', 'fixture'), ('display_mode', {}), ('host_terminal_of', None),
+                                ('harness_revision', {}), ('terminal_identity', ({'sha256': 'same'}, {}))):
+                stack.enter_context(patch.object(standing, name, return_value=value))
+            stack.enter_context(patch.object(standing, 'probe_lock', return_value=contextlib.nullcontext()))
+            stack.enter_context(patch.object(standing, 'validate_latency_probe', return_value={}))
+            spawn = stack.enter_context(patch.object(standing.subprocess, 'Popen', return_value=Mock()))
+            stack.enter_context(patch.object(standing.hc, 'build_helpers', return_value={}))
+            stack.enter_context(patch.object(standing, 'file_sha256', return_value='fixture'))
+            stack.enter_context(patch.object(standing.hc, 'collect', collect))
+            stack.enter_context(patch.object(standing.Runner, 'stop_current'))
+            stack.enter_context(patch.object(standing.time, 'sleep'))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            with self.assertRaisesRegex(SystemExit, 'campaign inputs changed'):
+                standing.main()
+        raw = _json.loads((output / 'results.json').read_text())
+        self.assertEqual(len(raw['workloads'][workload]['kettle-a']), 1)
+        self.assertEqual(len(completed), 2)
+        self.assertFalse(raw['meta']['complete'])
+        self.assertFalse(standing.session_countable(raw['meta']))
+        self.assertIn('config_closures', raw['meta'])
+        self.assertEqual(raw['config_invalid_rows'][0]['footprint_mib'], 10.)
+        local = _json.loads((output / 'local-manifest.json').read_text())
+        self.assertIn('config_closure', local)
+        self.assertTrue((output / 'private-config/assets').is_dir())
+
     def test_pr3_existing_snapshot_must_match_addressed_bytes(self):
         import hashlib
         work = self.root / 'already-captured'
@@ -4481,6 +4592,522 @@ class NativeEvidence(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     standing.diagnostic_json(path)
 
+
+class OutputBlink(unittest.TestCase):
+    """Portable PR 4 contracts; native fixture tests never launch a GUI."""
+    def native_fixture(self, name, data=None):
+        """Compile the changed source and execute only its GUI-free entry."""
+        import tempfile
+        if sys.platform != 'darwin' or not shutil.which('clang') or not shutil.which('swiftc'):
+            self.skipTest('native decision fixtures need macOS clang and swiftc')
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp)/name
+            source = HERE/'macos-standing'
+            commands = {
+                'printing': ['clang', '-O2', str(source/'printing.c')],
+                'observer': ['clang', '-O2', '-fobjc-arc', '-framework', 'AppKit',
+                             '-framework', 'CoreGraphics', str(source/'observer.m')],
+                'latency-probe': ['swiftc', '-O', str(source/'latency-probe.swift')],
+            }
+            build = subprocess.run([*commands[name], '-o', str(binary)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            result = subprocess.run([str(binary), '--self-test'], input=data, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            if name == 'latency-probe':
+                for blink, expected in [(True,dict(posts=0,captures=1)),(False,dict(posts=1,captures=0))]:
+                    output=Path(tmp)/'dispatch.json'
+                    args=[str(binary),'--self-test-dispatch','--pid','42','--out',str(output)]
+                    if blink:args+=['--blink-check','--window-id','7','--started-ns','100','--cursor-rect','1,2,3,4']
+                    dispatched=subprocess.run(args,capture_output=True,text=True,timeout=10)
+                    self.assertEqual(dispatched.returncode,0,dispatched.stderr)
+                    self.assertEqual(_json.loads(output.read_text()),expected)
+            return result
+
+    def samples(self, origin=10_000_000_000, count=82):
+        result = []
+        for i in range(count):
+            t = origin + i * 100_000_000
+            c = dict(t_ns=t, known=True, valid=True, frontmost_pid=42, target_window=7, top_window=7)
+            result.append(dict(query_start_ns=t+1000, query_end_ns=t+2000, t_ns=t+2000,
+                scheduled_ns=t, pid=42, process_start_identity='123:45', rss=10,
+                footprint=(100+i)*1048576, max_footprint=999*1048576,
+                cpu_ns=i*100_000, wakeups=i, status='ok', focus_before=c,
+                focus_after={**c, 't_ns': t+3000}, focus_changes=[]))
+        return result
+
+    def printing(self):
+        began=10_000_000_000
+        return ([{'began_ns':began}]+[dict(seq=i+1, deadline_ns=began+i*100_000_000,
+            write_ns=began+i*100_000_000, write_end_ns=began+i*100_000_000+500)
+            for i in range(80)]+[{'done_ns':began+8_000_000_000}])
+
+    def test_optional_selection_and_defaults(self):
+        import argparse
+        self.assertEqual(standing.WORKLOADS, ('startup','idle','flood-memory','vtebench'))
+        self.assertIn('output-memory', standing.OPT_IN_WORKLOADS)
+        self.assertIn('blink-window', standing.OPT_IN_WORKLOADS)
+        args=argparse.Namespace(rounds=None,startup_rounds=30,idle_rounds=5,flood_rounds=5,
+            vtebench_rounds=5,latency_rounds=10,output_memory_rounds=10,blink_rounds=10,
+            workloads='output-memory,blink-window')
+        self.assertEqual(standing.resolve_rounds(args)['output-memory'],10)
+        self.assertEqual(standing.resolve_rounds(args)['blink-window'],10)
+        args.workloads=','.join(standing.WORKLOADS)
+        self.assertEqual(standing.resolve_rounds(args),dict(startup=30,idle=5,**{'flood-memory':5},vtebench=5,latency=10))
+
+    def test_cli_optional_names_and_numeric_validation_before_side_effects(self):
+        from unittest.mock import patch
+        import contextlib,io
+        class ReachedPreparation(Exception):pass
+        for workload in ('output-memory','blink-window'):
+            with patch.object(sys,'argv',['standing','--workloads',workload,'--no-build','--peers','',
+                                           '--kettle','fixture','--allow-bare']),patch.object(standing,'build_probes',side_effect=ReachedPreparation),patch.object(standing,'require_bundles'):
+                with self.assertRaises(ReachedPreparation):standing.main()
+        for flag,value in [('--blink-settle','nan'),('--blink-window','inf'),('--blink-rounds','0'),
+                           ('--output-memory-rounds','0'),('--blink-timeout','-1'),('--blink-cursor-rect','1,2,300,4')]:
+            with patch.object(sys,'argv',['standing',flag,value]),patch.object(standing.subprocess,'run') as run,patch.object(standing,'claim_out_dir') as claim,contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:standing.main()
+                self.assertEqual(raised.exception.code,2)
+                run.assert_not_called();claim.assert_not_called()
+
+    def test_printing_bytes_and_absolute_schedule(self):
+        import hashlib
+        expected=b''.join(f'{i:02d}: The quick brown fox jumps over the lazy dog 0123456789\n'.encode() for i in range(1,81))
+        self.assertEqual(standing.hc.PRINT_BYTES,expected)
+        self.assertEqual(standing.hc.PRINT_SHA256,hashlib.sha256(expected).hexdigest())
+        result = self.native_fixture('printing')
+        self.assertEqual(result.stdout.encode(), expected)
+        records = [_json.loads(line) for line in result.stderr.splitlines()]
+        self.assertEqual(len(records), 82)
+        began = records[0]['began_ns']
+        self.assertEqual(records[-1]['done_ns'], began + 8_000_000_000)
+        for i, record in enumerate(records[1:-1]):
+            self.assertEqual(record['seq'], i+1)
+            self.assertEqual(record['deadline_ns'], began + i*100_000_000)
+            self.assertEqual(record['write_ns'], began + i*100_000_000)
+            self.assertEqual(record['write_end_ns'], record['write_ns']+30_000_000)
+        self.assertTrue(standing.hc.printing_row(self.printing(),self.samples(),42,7)['printing_valid'])
+
+    def test_first_designated_query_current_and_lifetime(self):
+        samples=self.samples()
+        samples[61]['footprint']=1*1048576
+        row=standing.hc.printing_row(self.printing(),samples,42,7)
+        self.assertTrue(row['printing_valid'],row)
+        self.assertEqual(row['printing_mib'],160)
+        self.assertEqual(row['printing_max_mib'],999)
+        self.assertEqual(row['printing_sample_ns'],samples[60]['query_start_ns'])
+        samples[60]['focus_before']['valid']=False
+        self.assertFalse(standing.hc.printing_row(self.printing(),samples,42,7)['printing_valid'])
+
+    def test_focus_race(self):
+        samples=self.samples()
+        # true 6.01 / focus loss 6.025 / query 6.09, never stale focus.
+        t=10_000_000_000
+        samples[60]['focus_before']['t_ns']=t+6_010_000_000
+        samples[60]['query_start_ns']=t+6_090_000_000
+        samples[60]['query_end_ns']=samples[60]['t_ns']=t+6_091_000_000
+        samples[60]['focus_after']['t_ns']=t+6_092_000_000
+        samples[60]['focus_changes']=[dict(t_ns=t+6_025_000_000,valid=False)]
+        row=standing.hc.printing_row(self.printing(),samples,42,7)
+        self.assertFalse(row['printing_valid'])
+        self.assertIn('focus change',row['printing_reason'])
+
+    def test_stale_and_nonmonotonic_focus(self):
+        import copy
+        for defect in ('stale-before', 'stale-first', 'late-after', 'backwards'):
+            samples=copy.deepcopy(self.samples())
+            if defect=='stale-before':samples[60]['focus_before']['t_ns']=0
+            if defect=='stale-first':samples[0]['focus_before']['t_ns']=0
+            if defect=='late-after':samples[0]['focus_after']['t_ns']+=250_000_000
+            if defect=='backwards':
+                # Each query is bracketed and fresh, but focus checks go back
+                # behind the preceding sample's completed focus observation.
+                samples[60]['focus_before']['t_ns']=samples[59]['focus_after']['t_ns']-1
+            row=standing.hc.printing_row(self.printing(),samples,42,7)
+            self.assertFalse(row['printing_valid'],defect)
+            self.assertIn('focus',row['printing_reason'])
+
+    def test_frame_freshness_and_public_linkage(self):
+        import copy,tempfile
+        self.assertIsNone(standing.hc.validation_reason(self.capture(),self.setup()))
+        for defect in ('stale','missing','future','bool','float','backwards',
+                       'private-id','private-digest','bad-frame-digest'):
+            capture=copy.deepcopy(self.capture())
+            if defect=='missing':del capture['frames'][30]['arrival_ns']
+            if defect=='stale':
+                for frame in capture['frames']:frame['arrival_ns']=0
+            if defect=='future':capture['frames'][30]['arrival_ns']=capture['frames'][30]['t_ns']+1
+            if defect=='bool':capture['frames'][30]['arrival_ns']=True
+            if defect=='float':capture['frames'][30]['arrival_ns']=float(capture['frames'][30]['arrival_ns'])
+            if defect=='backwards':capture['frames'][30]['arrival_ns']=capture['frames'][29]['arrival_ns']-1
+            if defect=='private-id':capture['validation_id']='/Users/private-owner/private@email.test'
+            if defect=='private-digest':capture['before_sha256']='Personal Signing Identity'
+            if defect=='bad-frame-digest':capture['frames'][30]['sha256']='x'*64
+            self.assertIsNotNone(standing.hc.validation_reason(capture,self.setup()),defect)
+            with tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'validation';path.write_text(_json.dumps(capture))
+                activity,evidence=standing.hc.blink_evidence(path,self.setup())
+                self.assertEqual(activity,'unproven',defect)
+                public=_json.dumps(evidence)
+                self.assertNotIn('/Users/private-owner',public)
+                self.assertNotIn('private@email.test',public)
+                self.assertNotIn('Personal Signing Identity',public)
+        capture=self.capture()
+        capture['frames'][30]['arrival_ns']=capture['frames'][30]['t_ns']-250_000_000
+        # Boundary freshness is valid when chronology is also preserved.
+        for frame in capture['frames']:frame['arrival_ns']=frame['t_ns']-250_000_000
+        self.assertIsNone(standing.hc.validation_reason(capture,self.setup()))
+
+    def test_missing_trace_public_error(self):
+        from unittest.mock import patch
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            class Runner:
+                def __init__(self):self.work=work;self.probes={'observer':'unused'}
+                def launch(self,*args):
+                    (work/'hc-launch.json').write_text(_json.dumps(dict(started_ns=10_000_000_000,pid=42,window_id=7)))
+                    return object()
+                def wait_for(self,*args):return True
+                def end_sampler(self,*args):pass
+                def stop(self,*args):return True
+            with patch.object(standing.hc,'now_ns',side_effect=[11_000_000_000,19_000_000_000]),patch.object(standing.hc,'start_observer',return_value=object()):
+                row=standing.hc.collect(Runner(),'fixture','blink-window',dict(activate=False,settle=2.5,window=6.),work/'saved',self.setup())
+            self.assertEqual(row,{'error':'observer/payload trace invalid'})
+            self.assertNotIn(tmp,_json.dumps(row))
+            private=_json.loads((work/'saved.trace-error.json').read_text())
+            self.assertEqual(private['timeline_path'],str(work/'hc-timeline.jsonl'))
+
+    def test_wrong_window_cover_unknown(self):
+        import copy
+        for key,value in [('top_window',8),('known',False),('valid',False),('frontmost_pid',99),('target_window',8)]:
+            samples=copy.deepcopy(self.samples())
+            samples[60]['focus_after'][key]=value
+            self.assertFalse(standing.hc.printing_row(self.printing(),samples,42,7)['printing_valid'],key)
+        # Front-to-back synthetic CoreGraphics dictionaries, no window server.
+        def window(number, owner=42, layer=0, alpha=1, x=0):
+            return dict(kCGWindowNumber=number,kCGWindowOwnerPID=owner,kCGWindowLayer=layer,
+                        kCGWindowAlpha=alpha,kCGWindowBounds=dict(X=x,Y=0,Width=600,Height=400))
+        wanted=window(7)
+        fixtures=[([wanted],42,True,True),([window(8),wanted],42,True,False),
+                  ([window(9,owner=99,layer=1000),wanted],42,True,False),
+                  ([window(9,layer=1000),wanted],42,True,False),
+                  ([window(9,layer=1000,x=1000),wanted],42,True,True),
+                  ([window(9,layer=1000,alpha=0),wanted],42,True,True),
+                  ([wanted],99,True,False),([],42,False,False),
+                  ([window(7,owner=99)],42,True,False)]
+        for windows, front, known, valid in fixtures:
+            result=self.native_fixture('observer',_json.dumps(dict(pid=42,target=7,front=front,windows=windows)))
+            decision=_json.loads(result.stdout)
+            self.assertEqual(decision['known'],known)
+            self.assertEqual(decision['valid'],valid,windows)
+
+    def test_payload_short_stalled_omitted_missing_done(self):
+        import copy
+        good=self.printing()
+        for defect in ('short','overlong','stalled','omitted','missing-done'):
+            records=copy.deepcopy(good)
+            if defect=='short':records[-1]['done_ns']=15_000_000_000
+            if defect=='overlong':records[-1]['done_ns']=18_300_000_000
+            if defect=='stalled':
+                records[-2]['write_end_ns']=18_160_000_000
+                records[-1]['done_ns']=18_200_000_000
+            if defect=='omitted':del records[25]
+            if defect=='missing-done':records.pop()
+            self.assertFalse(standing.hc.printing_row(records,self.samples(),42,7)['printing_valid'],defect)
+
+    def test_blink_launch_origin_readiness_actual_span(self):
+        samples=self.samples(origin=12_500_000_000,count=63)
+        samples[60]['query_end_ns']+=10_000_000
+        samples[60]['t_ns']=samples[60]['query_end_ns']
+        samples[60]['focus_after']['t_ns']=samples[60]['query_end_ns']+1000
+        row=standing.hc.blink_row(samples,10_000_000_000,12_000_000_000,42,7,'verified')
+        self.assertTrue(row['blink_valid'],row)
+        self.assertEqual(row['blink_start_ns'],12_500_000_000)
+        self.assertEqual(row['blink_end_ns'],18_500_000_000)
+        self.assertAlmostEqual(row['wakeups_per_second'],60/6.01)
+        self.assertFalse(standing.hc.blink_row(samples,10_000_000_000,12_500_000_000,42,7,'verified')['blink_valid'])
+
+    def setup(self):
+        return dict(binary_sha256='b'*64,config_sha256='c'*64,display='d',settle_s=2.5,window_s=6.,
+                    cursor_rect='1,2,3,4',shape='block',timeout_s=10.,native_display={'width_pt':1920})
+
+    def capture(self):
+        return dict(contract=standing.hc.CONTRACT,setup=self.setup(),start_ns=12_500_000_000,
+            end_ns=18_500_000_000,validation_id='10000000000',before_sha256=None,started_ns=10_000_000_000,
+            window_id=7,target_window_id=7,native_display={'width_pt':1920},cursor_rect=[1.,2.,3.,4.],
+            frames=[dict(t_ns=12_500_000_000+i*100_000_000,arrival_ns=12_499_000_000+i*100_000_000,sha256=str(i//5%2)*64,visible=True,frame_status='complete') for i in range(61)])
+
+    def test_blink_peak_activity_evidence_and_noninjecting(self):
+        import tempfile,copy
+        samples=self.samples(origin=12_500_000_000,count=63)
+        row=standing.hc.blink_row(samples,10_000_000_000,12_000_000_000,42,7,'verified')
+        self.assertEqual(row['blink_peak_mib'],160)
+        self.assertNotEqual(row['blink_peak_mib'],999)
+        for activity in ('unproven','disabled-default'):
+            row=standing.hc.blink_row(samples,10_000_000_000,12_000_000_000,42,7,activity)
+            self.assertTrue(row['blink_window_valid'])
+            self.assertFalse(row['blink_valid'])
+            self.assertIsNone(standing.metric_value(standing.metric_descriptor('blink-window','footprint_mib'),'blink-window',row))
+            self.assertEqual(row['footprint_mib'],160)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'validation.json';p.write_text(_json.dumps(self.capture()))
+            self.assertEqual(standing.hc.blink_evidence(p,self.setup())[0],'verified')
+            for field in ('binary_sha256','config_sha256','display','window_s'):
+                setup=copy.deepcopy(self.setup());setup[field]=7. if field=='window_s' else 'd'*64 if field.endswith('sha256') else 'different'
+                self.assertEqual(standing.hc.blink_evidence(p,setup)[0],'unproven')
+        self.native_fixture('latency-probe')
+        capture=self.capture();capture['frames'][-20:]=[dict(f,sha256='0'*64) for f in capture['frames'][-20:]]
+        self.assertIsNotNone(standing.hc.validation_reason(capture,self.setup()))
+
+    def test_timeline_bounds_and_native_errors(self):
+        import copy,tempfile
+        for defect in ('count','gap','late','timestamp','cpu','wakeups','identity','exit','malformed'):
+            samples=copy.deepcopy(self.samples())
+            if defect=='count':samples=samples[::2]
+            if defect=='gap':del samples[20:24]
+            if defect=='late':
+                for sample in samples:sample['scheduled_ns']-=300_000_000
+            if defect=='timestamp':samples[30]['query_start_ns']=samples[29]['query_start_ns']
+            if defect=='cpu':samples[30]['cpu_ns']=0
+            if defect=='wakeups':samples[30]['wakeups']=0
+            if defect=='identity':samples[30]['process_start_identity']='other'
+            if defect=='exit':samples[30]['status']='target-exited-or-query-failed'
+            if defect=='malformed':samples[30]['rss']=True
+            self.assertFalse(standing.hc.printing_row(self.printing(),samples,42,7)['printing_valid'],defect)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'bad';p.write_text('{}\nnot-json\n')
+            with self.assertRaises(ValueError):standing.hc.read_jsonl(p)
+            p.write_text('{}\n'*2001)
+            with self.assertRaises(ValueError):standing.hc.read_jsonl(p)
+
+    def test_observer_reaped_before_launch_on_exception_timeout_cancel(self):
+        from unittest.mock import patch
+        import tempfile
+        hc=standing.hc
+        real_spawn=subprocess.Popen
+        for exception in (RuntimeError('fixture'),subprocess.TimeoutExpired('fixture',1),KeyboardInterrupt()):
+            with tempfile.TemporaryDirectory() as tmp:
+                work=Path(tmp);events=[];children=[]
+                class Runner:
+                    def __init__(self):
+                        self.work=work;self.probes={'printing':'unused','observer':'unused'}
+                    def launch(self,*args):
+                        child=real_spawn([sys.executable,'-c','import time;time.sleep(30)']);children.append(child)
+                        (work/'grid').touch();(work/'hc-launch.json').write_text(_json.dumps(dict(started_ns=1,pid=42,window_id=7)))
+                        return child
+                    def wait_for(self,*args):return True
+                    def activate(self):return True
+                    def end_sampler(self,child):
+                        events.append('observer');child.terminate();child.wait(timeout=5)
+                    def stop(self,child,*args):
+                        events.append('launch');child.terminate();child.wait(timeout=5);return True
+                def observer(*args,**kwargs):
+                    child=real_spawn([sys.executable,'-c','import time;time.sleep(30)']);children.append(child)
+                    (work/'hc-timeline.jsonl').write_text(_json.dumps(self.samples()[0])+'\n')
+                    return child
+                try:
+                    with patch.object(hc,'start_observer',side_effect=observer),patch.object(hc,'read_jsonl',side_effect=exception):
+                        with self.assertRaises(type(exception)):
+                            hc.collect(Runner(),'fixture','output-memory',dict(activate=False),work/'saved')
+                    self.assertEqual(events,['observer','launch'])
+                    self.assertTrue(all(c.poll() is not None for c in children))
+                finally:
+                    for child in children:
+                        if child.poll() is None:child.terminate()
+                        child.wait(timeout=5)
+
+    def test_validation_nonobject_json_and_cadence_bounds(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'validation'
+            for data in ('[]','null','42','"text"','{'):
+                p.write_text(data)
+                self.assertEqual(standing.hc.blink_evidence(p,self.setup())[0],'unproven')
+        from unittest.mock import patch
+        import contextlib,io
+        for value in ('49','1001'):
+            with patch.object(sys,'argv',['standing','--memory-sample-ms',value]),contextlib.redirect_stderr(io.StringIO()),patch.object(standing,'build_probes') as builds:
+                with self.assertRaises(SystemExit) as raised:standing.main()
+                self.assertEqual(raised.exception.code,2);builds.assert_not_called()
+
+    def test_validation_override_identity_and_cleanup(self):
+        import argparse,copy,tempfile
+        args=argparse.Namespace(rounds=2,workloads=','.join(standing.WORKLOADS),blink_validate_only=True)
+        self.assertEqual(standing.resolve_rounds(args)['blink-window'],2)
+        for field,value in [('window_id',8),('target_window_id',8),('native_display',{'width_pt':1}),
+                            ('cursor_rect',[9,9,9,9]),('started_ns',1)]:
+            capture=copy.deepcopy(self.capture());capture[field]=value
+            self.assertIsNotNone(standing.hc.validation_reason(capture,self.setup()),field)
+        self.native_fixture('latency-probe')
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            class Runner:
+                def __init__(self):self.work=work;self.probes={}
+                def launch(self,*args):
+                    (work/'grid').touch()
+                    (work/'hc-launch.json').write_text(_json.dumps(dict(started_ns=10_000_000_000,
+                        pid=42,window_id=7,native_display={'width_pt':1920})))
+                    return object()
+                def wait_for(self,*args):return True
+                def stop(self,*args):return False
+                def blink_probe(self,*args):(work/'blink-capture.json').write_text(_json.dumps(test.capture()))
+            from unittest.mock import patch
+            test=self
+            with patch.object(standing.hc,'now_ns',return_value=11_000_000_000):
+                result=standing.hc.collect(Runner(),'fixture','blink-window',dict(activate=False,settle=2.5,
+                    window=6.,validate_only=True,rect='1,2,3,4'),work/'evidence',self.setup())
+            self.assertIn('cleanup failed',result.get('error',''))
+            self.assertTrue(_json.loads((work/'evidence.json').read_text())['killed'])
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_native_launch_retains_exited_target_until_observer_drain(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);binary=work/'launch'
+            subprocess.run(['swiftc','-O','-o',str(binary),str(HERE/'macos-standing'/'launch.swift')],check=True)
+            context=work/'context';stamp=work/'stamp';env=dict(os.environ,KETTLE_HC_LAUNCH_CONTEXT=str(context))
+            fixture=work/'fixture'
+            code=work/'fixture.c';code.write_text('#include <unistd.h>\nint main(void){usleep(1500000);return 0;}\n')
+            subprocess.run(['clang','-O','-o',str(fixture),str(code)],check=True)
+            process=subprocess.Popen([str(binary),str(work/'result'),str(stamp),'3','--','/bin/sleep','.5'],env=env)
+            try:
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline:
+                    pid_file=Path(str(stamp)+'.pid')
+                    if pid_file.exists() and pid_file.read_text().strip().isdigit():break
+                    time.sleep(.01)
+                pid=int(Path(str(stamp)+'.pid').read_text())
+                # A command-line fixture standing in for the observer. Its PID
+                # is owned by the same launch helper, which must reap it first.
+                request=Path(str(context)+'.observer-request')
+                request.write_text(_json.dumps([str(fixture),str(pid),'0','unused','0','100','5']))
+                receipt=Path(str(context)+'.observer-reaped')
+                process.wait(timeout=5)
+                self.assertTrue(receipt.exists(), 'target released before observer reap')
+                self.assertFalse(Path(str(stamp)+'.pid').exists())
+            finally:
+                if process.poll() is None:process.terminate()
+                process.wait(timeout=5)
+                # The deliberately reverted fixture observer exits by itself.
+                # Never signal an orphan after its owner released the PID.
+                time.sleep(1.6)
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_native_launch_parent_loss_before_observer_registration(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);binary=work/'launch'
+            subprocess.run(['swiftc','-O','-o',str(binary),str(HERE/'macos-standing'/'launch.swift')],check=True)
+            stamp=work/'stamp';result=work/'result';context=work/'context'
+            owner_code='import subprocess,pathlib,time,os; p=subprocess.Popen('+repr([str(binary),str(result),str(stamp),'3','--','/bin/sleep','30'])+'); pathlib.Path('+repr(str(work/'launch.pid'))+').write_text(str(p.pid)); deadline=time.monotonic()+2\nwhile not pathlib.Path('+repr(str(stamp)+'.pid')+').exists() and time.monotonic()<deadline:time.sleep(.01)\n'
+            env=dict(os.environ,KETTLE_HC_LAUNCH_CONTEXT=str(context))
+            owner=subprocess.Popen([sys.executable,'-c',owner_code],env=env)
+            owner.wait(timeout=5)
+            deadline=time.monotonic()+5
+            while not result.exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue(result.exists(), 'orphan cleanup stuck before observer registration')
+            self.assertFalse(Path(str(stamp)+'.pid').exists())
+            launch_pid=int((work/'launch.pid').read_text())
+            self.assertTrue(gone_within(launch_pid))
+
+    @unittest.skipUnless(sys.platform=='darwin' and shutil.which('clang'), 'needs macOS clang')
+    def test_native_printing_and_observer_owned_scratch(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp);helpers=standing.hc.build_helpers(HERE/'macos-standing',work)
+            barrier=work/'go';log=work/'printing.jsonl';output=work/'output'
+            children=[]
+            try:
+                with output.open('wb') as sink:
+                    child=subprocess.Popen([str(helpers['printing']),str(barrier),str(log)],stdout=sink);children.append(child)
+                target=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);children.append(target)
+                trace=work/'observer.jsonl'
+                observer=subprocess.Popen([str(helpers['observer']),str(target.pid),'0',str(trace),
+                    str(standing.hc.now_ns()+1_000_000_000),'100','5']);children.append(observer)
+                observer.wait(timeout=5)
+                rows=standing.hc.read_jsonl(trace)
+                self.assertEqual(len(rows),5)
+                self.assertTrue(all(s['status']=='ok' and s['pid']==target.pid for s in rows))
+                self.assertIsNone(standing.hc.trace_reason(rows,target.pid,0))
+                self.assertTrue(all(not standing.hc.visible(s,target.pid,0) for s in rows))
+                target.terminate()
+                # Retain the unreaped spawn handle through the final query.
+                time.sleep(.05)
+                dead=work/'dead.jsonl'
+                observer=subprocess.Popen([str(helpers['observer']),str(target.pid),'0',str(dead),
+                    str(standing.hc.now_ns()+1_000_000_000),'100','5']);children.append(observer)
+                observer.wait(timeout=5)
+                self.assertNotEqual(standing.hc.read_jsonl(dead)[0]['status'],'ok')
+                target.wait(timeout=5)
+                barrier.touch()
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline and 'done_ns' not in log.read_text():time.sleep(.02)
+                records=standing.hc.read_jsonl(log,82)
+                self.assertEqual(len(records),82)
+                self.assertEqual(output.read_bytes(),standing.hc.PRINT_BYTES)
+                began=records[0]['began_ns'];done=records[-1]['done_ns']
+                self.assertGreaterEqual(done-began,8_000_000_000)
+                self.assertLessEqual(done-began,8_250_000_000)
+                self.assertEqual([r['seq'] for r in records[1:-1]],list(range(1,81)))
+                self.assertTrue(all(r['deadline_ns']==began+(r['seq']-1)*100_000_000 for r in records[1:-1]))
+            finally:
+                for child in children:
+                    if child.poll() is None:child.terminate()
+                    child.wait(timeout=5)
+                self.assertTrue(all(c.poll() is not None for c in children))
+
+
+class RebaseOwnership(unittest.TestCase):
+    def test_missing_owner_receipt_fails_without_retry_loop(self):
+        import tempfile
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            observer = standing.hc.OwnedObserver(Path(tmp) / 'context', Mock())
+            observer.launch.poll.return_value = 0
+            with self.assertRaisesRegex(RuntimeError, 'without sampler reap receipt'):
+                standing.Runner.end_sampler(observer)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'needs macOS swiftc')
+    def test_owned_observer_reaps_after_repeated_cancellation(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            launch = work / 'launch'
+            subprocess.run(['swiftc', '-O', '-o', str(launch), str(HERE / 'macos-standing/launch.swift')], check=True)
+            helpers = standing.hc.build_helpers(HERE / 'macos-standing', work)
+            context, stamp = work / 'context', work / 'stamp'
+            process = subprocess.Popen([str(launch), str(work / 'result'), str(stamp), '30', '--', '/bin/sleep', '30'],
+                env=dict(os.environ, KETTLE_HC_LAUNCH_CONTEXT=str(context)))
+            try:
+                deadline = time.monotonic() + 5
+                while (not Path(str(stamp) + '.pid').exists() or not Path(str(stamp) + '.pid').read_text()) and time.monotonic() < deadline:
+                    time.sleep(.01)
+                pid = int(Path(str(stamp) + '.pid').read_text())
+                observer = standing.hc.start_observer(None, process, context,
+                    [str(helpers['observer']), str(pid), '0', str(work / 'timeline'), str(standing.hc.now_ns()), '100', '300'])
+                deadline = time.monotonic() + 5
+                while not observer.path('started').exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(observer.path('started').exists())
+                interrupts = [KeyboardInterrupt('first'), KeyboardInterrupt('second')]
+                original = observer.wait
+                def interrupted(timeout=None):
+                    if interrupts:
+                        raise interrupts.pop(0)
+                    return original(timeout)
+                observer.wait = interrupted
+                standing.Runner.end_sampler(observer)
+                self.assertFalse(interrupts)
+                self.assertTrue(observer.path('reaped').exists())
+                self.assertIsNone(process.poll())
+                process.terminate()
+                process.wait(timeout=15)
+                self.assertFalse(Path(str(stamp) + '.pid').exists())
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                standing.reap_owned_child(process, 15)
+            self.assertIsNotNone(process.returncode)
 
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0], "-v"])

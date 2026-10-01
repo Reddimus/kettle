@@ -46,13 +46,68 @@ guard spawned == 0 else {
 }
 try? "\(pid)".write(toFile: stampPath + ".pid", atomically: true, encoding: .utf8)
 
+let contextPath = ProcessInfo.processInfo.environment["KETTLE_HC_LAUNCH_CONTEXT"]
+func context(_ window: UInt32) {
+    guard let contextPath else { return }
+    let data = try! JSONSerialization.data(withJSONObject: ["pid": pid, "started_ns": started,
+                                                           "window_id": window,
+        "native_display": ["width_pt": CGDisplayCopyDisplayMode(CGMainDisplayID())?.width ?? 0,
+                           "height_pt": CGDisplayCopyDisplayMode(CGMainDisplayID())?.height ?? 0,
+                           "pixel_width": CGDisplayCopyDisplayMode(CGMainDisplayID())?.pixelWidth ?? 0,
+                           "pixel_height": CGDisplayCopyDisplayMode(CGMainDisplayID())?.pixelHeight ?? 0,
+                           "refresh_hz": CGDisplayCopyDisplayMode(CGMainDisplayID())?.refreshRate ?? 0]], options: [.sortedKeys])
+    try? data.write(to: URL(fileURLWithPath: contextPath), options: .atomic)
+}
+// The launch helper owns both processes. Reap the sampler before releasing
+// the target PID, including on target exit, parent loss, and cancellation.
+var observerPID: pid_t = 0
+var observerStarted = false
+func observerPath(_ suffix: String) -> String? { contextPath.map { $0 + ".observer-" + suffix } }
+func stopObserver() {
+    guard observerPID > 0 else { return }
+    kill(observerPID, SIGTERM)
+    var state: Int32 = 0
+    let until = now() + 2_000_000_000
+    while now() < until {
+        if waitpid(observerPID, &state, WNOHANG) == observerPID { observerPID = 0; break }
+        usleep(2_000)
+    }
+    if observerPID > 0 { kill(observerPID, SIGKILL); waitpid(observerPID, &state, 0); observerPID = 0 }
+    if let path = observerPath("reaped") { try? "reaped".write(toFile: path, atomically: true, encoding: .utf8) }
+}
+func serviceObserver() {
+    if observerPID > 0 {
+        if let path = observerPath("stop"), FileManager.default.fileExists(atPath: path) { stopObserver(); return }
+        var state: Int32 = 0
+        if waitpid(observerPID, &state, WNOHANG) == observerPID {
+            observerPID = 0
+            if let path = observerPath("reaped") { try? "reaped".write(toFile: path, atomically: true, encoding: .utf8) }
+        }
+    }
+    guard !observerStarted, let request = observerPath("request"),
+          let data = try? Data(contentsOf: URL(fileURLWithPath: request)),
+          let args = try? JSONSerialization.jsonObject(with: data) as? [String], args.count == 7,
+          args[1] == String(pid), getppid() == parent, stopRequested == 0 else { return }
+    observerStarted = true
+    let cargs = args.map { strdup($0) } + [nil]
+    let spawned = posix_spawn(&observerPID, args[0], nil, nil, cargs, environ)
+    for arg in cargs { free(arg) }
+    if spawned != 0 {
+        observerPID = 0
+        if let path = observerPath("reaped") { try? "spawn-failed".write(toFile: path, atomically: true, encoding: .utf8) }
+    } else if let path = observerPath("started") {
+        try? "\(observerPID)".write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
 var windowAt: UInt64?, stampSeenAt: UInt64?, exitedAt: UInt64?
 var status: Int32 = 0
 var deadline = started + UInt64(timeout * 1e9)
 var stopped = false
 while now() < deadline {
+    serviceObserver()
     if (stopRequested != 0 || getppid() != parent) && !stopped {
         stopped = true
+        stopObserver()
         kill(pid, SIGTERM)
         deadline = min(deadline, now() + 10_000_000_000)
     }
@@ -64,12 +119,23 @@ while now() < deadline {
             if let bounds = window[kCGWindowBounds as String] as? [String: Double],
                (bounds["Width"] ?? 0) > 300 {
                 windowAt = now()
+                context(window[kCGWindowNumber as String] as? UInt32 ?? 0)
                 break
             }
         }
     }
     if stampSeenAt == nil, FileManager.default.fileExists(atPath: stampPath) { stampSeenAt = now() }
-    if waitpid(pid, &status, WNOHANG) == pid {
+    var observedExit = false
+    if contextPath != nil {
+        // WNOWAIT preserves the zombie and its PID while Python drains its
+        // observer. Ordinary launches retain their existing waitpid path.
+        var childInfo = siginfo_t()
+        observedExit = waitid(P_PID, id_t(pid), &childInfo, WEXITED | WNOHANG | WNOWAIT) == 0 && childInfo.si_pid == pid
+        if observedExit { stopObserver(); waitpid(pid, &status, 0) }
+    } else {
+        observedExit = waitpid(pid, &status, WNOHANG) == pid
+    }
+    if observedExit {
         exitedAt = now()
         try? FileManager.default.removeItem(atPath: stampPath + ".pid")
         break
@@ -78,6 +144,7 @@ while now() < deadline {
 }
 let killed = exitedAt == nil
 if killed {
+    stopObserver()
     kill(pid, SIGTERM)
     usleep(1_000_000)
     kill(pid, SIGKILL)

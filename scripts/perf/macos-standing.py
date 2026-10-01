@@ -19,6 +19,10 @@ argument path. Workloads:
   vtebench      Alacritty's vtebench at a pinned revision, built from a copy
                 that records microseconds instead of whole milliseconds, with
                 its scripts' window-size lookup fixed for macOS
+  output-memory (opt in) 80 numbered ASCII lines at absolute 100 ms deadlines;
+                current/lifetime footprint at the designated six-second query
+  blink-window  (opt in) quiet shipped cursor, launch +2.5..+8.5 seconds;
+                separate noninjecting validation certifies the unchanged setup
   latency       (opt in with --workloads; never a default) keystroke to
                 screen: KettleLatencyProbe posts the key j, and the time runs
                 to the display time of the first captured frame showing the
@@ -57,6 +61,7 @@ import base64
 import contextlib
 import datetime
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -80,6 +85,9 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 PROBES = Path(__file__).resolve().parent / "macos-standing"
+_hc_spec = importlib.util.spec_from_file_location("standing_output_blink", PROBES / "output_blink.py")
+hc = importlib.util.module_from_spec(_hc_spec)
+_hc_spec.loader.exec_module(hc)
 DEFAULT_KETTLE = REPO / "target" / "release" / "kettle"
 INSTALLED_KETTLE = "/Applications/kettle.app/Contents/MacOS/kettle"
 VTEBENCH_URL = "https://github.com/alacritty/vtebench"
@@ -98,7 +106,7 @@ APPS = {
 WORKLOADS = ("startup", "idle", "flood-memory", "vtebench")
 # Never in the default list: latency posts key presses, needs the probe's
 # Screen Recording and Accessibility grants, and needs the machine to itself.
-OPT_IN_WORKLOADS = ("latency",)
+OPT_IN_WORKLOADS = ("latency", "output-memory", "blink-window")
 # Publication defaults. Counts are multiples of five so a five-terminal
 # rotation is balanced.
 ROUNDS = {"startup": 30, "idle": 5, "flood-memory": 5, "vtebench": 5, "latency": 10}
@@ -115,7 +123,7 @@ MIN_PAIRED_SHARE = 0.8
 # new set.
 SESSION_KEYS = ("harness_tree", "tool_hashes", "hw_model", "macos_build", "display", "fd_limit", "rounds", "warmup",
                 "vtebench_seconds", "idle_settle", "idle_window", "flood_offsets", "activate", "configs",
-                "footprint_detail", "startup_phases", "latency", "config_closures")
+                "footprint_detail", "startup_phases", "latency", "config_closures", "output_blink")
 # Reported once per terminal rather than as metrics.
 GRID_KEYS = ("cols", "rows")
 
@@ -1647,6 +1655,9 @@ class Runner:
         # while it runs.
         self.current: Optional[subprocess.Popen] = None
         self.config_closure: Optional[ConfigClosure] = None
+        self.observation_context: Optional[Path] = None
+        self.blink_probe = lambda args, work, timeout: run_latency_probe(
+            self.probes["latency-probe"], args, work, timeout)
 
     def script(self, body: str) -> Path:
         """One script per distinct body, reused across launches. macOS assesses
@@ -1697,6 +1708,8 @@ class Runner:
         env = {key: value for key, value in os.environ.items() if key != "RUST_LOG"}
         if self.config_closure is not None:
             env = self.config_closure.launch_environment(env)
+        if self.observation_context is not None:
+            env["KETTLE_HC_LAUNCH_CONTEXT"] = str(self.observation_context)
         if stamped:
             env["RUST_LOG"] = "warn,kettle::startup=info"
         # Its own session, so the probe leads a process group holding only it
@@ -1879,11 +1892,10 @@ class Runner:
         """Stop a memsample loop this runner started, and reap it."""
         if loop.poll() is None:
             loop.terminate()
-        try:
-            loop.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            loop.kill()
-            loop.wait()
+        if isinstance(loop, hc.OwnedObserver):
+            loop.reap()
+        else:
+            reap_owned_child(loop, 5)
 
     def startup(self, name: str) -> dict:
         # Hold the window for a second so terminals that spawn the child before
@@ -2976,6 +2988,8 @@ def metric_reason(descriptor: Metric, workload: str, run: dict) -> Optional[str]
     if workload == "idle" and not run.get("frontmost"):
         return "not frontmost"
     field = descriptor.id.split(".", 1)[1]
+    if workload == "blink-window" and descriptor.publication_role != "diagnostic" and run.get("blink_activity") != "verified":
+        return "active blink " + run.get("blink_activity", "unproven")
     if descriptor.eligibility == "metric-validity":
         validity = (run.get("metric_validity") or {}).get(field)
         if not isinstance(validity, dict):
@@ -3304,6 +3318,14 @@ def summarize(results: dict, names: List[str], ab: bool, analysis: Optional[dict
             continue
         metrics = info["metrics"]
         mean_based = workload == "vtebench"
+        if workload == "blink-window":
+            for name, runs in results["workloads"][workload].items():
+                states = sorted({run.get("blink_activity", "unproven") for run in runs})
+                out.append(f"{name}: shipped cursor activity {', '.join(states)}. Separate validation supports the setup; it does not observe every counted round.")
+                quiet = [run["footprint_mib"] for run in runs if run.get("blink_window_valid") and is_number(run.get("footprint_mib"))]
+                if states != ["verified"] and quiet:
+                    out.append(f"Quiet-window descriptive endpoint footprint: {statistics.median(quiet):.2f} MiB. Active blink is not measured.")
+            out.append("")
         if "grids" in info:
             out.append("Grid: " + ", ".join(
                 f"{name} {'/'.join(f'{c}x{r}' for c, r in grid)}" for name, grid in info["grids"].items() if grid))
@@ -3416,6 +3438,8 @@ def round_ok(workload: str, run: dict, meta: Optional[dict] = None) -> bool:
         # of samples to records: the round is not trusted.
         return (isinstance(run.get("samples_ms"), list) and not run.get("killed")
                 and not run.get("seq_mismatch"))
+    if workload in ("output-memory", "blink-window"):
+        return run.get("printing_valid" if workload == "output-memory" else "blink_window_valid") is True
     required = metrics_for(workload, meta or {}) if workload == "flood-memory" else REQUIRED.get(workload, ())
     return all(is_number(run.get(key)) for key in required)
 
@@ -4244,9 +4268,12 @@ def claim_out_dir(path: Path) -> Path:
 
 def resolve_rounds(args: argparse.Namespace) -> Dict[str, int]:
     if args.rounds:
-        return {workload: args.rounds for workload in WORKLOADS + OPT_IN_WORKLOADS}
+        selected = [w for w in ("output-memory", "blink-window") if w in getattr(args, "workloads", "") or (w == "blink-window" and getattr(args, "blink_validate_only", False))]
+        return {workload: args.rounds for workload in WORKLOADS + ("latency",) + tuple(selected)}
     return {"startup": args.startup_rounds, "idle": args.idle_rounds, "flood-memory": args.flood_rounds,
-            "vtebench": args.vtebench_rounds, "latency": args.latency_rounds}
+            "vtebench": args.vtebench_rounds, "latency": args.latency_rounds,
+            **({"output-memory": args.output_memory_rounds} if "output-memory" in getattr(args, "workloads", "") else {}),
+            **({"blink-window": args.blink_rounds} if "blink-window" in getattr(args, "workloads", "") or getattr(args, "blink_validate_only", False) else {})}
 
 
 def latency_entries(names: List[str], ab: bool, opaque: bool, floors: List[str]) -> List[str]:
@@ -4312,6 +4339,21 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     parser.add_argument("--flood-rounds", type=int, default=ROUNDS["flood-memory"])
     parser.add_argument("--vtebench-rounds", type=int, default=ROUNDS["vtebench"])
     parser.add_argument("--latency-rounds", type=int, default=ROUNDS["latency"])
+    parser.add_argument("--output-memory-rounds", type=int, default=10,
+                        help="opt-in paced printing rounds, 80 lines over eight seconds")
+    parser.add_argument("--memory-sample-ms", type=int, default=100,
+                        help="optional printing/blink cadence, 50..1000 ms; nondefault is diagnostic")
+    parser.add_argument("--blink-rounds", type=int, default=10, help="opt-in launch blink-window rounds")
+    parser.add_argument("--blink-settle", type=float, default=2.5, help="blink boundary seconds from launch")
+    parser.add_argument("--blink-window", type=float, default=6.0, help="blink observation seconds")
+    parser.add_argument("--blink-validate-only", action="store_true",
+                        help="separate cursor-area capture, no keys or performance session")
+    parser.add_argument("--blink-validation", help="same binary/config/display validation JSON")
+    parser.add_argument("--blink-validation-before", help="prior validation JSON to link a post-set check")
+    parser.add_argument("--blink-cursor-rect", help="validation crop x,y,width,height in window points")
+    parser.add_argument("--blink-shape", help="shipped cursor shape recorded by the owner pilot")
+    parser.add_argument("--blink-timeout", type=float, help="shipped blink timeout seconds, 0 for none")
+    parser.add_argument("--blink-disabled-default", default="", help="comma list of peers with shipped blink disabled")
     parser.add_argument("--latency-keys", type=int, default=100, help="measured keys per latency round")
     parser.add_argument("--latency-warmup", type=int, default=20, help="discarded keys before them")
     parser.add_argument("--latency-censor-ms", type=int, default=500,
@@ -4403,6 +4445,28 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
 
     if args.rebuild_latency_probe and (not args.latency_check or args.combine or args.make_bundle or args.preflight_only):
         parser.error("--rebuild-latency-probe requires --latency-check alone")
+    for flag, value, low, high in (("--memory-sample-ms", args.memory_sample_ms, 50, 1000),
+                                  ("--output-memory-rounds", args.output_memory_rounds, 1, 100),
+                                  ("--blink-rounds", args.blink_rounds, 1, 100),
+                                  ("--blink-settle", args.blink_settle, .1, 10),
+                                  ("--blink-window", args.blink_window, .1, 20)):
+        if not math.isfinite(value) or not low <= value <= high:
+            parser.error(f"{flag} must be finite and in {low}..{high}")
+    if args.blink_timeout is not None and (not math.isfinite(args.blink_timeout) or args.blink_timeout < 0):
+        parser.error("--blink-timeout must be finite and nonnegative")
+    if args.blink_cursor_rect:
+        try:
+            rect = [float(v) for v in args.blink_cursor_rect.split(",")]
+            if len(rect) != 4 or not all(math.isfinite(v) for v in rect) or min(rect[:2]) < 0 or min(rect[2:]) <= 0 or max(rect[2:]) > 256:
+                raise ValueError()
+        except ValueError:
+            parser.error("--blink-cursor-rect requires finite x,y,width,height")
+    if args.blink_validate_only and (not args.blink_cursor_rect or not args.blink_shape or args.blink_timeout is None):
+        parser.error("--blink-validate-only requires --blink-cursor-rect, --blink-shape and --blink-timeout")
+    if args.blink_validation_before and not args.blink_validate_only:
+        parser.error("--blink-validation-before requires --blink-validate-only")
+    if args.blink_validate_only and (args.combine or args.latency_check or args.make_bundle):
+        parser.error("blink validation is a separate preparation invocation")
     if args.combine:
         return run_combine(args)
     if args.make_bundle:
@@ -4414,6 +4478,8 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
     if args.latency_check:
         return run_latency_check(REPO / "target" / "perf-tools" / "macos-standing", args.latency_sign_identity, args.rebuild_latency_probe)
     workloads = [w for w in args.workloads.split(",") if w]
+    if args.blink_validate_only:
+        workloads = ["blink-window"]
     unknown = set(workloads) - set(WORKLOADS) - set(OPT_IN_WORKLOADS)
     if unknown:
         parser.error(f"unknown workloads: {', '.join(sorted(unknown))}")
@@ -4489,7 +4555,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         return 1 if refusals else 0
 
     tools = REPO / "target" / "perf-tools" / "macos-standing"
-    if "latency" in workloads:
+    if "latency" in workloads or args.blink_validate_only:
         cleanup.enter_context(probe_lock(tools))
         validate_latency_probe(tools / "KettleLatencyProbe.app", args.latency_sign_identity)
     if needs_build(args.kettle, args.kettle_b, args.no_build):
@@ -4505,7 +4571,9 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
 
     # Build every tool first: compiling right before measuring adds load and
     # heat, so the preflight that decides the session runs after it.
-    probes = build_probes(tools, latency="latency" in workloads, sign_identity=args.latency_sign_identity)
+    probes = build_probes(tools, latency="latency" in workloads or args.blink_validate_only, sign_identity=args.latency_sign_identity)
+    if set(workloads) & {"output-memory", "blink-window"}:
+        probes.update(hc.build_helpers(PROBES, tools))
     vtebench = build_vtebench(tools) if "vtebench" in workloads else None
     tool_hashes, tool_artifacts = probe_tool_identity(probes, args.latency_sign_identity)
     if "latency" in workloads:
@@ -4603,6 +4671,19 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
         runner = Runner(probes, work, kettle)
         runner.config_closure = closure
         runner.phases = stamped
+        optional_options = {"activate": not args.no_activate, "settle": args.blink_settle,
+                            "window": args.blink_window, "validation": args.blink_validation,
+                            "validate_only": args.blink_validate_only, "rect": args.blink_cursor_rect,
+                            "before_path": args.blink_validation_before, "sample_ms": args.memory_sample_ms}
+        if args.blink_validation_before:
+            optional_options["before_sha256"] = file_sha256(Path(args.blink_validation_before))
+        if set(workloads) & {"output-memory", "blink-window"}:
+            results["meta"]["output_blink"] = {"contract": hc.CONTRACT, "sample_ms": args.memory_sample_ms,
+                "settle_s": args.blink_settle, "window_s": args.blink_window,
+                "validation_only": args.blink_validate_only,
+                "printing_payload_sha256": hc.PRINT_SHA256}
+            if args.memory_sample_ms != 100 or args.blink_settle != 2.5 or args.blink_window != 6.0 or args.blink_validate_only:
+                results["meta"]["refusals"].append("diagnostic blink interval or validation-only capture")
         flood = work / "flood.txt"
         if "flood-memory" in workloads:
             write_flood(flood)
@@ -4630,7 +4711,7 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                     # never enter a statistic; they absorb first-launch costs such as
                     # the payload script's one-time assessment.
                     warmups = args.warmup if workload == "startup" else 0
-                    for round_index in range(warmups + rounds[workload]):
+                    for round_index in range(1 if args.blink_validate_only else warmups + rounds[workload]):
                         for name in rotated(entries, round_index):
                             # A round that never launches (latency's "not run")
                             # must not read the previous launch's grid.
@@ -4644,6 +4725,16 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
                                     row = runner.idle(name, args.idle_settle, args.idle_window, not args.no_activate)
                                 elif workload == "flood-memory":
                                     row = runner.flood_memory(name, flood, offsets, not args.no_activate, args.footprint_detail)
+                                elif workload in ("output-memory", "blink-window"):
+                                    config_bytes = dumps(closure.public[name]).encode()
+                                    setup = {"binary_sha256": file_sha256(Path(kettle.get(name) or APPS[name])),
+                                             "config_sha256": hashlib.sha256(config_bytes).hexdigest(), "display": display_mode(),
+                                             "settle_s": args.blink_settle, "window_s": args.blink_window,
+                                             "cursor_rect": args.blink_cursor_rect, "shape": args.blink_shape,
+                                             "timeout_s": args.blink_timeout}
+                                    row = hc.collect(runner, name, workload,
+                                        {**optional_options, "disabled": name in args.blink_disabled_default.split(",")},
+                                        out_dir / f"{workload}-{name}-r{round_index}", setup)
                                 elif workload == "latency":
                                     if failures_in_a_row >= len(entries):
                                         row = {"error": f"not run: {len(entries)} latency rounds in a row failed"}
@@ -4685,6 +4776,9 @@ def standing_main(cleanup: contextlib.ExitStack) -> int:
 
     if tool_artifacts:
         validate_latency_probe(probes["latency-probe"], args.latency_sign_identity)
+    if args.blink_validate_only:
+        print("blink validation artifacts written; no performance session")
+        return 0 if all(not row.get("error") for runs in results["workloads"]["blink-window"].values() for row in runs) else 1
     results["meta"]["complete"] = True
     results["meta"]["countable"] = session_countable(results["meta"]) and rounds_complete(results, results["meta"])
     results["meta"]["workload_countable"] = workload_countable(results, results["meta"])

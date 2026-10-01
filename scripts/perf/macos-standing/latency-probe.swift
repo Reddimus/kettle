@@ -24,6 +24,7 @@
 import AppKit
 import CoreMedia
 import CoreVideo
+import CryptoKit
 import Foundation
 import QuartzCore
 import ScreenCaptureKit
@@ -349,6 +350,30 @@ func selfTest() -> Int32 {
     check(phaseSpread([100, 16_867], vsyncNs: 100, periodNs: 16_667) == 100, "spread is the arc width")
     check(phaseSpread([16_600, 16_700], vsyncNs: 0, periodNs: 16_667) == 100, "spread wraps around the period")
 
+    var blinkOptions = Options()
+    blinkOptions.blinkCheck = true; blinkOptions.pid = 42; blinkOptions.blinkWindowID = 7
+    var posts = 0, captures = 0
+    probeMode(blinkOptions, blink: { captures += 1 }, injecting: { posts += 1 })
+    check(posts == 0 && captures == 1, "blink dispatch captures without posting")
+    blinkOptions.blinkCheck = false
+    probeMode(blinkOptions, blink: { captures += 1 }, injecting: { posts += 1 })
+    check(posts == 1 && captures == 1, "ordinary dispatch retains injecting mode")
+    check(blinkWindowMatches(owner: 42, windowID: 7, layer: 0, width: 500, options: blinkOptions), "exact blink window")
+    check(!blinkWindowMatches(owner: 42, windowID: 8, layer: 0, width: 500, options: blinkOptions), "another target window refused")
+    check(!blinkWindowMatches(owner: 43, windowID: 7, layer: 0, width: 500, options: blinkOptions), "foreign owner refused")
+    check(!blinkWindowMatches(owner: 42, windowID: 7, layer: 1, width: 500, options: blinkOptions), "layer refused")
+    check(!blinkWindowMatches(owner: 42, windowID: 7, layer: 0, width: 300, options: blinkOptions), "small window refused")
+    let complete = blinkFrame(previous: nil, raw: SCFrameStatus.complete.rawValue, hash: "pixels", arrival: 100)
+    check(complete?.0 == 100 && complete?.1 == "pixels" && complete?.2 == "complete", "complete frame updates pixels")
+    let idle = blinkFrame(previous: complete, raw: SCFrameStatus.idle.rawValue, hash: nil, arrival: 200)
+    check(idle?.0 == 200 && idle?.1 == "pixels" && idle?.2 == "idle", "idle refreshes complete pixels")
+    check(blinkFrame(previous: nil, raw: SCFrameStatus.idle.rawValue, hash: nil, arrival: 200) == nil, "idle cannot invent pixels")
+    for raw in [SCFrameStatus.blank.rawValue, SCFrameStatus.stopped.rawValue, -1] {
+        let rejected = blinkFrame(previous: complete, raw: raw, hash: "partial", arrival: 300)
+        check(rejected?.0 == 100 && rejected?.1 == "pixels", "incomplete frame does not refresh pixels")
+    }
+    check(blinkFrame(previous: nil, raw: SCFrameStatus.complete.rawValue, hash: nil, arrival: 300) == nil, "complete needs image pixels")
+
     if failures.isEmpty {
         print("latency-probe self-test: ok")
         return 0
@@ -494,6 +519,13 @@ struct Options {
     /// so it can never outlive the harness's wait for it.
     var deadlineMs = 0
     var leaseFile = ""
+    var selfTestDispatch = false
+    var blinkCheck = false
+    var blinkWindowID: UInt32 = 0
+    var startedNs: UInt64 = 0
+    var blinkSettle = 2.5
+    var blinkWindow = 6.0
+    var cursorRect: CGRect?
 }
 
 struct Failure: Error { let reason: String }
@@ -566,6 +598,7 @@ func secondsSince(_ type: CGEventType) -> Double {
 }
 
 func run(_ options: Options) async throws -> [String: Any] {
+    if options.selfTestDispatch { return ["posts": 1, "captures": 0] }
     guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
     guard CGPreflightScreenCaptureAccess() && CGPreflightPostEventAccess() else { throw Failure(reason: "permission") }
     var result: [String: Any] = ["display": displayContext()]
@@ -784,6 +817,18 @@ func parse(_ args: [String]) -> Options? {
     func value() -> String? { i += 1; return i < args.count ? args[i] : nil }
     while i < args.count {
         switch args[i] {
+        case "--self-test-dispatch": o.selfTestDispatch = true
+        case "--blink-check": o.blinkCheck = true
+        case "--window-id": guard let v = value(), let n = UInt32(v), n > 0 else { return nil }; o.blinkWindowID = n
+        case "--started-ns": guard let v = value(), let n = UInt64(v), n > 0 else { return nil }; o.startedNs = n
+        case "--blink-settle": guard let v = value(), let n = Double(v), n.isFinite, n > 0, n <= 10 else { return nil }; o.blinkSettle = n
+        case "--blink-window": guard let v = value(), let n = Double(v), n.isFinite, n > 0, n <= 20 else { return nil }; o.blinkWindow = n
+        case "--cursor-rect":
+            guard let v = value() else { return nil }
+            let r = v.split(separator: ",").compactMap { Double($0) }
+            guard r.count == 4, r.allSatisfy({ $0.isFinite }), r[0] >= 0, r[1] >= 0,
+                  r[2] > 0, r[3] > 0, r[2] <= 256, r[3] <= 256 else { return nil }
+            o.cursorRect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
         case "--pid": guard let v = value(), let p = pid_t(v) else { return nil }; o.pid = p
         case "--out": guard let v = value() else { return nil }; o.out = v
         case "--keys": guard let v = value(), let n = Int(v) else { return nil }; o.keys = n
@@ -802,6 +847,7 @@ func parse(_ args: [String]) -> Options? {
         }
         i += 1
     }
+    if o.blinkCheck && (o.startedNs == 0 || o.cursorRect == nil || o.blinkWindowID == 0) { return nil }
     return o.pid > 0 && !o.out.isEmpty && o.keys > 0 ? o : nil
 }
 
@@ -809,6 +855,113 @@ func parse(_ args: [String]) -> Options? {
 func write(_ object: [String: Any], to path: String) {
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+}
+
+// GUI-free decisions also used by the native capture and entry dispatch.
+func probeMode<T>(_ options: Options, blink: () -> T, injecting: () -> T) -> T {
+    options.blinkCheck ? blink() : injecting()
+}
+func blinkWindowMatches(owner: pid_t?, windowID: UInt32, layer: Int, width: CGFloat,
+                        options: Options) -> Bool {
+    owner == options.pid && windowID == options.blinkWindowID && layer == 0 && width > 300
+}
+func blinkFrame(previous: (UInt64, String, String)?, raw: Int, hash: String?,
+                arrival: UInt64) -> (UInt64, String, String)? {
+    if SCFrameStatus(rawValue: raw) == .idle {
+        return previous.map { (arrival, $0.1, "idle") }
+    }
+    guard SCFrameStatus(rawValue: raw) == .complete, let hash = hash else { return previous }
+    return (arrival, hash, "complete")
+}
+
+// Noninjecting preparation mode. No calibration, key posting, pointer warp,
+// click, or activation belongs to this path. The owner supplies a cursor-only
+// crop from an excluded geometry pilot; the counted window uses no capture.
+final class BlinkCapture: NSObject, SCStreamOutput, @unchecked Sendable {
+    let lock = NSLock()
+    var latest: (UInt64, String, String)?
+    func snapshot() -> (UInt64, String, String)? { lock.withLock { latest } }
+    func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer,
+                of type: SCStreamOutputType) {
+        guard type == .screen,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let raw = attachments.first?[.status] as? Int else { return }
+        let arrival = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        guard SCFrameStatus(rawValue: raw) == .complete, let image = sample.imageBuffer else {
+            lock.withLock { latest = blinkFrame(previous: latest, raw: raw, hash: nil, arrival: arrival) }
+            return
+        }
+        CVPixelBufferLockBaseAddress(image, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(image, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(image) else { return }
+        // Hash only actual pixels, never allocation padding.
+        var bytes = Data()
+        let width = CVPixelBufferGetWidth(image), height = CVPixelBufferGetHeight(image)
+        for y in 0..<height {
+            bytes.append(base.advanced(by: y * CVPixelBufferGetBytesPerRow(image))
+                .assumingMemoryBound(to: UInt8.self), count: width * 4)
+        }
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        lock.withLock { latest = blinkFrame(previous: latest, raw: raw, hash: hash, arrival: arrival) }
+    }
+}
+func blinkCheck(_ options: Options) async throws -> [String: Any] {
+    if options.selfTestDispatch { return ["posts": 0, "captures": 1] }
+    guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
+    guard CGPreflightScreenCaptureAccess() else { throw Failure(reason: "screen recording permission") }
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    guard let window = content.windows.first(where: {
+        blinkWindowMatches(owner: $0.owningApplication?.processID, windowID: $0.windowID,
+                           layer: $0.windowLayer, width: $0.frame.width, options: options)
+    }), let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }),
+          let crop = options.cursorRect,
+          CGRect(origin: .zero, size: window.frame.size).contains(crop) else {
+        throw Failure(reason: "cursor window or crop unavailable")
+    }
+    let start = options.startedNs + UInt64(options.blinkSettle * 1e9)
+    let end = start + UInt64(options.blinkWindow * 1e9)
+    guard clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < start else { throw Failure(reason: "capture readiness missed launch boundary") }
+    let config = SCStreamConfiguration()
+    let scale = CGFloat(NSScreen.main?.backingScaleFactor ?? 1)
+    let screen = CGDisplayBounds(display.displayID)
+    config.sourceRect = crop.offsetBy(dx: window.frame.minX - screen.minX, dy: window.frame.minY - screen.minY)
+    config.width = Int(crop.width * scale); config.height = Int(crop.height * scale)
+    config.minimumFrameInterval = CMTime(value: 1, timescale: 10)
+    config.pixelFormat = kCVPixelFormatType_32BGRA
+    config.showsCursor = false
+    config.queueDepth = 3
+    let capture = BlinkCapture()
+    let stream = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: config, delegate: nil)
+    try stream.addStreamOutput(capture, type: .screen, sampleHandlerQueue: DispatchQueue(label: "blink-check.capture"))
+    try await stream.startCapture()
+    var frames: [[String: Any]] = []
+    do {
+        for i in 0...Int(options.blinkWindow * 10) {
+            let deadline = start + UInt64(i) * 100_000_000
+            let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            if deadline > now { try await Task.sleep(nanoseconds: deadline - now) }
+            guard invocationAlive(options.leaseFile) else { throw Failure(reason: "invocation cancelled") }
+            let t = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            guard let (arrival, hash, status) = capture.snapshot(), t >= arrival, t - arrival <= 250_000_000 else {
+                throw Failure(reason: "cursor frame missing or stale")
+            }
+            let visible = mayPost(frontmost: frontmostPid(), topWindow: topWindow(), target: options.pid, window: window.windowID)
+                && obscuring(onScreenWindows(), window: window.windowID,
+                             rect: crop.offsetBy(dx: window.frame.minX, dy: window.frame.minY)) == nil
+            frames.append(["t_ns": t, "arrival_ns": arrival, "sha256": hash, "visible": visible, "frame_status": status])
+        }
+        try await stream.stopCapture()
+    } catch {
+        try? await stream.stopCapture()
+        throw error
+    }
+    let mode = CGDisplayCopyDisplayMode(display.displayID)
+    let nativeDisplay: [String: Any] = ["width_pt": mode?.width ?? 0, "height_pt": mode?.height ?? 0,
+                                      "pixel_width": mode?.pixelWidth ?? 0, "pixel_height": mode?.pixelHeight ?? 0,
+                                      "refresh_hz": mode?.refreshRate ?? 0]
+    return ["started_ns": options.startedNs, "native_display": nativeDisplay,
+            "start_ns": start, "end_ns": end, "frames": frames, "window_id": window.windowID,
+            "display": displayContext(), "cursor_rect": [crop.minX, crop.minY, crop.width, crop.height]]
 }
 
 // MARK: - Entry
@@ -842,8 +995,9 @@ guard let options = parse(args) else {
     FileHandle.standardError.write("usage: see the header of latency-probe.swift\n".data(using: .utf8)!)
     exit(2)
 }
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// Synthetic entry dispatch uses the same parser and task, before AppKit or TCC.
+let app = options.selfTestDispatch ? nil : NSApplication.shared
+app?.setActivationPolicy(.accessory)
 if options.deadlineMs > 0 {
     // guardedPost refuses after the deadline; this also ends a probe stuck
     // in a wait, so none outlives the harness's wait for it.
@@ -853,11 +1007,12 @@ if options.deadlineMs > 0 {
 }
 Task.detached {
     do {
-        finish(try await run(options), to: options.out, code: 0)
+        let operation = probeMode(options, blink: { blinkCheck }, injecting: { run })
+        finish(try await operation(options), to: options.out, code: 0)
     } catch let failure as Failure {
         finish(["error": failure.reason], to: options.out, code: failure.reason == "permission" ? 3 : 1)
     } catch {
         finish(["error": "\(error)"], to: options.out, code: 1)
     }
 }
-app.run()
+if let app { app.run() } else { dispatchMain() }
