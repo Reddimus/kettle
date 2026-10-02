@@ -342,7 +342,12 @@ failed for another reason, and every invalid pair stays in the report by
 reason. Every terminal must pass for overall equivalence. A typing pair
 counts only if its on arm's observer covered the whole typing epoch
 (`typing_memory_valid`); timing that survives an observer that stopped early
-does not measure the observer-on condition.
+does not measure the observer-on condition. A focus change or hidden window
+that the observer's own checks catch between the probe's is the desktop's
+failure, and counts toward the allowance under its own name. A probe failure
+still records a terminal that did not stop cleanly, which is never the
+desktop's. Row builders check the desktop's reasons last, so a focus change
+never stands in for a missing query or a coverage failure in the same arm.
 
 Printing off arms retain the readiness query at origin, then query at
 5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus

@@ -435,7 +435,8 @@ PILOT_LEVEL = .90
 PILOT_INVALID_SHARE = .05
 PILOT_DESKTOP_REASONS = frozenset({
     'known focus change during interval', 'window not visible during interval', 'printing window not visible',
-    'designated query lost focus', 'blink window not visible', 'probe saw focus, cover or foreign input'})
+    'designated query lost focus', 'blink window not visible', 'typing window not visible',
+    'probe saw focus, cover or foreign input'})
 # The latency probe's own guards, as its failures name them.
 PROBE_DESKTOP_FAILURE = re.compile(
     r'latency probe: (?:not frontmost(?:, and the titlebar is covered)?|focus changed before a key \(.*\)'
@@ -507,8 +508,12 @@ def observer_pilot_report(h, results):
                             reason = reason or 'incomplete typing keys'
                         # An on arm counts only if its observer ran through
                         # the whole typing epoch, not just its readiness query.
+                        # Its focus checks can see the desktop interrupt between
+                        # the probe's own; only those reasons keep their name.
                         if arm == 'on' and row.get('typing_memory_valid') is not True:
-                            reason = reason or 'on-arm observer evidence invalid'
+                            observed = row.get('typing_memory_reason')
+                            reason = reason or (observed if observed in PILOT_DESKTOP_REASONS
+                                                else 'on-arm observer evidence invalid')
                     else:
                         evidence = (row.get('metric_validity') or {}).get(field) or {}
                         value = row.get(field)

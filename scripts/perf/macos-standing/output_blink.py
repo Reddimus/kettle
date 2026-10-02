@@ -153,9 +153,7 @@ def printing_row(records, samples, pid, window, observer_off=False):
         if reason:
             raise ValueError(reason)
         active = [s for s in samples if s['query_start_ns'] >= began and s['query_end_ns'] <= done]
-        reason = (None if observer_off else coverage_reason(active, began, done)) or focus_reason(samples, began, done, pid, window)
-        if observer_off and any(not visible(s, pid, window) for s in samples):
-            reason = reason or 'printing window not visible'
+        reason = None if observer_off else coverage_reason(active, began, done)
         # Without a record after done, a late focus change would go unseen.
         if observer_off and not any(s['query_start_ns'] >= done for s in samples):
             reason = reason or 'off-arm query after done missing'
@@ -167,6 +165,11 @@ def printing_row(records, samples, pid, window, observer_off=False):
         row.update(printing_sample_ns=sample['query_start_ns'], printing_sample_end_ns=sample['query_end_ns'],
                    printing_lateness_ms=(sample['query_end_ns']-began-6_000_000_000)/1e6,
                    printing_focus=visible(sample, pid, window))
+        # The desktop's reasons (focus moving, the window hidden) come last,
+        # so they never stand in for a failure of the harness or terminal.
+        reason = reason or focus_reason(samples, began, done, pid, window)
+        if observer_off and any(not visible(s, pid, window) for s in samples):
+            reason = reason or 'printing window not visible'
         reason = reason or (None if row['printing_focus'] else 'designated query lost focus')
         if reason:
             raise ValueError(reason)

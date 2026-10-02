@@ -1927,21 +1927,26 @@ class Runner:
                                     shutil.copyfile(source, keep.with_suffix(suffix))
                     if pending_result is not None:
                         linked_result(pending_result)
+        # The terminal has been stopped by now. A failed round still records
+        # whether that stop was clean, so a desktop failure the probe reports
+        # cannot stand for a terminal that would not stop.
+        def failed(error: str) -> dict:
+            return linked_result({"error": error, **({} if clean else {"killed": True})})
         if not finished:
-            return linked_result({"error": "the latency probe never finished"})
+            return failed("the latency probe never finished")
         try:
             probe = json.loads(out.read_text())
         except (OSError, json.JSONDecodeError):
-            return linked_result({"error": "the latency probe wrote no result"})
+            return failed("the latency probe wrote no result")
         if "error" in probe:
-            return linked_result({"error": f"latency probe: {probe['error']}"})
+            return failed(f"latency probe: {probe['error']}")
         payload_records = read_keyblock_log(log)
         if cursor_mode:
             try:
                 payload_records = cursor.read_payload(log.read_bytes())
                 cursor.validate_stream(probe, payload_records, options["warmup"], options["keys"])
             except (OSError, ValueError, TypeError, KeyError):
-                return linked_result({"error": "cursor stream invalid"})
+                return failed("cursor stream invalid")
         row = latency_row(probe, payload_records, options["censor_ms"])
         row["tool_artifact"] = artifact
         if cursor_mode:

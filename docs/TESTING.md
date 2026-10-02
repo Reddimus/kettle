@@ -548,7 +548,10 @@ without retries, missing-observer on-arm refusal,
 typing observer omission, sparse observer requests, boundary/query focus and
 lateness, numeric self-cost allowlists, the 90% interval against its bounds,
 the desktop-only 5% allowance (a pair with any other failure never counts as
-the desktop's), incomplete pairs, failed arms, report dispatch and privacy. The native offset parser fixture
+the desktop's), typing observer focus reasons counted as the desktop's, a
+failed probe round that keeps its unclean stop, an off-arm printing row whose
+hidden window cannot mask its missing post-done query, incomplete pairs,
+failed arms, report dispatch and privacy. The native offset parser fixture
 compiles `observer.m` using the existing macOS skip policy and runs only its
 pure `--self-test-offsets` entry. Owned native scratch fixtures also verify
 the pilot self-cost sidecar and sparse launch requests. The parser checks
