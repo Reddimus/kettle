@@ -951,9 +951,10 @@ the asynchronous readback path.
 A headless renderer holds exactly two distinct quad pipelines, one replacing
 and one blending, and one image pipeline; a source guard keeps `with_gpu`
 building its layers only from `SharedPipelines`, and replacing and blending
-layers draw the same pixels through shared and standalone pipelines. S4 also
-runs the latency A/B gate with `--kettle-b --workloads latency --rounds 5
---latency-keys 100`; the difference CI upper bound must be at most +1 ms.
+layers draw the same pixels through shared and standalone pipelines. A
+latency A/B (`--kettle-b --workloads latency --rounds 5 --latency-keys 100`,
+difference CI upper bound at most +1 ms) is optional: 4.9.0 merged this change
+on tests and reviews, without its measurement gates, by the owner's decision.
 
 ### kettle-ui (290+ tests)
 
