@@ -1928,10 +1928,14 @@ class Runner:
                     if pending_result is not None:
                         linked_result(pending_result)
         # The terminal has been stopped by now. A failed round still records
-        # whether that stop was clean, so a desktop failure the probe reports
-        # cannot stand for a terminal that would not stop.
+        # whether that stop was clean, and an observer that never became
+        # ready, so a desktop failure the probe reports cannot stand for
+        # either.
         def failed(error: str) -> dict:
-            return linked_result({"error": error, **({} if clean else {"killed": True})})
+            row = {"error": error, **({} if clean else {"killed": True})}
+            if observer_reason:
+                row.update(typing_memory_valid=False, typing_memory_reason=observer_reason)
+            return linked_result(row)
         if not finished:
             return failed("the latency probe never finished")
         try:

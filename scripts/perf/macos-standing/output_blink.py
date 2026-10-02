@@ -91,7 +91,19 @@ def visible(sample, pid, window):
                for c in (sample['focus_before'], sample['focus_after']))
 
 
+def focus_unknown(samples):
+    """Whether a focus check could not read the window server (no frontmost
+    app, the window missing from the list, unreadable bounds). That proves
+    nothing about the desktop, so it is the observer's failure, not a focus
+    change, and is judged ahead of the desktop's reasons."""
+    return any(s[key].get('known') is not True for s in samples for key in ('focus_before', 'focus_after'))
+
+
 def focus_reason(samples, start, end, pid, window):
+    for sample in samples:
+        for key in ('focus_before', 'focus_after'):
+            if start <= sample[key]['t_ns'] <= end and sample[key].get('known') is not True:
+                return 'focus evidence unavailable'
     for sample in samples:
         for c in sample['focus_changes']:
             if start <= c['t_ns'] <= end:
@@ -166,7 +178,12 @@ def printing_row(records, samples, pid, window, observer_off=False):
                    printing_lateness_ms=(sample['query_end_ns']-began-6_000_000_000)/1e6,
                    printing_focus=visible(sample, pid, window))
         # The desktop's reasons (focus moving, the window hidden) come last,
-        # so they never stand in for a failure of the harness or terminal.
+        # behind focus checks that could not read the window server, so they
+        # never stand in for a failure of the observer, harness or terminal.
+        # focus_reason covers checks inside the output; the off arm also
+        # judges its readiness query and its record after done.
+        if observer_off and focus_unknown(samples):
+            reason = reason or 'focus evidence unavailable'
         reason = reason or focus_reason(samples, began, done, pid, window)
         if observer_off and any(not visible(s, pid, window) for s in samples):
             reason = reason or 'printing window not visible'
@@ -592,7 +609,11 @@ def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer
                    typing_coverage=len(active)/expected)
         if len(active) < 5:
             raise ValueError('insufficient typing memory duration')
-        reason = coverage_reason(active, start, end) or focus_reason(samples, start, end, pid, window)
+        # The last query can end inside the epoch with its focus check after
+        # it, where focus_reason does not look but visibility does.
+        reason = (coverage_reason(active, start, end)
+                  or ('focus evidence unavailable' if focus_unknown(active) else None)
+                  or focus_reason(samples, start, end, pid, window))
         if reason:
             raise ValueError(reason)
         if any(not visible(s, pid, window) for s in active):

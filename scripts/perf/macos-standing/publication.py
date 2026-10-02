@@ -425,7 +425,8 @@ PILOT_INVALID_REASONS = frozenset({
     'blink window not visible', 'blink boundary missing or late', 'readiness missed launch boundary',
     'native query late', 'native query failed or target exited', 'native focus notification overflow',
     'process lifetime identity missing or changed', 'stale focus check', 'nonmonotonic native trace',
-    'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing'})
+    'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing',
+    'focus evidence unavailable'})
 # Equivalence is the two one-sided tests at 5 % each: the paired Student-t
 # 90 % interval must sit inside the bounds. Up to 5 % of the planned pairs may
 # be invalid, and only for the desktop's reasons below (focus moving, a window
@@ -497,8 +498,11 @@ def observer_pilot_report(h, results):
                     if row.get('killed') or row.get('warmup') or row.get('seq_mismatch'):
                         reason = reason or 'failed arm'
                     elif 'error' in row:
+                        # The probe's error ends the row early; the grid it
+                        # settled at must still be the session's.
                         desktop = (kind == 'typing' and isinstance(row['error'], str)
-                                   and PROBE_DESKTOP_FAILURE.fullmatch(row['error']))
+                                   and PROBE_DESKTOP_FAILURE.fullmatch(row['error'])
+                                   and (row.get('cols'), row.get('rows')) == (h.COLS, h.ROWS))
                         reason = reason or ('probe saw focus, cover or foreign input' if desktop else 'failed arm')
                     if kind == 'typing':
                         options = meta.get('latency') or {}

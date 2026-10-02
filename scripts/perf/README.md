@@ -344,10 +344,15 @@ counts only if its on arm's observer covered the whole typing epoch
 (`typing_memory_valid`); timing that survives an observer that stopped early
 does not measure the observer-on condition. A focus change or hidden window
 that the observer's own checks catch between the probe's is the desktop's
-failure, and counts toward the allowance under its own name. A probe failure
-still records a terminal that did not stop cleanly, which is never the
-desktop's. Row builders check the desktop's reasons last, so a focus change
-never stands in for a missing query or a coverage failure in the same arm.
+failure, and counts toward the allowance under its own name. A focus check
+that could not read the window server (no frontmost app, the window missing
+from the list, unreadable bounds) is "focus evidence unavailable": the
+observer's failure, never the desktop's. A probe failure counts as the
+desktop's only at the session's 120x36 grid, and it still records a terminal
+that did not stop cleanly or an observer that never became ready, neither of
+which is the desktop's. Row builders check the desktop's reasons last, so a
+focus change never stands in for unreadable focus evidence, a missing query
+or a coverage failure in the same arm.
 
 Printing off arms retain the readiness query at origin, then query at
 5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus

@@ -190,9 +190,11 @@ per-arm medians and self-cost/query summaries. Bounds are +/-1 ms launch mean fo
 `wakeups_per_second` for blink. `allowed_invalid_pairs` is 5% of the declared
 pairs, rounded down. An invalid pair for any reason other than focus,
 visibility or the probe's cover and foreign-input guards ("probe saw focus,
-cover or foreign input") means "invalid pairs not caused by the desktop";
-more desktop failures than allowed means "insufficient valid pairs"; an
-unfinished session means "pilot incomplete". Overall equivalence needs every
-terminal to pass.
+cover or foreign input") means "invalid pairs not caused by the desktop".
+Focus evidence the observer could not read ("focus evidence unavailable") and
+a probe failure off the 120x36 grid are not the desktop's. More desktop
+failures than allowed means "insufficient valid pairs", and an unfinished
+session means "pilot incomplete". Overall equivalence needs every terminal to
+pass.
 Ordinary analysis, combine and A/A cannot consume these sessions. The startup
 stamp observer-control report retains its existing contract.
