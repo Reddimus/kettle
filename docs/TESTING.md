@@ -948,6 +948,13 @@ truncated-source rejection. Separate file-policy regressions prove an
 explicit output succeeds beneath a public existing parent while the default
 private-state policy rejects the same tree. The native live smoke exercises
 the asynchronous readback path.
+A headless renderer holds exactly two distinct quad pipelines, one replacing
+and one blending, and one image pipeline; a source guard keeps `with_gpu`
+building its layers only from `SharedPipelines`, and replacing and blending
+layers draw the same pixels through shared and standalone pipelines. A
+latency A/B (`--kettle-b --workloads latency --rounds 5 --latency-keys 100`,
+difference CI upper bound at most +1 ms) is optional: 4.9.0 merged this change
+on tests and reviews, without its measurement gates, by the owner's decision.
 
 ### kettle-ui (290+ tests)
 
@@ -1010,7 +1017,10 @@ user-initiated QoS class. A source guard proves `run_with` starts the preload
 right after the trace guard, before the event loop is built and before any
 config read, sends the family after the command-line overrides, and that
 the first window joins it and keeps the fonts for the renderer before its
-pane spawns. Input-queue regressions fill both the
+pane spawns. On macOS `load_window_icon` returns `None`
+without decoding (`macos_skips_the_window_icon_decode`). The existing palette
+guard retains both icon assets and the Windows/X11 call sites.
+Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests

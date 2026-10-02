@@ -43,6 +43,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   instead of on the main thread before the first window and shell. The first
   window waits only for whatever font work is still unfinished when it opens.
   New windows (`Cmd+N`) load fonts as before.
+- A new window builds each distinct quad and image GPU pipeline once, instead
+  of once per layer, and on macOS no longer decodes the window icon, which
+  macOS ignores. Both were startup work with no effect.
 - `Shift+Arrow` reaches a program that owns the keyboard (the alternate
   screen or mouse reporting, or the kitty keyboard protocol or
   `modifyOtherKeys` away from the shell prompt) instead of resizing a split,

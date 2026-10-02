@@ -162,6 +162,49 @@ fn a_headless_frame_draws_a_real_pane() {
     }
 }
 
+/// A renderer compiles each distinct quad and image pipeline once: its five
+/// quad layers draw with one blending and one replacing pipeline, and its three
+/// image layers with one, instead of each layer compiling its own.
+#[test]
+fn a_renderer_compiles_each_distinct_pipeline_once() {
+    let _serialized = gpu_test_guard();
+    let Some((renderer, _cfg)) = renderer(64, 32) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let replacing = [&renderer.pane_bases, &renderer.live_pane_bases];
+    let blending = [
+        &renderer.quads,
+        &renderer.overlay_quads,
+        &renderer.menu_quads,
+    ];
+    let mut quads: Vec<&wgpu::RenderPipeline> = replacing
+        .iter()
+        .chain(&blending)
+        .map(|layer| layer.pipeline())
+        .collect();
+    quads.sort();
+    quads.dedup();
+    assert_eq!(quads.len(), 2, "five quad layers, two blend modes");
+    assert_eq!(replacing[0].pipeline(), replacing[1].pipeline());
+    assert!(
+        blending
+            .iter()
+            .all(|layer| layer.pipeline() == blending[0].pipeline())
+    );
+    let image_layers = [
+        &renderer.imgs,
+        &renderer.media_receipt_img,
+        &renderer.bg_imgs,
+    ];
+    let mut images: Vec<&wgpu::RenderPipeline> =
+        image_layers.iter().map(|layer| layer.pipeline()).collect();
+    images.sort();
+    images.dedup();
+    assert_eq!(images.len(), 1, "three image layers, one pipeline");
+    crate::gpu_tests::assert_shared_quad_pixels_match_standalone();
+}
+
 /// The quad instance bytes the last frame uploaded.
 fn uploaded_quads(renderer: &Renderer) -> Vec<u8> {
     bytemuck::cast_slice(&renderer.quad_scratch).to_vec()
