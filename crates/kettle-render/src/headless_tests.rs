@@ -216,39 +216,59 @@ fn uploaded_quads(renderer: &Renderer) -> Vec<u8> {
 #[test]
 fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
     let _serialized = gpu_test_guard();
-    let Some((mut renderer, cfg)) = renderer(320, 120) else {
-        eprintln!("no GPU adapter on this host; skipped");
-        return;
-    };
-    let snap = snapshot_of(20, 4, b"hello");
-    let panes = [pane(&snap, 320, 120)];
-    let on = capture(&mut renderer, &cfg, &panes, &focused(true));
-    let quads_on = uploaded_quads(&renderer);
-    let prepares = renderer.text_prepares;
-    let uploads = renderer.render_uploads();
-    let off = capture(&mut renderer, &cfg, &panes, &focused(false));
-    assert_eq!(
-        uploaded_quads(&renderer),
-        quads_on,
-        "a blink must not change the uploaded quads"
-    );
-    let after = renderer.render_uploads();
-    assert_eq!(
-        (after.buffer_writes, after.texture_writes),
-        (uploads.buffer_writes, uploads.texture_writes),
-        "a blink writes nothing to the GPU: one write keeps Apple's blit pool resident"
-    );
-    assert_eq!(
-        renderer.text_prepares, prepares,
-        "a blink must not prepare text"
-    );
-    assert!(
-        cursor_pixels(&on, &cfg, &snap) > cursor_pixels(&off, &cfg, &snap) + 100,
-        "the on phase shows the block and the off phase hides it"
-    );
-    let back_on = capture(&mut renderer, &cfg, &panes, &focused(true));
-    assert_eq!(back_on, on, "the next on phase is the first one again");
-    assert_eq!(renderer.text_prepares, prepares);
+    for allow_mapping in [true, false] {
+        let cfg = gpu_test_config();
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
+                .expect("headless renderer builds")
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        if !allow_mapping {
+            assert!(
+                !renderer.gpu.mapped_uploads(),
+                "the forced queue device has no mapped uploads"
+            );
+        }
+        let snap = snapshot_of(20, 4, b"hello");
+        let panes = [pane(&snap, 320, 120)];
+        let on = capture(&mut renderer, &cfg, &panes, &focused(true));
+        let quads_on = uploaded_quads(&renderer);
+        let prepares = renderer.text_prepares;
+        let uploads = renderer.render_uploads();
+        let off = capture(&mut renderer, &cfg, &panes, &focused(false));
+        assert_eq!(
+            uploaded_quads(&renderer),
+            quads_on,
+            "a blink must not change the uploaded quads"
+        );
+        let after = renderer.render_uploads();
+        assert_eq!(
+            (
+                after.buffer_writes,
+                after.texture_writes,
+                after.mapped_writes
+            ),
+            (
+                uploads.buffer_writes,
+                uploads.texture_writes,
+                uploads.mapped_writes
+            ),
+            "a blink writes nothing to the GPU: one write keeps Apple's blit pool resident"
+        );
+        assert_eq!(
+            renderer.text_prepares, prepares,
+            "a blink must not prepare text"
+        );
+        assert!(
+            cursor_pixels(&on, &cfg, &snap) > cursor_pixels(&off, &cfg, &snap) + 100,
+            "the on phase shows the block and the off phase hides it"
+        );
+        let back_on = capture(&mut renderer, &cfg, &panes, &focused(true));
+        assert_eq!(back_on, on, "the next on phase is the first one again");
+        assert_eq!(renderer.text_prepares, prepares);
+    }
 }
 
 /// A frame whose content did not change writes nothing to the GPU, and one
@@ -256,47 +276,426 @@ fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
 #[test]
 fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
     let _serialized = gpu_test_guard();
+    for allow_mapping in [true, false] {
+        let cfg = gpu_test_config();
+        let Some(mut renderer) =
+            Renderer::headless_for_tests_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
+                .expect("headless renderer builds")
+        else {
+            eprintln!("no GPU adapter on this host; skipped");
+            return;
+        };
+        if !allow_mapping {
+            assert!(
+                !renderer.gpu.mapped_uploads(),
+                "the forced queue device has no mapped uploads"
+            );
+        }
+        let snap = snapshot_of(20, 4, b"hello");
+        let panes = [pane(&snap, 320, 120)];
+        capture(&mut renderer, &cfg, &panes, &focused(true));
+        let first = renderer.render_uploads();
+        assert!(
+            first.buffer_writes > 0,
+            "the first frame uploads everything"
+        );
+        capture(&mut renderer, &cfg, &panes, &focused(true));
+        let steady = renderer.render_uploads();
+        assert_eq!(
+            (
+                steady.buffer_writes,
+                steady.buffer_bytes,
+                steady.texture_writes,
+                steady.mapped_writes
+            ),
+            (
+                first.buffer_writes,
+                first.buffer_bytes,
+                first.texture_writes,
+                first.mapped_writes
+            ),
+            "an unchanged frame writes nothing"
+        );
+        assert!(steady.skipped_writes > first.skipped_writes);
+        assert_eq!(steady.text_prepares, first.text_prepares);
+
+        let changed = snapshot_of(20, 4, b"hellp");
+        let panes = [pane(&changed, 320, 120)];
+        capture(&mut renderer, &cfg, &panes, &focused(true));
+        let after = renderer.render_uploads();
+        // On shared memory the instances go through mapped buffers rather than
+        // the queue, so count both.
+        let writes = |u: RenderUploads| u.buffer_writes + u.mapped_writes;
+        let bytes = |u: RenderUploads| u.buffer_bytes + u.mapped_bytes;
+        assert!(
+            writes(after) > writes(steady),
+            "changed text still reaches the GPU"
+        );
+        assert!(
+            bytes(after) - bytes(steady) < bytes(first),
+            "only the difference is written, not the whole first frame again"
+        );
+    }
+}
+
+/// On shared memory, output that changes the grid reaches the GPU without a
+/// queue write: its glyph instances and quads go through mapped buffers, and
+/// the screen uniforms did not change. On Apple GPUs each queue write is a
+/// staging copy and a blit, and one per frame keeps the driver's blit pool
+/// (about 128 MiB) resident for as long as a pane prints.
+#[test]
+fn printing_writes_nothing_through_the_queue_on_shared_memory() {
+    let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
-    let snap = snapshot_of(20, 4, b"hello");
-    let panes = [pane(&snap, 320, 120)];
-    capture(&mut renderer, &cfg, &panes, &focused(true));
-    let first = renderer.render_uploads();
+    let info = renderer.gpu.adapter.get_info();
+    let shared = renderer
+        .gpu
+        .adapter
+        .features()
+        .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
+        && matches!(info.backend, wgpu::Backend::Metal | wgpu::Backend::Vulkan)
+        && matches!(
+            info.device_type,
+            wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu
+        );
+    if !shared {
+        eprintln!(
+            "{} ({:?}, {:?}) keeps queue uploads; skipped",
+            info.name, info.backend, info.device_type
+        );
+        return;
+    }
     assert!(
-        first.buffer_writes > 0,
-        "the first frame uploads everything"
+        renderer.gpu.mapped_uploads(),
+        "the shared-memory device enabled mapped uploads"
     );
-    capture(&mut renderer, &cfg, &panes, &focused(true));
-    let steady = renderer.render_uploads();
+    let first = snapshot_of(20, 4, b"line 1\r\n");
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&first, 320, 120)],
+        &focused(true),
+    );
+    let before = renderer.render_uploads();
+    // A new line: new glyph instances, and the cursor quad moves down.
+    let printed = snapshot_of(20, 4, b"line 1\r\nline 2\r\n");
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&printed, 320, 120)],
+        &focused(true),
+    );
+    let after = renderer.render_uploads();
+    assert_eq!(
+        after.buffer_writes, before.buffer_writes,
+        "printing wrote through the queue: {before:?} then {after:?}"
+    );
+    assert_eq!(after.chrome_prepares, before.chrome_prepares);
+    assert!(after.mapped_writes > before.mapped_writes);
+}
+
+/// A device with the mapping feature, regardless of adapter type, for ring
+/// correctness tests. The live path still excludes discrete adapters.
+fn mapped_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let cfg = gpu_test_config();
+    pollster::block_on(async {
+        let (_instance, adapter) = crate::resolve_headless_adapter(&cfg, "mapped-ring-test")
+            .await
+            .ok()?;
+        let required_features = wgpu::Features::MAPPABLE_PRIMARY_BUFFERS;
+        if !adapter.features().contains(required_features) {
+            return None;
+        }
+        adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features,
+                ..Default::default()
+            })
+            .await
+            .ok()
+    })
+}
+
+/// Draw `quads` over black into a `size`-square sRGB target and read the
+/// pixels back, tightly packed RGBA. The wait for the readback also lets the
+/// ring's map of the buffer this frame replaced complete.
+fn draw_quads(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    quads: &QuadPipeline,
+    size: u32,
+) -> Vec<u8> {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kettle-ring-target"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Rows are padded to wgpu's 256-byte copy alignment.
+    let row = 256_u32;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("kettle-ring-readback"),
+        size: u64::from(row) * u64::from(size),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("kettle-ring-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        quads.draw(&mut pass);
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(size),
+            },
+        },
+        wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    rx.recv()
+        .expect("the readback's map callback ran")
+        .expect("the readback maps");
+    let data = slice.get_mapped_range().expect("the readback's bytes");
+    let width = size as usize * 4;
+    let mut pixels = Vec::with_capacity(width * size as usize);
+    for y in 0..size as usize {
+        pixels.extend_from_slice(&data[y * row as usize..][..width]);
+    }
+    drop(data);
+    readback.unmap();
+    pixels
+}
+
+/// On a device with mapped uploads, changing quads reach the GPU through the
+/// ring, not the queue, and each frame draws its own data. The middle frame
+/// is shorter than the others, so a ring that remembered the first frame's
+/// tail as still held would skip the last frame's write and draw a stale
+/// buffer.
+#[test]
+fn a_mapped_ring_draws_each_frame_without_queue_writes() {
+    let _serialized = gpu_test_guard();
+    let Some((device, queue)) = mapped_device() else {
+        eprintln!("no adapter with mapped uploads on this host; skipped");
+        return;
+    };
+    let size = 16_u32;
+    let screen = [size as f32, size as f32];
+    let quad = |x: f32, color: [f32; 4]| QuadInstance {
+        pos: [x, 0.0],
+        size: [8.0, 16.0],
+        color,
+    };
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let (red, green, blue) = (
+        [1.0, 0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0, 1.0],
+    );
+    let frames = [
+        (vec![quad(0.0, red), quad(8.0, green)], [red, green]),
+        (vec![quad(0.0, blue)], [blue, black]),
+        (vec![quad(0.0, blue), quad(8.0, green)], [blue, green]),
+    ];
+    let mut quads = QuadPipeline::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    for (index, (data, expected)) in frames.into_iter().enumerate() {
+        quads.upload(&device, &queue, screen, &data);
+        let pixels = draw_quads(&device, &queue, &quads, size);
+        for (x, color) in [(4_usize, expected[0]), (12, expected[1])] {
+            let at = (8 * size as usize + x) * 4;
+            let want: Vec<u8> = color[..3].iter().map(|c| (c * 255.0) as u8).collect();
+            assert_eq!(pixels[at..at + 3], want[..], "frame {index}, x {x}");
+        }
+    }
+    let counts = quads.upload_counts();
+    assert_eq!(
+        counts.buffer_writes, 1,
+        "only the screen uniform went through the queue"
+    );
+    assert_eq!(counts.mapped_writes, 3, "every frame's quads were mapped");
+}
+
+/// A refused spare allocation still uploads into the fitting current
+/// buffer, both for glyph-like writes and quad-like retained writes.
+#[test]
+fn a_refused_spare_keeps_the_current_buffer_drawing() {
+    let _serialized = gpu_test_guard();
+    let Some((device, queue)) = mapped_device() else {
+        eprintln!("no adapter with mapped uploads on this host; skipped");
+        return;
+    };
+    for retain in [false, true] {
+        let budget = kettle_core::GraphicsBudget::default();
+        let mut ring = upload::MappedRing::new(
+            "refused-spare-test",
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_SRC,
+            Some(budget.clone()),
+        );
+        let counters = upload::UploadCounters::default();
+        let mut held = upload::RetainedBytes::default();
+        assert!(ring.write(
+            &device,
+            &queue,
+            retain.then_some(&mut held),
+            bytemuck::bytes_of(&1_u32),
+            &counters,
+        ));
+        assert_eq!(ring.current().unwrap().size(), 4096);
+        // Consume the remaining scope budget with reservations, without
+        // allocating textures or large buffers on the device.
+        let limits = budget.limits();
+        let mut remaining = limits.retained_bytes - 4096;
+        let mut charges = Vec::new();
+        while remaining > 0 {
+            let bytes = remaining.min(limits.image_bytes);
+            charges.push(budget.reserve_gpu(bytes).expect("remaining scope budget"));
+            remaining -= bytes;
+        }
+        assert!(
+            budget.reserve_gpu(4096).is_none(),
+            "a spare cannot be allocated"
+        );
+        assert!(
+            ring.write(
+                &device,
+                &queue,
+                retain.then_some(&mut held),
+                bytemuck::bytes_of(&2_u32),
+                &counters,
+            ),
+            "a fitting update must keep drawing, retain={retain}"
+        );
+        let counts = counters.snapshot();
+        assert_eq!((counts.mapped_writes, counts.buffer_writes), (1, 1));
+        assert_eq!(counts.buffer_bytes, 4);
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("refused-spare-readback"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_buffer_to_buffer(ring.current().unwrap(), 0, &readback, 0, 4);
+        queue.submit(std::iter::once(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback.map_async(wgpu::MapMode::Read, .., move |result| {
+            tx.send(result).unwrap();
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("readback poll");
+        rx.recv().unwrap().expect("readback map");
+        let view = readback.get_mapped_range(..).expect("readback bytes");
+        assert_eq!(&view[..], bytemuck::bytes_of(&2_u32));
+        drop(view);
+        readback.unmap();
+
+        // Growth cannot use the smaller current buffer. It must fail
+        // without an oversized queue write or a false retained-data update.
+        let oversized = vec![0_u8; 8192];
+        assert!(!ring.write(
+            &device,
+            &queue,
+            retain.then_some(&mut held),
+            &oversized,
+            &counters,
+        ));
+        assert_eq!(counters.snapshot(), counts);
+        assert_eq!(ring.current().unwrap().size(), 4096);
+        if retain {
+            assert!(ring.write(
+                &device,
+                &queue,
+                Some(&mut held),
+                bytemuck::bytes_of(&2_u32),
+                &counters,
+            ));
+            assert_eq!(counters.snapshot().buffer_writes, counts.buffer_writes);
+        }
+        drop(charges);
+    }
+}
+
+/// The glyph ring takes more instances than its first buffer holds.
+#[test]
+fn the_glyph_ring_outgrows_its_first_buffer() {
+    let _serialized = gpu_test_guard();
+    let Some((device, queue)) = mapped_device() else {
+        eprintln!("no adapter with mapped uploads on this host; skipped");
+        return;
+    };
+    let mut glyphs = GlyphPipeline::new_with_budget(
+        &device,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        kettle_core::GraphicsBudget::default(),
+    )
+    .expect("glyph pipeline");
+    let screen = [64.0, 32.0];
+    let glyph = <GlyphInstance as bytemuck::Zeroable>::zeroed();
+    glyphs.upload(&device, &queue, screen, &[glyph]);
+    let size = std::mem::size_of::<GlyphInstance>() as u64;
+    assert!(
+        100 * size > 4096,
+        "100 instances outgrow the first 4 KiB buffer"
+    );
+    glyphs.upload(&device, &queue, screen, &[glyph; 100]);
+    let counts = glyphs.upload_counts();
     assert_eq!(
         (
-            steady.buffer_writes,
-            steady.buffer_bytes,
-            steady.texture_writes
+            counts.buffer_writes,
+            counts.mapped_writes,
+            counts.mapped_bytes
         ),
-        (
-            first.buffer_writes,
-            first.buffer_bytes,
-            first.texture_writes
-        ),
-        "an unchanged frame writes nothing"
-    );
-    assert!(steady.skipped_writes > first.skipped_writes);
-    assert_eq!(steady.text_prepares, first.text_prepares);
-
-    let changed = snapshot_of(20, 4, b"hellp");
-    let panes = [pane(&changed, 320, 120)];
-    capture(&mut renderer, &cfg, &panes, &focused(true));
-    let after = renderer.render_uploads();
-    assert!(
-        after.buffer_writes > steady.buffer_writes,
-        "changed text still reaches the GPU"
-    );
-    assert!(
-        after.buffer_bytes - steady.buffer_bytes < first.buffer_bytes,
-        "only the difference is written, not the whole first frame again"
+        (1, 2, 101 * size),
+        "the uniform once through the queue, both instance sets mapped"
     );
 }
 
@@ -582,4 +981,68 @@ fn the_blink_phase_reaches_only_the_draw() {
         "the ordinary quads draw must honour the phase"
     );
     assert!(scene.contains("if cursor_on && self.pending_cursor_glyph.is_some()"));
+}
+
+/// Pane text in the default grid mode is drawn by the glyph pipeline, not
+/// glyphon, so output that changes only pane text prepares no glyphon text. A
+/// prepare would rewrite the chrome's unchanged vertices through the queue on
+/// every frame of output.
+#[test]
+fn grid_output_prepares_no_glyphon_text() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    assert_eq!(
+        cfg.text_renderer,
+        TextRendererMode::Grid,
+        "the default mode"
+    );
+    let first = snapshot_of(20, 4, b"hello");
+    let before = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&first, 320, 120)],
+        &focused(true),
+    );
+    let prepares = renderer.text_prepares;
+    let chrome_prepares = renderer.render_uploads().chrome_prepares;
+    assert!(
+        chrome_prepares >= 2,
+        "the first frame prepares main and menu"
+    );
+    // The cursor stays on the same blank cell, so only pane text changes.
+    let printed = snapshot_of(20, 4, b"hellp");
+    let after = capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&printed, 320, 120)],
+        &focused(true),
+    );
+    assert_eq!(
+        renderer.text_prepares, prepares,
+        "grid output must not prepare glyphon text"
+    );
+    assert_eq!(renderer.render_uploads().chrome_prepares, chrome_prepares);
+    assert_ne!(after, before, "the new text is still drawn");
+}
+
+/// Only legacy-mode pane text may force the glyphon prepare; hosts with no
+/// GPU still check it here.
+#[test]
+fn only_legacy_pane_text_forces_a_glyphon_prepare() {
+    let src = crate::production_source();
+    let need = src
+        .split_once("let need_prepare = self.text_prepare_dirty")
+        .expect("need_prepare")
+        .1
+        .split_once(';')
+        .expect("end of need_prepare")
+        .0;
+    assert!(
+        !need.contains("any_pane_text_changed"),
+        "grid output must not force a glyphon prepare"
+    );
+    assert!(src.contains("any_pane_text_changed && cfg.text_renderer == TextRendererMode::Legacy"));
 }

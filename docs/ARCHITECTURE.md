@@ -1286,7 +1286,36 @@ keeps its blit pool (about 112 MiB, counted in the process's footprint)
 resident while frames keep blitting; one 16-byte write per frame is enough to
 hold it. The render pool (about 168 MiB) stays while any frame draws.
 `ui_geometry.render_uploads` counts what a window has written, and a source
-guard fails on any upload outside `upload.rs`. `text-renderer = legacy` keeps the continuous-glyphon pane path
+guard fails on any upload outside `upload.rs`.
+
+Where the CPU and GPU share memory, instances that did change skip the queue
+too. The renderer asks wgpu for `MAPPABLE_PRIMARY_BUFFERS` only on a Metal or
+Vulkan adapter that is integrated or software: on a discrete GPU a mapped
+vertex buffer sits in system memory and every draw reads it across the bus,
+and GL cannot map one. On such a device the quad and glyph pipelines write
+their instances through a `MappedRing` of up to three vertex buffers. The CPU
+copies a frame's instances into a mapped spare, unmaps it and draws from it,
+and maps the buffer it replaced again; wgpu completes that map only once the
+frames that drew from it have finished. The renderer polls after the main
+and menu glyphon prepares, immediately before instance uploads. Metal can
+have three drawables outstanding at that point. The ring's three-buffer cap
+bounds memory; callbacks, rather than frame-count assumptions, control reuse.
+When every spare is still in flight or a new spare's GPU budget reservation
+is refused, data that fits goes through the queue into the unmapped current
+buffer. This keeps text drawing under budget pressure. A missing or smaller
+current buffer still fails the upload without exceeding the budget. In grid mode, pane text no
+longer forces the glyphon prepare, since it is not a glyphon area there and
+the prepare rewrites the chrome's vertices through the queue. So a pane that
+keeps printing cached glyphs on Apple silicon can draw each line without a
+blit when a mapped spare is available. Queue fallback can retain the blit
+pool; its release while output continues must be established by measurement. A glyph drawn for the first
+time, a changed chrome label, and the cursor over a visible glyph still write
+through the queue. `render_uploads` reports `mapped_uploads`, `mapped_writes`
+and `mapped_bytes`, plus `chrome_prepares` for main/menu prepares, excluding
+the cursor renderer. Buffers retain their high-water capacities. A dense 6K
+window with about 39,000 glyphs can retain three 4 MiB buffers, compared with
+about 3.6 MiB for the previous single glyph buffer. The 120x36 gate grid does
+not measure this large-window cost. `text-renderer = legacy` keeps the continuous-glyphon pane path
 (pass 4) as a rollback escape hatch; pass 3 is then an empty no-op.
 
 The five quad layers (`pane_bases`, `live_pane_bases`, `quads`,

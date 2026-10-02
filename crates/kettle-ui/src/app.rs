@@ -19481,7 +19481,9 @@ impl App {
                 "pane_titlebars": pane_titlebars,
                 // What this window's renderer has sent to the GPU: counts
                 // only, never content. A window that only blinks should add
-                // frames here but no writes (see kettle-render's upload.rs).
+                // frames here but no writes, and one printing on shared memory
+                // mapped writes but no buffer writes (see kettle-render's
+                // upload.rs).
                 "render_uploads": target.renderer.as_ref().map(|r| {
                     let u = r.render_uploads();
                     serde_json::json!({
@@ -19490,7 +19492,11 @@ impl App {
                         "buffer_bytes": u.buffer_bytes,
                         "texture_writes": u.texture_writes,
                         "text_prepares": u.text_prepares,
+                        "chrome_prepares": u.chrome_prepares,
                         "skipped_writes": u.skipped_writes,
+                        "mapped_uploads": u.mapped_uploads,
+                        "mapped_writes": u.mapped_writes,
+                        "mapped_bytes": u.mapped_bytes,
                     })
                 }),
                 // Who draws the blink: the GPU, or the window server's layer
@@ -34833,6 +34839,9 @@ mod tests {
             "\"next_edge_ms\":",
             "\"handoffs\": layer.handoffs,",
             "\"exits\": layer.exits,",
+            "\"mapped_uploads\": u.mapped_uploads",
+            "\"mapped_writes\": u.mapped_writes",
+            "\"chrome_prepares\": u.chrome_prepares",
         ] {
             assert!(body.contains(needle), "ui_geometry lost {needle:?}");
         }

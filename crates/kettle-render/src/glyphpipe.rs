@@ -32,8 +32,8 @@ use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
 use crate::upload::{
-    RetainedBytes, UploadCounters, UploadCounts, write_buffer_counted, write_buffer_if_changed,
-    write_texture_counted,
+    MappedRing, RetainedBytes, UploadCounters, UploadCounts, mapped_uploads, write_buffer_counted,
+    write_buffer_if_changed, write_texture_counted,
 };
 
 /// One pinned glyph quad. `kind` selects the atlas: 0 = color, 1 = mask.
@@ -656,6 +656,9 @@ pub struct GlyphPipeline {
     /// Only the uniform keeps a copy: the renderer uploads instances only
     /// when the grid's text or layout changed, and already holds them.
     screen_held: RetainedBytes,
+    /// On shared memory, the instances go through mapped buffers instead of
+    /// `instances`, each charged to `budget` (see `upload.rs`).
+    ring: Option<MappedRing>,
     counters: UploadCounters,
 }
 
@@ -800,7 +803,15 @@ impl GlyphPipeline {
             multiview_mask: None,
             cache: None,
         });
-        let capacity: usize = 8192;
+        let ring = mapped_uploads(device).then(|| {
+            MappedRing::new(
+                "kettle-glyph-instances",
+                wgpu::BufferUsages::VERTEX,
+                Some(budget.clone()),
+            )
+        });
+        // With a ring, the queue path's buffer is never drawn from.
+        let capacity: usize = if ring.is_some() { 1 } else { 8192 };
         let instance_bytes = capacity.checked_mul(std::mem::size_of::<GlyphInstance>())?;
         let instance_gpu = budget.reserve_gpu(instance_bytes)?;
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
@@ -827,6 +838,7 @@ impl GlyphPipeline {
             budget,
             count: 0,
             screen_held: RetainedBytes::default(),
+            ring,
             counters: UploadCounters::default(),
         })
     }
@@ -1107,6 +1119,17 @@ impl GlyphPipeline {
             }),
             &self.counters,
         );
+        if let Some(ring) = &mut self.ring {
+            let written = ring.write(
+                device,
+                queue,
+                None,
+                bytemuck::cast_slice(data),
+                &self.counters,
+            );
+            self.count = if written { data.len() as u32 } else { 0 };
+            return;
+        }
         if data.len() > self.capacity {
             let Some(capacity) = data.len().checked_next_power_of_two() else {
                 self.count = 0;
@@ -1168,9 +1191,16 @@ impl GlyphPipeline {
         if self.count == 0 {
             return;
         }
+        let instances = match &self.ring {
+            Some(ring) => match ring.current() {
+                Some(buffer) => buffer,
+                None => return,
+            },
+            None => &self.instances,
+        };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.set_vertex_buffer(0, instances.slice(..));
         if clips.is_empty() {
             pass.draw(0..4, 0..self.count);
             return;
