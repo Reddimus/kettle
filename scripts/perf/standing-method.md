@@ -71,10 +71,13 @@ review of the fixed candidate. Agree versioned native producer formats.
 
 Prepare and verify the dedicated probe once, record its source and bundle,
 then obtain owner grants for that artifact. Run excluded functional, focus,
-timestamp/floor and observer-cost pilots. Predeclare observer equivalence:
-block latency interval within +/-1 ms, printing memory within +/-0.5 MiB,
-blink CPU within +/-.01 percentage point and wakeups within +/-.1 per second.
-An interval merely containing zero is insufficient. Failed equivalence blocks
+timestamp/floor and observer-cost pilots. Predeclare observer equivalence by
+the two one-sided tests at 5% each, a paired Student-t 90% interval: block
+latency within +/-1 ms, printing memory within +/-0.5 MiB, blink CPU within
++/-.01 percentage point and wakeups within +/-.1 per second. Size pairs for 90%
+power; up to 5% may be invalid, only for the desktop's focus, visibility and
+probe-guard reasons, and all are retained. An interval merely containing zero
+is insufficient. Failed equivalence blocks
 freeze until the method is repaired and pilots repeated.
 
 The owner starts from the declared host terminal with field terminals quit,

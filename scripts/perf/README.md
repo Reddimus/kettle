@@ -281,8 +281,10 @@ consumers. Old sessions without typing memory keep their existing outputs.
 
 Before A/A, run an excluded observer-on/off pilot with the same terminal,
 sealed config, verified probe, payload, seed, display and timing settings.
-Predeclare ten valid paired launches per terminal, 100 measured keys and 20
-warmups, with paired order balanced between observer on and off. Retain every
+Predeclare the paired launches per terminal, 100 measured keys and 20
+warmups, with paired order balanced between observer on and off. Size the
+pairs from an earlier pilot's spread for 90% power to show equivalence when
+the true difference is zero; ten pairs allow no invalid pair. Retain every
 attempt and failure; do not select favorable launches or pool terminals. The
 diagnostic runner omits only the observer request on its off arm and marks
 both arms as observer-control data, never as standings or ordinary A/A.
@@ -317,22 +319,78 @@ Cancellation retains the attempted row before stopping. A typing on arm
 whose observer/context never became available is a failed arm, even if timing
 survived. No countable invocation offers a sampler-off option.
 
-For each terminal, compute the paired launch-mean timing difference with the
-current Student-t 95% interval. Its entire interval must lie within -1 to
-+1 ms. An interval containing zero is insufficient. Retain observer and target
+For each terminal, compute the paired launch-mean timing difference with a
+Student-t 90% interval: the two one-sided tests (TOST), each at 5%. Its entire
+interval must lie within -1 to +1 ms. An interval containing zero is
+insufficient. Retain observer and target
 CPU/wakeup deltas, query durations, deadline lateness, coverage, clock checks
 and all raw files. Both arms use the same SCK capture. Observer-off memory is
 unavailable and cannot enter a memory comparison. Fix a failed method and
 repeat the excluded pilot before freeze; do not change cadence after A/A.
 The companion printing pilot uses paired `printing_mib` on-minus-off differences
-with the same Student-t 95% interval, bounded by +/-0.5 MiB. Blink requires
+with the same Student-t 90% interval, bounded by +/-0.5 MiB. Blink requires
 both paired intervals within +/-0.01 percentage points for `cpu_percent` and
 +/-0.1/s for `wakeups_per_second`. Descriptive per-arm medians do not gate
-equivalence. Every predeclared pair must be valid; fewer yield "insufficient
-valid pairs". Every terminal must pass for overall equivalence. A typing pair
+equivalence. Up to 5% of the predeclared pairs, rounded down, may be invalid,
+and only where the evidence proves the desktop interrupted: another app
+activated or in front, another process's window on top of or over the
+measured one (a focus change, or a window not visible or out of focus at a
+designated query), or the latency probe naming another process's covering
+window, another app or window in front before a key, or foreign input. Any
+other invalid pair
+yields "invalid pairs not caused by the desktop", more desktop failures than
+that yield "insufficient valid pairs", and an unfinished session yields
+"pilot incomplete". A pair is a desktop failure only if neither of its arms
+failed for another reason, and every invalid pair stays in the report by
+reason. Every terminal must pass for overall equivalence. A typing pair
 counts only if its on arm's observer covered the whole typing epoch
 (`typing_memory_valid`); timing that survives an observer that stopped early
-does not measure the observer-on condition.
+does not measure the observer-on condition. A focus change or hidden window
+that the observer's own checks catch between the probe's is the desktop's
+failure, and counts toward the allowance under its own name.
+
+The native observer records who hid the window: each focus check carries the
+measured window's owner (`target_owner`), the top window's owner
+(`top_owner`) and the owner of every window over the measured one
+(`cover_owners`, whoever is in front); each activation carries the activated
+app's `pid`. One focus
+verdict per row weighs every record that bears on it at once (the activations
+and checks inside the interval and every check of the judged queries), so no
+record goes unchecked because another failed first. A check that could not
+read the window server (no frontmost app, the window missing from the list,
+unreadable bounds) is "focus evidence unavailable", the observer's failure.
+Otherwise the failure is the desktop's only when every failing record proves
+it: an activation names another app (one of the terminal itself only as focus
+returning after another app's), or a check shows the measured window still
+the terminal's while another process (pid above 0) is in front or on top, or
+owns every window over it. A check naming nobody, the terminal's own second
+window on top, any cover of its own or of unknown owner, a measured window
+owned by another process, or an activation naming nobody reads "window
+hidden, desktop cause unproven". Only rows built under these rules (`attribution_contract` 1) can
+carry the desktop's reasons; an older row's reads "desktop reason without
+attribution evidence".
+
+A probe failure counts as the desktop's only for foreign input, which the
+probe checks only after it found the terminal in front, its window on top and
+nothing over the block. A covering window or a front app or window that the
+probe names (pid above 0) is only the first culprit it met and cannot rule
+out the terminal's own panel beside it, so it counts only when the round's
+own observer proved the desktop up to the failure; an off arm, which runs no
+observer, can be excused only for foreign input. Either way the row must be
+attributed, name the terminal (`target_pid`), have settled at 120x36 and have
+ended by the harness's own stop (`shutdown` "stopped"; "exited"
+records a terminal that quit first, and "unknown" a launch record that cannot
+say). The launch helper checks for an earlier exit before it handles a stop,
+so a terminal that quit is never recorded as stopped. The probe's "not
+frontmost", "not on screen" and per-sample guard failures, which an
+unreadable window list or a terminal that never came forward also produce,
+never count. A failed round keeps its observer's own failure up to the
+probe's end: readiness, its trace, unreadable focus evidence, a broken
+cadence, coverage that stopped early, or a focus verdict that is not the
+desktop's. Within an arm every independent
+failure is kept and one that is not the desktop's decides; a failed round's
+missing keys or metric are its consequences, not counted again. Ordinary rows
+keep their validity; only these reason names and fields are new.
 
 Printing off arms retain the readiness query at origin, then query at
 5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus
@@ -519,7 +577,13 @@ Every launch pins an isolated XDG config root. This also blocks Kettle's
 automatic `init.lua` discovery, which uses its default config directory even
 with an explicit `--config`. Ghostty receives only the generated file. Alacritty
 uses `/dev/null`, kitty uses `NONE`, and WezTerm uses its config-skip flag.
-Peer config-directory/file environment overrides are removed. These generated
+Kettle's launch ends with AppKit's `-ApplePersistenceIgnoreState YES`, which
+`-e` passes to the payload as ignored arguments. Kettle before 4.8.0 keeps
+AppKit's persistent UI on, so the rounds the harness stops count as crashes
+while reopening windows, and AppKit then holds the next launch at a modal
+"reopen windows?" alert before the payload runs. Ignoring the saved state skips
+only that restore: 4.7.0 still idles with its persistence on, and later builds
+turn it off. Peer config-directory/file environment overrides are removed. These generated
 peer layouts support no includes or user Lua; added files or changed contents
 fail the boundary check. Native peer isolation and background-image rendering
 still need an excluded functional pilot on the actual installed apps.

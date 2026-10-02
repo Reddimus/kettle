@@ -336,7 +336,9 @@ members; and latency censoring. The date-selection fixture has one invalid
 optional round out of five, leaving four paired comparisons. It must reject
 the actual `countable: counts and covered` revert. The latency fixture rejects
 negative keys and negative, fractional or boolean censor counts, and must fail
-with the original latency-key decoder restored.
+with the original latency-key decoder restored. Kettle's launch argv ends with
+AppKit's `-ApplePersistenceIgnoreState YES` after the payload, and no peer's
+does, so a 4.7.0 baseline cannot stall at AppKit's "reopen windows?" alert.
 Adjacent peer fixtures check the current log-ratio and launch-difference
 Student-t intervals and require all ranked pairwise comparisons, including
 peer pairs that omit Kettle. Analysis, combine and Markdown checks reject
@@ -532,17 +534,37 @@ The excluded observer pilot is described in the standing README.
 balances consecutive arm order. Typing off starts no observer; printing off
 uses readiness, a 5900..6500 ms burst and one query after done; blink off uses
 only boundary queries.
-Off arms alone waive timeline coverage. Equivalence uses only paired Student-t
-95% intervals: +/-1 ms typing, +/-0.5 MiB printing, and both +/-0.01 percentage
-points CPU and +/-0.1/s wakeups for blink. All declared pairs and terminals
-must pass. `--observer-control` reports pilots; combine and A/A refuse them.
+Off arms alone waive timeline coverage. Equivalence is the two one-sided
+tests at 5% each: the paired Student-t 90% interval must lie within +/-1 ms
+typing, +/-0.5 MiB printing, and both +/-0.01 percentage points CPU and
++/-0.1/s wakeups for blink. Up to 5% of the declared pairs may be invalid, only
+for focus, visibility or the probe's cover and foreign-input guards, and every
+terminal must pass. `--observer-control` reports pilots; combine and A/A
+refuse them.
 
 `ObserverPilot` fixtures check CLI conflicts, rotation/order/seeds, real
 entry-point metadata with mocked collectors, retained failures/cancellation
 without retries, missing-observer on-arm refusal,
 typing observer omission, sparse observer requests, boundary/query focus and
-lateness, numeric self-cost allowlists, interval bounds, incomplete pairs,
-failed arms, report dispatch and privacy. The native offset parser fixture
+lateness, numeric self-cost allowlists, the 90% interval against its bounds,
+the desktop-only 5% allowance (a pair with any other failure never counts as
+the desktop's), typing observer focus reasons counted as the desktop's, a
+failed probe round that keeps its unclean stop, its target pid, its
+`shutdown` provenance and its observer's readiness, trace and coverage up to
+the probe's end, a probe failure off the session grid or naming no other
+process (pid 0 included) or, other than foreign input, unproven by the
+round's own observer (an off arm's cover included), a hidden window or activation counted as the
+desktop's only when another process is named while the measured window is
+still the target's, one verdict that no proven activation can let mask the
+terminal's own dialog, rows without `attribution_contract` never carrying the
+desktop, unreadable focus evidence judged ahead of a focus change, an off-arm
+printing row whose hidden window cannot mask its missing post-done query, the
+native observer's `top_owner`/`cover_owners`/`target_owner` decisions (a
+foreign cover beside the terminal's own panel included), activations that
+must each be explained, malformed reasons read as invalid evidence, the
+launch helper's records of a child that exited apart from one it stopped (the
+race its exit-before-stop check closes cannot be forced from outside),
+incomplete pairs, failed arms, report dispatch and privacy. The native offset parser fixture
 compiles `observer.m` using the existing macOS skip policy and runs only its
 pure `--self-test-offsets` entry. Owned native scratch fixtures also verify
 the pilot self-cost sidecar and sparse launch requests. The parser checks
@@ -558,9 +580,10 @@ cursor payload on a real controlling terminal from `pty.fork()`: it waits,
 enables and parks the cursor, and it refuses a standard input that is not its
 terminal. The socket handshake fixture stubs the terminal calls instead.
 
-For live acceptance, reserve an owner measurement window; it uses ten balanced on/off pairs per terminal with
-the same verified artifact, sealed config and seeds. Both arms are diagnostic.
-The entire 95% paired launch-mean difference interval must fit within +/-1 ms.
+For live acceptance, reserve an owner measurement window; it uses balanced on/off pairs per terminal, sized for
+90% power, with the same verified artifact, sealed config and seeds. Both arms
+are diagnostic. The entire 90% paired launch-mean difference interval must fit
+within +/-1 ms.
 Retain observer/target counters, query durations and every failed attempt. A
 zero-containing interval alone does not pass equivalence. This pilot, native
 focus/capture acceptance and the ordinary shared A/A remain separate from the

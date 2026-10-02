@@ -803,10 +803,34 @@ def missing_benchmarks(benchmarks: Path, dat: Dict[str, float]) -> List[str]:
     return sorted(d.name for d in benchmarks.iterdir() if (d / "benchmark").exists() and d.name not in dat)
 
 
+def shutdown_kind(ended: Optional[dict], clean: bool) -> str:
+    """How a launch ended, from its helper's record: "stopped" when the stop
+    ended it, "exited" when the terminal quit before the stop, "killed", or
+    "unknown" when the record cannot say."""
+    if not clean:
+        return "killed"
+    if (not isinstance(ended, dict) or type(ended.get("stopped")) is not bool
+            or type(ended.get("killed")) is not bool):
+        return "unknown"
+    if ended["killed"]:
+        return "killed"
+    if ended["stopped"]:
+        return "stopped"
+    return "exited" if ended.get("exit_ms") is not None else "unknown"
+
+
 def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -> List[str]:
     """How each terminal runs `script` at the pinned grid with default settings."""
     if name in kettle:
-        return [kettle[name], "--config", str(work / f"{name}.config"), "-e", str(script)]
+        # `-e` hands what follows the script to it, which ignores it, and
+        # AppKit reads `-Key value` pairs from the whole argv. Before 4.8.0
+        # Kettle kept AppKit's persistent UI on: every round stopped here
+        # counted as a crash while reopening windows, and AppKit then held the
+        # next launch at a modal "reopen windows?" alert, so its payload never
+        # ran. Ignoring the saved state skips only that restore; 4.7.0 still
+        # idles with its persistence on, and later builds turn it off.
+        return [kettle[name], "--config", str(work / f"{name}.config"), "-e", str(script),
+                "-ApplePersistenceIgnoreState", "YES"]
     if name == "alacritty":
         return [APPS[name], "--config-file", "/dev/null",
                 "-o", f"window.dimensions.columns={COLS}", "-o", f"window.dimensions.lines={ROWS}",
@@ -1834,7 +1858,7 @@ class Runner:
                         ("context", keep.with_suffix(".cursor-context.json")),
                         ("exits", keep.with_suffix(".cursor-exits.log"))) if path.is_file()}
             return value
-        process, observer = None, None
+        process, observer, probe_done_ns = None, None, None
         deadlines = cursor.budget(options)
         budget = deadlines["probe_s"]
         try:
@@ -1894,6 +1918,8 @@ class Runner:
             except subprocess.TimeoutExpired:
                 pass
             finished = wait_for_text(out, "}", max(1.0, budget + 15 - (time.monotonic() - started)))
+            # When the probe had ended, on the observer's clock.
+            probe_done_ns = hc.now_ns()
         finally:
             try:
                 if observer is not None:
@@ -1919,21 +1945,44 @@ class Runner:
                                     shutil.copyfile(source, keep.with_suffix(suffix))
                     if pending_result is not None:
                         linked_result(pending_result)
+        # The terminal has been stopped by now. A failed round still records
+        # its target, how its terminal ended and its observer's own failure
+        # up to the probe's end, so a desktop failure the probe reports cannot
+        # stand for any of them.
+        def failed(error: str) -> dict:
+            row = {"error": error, "target_pid": pid, "attribution_contract": hc.ATTRIBUTION_CONTRACT,
+                   **({} if clean else {"killed": True})}
+            try:
+                ended = json.loads((self.work / "launch.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                ended = None
+            row["shutdown"] = shutdown_kind(ended, clean)
+            observed = observer_reason
+            if observed is None and observer is not None:
+                try:
+                    samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
+                    observed = hc.observed_until(samples, pid, info.get("window_id"),
+                                                 options.get("sample_ms", 100), probe_done_ns)
+                except (OSError, ValueError, TypeError, KeyError, IndexError):
+                    observed = "typing timeline unavailable or invalid"
+            if observed:
+                row.update(typing_memory_valid=False, typing_memory_reason=observed)
+            return linked_result(row)
         if not finished:
-            return linked_result({"error": "the latency probe never finished"})
+            return failed("the latency probe never finished")
         try:
             probe = json.loads(out.read_text())
         except (OSError, json.JSONDecodeError):
-            return linked_result({"error": "the latency probe wrote no result"})
+            return failed("the latency probe wrote no result")
         if "error" in probe:
-            return linked_result({"error": f"latency probe: {probe['error']}"})
+            return failed(f"latency probe: {probe['error']}")
         payload_records = read_keyblock_log(log)
         if cursor_mode:
             try:
                 payload_records = cursor.read_payload(log.read_bytes())
                 cursor.validate_stream(probe, payload_records, options["warmup"], options["keys"])
             except (OSError, ValueError, TypeError, KeyError):
-                return linked_result({"error": "cursor stream invalid"})
+                return failed("cursor stream invalid")
         row = latency_row(probe, payload_records, options["censor_ms"])
         row["tool_artifact"] = artifact
         if cursor_mode:
@@ -3056,13 +3105,15 @@ def paired(a: List[Optional[float]], b: List[Optional[float]], family: int = 1) 
     return stats
 
 
-def paired_difference(a: List[Optional[float]], b: List[Optional[float]]) -> dict:
+def paired_difference(a: List[Optional[float]], b: List[Optional[float]],
+                      level: float = LEVEL) -> dict:
     """The mean of b - a round pairs, in the metric's own unit, with a
-    Student-t 95 % interval: the absolute gain a ratio hides."""
+    two-sided Student-t interval at `level` (95 % unless an equivalence test
+    asks for its own): the absolute gain a ratio hides."""
     diffs = [y - x for x, y in zip(a, b) if x is not None and y is not None]
     if not diffs:
         return {}
-    mean, low, high = t_interval(diffs)
+    mean, low, high = t_interval(diffs, level)
     return {"diff": mean, "low": low, "high": high, "n": len(diffs)}
 
 

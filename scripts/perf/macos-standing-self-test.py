@@ -2078,6 +2078,18 @@ class Payloads(unittest.TestCase):
             argv = standing.terminal_argv("kettle-b", work / "p.sh", work, {"kettle-a": "/k", "kettle-b": "/k"})
             self.assertEqual(argv[:3], ["/k", "--config", str(work / "kettle-b.config")])
 
+    def test_kettle_launches_skip_appkit_reopen_prompt(self) -> None:
+        # Kettle 4.7.0 keeps AppKit's persistent UI on; after stopped rounds
+        # AppKit holds its launch at a "reopen windows?" alert unless the
+        # saved state is ignored. The flag follows the script, which `-e`
+        # passes it to, so Kettle's own options never see it.
+        work = Path("/fixture-work")
+        argv = standing.terminal_argv("kettle-a", work / "p.sh", work, {"kettle-a": "/k470"})
+        self.assertEqual(argv, ["/k470", "--config", str(work / "kettle-a.config"), "-e", str(work / "p.sh"),
+                                "-ApplePersistenceIgnoreState", "YES"])
+        for peer in ("alacritty", "kitty", "wezterm", "ghostty"):
+            self.assertNotIn("-ApplePersistenceIgnoreState", standing.terminal_argv(peer, work / "p.sh", work, {}))
+
     def test_variants_are_listed_but_never_ranked(self) -> None:
         results = {"context": "t", "unranked": ["kettle-opaque"], "workloads": {"startup": {
             "kettle": [{"window_ms": 200.0}], "kettle-opaque": [{"window_ms": 100.0}],
@@ -5088,7 +5100,12 @@ class OutputBlink(unittest.TestCase):
         samples[60]['focus_changes']=[dict(t_ns=t+6_025_000_000,valid=False)]
         row=standing.hc.printing_row(self.printing(),samples,42,7)
         self.assertFalse(row['printing_valid'])
-        self.assertIn('focus change',row['printing_reason'])
+        # An activation that names no other app proves nothing about the desktop.
+        self.assertEqual(row['printing_reason'],standing.hc.UNPROVEN)
+        samples[60]['focus_changes']=[dict(t_ns=t+6_025_000_000,valid=False,pid=99)]
+        row=standing.hc.printing_row(self.printing(),samples,42,7)
+        self.assertFalse(row['printing_valid'])
+        self.assertEqual(row['printing_reason'],'known focus change during interval')
 
     def test_stale_and_nonmonotonic_focus(self):
         import copy
@@ -5167,18 +5184,26 @@ class OutputBlink(unittest.TestCase):
             return dict(kCGWindowNumber=number,kCGWindowOwnerPID=owner,kCGWindowLayer=layer,
                         kCGWindowAlpha=alpha,kCGWindowBounds=dict(X=x,Y=0,Width=600,Height=400))
         wanted=window(7)
-        fixtures=[([wanted],42,True,True),([window(8),wanted],42,True,False),
-                  ([window(9,owner=99,layer=1000),wanted],42,True,False),
-                  ([window(9,layer=1000),wanted],42,True,False),
-                  ([window(9,layer=1000,x=1000),wanted],42,True,True),
-                  ([window(9,layer=1000,alpha=0),wanted],42,True,True),
-                  ([wanted],99,True,False),([],42,False,False),
-                  ([window(7,owner=99)],42,True,False)]
-        for windows, front, known, valid in fixtures:
+        # The owners say who hid the window: the top window's, and the
+        # covering window's when one covers it.
+        # and whether the measured window is still the target's.
+        fixtures=[([wanted],42,True,True,42,[],42),([window(8),wanted],42,True,False,42,[42],42),
+                  ([window(9,owner=99,layer=1000),wanted],42,True,False,42,[99],42),
+                  ([window(9,layer=1000),wanted],42,True,False,42,[42],42),
+                  ([window(9,layer=1000,x=1000),wanted],42,True,True,42,[],42),
+                  ([window(9,layer=1000,alpha=0),wanted],42,True,True,42,[],42),
+                  # A foreign cover cannot hide the target's own panel beside it.
+                  ([window(9,owner=99,layer=1000),window(10,layer=3),wanted],42,True,False,42,[99,42],42),
+                  ([window(10,layer=3),wanted],99,True,False,42,[42],42),
+                  ([wanted],99,True,False,42,[],42),([],42,False,False,None,[],None),
+                  ([window(7,owner=99)],42,True,False,99,[],99)]
+        for windows, front, known, valid, top_owner, cover_owners, target_owner in fixtures:
             result=self.native_fixture('observer',_json.dumps(dict(pid=42,target=7,front=front,windows=windows)))
             decision=_json.loads(result.stdout)
             self.assertEqual(decision['known'],known)
             self.assertEqual(decision['valid'],valid,windows)
+            self.assertEqual((decision['top_owner'],decision['cover_owners'],decision['target_owner']),
+                             (top_owner,cover_owners,target_owner),windows)
 
     def test_payload_short_stalled_omitted_missing_done(self):
         import copy
@@ -5633,6 +5658,22 @@ class TypingMemory(unittest.TestCase):
         self.assertEqual(row['typing_max_footprint_mib'], 9999.)
         for i in (0,1,11,12): s[i]['footprint'] = 123456*standing.hc.MIB
         self.assertEqual(self.memory(p,s,a)['typing_footprint_mib'], 16.)
+
+    def test_unreadable_focus_after_the_epoch_is_not_the_desktops(self):
+        # The last measured query ends inside the epoch and its focus check
+        # just after it, beyond focus_reason; unreadable evidence there is the
+        # observer's failure, not a hidden window.
+        p,s,a = self.fixture()
+        s = s[:11]
+        s[10].update(query_end_ns=1_999_999_950, t_ns=1_999_999_950)
+        s[10]['focus_after'].update(t_ns=2_000_000_050, known=False, valid=False)
+        self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], 'focus evidence unavailable')
+        s[10]['focus_after'].update(known=True, valid=False)
+        self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], standing.hc.UNPROVEN)
+        s[10]['focus_after'].update(cover_owners=[506])
+        self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], standing.hc.UNPROVEN)
+        s[10]['focus_after'].update(target_owner=42)
+        self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], 'typing window not visible')
 
     def test_censored_key_and_guards_keep_the_epoch(self):
         p,s,a = self.fixture()
@@ -6930,7 +6971,8 @@ class ObserverPilot(unittest.TestCase):
             rows[name] = []
             for pair, diff in enumerate(differences):
                 for order, arm in enumerate(('on', 'off') if pair % 2 == 0 else ('off', 'on')):
-                    row = dict(observer_pair=pair, observer_arm=arm, observer_order=order)
+                    row = dict(observer_pair=pair, observer_arm=arm, observer_order=order, cols=120, rows=36,
+                               attribution_contract=standing.hc.ATTRIBUTION_CONTRACT)
                     for field in fields:
                         value = 10. + (diff if arm == 'on' else 0.)
                         if kind == 'typing':
@@ -7133,7 +7175,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertFalse(report['equivalent'])
             self.assertEqual(metric['valid_pairs'],0)
             self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':2})
-            self.assertEqual(metric['reason'],'insufficient valid pairs')
+            self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
             self.assertEqual(sum('error' in r for r in raw['workloads']['latency']['kettle']),2)
 
     def test_runner_keeps_failures_without_retries_or_cutoff(self):
@@ -7248,12 +7290,16 @@ class ObserverPilot(unittest.TestCase):
         self.assertEqual(row['printing_mib'], 160.)
         self.assertEqual(row['coverage_waived'], 'observer-pilot off arm')
         self.assertFalse(standing.hc.printing_row(records, sparse, 42, 7)['printing_valid'])
-        for defect in ('missing', 'late', 'change', 'boundary', 'readiness-focus', 'no-record-after-done', 'late-change'):
+        for defect in ('missing', 'late', 'change', 'boundary', 'readiness-focus', 'no-record-after-done', 'late-change',
+                       'hidden-and-no-record-after-done'):
             bad = copy.deepcopy(sparse)
             if defect == 'missing': bad = bad[:2]
-            if defect == 'no-record-after-done': bad = bad[:-1]
-            # Lost at 7 s and restored before the record after done reports it.
-            if defect == 'late-change': bad[-1]['focus_changes'] = [dict(t_ns=17_000_000_000, valid=False)]
+            if defect in ('no-record-after-done', 'hidden-and-no-record-after-done'): bad = bad[:-1]
+            # A desktop reason in the same arm must not hide the harness's own.
+            if defect == 'hidden-and-no-record-after-done': bad[2]['focus_after']['valid'] = False
+            # Lost to another app at 7 s and restored before the record after
+            # done reports it.
+            if defect == 'late-change': bad[-1]['focus_changes'] = [dict(t_ns=17_000_000_000, valid=False, pid=99)]
             if defect == 'late': bad = [bad[0], bad[1], *bad[5:]]
             if defect == 'change': bad[-1]['focus_changes'] = [dict(t_ns=12_000_000_000, valid=False)]
             if defect == 'boundary': bad[2]['focus_after']['valid'] = False
@@ -7261,8 +7307,26 @@ class ObserverPilot(unittest.TestCase):
             got = standing.hc.printing_row(records, bad, 42, 7, observer_off=True)
             self.assertFalse(got['printing_valid'], defect)
             if defect in ('missing', 'late'): self.assertIn('designated', got['printing_reason'])
-            if defect == 'no-record-after-done': self.assertEqual(got['printing_reason'], 'off-arm query after done missing')
-            if defect == 'late-change': self.assertEqual(got['printing_reason'], 'known focus change during interval')
+            if defect in ('no-record-after-done', 'hidden-and-no-record-after-done'):
+                self.assertEqual(got['printing_reason'], 'off-arm query after done missing')
+            if defect == 'readiness-focus': self.assertEqual(got['printing_reason'], 'focus evidence unavailable')
+            if defect == 'late-change':
+                self.assertEqual(got['printing_reason'], 'known focus change during interval')
+                # The same activation naming nobody proves nothing about the desktop.
+                del bad[-1]['focus_changes'][0]['pid']
+                self.assertEqual(standing.hc.printing_row(records, bad, 42, 7, observer_off=True)['printing_reason'],
+                                 standing.hc.UNPROVEN)
+        bad = copy.deepcopy(sparse)
+        bad[-1]['focus_after']['known'] = False
+        self.assertEqual(standing.hc.printing_row(records, bad, 42, 7, observer_off=True)['printing_reason'],
+                         'focus evidence unavailable')
+        for arm_off in (True, False):
+            bad = copy.deepcopy(sparse if arm_off else samples)
+            bad[-1]['focus_changes'] = [dict(t_ns=12_000_000_000, valid=False)]
+            designated = next(s for s in bad if s['query_start_ns'] >= records[0]['began_ns'] + 6_000_000_000)
+            designated['focus_after']['known'] = False
+            got = standing.hc.printing_row(records, bad, 42, 7, observer_off=arm_off)
+            self.assertEqual(got['printing_reason'], 'focus evidence unavailable', arm_off)
 
     def test_printing_off_arm_stops_its_observer_after_the_final_query(self):
         import tempfile
@@ -7317,8 +7381,16 @@ class ObserverPilot(unittest.TestCase):
             if defect == 'change': bad[-1]['focus_changes'] = [dict(t_ns=15_000_000_000, valid=False)]
             if defect == 'first-focus': bad[0]['focus_before']['valid'] = False
             if defect == 'final-focus': bad[-1]['focus_after']['known'] = False
-            self.assertFalse(standing.hc.blink_row(bad, 10_000_000_000, 11_000_000_000, 42, 7,
-                                                 'verified', observer_off=True)['blink_valid'], defect)
+            got = standing.hc.blink_row(bad, 10_000_000_000, 11_000_000_000, 42, 7, 'verified', observer_off=True)
+            self.assertFalse(got['blink_valid'], defect)
+            if defect == 'final-focus': self.assertEqual(got['blink_reason'], 'focus evidence unavailable')
+        # A check that could not read the window server is not the desktop's,
+        # even beside a real focus change.
+        bad = copy.deepcopy(sparse)
+        bad[-1]['focus_changes'] = [dict(t_ns=15_000_000_000, valid=False)]
+        bad[0]['focus_before']['known'] = False
+        got = standing.hc.blink_row(bad, 10_000_000_000, 11_000_000_000, 42, 7, 'verified', observer_off=True)
+        self.assertEqual(got['blink_reason'], 'focus evidence unavailable')
 
     def test_sparse_offsets_reach_owned_observer(self):
         import tempfile
@@ -7387,7 +7459,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertEqual(standing.hc.observer_cost(timeline, True)['query_count'],0)
             self.assertEqual(standing.hc.observer_cost(timeline, True)['cpu_ns'],0)
 
-    def test_analysis_student_t_inside_straddling_outside_and_short(self):
+    def test_analysis_tost_inside_straddling_outside_and_short(self):
         for kind in ('typing', 'printing', 'blink'):
             for case, diffs, equivalent in [('inside',[0.]*10,True), ('straddling',[-.1,.1]*5,kind != 'blink'),
                                              ('outside',[2.]*10,False), ('short',[0.]*10,False)]:
@@ -7397,16 +7469,469 @@ class ObserverPilot(unittest.TestCase):
                 self.assertEqual(report['equivalent'],equivalent,(kind,case,report))
                 for field, metric in report['terminals']['kettle']['metrics'].items():
                     if case=='short':
-                        self.assertEqual(metric['reason'],'insufficient valid pairs')
+                        self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
                         self.assertEqual(metric['valid_pairs'],9)
                         self.assertEqual(metric['invalid_pairs_by_reason'],{'missing arm':1})
                     if case=='inside':
                         self.assertEqual(metric['difference'],dict(diff=0.,low=0.,high=0.,n=10))
                     if case=='straddling':
-                        mean,low,high=standing.t_interval(diffs)
+                        mean,low,high=standing.t_interval(diffs,.90)
                         self.assertAlmostEqual(metric['difference']['diff'],mean)
                         self.assertAlmostEqual(metric['difference']['low'],low)
                         self.assertAlmostEqual(metric['difference']['high'],high)
+
+    def test_analysis_judges_equivalence_by_the_90_percent_interval(self):
+        # TOST at 5 % each side: this spread clears the bound at 90 % but
+        # not at 95 %, so only the two-one-sided rule calls it equivalent.
+        diffs=[-.25,1.25]*5
+        self.assertGreater(standing.t_interval(diffs,.95)[2],1.)
+        self.assertLess(standing.t_interval(diffs,.90)[2],1.)
+        report=self.report(self.fixture('typing',diffs,names=['kettle']))
+        metric=report['terminals']['kettle']['metrics']['mean_ms']
+        self.assertTrue(report['equivalent'],metric)
+        mean,low,high=standing.t_interval(diffs,.90)
+        self.assertAlmostEqual(metric['difference']['high'],high)
+        self.assertIsNone(metric['reason'])
+
+    def test_analysis_allows_five_percent_desktop_invalid_pairs(self):
+        def pilot(kind, pairs, spoil):
+            raw=self.fixture(kind,[0.]*pairs,names=['kettle'])
+            rows=raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle']
+            for pair, arm, failure in spoil:
+                row=next(r for r in rows if r['observer_pair']==pair and r['observer_arm']==arm)
+                if kind=='typing':
+                    row.update(error=failure,typing_memory_valid=False,target_pid=42,shutdown='stopped')
+                    if failure!='latency probe: foreign input' and arm=='on':
+                        # The on arm's observer saw the same interruption.
+                        row['typing_memory_reason']='window not visible during interval'
+                elif failure.startswith('error:'):
+                    row['error']=failure[6:]
+                else:
+                    for evidence in row['metric_validity'].values():
+                        evidence.update(valid=False,reason=failure)
+            return self.report(raw)
+        def metric(report):
+            return next(iter(report['terminals']['kettle']['metrics'].values()))
+        cover='latency probe: a window (pid 506, layer 21) covers the block'
+        focus='latency probe: focus changed before a key (frontmost 1, top window 1/2)'
+        for kind, failure, counted in (
+                ('typing',cover,'probe saw focus, cover or foreign input'),
+                ('typing',focus,'probe saw focus, cover or foreign input'),
+                ('typing','latency probe: foreign input','probe saw focus, cover or foreign input'),
+                ('printing','known focus change during interval','known focus change during interval'),
+                ('printing','window not visible during interval','window not visible during interval'),
+                ('blink','blink window not visible','blink window not visible')):
+            with self.subTest(kind=kind, failure=failure):
+                # 20 planned pairs allow one invalid pair; the 5 % is of the plan.
+                report=pilot(kind,20,[(3,'on',failure)])
+                self.assertTrue(report['equivalent'],report)
+                self.assertEqual(metric(report)['invalid_pairs_by_reason'],{counted:1})
+                self.assertEqual((metric(report)['valid_pairs'],metric(report)['allowed_invalid_pairs']),(19,1))
+                report=pilot(kind,20,[(3,'on',failure),(5,'on',failure)])
+                self.assertEqual(metric(report)['reason'],'insufficient valid pairs')
+                self.assertFalse(report['equivalent'])
+                report=pilot(kind,19,[(3,'on',failure)])
+                self.assertEqual(metric(report)['reason'],'insufficient valid pairs')
+        for kind, failure in (('typing','latency probe: no frames'),('typing','latency probe: calibration: the change is not one rectangle'),
+                              ('typing','/Users/private-owner/sentinel '+cover),('typing',cover+' /Users/private-owner'),
+                              ('printing','native query late'),('printing','error:the flood never finished'),
+                              ('blink','error:'+cover)):
+            with self.subTest(kind=kind, failure=failure):
+                report=pilot(kind,20,[(3,'on',failure)])
+                self.assertEqual(metric(report)['reason'],'invalid pairs not caused by the desktop')
+                self.assertFalse(report['equivalent'])
+                self.assertNotIn('private-owner',_json.dumps(report))
+        # An off arm runs no observer: its probe can prove only foreign input.
+        report=pilot('typing',20,[(3,'off','latency probe: a window (pid 506, layer 21) covers the block')])
+        self.assertEqual(metric(report)['reason'],'invalid pairs not caused by the desktop')
+        report=pilot('typing',20,[(3,'off','latency probe: foreign input')])
+        self.assertTrue(report['equivalent'])
+        # A desktop failure in one arm cannot hide another failure in its pair.
+        report=pilot('printing',20,[(3,'on','known focus change during interval'),(3,'off','native query late')])
+        self.assertEqual(metric(report)['invalid_pairs_by_reason'],{'native query late':1})
+        self.assertFalse(report['equivalent'])
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        row=raw['workloads']['latency']['kettle'][0]
+        row.update(error=cover,typing_memory_valid=False,killed=True,target_pid=42)
+        self.assertEqual(metric(self.report(raw))['invalid_pairs_by_reason'],{'failed arm':1})
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        raw['meta']['complete']=False
+        self.assertEqual(metric(self.report(raw))['reason'],'pilot incomplete')
+
+    def test_failed_round_keeps_terminal_exit_and_observer_trace(self):
+        import tempfile, contextlib
+        from unittest.mock import Mock, patch
+        for case in ('exited', 'late-trace', 'unknown-focus', 'stopped-early', 'unknown-shutdown', 'own-cover'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                work=Path(tmp)
+                runner=standing.Runner({k:work/k for k in ('keyblock','observer','latency-probe')},work,{})
+                samples=OutputBlink().samples(count=3)
+                if case=='late-trace':samples[2]['query_end_ns']+=400_000_000
+                if case=='unknown-focus':samples[1]['focus_after']['known']=False
+                if case=='own-cover':samples[1]['focus_after'].update(valid=False,cover_owners=[42],target_owner=42)
+                def launch(*args,**kwargs):
+                    (work/'typing-launch.json').write_text(_json.dumps({'pid':42,'window_id':7}))
+                    (work/'typing-memory.jsonl').write_text(''.join(_json.dumps(x)+'\n' for x in samples))
+                    return Mock()
+                def stop(*args):
+                    # The launch helper's record: the terminal exited before any stop.
+                    if case!='unknown-shutdown':
+                        (work/'launch.json').write_text(_json.dumps(dict(stopped=case!='exited',killed=False,exit_ms=5.)))
+                    return True
+                runner.launch=Mock(side_effect=launch);runner.wait_for=Mock(return_value=True)
+                runner.pid=Mock(return_value=42);runner.stop=Mock(side_effect=stop);runner.end_sampler=Mock()
+                def probe(*args):(work/'latency.json').write_text(_json.dumps({'error':'foreign input'}))
+                @contextlib.contextmanager
+                def verified(*args):yield {}
+                # The probe ended just after the last sample, or, for an
+                # observer that stopped early, a second later.
+                done=11_200_100_000 if case=='stopped-early' else 10_200_100_000
+                with patch.object(standing.hc,'start_observer',return_value=Mock()),\
+                     patch.object(standing.hc,'now_ns',return_value=done),\
+                     patch.object(standing,'run_latency_probe',side_effect=probe),\
+                     patch.object(standing,'verified_probe_use',verified),\
+                     patch.object(standing,'wait_for_text',return_value=True),\
+                     patch.object(standing.time,'sleep'):
+                    row=runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7)
+                self.assertEqual(row['shutdown'],{'exited':'exited','unknown-shutdown':'unknown'}.get(case,'stopped'))
+                if case in ('exited','unknown-shutdown'):
+                    self.assertNotIn('typing_memory_reason',row)
+                elif case=='stopped-early':
+                    self.assertEqual(row['typing_memory_reason'],'insufficient timeline coverage')
+                elif case=='own-cover':
+                    self.assertEqual(row['typing_memory_reason'],standing.hc.UNPROVEN)
+                else:
+                    expected=(standing.hc.trace_reason(samples,42,7) if case=='late-trace'
+                              else 'focus evidence unavailable')
+                    self.assertTrue(expected)
+                    self.assertEqual(row['typing_memory_reason'],expected)
+                raw=self.fixture('typing',[0.]*20,names=['kettle'])
+                on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+                kept={k:on[k] for k in ('observer_pair','observer_arm','observer_order','observer_cost','cols','rows')}
+                on.clear();on.update(row,**kept)
+                metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+                self.assertEqual(metric['invalid_pairs_by_reason'],
+                                 {'failed arm' if case in ('exited','unknown-shutdown') else 'on-arm observer evidence invalid':1})
+                self.assertFalse(metric['equivalent'])
+
+    def test_typing_on_arm_desktop_focus_counts_toward_the_allowance(self):
+        # The observer's focus checks can see the desktop interrupt between the
+        # probe's own; that pair is the desktop's, not the observer's.
+        def pilot(reason):
+            raw=self.fixture('typing',[0.]*20,names=['kettle'])
+            on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+            on.update(typing_memory_valid=False,typing_memory_reason=reason)
+            report=self.report(raw)
+            return report,report['terminals']['kettle']['metrics']['mean_ms']
+        for reason in ('known focus change during interval','window not visible during interval','typing window not visible'):
+            report,metric=pilot(reason)
+            self.assertEqual(metric['invalid_pairs_by_reason'],{reason:1})
+            self.assertTrue(report['equivalent'],metric)
+        for reason in ('insufficient typing memory duration','/Users/private-owner window not visible during interval'):
+            report,metric=pilot(reason)
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'on-arm observer evidence invalid':1})
+            self.assertFalse(report['equivalent'])
+            self.assertNotIn('private-owner',_json.dumps(report))
+
+    def test_unknown_focus_evidence_is_never_the_desktops(self):
+        evidence = lambda samples, start, end, pid, window: standing.hc.focus_verdict(
+            samples, start, end, [], pid, window, 'unused')
+        def check(t, known=True, valid=True):
+            return dict(t_ns=t, known=known, valid=valid, frontmost_pid=42, top_window=7, target_window=7)
+        samples = [dict(focus_changes=[dict(t_ns=5, valid=False)], focus_before=check(4), focus_after=check(6)),
+                   dict(focus_changes=[], focus_before=check(8, known=False, valid=False), focus_after=check(9))]
+        self.assertEqual(evidence(samples, 0, 10, 42, 7), 'focus evidence unavailable')
+        samples[1]['focus_before'] = check(8)
+        self.assertEqual(evidence(samples, 0, 10, 42, 7), standing.hc.UNPROVEN)
+        samples[0]['focus_changes'][0]['pid'] = 99
+        self.assertEqual(evidence(samples, 0, 10, 42, 7), 'known focus change during interval')
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+        on.update(typing_memory_valid=False,typing_memory_reason='focus evidence unavailable')
+        report=self.report(raw)
+        self.assertEqual(report['terminals']['kettle']['metrics']['mean_ms']['invalid_pairs_by_reason'],
+                         {'on-arm observer evidence invalid':1})
+        self.assertFalse(report['equivalent'])
+
+    def test_probe_desktop_failure_needs_the_session_grid(self):
+        cover='latency probe: a window (pid 506, layer 21) covers the block'
+        for grid, counted in (((120,36),'probe saw focus, cover or foreign input'),((99,35),'failed arm'),(None,'failed arm')):
+            raw=self.fixture('typing',[0.]*20,names=['kettle'])
+            on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+            on.update(error=cover,typing_memory_valid=False,target_pid=42,shutdown='stopped',
+                      typing_memory_reason='window not visible during interval')
+            if grid is None:
+                del on['cols'],on['rows']
+            else:
+                on.update(cols=grid[0],rows=grid[1])
+            metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+            self.assertEqual(metric['invalid_pairs_by_reason'],{counted:1},grid)
+            self.assertEqual(metric['equivalent'],grid==(120,36))
+
+    def test_rows_without_attribution_never_carry_the_desktop(self):
+        # Rows built before the owners were recorded named the desktop's
+        # reasons on evidence that could not prove them.
+        raw=self.fixture('printing',[0.]*20,names=['kettle'])
+        row=raw['workloads']['output-memory']['kettle'][0]
+        row['metric_validity']['printing_mib'].update(valid=False,reason='known focus change during interval')
+        row.pop('attribution_contract')
+        report=self.report(raw)
+        self.assertEqual(report['terminals']['kettle']['metrics']['printing_mib']['invalid_pairs_by_reason'],
+                         {'desktop reason without attribution evidence':1})
+        self.assertFalse(report['equivalent'])
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+        on.update(typing_memory_valid=False,typing_memory_reason='known focus change during interval')
+        on.pop('attribution_contract')
+        report=self.report(raw)
+        self.assertEqual(report['terminals']['kettle']['metrics']['mean_ms']['invalid_pairs_by_reason'],
+                         {'on-arm observer evidence invalid':1})
+        self.assertFalse(report['equivalent'])
+        for builder in (standing.hc.printing_row(OutputBlink().printing(), OutputBlink().samples(), 42, 7),
+                        standing.hc.blink_row(OutputBlink().samples(origin=12_500_000_000, count=61),
+                                              10_000_000_000, 11_000_000_000, 42, 7, 'verified')):
+            self.assertEqual(builder['attribution_contract'], standing.hc.ATTRIBUTION_CONTRACT)
+
+    def test_malformed_reasons_are_invalid_evidence_not_crashes(self):
+        for reason in ([], {}, 7, None):
+            raw=self.fixture('typing',[0.]*20,names=['kettle'])
+            on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+            on.update(typing_memory_valid=False,typing_memory_reason=reason)
+            metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'on-arm observer evidence invalid':1},reason)
+        for validity in ([], ['x'], 'x', {'printing_mib': []}, {'printing_mib': dict(valid=False, reason=[])},
+                         {'printing_mib': dict(valid=False, reason={})}):
+            raw=self.fixture('printing',[0.]*20,names=['kettle'])
+            raw['workloads']['output-memory']['kettle'][0]['metric_validity']=validity
+            metric=self.report(raw)['terminals']['kettle']['metrics']['printing_mib']
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'invalid metric evidence':1},validity)
+
+    def test_launch_helper_records_an_exit_apart_from_a_stop(self):
+        # A child that exits while the helper is held, with a stop queued
+        # behind it, is recorded as exited; a running child that is stopped is
+        # recorded as stopped. Where the hold lands decides whether the stop
+        # check runs before the exit check, so this pins the record's contract;
+        # it cannot force the race the exit-before-stop check closes.
+        import tempfile, signal as sig
+        if sys.platform != 'darwin' or not shutil.which('swiftc'):
+            self.skipTest('the launch helper needs macOS swiftc')
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            binary = work/'launch'
+            build = subprocess.run(['swiftc', '-O', str(HERE/'macos-standing'/'launch.swift'), '-o', str(binary)],
+                                   capture_output=True, text=True, timeout=180)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            for child, early in ((['/bin/sleep', '0.3'], True), (['/bin/sleep', '30'], False)):
+                out, stamp = work/'launch.json', work/'stamp'
+                out.unlink(missing_ok=True)
+                helper = subprocess.Popen([str(binary), str(out), str(stamp), '20', '--', *child])
+                try:
+                    deadline = time.monotonic() + 10
+                    while not Path(str(stamp)+'.pid').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(Path(str(stamp)+'.pid').exists())
+                    if early:
+                        os.kill(helper.pid, sig.SIGSTOP)
+                        time.sleep(1.)
+                    os.kill(helper.pid, sig.SIGTERM)
+                    if early:
+                        os.kill(helper.pid, sig.SIGCONT)
+                    self.assertEqual(helper.wait(timeout=30), 0)
+                finally:
+                    if helper.poll() is None:
+                        os.kill(helper.pid, sig.SIGCONT)
+                        os.kill(helper.pid, sig.SIGKILL)
+                        helper.wait()
+                record = _json.loads(out.read_text())
+                self.assertEqual(standing.shutdown_kind(record, True), 'exited' if early else 'stopped', record)
+
+    def test_shutdown_kind_needs_the_helpers_record(self):
+        kind = standing.shutdown_kind
+        self.assertEqual(kind(dict(stopped=True, killed=False, exit_ms=5.), True), 'stopped')
+        self.assertEqual(kind(dict(stopped=False, killed=False, exit_ms=5.), True), 'exited')
+        self.assertEqual(kind(dict(stopped=True, killed=True, exit_ms=None), True), 'killed')
+        self.assertEqual(kind(dict(stopped=True, killed=False, exit_ms=5.), False), 'killed')
+        for record in (None, {}, [], dict(stopped=1, killed=False), dict(stopped=True), dict(stopped=False, killed=False)):
+            self.assertEqual(kind(record, True), 'unknown', record)
+
+    def test_probe_failures_count_only_with_a_named_interrupter(self):
+        host = standing._publication_host()
+        decide = lambda row, *_: standing.publication.probe_desktop_failure(row, host)
+        base = dict(target_pid=42, cols=120, rows=36, shutdown='stopped',
+                    attribution_contract=standing.hc.ATTRIBUTION_CONTRACT)
+        seen = dict(base, typing_memory_reason='window not visible during interval')
+        # The probe names only the first culprit; without the round's own
+        # observer proving the desktop (an off arm has none), a cover or
+        # focus failure cannot rule out the terminal's own panel beside it.
+        for error in ('latency probe: a window (pid 506, layer 21) covers the block',
+                      'latency probe: focus changed before a key (frontmost 99, top window 42/7)'):
+            self.assertFalse(decide(dict(base, error=error)), error)
+            for observed in ('insufficient typing memory duration', standing.hc.UNPROVEN, [], None):
+                self.assertFalse(decide(dict(base, error=error, typing_memory_reason=observed)), observed)
+        base = seen
+        for error, desktop in (
+                ('latency probe: foreign input', True),
+                ('latency probe: a window (pid 506, layer 21) covers the block', True),
+                ('latency probe: a window (pid 42, layer 0) covers the block', False),
+                ('latency probe: focus changed before a key (frontmost 99, top window 42/7)', True),
+                ('latency probe: focus changed before a key (frontmost 42, top window 99/3)', True),
+                ('latency probe: focus changed before a key (frontmost none, top window 99/3)', True),
+                ('latency probe: focus changed before a key (frontmost 42, top window none)', False),
+                ('latency probe: focus changed before a key (frontmost 42, top window 42/8)', False),
+                ('latency probe: focus changed before a key (frontmost none, top window none)', False),
+                ('latency probe: not frontmost', False),
+                ('latency probe: not frontmost, and the titlebar is covered', False),
+                ('latency probe: the measured window is not on screen', False),
+                ('latency probe: focus changed or a window covered the block during a sample', False),
+                ('latency probe: no frames', False),
+                # Pid 0 is nobody: it never names another process.
+                ('latency probe: a window (pid 0, layer 21) covers the block', False),
+                ('latency probe: focus changed before a key (frontmost 0, top window 0/3)', False),
+                ('latency probe: focus changed before a key (frontmost 0, top window none)', False)):
+            self.assertEqual(decide(dict(base, error=error), 120, 36), desktop, error)
+        foreign = dict(base, error='latency probe: foreign input')
+        foreign.pop('typing_memory_reason')
+        for spoiled in (dict(target_pid=None), dict(target_pid=0), dict(killed=True), dict(shutdown='exited'),
+                        dict(shutdown='unknown'), dict(shutdown=None), dict(cols=99), dict(attribution_contract=None)):
+            self.assertFalse(decide({**foreign, **spoiled}, 120, 36), spoiled)
+        for key in ('target_pid', 'shutdown', 'attribution_contract'):
+            missing = dict(foreign); del missing[key]
+            self.assertFalse(decide(missing, 120, 36), key)
+
+    def test_observer_failure_outranks_a_desktop_probe_error(self):
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+        on.update(error='latency probe: foreign input',target_pid=42,shutdown='stopped',typing_memory_valid=False,
+                  typing_memory_reason='native query failed or target exited')
+        report=self.report(raw)
+        metric=report['terminals']['kettle']['metrics']['mean_ms']
+        self.assertEqual(metric['invalid_pairs_by_reason'],{'on-arm observer evidence invalid':1})
+        self.assertFalse(report['equivalent'])
+
+    def test_hidden_window_is_the_desktops_only_when_another_process_hid_it(self):
+        hc = standing.hc
+        def check(**changes):
+            return dict(dict(t_ns=5, known=True, valid=True, frontmost_pid=42, top_window=7, target_window=7,
+                             top_owner=42, target_owner=42), **changes)
+        def sample(before=None, after=None, changes=()):
+            return dict(focus_before=before or check(), focus_after=after or check(t_ns=6), focus_changes=list(changes))
+        name = 'blink window not visible'
+        def judged(samples):
+            # Judged outside any interval, as an off arm's records after done are.
+            return hc.focus_verdict(samples, 100, 200, samples, 42, 7, name)
+        for hidden, expected in (
+                (check(valid=False, cover_owners=[506]), name),
+                (check(valid=False, cover_owners=[506, 77]), name),
+                (check(valid=False, cover_owners=[42]), hc.UNPROVEN),
+                # A foreign cover cannot clear the target's own, or one of unknown owner.
+                (check(valid=False, cover_owners=[506, 42]), hc.UNPROVEN),
+                (check(valid=False, cover_owners=[506, None]), hc.UNPROVEN),
+                (check(valid=False, cover_owners=506), hc.UNPROVEN),
+                (check(valid=False), hc.UNPROVEN),
+                (check(valid=False, frontmost_pid=99), name),
+                (check(valid=False, top_window=3, top_owner=99), name),
+                (check(valid=False, top_window=8, top_owner=42), hc.UNPROVEN),
+                # Another process on top proves nothing while the measured
+                # window itself is no longer the target's.
+                (check(valid=False, cover_owners=[506], target_owner=99), hc.UNPROVEN),
+                (check(valid=False, top_window=3, top_owner=99, target_owner=None), hc.UNPROVEN),
+                (check(valid=False, cover_owners=[0]), hc.UNPROVEN)):
+            self.assertEqual(judged([sample(before=hidden)]), expected, hidden)
+        self.assertIsNone(judged([sample()]))
+        # Another process in one check cannot clear the terminal's own dialog in another.
+        both = [sample(before=check(valid=False, frontmost_pid=99), after=check(t_ns=6, valid=False, cover_owners=[42]))]
+        self.assertEqual(judged(both), hc.UNPROVEN)
+        # Activations: another app's proves the desktop; the target's own proves nothing.
+        for pid, expected in ((99, 'known focus change during interval'), (42, hc.UNPROVEN), (None, hc.UNPROVEN),
+                              (0, hc.UNPROVEN)):
+            got = hc.focus_verdict([sample(changes=[dict(t_ns=5, valid=False, pid=pid)])], 0, 10, [], 42, 7, name)
+            self.assertEqual(got, expected, pid)
+        # Every activation must be explained: the target's own only as focus
+        # returning after another app's, and one naming nobody never.
+        for pids, expected in (((99, 42), 'known focus change during interval'),
+                               ((99, 77), 'known focus change during interval'),
+                               ((42, 99), hc.UNPROVEN), ((99, None), hc.UNPROVEN),
+                               ((99, 42, 42), hc.UNPROVEN)):
+            changes = [dict(t_ns=1 + i, valid=False, pid=pid) for i, pid in enumerate(pids)]
+            got = hc.focus_verdict([sample(changes=list(reversed(changes)))], 0, 10, [], 42, 7, name)
+            self.assertEqual(got, expected, pids)
+        # A proven activation cannot clear a judged check that blames the target.
+        mixed = [sample(changes=[dict(t_ns=5, valid=False, pid=99)]),
+                 dict(sample(), focus_after=check(t_ns=150, valid=False, cover_owners=[42]))]
+        self.assertEqual(hc.focus_verdict(mixed, 0, 10, mixed, 42, 7, name), hc.UNPROVEN)
+        # Off-arm printing hidden by the terminal's own dialog is never the desktop's.
+        fixture = OutputBlink()
+        records, samples = fixture.printing(), fixture.samples()
+        sparse = [samples[0], *samples[59:66], samples[81]]
+        sparse[-1]['focus_after'] = dict(sparse[-1]['focus_after'], valid=False, cover_owners=[42], target_owner=42)
+        self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'], hc.UNPROVEN)
+        sparse[-1]['focus_after']['cover_owners'] = [506]
+        self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'],
+                         'printing window not visible')
+        # An activation by another app inside the output cannot clear the
+        # terminal's own dialog over the record after done.
+        sparse[-1]['focus_after']['cover_owners'] = [42]
+        sparse[3]['focus_changes'] = [dict(t_ns=sparse[3]['focus_before']['t_ns'] - 1, valid=False, pid=99)]
+        self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'], hc.UNPROVEN)
+
+    def test_failed_probe_round_keeps_an_unclean_stop(self):
+        # A probe error ends the round early; whether the terminal stopped
+        # cleanly must survive, or a desktop failure could hide one that did not.
+        import tempfile, contextlib, io
+        from unittest.mock import Mock, patch
+        for clean, ready in ((True, True), (False, True), (True, False)):
+            for written in ({'error': 'foreign input'}, None):
+                with self.subTest(clean=clean, ready=ready, written=written), tempfile.TemporaryDirectory() as tmp:
+                    work=Path(tmp)
+                    runner=standing.Runner({k:work/k for k in ('keyblock','observer','latency-probe')},work,{})
+                    def launch(*args,**kwargs):
+                        (work/'typing-launch.json').write_text(_json.dumps({'pid':42,'window_id':7}))
+                        if ready:
+                            (work/'typing-memory.jsonl').write_text(''.join(
+                                _json.dumps(x)+'\n' for x in OutputBlink().samples(count=3)))
+                        return Mock()
+                    def stop(*args):
+                        (work/'launch.json').write_text(_json.dumps(dict(stopped=True,killed=not clean,
+                                                                         exit_ms=None if not clean else 5.)))
+                        return clean
+                    runner.launch=Mock(side_effect=launch);runner.wait_for=Mock(return_value=True)
+                    runner.pid=Mock(return_value=42);runner.stop=Mock(side_effect=stop);runner.end_sampler=Mock()
+                    def probe(*args):
+                        if written is not None:(work/'latency.json').write_text(_json.dumps(written))
+                    @contextlib.contextmanager
+                    def verified(*args):yield {}
+                    with patch.object(standing.hc,'start_observer',return_value=Mock()),\
+                         patch.object(standing.hc,'now_ns',return_value=10_200_100_000),\
+                         patch.object(standing,'run_latency_probe',side_effect=probe),\
+                         patch.object(standing,'verified_probe_use',verified),\
+                         patch.object(standing,'wait_for_text',side_effect=lambda path,*a:ready or path.name!='typing-memory.jsonl'),\
+                         patch.object(standing.time,'sleep'):
+                        row=runner.latency('kettle',dict(keys=2,warmup=20,censor_ms=500,inject='hid'),7)
+                    runner.stop.assert_called_once()
+                    self.assertEqual(row['error'],'latency probe: foreign input' if written else 'the latency probe wrote no result')
+                    self.assertEqual(row.get('killed',False),not clean)
+                    self.assertEqual(row['target_pid'],42)
+                    self.assertEqual(row['shutdown'],'stopped' if clean else 'killed')
+                    if not ready:
+                        # The pilot runner turns this into "observer pilot on
+                        # arm unavailable", which is never the desktop's.
+                        self.assertEqual(row['typing_memory_reason'],'typing observer readiness missing')
+                        raw=self.fixture('typing',[0.]*2,names=['kettle']);raw['workloads']={}
+                        with patch.object(standing,'round_grid',return_value=((120,36),(120,36))),\
+                             contextlib.redirect_stdout(io.StringIO()):
+                            standing.run_observer_pilot(raw,['kettle'],2,lambda *a:dict(row),Mock(),Mock(),work,work)
+                        metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+                        self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':2})
+                        continue
+                    if written:
+                        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+                        on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+                        kept={k:on[k] for k in ('observer_pair','observer_arm','observer_order','observer_cost','cols','rows')}
+                        on.clear();on.update(row,**kept)
+                        metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+                        self.assertEqual(metric['invalid_pairs_by_reason'],
+                                         {'probe saw focus, cover or foreign input' if clean else 'failed arm':1})
+                        self.assertEqual(metric['equivalent'],clean)
 
     def test_analysis_straddles_every_bound_and_failed_arm(self):
         import copy
@@ -7431,7 +7956,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertTrue(report['terminals']['ghostty']['equivalent'])
             for metric in report['terminals']['kettle']['metrics'].values():
                 self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':1})
-                self.assertEqual(metric['reason'],'insufficient valid pairs')
+                self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
             self.assertNotIn('private-owner',_json.dumps(report))
 
     def test_pilot_dispatch_countability_combine_aa_and_analysis_refusal(self):
@@ -7446,7 +7971,7 @@ class ObserverPilot(unittest.TestCase):
             (folder/'local-manifest.json').write_text('/Users/private-owner/private@email.test')
             report=standing.publication.observer_control(standing._publication_host(),folder)
             self.assertTrue(report['equivalent'])
-            self.assertEqual(report['interval_policy'],'paired Student-t 95%')
+            self.assertEqual(report['interval_policy'],'TOST at 5% each side: paired Student-t 90% inside the bounds')
             self.assertNotIn('private',_json.dumps(report))
             with self.assertRaisesRegex(SystemExit,'observer pilot'):standing.combine([folder])
             ordinary=Path(tmp)/'ordinary';ordinary.mkdir()

@@ -24,6 +24,7 @@ static NSString *identity(pid_t pid) {
 static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front,
                                    NSArray *windows, uint64_t t) {
     NSDictionary *wanted = nil, *top = nil;
+    NSMutableArray *coverOwners = [NSMutableArray array];
     for (NSDictionary *w in windows) {
         if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) wanted = w;
         if (!top && [w[(id)kCGWindowLayer] intValue] == 0) top = w;
@@ -38,22 +39,30 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
     }
     // The window list is front-to-back. Any intersecting window above the
     // target, including a same-process dialog or nonzero-layer alert, fails.
-    if (visible) {
+    // Every such window's owner is kept, whoever is in front, so neither a
+    // foreign cover nor another app's focus can hide the target's own panel.
+    if (known) {
         for (NSDictionary *w in windows) {
             if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) break;
             CGRect cover = CGRectZero;
             if (!w[(id)kCGWindowAlpha] || !w[(id)kCGWindowBounds]
                 || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &cover)) {
-                known = NO; visible = NO; break;
+                known = NO; visible = NO; [coverOwners removeAllObjects]; break;
             }
             if ([w[(id)kCGWindowAlpha] doubleValue] > 0 && CGRectIntersectsRect(rect, cover)) {
-                visible = NO; break;
+                visible = NO;
+                [coverOwners addObject:w[(id)kCGWindowOwnerPID] ?: NSNull.null];
             }
         }
     }
+    // Owners say who hid the window: another process (the desktop) or the
+    // target itself, such as its own dialog.
     return @{@"t_ns":@(t), @"known":@(known), @"valid":@(visible),
              @"frontmost_pid":front ?: NSNull.null, @"target_window":@(target),
-             @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null};
+             @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null,
+             @"top_owner":top[(id)kCGWindowOwnerPID] ?: NSNull.null,
+             @"cover_owners":coverOwners,
+             @"target_owner":wanted[(id)kCGWindowOwnerPID] ?: NSNull.null};
 }
 static NSDictionary *focus(pid_t pid, CGWindowID target) {
     uint64_t t = now();
@@ -126,7 +135,9 @@ int main(int argc, char **argv) {
         id token = [NSWorkspace.sharedWorkspace.notificationCenter
             addObserverForName:NSWorkspaceDidActivateApplicationNotification object:nil queue:nil
             usingBlock:^(NSNotification *note) {
-                if (changes.count < 64) [changes addObject:@{@"t_ns":@(now()), @"valid":@NO}];
+                NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
+                if (changes.count < 64) [changes addObject:@{@"t_ns":@(now()), @"valid":@NO,
+                    @"pid":app ? @(app.processIdentifier) : NSNull.null}];
                 else changesOverflow = YES;
             }];
         mach_timebase_info_data_t base; mach_timebase_info(&base);
