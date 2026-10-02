@@ -858,6 +858,9 @@ split-exit-resize-smoke:
 # ui_geometry.render_uploads: five screenshots of an unchanged window, a
 # focused window blinking for 2 s, and the same after 2 MiB of output add no
 # buffer or texture writes and no text prepares (the blink adds frames only).
+# Where instances go through mapped buffers (shared memory), a window printing
+# a line every 100 ms adds mapped writes with flat buffer/texture writes
+# and main/menu text prepares.
 # Without window focus (Xvfb) only the screenshot phase runs. Artifacts under
 # target/diagnostics/steady-uploads-*.
 [unix]

@@ -8486,6 +8486,10 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
+    assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
+    import inspect
+    assert "quiet_keys = STEADY_UPLOAD_QUIET_KEYS" in inspect.getsource(run_steady_uploads), \
+        "settling and the blink checks must use the steady keys"
     for scale in (1.0, 1.25, 2.0):
         geometry = {
             "scale_factor": scale,
@@ -18670,6 +18674,13 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     return out
 
 
+# What a steady window must not write: settling waits for all of them to stop,
+# and a blink must move none. Mapped writes count too, or a regression that
+# rewrites instances on every blink through the mapped ring would pass; a
+# build without the counter reports zero.
+STEADY_UPLOAD_QUIET_KEYS = ("buffer_writes", "texture_writes", "text_prepares", "mapped_writes")
+
+
 def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) -> Path:
     """A window whose content is not changing writes nothing to the GPU.
 
@@ -18682,7 +18693,11 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
     A: five screenshots of an unchanged window add no buffer or texture
        writes and no text prepares;
     B: a focused window blinking for 2 s adds frames, and still nothing else;
-    C: after about 2 MiB of output has settled, B holds again.
+    C: after about 2 MiB of output has settled, B holds again;
+    D: where the renderer writes instances through mapped buffers (shared
+       memory: Apple silicon, integrated or software Vulkan), a window
+       printing a line every 100 ms writes them there and adds no buffer or
+       texture writes. Elsewhere D records why it did not run.
 
     A blink runs only in a focused window. A window under Xvfb with no window
     manager never gets focus, so CI passes --screenshots-only and runs only A;
@@ -18713,14 +18728,15 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         + "\n"
     )
     keys = ("frames_presented", "buffer_writes", "buffer_bytes", "texture_writes", "text_prepares",
-            "skipped_writes")
-    quiet_keys = ("buffer_writes", "texture_writes", "text_prepares")
+            "skipped_writes", "mapped_writes", "chrome_prepares")
+    quiet_keys = STEADY_UPLOAD_QUIET_KEYS
 
     def uploads(live: LiveKettle) -> Dict[str, int]:
         value = live.json_ctl("ui_geometry").get("render_uploads")
         if not isinstance(value, dict):
             raise SystemExit(f"steady-uploads smoke: ui_geometry has no render_uploads: {value!r}")
-        return {key: int(value[key]) for key in keys}
+        return {key: int(value.get(key, 0)) if key in ("mapped_writes", "chrome_prepares")
+                else int(value[key]) for key in keys}
 
     def settled(live: LiveKettle, label: str, quiet: float = 1.0, timeout: float = 30.0) -> Dict[str, int]:
         """The counts once nothing has been written for `quiet` seconds."""
@@ -18740,6 +18756,46 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         moved = {key: (before[key], after[key]) for key in quiet_keys if after[key] != before[key]}
         if moved:
             raise SystemExit(f"steady-uploads smoke: {label} wrote to the GPU: {moved}")
+
+    def printing(live: LiveKettle) -> object:
+        """D. The first round of lines rasterizes every glyph they use, so
+        the measured round, the same lines again, needs no texture upload."""
+        value = live.json_ctl("ui_geometry").get("render_uploads") or {}
+        if not value.get("mapped_uploads"):
+            print("steady-uploads smoke: phase D not run (this adapter keeps queue uploads)")
+            return "not run: this adapter keeps queue uploads"
+        if "chrome_prepares" not in value:
+            raise SystemExit("steady-uploads smoke: phase D needs the chrome_prepares counter")
+        # A cursor-only prepare on a blank cell has no vertices to upload.
+        # Main/menu prepares can rewrite glyphon's uncounted vertex buffers.
+        rounds = {}
+        for index, label in enumerate(("warm-up", "measured"), start=1):
+            before = settled(live, f"phase D ({label})")
+            # The typed line shows `%s`, so only the output carries the mark,
+            # and its digit is one the lines have already drawn.
+            mark = f"KETTLE_PRINT_{index}"
+            live.ctl(
+                "send_text",
+                params={
+                    "text": "i=0; while [ $i -lt 30 ]; do echo printing line $i; sleep 0.1; "
+                    f"i=$((i+1)); done; printf 'KETTLE_PRINT_%s\\n' {index}\r"
+                },
+            )
+            deadline = time.monotonic() + 30.0
+            while mark not in screen_text(live.json_ctl("read_screen")):
+                if time.monotonic() > deadline:
+                    raise SystemExit(f"steady-uploads smoke: the {label} lines never finished")
+                time.sleep(0.2)
+            rounds[label] = {"before": before, "after": uploads(live)}
+        before, after = rounds["measured"]["before"], rounds["measured"]["after"]
+        mapped = after["mapped_writes"] - before["mapped_writes"]
+        if mapped < 10:
+            raise SystemExit(f"steady-uploads smoke: printing made only {mapped} mapped write(s)")
+        moved = {key: (before[key], after[key]) for key in ("buffer_writes", "texture_writes", "chrome_prepares")
+                 if after[key] != before[key]}
+        if moved:
+            raise SystemExit(f"steady-uploads smoke: printing wrote through the queue: {moved}")
+        return rounds
 
     def blinks(live: LiveKettle, label: str) -> Dict[str, object]:
         before = settled(live, label)
@@ -18771,8 +18827,8 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         analysis["a"] = {"before": before, "after": after}
 
         if screenshots_only:
-            analysis["b"] = analysis["c"] = "not run: --screenshots-only"
-            print("steady-uploads smoke: phases B and C not run (--screenshots-only)")
+            analysis["b"] = analysis["c"] = analysis["d"] = "not run: --screenshots-only"
+            print("steady-uploads smoke: phases B, C and D not run (--screenshots-only)")
         else:
             focus_live_kettle_window(live)
             deadline = time.monotonic() + 10.0
@@ -18795,6 +18851,7 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
                     raise SystemExit("steady-uploads smoke: the 2 MiB of output never finished")
                 time.sleep(0.2)
             analysis["c"] = blinks(live, "a blinking window after 2 MiB of output")
+            analysis["d"] = printing(live)
     (out / "analysis.json").write_text(json.dumps(analysis, indent=2) + "\n")
     return out
 

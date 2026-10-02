@@ -2281,6 +2281,12 @@ impl GpuContext {
         matches!(self.adapter.get_info().device_type, wgpu::DeviceType::Cpu)
     }
 
+    /// Whether per-frame instances go through mapped buffers on this device
+    /// (see `upload::mapped_upload_features`).
+    pub fn mapped_uploads(&self) -> bool {
+        upload::mapped_uploads(&self.device)
+    }
+
     pub fn adapter_name(&self) -> String {
         self.adapter.get_info().name
     }
@@ -2600,11 +2606,6 @@ pub struct Renderer {
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
     last_cursor_glyph_key: Option<u64>,
-    /// The cursor-cell glyph shaped last frame. A change forces a `prepare` so
-    /// the new glyph is guaranteed resident in the atlas before the cursor pass
-    /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
-    /// the atlas and invalidate the cached pane vertices).
-    last_cursor_char: Option<char>,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -2647,6 +2648,7 @@ pub struct Renderer {
     /// and cursor-glyph renderers). Steady frames, blink edges included,
     /// should add none.
     text_prepares: u64,
+    chrome_prepares: u64,
     /// Frames presented to the window so far.
     frames_presented: u64,
     /// What the frame on screen drew, so `present_cursor_patch` can encode
@@ -4851,9 +4853,12 @@ impl Renderer {
         // front so later high-DPI or multi-display resizes can configure the
         // swapchain at the window's actual physical dimensions.
         let required_limits = live_device_limits(adapter.limits());
+        // On shared memory the renderer writes per-frame instances through
+        // mapped buffers, which needs a feature; elsewhere this is empty.
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("kettle-device"),
+                required_features: upload::mapped_upload_features(&adapter),
                 required_limits,
                 ..Default::default()
             })
@@ -4969,14 +4974,35 @@ impl Renderer {
         scale: f32,
         translucent_surface: bool,
     ) -> Result<Option<Renderer>> {
+        Self::headless_for_tests_with_mapping(cfg, width, height, scale, translucent_surface, true)
+    }
+
+    /// [`Self::headless_for_tests_with`], and with `allow_mapping` false the
+    /// queue upload path on the same adapter the live upload path uses.
+    #[cfg(test)]
+    pub(crate) fn headless_for_tests_with_mapping(
+        cfg: &Config,
+        width: u32,
+        height: u32,
+        scale: f32,
+        translucent_surface: bool,
+        allow_mapping: bool,
+    ) -> Result<Option<Renderer>> {
         pollster::block_on(async {
             let Ok((instance, adapter)) = resolve_headless_adapter(cfg, "headless-renderer").await
             else {
                 return Ok(None);
             };
+            // The live device's features, so these tests take the upload
+            // path a window on this host takes.
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kettle-headless-renderer"),
+                    required_features: if allow_mapping {
+                        upload::mapped_upload_features(&adapter)
+                    } else {
+                        wgpu::Features::empty()
+                    },
                     required_limits: live_device_limits(adapter.limits()),
                     ..Default::default()
                 })
@@ -5189,6 +5215,7 @@ impl Renderer {
             quad_scratch: Vec::new(),
             cursor_quad_range: None,
             text_prepares: 0,
+            chrome_prepares: 0,
             frames_presented: 0,
             last_scene: None,
             cursor_patch: None,
@@ -5207,7 +5234,6 @@ impl Renderer {
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
             last_cursor_glyph_key: None,
-            last_cursor_char: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
             hint_texts: Vec::new(),
@@ -8993,9 +9019,10 @@ impl Renderer {
         // cursor blink, a bell-flash decay, a focus-dim toggle) the text is
         // byte-identical, so we re-render the cached vertex buffers as-is and
         // only rebuild/upload the cheap quad list. Skipping is conservative.
-        // ANY pane row reshape, ANY chrome label or damage-key change, or an
-        // open text overlay without its own damage key forces the prepare, so
-        // a stale frame is impossible. `atlas.trim()` (below) is gated the same
+        // ANY pane row reshape in legacy mode (where pane text is a glyphon
+        // area), ANY chrome label or damage-key change, or an open text
+        // overlay without its own damage key forces the prepare, so a stale
+        // frame is impossible. `atlas.trim()` (below) is gated the same
         // way, because trimming without a following prepare would clear the
         // in-use set and let a later prepare evict still-displayed glyphs out
         // from under the cached vertices.
@@ -9052,25 +9079,42 @@ impl Renderer {
         // vertices we're about to re-render). A char change almost always
         // coincides with a content change (so the prepare runs anyway); this
         // only adds a prepare for the rare move-without-output case.
-        let cursor_char = self.pending_cursor_glyph.as_ref().map(|c| c.ch);
-        let cursor_char_changed = cursor_char != self.last_cursor_char;
-        self.last_cursor_char = cursor_char;
+        // A cursor glyph that rasterizes anything can be the allocation that
+        // grows or evicts the shared atlas, at any new character, emoji
+        // presentation, colour or subpixel position, and grid output no longer
+        // prepares the chrome on its own. So a visible cursor glyph never
+        // prepares alone: whenever its key changes, the chrome and pane text
+        // that share the atlas are prepared with it. Only an ordinary space
+        // or an empty cell is known to rasterize nothing (other whitespace,
+        // such as U+1680 OGHAM SPACE MARK, can draw a stroke), and a blink
+        // leaves the key as it was.
+        let cursor_glyph_key =
+            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
+        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
+        let cursor_char_changed = cursor_glyph_changed
+            && self
+                .pending_cursor_glyph
+                .as_ref()
+                .is_some_and(|c| c.ch != ' ' && c.ch != '\0');
         // The frame an overlay CLOSES (`overlay_open` flips true→false) must
         // still prepare once, or the closed panel's cached text vertices keep
         // rendering until the next keystroke. Open overlays are covered above;
         // this covers the close edge.
         let overlay_changed = overlay_open != self.last_overlay_open;
         self.last_overlay_open = overlay_open;
+        // In the default grid mode the glyph pipeline draws pane text from its
+        // own atlas, behind its own gate below, so output leaves every glyphon
+        // vertex as it was. Preparing anyway would rewrite the chrome's
+        // unchanged vertices through the queue on every frame of output.
+        let glyphon_pane_text_changed =
+            any_pane_text_changed && cfg.text_renderer == TextRendererMode::Legacy;
         let need_prepare = self.text_prepare_dirty
-            || any_pane_text_changed
+            || glyphon_pane_text_changed
             || chrome_changed
             || text_layout_changed
             || non_context_text_overlay_open
             || cursor_char_changed
             || overlay_changed;
-        let cursor_glyph_key =
-            cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
-        let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
         let need_cursor_prepare =
             self.pending_cursor_glyph.is_some() && (need_prepare || cursor_glyph_changed);
         if cursor_glyph_key.is_none() {
@@ -9084,6 +9128,7 @@ impl Renderer {
             self.text_prepare_dirty = true;
         }
         if need_prepare {
+            self.chrome_prepares += 1;
             self.text_prepares += 1;
             // Buffer and damage caches above have already advanced to this
             // frame. Any `?` return leaves the retry latch set for the next
@@ -9101,6 +9146,7 @@ impl Renderer {
             // settings, completion, and other top-layer text). Empty
             // `menu_areas` is fine; glyphon's prepare handles a zero-area
             // batch as a no-op.
+            self.chrome_prepares += 1;
             self.text_prepares += 1;
             self.menu_text_renderer.prepare(
                 &self.gpu.device,
@@ -9111,6 +9157,11 @@ impl Renderer {
                 menu_areas,
                 &mut self.swash,
             )?;
+        }
+        // A mapped instance buffer becomes writable again only through a poll
+        // (or a submit) after the frames that drew from it have finished.
+        if self.gpu.mapped_uploads() {
+            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
         }
         // Cell-locked pane text has its OWN damage gate. A cursor blink
         // can force `need_prepare` via `cursor_char_changed` for the separate
@@ -9516,7 +9567,11 @@ impl Renderer {
             buffer_bytes: counts.buffer_bytes,
             texture_writes: counts.texture_writes,
             text_prepares: self.text_prepares,
+            chrome_prepares: self.chrome_prepares,
             skipped_writes: counts.skipped_writes,
+            mapped_uploads: self.gpu.mapped_uploads(),
+            mapped_writes: counts.mapped_writes,
+            mapped_bytes: counts.mapped_bytes,
         }
     }
 

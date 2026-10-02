@@ -3,7 +3,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use crate::upload::{RetainedBytes, UploadCounters, UploadCounts, write_buffer_if_changed};
+use crate::upload::{
+    MappedRing, RetainedBytes, UploadCounters, UploadCounts, mapped_uploads,
+    write_buffer_if_changed,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -221,7 +224,12 @@ pub struct QuadPipeline {
     capacity: usize,
     pub count: u32,
     screen_held: RetainedBytes,
+    /// What the buffer the draws read holds: `instances`, or the ring's
+    /// current buffer when there is a ring.
     instances_held: RetainedBytes,
+    /// On shared memory, the instances go through mapped buffers instead of
+    /// `instances` (see `upload.rs`).
+    ring: Option<MappedRing>,
     counters: UploadCounters,
 }
 
@@ -271,7 +279,10 @@ impl QuadPipeline {
                 resource: screen_buf.as_entire_binding(),
             }],
         });
-        let capacity = 4096;
+        let ring = mapped_uploads(device)
+            .then(|| MappedRing::new("kettle-quad-instances", wgpu::BufferUsages::VERTEX, None));
+        // With a ring, the queue path's buffer is never drawn from.
+        let capacity = if ring.is_some() { 1 } else { 4096 };
         let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-quad-instances"),
             size: (capacity * std::mem::size_of::<QuadInstance>()) as u64,
@@ -287,6 +298,7 @@ impl QuadPipeline {
             count: 0,
             screen_held: RetainedBytes::default(),
             instances_held: RetainedBytes::default(),
+            ring,
             counters: UploadCounters::default(),
         }
     }
@@ -320,6 +332,17 @@ impl QuadPipeline {
             }),
             &self.counters,
         );
+        if let Some(ring) = &mut self.ring {
+            let written = ring.write(
+                device,
+                queue,
+                Some(&mut self.instances_held),
+                bytemuck::cast_slice(data),
+                &self.counters,
+            );
+            self.count = if written { data.len() as u32 } else { 0 };
+            return;
+        }
         if data.len() > self.capacity {
             // `grow_capacity` is checked because release builds use
             // `panic = "abort"`, so an overflow panic would abort the process.
@@ -383,9 +406,16 @@ impl QuadPipeline {
         if self.count == 0 {
             return;
         }
+        let instances = match &self.ring {
+            Some(ring) => match ring.current() {
+                Some(buffer) => buffer,
+                None => return,
+            },
+            None => &self.instances,
+        };
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.instances.slice(..));
+        pass.set_vertex_buffer(0, instances.slice(..));
         for range in visible_instance_ranges(self.count, hidden) {
             if !range.is_empty() {
                 pass.draw(0..4, range);

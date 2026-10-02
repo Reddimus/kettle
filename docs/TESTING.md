@@ -1219,6 +1219,30 @@ same through `ui_geometry.render_uploads` in a live window: unchanged
 screenshots, a blinking window, and a blinking window after 2 MiB of output.
 The window runs a plain `/bin/sh` with a fixed prompt, since a user's shell can
 redraw its prompt after the smoke has decided the window is steady.
+On a host whose adapter gets mapped uploads (Apple silicon, lavapipe), the
+headless tests also prove that a visible cursor glyph whose key changes
+(another character, emoji presentation or cell, even the same character one
+cell over) prepares the chrome with it, while a blank-cell cursor and a blink
+do not, that printing a line adds no queue write, that the
+quad ring draws each frame's own data (a short frame between two longer ones
+must not leave a stale tail) with only the screen uniform through the queue,
+and that the glyph ring outgrows its first buffer. The direct ring tests run
+on any adapter supporting the feature, including discrete test devices.
+The live-path printing test uses the production adapter policy. Blink and
+steady-frame tests run with both that policy and an explicitly featureless
+device, so shared-memory hosts also cover queue uploads. Hosts without an
+adapter skip GPU tests. Unit
+tests pin which platform, backend and adapter type get the feature (never
+Windows, a discrete GPU or GL) and the ring's choice between a mapped spare, a new buffer and the
+queue, and source guards keep `MAP_WRITE`, the feature and every write in
+`upload.rs` and the live device's feature request behind that check. Grid-mode
+output prepares no glyphon text, while legacy-mode output still does. The
+smoke's fourth phase prints 30 lines twice where uploads are mapped and
+requires the second round to add mapped writes with flat buffer writes,
+texture writes and main/menu `chrome_prepares`. Cursor-only prepares are
+excluded because a blank-cell cursor prepares no vertices. Older builds
+without mapping diagnostics run phases A-C and skip D. A mapped build must
+supply `chrome_prepares`. GL backend rendering still needs the native check.
 
 The cursor patch tests composite the patch over the off frame and require the
 on frame byte for byte, both rendered as the window shows them: an `Opaque`

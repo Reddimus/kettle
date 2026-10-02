@@ -49,6 +49,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   3 s after a burst of output Kettle's memory is 236 MiB instead of 365 MiB
   (10 paired rounds on an Apple M5 Max, B/A 0.647, 95% CI 0.645-0.653). While
   any frame draws, the render pool (about 168 MiB) stays.
+- On macOS and Linux GPUs that share memory with the CPU (Apple silicon, and
+  integrated or software Vulkan adapters), Kettle writes the quads and glyphs
+  that change in a frame straight into memory the GPU reads, instead of
+  copying them through a staging upload. Elsewhere uploads work as before.
+  Output in the default grid text mode no longer re-prepares the window's
+  unchanged chrome text.
 - Kettle finds and loads its fonts on a thread while the event loop starts,
   instead of on the main thread before the first window and shell. The first
   window waits only for whatever font work is still unfinished when it opens.
