@@ -806,7 +806,15 @@ def missing_benchmarks(benchmarks: Path, dat: Dict[str, float]) -> List[str]:
 def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -> List[str]:
     """How each terminal runs `script` at the pinned grid with default settings."""
     if name in kettle:
-        return [kettle[name], "--config", str(work / f"{name}.config"), "-e", str(script)]
+        # `-e` hands what follows the script to it, which ignores it, and
+        # AppKit reads `-Key value` pairs from the whole argv. Before 4.8.0
+        # Kettle kept AppKit's persistent UI on: every round stopped here
+        # counted as a crash while reopening windows, and AppKit then held the
+        # next launch at a modal "reopen windows?" alert, so its payload never
+        # ran. Ignoring the saved state skips only that restore; 4.7.0 still
+        # idles with its persistence on, and later builds turn it off.
+        return [kettle[name], "--config", str(work / f"{name}.config"), "-e", str(script),
+                "-ApplePersistenceIgnoreState", "YES"]
     if name == "alacritty":
         return [APPS[name], "--config-file", "/dev/null",
                 "-o", f"window.dimensions.columns={COLS}", "-o", f"window.dimensions.lines={ROWS}",

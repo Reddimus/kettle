@@ -336,7 +336,9 @@ members; and latency censoring. The date-selection fixture has one invalid
 optional round out of five, leaving four paired comparisons. It must reject
 the actual `countable: counts and covered` revert. The latency fixture rejects
 negative keys and negative, fractional or boolean censor counts, and must fail
-with the original latency-key decoder restored.
+with the original latency-key decoder restored. Kettle's launch argv ends with
+AppKit's `-ApplePersistenceIgnoreState YES` after the payload, and no peer's
+does, so a 4.7.0 baseline cannot stall at AppKit's "reopen windows?" alert.
 Adjacent peer fixtures check the current log-ratio and launch-difference
 Student-t intervals and require all ranked pairwise comparisons, including
 peer pairs that omit Kettle. Analysis, combine and Markdown checks reject

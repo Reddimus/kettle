@@ -2078,6 +2078,18 @@ class Payloads(unittest.TestCase):
             argv = standing.terminal_argv("kettle-b", work / "p.sh", work, {"kettle-a": "/k", "kettle-b": "/k"})
             self.assertEqual(argv[:3], ["/k", "--config", str(work / "kettle-b.config")])
 
+    def test_kettle_launches_skip_appkit_reopen_prompt(self) -> None:
+        # Kettle 4.7.0 keeps AppKit's persistent UI on; after stopped rounds
+        # AppKit holds its launch at a "reopen windows?" alert unless the
+        # saved state is ignored. The flag follows the script, which `-e`
+        # passes it to, so Kettle's own options never see it.
+        work = Path("/fixture-work")
+        argv = standing.terminal_argv("kettle-a", work / "p.sh", work, {"kettle-a": "/k470"})
+        self.assertEqual(argv, ["/k470", "--config", str(work / "kettle-a.config"), "-e", str(work / "p.sh"),
+                                "-ApplePersistenceIgnoreState", "YES"])
+        for peer in ("alacritty", "kitty", "wezterm", "ghostty"):
+            self.assertNotIn("-ApplePersistenceIgnoreState", standing.terminal_argv(peer, work / "p.sh", work, {}))
+
     def test_variants_are_listed_but_never_ranked(self) -> None:
         results = {"context": "t", "unranked": ["kettle-opaque"], "workloads": {"startup": {
             "kettle": [{"window_ms": 200.0}], "kettle-opaque": [{"window_ms": 100.0}],

@@ -529,7 +529,13 @@ Every launch pins an isolated XDG config root. This also blocks Kettle's
 automatic `init.lua` discovery, which uses its default config directory even
 with an explicit `--config`. Ghostty receives only the generated file. Alacritty
 uses `/dev/null`, kitty uses `NONE`, and WezTerm uses its config-skip flag.
-Peer config-directory/file environment overrides are removed. These generated
+Kettle's launch ends with AppKit's `-ApplePersistenceIgnoreState YES`, which
+`-e` passes to the payload as ignored arguments. Kettle before 4.8.0 keeps
+AppKit's persistent UI on, so the rounds the harness stops count as crashes
+while reopening windows, and AppKit then holds the next launch at a modal
+"reopen windows?" alert before the payload runs. Ignoring the saved state skips
+only that restore: 4.7.0 still idles with its persistence on, and later builds
+turn it off. Peer config-directory/file environment overrides are removed. These generated
 peer layouts support no includes or user Lua; added files or changed contents
 fail the boundary check. Native peer isolation and background-image rendering
 still need an excluded functional pilot on the actual installed apps.
