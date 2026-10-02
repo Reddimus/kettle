@@ -9084,8 +9084,10 @@ impl Renderer {
         // presentation, colour or subpixel position, and grid output no longer
         // prepares the chrome on its own. So a visible cursor glyph never
         // prepares alone: whenever its key changes, the chrome and pane text
-        // that share the atlas are prepared with it. A blank cell rasterizes
-        // nothing, and a blink leaves the key as it was.
+        // that share the atlas are prepared with it. Only an ordinary space
+        // or an empty cell is known to rasterize nothing (other whitespace,
+        // such as U+1680 OGHAM SPACE MARK, can draw a stroke), and a blink
+        // leaves the key as it was.
         let cursor_glyph_key =
             cursor_glyph_damage_key(self.pending_cursor_glyph.as_ref(), metrics, &family);
         let cursor_glyph_changed = cursor_glyph_key != self.last_cursor_glyph_key;
@@ -9093,7 +9095,7 @@ impl Renderer {
             && self
                 .pending_cursor_glyph
                 .as_ref()
-                .is_some_and(|c| !c.ch.is_whitespace() && c.ch != '\0');
+                .is_some_and(|c| c.ch != ' ' && c.ch != '\0');
         // The frame an overlay CLOSES (`overlay_open` flips true→false) must
         // still prepare once, or the closed panel's cached text vertices keep
         // rendering until the next keystroke. Open overlays are covered above;

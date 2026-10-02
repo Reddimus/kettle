@@ -1090,6 +1090,27 @@ fn output_moving_the_cursor_over_text_prepares_the_chrome() {
     let chrome = renderer.render_uploads().chrome_prepares;
     capture(&mut renderer, &cfg, &[pane(&two, 320, 120)], &focused(true));
     assert_eq!(renderer.render_uploads().chrome_prepares, chrome);
+    // Whitespace is not proof of an empty bitmap: U+1680 OGHAM SPACE MARK
+    // draws a stroke in a font that has it.
+    let ogham = snapshot_of(20, 4, "\u{1680}\u{1680}\x1b[D".as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&ogham, 320, 120)],
+        &focused(true),
+    );
+    let chrome = renderer.render_uploads().chrome_prepares;
+    let ogham = snapshot_of(20, 4, "\u{1680}\u{1680}\u{1680}\x1b[D".as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&ogham, 320, 120)],
+        &focused(true),
+    );
+    assert!(
+        renderer.render_uploads().chrome_prepares > chrome,
+        "a moved non-blank whitespace glyph must prepare the chrome with it"
+    );
 }
 
 /// Only legacy-mode pane text may force the glyphon prepare; hosts with no
