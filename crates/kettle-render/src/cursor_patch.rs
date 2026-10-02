@@ -355,13 +355,49 @@ fn outline_touches(outline: &OutlineInstance, near: PixelBox) -> bool {
     {
         return false;
     }
-    let inset = outline.border_width + outline.corner_radius.max(0.0) + 2.0;
+    // The stroke is a band of `border_width` inside every edge, with 2 px for
+    // antialiasing.
+    let [x, y] = outline.pos;
+    let [width, height] = outline.size;
+    let edge = outline.border_width + 2.0;
     let interior = PixelBox::covered(
-        [outline.pos[0] + inset, outline.pos[1] + inset],
-        [outline.size[0] - 2.0 * inset, outline.size[1] - 2.0 * inset],
+        [x + edge, y + edge],
+        [width - 2.0 * edge, height - 2.0 * edge],
     );
-    !interior.contains(near)
+    if !interior.contains(near) {
+        return true;
+    }
+    // A rounded corner bends the band inward, but only at the corners the
+    // mask rounds (a pane's bottom window corners). Insetting every side by
+    // the radius would refuse every cursor in the first row or column.
+    let reach = outline.corner_radius.max(0.0) + edge;
+    [
+        (OUTLINE_CORNER_TOP_LEFT, x, y),
+        (OUTLINE_CORNER_TOP_RIGHT, x + width - reach, y),
+        (
+            OUTLINE_CORNER_BOTTOM_RIGHT,
+            x + width - reach,
+            y + height - reach,
+        ),
+        (OUTLINE_CORNER_BOTTOM_LEFT, x, y + height - reach),
+    ]
+    .into_iter()
+    .any(|(bit, corner_x, corner_y)| {
+        outline.corner_mask & bit != 0
+            && PixelBox::bounding([corner_x, corner_y], [reach, reach]).intersects(near)
+    })
 }
+
+/// `OutlineInstance::corner_mask` bits: top-left, top-right, bottom-right,
+/// bottom-left.
+const OUTLINE_CORNER_TOP_LEFT: u32 = 1 << 0;
+const OUTLINE_CORNER_TOP_RIGHT: u32 = 1 << 1;
+const OUTLINE_CORNER_BOTTOM_RIGHT: u32 = 1 << 2;
+const OUTLINE_CORNER_BOTTOM_LEFT: u32 = 1 << 3;
+const _: () = assert!(
+    OUTLINE_CORNER_BOTTOM_RIGHT == crate::OUTLINE_BOTTOM_RIGHT
+        && OUTLINE_CORNER_BOTTOM_LEFT == crate::OUTLINE_BOTTOM_LEFT
+);
 
 /// The clip glyphon applies to a text area: its `TextBounds`, built from the
 /// pane rect as the cursor-glyph prepare builds them, clamped to the surface.
@@ -1365,6 +1401,43 @@ mod tests {
         };
         assert!(!outline_touches(&outline, inside));
         assert!(outline_touches(&outline, edge));
+        // A cursor in the first row, a few pixels below an unrounded top
+        // edge: clear of the stroke, so not touching. Only the rounded
+        // bottom corners (mask 0b1100) reach further in.
+        let first_row = PixelBox {
+            x0: 22,
+            y0: 7,
+            x1: 33,
+            y1: 26,
+        };
+        assert!(!outline_touches(&outline, first_row));
+        let top_band = PixelBox {
+            y0: 0,
+            y1: 6,
+            ..first_row
+        };
+        assert!(outline_touches(&outline, top_band));
+        let bottom_left_corner = PixelBox {
+            x0: 4,
+            y0: 286,
+            x1: 9,
+            y1: 293,
+        };
+        assert!(outline_touches(&outline, bottom_left_corner));
+        let top_left_corner = PixelBox {
+            x0: 4,
+            y0: 4,
+            x1: 9,
+            y1: 11,
+        };
+        assert!(!outline_touches(&outline, top_left_corner));
+        assert!(outline_touches(
+            &OutlineInstance {
+                corner_mask: 0b0001,
+                ..outline
+            },
+            top_left_corner
+        ));
         assert!(!outline_touches(
             &OutlineInstance {
                 border_width: 0.0,
