@@ -1155,10 +1155,11 @@ window changes size or scale, loses focus or is occluded, hand off only at an
 edge that hid the cursor, and keep `ui_geometry` reads frameless. The writer-wins check calls the
 production anchor decision; refused hand-offs wait for a non-blink frame.
 Exit durations include transaction begin, render, commit and flush; logs also
-carry render-only durations. The cursor-latency gate remains required. Its
-`--latency-payload cursor` implementation belongs to harness-completion PR 6
-and must be merged and frozen before those measurements. C2's smoke and helper
-checks run independently of that harness change.
+carry render-only durations. The cursor-latency measurement is optional: 4.9.0
+merged this change on tests and reviews, without its measurement gates, by
+the owner's decision, so no latency result is claimed. When it is run, it uses
+the harness's `--latency-payload cursor` on a frozen harness. C2's smoke and
+helper checks run independently of it.
 `cargo test -p kettle-ui cursor_exit_log` exercises strict context parsing,
 private-file metadata rules, exact capability/input/exit bytes, the 4096-byte
 limit, calibration and extra-key counting, modifier/release/window exclusions,
@@ -1171,7 +1172,7 @@ scene preparation, rendering, layer hide, transaction commit and flush.
 These pure tests run on Linux and Windows too; protocol activation stays
 macOS-only. They do not establish native handoffs or clock/input correlation.
 
-For native acceptance, use HC PR 6's frozen cursor harness with a private
+For an optional native measurement, use the frozen cursor harness with a private
 context and `kettle::cursor_blink` info enabled. Require one capability even
 for a zero-exit launch, `input` records for keys 1-6 and no other key, exactly
 one exit for every warmup/measured key, actual
@@ -1180,7 +1181,8 @@ agreement with its `cursor-exits.fixture`. The legacy duration line is
 suppressed only in this opt-in stream because HC refuses legacy records.
 Do not poll geometry during the campaign. Missing handoffs or coalesced,
 extra, duplicate or wrong-pane keys must fail coverage, never become synthetic
-zero-cost records. Complete-frame p95 must meet the harness's 4000 us gate.
+zero-cost records. The harness reports complete-frame p95 against its 4000 us
+threshold.
 
 `just cursor-blink-layer-self-test` checks the wire geometry object, refuses
 idle samples shorter than 3 s, and verifies private capture cleanup on success
