@@ -351,20 +351,21 @@ failure, and counts toward the allowance under its own name.
 
 The native observer records who hid the window: each focus check carries the
 measured window's owner (`target_owner`), the top window's owner
-(`top_owner`) and, when a window covers the measured one, its owner
-(`cover_owner`); each activation carries the activated app's `pid`. One focus
+(`top_owner`) and the owner of every window over the measured one
+(`cover_owners`); each activation carries the activated app's `pid`. One focus
 verdict per row weighs every record that bears on it at once (the activations
 and checks inside the interval and every check of the judged queries), so no
 record goes unchecked because another failed first. A check that could not
 read the window server (no frontmost app, the window missing from the list,
 unreadable bounds) is "focus evidence unavailable", the observer's failure.
 Otherwise the failure is the desktop's only when every failing record proves
-it: an activation names another app, or a check shows the measured window
-still the terminal's while another process (pid above 0) is in front, on top
-or over it. A check naming nobody, the terminal's own second window on top or
-its own dialog over the window, a measured window owned by another process,
-or an activation of the terminal itself reads "window hidden, desktop cause
-unproven". Only rows built under these rules (`attribution_contract` 1) can
+it: an activation names another app (one of the terminal itself only as focus
+returning after another app's), or a check shows the measured window still
+the terminal's while another process (pid above 0) is in front or on top, or
+owns every window over it. A check naming nobody, the terminal's own second
+window on top, any cover of its own or of unknown owner, a measured window
+owned by another process, or an activation naming nobody reads "window
+hidden, desktop cause unproven". Only rows built under these rules (`attribution_contract` 1) can
 carry the desktop's reasons; an older row's reads "desktop reason without
 attribution evidence".
 
@@ -379,7 +380,8 @@ frontmost", "not on screen" and per-sample guard failures, which an
 unreadable window list or a terminal that never came forward also produce,
 never count. A failed round keeps its observer's own failure up to the
 probe's end: readiness, its trace, unreadable focus evidence, a broken
-cadence or coverage that stopped early. Within an arm every independent
+cadence, coverage that stopped early, or a focus verdict that is not the
+desktop's. Within an arm every independent
 failure is kept and one that is not the desktop's decides; a failed round's
 missing keys or metric are its consequences, not counted again. Ordinary rows
 keep their validity; only these reason names and fields are new.

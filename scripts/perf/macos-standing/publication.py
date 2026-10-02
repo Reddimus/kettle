@@ -548,8 +548,8 @@ def observer_pilot_report(h, results):
                         # failed round carries its observer's failure, if any.
                         observed = row.get('typing_memory_reason')
                         if arm == 'on' and row.get('typing_memory_valid') is not True and (not failed or observed):
-                            found.append(observed if observed in PILOT_DESKTOP_REASONS and attributed(row, h)
-                                         else 'on-arm observer evidence invalid')
+                            found.append(observed if isinstance(observed, str) and observed in PILOT_DESKTOP_REASONS
+                                         and attributed(row, h) else 'on-arm observer evidence invalid')
                         if not failed:
                             options = meta.get('latency') or {}
                             keys = h.latency_keys(row, options.get('censor_ms', 500))
@@ -557,11 +557,19 @@ def observer_pilot_report(h, results):
                             if keys is None or len(keys) != options.get('keys'):
                                 found.append('incomplete typing keys')
                     elif not failed:
-                        evidence = (row.get('metric_validity') or {}).get(field) or {}
+                        # A malformed row is invalid evidence, never a crash.
+                        validity = row.get('metric_validity')
+                        evidence = validity.get(field) if isinstance(validity, dict) else None
+                        evidence = evidence if isinstance(evidence, dict) else {}
                         value = row.get(field)
-                        failure = h.metric_reason(h.metric_descriptor(workload, field), workload, row)
+                        try:
+                            failure = h.metric_reason(h.metric_descriptor(workload, field), workload, row)
+                        except (AttributeError, TypeError, KeyError):
+                            failure = 'invalid metric evidence'
                         if evidence.get('valid') is not True or failure is not None:
-                            if failure in PILOT_DESKTOP_REASONS and not attributed(row, h):
+                            if not isinstance(failure, str):
+                                failure = None
+                            elif failure in PILOT_DESKTOP_REASONS and not attributed(row, h):
                                 failure = PILOT_UNATTRIBUTED
                             found.append(failure if failure in PILOT_INVALID_REASONS else 'invalid metric evidence')
                     if not found and (not number(value) or value < 0):

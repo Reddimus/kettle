@@ -118,26 +118,34 @@ def check_held(c, pid, window):
 
 
 def desktop_hid(records, pid, window):
-    """Whether the focus records that failed prove the desktop interrupted.
-    An activation proves it when it names another app; the target's own
-    activation proves nothing. A check proves it only while the measured
-    window is still the target's (target_owner) and another process is in
-    front, on top or over the window; one that shows the target's own second
-    window on top or its own dialog over the window blames the target, and
-    so does one that names nobody."""
-    proven = False
-    for c in records:
-        if 'frontmost_pid' not in c:
-            proven = proven or other_process(c.get('pid'), pid)
-            continue
-        # The observer records a cover only while the target is in front and
-        # on top, so the target's own dialog names nobody else and fails here.
+    """Whether the focus records that failed prove the desktop interrupted,
+    every one of them. An activation proves it when it names another app; one
+    of the target itself only counts as focus returning after another app's
+    activation in the same records, and one naming nobody never counts. A
+    check proves it only while the measured window is still the target's
+    (target_owner), another process is in front or on top, or every window
+    over the target is another process's. A check that shows the target's own
+    second window on top, any cover of its own or of unknown owner, or no
+    other process at all blames the target."""
+    activations = sorted((c for c in records if 'frontmost_pid' not in c),
+                         key=lambda c: c['t_ns'] if integer(c.get('t_ns')) else -1)
+    away = False
+    for c in activations:
+        if other_process(c.get('pid'), pid):
+            away = True
+        elif c.get('pid') == pid and away:
+            away = False
+        else:
+            return False
+    checks = [c for c in records if 'frontmost_pid' in c]
+    for c in checks:
+        covers = c.get('cover_owners', [])
         if (c.get('known') is not True or c.get('target_owner') != pid
                 or (c.get('top_window') != window and c.get('top_owner') == pid)
-                or not any(other_process(c.get(key), pid) for key in ('frontmost_pid', 'top_owner', 'cover_owner'))):
+                or not isinstance(covers, list) or not all(other_process(o, pid) for o in covers)
+                or not (covers or other_process(c.get('frontmost_pid'), pid) or other_process(c.get('top_owner'), pid))):
             return False
-        proven = True
-    return proven
+    return bool(activations or checks)
 
 
 def focus_verdict(samples, start, end, judged, pid, window, hidden_name):
@@ -175,7 +183,11 @@ def observed_until(samples, pid, window, sample_ms, until):
     if any(b['scheduled_ns'] - a['scheduled_ns'] != sample_ms * 1_000_000 for a, b in zip(samples, samples[1:])):
         return 'typing observer interval mismatch'
     watched = [s for s in samples if s['query_end_ns'] <= until]
-    return coverage_reason(watched, samples[0]['query_start_ns'], until)
+    begin = samples[0]['query_start_ns']
+    # The focus verdict runs to the failure too: a cover of the terminal's own
+    # seen before the probe gave up is the terminal's, whatever ended it.
+    return (coverage_reason(watched, begin, until)
+            or focus_verdict(samples, begin, until, watched, pid, window, 'typing window not visible'))
 
 
 def coverage_reason(samples, start, end):

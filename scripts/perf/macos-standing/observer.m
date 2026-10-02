@@ -23,7 +23,8 @@ static NSString *identity(pid_t pid) {
 // This decision takes values only; the self-test never reads the window server.
 static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front,
                                    NSArray *windows, uint64_t t) {
-    NSDictionary *wanted = nil, *top = nil, *coverWindow = nil;
+    NSDictionary *wanted = nil, *top = nil;
+    NSMutableArray *coverOwners = [NSMutableArray array];
     for (NSDictionary *w in windows) {
         if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) wanted = w;
         if (!top && [w[(id)kCGWindowLayer] intValue] == 0) top = w;
@@ -38,16 +39,19 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
     }
     // The window list is front-to-back. Any intersecting window above the
     // target, including a same-process dialog or nonzero-layer alert, fails.
+    // Every such window's owner is kept, so a foreign cover cannot hide the
+    // target's own panel beside it.
     if (visible) {
         for (NSDictionary *w in windows) {
             if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) break;
             CGRect cover = CGRectZero;
             if (!w[(id)kCGWindowAlpha] || !w[(id)kCGWindowBounds]
                 || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)w[(id)kCGWindowBounds], &cover)) {
-                known = NO; visible = NO; break;
+                known = NO; visible = NO; [coverOwners removeAllObjects]; break;
             }
             if ([w[(id)kCGWindowAlpha] doubleValue] > 0 && CGRectIntersectsRect(rect, cover)) {
-                visible = NO; coverWindow = w; break;
+                visible = NO;
+                [coverOwners addObject:w[(id)kCGWindowOwnerPID] ?: NSNull.null];
             }
         }
     }
@@ -57,7 +61,7 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
              @"frontmost_pid":front ?: NSNull.null, @"target_window":@(target),
              @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null,
              @"top_owner":top[(id)kCGWindowOwnerPID] ?: NSNull.null,
-             @"cover_owner":coverWindow[(id)kCGWindowOwnerPID] ?: NSNull.null,
+             @"cover_owners":coverOwners,
              @"target_owner":wanted[(id)kCGWindowOwnerPID] ?: NSNull.null};
 }
 static NSDictionary *focus(pid_t pid, CGWindowID target) {

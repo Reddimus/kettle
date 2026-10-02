@@ -5187,20 +5187,22 @@ class OutputBlink(unittest.TestCase):
         # The owners say who hid the window: the top window's, and the
         # covering window's when one covers it.
         # and whether the measured window is still the target's.
-        fixtures=[([wanted],42,True,True,42,None,42),([window(8),wanted],42,True,False,42,None,42),
-                  ([window(9,owner=99,layer=1000),wanted],42,True,False,42,99,42),
-                  ([window(9,layer=1000),wanted],42,True,False,42,42,42),
-                  ([window(9,layer=1000,x=1000),wanted],42,True,True,42,None,42),
-                  ([window(9,layer=1000,alpha=0),wanted],42,True,True,42,None,42),
-                  ([wanted],99,True,False,42,None,42),([],42,False,False,None,None,None),
-                  ([window(7,owner=99)],42,True,False,99,None,99)]
-        for windows, front, known, valid, top_owner, cover_owner, target_owner in fixtures:
+        fixtures=[([wanted],42,True,True,42,[],42),([window(8),wanted],42,True,False,42,[],42),
+                  ([window(9,owner=99,layer=1000),wanted],42,True,False,42,[99],42),
+                  ([window(9,layer=1000),wanted],42,True,False,42,[42],42),
+                  ([window(9,layer=1000,x=1000),wanted],42,True,True,42,[],42),
+                  ([window(9,layer=1000,alpha=0),wanted],42,True,True,42,[],42),
+                  # A foreign cover cannot hide the target's own panel beside it.
+                  ([window(9,owner=99,layer=1000),window(10,layer=3),wanted],42,True,False,42,[99,42],42),
+                  ([wanted],99,True,False,42,[],42),([],42,False,False,None,[],None),
+                  ([window(7,owner=99)],42,True,False,99,[],99)]
+        for windows, front, known, valid, top_owner, cover_owners, target_owner in fixtures:
             result=self.native_fixture('observer',_json.dumps(dict(pid=42,target=7,front=front,windows=windows)))
             decision=_json.loads(result.stdout)
             self.assertEqual(decision['known'],known)
             self.assertEqual(decision['valid'],valid,windows)
-            self.assertEqual((decision['top_owner'],decision['cover_owner'],decision['target_owner']),
-                             (top_owner,cover_owner,target_owner),windows)
+            self.assertEqual((decision['top_owner'],decision['cover_owners'],decision['target_owner']),
+                             (top_owner,cover_owners,target_owner),windows)
 
     def test_payload_short_stalled_omitted_missing_done(self):
         import copy
@@ -5667,7 +5669,7 @@ class TypingMemory(unittest.TestCase):
         self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], 'focus evidence unavailable')
         s[10]['focus_after'].update(known=True, valid=False)
         self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], standing.hc.UNPROVEN)
-        s[10]['focus_after'].update(cover_owner=506)
+        s[10]['focus_after'].update(cover_owners=[506])
         self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], standing.hc.UNPROVEN)
         s[10]['focus_after'].update(target_owner=42)
         self.assertEqual(self.memory(p,s,a)['typing_memory_reason'], 'typing window not visible')
@@ -7544,13 +7546,14 @@ class ObserverPilot(unittest.TestCase):
     def test_failed_round_keeps_terminal_exit_and_observer_trace(self):
         import tempfile, contextlib
         from unittest.mock import Mock, patch
-        for case in ('exited', 'late-trace', 'unknown-focus', 'stopped-early', 'unknown-shutdown'):
+        for case in ('exited', 'late-trace', 'unknown-focus', 'stopped-early', 'unknown-shutdown', 'own-cover'):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 work=Path(tmp)
                 runner=standing.Runner({k:work/k for k in ('keyblock','observer','latency-probe')},work,{})
                 samples=OutputBlink().samples(count=3)
                 if case=='late-trace':samples[2]['query_end_ns']+=400_000_000
                 if case=='unknown-focus':samples[1]['focus_after']['known']=False
+                if case=='own-cover':samples[1]['focus_after'].update(valid=False,cover_owners=[42],target_owner=42)
                 def launch(*args,**kwargs):
                     (work/'typing-launch.json').write_text(_json.dumps({'pid':42,'window_id':7}))
                     (work/'typing-memory.jsonl').write_text(''.join(_json.dumps(x)+'\n' for x in samples))
@@ -7580,6 +7583,8 @@ class ObserverPilot(unittest.TestCase):
                     self.assertNotIn('typing_memory_reason',row)
                 elif case=='stopped-early':
                     self.assertEqual(row['typing_memory_reason'],'insufficient timeline coverage')
+                elif case=='own-cover':
+                    self.assertEqual(row['typing_memory_reason'],standing.hc.UNPROVEN)
                 else:
                     expected=(standing.hc.trace_reason(samples,42,7) if case=='late-trace'
                               else 'focus evidence unavailable')
@@ -7671,6 +7676,59 @@ class ObserverPilot(unittest.TestCase):
                                               10_000_000_000, 11_000_000_000, 42, 7, 'verified')):
             self.assertEqual(builder['attribution_contract'], standing.hc.ATTRIBUTION_CONTRACT)
 
+    def test_malformed_reasons_are_invalid_evidence_not_crashes(self):
+        for reason in ([], {}, 7, None):
+            raw=self.fixture('typing',[0.]*20,names=['kettle'])
+            on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
+            on.update(typing_memory_valid=False,typing_memory_reason=reason)
+            metric=self.report(raw)['terminals']['kettle']['metrics']['mean_ms']
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'on-arm observer evidence invalid':1},reason)
+        for validity in ([], ['x'], 'x', {'printing_mib': []}, {'printing_mib': dict(valid=False, reason=[])},
+                         {'printing_mib': dict(valid=False, reason={})}):
+            raw=self.fixture('printing',[0.]*20,names=['kettle'])
+            raw['workloads']['output-memory']['kettle'][0]['metric_validity']=validity
+            metric=self.report(raw)['terminals']['kettle']['metrics']['printing_mib']
+            self.assertEqual(metric['invalid_pairs_by_reason'],{'invalid metric evidence':1},validity)
+
+    def test_launch_helper_records_an_exit_apart_from_a_stop(self):
+        # A child that exits while the helper is held, with a stop queued
+        # behind it, is recorded as exited; a running child that is stopped is
+        # recorded as stopped. Where the hold lands decides whether the stop
+        # check runs before the exit check, so this pins the record's contract;
+        # it cannot force the race the exit-before-stop check closes.
+        import tempfile, signal as sig
+        if sys.platform != 'darwin' or not shutil.which('swiftc'):
+            self.skipTest('the launch helper needs macOS swiftc')
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            binary = work/'launch'
+            build = subprocess.run(['swiftc', '-O', str(HERE/'macos-standing'/'launch.swift'), '-o', str(binary)],
+                                   capture_output=True, text=True, timeout=180)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            for child, early in ((['/bin/sleep', '0.3'], True), (['/bin/sleep', '30'], False)):
+                out, stamp = work/'launch.json', work/'stamp'
+                out.unlink(missing_ok=True)
+                helper = subprocess.Popen([str(binary), str(out), str(stamp), '20', '--', *child])
+                try:
+                    deadline = time.monotonic() + 10
+                    while not Path(str(stamp)+'.pid').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(Path(str(stamp)+'.pid').exists())
+                    if early:
+                        os.kill(helper.pid, sig.SIGSTOP)
+                        time.sleep(1.)
+                    os.kill(helper.pid, sig.SIGTERM)
+                    if early:
+                        os.kill(helper.pid, sig.SIGCONT)
+                    self.assertEqual(helper.wait(timeout=30), 0)
+                finally:
+                    if helper.poll() is None:
+                        os.kill(helper.pid, sig.SIGCONT)
+                        os.kill(helper.pid, sig.SIGKILL)
+                        helper.wait()
+                record = _json.loads(out.read_text())
+                self.assertEqual(standing.shutdown_kind(record, True), 'exited' if early else 'stopped', record)
+
     def test_shutdown_kind_needs_the_helpers_record(self):
         kind = standing.shutdown_kind
         self.assertEqual(kind(dict(stopped=True, killed=False, exit_ms=5.), True), 'stopped')
@@ -7735,43 +7793,57 @@ class ObserverPilot(unittest.TestCase):
             # Judged outside any interval, as an off arm's records after done are.
             return hc.focus_verdict(samples, 100, 200, samples, 42, 7, name)
         for hidden, expected in (
-                (check(valid=False, cover_owner=506), name),
-                (check(valid=False, cover_owner=42), hc.UNPROVEN),
+                (check(valid=False, cover_owners=[506]), name),
+                (check(valid=False, cover_owners=[506, 77]), name),
+                (check(valid=False, cover_owners=[42]), hc.UNPROVEN),
+                # A foreign cover cannot clear the target's own, or one of unknown owner.
+                (check(valid=False, cover_owners=[506, 42]), hc.UNPROVEN),
+                (check(valid=False, cover_owners=[506, None]), hc.UNPROVEN),
+                (check(valid=False, cover_owners=506), hc.UNPROVEN),
                 (check(valid=False), hc.UNPROVEN),
                 (check(valid=False, frontmost_pid=99), name),
                 (check(valid=False, top_window=3, top_owner=99), name),
                 (check(valid=False, top_window=8, top_owner=42), hc.UNPROVEN),
                 # Another process on top proves nothing while the measured
                 # window itself is no longer the target's.
-                (check(valid=False, cover_owner=506, target_owner=99), hc.UNPROVEN),
+                (check(valid=False, cover_owners=[506], target_owner=99), hc.UNPROVEN),
                 (check(valid=False, top_window=3, top_owner=99, target_owner=None), hc.UNPROVEN),
-                (check(valid=False, cover_owner=0), hc.UNPROVEN)):
+                (check(valid=False, cover_owners=[0]), hc.UNPROVEN)):
             self.assertEqual(judged([sample(before=hidden)]), expected, hidden)
         self.assertIsNone(judged([sample()]))
         # Another process in one check cannot clear the terminal's own dialog in another.
-        both = [sample(before=check(valid=False, frontmost_pid=99), after=check(t_ns=6, valid=False, cover_owner=42))]
+        both = [sample(before=check(valid=False, frontmost_pid=99), after=check(t_ns=6, valid=False, cover_owners=[42]))]
         self.assertEqual(judged(both), hc.UNPROVEN)
         # Activations: another app's proves the desktop; the target's own proves nothing.
         for pid, expected in ((99, 'known focus change during interval'), (42, hc.UNPROVEN), (None, hc.UNPROVEN),
                               (0, hc.UNPROVEN)):
             got = hc.focus_verdict([sample(changes=[dict(t_ns=5, valid=False, pid=pid)])], 0, 10, [], 42, 7, name)
             self.assertEqual(got, expected, pid)
+        # Every activation must be explained: the target's own only as focus
+        # returning after another app's, and one naming nobody never.
+        for pids, expected in (((99, 42), 'known focus change during interval'),
+                               ((99, 77), 'known focus change during interval'),
+                               ((42, 99), hc.UNPROVEN), ((99, None), hc.UNPROVEN),
+                               ((99, 42, 42), hc.UNPROVEN)):
+            changes = [dict(t_ns=1 + i, valid=False, pid=pid) for i, pid in enumerate(pids)]
+            got = hc.focus_verdict([sample(changes=list(reversed(changes)))], 0, 10, [], 42, 7, name)
+            self.assertEqual(got, expected, pids)
         # A proven activation cannot clear a judged check that blames the target.
         mixed = [sample(changes=[dict(t_ns=5, valid=False, pid=99)]),
-                 dict(sample(), focus_after=check(t_ns=150, valid=False, cover_owner=42))]
+                 dict(sample(), focus_after=check(t_ns=150, valid=False, cover_owners=[42]))]
         self.assertEqual(hc.focus_verdict(mixed, 0, 10, mixed, 42, 7, name), hc.UNPROVEN)
         # Off-arm printing hidden by the terminal's own dialog is never the desktop's.
         fixture = OutputBlink()
         records, samples = fixture.printing(), fixture.samples()
         sparse = [samples[0], *samples[59:66], samples[81]]
-        sparse[-1]['focus_after'] = dict(sparse[-1]['focus_after'], valid=False, cover_owner=42, target_owner=42)
+        sparse[-1]['focus_after'] = dict(sparse[-1]['focus_after'], valid=False, cover_owners=[42], target_owner=42)
         self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'], hc.UNPROVEN)
-        sparse[-1]['focus_after']['cover_owner'] = 506
+        sparse[-1]['focus_after']['cover_owners'] = [506]
         self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'],
                          'printing window not visible')
         # An activation by another app inside the output cannot clear the
         # terminal's own dialog over the record after done.
-        sparse[-1]['focus_after']['cover_owner'] = 42
+        sparse[-1]['focus_after']['cover_owners'] = [42]
         sparse[3]['focus_changes'] = [dict(t_ns=sparse[3]['focus_before']['t_ns'] - 1, valid=False, pid=99)]
         self.assertEqual(hc.printing_row(records, sparse, 42, 7, observer_off=True)['printing_reason'], hc.UNPROVEN)
 

@@ -558,9 +558,12 @@ still the target's, one verdict that no proven activation can let mask the
 terminal's own dialog, rows without `attribution_contract` never carrying the
 desktop, unreadable focus evidence judged ahead of a focus change, an off-arm
 printing row whose hidden window cannot mask its missing post-done query, the
-native observer's `top_owner`/`cover_owner`/`target_owner` decisions,
-incomplete pairs,
-failed arms, report dispatch and privacy. The native offset parser fixture
+native observer's `top_owner`/`cover_owners`/`target_owner` decisions (a
+foreign cover beside the terminal's own panel included), activations that
+must each be explained, malformed reasons read as invalid evidence, the
+launch helper's records of a child that exited apart from one it stopped (the
+race its exit-before-stop check closes cannot be forced from outside),
+incomplete pairs, failed arms, report dispatch and privacy. The native offset parser fixture
 compiles `observer.m` using the existing macOS skip policy and runs only its
 pure `--self-test-offsets` entry. Owned native scratch fixtures also verify
 the pilot self-cost sidecar and sparse launch requests. The parser checks
