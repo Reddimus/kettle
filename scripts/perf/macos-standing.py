@@ -1928,13 +1928,28 @@ class Runner:
                     if pending_result is not None:
                         linked_result(pending_result)
         # The terminal has been stopped by now. A failed round still records
-        # whether that stop was clean, and an observer that never became
-        # ready, so a desktop failure the probe reports cannot stand for
-        # either.
+        # its target, whether that stop was clean, a terminal that exited
+        # before it was asked to, and its observer's own failure, so a desktop
+        # failure the probe reports cannot stand for any of them.
         def failed(error: str) -> dict:
-            row = {"error": error, **({} if clean else {"killed": True})}
-            if observer_reason:
-                row.update(typing_memory_valid=False, typing_memory_reason=observer_reason)
+            row = {"error": error, "target_pid": pid, **({} if clean else {"killed": True})}
+            try:
+                ended = json.loads((self.work / "launch.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                ended = {}
+            if (isinstance(ended, dict) and ended.get("stopped") is False and ended.get("killed") is False
+                    and ended.get("exit_ms") is not None):
+                row["terminal_exited"] = True
+            observed = observer_reason
+            if observed is None and observer is not None:
+                try:
+                    samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
+                    observed = (hc.trace_reason(samples, pid, info.get("window_id"))
+                                or ("focus evidence unavailable" if hc.focus_unknown(samples) else None))
+                except (OSError, ValueError, TypeError, KeyError):
+                    observed = "typing timeline unavailable or invalid"
+            if observed:
+                row.update(typing_memory_valid=False, typing_memory_reason=observed)
             return linked_result(row)
         if not finished:
             return failed("the latency probe never finished")

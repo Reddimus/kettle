@@ -426,7 +426,7 @@ PILOT_INVALID_REASONS = frozenset({
     'native query late', 'native query failed or target exited', 'native focus notification overflow',
     'process lifetime identity missing or changed', 'stale focus check', 'nonmonotonic native trace',
     'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing',
-    'focus evidence unavailable'})
+    'focus evidence unavailable', 'window hidden, desktop cause unproven'})
 # Equivalence is the two one-sided tests at 5 % each: the paired Student-t
 # 90 % interval must sit inside the bounds. Up to 5 % of the planned pairs may
 # be invalid, and only for the desktop's reasons below (focus moving, a window
@@ -438,11 +438,33 @@ PILOT_DESKTOP_REASONS = frozenset({
     'known focus change during interval', 'window not visible during interval', 'printing window not visible',
     'designated query lost focus', 'blink window not visible', 'typing window not visible',
     'probe saw focus, cover or foreign input'})
-# The latency probe's own guards, as its failures name them.
-PROBE_DESKTOP_FAILURE = re.compile(
-    r'latency probe: (?:not frontmost(?:, and the titlebar is covered)?|focus changed before a key \(.*\)'
-    r'|the measured window is not on screen|a window \(pid [0-9]+, layer -?[0-9]+\) covers the block'
-    r'|foreign input|focus changed or a window covered the block during a sample)')
+# The latency probe's failures that name who interrupted.
+PROBE_COVER = re.compile(r'latency probe: a window \(pid ([0-9]+), layer [0-9]+\) covers the block')
+PROBE_FOCUS = re.compile(r'latency probe: focus changed before a key \(frontmost ([0-9]+|none), '
+                         r'top window (?:([0-9]+)/[0-9]+|none)\)')
+
+
+def probe_desktop_failure(row, cols, rows):
+    """Whether a typing row's probe failure proves the desktop interrupted:
+    another process's window over the block, another app or another
+    process's window in front before a key, or input from outside the
+    harness. The round must name its target, have settled at the session
+    grid, stopped cleanly and kept its terminal running. Failures that an
+    unreadable window list or a terminal that never came forward also
+    produce ("not frontmost", "not on screen", the per-sample guard) never
+    count."""
+    error, target = row.get('error'), row.get('target_pid')
+    if (not isinstance(error, str) or type(target) is not int or target <= 0 or row.get('killed')
+            or row.get('terminal_exited') or (row.get('cols'), row.get('rows')) != (cols, rows)):
+        return False
+    if error == 'latency probe: foreign input':
+        return True
+    cover = PROBE_COVER.fullmatch(error)
+    if cover:
+        return int(cover[1]) != target
+    focus = PROBE_FOCUS.fullmatch(error)
+    return bool(focus) and any(owner not in (None, 'none') and int(owner) != target
+                               for owner in (focus[1], focus[2]))
 COST_FIELDS = ('cpu_ns', 'wakeups', 'query_count', 'query_duration_median_ms',
                'query_duration_max_ms', 'deadline_lateness_max_ms',
                'target_cpu_delta_ns', 'target_wakeups_delta')
@@ -481,54 +503,58 @@ def observer_pilot_report(h, results):
             values = {'on': [], 'off': []}
             invalid = {}
             for pair, arms in grouped.items():
-                # Each arm keeps its first reason. A pair counts against the
-                # desktop allowance only if neither arm failed otherwise.
+                # A pair counts against the desktop allowance only if neither
+                # arm shows any failure that is not the desktop's.
                 reasons = []
                 selected = {}
                 for arm in ('on', 'off'):
-                    reason = None
                     launches = arms[arm]
                     if len(launches) != 1:
                         reasons.append('missing arm' if not launches else 'duplicate arm')
                         continue
                     row = launches[0]
+                    # Every independent failure of this arm; one that is not
+                    # the desktop's decides. A failed round's missing keys or
+                    # metric follow from its failure and do not count again.
+                    found = []
                     expected_order = int(arm != ('on' if pair % 2 == 0 else 'off'))
                     if type(row.get('observer_order')) is not int or row['observer_order'] != expected_order:
-                        reason = reason or 'invalid arm order'
-                    if row.get('killed') or row.get('warmup') or row.get('seq_mismatch'):
-                        reason = reason or 'failed arm'
-                    elif 'error' in row:
-                        # The probe's error ends the row early; the grid it
-                        # settled at must still be the session's.
-                        desktop = (kind == 'typing' and isinstance(row['error'], str)
-                                   and PROBE_DESKTOP_FAILURE.fullmatch(row['error'])
-                                   and (row.get('cols'), row.get('rows')) == (h.COLS, h.ROWS))
-                        reason = reason or ('probe saw focus, cover or foreign input' if desktop else 'failed arm')
+                        found.append('invalid arm order')
+                    if row.get('killed') or row.get('warmup') or row.get('seq_mismatch') or row.get('terminal_exited'):
+                        found.append('failed arm')
+                    failed = 'error' in row
+                    if failed:
+                        found.append('probe saw focus, cover or foreign input'
+                                     if kind == 'typing' and probe_desktop_failure(row, h.COLS, h.ROWS)
+                                     else 'failed arm')
+                    value = None
                     if kind == 'typing':
-                        options = meta.get('latency') or {}
-                        keys = h.latency_keys(row, options.get('censor_ms', 500))
-                        value = statistics.mean(keys) if keys else None
-                        if keys is None or len(keys) != options.get('keys'):
-                            reason = reason or 'incomplete typing keys'
                         # An on arm counts only if its observer ran through
                         # the whole typing epoch, not just its readiness query.
                         # Its focus checks can see the desktop interrupt between
-                        # the probe's own; only those reasons keep their name.
-                        if arm == 'on' and row.get('typing_memory_valid') is not True:
-                            observed = row.get('typing_memory_reason')
-                            reason = reason or (observed if observed in PILOT_DESKTOP_REASONS
-                                                else 'on-arm observer evidence invalid')
-                    else:
+                        # the probe's own; only those reasons keep their name. A
+                        # failed round carries its observer's failure, if any.
+                        observed = row.get('typing_memory_reason')
+                        if arm == 'on' and row.get('typing_memory_valid') is not True and (not failed or observed):
+                            found.append(observed if observed in PILOT_DESKTOP_REASONS
+                                         else 'on-arm observer evidence invalid')
+                        if not failed:
+                            options = meta.get('latency') or {}
+                            keys = h.latency_keys(row, options.get('censor_ms', 500))
+                            value = statistics.mean(keys) if keys else None
+                            if keys is None or len(keys) != options.get('keys'):
+                                found.append('incomplete typing keys')
+                    elif not failed:
                         evidence = (row.get('metric_validity') or {}).get(field) or {}
                         value = row.get(field)
                         failure = h.metric_reason(h.metric_descriptor(workload, field), workload, row)
                         if evidence.get('valid') is not True or failure is not None:
-                            reason = reason or (failure if failure in PILOT_INVALID_REASONS else 'invalid metric evidence')
-                    if not number(value) or value < 0:
-                        reason = reason or 'metric unavailable'
+                            found.append(failure if failure in PILOT_INVALID_REASONS else 'invalid metric evidence')
+                    if not found and (not number(value) or value < 0):
+                        found.append('metric unavailable')
                     selected[arm] = value
-                    if reason:
-                        reasons.append(reason)
+                    if found:
+                        reasons.append(next((r for r in found if r not in PILOT_DESKTOP_REASONS), found[0]))
                 if reasons:
                     reason = next((r for r in reasons if r not in PILOT_DESKTOP_REASONS), reasons[0])
                     invalid[reason] = invalid.get(reason, 0) + 1

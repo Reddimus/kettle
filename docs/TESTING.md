@@ -549,10 +549,13 @@ typing observer omission, sparse observer requests, boundary/query focus and
 lateness, numeric self-cost allowlists, the 90% interval against its bounds,
 the desktop-only 5% allowance (a pair with any other failure never counts as
 the desktop's), typing observer focus reasons counted as the desktop's, a
-failed probe round that keeps its unclean stop and an observer that never
-became ready, a probe failure off the session grid, unreadable focus evidence
-judged ahead of a focus change, an off-arm printing row whose hidden window
-cannot mask its missing post-done query, incomplete pairs,
+failed probe round that keeps its unclean stop, its target pid, an early
+terminal exit and its observer's readiness or trace failure, a probe failure
+off the session grid or naming no other process, a hidden window or
+activation counted as the desktop's only when another process is named,
+unreadable focus evidence judged ahead of a focus change, an off-arm printing
+row whose hidden window cannot mask its missing post-done query, the native
+observer's `top_owner`/`cover_owner` decisions, incomplete pairs,
 failed arms, report dispatch and privacy. The native offset parser fixture
 compiles `observer.m` using the existing macOS skip policy and runs only its
 pure `--self-test-offsets` entry. Owned native scratch fixtures also verify

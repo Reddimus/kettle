@@ -191,8 +191,13 @@ per-arm medians and self-cost/query summaries. Bounds are +/-1 ms launch mean fo
 pairs, rounded down. An invalid pair for any reason other than focus,
 visibility or the probe's cover and foreign-input guards ("probe saw focus,
 cover or foreign input") means "invalid pairs not caused by the desktop".
-Focus evidence the observer could not read ("focus evidence unavailable") and
-a probe failure off the 120x36 grid are not the desktop's. More desktop
+Focus evidence the observer could not read ("focus evidence unavailable"), a
+hidden window or activation that names no other process ("window hidden,
+desktop cause unproven"), and a probe failure that names no other process,
+ran off the 120x36 grid, did not stop cleanly or lost its terminal
+(`terminal_exited`) are not the desktop's. Native focus checks carry
+`top_owner` and `cover_owner`, activations carry `pid`, and failed latency
+rows carry `target_pid`. More desktop
 failures than allowed means "insufficient valid pairs", and an unfinished
 session means "pilot incomplete". Overall equivalence needs every terminal to
 pass.

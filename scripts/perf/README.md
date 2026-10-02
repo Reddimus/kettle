@@ -332,9 +332,12 @@ with the same Student-t 90% interval, bounded by +/-0.5 MiB. Blink requires
 both paired intervals within +/-0.01 percentage points for `cpu_percent` and
 +/-0.1/s for `wakeups_per_second`. Descriptive per-arm medians do not gate
 equivalence. Up to 5% of the predeclared pairs, rounded down, may be invalid,
-and only for the desktop's reasons: a known focus change, a measured window
-that was not visible or lost focus at a designated query, or the latency
-probe's own focus, cover and foreign-input guards. Any other invalid pair
+and only where the evidence proves the desktop interrupted: another app
+activated or in front, another process's window on top of or over the
+measured one (a focus change, or a window not visible or out of focus at a
+designated query), or the latency probe naming another process's covering
+window, another app or window in front before a key, or foreign input. Any
+other invalid pair
 yields "invalid pairs not caused by the desktop", more desktop failures than
 that yield "insufficient valid pairs", and an unfinished session yields
 "pilot incomplete". A pair is a desktop failure only if neither of its arms
@@ -344,15 +347,30 @@ counts only if its on arm's observer covered the whole typing epoch
 (`typing_memory_valid`); timing that survives an observer that stopped early
 does not measure the observer-on condition. A focus change or hidden window
 that the observer's own checks catch between the probe's is the desktop's
-failure, and counts toward the allowance under its own name. A focus check
-that could not read the window server (no frontmost app, the window missing
-from the list, unreadable bounds) is "focus evidence unavailable": the
-observer's failure, never the desktop's. A probe failure counts as the
-desktop's only at the session's 120x36 grid, and it still records a terminal
-that did not stop cleanly or an observer that never became ready, neither of
-which is the desktop's. Row builders check the desktop's reasons last, so a
-focus change never stands in for unreadable focus evidence, a missing query
-or a coverage failure in the same arm.
+failure, and counts toward the allowance under its own name.
+
+The native observer records who hid the window: each focus check carries the
+top window's owner (`top_owner`) and, when a window covers the measured one,
+its owner (`cover_owner`), and each activation carries the activated app's
+`pid`. A hidden window whose records name no other process, or any record
+that blames only the terminal (its own dialog or second window), reads
+"window hidden, desktop cause unproven" and never counts as the desktop's;
+an activation of the terminal itself proves nothing. A focus check that could
+not read the window server (no frontmost app, the window missing from the
+list, unreadable bounds) is "focus evidence unavailable", the observer's
+failure. A probe failure counts as the desktop's only when its row names the
+terminal (`target_pid`), settled at 120x36, stopped cleanly and kept its
+terminal running (`terminal_exited` records one that quit before the stop);
+the probe's "not frontmost", "not on screen" and per-sample guard failures,
+which an unreadable window list or a terminal that never came forward also
+produce, never count. A failed round also keeps its observer's own failure
+(readiness, its trace, unreadable focus evidence). Within an arm every
+independent failure is kept and one that is not the desktop's decides; a
+failed round's missing keys or metric are its consequences, not counted
+again. Row builders check the desktop's reasons last, so a focus change never
+stands in for unreadable focus evidence, a missing query or a coverage failure
+in the same arm. Ordinary rows keep their validity; only these reason names
+are new.
 
 Printing off arms retain the readiness query at origin, then query at
 5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus

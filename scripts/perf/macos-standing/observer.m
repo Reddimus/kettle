@@ -23,7 +23,7 @@ static NSString *identity(pid_t pid) {
 // This decision takes values only; the self-test never reads the window server.
 static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front,
                                    NSArray *windows, uint64_t t) {
-    NSDictionary *wanted = nil, *top = nil;
+    NSDictionary *wanted = nil, *top = nil, *coverWindow = nil;
     for (NSDictionary *w in windows) {
         if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) wanted = w;
         if (!top && [w[(id)kCGWindowLayer] intValue] == 0) top = w;
@@ -47,13 +47,17 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
                 known = NO; visible = NO; break;
             }
             if ([w[(id)kCGWindowAlpha] doubleValue] > 0 && CGRectIntersectsRect(rect, cover)) {
-                visible = NO; break;
+                visible = NO; coverWindow = w; break;
             }
         }
     }
+    // Owners say who hid the window: another process (the desktop) or the
+    // target itself, such as its own dialog.
     return @{@"t_ns":@(t), @"known":@(known), @"valid":@(visible),
              @"frontmost_pid":front ?: NSNull.null, @"target_window":@(target),
-             @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null};
+             @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null,
+             @"top_owner":top[(id)kCGWindowOwnerPID] ?: NSNull.null,
+             @"cover_owner":coverWindow[(id)kCGWindowOwnerPID] ?: NSNull.null};
 }
 static NSDictionary *focus(pid_t pid, CGWindowID target) {
     uint64_t t = now();
@@ -126,7 +130,9 @@ int main(int argc, char **argv) {
         id token = [NSWorkspace.sharedWorkspace.notificationCenter
             addObserverForName:NSWorkspaceDidActivateApplicationNotification object:nil queue:nil
             usingBlock:^(NSNotification *note) {
-                if (changes.count < 64) [changes addObject:@{@"t_ns":@(now()), @"valid":@NO}];
+                NSRunningApplication *app = note.userInfo[NSWorkspaceApplicationKey];
+                if (changes.count < 64) [changes addObject:@{@"t_ns":@(now()), @"valid":@NO,
+                    @"pid":app ? @(app.processIdentifier) : NSNull.null}];
                 else changesOverflow = YES;
             }];
         mach_timebase_info_data_t base; mach_timebase_info(&base);
