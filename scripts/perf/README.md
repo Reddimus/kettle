@@ -281,8 +281,10 @@ consumers. Old sessions without typing memory keep their existing outputs.
 
 Before A/A, run an excluded observer-on/off pilot with the same terminal,
 sealed config, verified probe, payload, seed, display and timing settings.
-Predeclare ten valid paired launches per terminal, 100 measured keys and 20
-warmups, with paired order balanced between observer on and off. Retain every
+Predeclare the paired launches per terminal, 100 measured keys and 20
+warmups, with paired order balanced between observer on and off. Size the
+pairs from an earlier pilot's spread for 90% power to show equivalence when
+the true difference is zero; ten pairs allow no invalid pair. Retain every
 attempt and failure; do not select favorable launches or pool terminals. The
 diagnostic runner omits only the observer request on its off arm and marks
 both arms as observer-control data, never as standings or ordinary A/A.
@@ -317,19 +319,27 @@ Cancellation retains the attempted row before stopping. A typing on arm
 whose observer/context never became available is a failed arm, even if timing
 survived. No countable invocation offers a sampler-off option.
 
-For each terminal, compute the paired launch-mean timing difference with the
-current Student-t 95% interval. Its entire interval must lie within -1 to
-+1 ms. An interval containing zero is insufficient. Retain observer and target
+For each terminal, compute the paired launch-mean timing difference with a
+Student-t 90% interval: the two one-sided tests (TOST), each at 5%. Its entire
+interval must lie within -1 to +1 ms. An interval containing zero is
+insufficient. Retain observer and target
 CPU/wakeup deltas, query durations, deadline lateness, coverage, clock checks
 and all raw files. Both arms use the same SCK capture. Observer-off memory is
 unavailable and cannot enter a memory comparison. Fix a failed method and
 repeat the excluded pilot before freeze; do not change cadence after A/A.
 The companion printing pilot uses paired `printing_mib` on-minus-off differences
-with the same Student-t 95% interval, bounded by +/-0.5 MiB. Blink requires
+with the same Student-t 90% interval, bounded by +/-0.5 MiB. Blink requires
 both paired intervals within +/-0.01 percentage points for `cpu_percent` and
 +/-0.1/s for `wakeups_per_second`. Descriptive per-arm medians do not gate
-equivalence. Every predeclared pair must be valid; fewer yield "insufficient
-valid pairs". Every terminal must pass for overall equivalence. A typing pair
+equivalence. Up to 5% of the predeclared pairs, rounded down, may be invalid,
+and only for the desktop's reasons: a known focus change, a measured window
+that was not visible or lost focus at a designated query, or the latency
+probe's own focus, cover and foreign-input guards. Any other invalid pair
+yields "invalid pairs not caused by the desktop", more desktop failures than
+that yield "insufficient valid pairs", and an unfinished session yields
+"pilot incomplete". A pair is a desktop failure only if neither of its arms
+failed for another reason, and every invalid pair stays in the report by
+reason. Every terminal must pass for overall equivalence. A typing pair
 counts only if its on arm's observer covered the whole typing epoch
 (`typing_memory_valid`); timing that survives an observer that stopped early
 does not measure the observer-on condition.

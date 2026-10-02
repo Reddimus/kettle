@@ -182,11 +182,17 @@ Unavailable counters are null; typing off observer counters/count are zero.
 The native observer writes a bounded `.self.json` sidecar only in pilot mode.
 
 `observer-equivalence.json` reports per-terminal metric differences on minus
-off with paired Student-t 95% intervals, valid-pair counts, invalid-pair
-counts by public reason, descriptive per-arm medians and self-cost/query
-summaries. Bounds are +/-1 ms launch mean for typing, +/-0.5 MiB
+off with paired Student-t 90% intervals (`interval_policy` "TOST at 5% each
+side: paired Student-t 90% inside the bounds"), valid-pair counts,
+`allowed_invalid_pairs`, invalid-pair counts by public reason, descriptive
+per-arm medians and self-cost/query summaries. Bounds are +/-1 ms launch mean for typing, +/-0.5 MiB
 `printing_mib`, and both +/-0.01 percentage points `cpu_percent` and +/-0.1/s
-`wakeups_per_second` for blink. Fewer valid pairs than declared means
-"insufficient valid pairs". Overall equivalence needs every terminal to pass.
+`wakeups_per_second` for blink. `allowed_invalid_pairs` is 5% of the declared
+pairs, rounded down. An invalid pair for any reason other than focus,
+visibility or the probe's cover and foreign-input guards ("probe saw focus,
+cover or foreign input") means "invalid pairs not caused by the desktop";
+more desktop failures than allowed means "insufficient valid pairs"; an
+unfinished session means "pilot incomplete". Overall equivalence needs every
+terminal to pass.
 Ordinary analysis, combine and A/A cannot consume these sessions. The startup
 stamp observer-control report retains its existing contract.

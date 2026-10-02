@@ -426,6 +426,21 @@ PILOT_INVALID_REASONS = frozenset({
     'native query late', 'native query failed or target exited', 'native focus notification overflow',
     'process lifetime identity missing or changed', 'stale focus check', 'nonmonotonic native trace',
     'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing'})
+# Equivalence is the two one-sided tests at 5 % each: the paired Student-t
+# 90 % interval must sit inside the bounds. Up to 5 % of the planned pairs may
+# be invalid, and only for the desktop's reasons below (focus moving, a window
+# covering the measured one, input from outside the harness), never for the
+# observer's or the terminal's; every invalid pair stays in the report.
+PILOT_LEVEL = .90
+PILOT_INVALID_SHARE = .05
+PILOT_DESKTOP_REASONS = frozenset({
+    'known focus change during interval', 'window not visible during interval', 'printing window not visible',
+    'designated query lost focus', 'blink window not visible', 'probe saw focus, cover or foreign input'})
+# The latency probe's own guards, as its failures name them.
+PROBE_DESKTOP_FAILURE = re.compile(
+    r'latency probe: (?:not frontmost(?:, and the titlebar is covered)?|focus changed before a key \(.*\)'
+    r'|the measured window is not on screen|a window \(pid [0-9]+, layer -?[0-9]+\) covers the block'
+    r'|foreign input|focus changed or a window covered the block during a sample)')
 COST_FIELDS = ('cpu_ns', 'wakeups', 'query_count', 'query_duration_median_ms',
                'query_duration_max_ms', 'deadline_lateness_max_ms',
                'target_cpu_delta_ns', 'target_wakeups_delta')
@@ -464,19 +479,26 @@ def observer_pilot_report(h, results):
             values = {'on': [], 'off': []}
             invalid = {}
             for pair, arms in grouped.items():
-                reason = None
+                # Each arm keeps its first reason. A pair counts against the
+                # desktop allowance only if neither arm failed otherwise.
+                reasons = []
                 selected = {}
                 for arm in ('on', 'off'):
+                    reason = None
                     launches = arms[arm]
                     if len(launches) != 1:
-                        reason = reason or ('missing arm' if not launches else 'duplicate arm')
+                        reasons.append('missing arm' if not launches else 'duplicate arm')
                         continue
                     row = launches[0]
                     expected_order = int(arm != ('on' if pair % 2 == 0 else 'off'))
                     if type(row.get('observer_order')) is not int or row['observer_order'] != expected_order:
                         reason = reason or 'invalid arm order'
-                    if 'error' in row or row.get('killed') or row.get('warmup') or row.get('seq_mismatch'):
+                    if row.get('killed') or row.get('warmup') or row.get('seq_mismatch'):
                         reason = reason or 'failed arm'
+                    elif 'error' in row:
+                        desktop = (kind == 'typing' and isinstance(row['error'], str)
+                                   and PROBE_DESKTOP_FAILURE.fullmatch(row['error']))
+                        reason = reason or ('probe saw focus, cover or foreign input' if desktop else 'failed arm')
                     if kind == 'typing':
                         options = meta.get('latency') or {}
                         keys = h.latency_keys(row, options.get('censor_ms', 500))
@@ -496,20 +518,31 @@ def observer_pilot_report(h, results):
                     if not number(value) or value < 0:
                         reason = reason or 'metric unavailable'
                     selected[arm] = value
-                if reason:
+                    if reason:
+                        reasons.append(reason)
+                if reasons:
+                    reason = next((r for r in reasons if r not in PILOT_DESKTOP_REASONS), reasons[0])
                     invalid[reason] = invalid.get(reason, 0) + 1
                     continue
                 for arm in ('on', 'off'):
                     values[arm].append(selected[arm])
             n = len(values['on'])
-            difference = h.paired_difference(values['off'], values['on']) if n >= 2 else {}
-            complete = n == planned and meta.get('complete') is True
-            inside = bool(difference) and low_bound <= difference['low'] <= difference['high'] <= high_bound
+            difference = h.paired_difference(values['off'], values['on'], PILOT_LEVEL) if n >= 2 else {}
+            allowed = math.floor(PILOT_INVALID_SHARE * planned + 1e-9)
+            if meta.get('complete') is not True:
+                reason = 'pilot incomplete'
+            elif any(r not in PILOT_DESKTOP_REASONS for r in invalid):
+                reason = 'invalid pairs not caused by the desktop'
+            elif planned - n > allowed:
+                reason = 'insufficient valid pairs'
+            elif not (difference and low_bound <= difference['low'] <= difference['high'] <= high_bound):
+                reason = 'interval outside equivalence bounds'
+            else:
+                reason = None
             metrics[field] = {'bounds': [low_bound, high_bound], 'valid_pairs': n,
-                'invalid_pairs_by_reason': invalid, 'difference': difference,
+                'allowed_invalid_pairs': allowed, 'invalid_pairs_by_reason': invalid, 'difference': difference,
                 'arm_medians': {arm: statistics.median(v) if v else None for arm, v in values.items()},
-                'equivalent': complete and inside,
-                'reason': None if complete and inside else 'insufficient valid pairs' if not complete else 'interval outside equivalence bounds'}
+                'equivalent': reason is None, 'reason': reason}
         costs = {}
         for arm in ('on', 'off'):
             costs[arm] = {}
@@ -521,7 +554,8 @@ def observer_pilot_report(h, results):
         reports[terminal] = {'metrics': metrics, 'observer_cost': costs,
                              'equivalent': all(m['equivalent'] for m in metrics.values())}
     return public({'schema': 1, 'kind': 'observer-pilot', 'countable': False,
-                   'pilot': kind, 'pairs': planned, 'interval_policy': 'paired Student-t 95%',
+                   'pilot': kind, 'pairs': planned,
+                   'interval_policy': 'TOST at 5% each side: paired Student-t 90% inside the bounds',
                    'terminals': reports, 'equivalent': all(r['equivalent'] for r in reports.values())})
 
 

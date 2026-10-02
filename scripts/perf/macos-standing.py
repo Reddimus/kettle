@@ -3056,13 +3056,15 @@ def paired(a: List[Optional[float]], b: List[Optional[float]], family: int = 1) 
     return stats
 
 
-def paired_difference(a: List[Optional[float]], b: List[Optional[float]]) -> dict:
+def paired_difference(a: List[Optional[float]], b: List[Optional[float]],
+                      level: float = LEVEL) -> dict:
     """The mean of b - a round pairs, in the metric's own unit, with a
-    Student-t 95 % interval: the absolute gain a ratio hides."""
+    two-sided Student-t interval at `level` (95 % unless an equivalence test
+    asks for its own): the absolute gain a ratio hides."""
     diffs = [y - x for x, y in zip(a, b) if x is not None and y is not None]
     if not diffs:
         return {}
-    mean, low, high = t_interval(diffs)
+    mean, low, high = t_interval(diffs, level)
     return {"diff": mean, "low": low, "high": high, "n": len(diffs)}
 
 

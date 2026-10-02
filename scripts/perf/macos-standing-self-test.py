@@ -7133,7 +7133,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertFalse(report['equivalent'])
             self.assertEqual(metric['valid_pairs'],0)
             self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':2})
-            self.assertEqual(metric['reason'],'insufficient valid pairs')
+            self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
             self.assertEqual(sum('error' in r for r in raw['workloads']['latency']['kettle']),2)
 
     def test_runner_keeps_failures_without_retries_or_cutoff(self):
@@ -7387,7 +7387,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertEqual(standing.hc.observer_cost(timeline, True)['query_count'],0)
             self.assertEqual(standing.hc.observer_cost(timeline, True)['cpu_ns'],0)
 
-    def test_analysis_student_t_inside_straddling_outside_and_short(self):
+    def test_analysis_tost_inside_straddling_outside_and_short(self):
         for kind in ('typing', 'printing', 'blink'):
             for case, diffs, equivalent in [('inside',[0.]*10,True), ('straddling',[-.1,.1]*5,kind != 'blink'),
                                              ('outside',[2.]*10,False), ('short',[0.]*10,False)]:
@@ -7397,16 +7397,86 @@ class ObserverPilot(unittest.TestCase):
                 self.assertEqual(report['equivalent'],equivalent,(kind,case,report))
                 for field, metric in report['terminals']['kettle']['metrics'].items():
                     if case=='short':
-                        self.assertEqual(metric['reason'],'insufficient valid pairs')
+                        self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
                         self.assertEqual(metric['valid_pairs'],9)
                         self.assertEqual(metric['invalid_pairs_by_reason'],{'missing arm':1})
                     if case=='inside':
                         self.assertEqual(metric['difference'],dict(diff=0.,low=0.,high=0.,n=10))
                     if case=='straddling':
-                        mean,low,high=standing.t_interval(diffs)
+                        mean,low,high=standing.t_interval(diffs,.90)
                         self.assertAlmostEqual(metric['difference']['diff'],mean)
                         self.assertAlmostEqual(metric['difference']['low'],low)
                         self.assertAlmostEqual(metric['difference']['high'],high)
+
+    def test_analysis_judges_equivalence_by_the_90_percent_interval(self):
+        # TOST at 5 % each side: this spread clears the bound at 90 % but
+        # not at 95 %, so only the two-one-sided rule calls it equivalent.
+        diffs=[-.25,1.25]*5
+        self.assertGreater(standing.t_interval(diffs,.95)[2],1.)
+        self.assertLess(standing.t_interval(diffs,.90)[2],1.)
+        report=self.report(self.fixture('typing',diffs,names=['kettle']))
+        metric=report['terminals']['kettle']['metrics']['mean_ms']
+        self.assertTrue(report['equivalent'],metric)
+        mean,low,high=standing.t_interval(diffs,.90)
+        self.assertAlmostEqual(metric['difference']['high'],high)
+        self.assertIsNone(metric['reason'])
+
+    def test_analysis_allows_five_percent_desktop_invalid_pairs(self):
+        def pilot(kind, pairs, spoil):
+            raw=self.fixture(kind,[0.]*pairs,names=['kettle'])
+            rows=raw['workloads'][standing.publication.PILOT_WORKLOADS[kind]]['kettle']
+            for pair, arm, failure in spoil:
+                row=next(r for r in rows if r['observer_pair']==pair and r['observer_arm']==arm)
+                if kind=='typing':
+                    row.update(error=failure,typing_memory_valid=False)
+                elif failure.startswith('error:'):
+                    row['error']=failure[6:]
+                else:
+                    for evidence in row['metric_validity'].values():
+                        evidence.update(valid=False,reason=failure)
+            return self.report(raw)
+        def metric(report):
+            return next(iter(report['terminals']['kettle']['metrics'].values()))
+        cover='latency probe: a window (pid 506, layer 21) covers the block'
+        focus='latency probe: focus changed before a key (frontmost 1, top window 1/2)'
+        for kind, failure, counted in (
+                ('typing',cover,'probe saw focus, cover or foreign input'),
+                ('typing',focus,'probe saw focus, cover or foreign input'),
+                ('typing','latency probe: foreign input','probe saw focus, cover or foreign input'),
+                ('printing','known focus change during interval','known focus change during interval'),
+                ('printing','window not visible during interval','window not visible during interval'),
+                ('blink','blink window not visible','blink window not visible')):
+            with self.subTest(kind=kind, failure=failure):
+                # 20 planned pairs allow one invalid pair; the 5 % is of the plan.
+                report=pilot(kind,20,[(3,'on',failure)])
+                self.assertTrue(report['equivalent'],report)
+                self.assertEqual(metric(report)['invalid_pairs_by_reason'],{counted:1})
+                self.assertEqual((metric(report)['valid_pairs'],metric(report)['allowed_invalid_pairs']),(19,1))
+                report=pilot(kind,20,[(3,'on',failure),(5,'off',failure)])
+                self.assertEqual(metric(report)['reason'],'insufficient valid pairs')
+                self.assertFalse(report['equivalent'])
+                report=pilot(kind,19,[(3,'on',failure)])
+                self.assertEqual(metric(report)['reason'],'insufficient valid pairs')
+        for kind, failure in (('typing','latency probe: no frames'),('typing','latency probe: calibration: the change is not one rectangle'),
+                              ('typing','/Users/private-owner/sentinel '+cover),('typing',cover+' /Users/private-owner'),
+                              ('printing','native query late'),('printing','error:the flood never finished'),
+                              ('blink','error:'+cover)):
+            with self.subTest(kind=kind, failure=failure):
+                report=pilot(kind,20,[(3,'on',failure)])
+                self.assertEqual(metric(report)['reason'],'invalid pairs not caused by the desktop')
+                self.assertFalse(report['equivalent'])
+                self.assertNotIn('private-owner',_json.dumps(report))
+        # A desktop failure in one arm cannot hide another failure in its pair.
+        report=pilot('printing',20,[(3,'on','known focus change during interval'),(3,'off','native query late')])
+        self.assertEqual(metric(report)['invalid_pairs_by_reason'],{'native query late':1})
+        self.assertFalse(report['equivalent'])
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        row=raw['workloads']['latency']['kettle'][0]
+        row.update(error=cover,typing_memory_valid=False,killed=True)
+        self.assertEqual(metric(self.report(raw))['invalid_pairs_by_reason'],{'failed arm':1})
+        raw=self.fixture('typing',[0.]*20,names=['kettle'])
+        raw['meta']['complete']=False
+        self.assertEqual(metric(self.report(raw))['reason'],'pilot incomplete')
 
     def test_analysis_straddles_every_bound_and_failed_arm(self):
         import copy
@@ -7431,7 +7501,7 @@ class ObserverPilot(unittest.TestCase):
             self.assertTrue(report['terminals']['ghostty']['equivalent'])
             for metric in report['terminals']['kettle']['metrics'].values():
                 self.assertEqual(metric['invalid_pairs_by_reason'],{'failed arm':1})
-                self.assertEqual(metric['reason'],'insufficient valid pairs')
+                self.assertEqual(metric['reason'],'invalid pairs not caused by the desktop')
             self.assertNotIn('private-owner',_json.dumps(report))
 
     def test_pilot_dispatch_countability_combine_aa_and_analysis_refusal(self):
@@ -7446,7 +7516,7 @@ class ObserverPilot(unittest.TestCase):
             (folder/'local-manifest.json').write_text('/Users/private-owner/private@email.test')
             report=standing.publication.observer_control(standing._publication_host(),folder)
             self.assertTrue(report['equivalent'])
-            self.assertEqual(report['interval_policy'],'paired Student-t 95%')
+            self.assertEqual(report['interval_policy'],'TOST at 5% each side: paired Student-t 90% inside the bounds')
             self.assertNotIn('private',_json.dumps(report))
             with self.assertRaisesRegex(SystemExit,'observer pilot'):standing.combine([folder])
             ordinary=Path(tmp)/'ordinary';ordinary.mkdir()
