@@ -1184,6 +1184,17 @@ takes one patch frame sized to the patch. That test runs in a child process
 with a 30-second deadline, since Metal drawable acquisition can block
 indefinitely. A timeout fails the test and reaps the child; it is not a pass.
 
+Trailing-blank shaping tests compare row keys directly when prompt padding
+or a reverse-video block on a blank row changes colour. The headless test
+also checks text prepares, the changed background pixels, and retained
+interior spaces. GPU-independent tests cover the inked extent, row keys,
+and a pad blank for each cut bold/italic face. A cosmic-text layout test
+compares full and cut rows with `font-family-bold = "Courier New"`, which
+has different metrics from the bundled regular family; it skips when that
+family is absent. A source guard checks that `build_pane` uses the same
+`ShapedRow` for its key and text. Red checks revert only production code
+and retain every test, including after rebasing onto changes to preparation.
+
 ### kettle-remote (50+ tests)
 
 Injected process-tree fixtures cover SSH and

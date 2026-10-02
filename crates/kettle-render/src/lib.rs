@@ -10338,15 +10338,11 @@ impl Renderer {
             let end = span_line_breaks.get(row).copied().unwrap_or(n).min(n);
             let runs = &spans[start.min(end)..end];
             start = end;
-            let key = {
-                let mut h = std::hash::DefaultHasher::new();
-                for (text, fg, bold, italic) in runs {
-                    text.hash(&mut h);
-                    (fg.r, fg.g, fg.b).hash(&mut h);
-                    (bold, italic).hash(&mut h);
-                }
-                h.finish()
-            };
+            // Shape the row only up to its last inked cell (see `ShapedRow`).
+            // The key covers exactly what is shaped, so recolouring the
+            // blanks after that cell reshapes nothing.
+            let shaped = ShapedRow::of(runs);
+            let key = shaped.key(runs);
             let prev = keys.get(row).copied();
             if prev == Some(key) {
                 continue;
@@ -10355,7 +10351,8 @@ impl Renderer {
             text_changed = true;
             row_text.clear();
             let mut attrs_list = AttrsList::new(&default_attrs);
-            for (text, fg, bold, italic) in runs {
+            for (i, (text, fg, bold, italic)) in runs[..shaped.runs].iter().enumerate() {
+                let text = shaped.text(i, text);
                 let s = row_text.len();
                 row_text.push_str(text);
                 let a = run_attrs(cfg, &ff, *fg, *bold, *italic);
@@ -10394,6 +10391,7 @@ impl Renderer {
                     }
                 }
             }
+            shaped.push_pad(&mut row_text, &mut attrs_list, cfg, &ff);
             if prev.is_some() {
                 buf.lines[row].set_text(&row_text, LineEnding::Lf, attrs_list);
             } else {
@@ -10733,6 +10731,424 @@ fn run_attrs<'a>(
         a = a.style(Style::Italic);
     }
     a
+}
+
+/// The row's inked extent and the faces of its trailing U+0020 cells.
+/// Interior spaces and spaces carrying combining marks stay in the extent.
+/// One blank per cut face preserves the maximum ascent and descent that
+/// cosmic-text uses for the baseline, including configured variant families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShapedRow {
+    /// Runs shaped, from the start of the row.
+    runs: usize,
+    /// Bytes shaped of the last of those runs.
+    last_len: usize,
+    /// The faces of the cut blanks, one bit per `(bold, italic)` pair (see
+    /// `ShapedRow::face_bit`). Each bit adds one pad blank after the runs.
+    pad_faces: u8,
+}
+
+impl ShapedRow {
+    /// The pad's colour. A blank draws no ink, so a fixed colour changes
+    /// nothing on screen and keeps a recolour of the cut blanks out of the
+    /// shaper's input.
+    const PAD_FG: Rgb = Rgb::new(0, 0, 0);
+
+    fn of(runs: &[(String, Rgb, bool, bool)]) -> Self {
+        let mut pad_faces = 0;
+        for (i, (text, _, bold, italic)) in runs.iter().enumerate().rev() {
+            let inked = text.trim_end_matches(' ').len();
+            if inked < text.len() {
+                pad_faces |= Self::face_bit(*bold, *italic);
+            }
+            if inked > 0 {
+                return Self {
+                    runs: i + 1,
+                    last_len: inked,
+                    pad_faces,
+                };
+            }
+        }
+        Self {
+            runs: 0,
+            last_len: 0,
+            pad_faces: 0,
+        }
+    }
+
+    /// The bit of the `(bold, italic)` face in `pad_faces`.
+    fn face_bit(bold: bool, italic: bool) -> u8 {
+        1 << (u8::from(bold) | (u8::from(italic) << 1))
+    }
+
+    /// The shaped part of the run at `index`, one of the first `self.runs`.
+    fn text(self, index: usize, text: &str) -> &str {
+        if index + 1 == self.runs {
+            &text[..self.last_len]
+        } else {
+            text
+        }
+    }
+
+    /// The row key: the shaped part of each run with its colour and face,
+    /// then the pad's faces. The cut blanks' colours do not reach it, so a
+    /// row whose trailing blanks only change colour keeps its key and is not
+    /// reshaped.
+    fn key(self, runs: &[(String, Rgb, bool, bool)]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        for (i, (text, fg, bold, italic)) in runs[..self.runs].iter().enumerate() {
+            self.text(i, text).hash(&mut h);
+            (fg.r, fg.g, fg.b).hash(&mut h);
+            (bold, italic).hash(&mut h);
+        }
+        self.pad_faces.hash(&mut h);
+        h.finish()
+    }
+
+    /// Appends the pad after the shaped runs: one blank per face in
+    /// `pad_faces`, each with that face's attrs from `run_attrs`, the source
+    /// the runs and the style key use, in the fixed pad colour.
+    fn push_pad(
+        self,
+        row_text: &mut String,
+        attrs_list: &mut AttrsList,
+        cfg: &Config,
+        ff: &FontFeatures,
+    ) {
+        for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+            if self.pad_faces & Self::face_bit(bold, italic) != 0 {
+                let s = row_text.len();
+                row_text.push(' ');
+                let a = run_attrs(cfg, ff, Self::PAD_FG, bold, italic);
+                attrs_list.add_span(s..row_text.len(), &a);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod shaped_row_tests {
+    use super::{
+        Attrs, AttrsList, BufferLine, Config, Family, FontSystem, GColor, LineEnding, Metrics,
+        ShapedRow, Shaping, Style, TextBuffer, Weight, Wrap, font_features, load_bundled_font,
+        production_source, run_attrs,
+    };
+    use kettle_config::Rgb;
+
+    /// A run as `build_pane`'s cell walk builds it: text, colour, bold, italic.
+    type Run = (String, Rgb, bool, bool);
+
+    fn run(text: &str, fg: u8, bold: bool, italic: bool) -> Run {
+        (text.to_string(), Rgb::new(fg, 0, 0), bold, italic)
+    }
+
+    /// Regular runs, one per part, each in its own colour.
+    fn runs(parts: &[&str]) -> Vec<Run> {
+        parts
+            .iter()
+            .enumerate()
+            .map(|(i, part)| run(part, i as u8, false, false))
+            .collect()
+    }
+
+    /// The text `build_pane` shapes for a row of `runs`.
+    fn shaped_text(runs: &[Run]) -> String {
+        let shaped = ShapedRow::of(runs);
+        let mut text: String = runs[..shaped.runs]
+            .iter()
+            .enumerate()
+            .map(|(i, (part, ..))| shaped.text(i, part))
+            .collect();
+        let cfg = Config::default();
+        let mut attrs = AttrsList::new(&Attrs::new());
+        shaped.push_pad(&mut text, &mut attrs, &cfg, &font_features(&cfg));
+        text
+    }
+
+    #[test]
+    fn a_row_is_shaped_up_to_its_last_inked_cell() {
+        // keyblock's rows: blanks in three colours and nothing inked.
+        assert_eq!(shaped_text(&runs(&["    ", "  ", "    "])), "");
+        assert_eq!(
+            ShapedRow::of(&runs(&["    ", "  "])),
+            ShapedRow {
+                runs: 0,
+                last_len: 0,
+                pad_faces: 0,
+            }
+        );
+        assert_eq!(shaped_text(&[]), "");
+        // A prompt: its padding goes and one blank stays, whether the padding
+        // shares the prompt's run or has its own colour.
+        assert_eq!(shaped_text(&runs(&["$ ls      "])), "$ ls ");
+        assert_eq!(shaped_text(&runs(&["$ ls", "      "])), "$ ls ");
+        assert_eq!(shaped_text(&runs(&["a  ", "  "])), "a ");
+        // Blanks between inked cells keep every later cell on its column.
+        assert_eq!(shaped_text(&runs(&["a", "   ", "b"])), "a   b");
+        assert_eq!(shaped_text(&runs(&["a   b", "  "])), "a   b ");
+        // A row inked to its last column is shaped whole, with no pad.
+        assert_eq!(shaped_text(&runs(&["abc"])), "abc");
+        assert_eq!(shaped_text(&runs(&["ab", "c"])), "abc");
+        // Only U+0020 is cut: a space carrying a combining mark, a no-break
+        // space and an ideographic space stay.
+        assert_eq!(shaped_text(&runs(&["x \u{301}", "  "])), "x \u{301} ");
+        assert_eq!(shaped_text(&runs(&["x\u{a0}"])), "x\u{a0}");
+        assert_eq!(shaped_text(&runs(&["x\u{3000}", " "])), "x\u{3000} ");
+    }
+
+    /// The pad holds one blank per face among the cut blanks, each in that
+    /// face and the fixed pad colour. Blanks that stay add no pad.
+    #[test]
+    fn the_pad_has_one_blank_in_each_face_of_the_cut_blanks() {
+        let regular = ShapedRow::face_bit(false, false);
+        let bold = ShapedRow::face_bit(true, false);
+        let italic = ShapedRow::face_bit(false, true);
+        let bold_italic = ShapedRow::face_bit(true, true);
+        assert_eq!([regular, bold, italic, bold_italic], [1, 2, 4, 8]);
+        let pad = |row: &[Run]| ShapedRow::of(row).pad_faces;
+        // Vim's status line: bold text, then bold blanks.
+        assert_eq!(
+            pad(&[run("NORMAL  ", 1, true, false), run("    ", 1, true, false)]),
+            bold
+        );
+        assert_eq!(
+            pad(&[run("$ ls", 1, false, false), run("    ", 2, true, false)]),
+            bold
+        );
+        assert_eq!(
+            pad(&[
+                run("a ", 1, false, true),
+                run("  ", 2, true, true),
+                run("  ", 3, true, false),
+                run("  ", 4, false, false),
+            ]),
+            regular | bold | italic | bold_italic
+        );
+        // Blanks between inked cells, and the blanks of a blank row, stay or
+        // go without a pad.
+        assert_eq!(
+            pad(&[
+                run("a", 1, false, false),
+                run("  ", 2, true, true),
+                run("b", 3, false, false),
+            ]),
+            0
+        );
+        assert_eq!(pad(&[run("    ", 1, true, false)]), 0);
+
+        let cfg = Config {
+            font_family_bold: Some("Bold Family".to_string()),
+            font_family_italic: Some("Italic Family".to_string()),
+            ..Config::default()
+        };
+        let row = [
+            run("a", 1, false, false),
+            run("  ", 2, true, false),
+            run("  ", 3, false, true),
+            run("  ", 4, true, false),
+        ];
+        let shaped = ShapedRow::of(&row);
+        let mut text = shaped.text(0, &row[0].0).to_string();
+        let mut attrs = AttrsList::new(&Attrs::new());
+        shaped.push_pad(&mut text, &mut attrs, &cfg, &font_features(&cfg));
+        assert_eq!(text, "a  ", "one blank per face, not per cut blank");
+        let face = |at: usize| {
+            let a = attrs.get_span(at);
+            (a.family, a.weight, a.style, a.color_opt)
+        };
+        let pad_fg = Some(GColor::rgb(0, 0, 0));
+        assert_eq!(
+            face(1),
+            (
+                Family::Name("Bold Family"),
+                Weight::BOLD,
+                Style::Normal,
+                pad_fg
+            )
+        );
+        assert_eq!(
+            face(2),
+            (
+                Family::Name("Italic Family"),
+                Weight::NORMAL,
+                Style::Italic,
+                pad_fg
+            )
+        );
+    }
+
+    /// The row key covers exactly what is shaped. Blanks after the last inked
+    /// cell change colour without changing it; anything shaped changes it.
+    #[test]
+    fn a_row_key_covers_exactly_what_is_shaped() {
+        let key = |row: &[Run]| ShapedRow::of(row).key(row);
+        let prompt = key(&[run("$ ls", 1, false, false), run("      ", 2, false, false)]);
+        assert_eq!(
+            key(&[run("$ ls", 1, false, false), run("      ", 9, false, false)]),
+            prompt,
+            "recoloured blanks after the ink"
+        );
+        assert_eq!(
+            key(&[run("$ ls  ", 1, false, false), run("    ", 9, false, false)]),
+            prompt,
+            "the same blanks split across runs another way"
+        );
+        // keyblock: a reverse-video block on a blank row.
+        assert_eq!(
+            key(&[
+                run("       ", 1, false, false),
+                run("    ", 7, false, false),
+                run("         ", 1, false, false),
+            ]),
+            key(&[run(&" ".repeat(20), 1, false, false)]),
+            "a blank row in any colours"
+        );
+        assert_ne!(
+            key(&[run("$ ls", 3, false, false), run("      ", 2, false, false)]),
+            prompt,
+            "recoloured ink"
+        );
+        assert_ne!(
+            key(&[run("$ lt", 1, false, false), run("      ", 2, false, false)]),
+            prompt,
+            "other ink"
+        );
+        assert_ne!(key(&[run("$ ls", 1, false, false)]), prompt, "no pad");
+        assert_ne!(
+            key(&[run("$ ls", 1, false, false), run("      ", 2, true, false)]),
+            prompt,
+            "a pad in another face"
+        );
+        assert_ne!(
+            key(&[
+                run("$ ls", 1, false, false),
+                run("   ", 2, false, false),
+                run("   ", 2, true, false),
+            ]),
+            prompt,
+            "one more pad face"
+        );
+    }
+
+    /// Shapes `row` as `build_pane` does, cut as `shaped` says, and returns
+    /// the line's baseline and the x of every glyph.
+    fn layout(
+        fs: &mut FontSystem,
+        cfg: &Config,
+        row: &[Run],
+        shaped: ShapedRow,
+    ) -> (f32, Vec<f32>) {
+        let ff = font_features(cfg);
+        let default_attrs = Attrs::new()
+            .family(Family::Name(&cfg.font_family))
+            .font_features(ff.clone());
+        let mut text = String::new();
+        let mut attrs = AttrsList::new(&default_attrs);
+        for (i, (part, fg, bold, italic)) in row[..shaped.runs].iter().enumerate() {
+            let s = text.len();
+            text.push_str(shaped.text(i, part));
+            attrs.add_span(s..text.len(), &run_attrs(cfg, &ff, *fg, *bold, *italic));
+        }
+        shaped.push_pad(&mut text, &mut attrs, cfg, &ff);
+        let mut buf = TextBuffer::new(fs, Metrics::new(26.0, 32.0));
+        buf.set_size(Some(2000.0), Some(64.0));
+        buf.set_wrap(Wrap::None);
+        buf.lines = vec![BufferLine::new(
+            text,
+            LineEnding::Lf,
+            attrs,
+            Shaping::Advanced,
+        )];
+        buf.shape_until_scroll(fs, false);
+        let run = buf.layout_runs().next().expect("one laid-out line");
+        (run.line_y, run.glyphs.iter().map(|glyph| glyph.x).collect())
+    }
+
+    /// A cut row keeps the baseline and glyph positions it had when shaped
+    /// whole. The baseline comes from the largest ascent and descent among a
+    /// row's glyphs, so it moves when the cut takes away the only glyphs of a
+    /// face with other metrics: here a bold family, Courier New, beside the
+    /// bundled JetBrains Mono.
+    #[test]
+    fn a_cut_row_keeps_the_baseline_of_the_whole_row() {
+        const BOLD: &str = "Courier New";
+        let mut fs = FontSystem::new();
+        for face in kettle_config::font::all() {
+            load_bundled_font(&mut fs, face);
+        }
+        if !fs
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == BOLD))
+        {
+            eprintln!("{BOLD} is not installed on this host; skipped");
+            return;
+        }
+        let cfg = Config {
+            font_family_bold: Some(BOLD.to_string()),
+            ..Config::default()
+        };
+        let blanks = " ".repeat(20);
+        let rows = [
+            // Vim's status line: bold text and bold blanks.
+            vec![run("NORMAL", 1, true, false), run(&blanks, 1, true, false)],
+            // Bold text, then plain blanks.
+            vec![run("NORMAL", 1, true, false), run(&blanks, 2, false, false)],
+            // Plain text, then bold blanks.
+            vec![run("$ ls", 1, false, false), run(&blanks, 2, true, false)],
+            // Plain text, then blanks in both faces.
+            vec![
+                run("$ ls", 1, false, false),
+                run(&blanks, 2, true, false),
+                run(&blanks, 3, false, false),
+            ],
+        ];
+        for row in rows {
+            let whole = ShapedRow {
+                runs: row.len(),
+                last_len: row[row.len() - 1].0.len(),
+                pad_faces: 0,
+            };
+            let (whole_y, whole_x) = layout(&mut fs, &cfg, &row, whole);
+            let (cut_y, cut_x) = layout(&mut fs, &cfg, &row, ShapedRow::of(&row));
+            let ink = row[0].0.chars().count();
+            assert_eq!(cut_y, whole_y, "{row:?}: the baseline moved");
+            assert_eq!(cut_x[..ink], whole_x[..ink], "{row:?}: a glyph moved");
+        }
+    }
+
+    /// `build_pane` keys and shapes each row through one `ShapedRow`. This
+    /// guard runs where the headless test has no GPU and skips.
+    #[test]
+    fn build_pane_keys_and_shapes_the_same_extent() {
+        let src = production_source();
+        let build_pane = src
+            .split_once("    fn build_pane(")
+            .expect("build_pane")
+            .1
+            .split_once("\n    fn ")
+            .expect("end of build_pane")
+            .0;
+        let compact: String = build_pane.split_whitespace().collect();
+        for needle in [
+            "letshaped=ShapedRow::of(runs);",
+            "letkey=shaped.key(runs);",
+            "inruns[..shaped.runs].iter().enumerate(){lettext=shaped.text(i,text);",
+            "shaped.push_pad(&mutrow_text,&mutattrs_list,cfg,&ff);",
+        ] {
+            assert!(compact.contains(needle), "build_pane lost {needle:?}");
+        }
+        assert!(
+            !build_pane.contains("in runs {"),
+            "a loop over a row's whole runs would key or shape the blanks after its ink"
+        );
+        assert_eq!(
+            build_pane.matches("row_text.push").count(),
+            1,
+            "the row text has one source besides the pad"
+        );
+    }
 }
 
 /// Pick the per-pane titlebar background color from the focus / broadcast state.

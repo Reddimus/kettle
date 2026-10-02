@@ -486,6 +486,66 @@ fn a_blink_over_a_wide_glyph_restores_the_glyph() {
     assert_eq!(off, dectcem);
 }
 
+/// A blank cell draws no ink, so a row is shaped only up to its last inked
+/// cell. Recolouring the blanks after it (a prompt's padding, keyblock's
+/// reverse-video block on blank rows) changes no row key, so no row is
+/// reshaped and no text is prepared, while the new colours are still drawn.
+#[test]
+fn blanks_at_the_end_of_a_row_are_not_shaped() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let overlay = focused(true);
+    // The two frames of each pair differ only in the colours of blanks after
+    // the last inked cell of a row. The cursor ends on the same cell.
+    let pairs: [(&str, &[u8], &[u8]); 2] = [
+        // `hi`, then six blanks in reverse video, or plain.
+        ("padding", b"hi\x1b[7m      \x1b[0m", b"hi      "),
+        // Blank rows and a hidden cursor, then a reverse-video block in the
+        // middle of row 1.
+        (
+            "keyblock",
+            b"\x1b[?25l",
+            b"\x1b[?25l\x1b[2;8H\x1b[7m    \x1b[0m\x1b[H",
+        ),
+    ];
+    for (what, first, second) in pairs {
+        let first_snap = snapshot_of(20, 4, first);
+        let first_panes = [pane(&first_snap, 320, 120)];
+        let first_frame = capture(&mut renderer, &cfg, &first_panes, &overlay);
+        let keys = renderer.pane_line_keys[0].clone();
+        let prepares = renderer.text_prepares;
+        let second_snap = snapshot_of(20, 4, second);
+        let second_panes = [pane(&second_snap, 320, 120)];
+        let second_frame = capture(&mut renderer, &cfg, &second_panes, &overlay);
+        assert_eq!(
+            renderer.pane_line_keys[0], keys,
+            "{what}: recolouring blanks after the ink must not reshape a row"
+        );
+        assert_eq!(
+            renderer.text_prepares, prepares,
+            "{what}: recolouring blanks after the ink must not prepare text"
+        );
+        assert_ne!(
+            first_frame, second_frame,
+            "{what}: the blanks' new colours are drawn, as cell backgrounds"
+        );
+    }
+
+    // What is shaped: a row up to its ink and one blank, blanks between
+    // inked cells in place, and nothing for a blank row.
+    let snap = snapshot_of(20, 4, b"hi      \r\na    b");
+    capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+    let rows: Vec<String> = renderer.pane_buffers[0]
+        .lines
+        .iter()
+        .map(|line| line.text().to_string())
+        .collect();
+    assert_eq!(rows, ["hi ", "a    b ", "", ""]);
+}
+
 /// The blink phase reaches the renderer only at draw time: `build_pane` never
 /// sees it, so it cannot change what is built or uploaded.
 #[test]
