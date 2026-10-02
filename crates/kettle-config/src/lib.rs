@@ -1174,6 +1174,11 @@ pub struct Config {
     pub completion_overlay: CompletionOverlayMode,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
+    /// macOS: once a window has been idle for a blink half-period, the window
+    /// server blinks the cursor in a Core Animation layer and Kettle stops
+    /// drawing until something else changes. Off keeps redrawing the window
+    /// at every blink. Parsed but inert elsewhere.
+    pub macos_cursor_blink_layer: bool,
     pub bell: BellMode,
     /// OSC 52 clipboard policy (default: writes only).
     pub osc52: Osc52,
@@ -1746,8 +1751,10 @@ pub struct Config {
     pub cursor_blink_interval: u64,
     /// Seconds without typing after which the cursor stops blinking and stays
     /// visible. Output does not restart the blink, as in kitty and Alacritty.
-    /// `0` blinks for as long as the window is focused. Each blink repaints the window, so a cursor that blinks
-    /// forever keeps an idle window drawing.
+    /// `0` blinks for as long as the window is focused. Each blink repaints the
+    /// window, so a cursor that blinks forever keeps an idle window drawing,
+    /// except on macOS with `macos_cursor_blink_layer`, where the window
+    /// server blinks an idle window's cursor.
     pub cursor_blink_timeout: u64,
     /// An inactive tab whose unseen output went quiet for
     /// at least this many milliseconds transitions from the
@@ -2653,6 +2660,7 @@ impl Default for Config {
             completion_overlay: CompletionOverlayMode::Auto,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
+            macos_cursor_blink_layer: true,
             bell: BellMode::Both,
             osc52: Osc52::Copy,
             macos_option_as_alt: MacosOptionAsAlt::None,
@@ -3279,6 +3287,8 @@ impl Config {
         "log_strip_ansi",
         "login-shell",
         "login_shell",
+        "macos-cursor-blink-layer",
+        "macos_cursor_blink_layer",
         "shell-integration",
         "shell_integration",
         "mouse-autohide",
@@ -3912,6 +3922,8 @@ impl Config {
         "enabled-plugins",
         #[cfg(not(target_os = "macos"))]
         "macos-option-as-alt",
+        #[cfg(not(target_os = "macos"))]
+        "macos-cursor-blink-layer",
         "extra-styling",
         "http-proxy",
         "title-font",
@@ -4273,6 +4285,11 @@ impl Config {
                         "paste" | "read" => Osc52::Paste,
                         "both" | "all" | "true" => Osc52::Both,
                         _ => Osc52::Copy,
+                    }
+                }
+                "macos-cursor-blink-layer" | "macos_cursor_blink_layer" => {
+                    if let Some(b) = parse_bool(&e.value) {
+                        cfg.macos_cursor_blink_layer = b;
                     }
                 }
                 "macos-option-as-alt" | "macos_option_as_alt" => {
@@ -6881,6 +6898,43 @@ cell-height = 1.2\n";
         assert!(Osc52::Both.can_copy() && Osc52::Both.can_paste());
     }
 
+    /// The escape hatch for the macOS Core Animation cursor blink: on by
+    /// default, a bool with the usual aliases, and reported inert off macOS
+    /// so one shared config works everywhere.
+    #[test]
+    fn macos_cursor_blink_layer_defaults_on_and_is_inert_off_macos() {
+        assert!(Config::default().macos_cursor_blink_layer);
+        assert!(!Config::parse_text("macos-cursor-blink-layer = false").macos_cursor_blink_layer);
+        assert!(!Config::parse_text("macos_cursor_blink_layer = off").macos_cursor_blink_layer);
+        assert!(
+            Config::parse_text("macos-cursor-blink-layer = off\nmacos-cursor-blink-layer = yes")
+                .macos_cursor_blink_layer
+        );
+        // A bad value keeps the default instead of flipping it.
+        assert!(
+            Config::parse_text("macos-cursor-blink-layer = sometimes").macos_cursor_blink_layer
+        );
+        assert_eq!(
+            Config::detect_malformed_values("macos-cursor-blink-layer = sometimes").len(),
+            1
+        );
+        assert!(Config::BOOL_KEYS.contains(&"macos-cursor-blink-layer"));
+        assert!(Config::BOOL_KEYS.contains(&"macos_cursor_blink_layer"));
+        let (_, unknown) = Config::parse_collect("macos-cursor-blink-layer = false\n");
+        assert!(unknown.is_empty(), "{unknown:?}");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            Config::parse_text("macos-cursor-blink-layer = false").inert_keys,
+            vec!["macos-cursor-blink-layer"]
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            Config::parse_text("macos-cursor-blink-layer = false")
+                .inert_keys
+                .is_empty()
+        );
+    }
+
     #[test]
     fn macos_option_as_alt_parsing_validation_and_default() {
         assert_eq!(
@@ -8493,6 +8547,8 @@ split_horiz = <Control><Shift>j
             ("text_renderer", "grid"),
             ("macos-option-as-alt", "none"),
             ("macos_option_as_alt", "left"),
+            ("macos-cursor-blink-layer", "false"),
+            ("macos_cursor_blink_layer", "true"),
             ("modify-other-keys", "auto"),
             ("modify_other_keys", "always"),
             ("keybind-yield", "off"),

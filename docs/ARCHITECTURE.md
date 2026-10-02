@@ -1422,8 +1422,104 @@ latest call returned `Presented`; detach does not clear its contents.
 C2 calls `present_cursor_patch` after an off-phase `Presented` frame, with
 the same config. Renderer geometry and compositing setters invalidate that
 frame record. Headless tests substitute an offscreen capture for a present.
-C1 uses this separate method instead of the planned `Overlay.cursor_layer`
-and `take_cursor_patch_report()` API.
+The UI owns layer visibility, geometry, animations and synchronized exits.
+
+## macOS cursor blink layer
+
+A blinking cursor draws a frame every half-period, keeping the GPU driver's
+render pool active. On macOS an eligible idle cursor can instead blink in a
+Core Animation layer, with `macos-cursor-blink-layer` on by default.
+
+- **Hand-off.** `about_to_wait_inner` marks an edge that hides the cursor as a
+  hand-off when the half-period before it drew nothing but its own blink frame,
+  and nothing else will draw soon: no bell, program or background animation,
+  autoscroll, resize chip, media receipt or completion timer, no IME preedit,
+  no modal holding the cursor steady, and no deferred output, screenshot,
+  resize, frame recovery or accessibility update
+  (`cursor_blink::handoff_allowed`). That edge's frame is the hand-off frame:
+  the renderer first presents the off phase as usual. The app then calls
+  `present_cursor_patch` with that frame's config to render the cursor patch,
+  the pixels that differ between the on and off phases, into a small
+  `CAMetalLayer` directly above wgpu's Metal layer (`macos_cursor_layer`,
+  installed at the first hand-off). Only `CursorPatchOutcome::Presented(PatchRect)` permits showing the layer.
+  Ineligible and failed results keep it hidden; a lost surface retires the
+  layer so a later attempt can attach it again. After a successful patch, the layer moves
+  over the cursor and a discrete opacity `CAKeyframeAnimation` blinks it:
+  hidden for the first half-period, then alternating, for exactly the
+  half-periods the GPU scheduler would still have blinked before
+  `cursor-blink-timeout` (`cursor_blink::layer_plan`). The animation ends on a
+  hidden half-period and the layer's model opacity is 1, so the cursor then
+  rests visible with no wake, as the GPU blink stops on its visible phase.
+  Kettle presents nothing and does not wake for the blink. The driver can
+  then release its render pool.
+- **Entry needs no synchronization.** The animation starts hidden, so the
+  patch first shows at the next edge. A frame arriving more than half a
+  half-period after its edge keeps GPU blink, leaving time for the drawable.
+- **Exit.** While the layer blinks, the scheduler neither flips the phase nor
+  wakes for it, and any frame ends the blink. `redraw` first materializes the
+  phase the animation shows (`cursor_blink::materialize`, which replays the
+  scheduler's edges with on-time wakes), unless a writer changed `last_blink`
+  since the hand-off (`reset_blink_phase`, a DEC mode 12 change), whose phase
+  wins. The exit frame then presents with `presentsWithTransaction` inside one
+  explicit `CATransaction` that also hides the layer, so new content never
+  shows under a stale cursor and the old frame never shows with no cursor.
+  `reset_blink_phase` requests that frame while the layer blinks, so a layer
+  blink never outlives new activity. Turning the key off retires the layer
+  after a presented exit frame.
+  Focus loss, occlusion, a size or scale change and a renderer rebuild hide
+  it immediately. A resize stretches the Metal layer's last frame until the
+  resize's own frame presents, which may retry, and a scale change makes the
+  patch the wrong size. Either can leave the cursor absent until the next
+  frame, since a patch that no longer matches the frame beneath would show
+  misplaced.
+- **Transactions.** `redraw` runs from winit's before-waiting run-loop
+  observer, which fires after Core Animation's own commit observer, so a change
+  left to an implicit transaction would wait for the next wake. Every layer
+  change therefore runs in an explicit transaction with implicit actions off,
+  then flushes. The layer has no delegate and the animation no completion
+  block, so nothing calls back into the app.
+- **Exactness.** The patch holds opaque pixels only where the two phases
+  differ, so compositing it over the off frame reproduces the on frame byte
+  for byte, and over the on frame changes nothing. The layer shares the Metal
+  layer's pixel format, colorspace and scale, and sits on device-pixel edges.
+  An inverted glyph that overhangs a block cursor in a translucent window has
+  no opaque on-phase pixel to show, so the renderer reports the patch
+  ineligible and GPU blink continues. A refused hand-off waits for a frame
+  other than a blink frame before retrying. Hidden, offscreen and vi cursors
+  do not request patches.
+- **Fallback.** A layer or surface that cannot be set up logs once under
+  `kettle::cursor_blink` and keeps the GPU blink for that window. Linux and
+  Windows keep the GPU blink.
+- **Diagnostics.** `ui_geometry.cursor_blink` reports who draws the blink, the
+  patch rect, the phase the screen shows and the layer's counters. Reading it
+  draws no frame, so it can watch a layer blink without ending it.
+
+The private `cursor_exit_log` observer binds the launch's initial pane to its
+native NSWindow number before the first frame. It emits one capability line,
+then counts accepted nonmodifier native key-downs in that window from one.
+Calibration consumes sequences 1 through 6. Input routing retains the actual
+pane and sequence when that key requests an active-layer exit. Coalesced keys
+keep the first requester's identity; later keys still consume sequences.
+Other windows, key-up, PTY bytes, control requests and redraws never increment
+this counter. Every counted key gets exactly one record. A key that cannot
+end a layer blink (calibration, an inactive layer, an unknown pane) gets an
+`input` record at once. So does a key coalesced into another key's frame, a
+pending key whose layer is hidden without a frame, and a key whose frame
+presents untimed. An eligible key that asks for no frame is recorded at the
+next key or before the event loop waits. Extra input therefore stays visible
+to the harness even when it ends no blink.
+
+A successful joined exit records `CLOCK_UPTIME_RAW` at `redraw` entry, before
+phase materialization and scene preparation, and after `end_exit_frame` has
+restored synchronized presentation, committed and flushed the transaction.
+Formatting and the single stderr write follow that endpoint. Failed frames
+emit nothing and retain the requesting key for a retry. Exits no key caused
+emit no wire record. The observer does not change scheduling or layer ownership.
+Records retain duplicate submissions and extra keys for the harness to reject.
+`total_frame_us` rounds the complete frame duration up to microseconds; the
+existing aggregate still measures its original render/transaction region.
+The wire is inert off macOS. Disabled hooks check a cached boolean and perform
+no context reads, clock queries, formatting or writes.
 
 ## Threading model
 
@@ -1437,7 +1533,9 @@ and `take_cursor_patch_report()` API.
   settings change, always on its visible phase. Output does not restart it,
   as in kitty and Alacritty. Blink phase advances at the timer edge before the
   redraw request, so a delayed Wayland frame callback cannot enqueue the same
-  phase repeatedly. Empty `Ime::Preedit` events normalize to absent state and
+  phase repeatedly. On macOS an idle window hands the blink to the window
+  server after one quiet half-period and stops waking for it (see "macOS cursor
+  blink layer"). Empty `Ime::Preedit` events normalize to absent state and
   do not reposition IME or request another frame unless visible preedit state
   actually changed. The visual bell is per pane: `drain_events` stamps each
   ringing pane in `WindowState::bell_flashes`, the frame builder turns each

@@ -1134,7 +1134,77 @@ require the phase timestamp to advance before a redraw request, simulate an
 idle blink to prove it stops on its visible phase within one half-period of
 `cursor-blink-timeout`, and normalize repeated empty IME preedit notifications
 to the same absent state. `check-live-render-smoke.sh` sets
-`cursor-blink-timeout = 0` so the blink keeps running for its whole capture.
+`cursor-blink-timeout = 0` so the blink keeps running for its whole capture;
+its `ctl screenshot` captures are frames, so on macOS they end any Core
+Animation blink and show the app's phase, not the window server's.
+`kettle-ui`'s `cursor_blink` tests prove on every platform that the macOS
+layer's plan shows exactly what the GPU scheduler would draw at every
+millisecond, for intervals across 50-5000 ms, timeouts of 0 or 1-60 s and random
+activity times; that materializing the phase after any gap matches stepping the
+scheduler and composes; the hand-off truth table (each condition alone blocks
+it); the quiet half-period rule; and layer frames for flipped and unflipped
+roots at 1x and 2x. On macOS, CA tests on a windowless layer tree check that the
+layer sits directly above the topmost Metal layer, that `show` installs one
+discrete opacity keyframe animation with the planned timing and a visible model
+opacity, that `hide` leaves no animation, and that an exit frame restores
+`presentsWithTransaction`; they take turns, since one thread's commit can drop
+another's finished animation. Source guards keep every layer mutation inside a
+transaction with implicit actions off, hide the layer in `redraw` only for a
+presented frame inside the exit transaction, hide it without a frame when the
+window changes size or scale, loses focus or is occluded, hand off only at an
+edge that hid the cursor, and keep `ui_geometry` reads frameless. The writer-wins check calls the
+production anchor decision; refused hand-offs wait for a non-blink frame.
+Exit durations include transaction begin, render, commit and flush; logs also
+carry render-only durations. The cursor-latency measurement is optional: 4.9.0
+merged this change on tests and reviews, without its measurement gates, by
+the owner's decision, so no latency result is claimed. When it is run, it uses
+the harness's `--latency-payload cursor` on a frozen harness. C2's smoke and
+helper checks run independently of it.
+`cargo test -p kettle-ui cursor_exit_log` exercises strict context parsing,
+private-file metadata rules, exact capability/input/exit bytes, the 4096-byte
+limit, calibration and extra-key counting, modifier/release/window exclusions,
+input-to-exit joins, retry/hide handling, duplicate preservation, and an
+`input` record for every counted key that ends no layer blink: calibration
+keys, a key after the final exit, coalesced and hide-cancelled keys, untimed
+frames and eligible keys that ask for no frame. Source
+guards pin the native routing hook, startup binding and timestamps around
+scene preparation, rendering, layer hide, transaction commit and flush.
+These pure tests run on Linux and Windows too; protocol activation stays
+macOS-only. They do not establish native handoffs or clock/input correlation.
+
+For an optional native measurement, use the frozen cursor harness with a private
+context and `kettle::cursor_blink` info enabled. Require one capability even
+for a zero-exit launch, `input` records for keys 1-6 and no other key, exactly
+one exit for every warmup/measured key, actual
+initial pane/native-window identity, ordered raw-clock endpoints and byte
+agreement with its `cursor-exits.fixture`. The legacy duration line is
+suppressed only in this opt-in stream because HC refuses legacy records.
+Do not poll geometry during the campaign. Missing handoffs or coalesced,
+extra, duplicate or wrong-pane keys must fail coverage, never become synthetic
+zero-cost records. The harness reports complete-frame p95 against its 4000 us
+threshold.
+
+`just cursor-blink-layer-self-test` checks the wire geometry object, refuses
+idle samples shorter than 3 s, and verifies private capture cleanup on success
+and failure. It also checks delayed diagnostic replies, captures spanning two
+edges, exhaustion of the capture retry deadline, captures that the expected
+renderer did not draw throughout, and blank or unblinking captures. The live
+smoke runs these checks before launching a window.
+`just cursor-blink-layer-smoke` (macOS) checks the same in a live window through
+`ui_geometry.cursor_blink`: the hand-off over the cursor cell, footprint, wakeups
+and CPU while the layer blinks, the visible rest at the timeout, and the exit a
+reload and a key cause. Its `analysis.json` keeps the raw evidence beside the
+aggregates: every rusage sample, the phase stamps (hand-off, measurement window,
+rest, reload, key) and each of the 20 geometry reads, all on one monotonic
+clock. `--pixels` compares `screencapture -l` frames with the key on and off
+and needs Screen Recording. Pixel sampling bounds each capture
+command using timed diagnostic reads and millisecond truncation, with 20 ms
+margins at both phase edges. It re-reads after sleeping, deletes ambiguous
+captures and retries within 10 s. The reads before and after a capture must
+show the expected renderer, the same phase and the same hand-off, exit and hide
+counts. Each run's on and off captures must differ at the cursor before the
+layer and GPU runs are compared. These helper checks use a simulated clock; native pixel parity must
+still verify compositor behavior, including delayed captures.
 `kettle-render`'s headless tests render real panes from a real `Term` through
 the live frame path into the offscreen capture target, with no window. They
 prove a blink uploads the same quads in both phases and prepares no text, that
@@ -2395,7 +2465,8 @@ session run
 `just tabbar-click-smoke`,
 `just pane-drag-smoke`, `just tearoff-smoke`, `just tab-title-smoke`,
 `just split-titlebar-smoke`, `just split-exit-resize-smoke`,
-`just steady-uploads-smoke`, `just text-presentation-smoke`,
+`just steady-uploads-smoke`, `just cursor-blink-layer-smoke` (macOS),
+`just text-presentation-smoke`,
 `just zoom-keybind-smoke`, `just alt-arrow-zoom-smoke`, `just program-keys-smoke`,
 `just color-scheme-smoke`,
 `just search-selection-smoke`, `just bell-flash-smoke`,

@@ -4,6 +4,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
+use crate::cursor_blink::{cursor_blink_timed_out, next_cursor_blink_phase};
 use accesskit::{
     Action as AccessibilityAction, ActionData, ActionHandler, ActionRequest, ActivationHandler,
     DeactivationHandler, Node, NodeId, Role, TextPosition, TextSelection, TreeId, TreeInfo,
@@ -18,8 +19,9 @@ use kettle_config::{
 };
 use kettle_core::{ClipboardType, Dimensions, PtyGeometry, Scroll, TermEvent};
 use kettle_render::{
-    ContextMenu, ContextMenuRow, FrameOutcome, HighlightRect, HintLabel, ImePreedit, Overlay,
-    PaneSnapshot, PaneView, Renderer, TabActivity as RenderTabActivity, TabBar, TabSeg,
+    ContextMenu, ContextMenuRow, CursorPatchFailure, CursorPatchOutcome, FrameOutcome,
+    HighlightRect, HintLabel, ImePreedit, Overlay, PaneSnapshot, PaneView, Renderer,
+    TabActivity as RenderTabActivity, TabBar, TabSeg,
 };
 use unicode_width::UnicodeWidthStr as _;
 use winit::application::ApplicationHandler;
@@ -464,6 +466,51 @@ fn render_hidden_from_observations(
     visible: bool,
 ) -> bool {
     occluded || minimized || (window_shown && !visible)
+}
+
+/// The log target for the cursor blink layer: one line per window when it
+/// falls back to GPU blink, and each exit frame's duration, printed only
+/// under `RUST_LOG=warn,kettle::cursor_blink=info`.
+const CURSOR_BLINK_LOG: &str = "kettle::cursor_blink";
+
+/// Whether a theme schedule has flipped since the last redraw applied it.
+/// The first decision only seeds the schedule (`poll_theme_schedule`), so it
+/// asks for nothing.
+fn theme_schedule_redraw_due(last: Option<bool>, now: Option<bool>) -> bool {
+    matches!((last, now), (Some(last), Some(now)) if last != now)
+}
+
+/// The wait until the next whole wall-clock minute, when a clock or sunrise
+/// schedule can next flip; never zero.
+fn until_next_wall_minute() -> std::time::Duration {
+    let into_minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() % 60_000)
+        .unwrap_or(0) as u64;
+    std::time::Duration::from_millis(60_000 - into_minute)
+}
+
+/// A modal whose input bar is an active text surface keeps the terminal
+/// cursor steady, never mid-blink-off, while it is open.
+fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
+    ws.ssh_input.is_some()
+        || ws.palette_input.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.hint_state.is_some()
+        || ws.search.open
+        // The title-edit and confirm-dialog input bars are also active text
+        // surfaces, like the other modals.
+        || ws.editing_title.is_some()
+        || ws.confirm_dialog.is_some()
+        || ws.settings_nav.is_some()
+}
+
+/// A control request that only reads UI state, so it needs no frame. A
+/// frame would also end the Core Animation cursor blink `ui_geometry` is
+/// there to observe.
+fn ctl_request_is_pure_read(req: &kettle_ctl::protocol::Request) -> bool {
+    kettle_ctl::protocol::Method::from_name(&req.method)
+        == Some(kettle_ctl::protocol::Method::UiGeometry)
 }
 
 fn window_is_render_hidden(ws: &WindowState) -> bool {
@@ -7559,7 +7606,9 @@ impl App {
             m
         };
         let mut windows = std::collections::BTreeMap::new();
-        windows.insert(1, WindowState::new(1, start_fullscreen, mux));
+        let mut initial_window = WindowState::new(1, start_fullscreen, mux);
+        initial_window.cursor_exit_log = crate::cursor_exit_log::CursorExitLog::from_env(1);
+        windows.insert(1, initial_window);
         let remote_proxy = proxy.clone();
         let remote_scan_worker =
             match kettle_remote::RemoteScanWorker::spawn_with_notifier(move || {
@@ -9505,6 +9554,28 @@ impl App {
         pane_snapshot_keys_match(&ws.pane_snapshot_keys, current)
     }
 
+    fn pane_cursor_layer_eligible(ws: &WindowState) -> bool {
+        use kettle_core::CursorShape;
+        use kettle_core::TermMode;
+        ws.vi_mode.is_none()
+            && ws
+                .mux
+                .active_focus()
+                .and_then(|id| ws.mux.panes.get(&id))
+                .is_some_and(|pane| {
+                    let Ok(term) = pane.term.term.try_lock() else {
+                        return false;
+                    };
+                    let content = term.renderable_content();
+                    let row = i64::from(content.cursor.point.line.0)
+                        .saturating_add(i64::try_from(content.display_offset).unwrap_or(i64::MAX));
+                    !content.mode.contains(TermMode::VI)
+                        && content.cursor.shape != CursorShape::Hidden
+                        && (0..i64::try_from(term.grid().screen_lines()).unwrap_or(0))
+                            .contains(&row)
+                })
+    }
+
     fn pane_cursor_blinking(&self, ws: &WindowState, use_pane_snapshots: bool) -> bool {
         pane_cursor_blinking_with(
             ws.mux.active_focus(),
@@ -11304,6 +11375,7 @@ impl App {
     }
 
     fn stash_renderer_for_gpu_recovery(ws: &mut WindowState) {
+        Self::retire_cursor_layer(ws);
         let live = ws.renderer.as_ref().map(Renderer::recovery_state);
         retain_renderer_recovery_snapshot(&mut ws.renderer_recovery, live);
         ws.renderer = None;
@@ -11382,6 +11454,7 @@ impl App {
         // Commit only after the replacement is fully initialized. A failed
         // candidate leaves the old renderer in place while the state machine
         // backs off and tries again.
+        Self::retire_cursor_layer(ws);
         ws.renderer = Some(replacement);
         self.reclamp_context_menu(ws, (size.width as f32, size.height as f32));
         if ws.dpi_resize_surface_suspended {
@@ -12893,20 +12966,7 @@ impl App {
         // pure `&self` reader.)
         let pane_blink = self.pane_cursor_blinking(ws, reuse_pane_snapshots);
         let blink_enabled = self.cfg.cursor_blink && pane_blink;
-        let cursor_visible = if !blink_enabled
-            || !window_focused
-            || ws.ssh_input.is_some()
-            || ws.palette_input.is_some()
-            || ws.layout_picker_input.is_some()
-            || ws.hint_state.is_some()
-            || ws.search.open
-            // The title-edit and confirm-dialog input bars are also
-            // active text surfaces — keep the cursor steady (not mid-blink-off)
-            // while the user is typing/navigating them, like the other modals.
-            || ws.editing_title.is_some()
-            || ws.confirm_dialog.is_some()
-            || ws.settings_nav.is_some()
-        {
+        let cursor_visible = if !blink_enabled || !window_focused || modal_holds_cursor_steady(ws) {
             true
         } else {
             ws.blink_on
@@ -13138,6 +13198,18 @@ impl App {
     }
 
     fn redraw(&mut self, ws: &mut WindowState) {
+        // A frame while the window server blinks the cursor ends that blink.
+        // Bring the app's phase to where the animation is first, so the frame
+        // draws what the screen shows. The harness timer includes this work.
+        let cursor_exit_frame = if ws.cursor_exit_log.enabled {
+            ws.cursor_exit_log.begin_frame(
+                ws.blink_layer.is_active(),
+                crate::cursor_exit_log::raw_now_ns(),
+            )
+        } else {
+            None
+        };
+        Self::materialize_layer_blink(ws, std::time::Instant::now());
         // Flush any pending chrome-geometry change before painting. A title
         // edit materialises a chrome strip (see `tab_bar_h`), so opening or
         // closing one changes the content rectangle and the PTYs must follow.
@@ -13523,6 +13595,17 @@ impl App {
             .native_material
             .as_ref()
             .and_then(|material| material.live_opacity_floor());
+        // An on-to-off edge the scheduler marked hands the blink to the window
+        // server (macOS) if this frame still draws the off phase with nothing
+        // holding the cursor. Only a successful main present lets the renderer
+        // draw the patch into the layer's surface afterward.
+        let blink_handoff = ws.blink_layer.take_pending_handoff()
+            && self.cfg.macos_cursor_blink_layer
+            && !overlay.cursor_visible
+            && overlay.window_focused
+            && overlay.ime_preedit.is_none()
+            && Self::pane_cursor_layer_eligible(ws)
+            && Self::ensure_cursor_layer(ws);
         // Status bar and native fallback state are built BEFORE the &mut
         // renderer borrow (the helpers read other window state immutably).
         let Some(renderer) = ws.renderer.as_mut() else {
@@ -13552,6 +13635,17 @@ impl App {
             live_fullscreen,
         ));
         renderer.set_live_background_opacity_floor(live_opacity_floor);
+        // Any frame while the window server blinks the cursor ends that blink.
+        // The frame presents in one Core Animation transaction with hiding the
+        // layer, so the screen never shows new content under a stale cursor,
+        // or the old frame with no cursor.
+        let layer_exit = ws.blink_layer.is_active();
+        let exit_started = std::time::Instant::now();
+        let mut layer_exit_presented = false;
+        if layer_exit && let Some(layer) = &ws.cursor_layer {
+            layer.begin_exit_frame();
+        }
+        let frame_started = std::time::Instant::now();
         let frame_result = renderer.render_frame_with_status_and_pre_present(
             &panes,
             &tabbar,
@@ -13564,6 +13658,15 @@ impl App {
                 }
             },
         );
+        let frame_time = frame_started.elapsed();
+        // C1 records only a presented scene. Reuse that scene immediately,
+        // before any renderer setter can invalidate it, and with the same cfg.
+        let cursor_patch = if blink_handoff && matches!(&frame_result, Ok(FrameOutcome::Presented))
+        {
+            Some(renderer.present_cursor_patch(&self.cfg))
+        } else {
+            None
+        };
         // Return the snapshot pool (cell-Vec capacity recycles next frame).
         drop(panes);
         ws.pane_snapshots = snaps;
@@ -13623,6 +13726,21 @@ impl App {
                         } else {
                             0
                         };
+                        ws.blink_layer.note_presented(std::time::Instant::now());
+                        if layer_exit {
+                            // Commits with this frame's present in
+                            // `end_exit_frame` below.
+                            if let Some(layer) = &ws.cursor_layer {
+                                layer.hide();
+                            }
+                            layer_exit_presented = true;
+                        } else if blink_handoff {
+                            if let Some(patch) = cursor_patch {
+                                self.start_layer_blink(ws, patch, window.as_deref());
+                            } else {
+                                ws.blink_layer.failed_handoff();
+                            }
+                        }
                     }
                     FrameOutcome::RetryLater => {
                         debug_assert!(!presented);
@@ -13671,6 +13789,35 @@ impl App {
                     ws.frame_recovery
                         .schedule_renderer_rebuild(std::time::Instant::now());
                 }
+            }
+        }
+        // A frame that did not present leaves the layer blinking over the
+        // off-phase frame beneath it, which is still what the screen shows.
+        if layer_exit && let Some(layer) = &ws.cursor_layer {
+            layer.end_exit_frame();
+        }
+        let cursor_exit_end = if cursor_exit_frame.is_some() && layer_exit_presented {
+            crate::cursor_exit_log::raw_now_ns()
+        } else {
+            None
+        };
+        if layer_exit_presented {
+            let exit_time = exit_started.elapsed();
+            ws.blink_layer.exited(exit_time);
+            if ws.cursor_exit_log.enabled {
+                if let Some(line) = ws.cursor_exit_log.finish_frame(
+                    cursor_exit_frame,
+                    layer_exit_presented,
+                    cursor_exit_end,
+                ) {
+                    crate::cursor_exit_log::emit_line(&line);
+                }
+            } else {
+                log::info!(target: CURSOR_BLINK_LOG, "exit_frame_us={} render_frame_us={}",
+                    exit_time.as_micros(), frame_time.as_micros());
+            }
+            if !self.cfg.macos_cursor_blink_layer {
+                Self::retire_cursor_layer(ws);
             }
         }
     }
@@ -15552,6 +15699,153 @@ impl App {
         ws.blink_on = true;
         ws.last_blink = now;
         ws.last_blink_activity = now;
+        // The window server's blink was planned from the old activity time.
+        // A frame ends it (see `redraw`), so it never outlives new activity.
+        if ws.blink_layer.is_active()
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+    }
+
+    /// Bring the app's blink phase to where the window server's animation is.
+    /// A writer since the hand-off (`reset_blink_phase`, a DEC mode 12
+    /// change) moves `last_blink` off the anchor, and its phase wins.
+    fn materialize_layer_blink(ws: &mut WindowState, now: std::time::Instant) {
+        let Some((on, edge)) = ws.blink_layer.materialize(ws.blink_on, ws.last_blink, now) else {
+            return;
+        };
+        ws.blink_on = on;
+        ws.last_blink = edge;
+    }
+
+    /// The window's cursor layer, installed and given to the renderer at the
+    /// first hand-off, so startup never pays for it. A failure keeps the GPU
+    /// blink for this window and logs once.
+    fn ensure_cursor_layer(ws: &mut WindowState) -> bool {
+        if ws.cursor_layer.is_some() {
+            return true;
+        }
+        // A window between renderers (recovery) tries again at a later edge.
+        let (Some(window), Some(renderer)) = (ws.window.as_deref(), ws.renderer.as_mut()) else {
+            return false;
+        };
+        let installed = crate::macos_cursor_layer::CursorLayer::install(window).and_then(|layer| {
+            layer.attach(renderer)?;
+            Ok(layer)
+        });
+        match installed {
+            Ok(layer) => {
+                ws.cursor_layer = Some(layer);
+                true
+            }
+            Err(reason) => {
+                if ws.blink_layer.fall_back(reason) {
+                    log::info!(
+                        target: CURSOR_BLINK_LOG,
+                        "window {}: the cursor blinks on the GPU: {reason}",
+                        ws.seq
+                    );
+                }
+                false
+            }
+        }
+    }
+
+    /// A hand-off frame reached the screen: start the window server's blink
+    /// over the patch it drew, or keep the GPU blink for this edge.
+    fn start_layer_blink(
+        &self,
+        ws: &mut WindowState,
+        patch: CursorPatchOutcome,
+        window: Option<&winit::window::Window>,
+    ) {
+        ws.blink_layer.failed_handoff();
+        // A failed patch present may leave old contents on the layer.
+        // Keep them hidden until both the patch and the animation are ready.
+        if let Some(layer) = &ws.cursor_layer {
+            layer.hide();
+        }
+        let rect = match patch {
+            CursorPatchOutcome::Presented(rect) => rect,
+            CursorPatchOutcome::Ineligible(reason) => {
+                log::debug!(
+                    target: CURSOR_BLINK_LOG,
+                    "window {}: cursor patch ineligible: {reason:?}",
+                    ws.seq
+                );
+                return;
+            }
+            CursorPatchOutcome::Failed(reason) => {
+                log::debug!(
+                    target: CURSOR_BLINK_LOG,
+                    "window {}: cursor patch failed: {}",
+                    ws.seq,
+                    reason.as_str()
+                );
+                if reason == CursorPatchFailure::Lost {
+                    Self::retire_cursor_layer(ws);
+                }
+                return;
+            }
+        };
+        let rect_px = [rect.x, rect.y, rect.width, rect.height];
+        let Some(plan) = crate::cursor_blink::layer_plan(
+            ws.blink_on,
+            ws.last_blink,
+            ws.last_blink_activity,
+            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+            self.cfg.cursor_blink_timeout(),
+        ) else {
+            return;
+        };
+        let (Some(layer), Some(window)) = (&ws.cursor_layer, window) else {
+            return;
+        };
+        match layer.show(
+            rect_px,
+            window.scale_factor(),
+            &plan,
+            std::time::Instant::now(),
+        ) {
+            Ok(()) => ws.blink_layer.started(plan, rect_px),
+            Err(reason) => log::debug!(
+                target: CURSOR_BLINK_LOG,
+                "window {}: the cursor layer did not start: {reason}",
+                ws.seq
+            ),
+        }
+    }
+
+    /// Hide the cursor layer without a frame: the window lost focus, was
+    /// occluded, changed size or scale, or is rebuilding its renderer. The Metal
+    /// layer beneath shows the off phase, which is right for each of these
+    /// until the next frame draws the phase materialized here.
+    fn hide_cursor_layer(ws: &mut WindowState) {
+        if !ws.blink_layer.is_active() {
+            return;
+        }
+        Self::materialize_layer_blink(ws, std::time::Instant::now());
+        if let Some(layer) = &ws.cursor_layer {
+            layer.hide();
+        }
+        ws.blink_layer.hidden();
+        if ws.cursor_exit_log.enabled {
+            ws.cursor_exit_log.hidden();
+        }
+    }
+
+    /// Remove the cursor layer and the renderer's surface on it. A rebuilt
+    /// surface adds its Metal layer above the old one, so the next hand-off
+    /// installs a fresh cursor layer above that.
+    fn retire_cursor_layer(ws: &mut WindowState) {
+        Self::hide_cursor_layer(ws);
+        let layer = ws.cursor_layer.take();
+        if layer.is_some()
+            && let Some(renderer) = ws.renderer.as_mut()
+        {
+            renderer.detach_cursor_layer();
+        }
     }
 
     /// Send a broadcast from `ws`, and then to the panes in every OTHER window
@@ -17378,16 +17672,16 @@ impl App {
         }
     }
 
-    fn poll_theme_schedule(&mut self, ws: &mut WindowState) {
-        let Some(schedule) = self.cfg.theme_schedule else {
-            return;
-        };
+    /// Whether the configured theme schedule calls for the dark theme now,
+    /// or `None` without a schedule.
+    fn theme_schedule_is_dark(&self) -> Option<bool> {
+        let schedule = self.cfg.theme_schedule?;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let day_secs = secs % 86_400;
-        let is_dark = match schedule {
+        Some(match schedule {
             // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
                 let (h, m, _) = crate::wall_clock::now_local();
@@ -17404,6 +17698,12 @@ impl App {
                 let approx_doy = ((days_since_epoch % 365) + 1) as u16;
                 kettle_config::schedule_decision_sunrise(day_secs as u32, approx_doy, lat, long)
             }
+        })
+    }
+
+    fn poll_theme_schedule(&mut self, ws: &mut WindowState) {
+        let Some(is_dark) = self.theme_schedule_is_dark() else {
+            return;
         };
         // Seed on first call so we don't flip the theme just for
         // existing on a "now's dark" tick — only boundary
@@ -17988,6 +18288,9 @@ impl App {
         // A config change, including a Settings edit or a menu toggle, is
         // activity: a new blink or timeout value takes effect visibly now.
         self.reset_blink_phase(ws);
+        if !self.cfg.macos_cursor_blink_layer && !ws.blink_layer.is_active() {
+            Self::retire_cursor_layer(ws);
+        }
         #[cfg(target_os = "macos")]
         {
             refresh_macos_modifiers(ws, self.cfg.macos_option_as_alt);
@@ -18133,8 +18436,8 @@ impl App {
                 } => {
                     // Mutations + first-time attaches change visible state
                     // (pane content, agent badge); wait_for's internal
-                    // probes never do.
-                    if !internal_probe {
+                    // probes and `ui_geometry` reads never do.
+                    if !internal_probe && !ctl_request_is_pure_read(&req) {
                         needs_redraw = true;
                     }
                     self.handle_ctl_request(ws, event_loop, conn_id, &req, reply, internal_probe);
@@ -18145,6 +18448,8 @@ impl App {
                         .as_mut()
                         .map(|c| c.remove_conn(conn_id))
                         .unwrap_or_default();
+                    // Only a connection that held panes can clear a badge.
+                    needs_redraw |= !panes.is_empty();
                     // Clear the agent badge for panes no connection holds now.
                     for pane in panes {
                         let still = self
@@ -18160,7 +18465,6 @@ impl App {
                     self.pending_runs
                         .retain(|_, p: &mut PendingRun| p.conn_id != conn_id);
                     log::info!("agent-server: connection {conn_id} closed");
-                    needs_redraw = true; // the agent badge may have cleared
                 }
             }
         }
@@ -19189,8 +19493,79 @@ impl App {
                         "skipped_writes": u.skipped_writes,
                     })
                 }),
+                // Who draws the blink: the GPU, or the window server's layer
+                // (macOS). Timing, geometry and counts only.
+                "cursor_blink": self.cursor_blink_diagnostics(target),
             }),
         )
+    }
+
+    /// `ui_geometry.cursor_blink`: the phase the screen shows, when it next
+    /// changes, and the layer's hand-offs, exits and exit-frame times.
+    fn cursor_blink_diagnostics(&self, ws: &WindowState) -> serde_json::Value {
+        let now = std::time::Instant::now();
+        let layer = &ws.blink_layer;
+        let (phase_on, next_edge) = match layer.active() {
+            Some((anchor, plan, _)) if ws.last_blink == anchor => {
+                let (on, edge) = crate::cursor_blink::materialize(
+                    ws.blink_on,
+                    ws.last_blink,
+                    plan.activity,
+                    plan.interval,
+                    plan.timeout,
+                    now,
+                );
+                let next = crate::cursor_blink::next_edge(
+                    on,
+                    edge,
+                    plan.activity,
+                    plan.interval,
+                    plan.timeout,
+                    now,
+                );
+                (on, next)
+            }
+            _ => {
+                let running = ws.window_focused
+                    && !window_is_render_hidden(ws)
+                    && cursor_blink_active(
+                        self.cfg.cursor_blink,
+                        self.pane_cursor_blinking(ws, false),
+                        ws.window_focused,
+                    );
+                let next = running
+                    .then(|| {
+                        crate::cursor_blink::next_edge(
+                            ws.blink_on,
+                            ws.last_blink,
+                            ws.last_blink_activity,
+                            std::time::Duration::from_millis(self.cfg.cursor_blink_interval),
+                            self.cfg.cursor_blink_timeout(),
+                            now,
+                        )
+                    })
+                    .flatten();
+                (ws.blink_on, next)
+            }
+        };
+        let exit_frames = &layer.exit_frames;
+        serde_json::json!({
+            "renderer": if layer.is_active() { "layer" } else { "gpu" },
+            "layer_rect": layer.active().map(|(_, _, rect)| rect),
+            "phase_on": phase_on,
+            "next_edge_ms": next_edge
+                .map(|at| u64::try_from(at.saturating_duration_since(now).as_millis()).unwrap_or(u64::MAX)),
+            "handoffs": layer.handoffs,
+            "exits": layer.exits,
+            "hides": layer.hides,
+            "exit_frame_us": {
+                "count": exit_frames.count(),
+                "p50": exit_frames.percentile_us(50),
+                "p95": exit_frames.percentile_us(95),
+                "max": exit_frames.max_us(),
+            },
+            "fallback": layer.fallback(),
+        })
     }
 
     /// `perform_action`: dispatch a named kettle app action against the focused
@@ -24750,27 +25125,6 @@ fn cursor_blink_active(configured: bool, pane_requests_blink: bool, window_focus
     configured && pane_requests_blink && window_focused
 }
 
-/// Whether an idle cursor has stopped blinking. It stops only in its visible
-/// phase, so the final toggle always leaves the cursor showing. Each blink
-/// repaints the window, and on macOS a window that keeps drawing keeps its GPU
-/// driver memory resident, so an idle window should settle.
-fn cursor_blink_timed_out(
-    idle: std::time::Duration,
-    timeout: Option<std::time::Duration>,
-    cursor_on: bool,
-) -> bool {
-    cursor_on && timeout.is_some_and(|timeout| idle >= timeout)
-}
-
-fn next_cursor_blink_phase(
-    active: bool,
-    elapsed: std::time::Duration,
-    interval: std::time::Duration,
-    current: bool,
-) -> Option<bool> {
-    (active && elapsed >= interval).then_some(!current)
-}
-
 fn normalized_ime_preedit(
     text: String,
     selection: Option<(usize, usize)>,
@@ -25071,6 +25425,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let runtime_tracker = self.runtime_tracker.clone();
         let _phase = runtime_tracker.enter("about_to_wait");
+        // Opt-in cursor_exit_v1: a key that could have ended the layer blink
+        // but asked for no frame is recorded before the loop sleeps.
+        for ws in self.windows.values_mut() {
+            if ws.cursor_exit_log.enabled {
+                ws.cursor_exit_log.flush_unrequested();
+            }
+        }
         // Tear-off UX failsafe: torn-drag tracking that lost its
         // drop signal (an X11 release the WM swallowed, then no further
         // input) is abandoned after 120s of silence. The window is long
@@ -27770,6 +28131,12 @@ impl App {
             crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
             crate::startup_trace::note_path(crate::startup_trace::StartupPath::AfterRenderer);
         }
+        if ws.cursor_exit_log.enabled
+            && let Some(pane_id) = ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus)
+            && let Some(window) = ws.window.as_deref()
+        {
+            ws.cursor_exit_log.bind(ws.seq, pane_id, window);
+        }
         self.resize_all(ws);
         // Start the control server right after the first pane exists and BEFORE
         // the first GPU paint, which can take several seconds on a cold shader
@@ -28307,6 +28674,17 @@ impl App {
                     return;
                 }
                 ws.dpi_resize_surface_suspended = false;
+                // The Metal layer stretches its last frame to the new size
+                // until the resize's frame presents, and that frame may have
+                // to retry. The cursor patch would keep blinking where the
+                // cell was.
+                if ws
+                    .renderer
+                    .as_ref()
+                    .is_none_or(|r| r.surface_size() != (size.width, size.height))
+                {
+                    Self::hide_cursor_layer(ws);
+                }
                 let renderer_ready = self.dpi_resize_renderer_ready(ws);
                 if ws.dpi_resize.on_event(DpiResizeEvent::Resized {
                     width: size.width,
@@ -28318,6 +28696,9 @@ impl App {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // The patch was drawn at the old scale, and the new-scale frame
+                // may wait for the paired resize.
+                Self::hide_cursor_layer(ws);
                 self.sync_output_frame_budget(ws, true);
                 // Apply the new DPI scale so text follows >100% Windows scaling
                 // and rescales when dragged to a different-DPI monitor.
@@ -29492,6 +29873,11 @@ impl App {
                 if f {
                     self.focused_seq = ws.seq;
                 }
+                if !f {
+                    // An unfocused window draws no cursor, and the Metal layer
+                    // beneath already shows the off phase.
+                    Self::hide_cursor_layer(ws);
+                }
                 // Non-interactive UI-state marker (OS-driven focus
                 // change — a transition the PTY output stream can't show).
                 if let Some(rec) = self.recorder.as_mut() {
@@ -29605,6 +29991,9 @@ impl App {
                 // un-occlude, repaint at once so the wallpaper catches up to
                 // its true time.
                 ws.window_occluded = occluded;
+                if occluded {
+                    Self::hide_cursor_layer(ws);
+                }
                 if !occluded {
                     ws.frame_recovery.expedite(std::time::Instant::now());
                     if let Some(w) = &ws.window {
@@ -29727,6 +30116,18 @@ impl App {
                         return;
                     }
                 }
+                let cursor_exit_key = if ws.cursor_exit_log.enabled {
+                    ws.cursor_exit_log.accepted_key(
+                        ws.seq,
+                        ws.mux.tabs.get(ws.mux.active).map(|tab| tab.focus),
+                        event.state,
+                        &event.logical_key,
+                        event.physical_key,
+                        ws.blink_layer.is_active(),
+                    )
+                } else {
+                    None
+                };
                 // Record the keystroke (redacted token) BEFORE any
                 // modal/early-return path consumes it, so the trace captures
                 // every key. Pasted content never reaches here — it's a `paste`
@@ -29755,6 +30156,9 @@ impl App {
                     // the terminal.
                     ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
+                        if cursor_exit_key.is_some() {
+                            ws.cursor_exit_log.request_exit(cursor_exit_key);
+                        }
                         w.request_redraw();
                     }
                     return;
@@ -29772,6 +30176,9 @@ impl App {
                     ws.tab_pressed_idx = None;
                     ws.closing_keys.insert(event.physical_key);
                     if let Some(w) = &ws.window {
+                        if cursor_exit_key.is_some() {
+                            ws.cursor_exit_log.request_exit(cursor_exit_key);
+                        }
                         w.request_redraw();
                     }
                     return;
@@ -29794,6 +30201,9 @@ impl App {
                 // user-driven blink-reset paths (Reset / focus changes /
                 // modal close / typing / tab close / window focus /
                 // DEC ?12 toggle) stay in lock-step.
+                if cursor_exit_key.is_some() {
+                    ws.cursor_exit_log.request_exit(cursor_exit_key);
+                }
                 self.reset_blink_phase(ws);
                 // Hide the OS mouse cursor (configurable; default on, like
                 // every modern terminal). Re-shown on the next CursorMoved.
@@ -30409,7 +30819,12 @@ impl App {
             self.cfg.cursor_blink_timeout(),
             ws.blink_on,
         );
+        // While the window server blinks the cursor, the scheduler neither
+        // flips the phase nor wakes for it; `redraw` materializes the phase
+        // from the layer's plan instead.
+        let layer_blink = ws.blink_layer.is_active();
         let blink_active = !render_hidden
+            && !layer_blink
             && !blink_timed_out
             && cursor_blink_active(self.cfg.cursor_blink, pane_blink, ws.window_focused);
         let blink_interval = std::time::Duration::from_millis(self.cfg.cursor_blink_interval);
@@ -30425,6 +30840,11 @@ impl App {
             ws.blink_on = next_blink;
             ws.last_blink = now;
         }
+        // Whether only the blink drew in the half-period this edge ends.
+        let blink_quiet = blink_due
+            && ws
+                .blink_layer
+                .note_edge(now, crate::cursor_blink::quiet_window(blink_interval));
         let term_anim = !render_hidden
             && ws
                 .mux
@@ -30505,6 +30925,59 @@ impl App {
                 .last_paint
                 .map(|t| now.saturating_duration_since(t) >= output_budget)
                 .unwrap_or(true);
+        // At an edge that hides the cursor, a quiet window with nothing else
+        // to draw hands its blink to the window server (macOS). The blink
+        // redraw requested below becomes the hand-off frame.
+        let cursor_eligible = crate::macos_cursor_layer::SUPPORTED
+            && self.cfg.macos_cursor_blink_layer
+            && next_blink == Some(false)
+            && Self::pane_cursor_layer_eligible(ws);
+        if crate::cursor_blink::handoff_allowed(crate::cursor_blink::HandoffInputs {
+            enabled: crate::macos_cursor_layer::SUPPORTED
+                && self.cfg.macos_cursor_blink_layer
+                && ws.blink_layer.fallback().is_none(),
+            edge_hides_cursor: next_blink == Some(false),
+            blink_active,
+            cursor_eligible,
+            quiet: blink_quiet,
+            other_animation: bell_active
+                || term_anim
+                || bg_anim_interval.is_some()
+                || autoscroll_active
+                || resize_chip_active
+                || media_receipt_redraw
+                || media_receipt_wait.is_some()
+                || pending_video_receipt_wait.is_some()
+                || completion_hide_due
+                || completion_hide_wait.is_some(),
+            ime_preedit: ws.ime_preedit.is_some(),
+            modal_steady: modal_holds_cursor_steady(ws),
+            work_pending: coalesce_due
+                || ws.output_pacer.is_deferred()
+                || ws.frame_recovery.has_pending()
+                || ws.pending_resize
+                || ws.accessibility_pending
+                || dpi_fallback_wait.is_some()
+                || pty_resize_retry_wait.is_some()
+                || ws
+                    .renderer
+                    .as_ref()
+                    .is_some_and(Renderer::has_pending_screenshot),
+        }) {
+            ws.blink_layer.request_handoff();
+        }
+        // A theme schedule flips at a wall-clock boundary, and only a redraw
+        // applies it. A window that draws nothing (idle, or with its cursor
+        // blinking on the window server's layer) would otherwise keep the old
+        // theme until something else changes, so check the schedule at each
+        // wall-clock minute and draw only when it has flipped.
+        let theme_schedule_due = !render_hidden
+            && theme_schedule_redraw_due(
+                self.last_schedule_decision,
+                self.theme_schedule_is_dark(),
+            );
+        let theme_schedule_wait =
+            (!render_hidden && self.cfg.theme_schedule.is_some()).then(until_next_wall_minute);
         if (bell_active
             || blink_due
             || term_anim
@@ -30513,7 +30986,8 @@ impl App {
             || coalesce_due
             || resize_chip_active
             || media_receipt_redraw
-            || completion_hide_due)
+            || completion_hide_due
+            || theme_schedule_due)
             && let Some(w) = &ws.window
         {
             w.request_redraw();
@@ -30538,6 +31012,9 @@ impl App {
                 None
             };
         if let Some(next) = frame_recovery_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = theme_schedule_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = dpi_fallback_wait {
@@ -34349,6 +34826,13 @@ mod tests {
             "\"frames_presented\": u.frames_presented",
             "\"buffer_writes\": u.buffer_writes",
             "\"text_prepares\": u.text_prepares",
+            "\"cursor_blink\": self.cursor_blink_diagnostics(target),",
+            "\"renderer\": if layer.is_active() { \"layer\" } else { \"gpu\" },",
+            "\"layer_rect\":",
+            "\"phase_on\": phase_on,",
+            "\"next_edge_ms\":",
+            "\"handoffs\": layer.handoffs,",
+            "\"exits\": layer.exits,",
         ] {
             assert!(body.contains(needle), "ui_geometry lost {needle:?}");
         }
@@ -34902,6 +35386,51 @@ mod tests {
     }
 
     #[test]
+    fn a_flipped_theme_schedule_asks_for_one_redraw() {
+        // The first decision only seeds the schedule; a flip asks for a frame.
+        assert!(!super::theme_schedule_redraw_due(None, Some(true)));
+        assert!(!super::theme_schedule_redraw_due(Some(true), Some(true)));
+        assert!(!super::theme_schedule_redraw_due(Some(false), None));
+        assert!(super::theme_schedule_redraw_due(Some(true), Some(false)));
+        assert!(super::theme_schedule_redraw_due(Some(false), Some(true)));
+        let wait = super::until_next_wall_minute();
+        assert!(wait > std::time::Duration::ZERO && wait <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_theme_schedule_redraws_whoever_blinks_the_cursor() {
+        // With the cursor blinking on the window server's layer, no blink
+        // frame comes to apply a scheduled theme, so the wait loop must check
+        // the schedule itself, at every minute, whatever the blink is doing.
+        let src = production_source();
+        let body = src
+            .split_once("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner")
+            .1;
+        let due = body
+            .split_once("let theme_schedule_due =")
+            .expect("theme schedule check")
+            .1
+            .split_once(';')
+            .expect("statement")
+            .0;
+        assert!(due.contains("theme_schedule_redraw_due("));
+        assert!(
+            !due.contains("blink"),
+            "the check must not depend on the blink"
+        );
+        assert!(
+            body.contains("|| theme_schedule_due)"),
+            "a flip must request a redraw"
+        );
+        assert!(
+            body.contains("if let Some(next) = theme_schedule_wait {"),
+            "the loop must wake for the schedule"
+        );
+        assert!(body.contains(".then(until_next_wall_minute)"));
+    }
+
+    #[test]
     fn cursor_blink_stops_after_the_timeout_only_while_visible() {
         use std::time::Duration;
         let timeout = Some(Duration::from_secs(10));
@@ -35153,6 +35682,9 @@ mod tests {
             .0;
         assert!(scheduler.contains("cursor_blink_timed_out("));
         assert!(scheduler.contains("&& !blink_timed_out"));
+        // The window server's blink replaces the scheduler's, never both.
+        assert!(scheduler.contains("let layer_blink = ws.blink_layer.is_active();"));
+        assert!(scheduler.contains("&& !layer_blink"));
         let reset = src
             .split_once("fn reset_blink_phase(&mut self, ws: &mut WindowState) {")
             .expect("reset_blink_phase")
@@ -35161,6 +35693,11 @@ mod tests {
             .expect("end of reset_blink_phase")
             .0;
         assert!(reset.contains("ws.last_blink_activity = now;"));
+        // New activity ends a layer blink planned from the old activity.
+        assert!(
+            reset.contains("if ws.blink_layer.is_active()")
+                && reset.contains("window.request_redraw();")
+        );
         let toggle = src
             .split_once("Action::ToggleCursorBlink => {")
             .expect("blink toggle")
@@ -35211,6 +35748,331 @@ mod tests {
             super::next_cursor_blink_phase(false, interval * 10, interval, true),
             None
         );
+    }
+
+    /// The scheduler hands the blink to the window server only at an edge
+    /// that hid the cursor, after it advanced the phase and recorded whether
+    /// the half-period was quiet, and before it requests the edge's redraw,
+    /// which becomes the hand-off frame.
+    #[test]
+    fn the_scheduler_hands_off_only_at_an_edge_that_hides_the_cursor() {
+        let src = super::production_source();
+        let body = src
+            .split_once("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner")
+            .1;
+        let edge = body.find("ws.last_blink = now;").expect("blink edge");
+        let quiet = body
+            .find(".note_edge(now, crate::cursor_blink::quiet_window(blink_interval));")
+            .expect("quiet half-period");
+        let gate = body
+            .find("crate::cursor_blink::handoff_allowed(")
+            .expect("hand-off gate");
+        let request = body
+            .find("ws.blink_layer.request_handoff();")
+            .expect("hand-off request");
+        let redraw = body.find("|| blink_due").expect("blink redraw");
+        assert!(edge < quiet && quiet < gate && gate < request && request < redraw);
+        let eligibility = src
+            .split_once("fn pane_cursor_layer_eligible(")
+            .expect("cursor eligibility")
+            .1
+            .split_once("fn pane_cursor_blinking(")
+            .expect("end of eligibility")
+            .0;
+        for needle in [
+            "ws.vi_mode.is_none()",
+            "TermMode::VI",
+            "CursorShape::Hidden",
+            "content.display_offset",
+            ".contains(&row)",
+        ] {
+            assert!(
+                eligibility.contains(needle),
+                "cursor eligibility lost {needle}"
+            );
+        }
+        let start = src
+            .split_once("fn start_layer_blink(")
+            .expect("start layer")
+            .1
+            .split_once("fn hide_cursor_layer(")
+            .expect("end of start layer")
+            .0;
+        assert!(start.contains("ws.blink_layer.failed_handoff();"));
+        assert!(body[..gate].contains("&& Self::pane_cursor_layer_eligible(ws);"));
+        let inputs = &body[gate..request];
+        for needle in [
+            "self.cfg.macos_cursor_blink_layer",
+            "edge_hides_cursor: next_blink == Some(false),",
+            "blink_active,",
+            "cursor_eligible,",
+            "|| pending_video_receipt_wait.is_some()",
+            "quiet: blink_quiet,",
+            "ime_preedit: ws.ime_preedit.is_some(),",
+            "modal_steady: modal_holds_cursor_steady(ws),",
+            "|| ws.accessibility_pending",
+            "is_some_and(Renderer::has_pending_screenshot)",
+        ] {
+            assert!(inputs.contains(needle), "the hand-off gate lost {needle:?}");
+        }
+    }
+
+    /// A frame ends the window server's blink only when it presents: the
+    /// layer hides in the `Presented` arm, inside the transaction that
+    /// `begin_exit_frame` opens before the render call and `end_exit_frame`
+    /// commits after the outcome match, so the frame and the hide land
+    /// together. The phase is materialized before anything reads it.
+    #[test]
+    fn a_layer_blink_ends_only_with_a_presented_frame() {
+        let src = super::production_source();
+        let redraw = src
+            .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
+            .expect("redraw")
+            .1
+            .split_once("\n    fn build_status_bar(")
+            .expect("end of redraw")
+            .0;
+        assert!(
+            redraw
+                .trim_start()
+                .starts_with("// A frame while the window server blinks")
+        );
+        assert!(redraw.contains("Self::materialize_layer_blink(ws, std::time::Instant::now());"));
+        let handoff = redraw
+            .split_once("let blink_handoff =")
+            .expect("redraw handoff recheck")
+            .1;
+        assert!(
+            handoff
+                .split_once("let Some(renderer) = ws.renderer.as_mut()")
+                .expect("renderer borrow")
+                .0
+                .contains("&& self.cfg.macos_cursor_blink_layer")
+        );
+        let phase = src
+            .split_once("fn materialize_layer_blink(")
+            .expect("materialize helper")
+            .1
+            .split_once("fn ensure_cursor_layer(")
+            .expect("end of materialize helper")
+            .0;
+        assert!(phase.contains(".materialize(ws.blink_on, ws.last_blink, now)"));
+        let begin = redraw
+            .find("layer.begin_exit_frame();")
+            .expect("exit frame opens");
+        let render = redraw
+            .find("render_frame_with_status_and_pre_present(")
+            .expect("render call");
+        let presented = redraw
+            .find("FrameOutcome::Presented => {")
+            .expect("presented arm");
+        let retry = redraw
+            .find("FrameOutcome::RetryLater => {")
+            .expect("retry arm");
+        let lost = redraw
+            .find("FrameOutcome::SurfaceLost => {")
+            .expect("lost arm");
+        let end = redraw
+            .find("layer.end_exit_frame();")
+            .expect("exit frame closes");
+        assert!(begin < render && render < presented && presented < retry && lost < end);
+        assert_eq!(redraw.matches("layer.hide();").count(), 1);
+        let hide = redraw.find("layer.hide();").expect("hide");
+        assert!(
+            presented < hide && hide < retry,
+            "hide() only for a presented frame"
+        );
+        let record = redraw
+            .find("ws.blink_layer.exited(exit_time);")
+            .expect("total exit time");
+        let start = redraw
+            .find("let exit_started =")
+            .expect("exit timer starts");
+        let measured = redraw
+            .find("let exit_time = exit_started.elapsed();")
+            .expect("exit timer ends");
+        assert!(start < begin && end < measured && measured < record);
+        assert!(redraw.contains("let exit_time = exit_started.elapsed();"));
+        assert!(redraw[record..].contains("Self::retire_cursor_layer(ws);"));
+        let reload = src
+            .split_once("fn apply_reloaded_config(")
+            .expect("config reload")
+            .1
+            .split_once("fn drain_ctl(")
+            .expect("end of config reload")
+            .0;
+        assert!(
+            reload.contains("!self.cfg.macos_cursor_blink_layer && !ws.blink_layer.is_active()")
+        );
+        assert_eq!(
+            redraw
+                .matches("ws.blink_layer.take_pending_handoff()")
+                .count(),
+            1
+        );
+    }
+
+    /// Window changes that move or invalidate the patch hide the layer at the
+    /// event, without waiting for a frame that may retry: a new size (the
+    /// Metal layer stretches its last frame but not the patch), a new scale,
+    /// focus loss and occlusion. A Resized that keeps the surface size, or
+    /// a degenerate one, leaves the blink alone.
+    #[test]
+    fn window_changes_hide_the_layer_without_a_frame() {
+        let src = super::production_source();
+        let arm = |head: &str, end: &str| -> String {
+            src.split_once(head)
+                .unwrap_or_else(|| panic!("{head}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{end}"))
+                .0
+                .to_string()
+        };
+        let resized = arm(
+            "WindowEvent::Resized(size) => {",
+            "WindowEvent::ScaleFactorChanged",
+        );
+        let degenerate = resized
+            .find("ws.dpi_resize_surface_suspended = true;")
+            .expect("degenerate return");
+        let changed = resized
+            .find(".is_none_or(|r| r.surface_size() != (size.width, size.height))")
+            .expect("size comparison");
+        let hide = resized
+            .find("Self::hide_cursor_layer(ws);")
+            .expect("resize hides the layer");
+        let layout = resized
+            .find("ws.dpi_resize.on_event(")
+            .expect("resize coalescer");
+        assert!(degenerate < changed && changed < hide && hide < layout);
+        let scale = arm(
+            "WindowEvent::ScaleFactorChanged { scale_factor, .. } => {",
+            "WindowEvent::ThemeChanged",
+        );
+        assert!(
+            scale
+                .find("Self::hide_cursor_layer(ws);")
+                .expect("scale hides")
+                < scale
+                    .find("ws.dpi_resize.on_event(")
+                    .expect("scale coalescer")
+        );
+        let focus = arm("WindowEvent::Focused(f) => {", "rec.record_marker(");
+        assert!(
+            focus
+                .split_once("if !f {")
+                .expect("focus loss")
+                .1
+                .contains("Self::hide_cursor_layer(ws);")
+        );
+        let occluded = arm("WindowEvent::Occluded(occluded) => {", "if !occluded {");
+        assert!(
+            occluded.contains("if occluded {\n                    Self::hide_cursor_layer(ws);")
+        );
+    }
+
+    /// C1 can retain old layer contents after failed patch presentation.
+    /// Only the latest Presented patch may show, and Lost must reattach later.
+    #[test]
+    fn cursor_patch_uses_the_presented_scene_and_hides_failed_contents() {
+        let src = super::production_source();
+        let redraw = src
+            .split_once("fn redraw(&mut self, ws: &mut WindowState) {")
+            .expect("redraw")
+            .1
+            .split_once("\n    fn build_status_bar(")
+            .expect("end redraw")
+            .0;
+        let render = redraw
+            .find("let frame_result = renderer.render_frame_with_status_and_pre_present(")
+            .expect("render");
+        let gate = redraw
+            .find("matches!(&frame_result, Ok(FrameOutcome::Presented))")
+            .expect("present gate");
+        let patch = redraw
+            .find("renderer.present_cursor_patch(&self.cfg)")
+            .expect("patch");
+        let outcome = redraw.find("match frame_result {").expect("outcome");
+        assert!(render < gate && gate < patch && patch < outcome);
+        assert!(!redraw[render..patch].contains("renderer.set_"));
+        let start = src
+            .split_once("fn start_layer_blink(")
+            .expect("start")
+            .1
+            .split_once("fn hide_cursor_layer(")
+            .expect("end start")
+            .0;
+        let hide = start.find("layer.hide();").expect("hide old contents");
+        let result = start.find("match patch {").expect("patch outcome");
+        let show = start.find("match layer.show(").expect("show");
+        assert!(hide < result && result < show);
+        assert!(start.contains("CursorPatchOutcome::Presented(rect) => rect,"));
+        let ineligible = start
+            .split_once("CursorPatchOutcome::Ineligible(reason) => {")
+            .expect("ineligible")
+            .1
+            .split_once("CursorPatchOutcome::Failed(reason) => {")
+            .expect("failure");
+        assert!(ineligible.0.contains("return;"));
+        let failed = ineligible.1.split_once("let rect_px =").expect("rect").0;
+        assert!(failed.contains("return;"));
+        assert!(failed.contains("if reason == CursorPatchFailure::Lost {\n                    Self::retire_cursor_layer(ws);"));
+        assert!(start.contains("let rect_px = [rect.x, rect.y, rect.width, rect.height];"));
+        let retire = src
+            .split_once("fn retire_cursor_layer(")
+            .expect("retire")
+            .1
+            .split_once("fn broadcast_input(")
+            .expect("end retire")
+            .0;
+        assert!(
+            retire.find("Self::hide_cursor_layer(ws);").expect("hide")
+                < retire
+                    .find("renderer.detach_cursor_layer();")
+                    .expect("detach")
+        );
+        assert!(retire.contains("let layer = ws.cursor_layer.take();"));
+    }
+
+    /// `ui_geometry` reads draw no frame, and a connection that attached no
+    /// pane draws none when it closes, so `kettle ctl ui_geometry` can watch a
+    /// window-server blink without ending it.
+    #[test]
+    fn ui_geometry_reads_draw_no_frame() {
+        let request = |method: &str| kettle_ctl::protocol::Request {
+            v: 1,
+            id: 1,
+            method: method.into(),
+            params: serde_json::Value::Null,
+        };
+        assert!(super::ctl_request_is_pure_read(&request("ui_geometry")));
+        for method in [
+            "read_screen",
+            "screenshot",
+            "send_keys",
+            "perform_action",
+            "nope",
+        ] {
+            assert!(
+                !super::ctl_request_is_pure_read(&request(method)),
+                "{method}"
+            );
+        }
+        let src = super::production_source();
+        let drain = src
+            .split_once(
+                "fn drain_ctl(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {",
+            )
+            .expect("drain_ctl")
+            .1
+            .split_once("\n    fn handle_ctl_request(")
+            .expect("end of drain_ctl")
+            .0;
+        assert!(drain.contains("if !internal_probe && !ctl_request_is_pure_read(&req) {"));
+        assert!(drain.contains("needs_redraw |= !panes.is_empty();"));
+        assert!(!drain.contains("the agent badge may have cleared"));
     }
 
     #[test]

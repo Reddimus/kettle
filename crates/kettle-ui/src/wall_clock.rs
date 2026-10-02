@@ -98,8 +98,8 @@ mod tests {
     fn the_schedule_and_status_clock_read_local_time() {
         let app = kettle_test_support::production_source(include_str!("app.rs"));
         let schedule = app
-            .split_once("fn poll_theme_schedule(")
-            .expect("poll_theme_schedule")
+            .split_once("fn theme_schedule_is_dark(")
+            .expect("theme_schedule_is_dark")
             .1
             .split_once("ThemeSchedule::SunriseSunset")
             .expect("sunrise arm")
