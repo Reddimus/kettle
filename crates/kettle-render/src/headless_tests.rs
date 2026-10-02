@@ -1028,6 +1028,47 @@ fn grid_output_prepares_no_glyphon_text() {
     assert_ne!(after, before, "the new text is still drawn");
 }
 
+/// The same character under the cursor with and without emoji presentation
+/// is two atlas bitmaps. Grid output no longer prepares the chrome, so when
+/// the cursor's bitmap changes the chrome must be prepared with it: a 1-glyph
+/// cursor prepare that grows or evicts the atlas would otherwise leave the
+/// tab bar's and menus' cached vertices pointing at glyphs it replaced.
+#[test]
+fn a_cursor_glyph_changing_presentation_prepares_the_chrome() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    // U+263A alone is text presentation, one cell; with U+FE0F it is emoji
+    // presentation, two cells. Either way the cursor steps back onto it.
+    let plain = snapshot_of(20, 4, "\u{263A}\x1b[D".as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&plain, 320, 120)],
+        &focused(true),
+    );
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&plain, 320, 120)],
+        &focused(true),
+    );
+    let chrome = renderer.render_uploads().chrome_prepares;
+    let qualified = snapshot_of(20, 4, "\u{263A}\u{FE0F}\x1b[2D".as_bytes());
+    capture(
+        &mut renderer,
+        &cfg,
+        &[pane(&qualified, 320, 120)],
+        &focused(true),
+    );
+    assert!(
+        renderer.render_uploads().chrome_prepares > chrome,
+        "a new cursor bitmap must prepare the chrome with it"
+    );
+}
+
 /// Only legacy-mode pane text may force the glyphon prepare; hosts with no
 /// GPU still check it here.
 #[test]

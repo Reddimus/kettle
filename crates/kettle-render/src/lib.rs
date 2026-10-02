@@ -2606,11 +2606,13 @@ pub struct Renderer {
     /// any main text prepare still forces a refresh in case the shared atlas
     /// repacked.
     last_cursor_glyph_key: Option<u64>,
-    /// The cursor-cell glyph shaped last frame. A change forces a `prepare` so
-    /// the new glyph is guaranteed resident in the atlas before the cursor pass
+    /// The cursor-cell glyph's atlas identity last frame: its character and
+    /// whether the cell asked for emoji presentation, which picks a different
+    /// bitmap for the same character. A change forces a `prepare` so the new
+    /// glyph is guaranteed resident in the atlas before the cursor pass
     /// reuses its bitmap (the only way the 1-glyph cursor prepare could grow
-    /// the atlas and invalidate the cached pane vertices).
-    last_cursor_char: Option<char>,
+    /// the atlas and invalidate cached chrome or pane vertices).
+    last_cursor_bitmap: Option<(char, bool)>,
     /// Last text shaped into each `pane_titlebar_buffers` slot.
     pane_titlebar_texts: Vec<String>,
     /// Last text shaped into each `tab_buffers` slot.
@@ -5239,7 +5241,7 @@ impl Renderer {
             cursor_glyph_buffer,
             pending_cursor_glyph: None,
             last_cursor_glyph_key: None,
-            last_cursor_char: None,
+            last_cursor_bitmap: None,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
             hint_texts: Vec::new(),
@@ -9085,9 +9087,15 @@ impl Renderer {
         // vertices we're about to re-render). A char change almost always
         // coincides with a content change (so the prepare runs anyway); this
         // only adds a prepare for the rare move-without-output case.
-        let cursor_char = self.pending_cursor_glyph.as_ref().map(|c| c.ch);
-        let cursor_char_changed = cursor_char != self.last_cursor_char;
-        self.last_cursor_char = cursor_char;
+        // The same character with and without emoji presentation is two
+        // bitmaps; grid output no longer prepares the chrome on its own, so the
+        // qualification counts as a change too.
+        let cursor_bitmap = self
+            .pending_cursor_glyph
+            .as_ref()
+            .map(|c| (c.ch, c.emoji_qualified));
+        let cursor_char_changed = cursor_bitmap != self.last_cursor_bitmap;
+        self.last_cursor_bitmap = cursor_bitmap;
         // The frame an overlay CLOSES (`overlay_open` flips true→false) must
         // still prepare once, or the closed panel's cached text vertices keep
         // rendering until the next keystroke. Open overlays are covered above;

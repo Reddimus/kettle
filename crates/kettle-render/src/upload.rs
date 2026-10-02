@@ -230,16 +230,27 @@ pub(crate) fn write_texture_counted(
 /// software adapter. On a discrete GPU a mapped vertex buffer lives in system
 /// memory and every draw reads it across the bus (wgpu warns that this is a
 /// performance trap); GL cannot map one at all. Those keep the queue path.
+/// Windows keeps it too, whatever the adapter: the mapped path is untested
+/// there, and DX12, its default backend, cannot take it anyway.
 pub(crate) fn mapped_upload_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     let info = adapter.get_info();
-    mapped_upload_features_for(info.backend, info.device_type, adapter.features())
+    mapped_upload_features_for(
+        cfg!(windows),
+        info.backend,
+        info.device_type,
+        adapter.features(),
+    )
 }
 
 fn mapped_upload_features_for(
+    windows: bool,
     backend: wgpu::Backend,
     device_type: wgpu::DeviceType,
     supported: wgpu::Features,
 ) -> wgpu::Features {
+    if windows {
+        return wgpu::Features::empty();
+    }
     let shared_memory = matches!(
         device_type,
         wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu
@@ -685,25 +696,29 @@ mod tests {
         use wgpu::{Backend, DeviceType, Features};
         let yes = Features::MAPPABLE_PRIMARY_BUFFERS;
         let no = Features::empty();
-        for (backend, device, supported, expected) in [
-            (Backend::Metal, DeviceType::IntegratedGpu, yes, yes),
-            (Backend::Vulkan, DeviceType::IntegratedGpu, yes, yes),
-            (Backend::Vulkan, DeviceType::Cpu, yes, yes),
+        for (windows, backend, device, supported, expected) in [
+            (false, Backend::Metal, DeviceType::IntegratedGpu, yes, yes),
+            (false, Backend::Vulkan, DeviceType::IntegratedGpu, yes, yes),
+            (false, Backend::Vulkan, DeviceType::Cpu, yes, yes),
             // An Intel Mac's discrete GPU, and any other: system memory
             // read across the bus on every draw.
-            (Backend::Metal, DeviceType::DiscreteGpu, yes, no),
-            (Backend::Vulkan, DeviceType::DiscreteGpu, yes, no),
-            (Backend::Vulkan, DeviceType::VirtualGpu, yes, no),
-            (Backend::Vulkan, DeviceType::Other, yes, no),
-            (Backend::Dx12, DeviceType::IntegratedGpu, yes, no),
-            (Backend::Gl, DeviceType::IntegratedGpu, yes, no),
-            (Backend::Gl, DeviceType::Cpu, no, no),
-            (Backend::Metal, DeviceType::IntegratedGpu, no, no),
+            (false, Backend::Metal, DeviceType::DiscreteGpu, yes, no),
+            (false, Backend::Vulkan, DeviceType::DiscreteGpu, yes, no),
+            (false, Backend::Vulkan, DeviceType::VirtualGpu, yes, no),
+            (false, Backend::Vulkan, DeviceType::Other, yes, no),
+            (false, Backend::Dx12, DeviceType::IntegratedGpu, yes, no),
+            (false, Backend::Gl, DeviceType::IntegratedGpu, yes, no),
+            (false, Backend::Gl, DeviceType::Cpu, no, no),
+            (false, Backend::Metal, DeviceType::IntegratedGpu, no, no),
+            // Windows never maps, even an integrated or software Vulkan adapter.
+            (true, Backend::Vulkan, DeviceType::IntegratedGpu, yes, no),
+            (true, Backend::Vulkan, DeviceType::Cpu, yes, no),
+            (true, Backend::Dx12, DeviceType::IntegratedGpu, yes, no),
         ] {
             assert_eq!(
-                mapped_upload_features_for(backend, device, supported),
+                mapped_upload_features_for(windows, backend, device, supported),
                 expected,
-                "{backend:?} {device:?} supporting {supported:?}"
+                "windows={windows} {backend:?} {device:?} supporting {supported:?}"
             );
         }
     }

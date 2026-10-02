@@ -8486,6 +8486,7 @@ def process_pid_is_running(pid: int) -> bool:
 
 
 def live_helper_selftest() -> None:
+    assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     for scale in (1.0, 1.25, 2.0):
         geometry = {
             "scale_factor": scale,
@@ -18670,6 +18671,13 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
     return out
 
 
+# What a steady window must not write: settling waits for all of them to stop,
+# and a blink must move none. Mapped writes count too, or a regression that
+# rewrites instances on every blink through the mapped ring would pass; a
+# build without the counter reports zero.
+STEADY_UPLOAD_QUIET_KEYS = ("buffer_writes", "texture_writes", "text_prepares", "mapped_writes")
+
+
 def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) -> Path:
     """A window whose content is not changing writes nothing to the GPU.
 
@@ -18718,7 +18726,7 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
     )
     keys = ("frames_presented", "buffer_writes", "buffer_bytes", "texture_writes", "text_prepares",
             "skipped_writes", "mapped_writes", "chrome_prepares")
-    quiet_keys = ("buffer_writes", "texture_writes", "text_prepares")
+    quiet_keys = STEADY_UPLOAD_QUIET_KEYS
 
     def uploads(live: LiveKettle) -> Dict[str, int]:
         value = live.json_ctl("ui_geometry").get("render_uploads")

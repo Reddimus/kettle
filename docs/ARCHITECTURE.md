@@ -1290,9 +1290,9 @@ guard fails on any upload outside `upload.rs`.
 
 Where the CPU and GPU share memory, instances that did change skip the queue
 too. The renderer asks wgpu for `MAPPABLE_PRIMARY_BUFFERS` only on a Metal or
-Vulkan adapter that is integrated or software: on a discrete GPU a mapped
-vertex buffer sits in system memory and every draw reads it across the bus,
-and GL cannot map one. On such a device the quad and glyph pipelines write
+Vulkan adapter that is integrated or software, and never on Windows, where
+the path is untested: on a discrete GPU a mapped vertex buffer sits in system
+memory and every draw reads it across the bus, and GL cannot map one. On such a device the quad and glyph pipelines write
 their instances through a `MappedRing` of up to three vertex buffers. The CPU
 copies a frame's instances into a mapped spare, unmaps it and draws from it,
 and maps the buffer it replaced again; wgpu completes that map only once the
