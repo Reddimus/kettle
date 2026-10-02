@@ -7297,8 +7297,9 @@ class ObserverPilot(unittest.TestCase):
             if defect in ('no-record-after-done', 'hidden-and-no-record-after-done'): bad = bad[:-1]
             # A desktop reason in the same arm must not hide the harness's own.
             if defect == 'hidden-and-no-record-after-done': bad[2]['focus_after']['valid'] = False
-            # Lost at 7 s and restored before the record after done reports it.
-            if defect == 'late-change': bad[-1]['focus_changes'] = [dict(t_ns=17_000_000_000, valid=False)]
+            # Lost to another app at 7 s and restored before the record after
+            # done reports it.
+            if defect == 'late-change': bad[-1]['focus_changes'] = [dict(t_ns=17_000_000_000, valid=False, pid=99)]
             if defect == 'late': bad = [bad[0], bad[1], *bad[5:]]
             if defect == 'change': bad[-1]['focus_changes'] = [dict(t_ns=12_000_000_000, valid=False)]
             if defect == 'boundary': bad[2]['focus_after']['valid'] = False
@@ -7309,6 +7310,12 @@ class ObserverPilot(unittest.TestCase):
             if defect in ('no-record-after-done', 'hidden-and-no-record-after-done'):
                 self.assertEqual(got['printing_reason'], 'off-arm query after done missing')
             if defect == 'readiness-focus': self.assertEqual(got['printing_reason'], 'focus evidence unavailable')
+            if defect == 'late-change':
+                self.assertEqual(got['printing_reason'], 'known focus change during interval')
+                # The same activation naming nobody proves nothing about the desktop.
+                del bad[-1]['focus_changes'][0]['pid']
+                self.assertEqual(standing.hc.printing_row(records, bad, 42, 7, observer_off=True)['printing_reason'],
+                                 standing.hc.UNPROVEN)
         bad = copy.deepcopy(sparse)
         bad[-1]['focus_after']['known'] = False
         self.assertEqual(standing.hc.printing_row(records, bad, 42, 7, observer_off=True)['printing_reason'],
@@ -7320,7 +7327,6 @@ class ObserverPilot(unittest.TestCase):
             designated['focus_after']['known'] = False
             got = standing.hc.printing_row(records, bad, 42, 7, observer_off=arm_off)
             self.assertEqual(got['printing_reason'], 'focus evidence unavailable', arm_off)
-            if defect == 'late-change': self.assertEqual(got['printing_reason'], 'known focus change during interval')
 
     def test_printing_off_arm_stops_its_observer_after_the_final_query(self):
         import tempfile
