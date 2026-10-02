@@ -1220,9 +1220,10 @@ screenshots, a blinking window, and a blinking window after 2 MiB of output.
 The window runs a plain `/bin/sh` with a fixed prompt, since a user's shell can
 redraw its prompt after the smoke has decided the window is steady.
 On a host whose adapter gets mapped uploads (Apple silicon, lavapipe), the
-headless tests also prove that the same character under the cursor with and
-without emoji presentation prepares the chrome (its bitmap is new), that
-printing a line adds no queue write, that the
+headless tests also prove that a visible cursor glyph whose key changes
+(another character, emoji presentation or cell, even the same character one
+cell over) prepares the chrome with it, while a blank-cell cursor and a blink
+do not, that printing a line adds no queue write, that the
 quad ring draws each frame's own data (a short frame between two longer ones
 must not leave a stale tail) with only the screen uniform through the queue,
 and that the glyph ring outgrows its first buffer. The direct ring tests run

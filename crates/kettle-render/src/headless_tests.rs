@@ -351,16 +351,10 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
         return;
     };
     let info = renderer.gpu.adapter.get_info();
-    let shared = renderer
-        .gpu
-        .adapter
-        .features()
-        .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS)
-        && matches!(info.backend, wgpu::Backend::Metal | wgpu::Backend::Vulkan)
-        && matches!(
-            info.device_type,
-            wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu
-        );
+    // The production policy decides, so a host it keeps on the queue
+    // (Windows, a discrete GPU, GL) skips rather than fails.
+    let shared = upload::mapped_upload_features(&renderer.gpu.adapter)
+        .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
     if !shared {
         eprintln!(
             "{} ({:?}, {:?}) keeps queue uploads; skipped",
@@ -1067,6 +1061,35 @@ fn a_cursor_glyph_changing_presentation_prepares_the_chrome() {
         renderer.render_uploads().chrome_prepares > chrome,
         "a new cursor bitmap must prepare the chrome with it"
     );
+}
+
+/// Output that moves the cursor onto another cell with the same character can
+/// still rasterize a new bitmap: at a fractional cell width the glyph lands
+/// on another subpixel position. A visible cursor glyph therefore never
+/// prepares alone, while a cursor on a blank cell (printing, typing at the end
+/// of a line) leaves the chrome alone.
+#[test]
+fn output_moving_the_cursor_over_text_prepares_the_chrome() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(320, 120) else {
+        eprintln!("no GPU adapter on this host; skipped");
+        return;
+    };
+    let one = snapshot_of(20, 4, b"AA\x1b[D");
+    capture(&mut renderer, &cfg, &[pane(&one, 320, 120)], &focused(true));
+    capture(&mut renderer, &cfg, &[pane(&one, 320, 120)], &focused(true));
+    let chrome = renderer.render_uploads().chrome_prepares;
+    // The same character under the cursor, one cell further right.
+    let two = snapshot_of(20, 4, b"AAA\x1b[D");
+    capture(&mut renderer, &cfg, &[pane(&two, 320, 120)], &focused(true));
+    assert!(
+        renderer.render_uploads().chrome_prepares > chrome,
+        "a moved visible cursor glyph must prepare the chrome with it"
+    );
+    // A blink keeps the cursor glyph's key, so it prepares nothing.
+    let chrome = renderer.render_uploads().chrome_prepares;
+    capture(&mut renderer, &cfg, &[pane(&two, 320, 120)], &focused(true));
+    assert_eq!(renderer.render_uploads().chrome_prepares, chrome);
 }
 
 /// Only legacy-mode pane text may force the glyphon prepare; hosts with no

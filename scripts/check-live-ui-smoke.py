@@ -8487,6 +8487,9 @@ def process_pid_is_running(pid: int) -> bool:
 
 def live_helper_selftest() -> None:
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
+    import inspect
+    assert "quiet_keys = STEADY_UPLOAD_QUIET_KEYS" in inspect.getsource(run_steady_uploads), \
+        "settling and the blink checks must use the steady keys"
     for scale in (1.0, 1.25, 2.0):
         geometry = {
             "scale_factor": scale,
