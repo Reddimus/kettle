@@ -454,14 +454,18 @@ def attributed(row, h):
 
 
 def probe_desktop_failure(row, h):
-    """Whether a typing row's probe failure proves the desktop interrupted:
-    another process's window over the block, another app or another
-    process's window in front before a key, or input from outside the
-    harness. The row must be attributed, name its target, have settled at
-    the session grid and have ended by the harness's own stop. Failures that
-    an unreadable window list or a terminal that never came forward also
-    produce ("not frontmost", "not on screen", the per-sample guard) never
-    count."""
+    """Whether a typing row's probe failure proves the desktop interrupted.
+    Foreign input does: the probe checks for it only after it found the
+    target in front, its window on top and nothing over the block. A cover by
+    another process or another app or window in front names only the first
+    culprit the probe met, which cannot rule out the terminal's own panel
+    beside it, so it counts only when the round's own observer proved the
+    desktop up to the failure (an attributed desktop typing_memory_reason;
+    an off arm has none). The row must be attributed, name its target, have
+    settled at the session grid and have ended by the harness's own stop.
+    Failures that an unreadable window list or a terminal that never came
+    forward also produce ("not frontmost", "not on screen", the per-sample
+    guard) never count."""
     error, target = row.get('error'), row.get('target_pid')
     if (not isinstance(error, str) or type(target) is not int or target <= 0 or not attributed(row, h)
             or row.get('killed') or row.get('shutdown') != 'stopped'
@@ -469,6 +473,9 @@ def probe_desktop_failure(row, h):
         return False
     if error == 'latency probe: foreign input':
         return True
+    observed = row.get('typing_memory_reason')
+    if not (isinstance(observed, str) and observed in PILOT_DESKTOP_REASONS):
+        return False
     cover = PROBE_COVER.fullmatch(error)
     if cover:
         return int(cover[1]) != target

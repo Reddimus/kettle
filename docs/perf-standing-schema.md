@@ -195,9 +195,10 @@ Focus evidence the observer could not read ("focus evidence unavailable"), a
 hidden window or activation that names no other process or blames the target
 ("window hidden, desktop cause unproven"), a desktop-named reason on a row
 without `attribution_contract` 1 ("desktop reason without attribution
-evidence"), and a probe failure that names no other process, ran off the
+evidence"), and a probe failure other than foreign input that the round's
+own observer did not prove (an off arm has none), or one that ran off the
 120x36 grid or did not end by the harness's stop (`shutdown` other than
-"stopped") are not the desktop's. Native focus checks carry `target_owner`,
+"stopped"), are not the desktop's. Native focus checks carry `target_owner`,
 `top_owner` and `cover_owners` (every window over the measured one),
 activations carry `pid`; printing, blink and
 typing-memory rows and failed latency rows carry `attribution_contract`, and

@@ -352,7 +352,8 @@ failure, and counts toward the allowance under its own name.
 The native observer records who hid the window: each focus check carries the
 measured window's owner (`target_owner`), the top window's owner
 (`top_owner`) and the owner of every window over the measured one
-(`cover_owners`); each activation carries the activated app's `pid`. One focus
+(`cover_owners`, whoever is in front); each activation carries the activated
+app's `pid`. One focus
 verdict per row weighs every record that bears on it at once (the activations
 and checks inside the interval and every check of the judged queries), so no
 record goes unchecked because another failed first. A check that could not
@@ -369,10 +370,15 @@ hidden, desktop cause unproven". Only rows built under these rules (`attribution
 carry the desktop's reasons; an older row's reads "desktop reason without
 attribution evidence".
 
-A probe failure counts as the desktop's only when it names another process
-(foreign input, a covering window or a front app or window with a pid above
-0) and its row is attributed, names the terminal (`target_pid`), settled at
-120x36 and ended by the harness's own stop (`shutdown` "stopped"; "exited"
+A probe failure counts as the desktop's only for foreign input, which the
+probe checks only after it found the terminal in front, its window on top and
+nothing over the block. A covering window or a front app or window that the
+probe names (pid above 0) is only the first culprit it met and cannot rule
+out the terminal's own panel beside it, so it counts only when the round's
+own observer proved the desktop up to the failure; an off arm, which runs no
+observer, can be excused only for foreign input. Either way the row must be
+attributed, name the terminal (`target_pid`), have settled at 120x36 and have
+ended by the harness's own stop (`shutdown` "stopped"; "exited"
 records a terminal that quit first, and "unknown" a launch record that cannot
 say). The launch helper checks for an earlier exit before it handles a stop,
 so a terminal that quit is never recorded as stopped. The probe's "not

@@ -552,7 +552,8 @@ the desktop's), typing observer focus reasons counted as the desktop's, a
 failed probe round that keeps its unclean stop, its target pid, its
 `shutdown` provenance and its observer's readiness, trace and coverage up to
 the probe's end, a probe failure off the session grid or naming no other
-process (pid 0 included), a hidden window or activation counted as the
+process (pid 0 included) or, other than foreign input, unproven by the
+round's own observer (an off arm's cover included), a hidden window or activation counted as the
 desktop's only when another process is named while the measured window is
 still the target's, one verdict that no proven activation can let mask the
 terminal's own dialog, rows without `attribution_contract` never carrying the

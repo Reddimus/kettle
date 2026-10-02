@@ -39,9 +39,9 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
     }
     // The window list is front-to-back. Any intersecting window above the
     // target, including a same-process dialog or nonzero-layer alert, fails.
-    // Every such window's owner is kept, so a foreign cover cannot hide the
-    // target's own panel beside it.
-    if (visible) {
+    // Every such window's owner is kept, whoever is in front, so neither a
+    // foreign cover nor another app's focus can hide the target's own panel.
+    if (known) {
         for (NSDictionary *w in windows) {
             if ([w[(id)kCGWindowNumber] unsignedIntValue] == target) break;
             CGRect cover = CGRectZero;

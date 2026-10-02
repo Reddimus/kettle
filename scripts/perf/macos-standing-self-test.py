@@ -5187,13 +5187,14 @@ class OutputBlink(unittest.TestCase):
         # The owners say who hid the window: the top window's, and the
         # covering window's when one covers it.
         # and whether the measured window is still the target's.
-        fixtures=[([wanted],42,True,True,42,[],42),([window(8),wanted],42,True,False,42,[],42),
+        fixtures=[([wanted],42,True,True,42,[],42),([window(8),wanted],42,True,False,42,[42],42),
                   ([window(9,owner=99,layer=1000),wanted],42,True,False,42,[99],42),
                   ([window(9,layer=1000),wanted],42,True,False,42,[42],42),
                   ([window(9,layer=1000,x=1000),wanted],42,True,True,42,[],42),
                   ([window(9,layer=1000,alpha=0),wanted],42,True,True,42,[],42),
                   # A foreign cover cannot hide the target's own panel beside it.
                   ([window(9,owner=99,layer=1000),window(10,layer=3),wanted],42,True,False,42,[99,42],42),
+                  ([window(10,layer=3),wanted],99,True,False,42,[42],42),
                   ([wanted],99,True,False,42,[],42),([],42,False,False,None,[],None),
                   ([window(7,owner=99)],42,True,False,99,[],99)]
         for windows, front, known, valid, top_owner, cover_owners, target_owner in fixtures:
@@ -7494,6 +7495,9 @@ class ObserverPilot(unittest.TestCase):
                 row=next(r for r in rows if r['observer_pair']==pair and r['observer_arm']==arm)
                 if kind=='typing':
                     row.update(error=failure,typing_memory_valid=False,target_pid=42,shutdown='stopped')
+                    if failure!='latency probe: foreign input' and arm=='on':
+                        # The on arm's observer saw the same interruption.
+                        row['typing_memory_reason']='window not visible during interval'
                 elif failure.startswith('error:'):
                     row['error']=failure[6:]
                 else:
@@ -7517,7 +7521,7 @@ class ObserverPilot(unittest.TestCase):
                 self.assertTrue(report['equivalent'],report)
                 self.assertEqual(metric(report)['invalid_pairs_by_reason'],{counted:1})
                 self.assertEqual((metric(report)['valid_pairs'],metric(report)['allowed_invalid_pairs']),(19,1))
-                report=pilot(kind,20,[(3,'on',failure),(5,'off',failure)])
+                report=pilot(kind,20,[(3,'on',failure),(5,'on',failure)])
                 self.assertEqual(metric(report)['reason'],'insufficient valid pairs')
                 self.assertFalse(report['equivalent'])
                 report=pilot(kind,19,[(3,'on',failure)])
@@ -7531,6 +7535,11 @@ class ObserverPilot(unittest.TestCase):
                 self.assertEqual(metric(report)['reason'],'invalid pairs not caused by the desktop')
                 self.assertFalse(report['equivalent'])
                 self.assertNotIn('private-owner',_json.dumps(report))
+        # An off arm runs no observer: its probe can prove only foreign input.
+        report=pilot('typing',20,[(3,'off','latency probe: a window (pid 506, layer 21) covers the block')])
+        self.assertEqual(metric(report)['reason'],'invalid pairs not caused by the desktop')
+        report=pilot('typing',20,[(3,'off','latency probe: foreign input')])
+        self.assertTrue(report['equivalent'])
         # A desktop failure in one arm cannot hide another failure in its pair.
         report=pilot('printing',20,[(3,'on','known focus change during interval'),(3,'off','native query late')])
         self.assertEqual(metric(report)['invalid_pairs_by_reason'],{'native query late':1})
@@ -7643,7 +7652,8 @@ class ObserverPilot(unittest.TestCase):
         for grid, counted in (((120,36),'probe saw focus, cover or foreign input'),((99,35),'failed arm'),(None,'failed arm')):
             raw=self.fixture('typing',[0.]*20,names=['kettle'])
             on=next(r for r in raw['workloads']['latency']['kettle'] if r['observer_pair']==3 and r['observer_arm']=='on')
-            on.update(error=cover,typing_memory_valid=False,target_pid=42,shutdown='stopped')
+            on.update(error=cover,typing_memory_valid=False,target_pid=42,shutdown='stopped',
+                      typing_memory_reason='window not visible during interval')
             if grid is None:
                 del on['cols'],on['rows']
             else:
@@ -7743,6 +7753,16 @@ class ObserverPilot(unittest.TestCase):
         decide = lambda row, *_: standing.publication.probe_desktop_failure(row, host)
         base = dict(target_pid=42, cols=120, rows=36, shutdown='stopped',
                     attribution_contract=standing.hc.ATTRIBUTION_CONTRACT)
+        seen = dict(base, typing_memory_reason='window not visible during interval')
+        # The probe names only the first culprit; without the round's own
+        # observer proving the desktop (an off arm has none), a cover or
+        # focus failure cannot rule out the terminal's own panel beside it.
+        for error in ('latency probe: a window (pid 506, layer 21) covers the block',
+                      'latency probe: focus changed before a key (frontmost 99, top window 42/7)'):
+            self.assertFalse(decide(dict(base, error=error)), error)
+            for observed in ('insufficient typing memory duration', standing.hc.UNPROVEN, [], None):
+                self.assertFalse(decide(dict(base, error=error, typing_memory_reason=observed)), observed)
+        base = seen
         for error, desktop in (
                 ('latency probe: foreign input', True),
                 ('latency probe: a window (pid 506, layer 21) covers the block', True),
@@ -7764,6 +7784,7 @@ class ObserverPilot(unittest.TestCase):
                 ('latency probe: focus changed before a key (frontmost 0, top window none)', False)):
             self.assertEqual(decide(dict(base, error=error), 120, 36), desktop, error)
         foreign = dict(base, error='latency probe: foreign input')
+        foreign.pop('typing_memory_reason')
         for spoiled in (dict(target_pid=None), dict(target_pid=0), dict(killed=True), dict(shutdown='exited'),
                         dict(shutdown='unknown'), dict(shutdown=None), dict(cols=99), dict(attribution_contract=None)):
             self.assertFalse(decide({**foreign, **spoiled}, 120, 36), spoiled)
