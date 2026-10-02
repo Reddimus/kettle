@@ -367,8 +367,10 @@ actual entry point and check private input redaction.
 `combined.json` and `combined.md` against fixed baseline outputs for schema 1,
 2 and 3, in both standing and A/B layouts. The schema-1 cases include `.dat`
 reconstruction. The checks use unittest equality, which remains active under
-`python3 -O`. The old S1 fixture is retained unchanged; the separate font fixture
-matches the font preload producer. Fixtures are inert harness-version inputs.
+`python3 -O`. `startup-phases-s1.fixture` is a frozen S1-era capture and
+`startup-font-phases.fixture` a frozen font preload capture, while
+`startup-phases.fixture` follows the live producer, which `startup_trace.rs`
+tests against. Fixtures are inert harness-version inputs.
 
 `CursorLayerEvidence` uses `cursor-layer.fixture`, a full synthetic export of the
 cursor layer smoke's `run_contract`, including its raw monotonic stamps,
@@ -911,6 +913,13 @@ ordinary pane padding while selection/link/mouse hit testing and the native
 IME anchor consume that same renderer-owned origin.
 The wallpaper no-clip test and zero-sized skipped slots pin the independent
 background contract and indexed batching.
+Startup fonts prepared before the scale is known measure what a direct load
+measures at 1x and 2x, for the default family and one the system lacks,
+whichever families were warmed first; warming a family a second time does
+nothing, and a remeasure at a new scale or size equals a fresh load there.
+Source guards prove only `PreparedFonts::enumerate` builds a font system, and a
+renderer given fonts measured for another scale remeasures them instead of
+loading them again.
 The grid-regression guard renders
 zsh-style `➜  ~`, POSIX, lambda/starship-style, git-status, and
 PowerShell-style prompt lines through the cell-locked glyph pipeline,
@@ -989,7 +998,19 @@ surface is the same rule in physical pixels. The startup phase stamps keep the f
 leave unmarked phases out, print in time order, and match the fixture the
 macOS standing harness parses (`startup-phases.fixture`); a source guard
 proves every phase is marked, only the reveal and the spawn at more than one
-site, and in startup order. Input-queue regressions fill both the
+site, and in startup order, the font phases in `font_preload.rs`. The same
+guard proves the font thread warms the compiled-in family before it waits for
+the config, and that measurement finishes before `fonts_joined`, so the stamped
+wait includes the fallback's cold matches and face loading. The font preload
+measures what a direct load measures, whether the family arrived
+early or only when the first window joined it, and without its thread the first
+window loads the fonts itself; a preload dropped before its first window ends
+its thread instead of waiting for a family, and on macOS the thread runs at the
+user-initiated QoS class. A source guard proves `run_with` starts the preload
+right after the trace guard, before the event loop is built and before any
+config read, sends the family after the command-line overrides, and that
+`resumed_inner` joins it and keeps the fonts for the renderer before the first
+pane spawns. Input-queue regressions fill both the
 64-message channel and user byte reservation, verify reservation release,
 enforce reply-lane failure on overflow, and pin the precedence of
 `failed > oversize > backpressured > read_only > queued`. RPC mapping tests

@@ -5028,7 +5028,8 @@ impl Renderer {
         }
 
         // Fonts loaded before the window reach here already measured. Ones
-        // measured for another scale or font are reloaded, not reused.
+        // measured for another scale or font are measured again, without
+        // enumerating the system fonts a second time.
         let StartupFonts {
             mut font_system,
             text_symbol_family,
@@ -5036,7 +5037,8 @@ impl Renderer {
             ..
         } = match fonts {
             Some(fonts) if fonts.matches(cfg, scale) => fonts,
-            _ => StartupFonts::load(cfg, scale),
+            Some(fonts) => fonts.remeasure(cfg, scale),
+            None => StartupFonts::load(cfg, scale),
         };
         let cell_scale_w = cfg.cell_width.max(0.01);
         let cell_scale_h = cfg.cell_height.max(0.01);
@@ -14305,10 +14307,22 @@ impl StartupFontsKey {
     }
 }
 
-impl StartupFonts {
-    /// Enumerate the system fonts, load the bundled face, and measure the
-    /// cell for `cfg` at `scale`, the display's scale factor.
-    pub fn load(cfg: &Config, scale: f32) -> Self {
+/// The system fonts, before the display's scale is known.
+///
+/// Nothing here depends on the scale, so these can be loaded on another
+/// thread while the event loop starts. [`PreparedFonts::measure`] then
+/// measures the cell once the scale is known.
+pub struct PreparedFonts {
+    font_system: FontSystem,
+    text_symbol_family: Option<&'static str>,
+    /// Families [`PreparedFonts::warm_family`] has already shaped.
+    warm: Vec<String>,
+}
+
+impl PreparedFonts {
+    /// Enumerate the system fonts, load the bundled face, and resolve the
+    /// text-presentation face.
+    pub fn enumerate() -> Self {
         let t_font_system = std::time::Instant::now();
         let mut font_system = FontSystem::new();
         let font_system_ms = t_font_system.elapsed().as_secs_f64() * 1000.0;
@@ -14324,6 +14338,38 @@ impl StartupFonts {
             "renderer init: FontSystem::new {font_system_ms:.1}ms, bundled font {:.1}ms",
             t_bundled.elapsed().as_secs_f64() * 1000.0
         );
+        Self {
+            font_system,
+            text_symbol_family,
+            warm: Vec::new(),
+        }
+    }
+
+    /// Shape the cell probe in `family` once, so that measuring it later
+    /// finds cosmic-text's font matches and faces already loaded: those for
+    /// the default attributes every text buffer starts with, and those for
+    /// `family`.
+    ///
+    /// Bold is not warmed. The first styled cell loads the bundled bold
+    /// faces, and adding a face clears cosmic-text's match cache.
+    pub fn warm_family(&mut self, family: &str) {
+        if self.warm.iter().any(|warm| warm == family) {
+            return;
+        }
+        // Matches and faces do not depend on the size, so any metrics do.
+        let metrics = metrics_for(13.0, 1.0);
+        let mut probe = TextBuffer::new(&mut self.font_system, metrics);
+        measure_cell(&mut self.font_system, &mut probe, family, metrics);
+        self.warm.push(family.to_owned());
+    }
+
+    /// Measure the cell for `cfg` at `scale`, the display's scale factor.
+    pub fn measure(self, cfg: &Config, scale: f32) -> StartupFonts {
+        let Self {
+            mut font_system,
+            text_symbol_family,
+            ..
+        } = self;
         let key = StartupFontsKey::new(cfg, scale);
         let metrics = metrics_for(key.font_size, scale);
         let mut measure = TextBuffer::new(&mut font_system, metrics);
@@ -14334,12 +14380,44 @@ impl StartupFonts {
             cell_w * key.cell_width.max(0.01),
             cell_h * key.cell_height.max(0.01),
         );
-        Self {
+        StartupFonts {
             font_system,
             text_symbol_family,
             cell,
             key,
         }
+    }
+}
+
+// The font preload builds these on its own thread and hands them to the
+// event-loop thread.
+const _: () = {
+    const fn assert_send<T: Send>() {}
+    assert_send::<PreparedFonts>();
+    assert_send::<StartupFonts>();
+};
+
+impl StartupFonts {
+    /// Enumerate the system fonts, load the bundled face, and measure the
+    /// cell for `cfg` at `scale`, the display's scale factor.
+    pub fn load(cfg: &Config, scale: f32) -> Self {
+        PreparedFonts::enumerate().measure(cfg, scale)
+    }
+
+    /// These fonts, measured for `cfg` at `scale` instead. The system fonts
+    /// are not enumerated again.
+    pub fn remeasure(self, cfg: &Config, scale: f32) -> Self {
+        let Self {
+            font_system,
+            text_symbol_family,
+            ..
+        } = self;
+        PreparedFonts {
+            font_system,
+            text_symbol_family,
+            warm: Vec::new(),
+        }
+        .measure(cfg, scale)
     }
 
     /// Whether these fonts were measured for `cfg` at `scale`.
@@ -20511,12 +20589,14 @@ mod completion_panel_tests {
 
 #[cfg(test)]
 mod startup_fonts_tests {
-    use super::{StartupFonts, production_source};
+    use super::{PreparedFonts, StartupFonts, production_source};
     use kettle_config::Config;
 
     /// A window's first renderer takes over the fonts its first pane was
     /// sized with. Loading them again would enumerate the system fonts twice
-    /// at startup and could measure a different cell than the pane got.
+    /// at startup and could measure a different cell than the pane got. Fonts
+    /// measured for another scale are measured again from the same system
+    /// fonts; only a renderer given no fonts loads them.
     #[test]
     fn the_renderer_takes_over_matching_startup_fonts() {
         let src = production_source();
@@ -20529,7 +20609,103 @@ mod startup_fonts_tests {
             .expect("end of with_gpu")
             .0;
         assert!(body.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
+        assert!(body.contains("Some(fonts) => fonts.remeasure(cfg, scale),"));
+        assert!(body.contains("None => StartupFonts::load(cfg, scale),"));
+        assert_eq!(body.matches("StartupFonts::load(").count(), 1);
         assert!(!body.contains("FontSystem::new()"));
+    }
+
+    /// Fonts prepared before the scale is known measure the cell a direct
+    /// load measures, so the first pane's grid does not depend on which path
+    /// loaded them. The preload warms the compiled-in family while it waits
+    /// for the config, then the configured one. A family the system lacks
+    /// falls back the same way on both paths, and warming one family never
+    /// changes what another measures.
+    #[test]
+    fn prepared_fonts_measure_what_load_measures() {
+        const MISSING: &str = "Kettle Test Family That Is Not Installed";
+        let compiled_in = kettle_config::font::FAMILY;
+        let default = Config::default();
+        let missing = Config {
+            font_family: MISSING.to_owned(),
+            font_size: 17.0,
+            ..Config::default()
+        };
+        for (cfg, warmed) in [
+            (&default, &[compiled_in][..]),
+            (&missing, &[compiled_in, MISSING][..]),
+            (&default, &[MISSING][..]),
+        ] {
+            for scale in [1.0, 2.0] {
+                let mut prepared = PreparedFonts::enumerate();
+                for family in warmed {
+                    prepared.warm_family(family);
+                }
+                let fonts = prepared.measure(cfg, scale);
+                let direct = StartupFonts::load(cfg, scale);
+                assert!(fonts.matches(cfg, scale));
+                assert_eq!(
+                    fonts.cell, direct.cell,
+                    "{:?} at {scale}x, {warmed:?} warmed",
+                    cfg.font_family
+                );
+                assert_eq!(fonts.text_symbol_family, direct.text_symbol_family);
+            }
+        }
+    }
+
+    /// The preload warms the compiled-in family before the config arrives,
+    /// and then the configured family, which is usually the same one. The
+    /// second call must not shape it again.
+    #[test]
+    fn warming_a_family_again_does_nothing() {
+        let family = kettle_config::font::FAMILY;
+        let mut prepared = PreparedFonts::enumerate();
+        prepared.warm_family(family);
+        prepared.warm_family(family);
+        assert_eq!(prepared.warm, [family]);
+    }
+
+    /// A window that opens at another scale than its fonts were measured for
+    /// gets the cell a fresh load at that scale would measure.
+    #[test]
+    fn remeasure_matches_a_fresh_load_at_the_new_scale() {
+        let cfg = Config::default();
+        let fonts = StartupFonts::load(&cfg, 1.0).remeasure(&cfg, 2.0);
+        assert!(fonts.matches(&cfg, 2.0));
+        assert!(!fonts.matches(&cfg, 1.0));
+        assert_eq!(fonts.cell, StartupFonts::load(&cfg, 2.0).cell);
+
+        let mut larger = cfg.clone();
+        larger.font_size += 3.0;
+        let fonts = fonts.remeasure(&larger, 2.0);
+        assert!(fonts.matches(&larger, 2.0));
+        assert_eq!(fonts.cell, StartupFonts::load(&larger, 2.0).cell);
+    }
+
+    /// Only enumerating builds a font system; measuring again reuses it.
+    #[test]
+    fn remeasuring_never_enumerates_the_system_fonts() {
+        fn body<'a>(src: &'a str, start: &str) -> &'a str {
+            src.split_once(start)
+                .unwrap_or_else(|| panic!("missing {start}"))
+                .1
+                .split_once("\n    }\n")
+                .expect("end of fn")
+                .0
+        }
+        let src = production_source();
+        for start in [
+            "pub fn remeasure(",
+            "pub fn measure(",
+            "pub fn warm_family(",
+        ] {
+            let body = body(&src, start);
+            assert!(!body.contains("FontSystem::new"), "{start}");
+            assert!(!body.contains("enumerate("), "{start}");
+            assert!(!body.contains("StartupFonts::load("), "{start}");
+        }
+        assert!(body(&src, "pub fn enumerate(").contains("FontSystem::new()"));
     }
 
     /// Fonts measured for one scale or size are not reused for another.
