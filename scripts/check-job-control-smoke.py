@@ -325,9 +325,23 @@ def run(args) -> Path:
         evidence["codex_version"] = helpers.run([client, "--version"]).stdout.strip()
     (out / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     with (
-        helpers.LiveKettle(kettle, cfg, out / "kettle.log", extra_args=launch) as live,
+        helpers.LiveKettle(kettle, cfg, out / "kettle.log", extra_args=launch,
+            extra_env={"RUST_LOG": "warn,kettle::startup=info"} if args.expect_startup_path else None) as live,
         failure_evidence(live, out),
     ):
+
+        if args.expect_startup_path:
+            log_path = out / "kettle.log"
+            wait_until(lambda: "startup path=" in log_path.read_text(errors="replace"), "startup summary")
+            if args.expect_startup_path != "pre_launch":
+                raise RuntimeError("unsupported expected startup path")
+            try:
+                report = helpers.startup_evidence_helpers().require_pre_launch_startup(
+                    log_path.read_text(), allow_fit_decline=args.allow_fit_decline)
+                if "pre_launch_declined" in report:
+                    print(f"job-control smoke: pre-launch declined, grid does not fit: {report['pre_launch_declined']}")
+            except ValueError as error:
+                raise RuntimeError("job-control smoke: invalid pre-launch startup evidence") from error
 
         def text(value: str):
             live.ctl("send_text", params={"text": value})
@@ -562,6 +576,10 @@ def main() -> int:
     parser.add_argument("--columns", type=int, default=110)
     parser.add_argument("--rows", type=int, default=32)
     parser.add_argument("--out-dir")
+    parser.add_argument("--allow-fit-decline", action="store_true",
+                        help="with --expect-startup-path, also accept Kettle's explained decline when the grid does not fit the display")
+    parser.add_argument("--expect-startup-path", choices=("pre_launch",),
+                        help="require pre_launch, monitor agreement and ordered phases on this launch")
     parser.add_argument("--hidden", action="store_true")
     parser.add_argument("--maximized", action="store_true")
     parser.add_argument("--split", action="store_true")
@@ -608,6 +626,7 @@ def main() -> int:
         fixture(args.state, args.alternate, args.broken_fixture, args.broken_background)
         return 0
     if args.negative_controls:
+        args.expect_startup_path = None
         if args.codex:
             parser.error("negative controls use only the offline fixture")
         check_negative_control_failure_classification()

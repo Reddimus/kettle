@@ -514,12 +514,54 @@ loaded; once the config arrives, it does the same for the configured family if
 that differs. Bold is not warmed: the first styled cell loads the bundled bold
 faces, which clears cosmic-text's match cache. On macOS the thread raises
 itself to the user-initiated QoS class: a thread spawned from the main thread
-starts at a lower class, and joining it does not raise it. `resumed` joins the
-thread and only measures the cell at the monitor's scale. If the thread could
+starts at a lower class, and joining it does not raise it. The first window
+joins the thread and only measures the cell at the monitor's scale. If the thread could
 not start, the first window loads the fonts itself, as every later window does.
 A renderer given fonts measured for another scale or size measures them again
 (`StartupFonts::remeasure`) instead of enumerating the system fonts a second
 time.
+
+On macOS, an eligible first pane starts after `App` construction and before
+`run_app`, while AppKit finishes launching. The order is font preload,
+event-loop build, application setup, display read and font measurement,
+first pane, AppKit launch completion, window, then GPU. A pure `startup_plan`
+decides whether the launch may restore and preserves the command/directory
+override before spawning consumes it. An override suppresses restoration,
+including named-layout writes. Without an override, session restore, layouts
+and tab handoffs use the resumed path. Pre-launch also requires Normal or
+Hidden state, no configured position, a surface that fits the monitor, and
+agreement between the primary NSScreen scale and `mainScreen`'s scale.
+Linux keeps the resumed path. Later windows keep their existing construction
+path. A rejected monitor fit retains the font system for measurement at the
+resumed monitor's scale. Window or renderer creation failures hang up the
+children through their owned handles.
+
+PTY output before `run_app` parses into the existing grid. The waker sends
+through winit's proxy, which queues the wake until after `Resumed`; the bounded
+terminal event queue and existing recorder backpressure still apply. The
+pre-launch pane supplies the window's exact surface and measured fonts.
+`resumed_inner` skips its session load, font measurement and spawn, compares
+the startup monitor, and warns if it changed. `display_read`, `path=pre_launch`,
+optional `monitor_match`, and `fonts_wait_ms` extend the startup diagnostics.
+
+A separate opt-in `kettle::pty_geometry=info` diagnostic observes the first
+Unix PTY immediately after creation, before child spawn or any correction.
+The recording clock starts before openpty; the creation timestamp and initial
+read follow openpty before command setup. It retains at most 64 resize attempts, including no-ops and failures, and
+reads final native geometry after a three-second recording deadline. The UI
+merges that deadline into its existing wait schedule, including for hidden
+windows; it starts no observer thread. Early teardown emits an incomplete
+record. One provisional `native_pty_v1` JSON line after `native_pty=` contains
+version, clock, process/pane
+linkage, timestamps, geometries, fixed outcomes/reasons and numeric errors.
+It contains no command, directory, environment, title or terminal data.
+The harness joins decimal-string application PID and focused pane ID, then
+checks the wrapper session ID against the native child PID. The child
+observation belongs to the harness. A no-call no-op has signal_sent=false; a
+native call has unknown signal delivery. Strict startup checks join this data and
+verify coverage through its two-second interval; complete recording alone
+is not evidence of correct geometry. This diagnostic remains off in ordinary
+launches and performance measurements until observer cost is checked.
 
 Startup marks its phases in `startup_trace` (`kettle-ui`): `main`, `run_with`,
 the built event loop, the loaded config, the built `App`, the font thread's

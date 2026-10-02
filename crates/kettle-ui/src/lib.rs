@@ -43,6 +43,8 @@ mod font_preload;
 mod gpu_diagnostics;
 mod input;
 mod lua;
+#[cfg(target_os = "macos")]
+mod macos_display;
 // macOS Dock context menu (right-click the Dock icon). No-op elsewhere.
 mod macos_dock;
 mod modal_input;

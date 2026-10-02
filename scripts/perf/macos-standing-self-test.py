@@ -2238,9 +2238,9 @@ class StartupPhases(unittest.TestCase):
         phases = standing.parse_phases(self.FIXTURE, 900_000_000)
         self.assertEqual(phases["phase_main_ms"], 100.0)
         self.assertEqual(phases["phase_fonts_ready_ms"], 160.0)
-        self.assertEqual(phases["phase_first_frame_ms"], 240.0)
-        self.assertEqual(phases["startup_path"], "resumed_early")
-        self.assertEqual(len([k for k in phases if k.startswith("phase_")]), 15)
+        self.assertEqual(phases["phase_first_frame_ms"], 250.0)
+        self.assertEqual(phases["startup_path"], "pre_launch")
+        self.assertEqual(len([k for k in phases if k.startswith("phase_")]), 16)
 
     def test_finish_reads_the_stamps_kettle_printed(self) -> None:
         import json
@@ -2256,8 +2256,8 @@ class StartupPhases(unittest.TestCase):
             (work / "terminal.stderr").write_text(self.FIXTURE)
             process = __import__("subprocess").Popen(["/usr/bin/true"])
             result = runner.finish(process, 1)
-            self.assertEqual(result["phase_first_frame_ms"], 240.0)
-            self.assertEqual(result["startup_path"], "resumed_early")
+            self.assertEqual(result["phase_first_frame_ms"], 250.0)
+            self.assertEqual(result["startup_path"], "pre_launch")
 
     def launched_env(self, stamped: set, name: str, startup: bool = True, ambient: str = "") -> str:
         """RUST_LOG as the launch probe saw it for entry `name`, launched by
@@ -4496,22 +4496,296 @@ class LegacyOutputBytes(unittest.TestCase):
                     self.assertEqual(data, case["expected"][name].encode(), f"whole file {name}")
 
 
+class S3Evidence(unittest.TestCase):
+    @staticmethod
+    def inputs():
+        row = NativeEvidence.row(100, 30)
+        row.update(launch_id="7", pane_id="1")
+        native = row.pop("native_pty")
+        native.update(launch_id="7", pane_id="1", child_pid=8)
+        native.pop("child_observation")
+        child = {"clock": "CLOCK_UPTIME_RAW", "pid": 9, "session_id": 8,
+                 "start_ns": 90, "t_ns": 100, "end_ns": 2_000_000_100,
+                 "cols": 100, "rows": 30, "pixel_width": 960, "pixel_height": 600,
+                 "sigwinch": 0}
+        return row, native, child
+
+    def test_s3_ci_accepts_only_an_explained_fit_decline(self):
+        # A small CI display can decline pre-launch; it must say so, with
+        # sizes, and still have read the display. Silence never passes.
+        fallback = "\n".join(line for line in StartupPhases.FIXTURE.splitlines()
+                             if "startup path=" not in line and "pane_spawned" not in line)
+        fallback += "\nstartup phase=pane_spawned t_ns=1999999999 since_main_ms=1.0 thread=main"
+        fallback += "\nstartup path=after_renderer fonts_wait_ms=10.00"
+        declined = fallback + "\nstartup pre_launch declined=fit surface=1900x1100 monitor=1024x768 scale=1"
+        report = standing.require_pre_launch_startup(declined, allow_fit_decline=True)
+        self.assertEqual(report["pre_launch_declined"],
+                         {"surface": [1900, 1100], "monitor": [1024, 768], "scale": 1.0})
+        for text, allow in ((declined, False), (fallback, True),
+                            (fallback + "\nstartup pre_launch declined=ineligible", True),
+                            (fallback + "\nstartup pre_launch declined=fit surface=x", True),
+                            (declined.replace("display_read", "display_reed"), True)):
+            with self.subTest(allow=allow, tail=text[-60:]), self.assertRaises(ValueError):
+                standing.require_pre_launch_startup(text, allow_fit_decline=allow)
+        # The strict pre-launch evidence still passes with or without the flag.
+        for allow in (False, True):
+            self.assertEqual(standing.require_pre_launch_startup(StartupPhases.FIXTURE, allow_fit_decline=allow)
+                             ["startup_path"], "pre_launch")
+
+    def test_s3_live_fixture_and_optional_summary_fields(self):
+        text = (HERE / "macos-standing" / "startup-phases.fixture").read_text()
+        report = standing.startup_phase_evidence(text, 900_000_000)
+        self.assertEqual(report["startup_stamps_ns"]["display_read"], 1_070_000_000)
+        self.assertNotIn("display_read", report["unknown_stamps_ns"])
+        self.assertEqual(report["startup_path"], "pre_launch")
+        self.assertIs(report["monitor_match"], True)
+        self.assertEqual(report["reported_fonts_wait_ms"], 10.)
+        self.assertEqual(report["durations"]["fonts_join_wait_ms"], 10.)
+        self.assertEqual(standing.startup_duration_summary([report])["path_counts"]["pre_launch"], 1)
+        for suffix, monitor, wait in (("", None, None), (" monitor_match=false", False, None),
+                                     (" fonts_wait_ms=2.50", None, 2.5),
+                                     (" monitor_match=true fonts_wait_ms=0.00", True, 0.)):
+            summary = standing.startup_phase_evidence("startup path=pre_launch" + suffix, None)
+            self.assertEqual((summary["monitor_match"], summary["reported_fonts_wait_ms"]), (monitor, wait))
+
+    def test_s3_malformed_or_conflicting_summary_voids_attribution(self):
+        text = (HERE / "macos-standing" / "startup-phases.fixture").read_text()
+        for suffix in ("monitor_match=false fonts_wait_ms=10.00", "monitor_match=true fonts_wait_ms=11.00",
+                       "monitor_match=true", "monitor_match=oops", "fonts_wait_ms=nan",
+                       "fonts_wait_ms=-1.00", "fonts_wait_ms=2.5", "fonts_wait_ms=2.500", "extra=1"):
+            with self.subTest(suffix=suffix):
+                report = standing.startup_phase_evidence(text + "\nstartup path=pre_launch " + suffix, None)
+                self.assertIsNone(report["startup_path"])
+                self.assertIsNone(report["monitor_match"])
+                self.assertIsNone(report["reported_fonts_wait_ms"])
+                self.assertIsNone(report["durations"]["fonts_join_wait_ms"])
+        self.assertEqual(standing.startup_phase_evidence(text + text, None)["startup_path"], "pre_launch")
+
+    def test_s3_collector_joins_owned_ids_and_preserves_off_bytes(self):
+        row, native, child = self.inputs()
+        log = "INFO kettle::pty_geometry: native_pty=" + json_dumps(native)
+        self.assertIs(standing.collect_native_pty(row, "garbage", "garbage"), row)
+        result = standing.collect_native_pty(row, log, json_dumps(child), enabled=True)
+        self.assertNotIn("native_pty", row)
+        self.assertEqual(result["native_pty"]["child_observation"], {
+            "child_observed_ns": 100, "start_cols": 100, "start_rows": 30,
+            "sigwinch_count": 0, "start_ns": 90, "end_ns": 2_000_000_100,
+            "pixel_width": 960, "pixel_height": 600})
+        self.assertEqual(standing.startup_grid_evidence(result, "native", 100, 30)["state"], "supported")
+
+    def test_s3_collector_refuses_malformed_or_wrong_launch(self):
+        import copy
+        row, native, child = self.inputs()
+        def collect(n=native, c=child, text=None):
+            return standing.collect_native_pty(row, text if text is not None else "native_pty=" + json_dumps(n), json_dumps(c), enabled=True)
+        for text in ("", "native_pty={", "native_pty=" + json_dumps(native) + "\nnative_pty=" + json_dumps(native),
+                     'native_pty={"version":"native_pty_v1","version":"native_pty_v1"}',
+                     'native_pty={"x":NaN}', "native_pty=" + "[" * 2000, "x" * (1024 * 1024 + 1)):
+            with self.subTest(text=text[:30]), self.assertRaises(ValueError):
+                collect(text=text)
+        for key, value in (("version", 1), ("clock", "CLOCK_MONOTONIC"), ("launch_id", "6"),
+                           ("pane_id", "2"), ("child_pid", 9), ("initial_stage", "after_correction"),
+                           ("event_count", True), ("events", [None]), ("final", None),
+                           ("child_observation", {}), ("complete", "true")):
+            changed = copy.deepcopy(native); changed[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                collect(n=changed)
+        for key, value in (("session_id", 9), ("clock", "CLOCK_MONOTONIC"), ("sigwinch", False),
+                           ("cols", 0), ("pixel_width", 65536), ("t_ns", -1)):
+            changed = dict(child); changed[key] = value
+            with self.subTest(child=key), self.assertRaises(ValueError):
+                collect(c=changed)
+        event = {"seq": 1, "t_ns": 200, "launch_id": "7", "pane_id": "1", "reason": "resize",
+                 "outcome": "noop", "signal_sent": False, "native_error": None,
+                 "requested": native["initial"], "observed": native["initial"]}
+        for key, value in (("seq", 2), ("t_ns", -1), ("reason", "window"), ("outcome", "unknown"),
+                           ("signal_sent", 0), ("native_error", "oops"), ("pane_id", "2"), ("observed", {})):
+            changed = copy.deepcopy(native); changed["events"] = [{**event, key: value}]; changed["event_count"] = 1
+            with self.subTest(event=key), self.assertRaises(ValueError):
+                collect(n=changed)
+        changed = copy.deepcopy(native); changed.update(events=[event] * 65, event_count=65)
+        with self.assertRaises(ValueError):
+            collect(n=changed)
+
+    def test_s3_child_full_interval_and_unknown_signal_fail_strict_policy(self):
+        import copy
+        row, native, child = self.inputs()
+        for field, value in (("end_ns", 2_000_000_099), ("end_ns", 4_000_000_000), ("start_ns", 10), ("sigwinch", 1), ("pixel_width", 959)):
+            changed = {**child, field: value}
+            joined = standing.collect_native_pty(row, "native_pty=" + json_dumps(native), json_dumps(changed), enabled=True)
+            self.assertEqual(standing.startup_grid_evidence(joined, "native", 100, 30)["state"], "incomplete")
+        event = {"seq": 1, "t_ns": 200, "launch_id": "7", "pane_id": "1", "reason": "resize",
+                 "outcome": "ok", "signal_sent": None, "native_error": None,
+                 "requested": native["initial"], "observed": native["initial"]}
+        native.update(events=[event], event_count=1)
+        joined = standing.collect_native_pty(row, "native_pty=" + json_dumps(native), json_dumps(child), enabled=True)
+        self.assertEqual(standing.startup_grid_evidence(joined, "native", 100, 30)["state"], "incomplete")
+        native["events"][0].update(outcome="noop", signal_sent=False)
+        joined = standing.collect_native_pty(row, "native_pty=" + json_dumps(native), json_dumps(child), enabled=True)
+        self.assertEqual(standing.startup_grid_evidence(joined, "native", 100, 30)["state"], "supported")
+
+    def test_s3_zero_pixels_are_valid_native_geometry(self):
+        row, native, child = self.inputs()
+        for name in ("initial", "final"):
+            native[name].update(pixel_width=0, pixel_height=0)
+        child.update(pixel_width=0, pixel_height=0)
+        joined = standing.collect_native_pty(row, "native_pty=" + json_dumps(native), json_dumps(child), enabled=True)
+        self.assertEqual(standing.startup_grid_evidence(joined, "native", 100, 30)["state"], "supported")
+
+    def test_s3_private_files_refuse_symlinks_public_modes_and_oversize(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "observation"; path.write_text("private"); path.chmod(0o600)
+            self.assertEqual(standing.private_native_text(path, 7), "private")
+            with self.assertRaises(ValueError):
+                standing.private_native_text(path, 6)
+            path.chmod(0o644)
+            with self.assertRaises(ValueError):
+                standing.private_native_text(path, 7)
+            link = Path(tmp) / "link"; link.symlink_to(path)
+            with self.assertRaises(OSError):
+                standing.private_native_text(link, 7)
+
+    def test_s3_postprocessing_collector_never_builds_or_launches(self):
+        import contextlib, io, tempfile
+        from unittest import mock
+        row, native, child = self.inputs()
+        row.update(cols=120, rows=36)
+        child.update(cols=120, rows=36)
+        for name in ("initial", "final"):
+            native[name].update(cols=120, rows=36)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log = root / "kettle.log"; log.write_text("native_pty=" + json_dumps(native)); log.chmod(0o600)
+            observation = root / "child.json"; observation.write_text(json_dumps(child)); observation.chmod(0o600)
+            # An A/B session keeps an empty entry for the side that never ran.
+            for startup in ({"kettle": [row]}, {"kettle-a": [], "kettle-b": [row]}):
+                data = root / "row.json"; data.write_text(json_dumps({"workloads": {"startup": startup}}))
+                argv = ["macos-standing.py", "--startup-input", str(data), "--startup-grid-policy", "native",
+                        "--startup-native-log", str(log), "--startup-child-observation", str(observation)]
+                out = io.StringIO()
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(standing, "build_probes", side_effect=AssertionError("build")), mock.patch.object(standing.subprocess, "Popen", side_effect=AssertionError("spawn")), contextlib.redirect_stdout(out):
+                    self.assertEqual(standing.main(), 0)
+                result = _json.loads(out.getvalue())
+                self.assertFalse(result["countable"])
+                rows = [r for report in result["reports"] for r in report["rows"]]
+                self.assertEqual([r["state"] for r in rows], ["supported"], startup)
+                self.assertNotIn('"launch_id"', out.getvalue())
+                self.assertNotIn(str(root), out.getvalue())
+
+    def test_s3_smoke_and_ci_require_summary_agreement_and_phase_order(self):
+        text = (HERE / "macos-standing" / "startup-phases.fixture").read_text()
+        self.assertEqual(standing.require_pre_launch_startup(text)["startup_path"], "pre_launch")
+        for changed in (text.replace("pre_launch", "resumed_early"), text.replace("monitor_match=true", "monitor_match=false"),
+                        text.replace("phase=display_read", "phase=other"), text.replace("t_ns=1080000000", "t_ns=1190000000")):
+            with self.assertRaises(ValueError):
+                standing.require_pre_launch_startup(changed)
+
+    @unittest.skipUnless(sys.platform == "darwin" and shutil.which("cc"), "requires macOS clock and C compiler")
+    def test_s3_shell_observer_reads_native_grid_and_holds_two_seconds(self):
+        import fcntl, pty, struct, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); binary = root / "observer"; output = root / "child.json"
+            subprocess.run(["cc", "-Wall", "-Wextra", "-Werror", "-o", str(binary),
+                            str(HERE / "macos-standing" / "child-observer.c")],
+                           check=True, capture_output=True, timeout=30)
+            master, slave = pty.openpty()
+            process = None
+            try:
+                fcntl.ioctl(slave, __import__("termios").TIOCSWINSZ, struct.pack("HHHH", 30, 100, 800, 480))
+                process = subprocess.Popen([str(binary), "--observe-only"], stdin=slave, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True,
+                    env={**os.environ, "KETTLE_S3_CHILD_OBSERVATION": str(output)})
+                deadline = time.monotonic() + 5
+                while not output.exists() and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.02)
+                record = standing.native_json(standing.private_native_text(output, 4096))
+                self.assertEqual((record["cols"], record["rows"], record["pixel_width"], record["pixel_height"]), (100, 30, 800, 480))
+                self.assertEqual(record["session_id"], process.pid)
+                self.assertEqual(record["pid"], process.pid)
+                self.assertEqual(record["clock"], "CLOCK_UPTIME_RAW")
+                self.assertEqual(record["sigwinch"], 0)
+                self.assertGreaterEqual(record["end_ns"] - record["t_ns"], 2_000_000_000)
+                self.assertEqual(process.wait(timeout=5), 0)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill(); process.wait(timeout=2)
+                os.close(master); os.close(slave)
+
+    def test_s3_smoke_uses_tracker_payload_and_ci_checks_every_success(self):
+        # Exercise the smoke body with a fake owned launch, without a GUI.
+        import importlib.util, tempfile
+        from unittest import mock
+        path = HERE.parent / "check-live-ui-smoke.py"
+        spec = importlib.util.spec_from_file_location("s3_live_smoke", path)
+        module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        row, native, child = self.inputs()
+        fixture = (HERE / "macos-standing" / "startup-phases.fixture").read_text()
+        calls = []
+        class Live:
+            def __init__(self, kettle, cfg, log, extra_env):
+                self.cfg, self.log, self.env = cfg, log, extra_env
+                self.proc = mock.Mock(pid=7)
+                calls.append(self)
+            def __enter__(self):
+                if self.env:
+                    self.log.write_text(fixture + "\nnative_pty=" + json_dumps(native))
+                    Path(self.env["KETTLE_S3_CHILD_OBSERVATION"]).write_text(json_dumps(child))
+                    Path(self.env["KETTLE_S3_CHILD_OBSERVATION"]).chmod(0o600)
+                return self
+            def __exit__(self, *args): pass
+            def json_ctl(self, name):
+                if name == "list_panes":
+                    return {"panes": [{"id": 1, "focused": True, "cols": 100 if self.env else 150, "rows": 30 if self.env else 40}]}
+                return {"surface": {"width": 1296}, "cell": {"width": 8.4}, "padding": {},
+                        "scale_factor": 1., "monitor": {"width": 1920, "height": 1080}}
+            def screenshot(self, path): pass
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(module, "LiveKettle", Live), mock.patch.object(module.platform, "system", return_value="Darwin"), mock.patch.object(module.subprocess, "run", side_effect=lambda args, **kw: Path(args[args.index("-o") + 1]).touch()), mock.patch.object(module.time, "clock_gettime_ns", return_value=10):
+            out = module.run_default_window_size("kettle", Path(tmp))
+            result = _json.loads((out / "analysis.json").read_text())
+            self.assertEqual(result["explicit"]["startup"]["native"]["state"], "supported")
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0].env, {})
+            self.assertNotIn("SHELL", calls[1].env)
+            self.assertIn("KETTLE_SMOKE_REAL_SHELL", calls[1].env)
+            self.assertIn("login-shell = false", calls[1].cfg.read_text())
+            self.assertIn("shell-integration = false", calls[1].cfg.read_text())
+        ci = (HERE.parents[1] / ".github/workflows/ci.yml").read_text()
+        ci = ci.split("Unix job-control compatibility (macOS)")[1].split("Preserve offline")[0]
+        self.assertEqual(ci.count("--expect-startup-path pre_launch --allow-fit-decline"), 3)
+        job = (HERE.parent / "check-job-control-smoke.py").read_text()
+        self.assertIn("require_pre_launch_startup(\n                    log_path.read_text(), allow_fit_decline=args.allow_fit_decline)", job)
+        self.assertIn("args.expect_startup_path = None", job)
+        # The tracker remains SHELL; extra_env overlays only its payload target.
+        tracker = module.LiveKettle._prepare_unix_pty_tracker
+        import inspect
+        source = inspect.getsource(tracker)
+        self.assertIn('env["KETTLE_SMOKE_REAL_SHELL"] = real_shell', source)
+        self.assertIn('env["SHELL"] = str(wrapper)', source)
+
 class NativeEvidence(unittest.TestCase):
     @staticmethod
     def row(cols=120, rows=36):
-        geometry = {"cols": cols, "rows": rows, "pixel_width": 960, "pixel_height": 600}
+        geometry = {"cols": cols, "rows": rows, "pixel_width": 960, "pixel_height": 600, "error": None}
         return {"cols": cols, "rows": rows, "start_cols": cols, "start_rows": rows,
-                "launch_id": "launch-1", "pane_id": "pane-1", "started_ns": 10,
+                "launch_id": "7", "pane_id": "1", "started_ns": 10,
                 "child_observed_ns": 100,
                 "native_pty": {"version": "native_pty_v1", "clock": "CLOCK_UPTIME_RAW",
-                    "launch_id": "launch-1", "pane_id": "pane-1", "complete": True,
+                    "launch_id": "7", "pane_id": "1", "complete": True,
                     "dropped": 0, "overflow": False, "recording_start_ns": 11,
                     "created_ns": 12, "initial_stage": "after_create_before_correction",
-                    "initial": {**geometry, "t_ns": 13}, "recording_end_ns": 2_000_000_011,
+                    "initial": {**geometry, "t_ns": 13}, "recording_end_ns": 3_000_000_011,
                     "events": [], "event_count": 0,
                     "child_observation": {"child_observed_ns": 100, "start_cols": cols,
-                                          "start_rows": rows, "sigwinch_count": 0},
-                    "final": {**geometry, "t_ns": 2_000_000_011}}}
+                                          "start_rows": rows, "sigwinch_count": 0,
+                                          "start_ns": 90, "end_ns": 2_000_000_100,
+                                          "pixel_width": 960, "pixel_height": 600},
+                    "final": {**geometry, "t_ns": 3_000_000_011}}}
 
     def test_child_rejects_initial_mismatch_and_missing_observation(self):
         row = self.row(); row["start_cols"] = 119
@@ -4527,17 +4801,17 @@ class NativeEvidence(unittest.TestCase):
             row["native_pty"]["initial"].update(cols=initial_cols, rows=initial_rows)
             corrected = dict(row["native_pty"]["final"])
             row["native_pty"].update(event_count=1, events=[{
-                "seq": 1, "t_ns": 50, "launch_id": "launch-1", "pane_id": "pane-1",
+                "seq": 1, "t_ns": 50, "launch_id": "7", "pane_id": "1",
                 "requested": corrected, "observed": corrected, "outcome": "ok",
-                "reason": "window", "native_error": None, "signal_sent": True}])
+                "reason": "resize", "native_error": None, "signal_sent": True}])
             self.assertEqual(standing.startup_grid_evidence(row, "child", cols, rows)["state"], "supported")
             self.assertEqual(standing.startup_grid_evidence(row, "native", cols, rows)["state"], "incomplete")
 
     def test_native_requires_two_seconds_of_actual_recording(self):
         row = self.row()
-        row["native_pty"].update(recording_start_ns=1_999_000_011, created_ns=1_999_000_012)
-        row["native_pty"]["initial"]["t_ns"] = 1_999_000_013
-        row["child_observed_ns"] = 1_999_000_014
+        row["native_pty"].update(recording_start_ns=2_999_000_011, created_ns=2_999_000_012)
+        row["native_pty"]["initial"]["t_ns"] = 2_999_000_013
+        row["child_observed_ns"] = 2_999_000_014
         row["native_pty"]["child_observation"]["child_observed_ns"] = row["child_observed_ns"]
         self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "incomplete")
 
@@ -4545,8 +4819,8 @@ class NativeEvidence(unittest.TestCase):
         row = self.row()
         self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
         initial = row["native_pty"]["initial"]
-        row["native_pty"]["events"] = [{"seq": 1, "t_ns": 200, "launch_id": "launch-1", "pane_id": "pane-1",
-            "requested": initial, "observed": initial, "outcome": "noop", "reason": "window",
+        row["native_pty"]["events"] = [{"seq": 1, "t_ns": 200, "launch_id": "7", "pane_id": "1",
+            "requested": initial, "observed": initial, "outcome": "noop", "reason": "resize",
             "native_error": None, "signal_sent": False}]
         row["native_pty"]["event_count"] = 1
         self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], "supported")
@@ -4556,9 +4830,9 @@ class NativeEvidence(unittest.TestCase):
     def test_native_missing_failed_dropped_wrong_pane_overflow_never_pass(self):
         import copy
         complete = self.row()["native_pty"]
-        event = {"seq": 1, "t_ns": 200, "launch_id": "launch-1", "pane_id": "pane-1",
+        event = {"seq": 1, "t_ns": 200, "launch_id": "7", "pane_id": "1",
                  "requested": complete["initial"], "observed": complete["initial"],
-                 "outcome": "noop", "reason": "window", "native_error": None, "signal_sent": False}
+                 "outcome": "noop", "reason": "resize", "native_error": None, "signal_sent": False}
         for field in ("recording_start_ns", "recording_end_ns", "initial", "final", "child_observation", "event_count", "created_ns", "initial_stage"):
             with self.subTest(missing=field):
                 row = self.row(); row["native_pty"].pop(field)
@@ -4594,6 +4868,7 @@ class NativeEvidence(unittest.TestCase):
                 row = self.row()
                 for record in ("initial", "final"):
                     row["native_pty"][record]["pixel_width"] = width
+                row["native_pty"]["child_observation"]["pixel_width"] = width
                 self.assertEqual(standing.startup_grid_evidence(row, "native")["state"], state)
 
     def test_malformed_phase_or_path_records_invalidate_their_intervals(self):

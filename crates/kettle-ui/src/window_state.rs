@@ -701,6 +701,7 @@ pub(crate) struct WindowState {
     /// The fonts `startup_cell` was measured with, until the renderer takes
     /// them over.
     pub(crate) startup_fonts: Option<kettle_render::StartupFonts>,
+    pub(crate) pre_launch: Option<crate::app::StartupMonitor>,
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) native_material: Option<crate::native_material::NativeMaterial>,
     /// Native accessibility bridge. Constructed while the window is still
@@ -1122,6 +1123,7 @@ impl WindowState {
             startup_cell: None,
             startup_surface: None,
             startup_fonts: None,
+            pre_launch: None,
             window: None,
             native_material: None,
             accessibility: None,

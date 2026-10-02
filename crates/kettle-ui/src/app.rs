@@ -3643,13 +3643,23 @@ fn surface_for_grid(
 /// What the startup sizing needs to know about the monitor a fresh window
 /// will most likely land on.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct StartupMonitor {
+pub(crate) struct StartupMonitor {
     /// Logical size (physical pixels divided by the scale factor).
     logical: (f64, f64),
     scale: f64,
 }
 
 impl StartupMonitor {
+    /// CoreGraphics points converted exactly as winit's macOS monitor size.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn from_display_points(width: usize, height: usize, scale: f64) -> Self {
+        let physical = winit::dpi::PhysicalSize::<u32>::from_logical::<_, f64>(
+            (width as f64, height as f64),
+            scale,
+        );
+        Self::from_physical(physical.width, physical.height, scale)
+    }
+
     fn from_physical(width: u32, height: u32, scale: f64) -> Self {
         let scale = if scale.is_finite() && scale > 0.0 {
             scale
@@ -3661,6 +3671,42 @@ impl StartupMonitor {
             scale,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StartupPlan {
+    launch_override: bool,
+    may_restore: bool,
+    pre_launch: bool,
+}
+
+fn startup_plan(options: &crate::Options, cfg: &Config) -> StartupPlan {
+    let launch_override = options.command.is_some() || options.cwd.is_some();
+    let may_restore = !launch_override
+        && (options.tab_handoff_fd.is_some()
+            || options.tab_handoff.is_some()
+            || options.layout.is_some()
+            || should_restore_session(options.restore, cfg.restore_session));
+    StartupPlan {
+        launch_override,
+        may_restore,
+        pre_launch: !may_restore
+            && matches!(
+                cfg.window_state,
+                kettle_config::WindowState::Normal | kettle_config::WindowState::Hidden
+            )
+            && cfg.window_position_x.is_none()
+            && cfg.window_position_y.is_none(),
+    }
+}
+
+fn fits_monitor(surface: (u32, u32), monitor: Option<StartupMonitor>) -> bool {
+    let (width, height) = surface;
+    monitor.is_some_and(|m| {
+        f64::from(width) <= (m.logical.0 * STARTUP_MONITOR_WIDTH_FRACTION).floor() * m.scale + 1.0
+            && f64::from(height)
+                <= (m.logical.1 * STARTUP_MONITOR_HEIGHT_FRACTION).floor() * m.scale + 1.0
+    })
 }
 
 /// The monitor to fit a fresh window to: the primary monitor where the
@@ -6519,8 +6565,11 @@ pub struct App {
     /// adapter/device request) renderer init of windows 2..N.
     gpu: Option<kettle_render::GpuContext>,
     /// The system fonts, loading on their own thread since `run_with`
-    /// began. Window 1 takes them in `resumed`; later windows load their own.
+    /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,
+    /// Decided before the first spawn consumes command/cwd.
+    launch_override: bool,
+    pre_launch_eligible: bool,
     /// Detected GPUs as `(token, label)` pairs for the Settings →
     /// Graphics device picker. Enumerated ONCE when the settings overlay first
     /// opens (a wgpu instance + adapter walk is ~tens of ms — too heavy per
@@ -7512,6 +7561,7 @@ impl App {
                 }
             };
         let video_previewer = crate::video_preview::VideoPreviewer::new(proxy.clone());
+        let plan = startup_plan(&startup, &initial_cfg);
         let mut app = App {
             restore_source: None,
             cfg: initial_cfg,
@@ -7523,6 +7573,8 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             font_preload: Some(font_preload),
+            launch_override: plan.launch_override,
+            pre_launch_eligible: plan.pre_launch && !plan.may_restore,
             gpu_choices: Vec::new(),
             gpu_recovery: RecoveryState::default(),
             gpu_incident: None,
@@ -7585,7 +7637,13 @@ impl App {
         };
         app.runtime_tracker.set_window_count(app.windows.len());
         crate::startup_trace::mark(crate::startup_trace::Phase::AppBuilt);
-        let result = event_loop.run_app(&mut app);
+        let result: Result<()> = match app.start_first_pane_before_launch() {
+            Ok(_) => event_loop.run_app(&mut app).map_err(Into::into),
+            Err(error) => {
+                log::error!("{error}");
+                Err(anyhow::anyhow!(error))
+            }
+        };
         app.runtime_tracker.set_phase("exiting");
         // Pasted screenshots are captured screen content, so they do not outlive
         // the session that produced them. Runs on the error path too — an exit
@@ -7596,7 +7654,7 @@ impl App {
         }
         app.runtime_tracker.stop();
         crate::notifications::flush_desktop_notifications(std::time::Duration::from_millis(250));
-        result.map_err(Into::into)
+        result
     }
 
     /// Drain commands a Lua callback (event hook or menu-item) just enqueued.
@@ -8863,6 +8921,71 @@ impl App {
                 physical(default_h)
             },
         ))
+    }
+
+    fn prepare_startup_fonts(&mut self, ws: &mut WindowState, startup_scale: f32) {
+        let fonts = match ws.startup_fonts.take() {
+            Some(fonts) if fonts.matches(&self.cfg, startup_scale) => fonts,
+            Some(fonts) => fonts.remeasure(&self.cfg, startup_scale),
+            None => match self.font_preload.take() {
+                Some(preload) => preload.finish(&self.cfg, startup_scale),
+                None => kettle_render::StartupFonts::load(&self.cfg, startup_scale),
+            },
+        };
+        ws.startup_cell = Some(fonts.cell);
+        ws.startup_fonts = Some(fonts);
+    }
+
+    fn start_first_pane_before_launch(&mut self) -> Result<bool, String> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = self.pre_launch_eligible;
+            Ok(false)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let decline = crate::startup_trace::note_pre_launch_decline;
+            if !self.pre_launch_eligible {
+                decline("ineligible".to_owned());
+                return Ok(false);
+            }
+            let Some(monitor) = crate::macos_display::startup_display() else {
+                decline("display".to_owned());
+                return Ok(false);
+            };
+            crate::startup_trace::mark(crate::startup_trace::Phase::DisplayRead);
+            let Some(mut ws) = self.windows.remove(&1) else {
+                decline("window".to_owned());
+                return Ok(false);
+            };
+            self.prepare_startup_fonts(&mut ws, monitor.scale as f32);
+            let surface = self.startup_surface(&ws, Some(monitor));
+            let result = if surface.is_some_and(|size| fits_monitor(size, Some(monitor))) {
+                ws.startup_surface = surface;
+                self.spawn_first_tab(&mut ws, self.launch_override)
+                    .map(|()| {
+                        ws.pre_launch = Some(monitor);
+                        crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
+                        crate::startup_trace::note_path(
+                            crate::startup_trace::StartupPath::PreLaunch,
+                        );
+                        true
+                    })
+            } else {
+                // Keep the font system for the resumed path's measurement.
+                ws.startup_cell = None;
+                decline(match surface {
+                    Some((width, height)) => format!(
+                        "fit surface={width}x{height} monitor={:.0}x{:.0} scale={}",
+                        monitor.logical.0, monitor.logical.1, monitor.scale
+                    ),
+                    None => "fit surface=none".to_owned(),
+                });
+                Ok(false)
+            };
+            self.windows.insert(1, ws);
+            result
+        }
     }
 
     /// Start the first tab at the current startup grid: the `-e` command and
@@ -24982,6 +25105,13 @@ impl ApplicationHandler<UserEvent> for App {
             if std::mem::take(&mut remote_poll_due) {
                 self.poll_remote_contexts(&mut ws);
             }
+            for pane in ws.mux.panes.values_mut() {
+                if let Some(wait) = pane.term.poll_startup_geometry() {
+                    let deadline = std::time::Instant::now() + wait;
+                    earliest_deadline =
+                        Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
+                }
+            }
             let wait = self.about_to_wait_inner(&mut ws, event_loop);
             self.finish_window_dispatch(event_loop, seq, ws);
             if let Some(deadline) = wait {
@@ -27212,12 +27342,12 @@ impl App {
         // Preserve the fields until the existing consumed-once spawn path
         // below, but decide and preflight the restore before native resources
         // are allocated.
-        let has_launch_override = self.startup.command.is_some() || self.startup.cwd.is_some();
+        let has_launch_override = self.launch_override;
         // A launch override means the named layout is not loaded, so it must
         // not be written back either — otherwise the flag that names a layout
         // is the same flag that destroys it.
         self.named_layout_writable = !has_launch_override;
-        let loaded_session = if has_launch_override {
+        let loaded_session = if ws.pre_launch.is_some() || has_launch_override {
             None
         } else {
             self.load_startup_session()
@@ -27227,6 +27357,13 @@ impl App {
         // like the monitor rects it is validated against: the same startup
         // rule a fresh window uses, so a restore and a first launch agree.
         let monitor = startup_monitor(event_loop);
+        if let Some(pre_launch) = ws.pre_launch {
+            let matched = monitor == Some(pre_launch);
+            crate::startup_trace::note_monitor_match(matched);
+            if !matched {
+                log::warn!("startup display changed after the pre-launch spawn");
+            }
+        }
         let default_surface = {
             let (w, h) = startup_inner_size(&self.cfg, monitor);
             let scale = monitor.map_or(1.0, |m| m.scale);
@@ -27267,12 +27404,9 @@ impl App {
         // `run_with` began, and only the measurement needs this scale. The
         // renderer takes the fonts over.
         let startup_scale = monitor.map_or(1.0, |m| m.scale) as f32;
-        let fonts = match self.font_preload.take() {
-            Some(preload) => preload.finish(&self.cfg, startup_scale),
-            None => kettle_render::StartupFonts::load(&self.cfg, startup_scale),
-        };
-        ws.startup_cell = Some(fonts.cell);
-        ws.startup_fonts = Some(fonts);
+        if ws.pre_launch.is_none() {
+            self.prepare_startup_fonts(ws, startup_scale);
+        }
         // A restored window keeps its saved geometry, and a maximized or
         // full-screen one gets its size from the OS after creation. Only a
         // fresh normal or hidden window knows its size before it exists.
@@ -27281,7 +27415,9 @@ impl App {
                 self.cfg.window_state,
                 kettle_config::WindowState::Normal | kettle_config::WindowState::Hidden
             );
-        let startup_surface = if early_start {
+        let startup_surface = if ws.pre_launch.is_some() {
+            ws.startup_surface
+        } else if early_start {
             self.startup_surface(ws, monitor)
         } else {
             None
@@ -27292,23 +27428,19 @@ impl App {
         // a configured position could change, and within it, where the OS
         // would shrink it. Otherwise it starts after the renderer, at the
         // window's real size.
-        let fits_monitor = |(width, height): (u32, u32)| {
-            monitor.is_some_and(|m| {
-                f64::from(width)
-                    <= (m.logical.0 * STARTUP_MONITOR_WIDTH_FRACTION).floor() * m.scale + 1.0
-                    && f64::from(height)
-                        <= (m.logical.1 * STARTUP_MONITOR_HEIGHT_FRACTION).floor() * m.scale + 1.0
-            })
-        };
-        let spawned_early = startup_surface.is_some_and(fits_monitor)
-            && self.cfg.window_position_x.is_none()
-            && self.cfg.window_position_y.is_none();
-        if spawned_early && let Err(e) = self.spawn_first_tab(ws, has_launch_override) {
+        let spawned_early = ws.pre_launch.is_some()
+            || startup_surface.is_some_and(|size| fits_monitor(size, monitor))
+                && self.cfg.window_position_x.is_none()
+                && self.cfg.window_position_y.is_none();
+        if ws.pre_launch.is_none()
+            && spawned_early
+            && let Err(e) = self.spawn_first_tab(ws, has_launch_override)
+        {
             log::error!("{e}");
             event_loop.exit();
             return;
         }
-        if spawned_early {
+        if spawned_early && ws.pre_launch.is_none() {
             crate::startup_trace::mark(crate::startup_trace::Phase::PaneSpawned);
             crate::startup_trace::note_path(crate::startup_trace::StartupPath::ResumedEarly);
         }
@@ -27341,6 +27473,7 @@ impl App {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 log::error!("failed to create window: {e}");
+                ws.mux.kill_children();
                 event_loop.exit();
                 return;
             }
@@ -27446,6 +27579,7 @@ impl App {
             Ok(r) => r,
             Err(e) => {
                 log::error!("renderer init failed: {e}");
+                ws.mux.kill_children();
                 event_loop.exit();
                 return;
             }
@@ -31007,6 +31141,177 @@ mod modal_discipline_guard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_plan_truth_table() {
+        use kettle_config::WindowState::{Fullscreen, Hidden, Maximise, Normal};
+        for command in [false, true] {
+            for cwd in [false, true] {
+                for restore_bits in 0u8..32 {
+                    for state in [Normal, Hidden, Maximise, Fullscreen] {
+                        for position in 0u8..4 {
+                            let options = crate::Options {
+                                command: command.then(|| vec!["/bin/true".into()]),
+                                cwd: cwd.then(|| std::path::PathBuf::from("/tmp")),
+                                layout: (restore_bits & 1 != 0).then(|| "test".into()),
+                                tab_handoff: (restore_bits & 2 != 0).then(|| "/tmp/handoff".into()),
+                                tab_handoff_fd: (restore_bits & 4 != 0).then_some(10),
+                                restore: restore_bits & 8 != 0,
+                                ..Default::default()
+                            };
+                            let cfg = kettle_config::Config {
+                                restore_session: restore_bits & 16 != 0,
+                                window_state: state,
+                                window_position_x: (position & 1 != 0).then_some(10),
+                                window_position_y: (position & 2 != 0).then_some(10),
+                                ..Default::default()
+                            };
+                            let override_launch = command || cwd;
+                            let restore = !override_launch && restore_bits != 0;
+                            assert_eq!(
+                                super::startup_plan(&options, &cfg),
+                                super::StartupPlan {
+                                    launch_override: override_launch,
+                                    may_restore: restore,
+                                    pre_launch: !restore
+                                        && matches!(state, Normal | Hidden)
+                                        && position == 0,
+                                },
+                                "command={command} cwd={cwd} restore={restore_bits} state={state:?} position={position}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_arithmetic_matches_winit_at_one_two_and_three_x() {
+        use super::{StartupMonitor, fits_monitor};
+        for scale in [1.0, 2.0, 3.0] {
+            for (width, height) in [(1920usize, 1080usize), (1371, 773)] {
+                let monitor = StartupMonitor::from_display_points(width, height, scale);
+                assert_eq!(
+                    monitor,
+                    StartupMonitor::from_physical(
+                        (width as f64 * scale).round() as u32,
+                        (height as f64 * scale).round() as u32,
+                        scale
+                    )
+                );
+                assert_eq!(monitor.logical, (width as f64, height as f64));
+                let limit = (
+                    ((width as f64 * super::STARTUP_MONITOR_WIDTH_FRACTION).floor() * scale) as u32,
+                    ((height as f64 * super::STARTUP_MONITOR_HEIGHT_FRACTION).floor() * scale)
+                        as u32,
+                );
+                assert!(fits_monitor(limit, Some(monitor)));
+                assert!(fits_monitor((limit.0 + 1, limit.1 + 1), Some(monitor)));
+                assert!(!fits_monitor((limit.0 + 2, limit.1), Some(monitor)));
+                assert!(!fits_monitor((limit.0, limit.1 + 2), Some(monitor)));
+                assert!(!fits_monitor(limit, None));
+            }
+        }
+    }
+
+    #[test]
+    fn pre_launch_spawn_sits_between_app_build_and_run_app() {
+        let src = super::production_source();
+        let run = src
+            .split_once("pub fn run_with(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        let order = [
+            run.find("EventLoop::<UserEvent>::with_user_event().build()")
+                .unwrap(),
+            run.find("let plan = startup_plan(&startup, &initial_cfg);")
+                .unwrap(),
+            run.find("let mut app = App {").unwrap(),
+            run.find("startup_trace::Phase::AppBuilt").unwrap(),
+            run.find("app.start_first_pane_before_launch()").unwrap(),
+            run.find("event_loop.run_app(&mut app)").unwrap(),
+            run.find("app.pasted_images.cleanup();").unwrap(),
+            run.find("app.runtime_tracker.stop();").unwrap(),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]));
+        assert!(run.contains("Err(anyhow::anyhow!(error))"));
+        assert!(run.contains("launch_override: plan.launch_override,"));
+        let early = src
+            .split_once("fn start_first_pane_before_launch(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        assert!(early.contains("#[cfg(not(target_os = \"macos\"))]"));
+        assert!(early.contains("if !self.pre_launch_eligible"));
+        assert!(early.contains("self.startup_surface(&ws, Some(monitor))"));
+        assert!(early.contains("fits_monitor(size, Some(monitor))"));
+        assert!(early.contains("self.windows.insert(1, ws);"));
+        let flat: String = early.split_whitespace().collect();
+        assert!(
+            flat.find("self.prepare_startup_fonts(&mutws,monitor.scaleasf32)")
+                .unwrap()
+                < flat
+                    .find("self.spawn_first_tab(&mutws,self.launch_override)")
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn resumed_preserves_the_launch_override_and_pre_launch_pane() {
+        let src = super::production_source();
+        let body = src
+            .split_once("fn resumed_inner(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        assert!(body.contains("let has_launch_override = self.launch_override;"));
+        assert!(!body.contains("self.startup.command.is_some()"));
+        assert!(!body.contains("self.startup.cwd.is_some()"));
+        assert!(body.contains("ws.pre_launch.is_some() || has_launch_override"));
+        assert!(body.contains("self.named_layout_writable = !has_launch_override;"));
+        assert!(body.contains("crate::startup_trace::note_monitor_match(matched);"));
+        let flat: String = body.split_whitespace().collect();
+        assert!(
+            flat.contains(
+                "ifws.pre_launch.is_none(){self.prepare_startup_fonts(ws,startup_scale);}"
+            )
+        );
+        assert!(flat.contains("ifws.pre_launch.is_none()&&spawned_early&&letErr(e)=self.spawn_first_tab(ws,has_launch_override)"));
+        assert!(flat.contains("letrestored=ifspawned_early{true}"));
+        for message in ["failed to create window: {e}", "renderer init failed: {e}"] {
+            let failure = body
+                .split_once(message)
+                .unwrap()
+                .1
+                .split_once("return;")
+                .unwrap()
+                .0;
+            assert!(
+                failure.find("ws.mux.kill_children();").unwrap()
+                    < failure.find("event_loop.exit();").unwrap()
+            );
+        }
+        let wait = src
+            .split_once("fn about_to_wait(&mut self,")
+            .unwrap()
+            .1
+            .split_once("// C1-DISPATCH-END")
+            .unwrap()
+            .0;
+        assert!(
+            wait.find("pane.term.poll_startup_geometry()").unwrap()
+                < wait.find("self.about_to_wait_inner(").unwrap()
+        );
+        assert!(wait.contains("current.min(deadline)"));
+    }
+
     use super::{
         ACCESSIBILITY_COMPLETION_CONTAINER_ID, ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID,
         ACCESSIBILITY_MEDIA_RECEIPT_ID, AUTOMATION_RETRY_MIN, App, AutomationRetry, ConfirmAction,
@@ -34783,15 +35088,21 @@ mod tests {
             .expect("resumed_inner")
             .1;
         let take = resumed
-            .find("let fonts = match self.font_preload.take() {")
-            .expect("window 1 takes the preloaded fonts");
-        let kept = resumed
-            .find("ws.startup_fonts = Some(fonts);")
-            .expect("window 1 keeps the measured fonts for its renderer");
+            .find("self.prepare_startup_fonts(ws, startup_scale);")
+            .expect("window 1 measures the preloaded fonts");
+        let helper = src
+            .split_once("fn prepare_startup_fonts(")
+            .unwrap()
+            .1
+            .split_once("\n    fn ")
+            .unwrap()
+            .0;
+        assert!(helper.contains("self.font_preload.take()"));
+        assert!(helper.contains("ws.startup_fonts = Some(fonts);"));
         let spawn = resumed
             .find("self.spawn_first_tab(ws, has_launch_override)")
             .expect("early spawn");
-        assert!(take < kept && kept < spawn);
+        assert!(take < spawn);
     }
 
     #[test]
@@ -35218,8 +35529,8 @@ mod tests {
         );
         assert_eq!(
             src.matches("self.startup_surface(").count(),
-            2,
-            "both constructors size a fresh window to the exact configured grid"
+            3,
+            "pre-launch and both constructors use the exact configured-grid rule"
         );
         assert!(
             src.contains("let (w, h) = startup_inner_size(&self.cfg, monitor);\n            let scale = monitor.map_or(1.0, |m| m.scale);"),

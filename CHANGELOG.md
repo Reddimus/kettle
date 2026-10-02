@@ -25,6 +25,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- On macOS, an eligible first shell starts before AppKit finishes launching,
+  sized from the measured font cell to the exact configured grid. Restored
+  sessions and later windows keep their existing startup paths.
 - Settings use consistent display text and unit spacing, stable label columns,
   separate label/value ellipses in narrow panels, evenly spaced category names,
   and contextual dependency and timing notes.
