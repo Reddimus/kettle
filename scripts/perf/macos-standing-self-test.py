@@ -4656,19 +4656,22 @@ class S3Evidence(unittest.TestCase):
             native[name].update(cols=120, rows=36)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            data = root / "row.json"; data.write_text(json_dumps({"workloads": {"startup": {"kettle": [row]}}}))
             log = root / "kettle.log"; log.write_text("native_pty=" + json_dumps(native)); log.chmod(0o600)
             observation = root / "child.json"; observation.write_text(json_dumps(child)); observation.chmod(0o600)
-            argv = ["macos-standing.py", "--startup-input", str(data), "--startup-grid-policy", "native",
-                    "--startup-native-log", str(log), "--startup-child-observation", str(observation)]
-            out = io.StringIO()
-            with mock.patch.object(sys, "argv", argv), mock.patch.object(standing, "build_probes", side_effect=AssertionError("build")), mock.patch.object(standing.subprocess, "Popen", side_effect=AssertionError("spawn")), contextlib.redirect_stdout(out):
-                self.assertEqual(standing.main(), 0)
-            result = _json.loads(out.getvalue())
-            self.assertFalse(result["countable"])
-            self.assertEqual(result["reports"][0]["rows"][0]["state"], "supported")
-            self.assertNotIn('"launch_id"', out.getvalue())
-            self.assertNotIn(str(root), out.getvalue())
+            # An A/B session keeps an empty entry for the side that never ran.
+            for startup in ({"kettle": [row]}, {"kettle-a": [], "kettle-b": [row]}):
+                data = root / "row.json"; data.write_text(json_dumps({"workloads": {"startup": startup}}))
+                argv = ["macos-standing.py", "--startup-input", str(data), "--startup-grid-policy", "native",
+                        "--startup-native-log", str(log), "--startup-child-observation", str(observation)]
+                out = io.StringIO()
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(standing, "build_probes", side_effect=AssertionError("build")), mock.patch.object(standing.subprocess, "Popen", side_effect=AssertionError("spawn")), contextlib.redirect_stdout(out):
+                    self.assertEqual(standing.main(), 0)
+                result = _json.loads(out.getvalue())
+                self.assertFalse(result["countable"])
+                rows = [r for report in result["reports"] for r in report["rows"]]
+                self.assertEqual([r["state"] for r in rows], ["supported"], startup)
+                self.assertNotIn('"launch_id"', out.getvalue())
+                self.assertNotIn(str(root), out.getvalue())
 
     def test_s3_smoke_and_ci_require_summary_agreement_and_phase_order(self):
         text = (HERE / "macos-standing" / "startup-phases.fixture").read_text()

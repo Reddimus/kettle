@@ -2862,6 +2862,10 @@ def run_evidence_postprocessing(args) -> int:
                         raise ValueError("native collection requires a Kettle launch row")
                     continue
                 if native_log:
+                    if not rows:
+                        # A sibling entry (kettle-a beside kettle-b) the
+                        # harness created but never launched.
+                        continue
                     rows = [collect_native_pty(rows[0],
                         private_native_text(Path(native_log), 1024 * 1024),
                         private_native_text(Path(child_file), NATIVE_RECORD_LIMIT), enabled=True)]
