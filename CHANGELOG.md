@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [4.9.0] — 2026-10-02
+
 ### Added
 
 - `RUST_LOG=warn,kettle::startup=info` prints how long each startup phase
