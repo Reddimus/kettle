@@ -71,18 +71,20 @@ print(json.dumps({
 PY
 }
 
-press_segment_center() {
-  python3 - "$1" "$2" <<'PY'
+segment_center_event() {
+  python3 - "$1" "$2" "$3" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 idx = int(sys.argv[2])
 seg = data["tab_bar"]["segments"][idx]["rect"]
-print(json.dumps({
-    "event": "press",
+event = {
+    "event": sys.argv[3],
     "x": seg["x"] + seg["width"] / 2,
     "y": seg["y"] + seg["height"] / 2,
-    "button": "left",
-}))
+}
+if sys.argv[3] == "press":
+    event["button"] = "left"
+print(json.dumps(event))
 PY
 }
 
@@ -122,12 +124,31 @@ PY
 python3 - "$out/geometry-before-press.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
-widths = [float(seg["rect"]["width"]) for seg in data["tab_bar"]["segments"]]
-if len(widths) >= 2 and not all(abs(w - widths[0]) < 1.0 for w in widths[1:]):
+bar = data["tab_bar"]
+segs = [seg["rect"] for seg in bar["segments"]]
+widths = [float(rect["width"]) for rect in segs]
+# Every tab but the last shares one width. When it can, the bar divides its
+# full width evenly so tab boundaries line up with pane splits, and only the
+# last tab gives up the room for the trailing new-tab buttons.
+if len(widths) >= 3 and not all(abs(w - widths[0]) < 1.0 for w in widths[1:-1]):
     raise SystemExit(f"tabbar-click smoke: homogeneous segments not equal: {widths}")
+if len(widths) >= 2 and widths[-1] > widths[0] + 1.0:
+    raise SystemExit(f"tabbar-click smoke: last segment wider than the rest: {widths}")
+for left, right in zip(segs, segs[1:]):
+    if abs(left["x"] + left["width"] - right["x"]) >= 1.0:
+        raise SystemExit(f"tabbar-click smoke: segments do not tile: {segs}")
+buttons = bar["new_tab_menu"] if bar["new_tab_menu"]["width"] > 0 else bar["new_tab"]
+if segs and abs(segs[-1]["x"] + segs[-1]["width"] - buttons["x"]) >= 1.0:
+    raise SystemExit(
+        f"tabbar-click smoke: last segment does not end at the new-tab buttons: {segs[-1]} vs {buttons}"
+    )
 PY
+# A real click starts with the pointer arriving on the tab. Without this move,
+# the hover the `+` clicks left on the new-tab button clears in the press diff.
+"$KETTLE" ctl --pid "$pid" send_mouse --json "$(segment_center_event "$out/geometry-before-press.json" 1 move)" >/dev/null
+sleep 0.2
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/before-press.png\"}" >/dev/null
-"$KETTLE" ctl --pid "$pid" send_mouse --json "$(press_segment_center "$out/geometry-before-press.json" 1)" >/dev/null
+"$KETTLE" ctl --pid "$pid" send_mouse --json "$(segment_center_event "$out/geometry-before-press.json" 1 press)" >/dev/null
 sleep 0.1
 "$KETTLE" ctl --pid "$pid" ui_geometry --raw >"$out/geometry-pressed.json"
 "$KETTLE" ctl --pid "$pid" screenshot --json "{\"full_window\":true,\"path\":\"$out/pressed.png\"}" >/dev/null
