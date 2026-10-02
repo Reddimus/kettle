@@ -350,27 +350,39 @@ that the observer's own checks catch between the probe's is the desktop's
 failure, and counts toward the allowance under its own name.
 
 The native observer records who hid the window: each focus check carries the
-top window's owner (`top_owner`) and, when a window covers the measured one,
-its owner (`cover_owner`), and each activation carries the activated app's
-`pid`. A hidden window whose records name no other process, or any record
-that blames only the terminal (its own dialog or second window), reads
-"window hidden, desktop cause unproven" and never counts as the desktop's;
-an activation of the terminal itself proves nothing. A focus check that could
-not read the window server (no frontmost app, the window missing from the
-list, unreadable bounds) is "focus evidence unavailable", the observer's
-failure. A probe failure counts as the desktop's only when its row names the
-terminal (`target_pid`), settled at 120x36, stopped cleanly and kept its
-terminal running (`terminal_exited` records one that quit before the stop);
-the probe's "not frontmost", "not on screen" and per-sample guard failures,
-which an unreadable window list or a terminal that never came forward also
-produce, never count. A failed round also keeps its observer's own failure
-(readiness, its trace, unreadable focus evidence). Within an arm every
-independent failure is kept and one that is not the desktop's decides; a
-failed round's missing keys or metric are its consequences, not counted
-again. Row builders check the desktop's reasons last, so a focus change never
-stands in for unreadable focus evidence, a missing query or a coverage failure
-in the same arm. Ordinary rows keep their validity; only these reason names
-are new.
+measured window's owner (`target_owner`), the top window's owner
+(`top_owner`) and, when a window covers the measured one, its owner
+(`cover_owner`); each activation carries the activated app's `pid`. One focus
+verdict per row weighs every record that bears on it at once (the activations
+and checks inside the interval and every check of the judged queries), so no
+record goes unchecked because another failed first. A check that could not
+read the window server (no frontmost app, the window missing from the list,
+unreadable bounds) is "focus evidence unavailable", the observer's failure.
+Otherwise the failure is the desktop's only when every failing record proves
+it: an activation names another app, or a check shows the measured window
+still the terminal's while another process (pid above 0) is in front, on top
+or over it. A check naming nobody, the terminal's own second window on top or
+its own dialog over the window, a measured window owned by another process,
+or an activation of the terminal itself reads "window hidden, desktop cause
+unproven". Only rows built under these rules (`attribution_contract` 1) can
+carry the desktop's reasons; an older row's reads "desktop reason without
+attribution evidence".
+
+A probe failure counts as the desktop's only when it names another process
+(foreign input, a covering window or a front app or window with a pid above
+0) and its row is attributed, names the terminal (`target_pid`), settled at
+120x36 and ended by the harness's own stop (`shutdown` "stopped"; "exited"
+records a terminal that quit first, and "unknown" a launch record that cannot
+say). The launch helper checks for an earlier exit before it handles a stop,
+so a terminal that quit is never recorded as stopped. The probe's "not
+frontmost", "not on screen" and per-sample guard failures, which an
+unreadable window list or a terminal that never came forward also produce,
+never count. A failed round keeps its observer's own failure up to the
+probe's end: readiness, its trace, unreadable focus evidence, a broken
+cadence or coverage that stopped early. Within an arm every independent
+failure is kept and one that is not the desktop's decides; a failed round's
+missing keys or metric are its consequences, not counted again. Ordinary rows
+keep their validity; only these reason names and fields are new.
 
 Printing off arms retain the readiness query at origin, then query at
 5900..6500 ms in 100 ms steps and once at 8600 ms, after done, so a focus

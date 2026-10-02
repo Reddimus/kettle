@@ -192,12 +192,15 @@ pairs, rounded down. An invalid pair for any reason other than focus,
 visibility or the probe's cover and foreign-input guards ("probe saw focus,
 cover or foreign input") means "invalid pairs not caused by the desktop".
 Focus evidence the observer could not read ("focus evidence unavailable"), a
-hidden window or activation that names no other process ("window hidden,
-desktop cause unproven"), and a probe failure that names no other process,
-ran off the 120x36 grid, did not stop cleanly or lost its terminal
-(`terminal_exited`) are not the desktop's. Native focus checks carry
-`top_owner` and `cover_owner`, activations carry `pid`, and failed latency
-rows carry `target_pid`. More desktop
+hidden window or activation that names no other process or blames the target
+("window hidden, desktop cause unproven"), a desktop-named reason on a row
+without `attribution_contract` 1 ("desktop reason without attribution
+evidence"), and a probe failure that names no other process, ran off the
+120x36 grid or did not end by the harness's stop (`shutdown` other than
+"stopped") are not the desktop's. Native focus checks carry `target_owner`,
+`top_owner` and `cover_owner`, activations carry `pid`; printing, blink and
+typing-memory rows and failed latency rows carry `attribution_contract`, and
+failed latency rows carry `target_pid` and `shutdown`. More desktop
 failures than allowed means "insufficient valid pairs", and an unfinished
 session means "pilot incomplete". Overall equivalence needs every terminal to
 pass.

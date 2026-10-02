@@ -803,6 +803,22 @@ def missing_benchmarks(benchmarks: Path, dat: Dict[str, float]) -> List[str]:
     return sorted(d.name for d in benchmarks.iterdir() if (d / "benchmark").exists() and d.name not in dat)
 
 
+def shutdown_kind(ended: Optional[dict], clean: bool) -> str:
+    """How a launch ended, from its helper's record: "stopped" when the stop
+    ended it, "exited" when the terminal quit before the stop, "killed", or
+    "unknown" when the record cannot say."""
+    if not clean:
+        return "killed"
+    if (not isinstance(ended, dict) or type(ended.get("stopped")) is not bool
+            or type(ended.get("killed")) is not bool):
+        return "unknown"
+    if ended["killed"]:
+        return "killed"
+    if ended["stopped"]:
+        return "stopped"
+    return "exited" if ended.get("exit_ms") is not None else "unknown"
+
+
 def terminal_argv(name: str, script: Path, work: Path, kettle: Dict[str, str]) -> List[str]:
     """How each terminal runs `script` at the pinned grid with default settings."""
     if name in kettle:
@@ -1842,7 +1858,7 @@ class Runner:
                         ("context", keep.with_suffix(".cursor-context.json")),
                         ("exits", keep.with_suffix(".cursor-exits.log"))) if path.is_file()}
             return value
-        process, observer = None, None
+        process, observer, probe_done_ns = None, None, None
         deadlines = cursor.budget(options)
         budget = deadlines["probe_s"]
         try:
@@ -1902,6 +1918,8 @@ class Runner:
             except subprocess.TimeoutExpired:
                 pass
             finished = wait_for_text(out, "}", max(1.0, budget + 15 - (time.monotonic() - started)))
+            # When the probe had ended, on the observer's clock.
+            probe_done_ns = hc.now_ns()
         finally:
             try:
                 if observer is not None:
@@ -1928,25 +1946,24 @@ class Runner:
                     if pending_result is not None:
                         linked_result(pending_result)
         # The terminal has been stopped by now. A failed round still records
-        # its target, whether that stop was clean, a terminal that exited
-        # before it was asked to, and its observer's own failure, so a desktop
-        # failure the probe reports cannot stand for any of them.
+        # its target, how its terminal ended and its observer's own failure
+        # up to the probe's end, so a desktop failure the probe reports cannot
+        # stand for any of them.
         def failed(error: str) -> dict:
-            row = {"error": error, "target_pid": pid, **({} if clean else {"killed": True})}
+            row = {"error": error, "target_pid": pid, "attribution_contract": hc.ATTRIBUTION_CONTRACT,
+                   **({} if clean else {"killed": True})}
             try:
                 ended = json.loads((self.work / "launch.json").read_text())
             except (OSError, json.JSONDecodeError):
-                ended = {}
-            if (isinstance(ended, dict) and ended.get("stopped") is False and ended.get("killed") is False
-                    and ended.get("exit_ms") is not None):
-                row["terminal_exited"] = True
+                ended = None
+            row["shutdown"] = shutdown_kind(ended, clean)
             observed = observer_reason
             if observed is None and observer is not None:
                 try:
                     samples = hc.read_jsonl(timeline, 12000, 32 * 1024 * 1024)
-                    observed = (hc.trace_reason(samples, pid, info.get("window_id"))
-                                or ("focus evidence unavailable" if hc.focus_unknown(samples) else None))
-                except (OSError, ValueError, TypeError, KeyError):
+                    observed = hc.observed_until(samples, pid, info.get("window_id"),
+                                                 options.get("sample_ms", 100), probe_done_ns)
+                except (OSError, ValueError, TypeError, KeyError, IndexError):
                     observed = "typing timeline unavailable or invalid"
             if observed:
                 row.update(typing_memory_valid=False, typing_memory_reason=observed)

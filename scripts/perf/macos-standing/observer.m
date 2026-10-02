@@ -57,7 +57,8 @@ static NSDictionary *focusDecision(pid_t pid, CGWindowID target, NSNumber *front
              @"frontmost_pid":front ?: NSNull.null, @"target_window":@(target),
              @"top_window":top[(id)kCGWindowNumber] ?: NSNull.null,
              @"top_owner":top[(id)kCGWindowOwnerPID] ?: NSNull.null,
-             @"cover_owner":coverWindow[(id)kCGWindowOwnerPID] ?: NSNull.null};
+             @"cover_owner":coverWindow[(id)kCGWindowOwnerPID] ?: NSNull.null,
+             @"target_owner":wanted[(id)kCGWindowOwnerPID] ?: NSNull.null};
 }
 static NSDictionary *focus(pid_t pid, CGWindowID target) {
     uint64_t t = now();

@@ -426,7 +426,8 @@ PILOT_INVALID_REASONS = frozenset({
     'native query late', 'native query failed or target exited', 'native focus notification overflow',
     'process lifetime identity missing or changed', 'stale focus check', 'nonmonotonic native trace',
     'active blink unproven', 'active blink disabled-default', 'off-arm query after done missing',
-    'focus evidence unavailable', 'window hidden, desktop cause unproven'})
+    'focus evidence unavailable', 'window hidden, desktop cause unproven',
+    'desktop reason without attribution evidence'})
 # Equivalence is the two one-sided tests at 5 % each: the paired Student-t
 # 90 % interval must sit inside the bounds. Up to 5 % of the planned pairs may
 # be invalid, and only for the desktop's reasons below (focus moving, a window
@@ -438,24 +439,33 @@ PILOT_DESKTOP_REASONS = frozenset({
     'known focus change during interval', 'window not visible during interval', 'printing window not visible',
     'designated query lost focus', 'blink window not visible', 'typing window not visible',
     'probe saw focus, cover or foreign input'})
-# The latency probe's failures that name who interrupted.
-PROBE_COVER = re.compile(r'latency probe: a window \(pid ([0-9]+), layer [0-9]+\) covers the block')
-PROBE_FOCUS = re.compile(r'latency probe: focus changed before a key \(frontmost ([0-9]+|none), '
-                         r'top window (?:([0-9]+)/[0-9]+|none)\)')
+# The latency probe's failures that name who interrupted; a pid is positive.
+PROBE_COVER = re.compile(r'latency probe: a window \(pid ([1-9][0-9]*), layer [0-9]+\) covers the block')
+PROBE_FOCUS = re.compile(r'latency probe: focus changed before a key \(frontmost ([1-9][0-9]*|none), '
+                         r'top window (?:([1-9][0-9]*)/[0-9]+|none)\)')
+# A desktop-named reason from a row built before the owners were recorded.
+PILOT_UNATTRIBUTED = 'desktop reason without attribution evidence'
 
 
-def probe_desktop_failure(row, cols, rows):
+def attributed(row, h):
+    """Whether a row was built under the attribution rules (output_blink),
+    so its desktop-named reasons rest on records naming another process."""
+    return row.get('attribution_contract') == h.hc.ATTRIBUTION_CONTRACT
+
+
+def probe_desktop_failure(row, h):
     """Whether a typing row's probe failure proves the desktop interrupted:
     another process's window over the block, another app or another
     process's window in front before a key, or input from outside the
-    harness. The round must name its target, have settled at the session
-    grid, stopped cleanly and kept its terminal running. Failures that an
-    unreadable window list or a terminal that never came forward also
+    harness. The row must be attributed, name its target, have settled at
+    the session grid and have ended by the harness's own stop. Failures that
+    an unreadable window list or a terminal that never came forward also
     produce ("not frontmost", "not on screen", the per-sample guard) never
     count."""
     error, target = row.get('error'), row.get('target_pid')
-    if (not isinstance(error, str) or type(target) is not int or target <= 0 or row.get('killed')
-            or row.get('terminal_exited') or (row.get('cols'), row.get('rows')) != (cols, rows)):
+    if (not isinstance(error, str) or type(target) is not int or target <= 0 or not attributed(row, h)
+            or row.get('killed') or row.get('shutdown') != 'stopped'
+            or (row.get('cols'), row.get('rows')) != (h.COLS, h.ROWS)):
         return False
     if error == 'latency probe: foreign input':
         return True
@@ -465,6 +475,8 @@ def probe_desktop_failure(row, cols, rows):
     focus = PROBE_FOCUS.fullmatch(error)
     return bool(focus) and any(owner not in (None, 'none') and int(owner) != target
                                for owner in (focus[1], focus[2]))
+
+
 COST_FIELDS = ('cpu_ns', 'wakeups', 'query_count', 'query_duration_median_ms',
                'query_duration_max_ms', 'deadline_lateness_max_ms',
                'target_cpu_delta_ns', 'target_wakeups_delta')
@@ -520,13 +532,13 @@ def observer_pilot_report(h, results):
                     expected_order = int(arm != ('on' if pair % 2 == 0 else 'off'))
                     if type(row.get('observer_order')) is not int or row['observer_order'] != expected_order:
                         found.append('invalid arm order')
-                    if row.get('killed') or row.get('warmup') or row.get('seq_mismatch') or row.get('terminal_exited'):
+                    if (row.get('killed') or row.get('warmup') or row.get('seq_mismatch')
+                            or row.get('shutdown') in ('exited', 'killed')):
                         found.append('failed arm')
                     failed = 'error' in row
                     if failed:
                         found.append('probe saw focus, cover or foreign input'
-                                     if kind == 'typing' and probe_desktop_failure(row, h.COLS, h.ROWS)
-                                     else 'failed arm')
+                                     if kind == 'typing' and probe_desktop_failure(row, h) else 'failed arm')
                     value = None
                     if kind == 'typing':
                         # An on arm counts only if its observer ran through
@@ -536,7 +548,7 @@ def observer_pilot_report(h, results):
                         # failed round carries its observer's failure, if any.
                         observed = row.get('typing_memory_reason')
                         if arm == 'on' and row.get('typing_memory_valid') is not True and (not failed or observed):
-                            found.append(observed if observed in PILOT_DESKTOP_REASONS
+                            found.append(observed if observed in PILOT_DESKTOP_REASONS and attributed(row, h)
                                          else 'on-arm observer evidence invalid')
                         if not failed:
                             options = meta.get('latency') or {}
@@ -549,6 +561,8 @@ def observer_pilot_report(h, results):
                         value = row.get(field)
                         failure = h.metric_reason(h.metric_descriptor(workload, field), workload, row)
                         if evidence.get('valid') is not True or failure is not None:
+                            if failure in PILOT_DESKTOP_REASONS and not attributed(row, h):
+                                failure = PILOT_UNATTRIBUTED
                             found.append(failure if failure in PILOT_INVALID_REASONS else 'invalid metric evidence')
                     if not found and (not number(value) or value < 0):
                         found.append('metric unavailable')

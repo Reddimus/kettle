@@ -102,55 +102,80 @@ def focus_unknown(samples):
 # A hidden window that no record blames on another process: it may be the
 # terminal's own dialog or second window, so it is never the desktop's.
 UNPROVEN = 'window hidden, desktop cause unproven'
+# Rows built under the rules below. Only they can carry the desktop's reasons
+# into an observer pilot; older rows named those reasons without the owners.
+ATTRIBUTION_CONTRACT = 1
 
 
 def other_process(owner, pid):
     return integer(owner) and owner > 0 and owner != pid
 
 
-def desktop_hid(records, pid):
-    """Whether the focus records that failed an interval prove the desktop
-    interrupted: one names another process (another app activated or in
-    front, another process's window on top of or over the target) and none
-    can only blame the target. An activation of the target itself proves
-    neither."""
+def check_held(c, pid, window):
+    """A check that saw the target app in front with the measured window on top."""
+    return (c.get('known') is True and c.get('valid') is True and c.get('frontmost_pid') == pid
+            and c.get('top_window') == window and c.get('target_window') == window)
+
+
+def desktop_hid(records, pid, window):
+    """Whether the focus records that failed prove the desktop interrupted.
+    An activation proves it when it names another app; the target's own
+    activation proves nothing. A check proves it only while the measured
+    window is still the target's (target_owner) and another process is in
+    front, on top or over the window; one that shows the target's own second
+    window on top or its own dialog over the window blames the target, and
+    so does one that names nobody."""
     proven = False
     for c in records:
         if 'frontmost_pid' not in c:
             proven = proven or other_process(c.get('pid'), pid)
-        elif c.get('known') is True and any(other_process(c.get(key), pid)
-                                            for key in ('frontmost_pid', 'top_owner', 'cover_owner')):
-            proven = True
-        else:
+            continue
+        # The observer records a cover only while the target is in front and
+        # on top, so the target's own dialog names nobody else and fails here.
+        if (c.get('known') is not True or c.get('target_owner') != pid
+                or (c.get('top_window') != window and c.get('top_owner') == pid)
+                or not any(other_process(c.get(key), pid) for key in ('frontmost_pid', 'top_owner', 'cover_owner'))):
             return False
+        proven = True
     return proven
 
 
-def hidden_reason(samples, pid, window, name):
-    """None while every check saw the window in front and uncovered; `name`
-    when another process hid it; UNPROVEN otherwise."""
-    failed = [c for s in samples for c in (s['focus_before'], s['focus_after'])
-              if not (c.get('known') is True and c.get('valid') is True and c.get('frontmost_pid') == pid
-                      and c.get('top_window') == window and c.get('target_window') == window)]
-    if not failed:
-        return None
-    return name if desktop_hid(failed, pid) else UNPROVEN
-
-
-def focus_reason(samples, start, end, pid, window):
-    for sample in samples:
-        for key in ('focus_before', 'focus_after'):
-            if start <= sample[key]['t_ns'] <= end and sample[key].get('known') is not True:
-                return 'focus evidence unavailable'
+def focus_verdict(samples, start, end, judged, pid, window, hidden_name):
+    """The one focus verdict of a row, from every record that bears on it:
+    the activations and checks between start and end, and every check of the
+    `judged` samples. None while focus held; "focus evidence unavailable"
+    when a check could not read the window server; the desktop's reason only
+    when every failing record proves it (desktop_hid); UNPROVEN otherwise.
+    No record is skipped because another already failed."""
+    checks = {id(c): c for s in samples for c in (s['focus_before'], s['focus_after']) if start <= c['t_ns'] <= end}
+    inside = set(checks)
+    checks.update({id(c): c for s in judged for c in (s['focus_before'], s['focus_after'])})
+    if any(c.get('known') is not True for c in checks.values()):
+        return 'focus evidence unavailable'
     changes = [c for s in samples for c in s['focus_changes'] if start <= c['t_ns'] <= end]
-    hidden = [c for s in samples for c in (s['focus_before'], s['focus_after'])
-              if start <= c['t_ns'] <= end and not (c.get('known') is True and c.get('valid') is True
-                  and c.get('frontmost_pid') == pid and c.get('top_window') == window)]
-    if not changes and not hidden:
+    failing = {k: c for k, c in checks.items() if not check_held(c, pid, window)}
+    if not changes and not failing:
         return None
-    if not desktop_hid(changes + hidden, pid):
+    if not desktop_hid([*changes, *failing.values()], pid, window):
         return UNPROVEN
-    return 'known focus change during interval' if changes else 'window not visible during interval'
+    if changes:
+        return 'known focus change during interval'
+    return 'window not visible during interval' if inside & set(failing) else hidden_name
+
+
+def observed_until(samples, pid, window, sample_ms, until):
+    """The observer's own failure over a round that failed at `until`: its
+    trace, an unreadable focus check, a broken cadence, or coverage that ends
+    before the failure. None when it watched throughout."""
+    reason = trace_reason(samples, pid, window)
+    if reason:
+        return reason
+    if focus_unknown(samples):
+        return 'focus evidence unavailable'
+    if any(b['scheduled_ns'] - a['scheduled_ns'] != sample_ms * 1_000_000 for a, b in zip(samples, samples[1:])):
+        return 'typing observer interval mismatch'
+    watched = [s for s in samples if s['query_end_ns'] <= until]
+    return coverage_reason(watched, samples[0]['query_start_ns'], until)
 
 
 def coverage_reason(samples, start, end):
@@ -177,7 +202,7 @@ def validity(row, workload, fields, reason):
 def printing_row(records, samples, pid, window, observer_off=False):
     fields = ('printing_mib', 'printing_max_mib')
     row = {'lines_expected': 80, 'printing_payload_sha256': PRINT_SHA256,
-           'timeline': samples, 'printing_log': records}
+           'timeline': samples, 'printing_log': records, 'attribution_contract': ATTRIBUTION_CONTRACT}
     if observer_off:
         row['coverage_waived'] = 'observer-pilot off arm'
     reason = trace_reason(samples, pid, window)
@@ -215,16 +240,11 @@ def printing_row(records, samples, pid, window, observer_off=False):
                    printing_lateness_ms=(sample['query_end_ns']-began-6_000_000_000)/1e6,
                    printing_focus=visible(sample, pid, window))
         # The desktop's reasons (focus moving, the window hidden) come last,
-        # behind focus checks that could not read the window server, so they
-        # never stand in for a failure of the observer, harness or terminal.
-        # focus_reason covers checks inside the output; the off arm also
-        # judges its readiness query and its record after done.
-        if observer_off and focus_unknown(samples):
-            reason = reason or 'focus evidence unavailable'
-        reason = reason or focus_reason(samples, began, done, pid, window)
-        if observer_off:
-            reason = reason or hidden_reason(samples, pid, window, 'printing window not visible')
-        reason = reason or hidden_reason([sample], pid, window, 'designated query lost focus')
+        # so they never stand in for a failure of the observer, harness or
+        # terminal. The off arm also judges its readiness query and its
+        # record after done, outside the output.
+        reason = reason or focus_verdict(samples, began, done, samples if observer_off else [sample], pid, window,
+                                         'printing window not visible' if observer_off else 'designated query lost focus')
         if reason:
             raise ValueError(reason)
         row.update(printing_mib=sample['footprint']/MIB, printing_max_mib=sample['max_footprint']/MIB)
@@ -240,7 +260,7 @@ def blink_row(samples, started, ready, pid, window, activity='unproven', evidenc
     start, end = started + int(settle * 1e9), started + int((settle + duration) * 1e9)
     row = dict(started_ns=started, blink_start_ns=start, blink_end_ns=end, blink_origin='launch',
                settle_s=settle, window_s=duration, ready_ns=ready, timeline=samples,
-               blink_activity=activity, blink_evidence=evidence)
+               blink_activity=activity, blink_evidence=evidence, attribution_contract=ATTRIBUTION_CONTRACT)
     if observer_off:
         row['coverage_waived'] = 'observer-pilot off arm'
     reason = trace_reason(samples, pid, window)
@@ -254,9 +274,8 @@ def blink_row(samples, started, ready, pid, window, activity='unproven', evidenc
         else:
             retained = [s for s in samples if first['query_start_ns'] <= s['query_start_ns'] <= final['query_start_ns']]
             reason = ((None if observer_off else coverage_reason(retained, first['query_start_ns'], final['query_end_ns']))
-                      or focus_reason(samples, start, final['focus_after']['t_ns'], pid, window))
-            reason = reason or hidden_reason(samples if observer_off else retained, pid, window,
-                                             'blink window not visible')
+                      or focus_verdict(samples, start, final['focus_after']['t_ns'],
+                                       samples if observer_off else retained, pid, window, 'blink window not visible'))
             span = (final['query_end_ns'] - first['query_end_ns']) / 1e9
             if span <= 0:
                 reason = reason or 'invalid counter span'
@@ -619,7 +638,8 @@ def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer
     fields = ('typing_footprint_mib', 'typing_observed_peak_mib', 'typing_max_footprint_mib')
     row = dict(typing_sample_interval_ms=sample_ms, typing_sample_count=0,
                typing_expected_samples=0, typing_coverage=0., typing_timeline=samples,
-               typing_tool_artifact=artifact, typing_window_id=window, typing_pid=pid)
+               typing_tool_artifact=artifact, typing_window_id=window, typing_pid=pid,
+               attribution_contract=ATTRIBUTION_CONTRACT)
     reason = observer_reason
     try:
         if observer_reason == 'observer off (pilot arm)':
@@ -647,15 +667,11 @@ def typing_memory_row(probe, samples, pid, window, sample_ms, artifact, observer
         if len(active) < 5:
             raise ValueError('insufficient typing memory duration')
         # The last query can end inside the epoch with its focus check after
-        # it, where focus_reason does not look but visibility does.
-        reason = (coverage_reason(active, start, end)
-                  or ('focus evidence unavailable' if focus_unknown(active) else None)
-                  or focus_reason(samples, start, end, pid, window))
+        # it, so the measured queries' checks are judged as well.
+        reason = coverage_reason(active, start, end) or focus_verdict(samples, start, end, active, pid, window,
+                                                                     'typing window not visible')
         if reason:
             raise ValueError(reason)
-        hidden = hidden_reason(active, pid, window, 'typing window not visible')
-        if hidden:
-            raise ValueError(hidden)
         values = [s['footprint']/MIB for s in active]
         row.update(typing_footprint_mib=statistics.median(values), typing_observed_peak_mib=max(values),
                    typing_max_footprint_mib=max(s['max_footprint']/MIB for s in active))

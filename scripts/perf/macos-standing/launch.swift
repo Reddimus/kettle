@@ -106,10 +106,15 @@ var stopped = false
 while now() < deadline {
     serviceObserver()
     if (stopRequested != 0 || getppid() != parent) && !stopped {
-        stopped = true
-        stopObserver()
-        kill(pid, SIGTERM)
-        deadline = min(deadline, now() + 10_000_000_000)
+        // A terminal that already exited quit on its own: leave that to the
+        // exit check below, so the result never calls it stopped.
+        var early = siginfo_t()
+        if !(waitid(P_PID, id_t(pid), &early, WEXITED | WNOHANG | WNOWAIT) == 0 && early.si_pid == pid) {
+            stopped = true
+            stopObserver()
+            kill(pid, SIGTERM)
+            deadline = min(deadline, now() + 10_000_000_000)
+        }
     }
     if windowAt == nil,
        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] {
