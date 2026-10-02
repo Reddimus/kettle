@@ -77,6 +77,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A scheduled light/dark theme (`theme-schedule`) now switches at its time even
+  while the window draws nothing, such as an idle window, or one whose cursor
+  the window server blinks. Before, it waited for the next keystroke, output
+  or other repaint.
 - A program that asked for focus reports (DEC mode 1004: tmux with
   `focus-events`, Neovim's `FocusGained`/`FocusLost`, Codex and Claude Code)
   hears focus leave its pane when focus moves to another pane or tab, and

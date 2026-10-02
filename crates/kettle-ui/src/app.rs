@@ -473,6 +473,23 @@ fn render_hidden_from_observations(
 /// under `RUST_LOG=warn,kettle::cursor_blink=info`.
 const CURSOR_BLINK_LOG: &str = "kettle::cursor_blink";
 
+/// Whether a theme schedule has flipped since the last redraw applied it.
+/// The first decision only seeds the schedule (`poll_theme_schedule`), so it
+/// asks for nothing.
+fn theme_schedule_redraw_due(last: Option<bool>, now: Option<bool>) -> bool {
+    matches!((last, now), (Some(last), Some(now)) if last != now)
+}
+
+/// The wait until the next whole wall-clock minute, when a clock or sunrise
+/// schedule can next flip; never zero.
+fn until_next_wall_minute() -> std::time::Duration {
+    let into_minute = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() % 60_000)
+        .unwrap_or(0) as u64;
+    std::time::Duration::from_millis(60_000 - into_minute)
+}
+
 /// A modal whose input bar is an active text surface keeps the terminal
 /// cursor steady, never mid-blink-off, while it is open.
 fn modal_holds_cursor_steady(ws: &WindowState) -> bool {
@@ -17655,16 +17672,16 @@ impl App {
         }
     }
 
-    fn poll_theme_schedule(&mut self, ws: &mut WindowState) {
-        let Some(schedule) = self.cfg.theme_schedule else {
-            return;
-        };
+    /// Whether the configured theme schedule calls for the dark theme now,
+    /// or `None` without a schedule.
+    fn theme_schedule_is_dark(&self) -> Option<bool> {
+        let schedule = self.cfg.theme_schedule?;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let day_secs = secs % 86_400;
-        let is_dark = match schedule {
+        Some(match schedule {
             // Clock times are local wall-clock times.
             kettle_config::ThemeSchedule::Clock { .. } => {
                 let (h, m, _) = crate::wall_clock::now_local();
@@ -17681,6 +17698,12 @@ impl App {
                 let approx_doy = ((days_since_epoch % 365) + 1) as u16;
                 kettle_config::schedule_decision_sunrise(day_secs as u32, approx_doy, lat, long)
             }
+        })
+    }
+
+    fn poll_theme_schedule(&mut self, ws: &mut WindowState) {
+        let Some(is_dark) = self.theme_schedule_is_dark() else {
+            return;
         };
         // Seed on first call so we don't flip the theme just for
         // existing on a "now's dark" tick — only boundary
@@ -30943,6 +30966,18 @@ impl App {
         }) {
             ws.blink_layer.request_handoff();
         }
+        // A theme schedule flips at a wall-clock boundary, and only a redraw
+        // applies it. A window that draws nothing (idle, or with its cursor
+        // blinking on the window server's layer) would otherwise keep the old
+        // theme until something else changes, so check the schedule at each
+        // wall-clock minute and draw only when it has flipped.
+        let theme_schedule_due = !render_hidden
+            && theme_schedule_redraw_due(
+                self.last_schedule_decision,
+                self.theme_schedule_is_dark(),
+            );
+        let theme_schedule_wait =
+            (!render_hidden && self.cfg.theme_schedule.is_some()).then(until_next_wall_minute);
         if (bell_active
             || blink_due
             || term_anim
@@ -30951,7 +30986,8 @@ impl App {
             || coalesce_due
             || resize_chip_active
             || media_receipt_redraw
-            || completion_hide_due)
+            || completion_hide_due
+            || theme_schedule_due)
             && let Some(w) = &ws.window
         {
             w.request_redraw();
@@ -30976,6 +31012,9 @@ impl App {
                 None
             };
         if let Some(next) = frame_recovery_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = theme_schedule_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = dpi_fallback_wait {
@@ -35344,6 +35383,51 @@ mod tests {
             wake.contains("if let Some(due) = self.remote_poll_due"),
             "about_to_wait must wake for the deferred poll"
         );
+    }
+
+    #[test]
+    fn a_flipped_theme_schedule_asks_for_one_redraw() {
+        // The first decision only seeds the schedule; a flip asks for a frame.
+        assert!(!super::theme_schedule_redraw_due(None, Some(true)));
+        assert!(!super::theme_schedule_redraw_due(Some(true), Some(true)));
+        assert!(!super::theme_schedule_redraw_due(Some(false), None));
+        assert!(super::theme_schedule_redraw_due(Some(true), Some(false)));
+        assert!(super::theme_schedule_redraw_due(Some(false), Some(true)));
+        let wait = super::until_next_wall_minute();
+        assert!(wait > std::time::Duration::ZERO && wait <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn a_theme_schedule_redraws_whoever_blinks_the_cursor() {
+        // With the cursor blinking on the window server's layer, no blink
+        // frame comes to apply a scheduled theme, so the wait loop must check
+        // the schedule itself, at every minute, whatever the blink is doing.
+        let src = production_source();
+        let body = src
+            .split_once("fn about_to_wait_inner(")
+            .expect("about_to_wait_inner")
+            .1;
+        let due = body
+            .split_once("let theme_schedule_due =")
+            .expect("theme schedule check")
+            .1
+            .split_once(';')
+            .expect("statement")
+            .0;
+        assert!(due.contains("theme_schedule_redraw_due("));
+        assert!(
+            !due.contains("blink"),
+            "the check must not depend on the blink"
+        );
+        assert!(
+            body.contains("|| theme_schedule_due)"),
+            "a flip must request a redraw"
+        );
+        assert!(
+            body.contains("if let Some(next) = theme_schedule_wait {"),
+            "the loop must wake for the schedule"
+        );
+        assert!(body.contains(".then(until_next_wall_minute)"));
     }
 
     #[test]
