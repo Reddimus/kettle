@@ -710,6 +710,7 @@ fn push_picker_accessibility(
     label: &str,
     query: &str,
     full_bounds: accesskit::Rect,
+    tr: &kettle_i18n::Translator,
 ) {
     let container_id = accessibility_modal_id(kind, 0);
     let input_id = accessibility_modal_id(kind, 1);
@@ -745,7 +746,7 @@ fn push_picker_accessibility(
         }
     }
     let mut list = Node::new(Role::ListBox);
-    list.set_label(format!("{label} results"));
+    list.set_label(tr.picker_a11y_results(label));
     list.set_children(list_children);
     projection.nodes.push((list_id, list));
 
@@ -824,7 +825,7 @@ fn modal_accessibility_projection(
             projection.nodes.push((id, node));
         }
         let mut node = Node::new(Role::Menu);
-        node.set_label("Terminal menu");
+        node.set_label(tr.text(kettle_i18n::Text::MenuA11yTerminal));
         node.set_children(children);
         node.set_bounds(full_bounds);
         projection.roots.push(container_id);
@@ -848,7 +849,7 @@ fn modal_accessibility_projection(
             projection.nodes.push((id, node));
         }
         let mut node = Node::new(Role::ListBox);
-        node.set_label("Quick select hints");
+        node.set_label(tr.text(kettle_i18n::Text::HintA11yList));
         node.set_children(children);
         projection.roots.push(container_id);
         projection.nodes.push((container_id, node));
@@ -865,6 +866,7 @@ fn modal_accessibility_projection(
             tr.text(kettle_i18n::Text::PickerA11yPalette),
             query,
             full_bounds,
+            tr,
         );
     }
     if let Some(query) = overlay.theme_picker_query.as_deref() {
@@ -875,6 +877,7 @@ fn modal_accessibility_projection(
             tr.text(kettle_i18n::Text::PickerA11yThemes),
             query,
             full_bounds,
+            tr,
         );
     }
 
@@ -923,6 +926,7 @@ fn modal_accessibility_projection(
             tr.text(kettle_i18n::Text::PickerA11yLayouts),
             query,
             full_bounds,
+            tr,
         );
     }
     if let Some(query) = overlay.ssh_query.as_deref() {
@@ -933,6 +937,7 @@ fn modal_accessibility_projection(
             tr.text(kettle_i18n::Text::PickerA11ySsh),
             query,
             full_bounds,
+            tr,
         );
     }
 
@@ -957,8 +962,8 @@ fn modal_accessibility_projection(
     if let Some((tag, _)) = overlay.update_available.as_ref() {
         let id = accessibility_modal_id(9, 0);
         let mut node = Node::new(Role::Button);
-        node.set_label(format!("Update available: {tag}"));
-        node.set_description("Open the release page");
+        node.set_label(tr.update_a11y_available(tag));
+        node.set_description(tr.text(kettle_i18n::Text::UpdateA11yOpen));
         node.set_live(accesskit::Live::Polite);
         projection.roots.push(id);
         projection.nodes.push((id, node));
@@ -1432,30 +1437,30 @@ fn ctl_snapshot(kind: &str, value: &(impl serde::Serialize + ?Sized)) -> String 
 fn media_receipt_accessibility_label(
     kind: &kettle_render::MediaPasteReceiptKind,
     remote: bool,
+    tr: &kettle_i18n::Translator,
 ) -> String {
     let mut label = match kind {
         kettle_render::MediaPasteReceiptKind::Image {
             original_width,
             original_height,
-        } => format!("Image path pasted, {original_width} by {original_height}"),
+        } => tr.receipt_a11y_image(u64::from(*original_width), u64::from(*original_height)),
         kettle_render::MediaPasteReceiptKind::Video {
             extension,
             size,
             count,
             ..
-        } if *count > 1 => format!(
-            "{count} video paths pasted, first is {extension}, {}",
-            kettle_render::format_media_size(*size)
+        } if *count > 1 => tr.receipt_a11y_videos(
+            *count as u64,
+            extension,
+            &kettle_render::format_media_size(*size),
         ),
         kettle_render::MediaPasteReceiptKind::Video {
             extension, size, ..
-        } => format!(
-            "Video path pasted, {extension}, {}",
-            kettle_render::format_media_size(*size)
-        ),
+        } => tr.receipt_a11y_video(extension, &kettle_render::format_media_size(*size)),
     };
     if remote {
-        label.push_str(", remote pane, local path only");
+        label.push_str(", ");
+        label.push_str(tr.text(kettle_i18n::Text::ReceiptA11yRemote));
     }
     label
 }
@@ -13122,6 +13127,7 @@ impl App {
             0.0
         };
         Some(kettle_render::MediaPasteReceiptOverlay {
+            tr: self.ui_text,
             pane_rect,
             grid_rect: (
                 grid_origin.0,
@@ -26625,9 +26631,9 @@ impl App {
         attrs.with_visible(false)
     }
 
-    fn initial_accessibility_tree() -> TreeUpdate {
+    fn initial_accessibility_tree(tr: &kettle_i18n::Translator) -> TreeUpdate {
         let mut root = Node::new(Role::Window);
-        root.set_label("Kettle terminal");
+        root.set_label(tr.text(kettle_i18n::Text::A11yWindow));
         let mut tree = TreeInfo::new(ACCESSIBILITY_ROOT_ID);
         tree.toolkit_name = Some("Kettle".to_string());
         tree.toolkit_version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -26644,12 +26650,13 @@ impl App {
         window: &Window,
         window_seq: u64,
         proxy: EventLoopProxy<UserEvent>,
+        tr: &kettle_i18n::Translator,
     ) -> accesskit_winit::Adapter {
         accesskit_winit::Adapter::with_direct_handlers(
             event_loop,
             window,
             AccessibilityActivation {
-                initial: Self::initial_accessibility_tree(),
+                initial: Self::initial_accessibility_tree(tr),
             },
             AccessibilityActions { proxy, window_seq },
             AccessibilityDeactivation,
@@ -26795,7 +26802,7 @@ impl App {
             nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
 
             let mut search = Node::new(Role::Search);
-            search.set_label("Find in terminal history");
+            search.set_label(self.ui_text.text(kettle_i18n::Text::SearchA11yRegion));
             search.set_children(search_children);
             search.set_bounds(bounds(geometry.rect));
             nodes.push((ACCESSIBILITY_SEARCH_CONTAINER_ID, search));
@@ -26832,7 +26839,10 @@ impl App {
                 nodes.push((id, row));
             }
             let mut list = Node::new(Role::ListBox);
-            list.set_label(format!("{} from {}", completion.kind, completion.source));
+            list.set_label(
+                self.ui_text
+                    .completion_a11y_list(&completion.kind, &completion.source),
+            );
             list.set_children(row_ids);
             list.set_size_of_set(completion.total);
             list.set_live(accesskit::Live::Polite);
@@ -26854,14 +26864,15 @@ impl App {
                 self.overlay_text_line_height(ws),
             )
         {
-            let label = media_receipt_accessibility_label(&receipt.kind, receipt.remote);
+            let label =
+                media_receipt_accessibility_label(&receipt.kind, receipt.remote, &receipt.tr);
             let mut node = Node::new(Role::Button);
             node.set_label(label);
-            node.set_description(if receipt.openable {
-                "Open the retained pasted image. The path remains on the command line."
+            node.set_description(self.ui_text.text(if receipt.openable {
+                kettle_i18n::Text::ReceiptA11yOpenImage
             } else {
-                "Hide this video poster notice. The path remains on the command line."
-            });
+                kettle_i18n::Text::ReceiptA11yHideVideo
+            }));
             node.set_live(accesskit::Live::Polite);
             node.add_action(AccessibilityAction::Click);
             let (x, y, _width, height) = geometry.rect;
@@ -26876,7 +26887,7 @@ impl App {
             nodes.push((ACCESSIBILITY_MEDIA_RECEIPT_ID, node));
 
             let mut dismiss = Node::new(Role::Button);
-            dismiss.set_label("Hide paste notice");
+            dismiss.set_label(self.ui_text.text(kettle_i18n::Text::ReceiptA11yDismiss));
             dismiss.add_action(AccessibilityAction::Click);
             let (x, y, width, height) = geometry.dismiss_rect;
             dismiss.set_bounds(accesskit::Rect::new(
@@ -26907,7 +26918,7 @@ impl App {
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
         let mut root = Node::new(Role::Window);
-        root.set_label("Kettle terminal");
+        root.set_label(self.ui_text.text(kettle_i18n::Text::A11yWindow));
         root.set_children(children);
         if let Some(window) = &ws.window {
             let size = window.inner_size();
@@ -27254,8 +27265,13 @@ impl App {
         };
         let seq = self.next_window_seq;
         self.next_window_seq += 1;
-        let accessibility =
-            Self::new_accessibility_adapter(event_loop, &window, seq, self.proxy.clone());
+        let accessibility = Self::new_accessibility_adapter(
+            event_loop,
+            &window,
+            seq,
+            self.proxy.clone(),
+            &self.ui_text,
+        );
         // Same Mux construction flags as run_with — process-global decisions.
         let mut mux = Mux::new();
         mux.lua_output_subscribed = self.lua_engine.is_some();
@@ -28437,8 +28453,13 @@ impl App {
         // setup to the GPU.
         let create_window_ms = t_startup.elapsed().as_secs_f64() * 1000.0;
         let t_a11y = std::time::Instant::now();
-        let accessibility =
-            Self::new_accessibility_adapter(event_loop, &window, ws.seq, self.proxy.clone());
+        let accessibility = Self::new_accessibility_adapter(
+            event_loop,
+            &window,
+            ws.seq,
+            self.proxy.clone(),
+            &self.ui_text,
+        );
         let a11y_ms = t_a11y.elapsed().as_secs_f64() * 1000.0;
 
         // Reveal AFTER the accessibility adapter. AccessKit's winit adapter
@@ -35300,13 +35321,17 @@ mod tests {
 
     #[test]
     fn accessibility_initial_tree_is_complete_and_pane_ids_are_stable() {
-        let update = App::initial_accessibility_tree();
+        let update = App::initial_accessibility_tree(&kettle_i18n::Translator::default());
         assert_eq!(update.focus, super::ACCESSIBILITY_ROOT_ID);
         assert_eq!(update.nodes.len(), 1);
         let (root_id, root) = &update.nodes[0];
         assert_eq!(*root_id, super::ACCESSIBILITY_ROOT_ID);
         assert_eq!(root.role(), accesskit::Role::Window);
         assert_eq!(root.label(), Some("Kettle terminal"));
+        let es = App::initial_accessibility_tree(&kettle_i18n::Translator::new(
+            kettle_i18n::Language::Es,
+        ));
+        assert_eq!(es.nodes[0].1.label(), Some("Terminal Kettle"));
 
         let tree = update.tree.expect("initial update must establish a tree");
         assert_eq!(tree.root, super::ACCESSIBILITY_ROOT_ID);
@@ -40737,8 +40762,9 @@ mod tests {
         assert!(
             receipt.contains("let mut node = Node::new(Role::Button)")
                 && receipt.contains("node.add_action(AccessibilityAction::Click)")
-                && receipt
-                    .contains("media_receipt_accessibility_label(&receipt.kind, receipt.remote)")
+                && receipt.contains(
+                    "media_receipt_accessibility_label(&receipt.kind, receipt.remote, &receipt.tr)"
+                )
                 && !receipt.contains("Role::Group"),
             "receipt bodies must advertise their action and visible video details"
         );
@@ -40780,9 +40806,15 @@ mod tests {
             count: 1,
             preview_pending: false,
         };
+        let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
         assert_eq!(
-            super::media_receipt_accessibility_label(&one, false),
+            super::media_receipt_accessibility_label(&one, false, &en),
             "Video path pasted, MP4, 1.5 KB"
+        );
+        assert_eq!(
+            super::media_receipt_accessibility_label(&one, false, &es),
+            "Ruta de video pegada, MP4, 1.5 KB"
         );
 
         let batch = kettle_render::MediaPasteReceiptKind::Video {
@@ -40792,8 +40824,24 @@ mod tests {
             preview_pending: true,
         };
         assert_eq!(
-            super::media_receipt_accessibility_label(&batch, true),
+            super::media_receipt_accessibility_label(&batch, true, &en),
             "3 video paths pasted, first is WEBM, 999 B, remote pane, local path only"
+        );
+        assert_eq!(
+            super::media_receipt_accessibility_label(&batch, true, &es),
+            "3 rutas de video pegadas, la primera es WEBM, 999 B, panel remoto, solo ruta local"
+        );
+        let image = kettle_render::MediaPasteReceiptKind::Image {
+            original_width: 1920,
+            original_height: 1080,
+        };
+        assert_eq!(
+            super::media_receipt_accessibility_label(&image, false, &en),
+            "Image path pasted, 1920 by 1080"
+        );
+        assert_eq!(
+            super::media_receipt_accessibility_label(&image, false, &es),
+            "Ruta de imagen pegada, 1920 por 1080"
         );
     }
 
@@ -46431,6 +46479,77 @@ mod picker_text_tests {
             ..kettle_render::Overlay::default()
         };
         assert!(names(ssh, &ES).iter().any(|n| n == "Lanzador SSH"));
+    }
+
+    /// The right-click menu, quick-select hints, the update banner and each
+    /// picker's result list are named in the UI's language.
+    #[test]
+    fn modal_accessibility_names_follow_the_ui_language() {
+        let labels = |overlay: kettle_render::Overlay, tr: &Translator| {
+            let projection = modal_accessibility_projection(&overlay, (800.0, 600.0), tr);
+            projection
+                .nodes
+                .iter()
+                .flat_map(|(_, node)| {
+                    [node.label(), node.description()]
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let menu = || kettle_render::Overlay {
+            context_menu: Some(kettle_render::ContextMenu {
+                rows: Vec::new(),
+                highlight: 0,
+                anchor: (0.0, 0.0),
+                scroll_offset: 0,
+                panel_w_clamped: 100.0,
+                panel_h_clamped: 100.0,
+            }),
+            ..kettle_render::Overlay::default()
+        };
+        assert!(labels(menu(), &EN).iter().any(|l| l == "Terminal menu"));
+        assert!(
+            labels(menu(), &ES)
+                .iter()
+                .any(|l| l == "Menú de la terminal")
+        );
+        let hints = kettle_render::Overlay {
+            hint_labels: vec![kettle_render::HintLabel {
+                row: 0,
+                col: 0,
+                label: "a".into(),
+                dim: false,
+            }],
+            ..kettle_render::Overlay::default()
+        };
+        assert!(
+            labels(hints, &ES)
+                .iter()
+                .any(|l| l == "Etiquetas de selección rápida")
+        );
+        let update = kettle_render::Overlay {
+            update_available: Some(("v5.0.0".into(), "https://example.invalid".into())),
+            ..kettle_render::Overlay::default()
+        };
+        let update = labels(update, &ES);
+        assert!(
+            update
+                .iter()
+                .any(|l| l == "Actualización disponible: v5.0.0")
+        );
+        assert!(update.iter().any(|l| l == "Abrir la página de la versión"));
+        let palette = kettle_render::Overlay {
+            palette_query: Some(String::new()),
+            ..kettle_render::Overlay::default()
+        };
+        assert!(
+            labels(palette, &ES)
+                .iter()
+                .any(|l| l == "Paleta de comandos: resultados")
+        );
     }
 
     /// The title editor's hint is built like the pickers', from its keys and

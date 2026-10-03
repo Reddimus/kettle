@@ -967,11 +967,18 @@ fn attach_parent_console_if_needed() {
 #[cfg(not(windows))]
 fn attach_parent_console_if_needed() {}
 
-fn queue_startup_update_recovery(warning: Option<&str>, queue: impl FnOnce(&str, &str)) -> bool {
+fn queue_startup_update_recovery(
+    warning: Option<&str>,
+    tr: &kettle_i18n::Translator,
+    queue: impl FnOnce(&str, &str),
+) -> bool {
     let Some(warning) = warning else {
         return false;
     };
-    queue("Kettle update recovery", warning);
+    queue(
+        tr.text(kettle_i18n::Text::NotifyTitleUpdateRecovery),
+        warning,
+    );
     true
 }
 
@@ -1716,8 +1723,10 @@ fn main() -> anyhow::Result<()> {
         recording_key: record.as_ref().map(recording_activation_key),
         record_raw_input: record.is_some() && record_raw_input,
     };
+    // English until the UI language setting exists.
     let startup_notification_queued = queue_startup_update_recovery(
         startup_update_warning.as_deref(),
+        &kettle_i18n::Translator::default(),
         kettle_ui::queue_desktop_notification,
     );
     let activation = if bare_gui_launch && !cli.new_process {
@@ -2585,8 +2594,10 @@ mod tests {
     #[test]
     fn update_recovery_notification_is_flushed_before_activated_handoff() {
         let mut observed = None;
+        let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         assert!(queue_startup_update_recovery(
             Some("pending transaction recovered"),
+            &en,
             |title, body| observed = Some((title.to_string(), body.to_string())),
         ));
         assert_eq!(
@@ -2596,9 +2607,25 @@ mod tests {
                 "pending transaction recovered".to_string()
             ))
         );
-        assert!(!queue_startup_update_recovery(None, |_title, _body| {
-            panic!("an absent warning must not queue a notification")
-        }));
+        // The title follows the UI language; the updater's message does not.
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        assert!(queue_startup_update_recovery(
+            Some("pending transaction recovered"),
+            &es,
+            |title, body| observed = Some((title.to_string(), body.to_string())),
+        ));
+        assert_eq!(
+            observed,
+            Some((
+                "Recuperación de la actualización de Kettle".to_string(),
+                "pending transaction recovered".to_string()
+            ))
+        );
+        assert!(!queue_startup_update_recovery(
+            None,
+            &en,
+            |_title, _body| { panic!("an absent warning must not queue a notification") }
+        ));
 
         let src = super::production_source();
         let activated_arm = src
