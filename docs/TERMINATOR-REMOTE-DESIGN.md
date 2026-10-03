@@ -3,8 +3,9 @@
 > Status: **Shipped in v1.46.0.** Every phase below landed — PID
 > plumbing, `detect_ssh`, `detect_container` (Docker/Podman/kubectl/
 > lxc), the `sysinfo`-backed `detect_remote_with` process-tree walk,
-> and `clone_session_command`/`clone_session_label` behind the
-> "Clone session" context-menu entry. See
+> and `clone_session_command` behind the "Clone session"
+> context-menu entry (its label is now worded by the UI, through
+> `kettle-i18n`). See
 > `crates/kettle-remote/src/lib.rs`, whose own module header tracks
 > the phase history as closed. This doc is kept as the historical
 > design record; the phase roadmap below describes what was built,

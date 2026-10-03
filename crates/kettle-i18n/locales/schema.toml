@@ -1,6 +1,172 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.about_copy_version]
+context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row."
+
+[messages.about_open_github]
+context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row."
+
+[messages.about_open_release]
+context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. The page of an available update's release."
+
+[messages.about_update_available]
+context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. tag is a release tag such as v5.0.0, verbatim."
+args = [{ name = "tag", type = "str" }]
+
+[messages.about_update_unknown]
+context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
+
+[messages.menu_about]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
+
+[messages.menu_close_pane]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_close_tab]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_close_window]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_command_palette]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown."
+
+[messages.menu_copy]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_copy_link]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_group_tab]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Puts every pane of the tab in one broadcast group."
+
+[messages.menu_new_tab]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_new_window]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_open_link]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown when the right-click lands on a link."
+
+[messages.menu_paste]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_pref_advanced]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_bell_attention]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_bell_both]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_bell_off]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_bell_visual]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_confirm_always]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_confirm_multiple]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_confirm_never]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_copy_on_select]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_cursor_blink]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_font_bigger]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_font_smaller]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_mouse_hide]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_scrollbar_always]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_scrollbar_auto]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_pref_scrollbar_hidden]
+context = "crates/kettle-ui/src/app.rs append_preferences_submenu_items: Preferences submenu row, after a ● ○ or ✓ marker."
+
+[messages.menu_preferences]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu of quick toggles."
+
+[messages.menu_profile]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu listing config profiles."
+
+[messages.menu_read_only]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Check row: the pane ignores typing while output keeps flowing."
+
+[messages.menu_reattach]
+context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row that reopens a detected remote session in a new pane. runtime is a command name (docker, podman, kubectl, lxc) and container a container name, both verbatim. Spanish may reorder them."
+args = [{ name = "runtime", type = "str" }, { name = "container", type = "str" }]
+
+[messages.menu_reconnect_ssh]
+context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row that reopens a detected remote session in a new pane. host is verbatim."
+args = [{ name = "host", type = "str" }]
+
+[messages.menu_reconnect_ssh_user]
+context = "crates/kettle-ui/src/app.rs remote_reconnect_label: right-click row that reopens a detected remote session in a new pane. user and host are verbatim."
+args = [{ name = "user", type = "str" }, { name = "host", type = "str" }]
+
+[messages.menu_reset_terminal]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_restore]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shown instead of Zoom while the pane is zoomed."
+
+[messages.menu_set_group]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Broadcast group of the pane. Opens an editor."
+
+[messages.menu_set_pane_title]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+
+[messages.menu_set_tab_title]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+
+[messages.menu_set_window_title]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens an editor."
+
+[messages.menu_settings]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Opens the Settings panel."
+
+[messages.menu_split_auto]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Splits along the pane's longer side."
+
+[messages.menu_split_down]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_split_left]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_split_right]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_split_up]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_theme]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Submenu listing color themes."
+
+[messages.menu_ungroup_tab]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row."
+
+[messages.menu_zoom]
+context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shows the pane alone in its tab."
+
 [messages.palette_about]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the About action."
 

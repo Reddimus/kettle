@@ -40,9 +40,12 @@ named arguments. A missing key, a placeholder mismatch, or a wrong argument
 fails the build; nothing is parsed at run time. Each process picks one language
 and passes an immutable `Translator` to the code that shows text, so there is no
 global locale. Terminal content, user and shell names, config values and
-protocol text never pass through it. Settings, the command palette and the
-layout and SSH pickers are on it so far; the other surfaces move in the 5.0
-localization track. The palette ranks a query against the label shown and,
+protocol text never pass through it. Settings, the command palette, the layout
+and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
+dropdown and the About panel are on it so far; the other surfaces move in the
+5.0 localization track. Crates below the UI keep returning data: the
+reconnect row for a detected remote session is worded in `kettle-ui` from
+`kettle-remote`'s typed context. The palette ranks a query against the label shown and,
 outside English, against the English label too, so a command name from the
 docs still finds its command.
 
