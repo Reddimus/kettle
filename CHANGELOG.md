@@ -68,6 +68,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On Linux, a video poster that tumbler (Xfce's thumbnailer) cached is used:
+  it records the file's modification time with a fraction of a second, which
+  Kettle read as stale. A different time or file still does not match.
 - A video paste after an update replaced Kettle no longer asks the new build's
   preview helper to read the old build's request. On Linux the helper is the
   running Kettle itself; elsewhere a helper from another build says so, and
