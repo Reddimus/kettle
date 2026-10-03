@@ -1,5 +1,6 @@
 //! Trim trailing punctuation that follows URLs in prose but isn't actually
-//! part of them (`.`, `,`, `;`, `:`, `'`, `"`), plus *bracket-balance-aware*
+//! part of them (`.`, `,`, `;`, `:`, `'`, `"`, and Markdown's `` ` `` code
+//! and `*` emphasis marks), plus *bracket-balance-aware*
 //! handling of `)`, `]`, `}`. Shared by the OSC 8 / autodetect link path
 //! (`links.rs`) and the quick-select hint mode (`hints.rs`).
 //!
@@ -33,7 +34,10 @@ pub fn trim_trailing(s: &str) -> &str {
     while end > 0 {
         let last = bytes[end - 1];
         let strip = match last {
-            b'.' | b',' | b';' | b':' | b'\'' | b'"' => true,
+            // A backtick is never part of a URL (it must be percent-encoded),
+            // and a trailing `*` closes Markdown emphasis far more often than
+            // it ends a URL: `` `https://x.test/a` `` and `**https://x.test**`.
+            b'.' | b',' | b';' | b':' | b'\'' | b'"' | b'`' | b'*' => true,
             b')' | b']' | b'}' => {
                 let open = match last {
                     b')' => b'(',
@@ -74,6 +78,22 @@ mod tests {
         );
         // Run of trailing punctuation strips the whole run.
         assert_eq!(trim_trailing("https://e.com.,.,"), "https://e.com");
+    }
+
+    /// Markdown wraps URLs in backticks and emphasis; neither belongs to the
+    /// URL, but the same characters inside it stay.
+    #[test]
+    fn strips_markdown_code_and_emphasis_marks() {
+        assert_eq!(trim_trailing("https://x.test/a`"), "https://x.test/a");
+        assert_eq!(trim_trailing("https://x.test/a**"), "https://x.test/a");
+        assert_eq!(trim_trailing("https://x.test/a*"), "https://x.test/a");
+        assert_eq!(trim_trailing("https://x.test/a`."), "https://x.test/a");
+        assert_eq!(trim_trailing("https://x.test/a**)."), "https://x.test/a");
+        assert_eq!(
+            trim_trailing("https://x.test/a*b`c/d"),
+            "https://x.test/a*b`c/d",
+            "inside a URL the marks are kept"
+        );
     }
 
     #[test]
