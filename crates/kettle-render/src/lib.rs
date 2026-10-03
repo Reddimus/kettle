@@ -744,6 +744,8 @@ fn context_menu_clip_indicators(
 pub struct TitleEditOverlay {
     pub label: String,
     pub input: String,
+    /// The key hint after the input, already in the UI's language.
+    pub hint: String,
     pub rect: Rect4,
 }
 
@@ -7356,10 +7358,7 @@ impl Renderer {
                 theme.palette[3],
                 0.96,
             ));
-            let label = format!(
-                "  ✎ {} {}_   (Enter apply · Esc cancel)",
-                edit.label, edit.input
-            );
+            let label = format!("  ✎ {} {}_   {}", edit.label, edit.input, edit.hint);
             let label = fit_single_line_label(&label, overlay_label_cols(edit.rect.2, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer

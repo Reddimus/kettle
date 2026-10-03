@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Close confirmations count in words that match the number: "Close tab with 1
+  pane?", "Close 3 panes?". The paste prompt says "1 line" or "2 lines". They
+  used to say "pane(s)" and "lines" whatever the count.
+
 ### Fixed
 
 - A Settings keybind row for an action with more than one shortcut shows the

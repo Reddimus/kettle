@@ -17,6 +17,55 @@ args = [{ name = "tag", type = "str" }]
 [messages.about_update_unknown]
 context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
 
+[messages.confirm_button_cancel]
+context = "crates/kettle-ui/src/app.rs: Confirmation button that closes the dialog and does nothing."
+
+[messages.confirm_button_close]
+context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for closing panes."
+
+[messages.confirm_button_paste]
+context = "crates/kettle-ui/src/app.rs: Confirmation button for a paste."
+
+[messages.confirm_button_reassign]
+context = "crates/kettle-ui/src/app.rs: Confirmation button for moving a key combination to another action."
+
+[messages.confirm_close_pane]
+context = "crates/kettle-ui/src/app.rs: confirmation before closing the focused pane."
+
+[messages.confirm_close_tab]
+context = "crates/kettle-ui/src/app.rs: confirmation before closing a tab. count is the number of panes in that tab."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_close_window]
+context = "crates/kettle-ui/src/app.rs: confirmation before closing a window. count is the number of panes in that window."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_paste]
+context = "crates/kettle-ui/src/app.rs paste_confirm_prompt: confirmation before pasting text that a shell would run line by line."
+args = [{ name = "count", type = "u64" }]
+plural = "count"
+
+[messages.confirm_rebind]
+context = "crates/kettle-ui/src/app.rs: confirmation before moving a key combination to another action. chord is a key combination such as Ctrl+Shift+T; taken and action are config action names such as split_right, all verbatim."
+args = [{ name = "chord", type = "str" }, { name = "taken", type = "str" }, { name = "action", type = "str" }]
+
+[messages.edit_hint_apply]
+context = "crates/kettle-ui/src/app.rs: title editor key hint, after Enter: apply the edit. Lowercase, one or two words."
+
+[messages.edit_title_group]
+context = "crates/kettle-ui/src/app.rs: label before the text being edited, for the broadcast group of the pane. Ends with a colon."
+
+[messages.edit_title_pane]
+context = "crates/kettle-ui/src/app.rs: label before the text being edited, for the pane. Ends with a colon."
+
+[messages.edit_title_tab]
+context = "crates/kettle-ui/src/app.rs: label before the text being edited, for the tab. Ends with a colon."
+
+[messages.edit_title_window]
+context = "crates/kettle-ui/src/app.rs: label before the text being edited, for the window. Ends with a colon."
+
 [messages.menu_about]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
 
@@ -489,7 +538,7 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
 
 [messages.picker_hint_cancel]
-context = "crates/kettle-ui/src/app.rs: picker key hint, after Esc: close the picker. Lowercase, one or two words."
+context = "crates/kettle-ui/src/app.rs: key hint after Esc: close the picker or the title editor. Lowercase, one or two words."
 
 [messages.picker_hint_complete]
 context = "crates/kettle-ui/src/app.rs: picker key hint, after Tab in the SSH launcher: complete the host name. Lowercase, one or two words."

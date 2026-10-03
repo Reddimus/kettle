@@ -5,6 +5,17 @@ about_open_github = "Open GitHub page"
 about_open_release = "Open release page"
 about_update_available = "Update available: {tag}"
 about_update_unknown = "Update status unknown"
+confirm_button_cancel = "Cancel"
+confirm_button_close = "Close"
+confirm_button_paste = "Paste"
+confirm_button_reassign = "Reassign"
+confirm_close_pane = "Close this pane?"
+confirm_rebind = "{chord} is already bound to \"{taken}\". Reassign it to \"{action}\"?"
+edit_hint_apply = "apply"
+edit_title_group = "Edit pane group:"
+edit_title_pane = "Edit pane title:"
+edit_title_tab = "Edit tab title:"
+edit_title_window = "Edit window title:"
 menu_about = "About kettle"
 menu_close_pane = "Close Pane"
 menu_close_tab = "Close Tab"
@@ -291,3 +302,15 @@ settings_value_visual_flash = "Visual flash"
 settings_value_visual_flash_and_attention = "Visual flash and attention"
 settings_value_when_focused = "When focused"
 settings_value_white = "White"
+
+[confirm_close_tab]
+one = "Close tab with {count} pane?"
+other = "Close tab with {count} panes?"
+
+[confirm_close_window]
+one = "Close {count} pane?"
+other = "Close {count} panes?"
+
+[confirm_paste]
+one = "Paste {count} line into a shell-like target?"
+other = "Paste {count} lines into a shell-like target?"
