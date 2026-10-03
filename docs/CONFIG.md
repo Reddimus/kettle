@@ -603,7 +603,8 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 inline rename overlay for the OS window / active tab / focused pane).
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
-`quick_select`; labels the URLs, paths, git hashes and IP addresses on screen:
+`quick_select`; labels the URLs, paths (a quoted or backticked path may hold
+spaces), git hashes and IP addresses on screen:
 type a label to open a URL or copy anything else, or hold Shift while typing it
 to copy a URL or open a path in the default app, resolved from that pane's
 directory. A path is copied instead when it may name another machine's file (a

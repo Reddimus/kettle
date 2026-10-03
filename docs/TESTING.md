@@ -1396,7 +1396,7 @@ keep a URL's path inside the URL, trim trailing punctuation and leave
 `10.0.0.1/24` an address; double-click smart selection follows the same spans.
 Each span says whether it meets a boundary on both sides. `out/report#1.pdf`,
 `out/report,1.pdf`, `out/report(1).pdf`, `foo(1)/bar.png`,
-`user@host:dir/file.txt`, `out/a.png?raw=1`, `"docs/annual report.pdf"`,
+`user@host:dir/file.txt`, `out/a.png?raw=1`, an unclosed `"docs/annual report.pdf`,
 `./docs/it's.md`, and every name in `out/report,dir/file.txt` or
 `./user's/report.pdf` give partial matches. Whole: `out/a.png, b`,
 `"src/main.rs:12"`, `[src/main.rs:12]`, `See src/main.rs:12.`,
@@ -1441,6 +1441,37 @@ verbatim path is kept only when Win32 reads it the same without `\\?\`: no
 name ending in a dot or a space, no reserved device name (`CON`, `nul.txt`,
 `COM1`). Red checks: each of
 these rules, removed on its own, fails a test.
+
+Quoted paths (kettle-core `hints::quoted_paths`, shared by hints and links)
+take a path between matching `"`, `'` or `` ` `` whole, spaces and `#`, `,` or
+`( )` included, and names in decomposed Unicode (`cafe\u{301}`): `"docs/annual report.pdf"`, Python's `File "/my app/x.py",
+line 12`, `` `out/report #1.pdf` ``, `"src/my file.rs:12"` (the location stays
+out of the hint and in the link), `"~/Library/Application Support"`,
+`"C:\Program Files\…"` on Windows (elsewhere a one-letter prefix is a remote
+host, as in `scp "h:/srv/a b.pdf" .`, and stays partial), and a quoted path
+the terminal wrapped. The contents
+must read as a path, with no filesystem lookup: quoted prose such as
+`"see src/main.rs"` keeps only its bare path, as do `"/model sonnet"`,
+`"and/or more words"`, a relative path whose first segment holds a space
+(`'My Files/a b.txt'`), segments that start or end with a space, empty
+segments, a backslash outside a drive path, a quoted URL and an overlong run.
+An unclosed, mismatched or glued quote (`"a/b c.pdf'`, `"a/b c.pdf"x`,
+`x"a/b c.pdf"`) leaves the bare match, as does any quote after a `:` (`scp
+user@host:"/srv/my report.pdf"` and `'user@host':"…"` name remote files, so
+compact JSON's `"file":"…"` is read the same way), after an escaped space
+(`host:dir\ "…"`), or inside a quote that opened but did not close on a
+boundary (`ssh host "cat '/srv/a b.pdf'"&&…`) or within reach, while pretty-printed JSON
+(`"file": "/my app/x.py", "line": 3`) and `["a/b c.txt","d/e f.txt"]` take
+each path whole. The boundary check reads at most 16 characters ahead, so a
+line of repeated `;""` stays linear (it took 2.8 s at 40,000 bytes before),
+and overlap checks against earlier matches use an ordered map (`Taken`), so
+neither looking up nor inserting depends on how many matches came before, and inside quoted text a bare path that
+stops before the closing quote is not whole (`Files/a`, `src/main.rs` in
+`"cannot open src/main.rs now"`). A quoted network (`"10.0.0.1/24/"`) stays an address, and a link or hint
+ending in a wide character covers its spacer cell too. A quoted link encodes
+its spaces, and one
+refused for a `..` climb also keeps any piece of it from linking. Red checks:
+each rule above, removed on its own, fails a test.
 
 URL tails (kettle-core `url_trim`, shared by links and hints) drop trailing
 prose punctuation, Markdown backticks and `*` emphasis, and closing brackets
