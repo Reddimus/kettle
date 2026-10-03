@@ -21,11 +21,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `kettle-media-worker`, the media worker executable, is built with the
   workspace. Before reading anything it closes inherited descriptors, turns
   off core dumps and lowers its resource limits, and a watchdog ends it if
-  its parent stalls. It renders nothing yet, and nothing ships it. The media
+  its parent stalls. Nothing ships it yet. The media
   client can run a job in a fresh worker under startup and job deadlines and
   a 768 MiB limit on the memory the worker and everything it started hold,
   killing the worker's whole process group before reaping it; nothing calls
   it yet.
+- The media worker renders raster images through `kettle-media-render`, a new
+  crate in safe code that writes nothing. It reads a file once through one
+  open descriptor, refusing anything but a regular file and a file that
+  changes while it is read; it takes the format from the content, not the
+  name, and decodes PNG, JPEG, WebP, BMP and a GIF's first frame only after
+  checking the image's size against the decoded caps. The image is fitted
+  into the requested box keeping its aspect ratio, without transparent pixels
+  bleeding color. Other media kinds are refused for now, and nothing in
+  Kettle asks for a render yet.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

@@ -124,13 +124,39 @@ fn handshake(child: &mut Child) {
     );
 }
 
+/// A 1x1 PNG of `color`, encoded by the `image` crate.
+fn png(color: [u8; 4]) -> Vec<u8> {
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(1, 1, image::Rgba(color)))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    bytes.into_inner()
+}
+
 #[test]
-fn ready_carries_this_build_and_jobs_are_refused_for_now() {
+fn ready_carries_this_build_and_a_raster_job_is_rendered() {
+    let mut child = worker();
+    handshake(&mut child);
+    send(&mut child, &job(&png([10, 20, 30, 255])));
+    let Some(Frame::Rendered(rendered)) = receive(&mut child) else {
+        panic!("no rendered reply");
+    };
+    assert_eq!(
+        (rendered.width, rendered.height, rendered.rgba),
+        (1, 1, vec![10, 20, 30, 255])
+    );
+    drop(child.stdin.take());
+    assert_eq!(receive(&mut child), None);
+    assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
+    assert_eq!(finish(&mut child), "");
+}
+
+#[test]
+fn a_job_it_cannot_render_is_refused() {
     let mut child = worker();
     handshake(&mut child);
     send(&mut child, &job(&[1, 2, 3]));
-    assert_eq!(receive(&mut child), failure(FailureCode::WorkerUnavailable));
-    drop(child.stdin.take());
+    assert_eq!(receive(&mut child), failure(FailureCode::UnsupportedMedia));
     assert_eq!(receive(&mut child), None);
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
     assert_eq!(finish(&mut child), "");
@@ -265,7 +291,7 @@ fn each_phase_has_its_own_deadline() {
     handshake(&mut child);
     std::thread::sleep(Duration::from_millis(3500));
     send(&mut child, &job(&[1]));
-    assert_eq!(receive(&mut child), failure(FailureCode::WorkerUnavailable));
+    assert_eq!(receive(&mut child), failure(FailureCode::UnsupportedMedia));
     assert_eq!(exit_code(&mut child, Duration::from_secs(10)), 0);
 }
 
