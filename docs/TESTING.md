@@ -803,8 +803,9 @@ writer guards its pipe writes before the first one; a footprint over the
 limit kills the worker before Ready or after it, never retried, while one at
 the limit for a whole deadline does not; a worker over the limit while it
 exits after a complete reply is `RenderResource`, not a success, while one
-that exits 0 just as a measurement runs keeps its reply; a footprint that
-cannot be measured fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+that exits 0 just as a measurement runs keeps its reply, as does any stop
+that ends after its own exit was seen; a footprint that cannot be measured
+fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -1811,7 +1812,10 @@ sampled, the limit itself refused, an unmeasurable worker read as fine,
 descendants not walked, the group not listed (macOS) or scanned (Linux),
 reused pids counted, `stat` read as text, stale candidates counted or not
 forgotten, a rescan that is never faster, no sampling while a replying
-worker exits, and an exit seen while measuring lost each fail a test above.
+worker exits, an exit seen while measuring lost, and a kill that forgets a
+seen exit each fail a test above. The stub's crash-after-reply test allows a
+long reply budget: without a core limit its abort can write a core dump first,
+which takes a CI runner seconds.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

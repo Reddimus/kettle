@@ -480,7 +480,8 @@ impl<'a> Running<'a> {
     /// enough of those turn media off.
     fn kill(&mut self) -> Stopped {
         let Some(mut process) = self.process.take() else {
-            return Stopped::Killed;
+            // Already reaped: by its own exit, if one was seen.
+            return self.own_exit().map_or(Stopped::Killed, Stopped::Exited);
         };
         // It may have exited by itself a moment ago; that exit is its own.
         if let Ok(Some(exit)) = process.try_wait() {
@@ -1321,6 +1322,27 @@ mod tests {
             ..Script::replies(output, WorkerExit::Code(0))
         }]);
         assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
+    }
+
+    #[test]
+    fn a_kill_after_a_seen_exit_keeps_that_exit() {
+        // However a stop ends, a worker whose own exit was already seen and
+        // reaped reports that exit, not a kill.
+        let fake = Fake::new(vec![Script::replies(vec![], WorkerExit::Code(0))]);
+        let shared = Arc::clone(&client(&fake).shared);
+        let spawned = fake.spawn(Path::new("/w")).unwrap();
+        let mut worker = Running::new(spawned.process, &shared, FAST);
+        drop(spawned.stdin);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while worker.own_exit().is_none() {
+            assert!(Instant::now() < deadline, "the exit was never seen");
+            worker.look();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(matches!(
+            worker.kill(),
+            Stopped::Exited(WorkerExit::Code(0))
+        ));
     }
 
     #[test]
