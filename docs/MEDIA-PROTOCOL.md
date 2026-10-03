@@ -191,8 +191,8 @@ here spawns a worker.
 
 `WorkerClient::render(job)` runs one job in a fresh worker, one job at a time,
 on the caller's thread (never the UI's). It checks the worker again first, the
-same check availability runs, and refuses without starting anything once two
-workers have been stuck. Nothing in the GUI calls it yet.
+same check availability runs, inside the startup deadline, and refuses without
+starting anything once two workers have been stuck. Nothing in the GUI calls it yet.
 
 The platform starts the worker with `client::worker_command`: no arguments, an
 empty environment, `/` as the working directory, stdin and stdout piped,
@@ -203,9 +203,10 @@ frame under Ready's own cap (`wire::read_frame_within`, 149 bytes, checked
 from the header before any payload is allocated), then the reply, then end of
 file. The caller's thread watches the clock:
 
-- **Ready within 5 s of the start, the start itself included.** The worker
-  is started on a helper thread, so a start that blocks (an executable on a
-  stalled network filesystem) cannot hold the caller; a worker that starts
+- **Ready within 5 s of the start, the check and the start included.** The
+  worker is checked and started on a helper thread, so a check or a start that
+  blocks (an executable on a stalled network filesystem) cannot hold the
+  caller; a worker that starts
   too late is killed by the helper, and while such a start is still running
   no other begins. A worker that never answers is killed
   and, once reaped, retried once; total startup is at most 10 s. A Ready from
@@ -214,7 +215,8 @@ file. The caller's thread watches the clock:
   end of file after it and an exit rather than a crash.
 - **The reply within the job's deadline**, 2 s for a raster and 3 s for other
   kinds, counted from before the job is written. A missed deadline kills the
-  worker: `RenderTimeout`. Nothing is retried after Ready.
+  worker: `RenderTimeout`, unless it ended by itself as the deadline passed,
+  when its exit says why. Nothing is retried after Ready.
 - **A reply counts only** when end of file follows it with nothing between,
   and the worker then exits 0 by itself. A reply followed by more bytes, a
   second frame, a crash or a non-zero exit is discarded.

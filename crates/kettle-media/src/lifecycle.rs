@@ -6,13 +6,13 @@
 //! nothing followed the reply on its stdout.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::client::{Shared, SpawnedWorker, WorkerExit, WorkerProcess};
+use crate::client::{Shared, SpawnedWorker, UnavailableCause, WorkerExit, WorkerProcess};
 use crate::wire::{self, Direction, Frame, MAX_READY_FRAME_BYTES, WireError};
 use crate::{BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, Rendered, check_ready};
 
@@ -87,7 +87,6 @@ enum Stopped {
 
 pub(crate) fn attempt(
     shared: &Arc<Shared>,
-    path: &Path,
     build_id: &BuildId,
     job: &Job,
     budgets: Budgets,
@@ -106,7 +105,7 @@ pub(crate) fn attempt(
         process,
         stdin,
         stdout,
-    } = match spawn_within(shared, path, ready_until, budgets) {
+    } = match spawn_within(shared, ready_until, budgets) {
         Ok(spawned) => spawned,
         Err(code) => return Ok(Err(code)),
     };
@@ -165,10 +164,12 @@ pub(crate) fn attempt(
     Ok(match worker.next(&received, reply_until) {
         Err(Wait::Timeout) => match worker.own_exit() {
             Some(exit) => Err(exit_failure(exit)),
-            None => {
-                worker.kill();
-                Err(FailureCode::RenderTimeout)
-            }
+            None => match worker.kill() {
+                // It ended by itself just as the deadline passed: its exit
+                // says why.
+                Stopped::Exited(exit) => Err(exit_failure(exit)),
+                Stopped::Killed | Stopped::Stuck => Err(FailureCode::RenderTimeout),
+            },
         },
         Ok(Event::Reply(Ok(Some(Frame::Rendered(rendered))), true)) => match worker.stop() {
             Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => Ok(rendered),
@@ -189,18 +190,18 @@ pub(crate) fn attempt(
 
 enum SpawnSlot {
     Waiting,
-    Done(std::io::Result<SpawnedWorker>),
+    Done(Result<SpawnedWorker, FailureCode>),
     /// The caller stopped waiting: whatever starts now is the helper's to
     /// kill.
     Abandoned,
 }
 
-/// Start the worker on a helper thread, so a start that blocks (an
-/// executable on a stalled network filesystem) cannot hold the caller past
-/// `until`. A worker that starts after that is killed by the helper.
+/// Check and start the worker on a helper thread, so a check or a start that
+/// blocks (an executable on a stalled network filesystem) cannot hold the
+/// caller past `until`. A worker that starts after that is killed by the
+/// helper.
 fn spawn_within(
     shared: &Arc<Shared>,
-    path: &Path,
     until: Instant,
     budgets: Budgets,
 ) -> Result<SpawnedWorker, FailureCode> {
@@ -212,11 +213,17 @@ fn spawn_within(
     let slot = Arc::new((Mutex::new(SpawnSlot::Waiting), Condvar::new()));
     let helper_slot = Arc::clone(&slot);
     let helper_shared = Arc::clone(shared);
-    let path: PathBuf = path.to_path_buf();
     let started = std::thread::Builder::new()
         .name("kettle-media-spawn".into())
         .spawn(move || {
-            let spawned = helper_shared.platform().spawn(&path);
+            let spawned = match helper_shared.checked_path() {
+                Ok(path) => helper_shared
+                    .platform()
+                    .spawn(path)
+                    .map_err(|_| FailureCode::WorkerUnavailable),
+                Err(UnavailableCause::UnsupportedPlatform) => Err(FailureCode::UnsupportedPlatform),
+                Err(_) => Err(FailureCode::WorkerUnavailable),
+            };
             let (state, changed) = &*helper_slot;
             let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
             if matches!(*state, SpawnSlot::Abandoned) {
@@ -237,8 +244,7 @@ fn spawn_within(
     let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
     loop {
         match std::mem::replace(&mut *state, SpawnSlot::Waiting) {
-            SpawnSlot::Done(Ok(spawned)) => return Ok(spawned),
-            SpawnSlot::Done(Err(_)) => return Err(FailureCode::WorkerUnavailable),
+            SpawnSlot::Done(result) => return result,
             SpawnSlot::Waiting | SpawnSlot::Abandoned => {}
         }
         let now = Instant::now();
@@ -499,6 +505,7 @@ mod tests {
     use crate::{Canvas, Failure, PROTOCOL_VERSION, Ready, Source, Target, Theme, content_digest};
     use std::collections::VecDeque;
     use std::io::{PipeReader, PipeWriter};
+    use std::path::Path;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -665,8 +672,10 @@ mod tests {
         scripts: Mutex<VecDeque<Script>>,
         spawns: AtomicUsize,
         kills: Arc<AtomicUsize>,
-        /// How long each spawn takes, and how many have begun.
+        /// How long each spawn and file check take, and how many spawns have
+        /// begun.
         spawn_delay: Mutex<Duration>,
+        inspect_delay: Mutex<Duration>,
         spawn_calls: AtomicUsize,
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
@@ -714,6 +723,8 @@ mod tests {
             Ok(Path::new("/install/kettle-media-worker"))
         }
         fn inspect(&self, _: &Path) -> Result<FileIdentity, UnavailableCause> {
+            let delay = *self.inspect_delay.lock().unwrap();
+            std::thread::sleep(delay);
             Ok(FileIdentity {
                 dev: 1,
                 ino: 2,
@@ -1060,6 +1071,41 @@ mod tests {
             Err(FailureCode::RestartRequired)
         );
         assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_check_that_hangs_is_bounded() {
+        let fake = Fake::new(vec![Script::silent()]);
+        *fake.inspect_delay.lock().unwrap() = FAST.ready * 3;
+        let client = client(&fake);
+        let started = Instant::now();
+        assert_eq!(client.render(&job(1)), Err(FailureCode::RenderTimeout));
+        assert!(
+            started.elapsed() < FAST.ready * 2,
+            "{:?}",
+            started.elapsed()
+        );
+        // Still hung: the next render starts no second check.
+        assert_eq!(client.render(&job(1)), Err(FailureCode::WorkerUnavailable));
+        assert!(
+            started.elapsed() < FAST.ready * 2,
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_crash_as_the_reply_deadline_passes_is_its_own_answer() {
+        let script = Script {
+            exits: Some(WorkerExit::Signal(11)),
+            exits_at_kill: true,
+            ..Script::silent_with(ready(build_id()))
+        };
+        let fake = Fake::new(vec![script]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RenderResource)
+        );
     }
 
     #[test]

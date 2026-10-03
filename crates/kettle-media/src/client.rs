@@ -264,7 +264,8 @@ impl WorkerClient {
         }
     }
 
-    /// Render `job` in a fresh worker, checked again first. Blocks the calling
+    /// Render `job` in a fresh worker, checked again first (inside the startup
+    /// deadline, so a stalled filesystem cannot hold it). Blocks the calling
     /// thread, which must not be the UI's, for at most the startup deadline
     /// (twice, when the first worker never answers), the job's deadline and
     /// cleanup; jobs run one at a time. A worker that never becomes ready is
@@ -279,27 +280,13 @@ impl WorkerClient {
             if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
                 return Err(FailureCode::WorkerUnavailable);
             }
-            let path = self.checked_path().map_err(|cause| match cause {
-                UnavailableCause::UnsupportedPlatform => FailureCode::UnsupportedPlatform,
-                _ => FailureCode::WorkerUnavailable,
-            })?;
-            match lifecycle::attempt(&self.shared, path, &self.build_id, job, self.budgets) {
+            match lifecycle::attempt(&self.shared, &self.build_id, job, self.budgets) {
                 Err(lifecycle::NeverReady) if attempt == 0 => {}
                 Err(lifecycle::NeverReady) => return Err(FailureCode::RenderTimeout),
                 Ok(result) => return result,
             }
         }
         Err(FailureCode::RenderTimeout)
-    }
-
-    /// The worker's path, after the same check [`Self::availability`] runs,
-    /// done here and now, and recorded for it.
-    fn checked_path(&self) -> Result<&Path, UnavailableCause> {
-        let verified = self.shared.lock().last.and_then(Result::ok);
-        let result = check(self.shared.platform.as_ref(), verified);
-        self.shared.lock().last = Some(result);
-        result?;
-        self.shared.platform.worker_path()
     }
 }
 
@@ -310,6 +297,16 @@ impl Shared {
 
     pub(crate) fn platform(&self) -> &dyn WorkerPlatform {
         self.platform.as_ref()
+    }
+
+    /// The worker's path, after the same check [`WorkerClient::availability`]
+    /// runs, done here and now, and recorded for it.
+    pub(crate) fn checked_path(&self) -> Result<&Path, UnavailableCause> {
+        let verified = self.lock().last.and_then(Result::ok);
+        let result = check(self.platform.as_ref(), verified);
+        self.lock().last = Some(result);
+        result?;
+        self.platform.worker_path()
     }
 
     /// Count a killed worker that would not exit, and keep it to reap later.
