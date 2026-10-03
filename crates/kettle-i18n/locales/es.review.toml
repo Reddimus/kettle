@@ -21,11 +21,13 @@ completion_kind_prediction = "draft"
 completion_matches = "draft"
 confirm_button_cancel = "draft"
 confirm_button_close = "draft"
+confirm_button_open = "draft"
 confirm_button_paste = "draft"
 confirm_button_reassign = "draft"
 confirm_close_pane = "draft"
 confirm_close_tab = "draft"
 confirm_close_window = "draft"
+confirm_open_local_file = "draft"
 confirm_paste = "draft"
 confirm_rebind = "draft"
 dock_new_tab = "draft"
@@ -109,6 +111,7 @@ notify_body_recording_flush_failed = "draft"
 notify_body_recording_overloaded = "draft"
 notify_body_recording_start_failed = "draft"
 notify_body_recording_write_failed = "draft"
+notify_body_remote_file_not_opened = "draft"
 notify_body_remote_not_delivered = "draft"
 notify_body_screenshot_wait = "draft"
 notify_body_session_log_io = "draft"
@@ -135,6 +138,7 @@ notify_title_lua_not_queued = "draft"
 notify_title_program_not_opened = "draft"
 notify_title_recording_error = "draft"
 notify_title_recording_stopped = "draft"
+notify_title_remote_file_not_opened = "draft"
 notify_title_remote_not_delivered = "draft"
 notify_title_screenshot_busy = "draft"
 notify_title_screenshot_queued = "draft"
@@ -458,11 +462,13 @@ keys = [
     "completion_a11y_list",
     "confirm_button_cancel",
     "confirm_button_close",
+    "confirm_button_open",
     "confirm_button_paste",
     "confirm_button_reassign",
     "confirm_close_pane",
     "confirm_close_tab",
     "confirm_close_window",
+    "confirm_open_local_file",
     "confirm_paste",
     "confirm_rebind",
     "hint_a11y_list",

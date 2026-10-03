@@ -43,7 +43,12 @@ Reports that fit any of these are welcome:
   resolves symlinks first and opens the resolved path, never the link's text,
   through the custom URL handler or the system opener, off the UI thread. A
   local process that rewrites the file between the check and the open is not
-  stopped; it can already run code itself.
+  stopped; it can already run code itself. A file link printed in a pane
+  connected to another machine names a file there, so Kettle refuses to open
+  the local file of that name, and behind a terminal multiplexer it asks
+  first (`link_gate`, `pane_path_origin`). What runs in the pane when the
+  link is opened decides, so output printed while a session was remote can
+  still open locally after the pane returns to a local shell.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that

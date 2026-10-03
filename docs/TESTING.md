@@ -1405,8 +1405,7 @@ Each span says whether it meets a boundary on both sides. `out/report#1.pdf`,
 or `*` before a path must close right after it. In kettle-ui, a plain label opens a URL and copies
 anything else, and Shift (the modifier, not Caps Lock) copies a URL and opens
 a path, only when the span is bounded and its own pane, looked up by id, is
-local: no detected remote session, container client, or tmux, screen, zellij,
-ssh or mosh in front. A path hint resolves against that pane's directory or
+not remote (behind a multiplexer it asks, as below). A path hint resolves against that pane's directory or
 home into a percent-encoded `file://` URL that passes the same open check as
 a clicked link, without touching the filesystem: a source guard keeps stats
 and `canonicalize` out, so a printed `/net/host/…` path cannot mount a share
@@ -1415,6 +1414,56 @@ from the UI thread. A climb with `..`, a base that is unknown or not local
 Windows no path hint opens. Red checks: the old pattern detects
 `/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
 a comma treated as a boundary in every position lets `out/report,1.pdf` open.
+Links from terminal output open through `open_pane_link`, which gates a
+`file://` link by its pane (`link_gate`, `pane_path_origin`): from a local pane
+it opens, behind tmux, screen or zellij it asks with a confirmation naming the
+file and the multiplexer, and from a remote pane, or one that has gone, it is
+refused with a notification, since the path names a file on that machine. Web
+and mail links are never gated. A pane is remote with a detected remote
+session, a remote or container client as the command it was launched with, or
+one in the foreground program, also through a shell's `-c` script (only the
+foreground's: a launch script that ran ssh and then `exec bash`, wrapped or
+not, leaves the pane local once bash runs), every command in it and its
+command substitutions (quoted parentheses inside them do not count), past
+leading or glued redirections (`2>/dev/null tmux`, `>log 2>&1 ssh`,
+`tmux</dev/tty`), quotes and backslash-newlines removed (`sh
+-c 'cd ~ && "tmux" attach'`, `echo hi | ssh host`), or a wrapper with its own
+value-taking options (`env TERM=xterm ssh host`, `sudo -n tmux`, `time -p ssh
+host`, `sshpass -p … ssh`, `sudo --user alice tmux`, and a client one word
+after an option the table does not know, but not a wrapper's plain arguments
+such as `env less /tmp/ssh`), past shell keywords (`if … then tmux`, `while
+…; do ssh`, `! {`, fish's `not`, `and`, `or`, `begin`) and precommand words with their options (`command -p
+tmux`, `exec -a work tmux`, `noglob ssh`; `command -v ssh` runs nothing); a
+command the parser cannot name
+(`$EDITOR`, `` `cmd` ``, `eval`), a script past 4 KiB or 16 commands and
+nesting past four levels fail closed as remote, and a remote client wins over
+a multiplexer. A Lua URL handler's rewritten
+target meets the same gate, as does a rewrite of a link the user confirmed
+behind a multiplexer: only the confirmed link opens unasked. The name a prompt or notification shows has
+bidirectional and format characters replaced and a long name shortened around
+an ellipsis, by display width. The confirmation ("Open report.pdf? tmux may
+be remote.") sizes the name to the window's bar (`confirm_name_columns`, from
+the renderer's `confirm_prompt_columns`), so the warning stays whole; a test
+checks it in an 80-column window in English and Spanish with `zellij` and a
+long name, a narrower window shrinks the name below twelve columns (to five at
+least) while the rest fits, and the dialog asks for a frame when a click
+installs it. Source guards keep every
+`open_url` call inside `open_pane_link`, its confirmation and the release
+page, route Cmd-click, the right-click "Open link" (which captures the link's
+pane with its address), quick-select hints and "open cwd in file manager"
+through it, and confirm through the shared confirmation transition. Red
+checks: opening from a remote or gone pane, a hint ignoring the origin,
+Cmd-click bypassing the gate, dropping the shell unwrap, a multiplexer
+outranking a remote client, the menu dropping the pane, and a confirmation
+that opens nothing each fail a test. `just remote-links-smoke` checks it live,
+with a missing file so nothing opens: in a bare `/bin/sh` a Shift-picked path
+hint opens without asking, and under a private tmux server (an explicit `-S`
+socket in a temporary directory, killed and removed afterwards) it asks and Esc
+cancels. The smoke picks only
+once the path is the one target on screen, so it never copies to the
+clipboard. Red check: with the multiplexer gate opening directly, the smoke
+fails ("behind tmux, a Shift-picked path opened without asking").
+
 A local link that names a program or shortcut is refused (kettle-core
 `names_program_or_shortcut`, kettle-ui `check_file_link`): Windows, macOS and
 Linux program, script and shortcut extensions, read as Windows reads a name

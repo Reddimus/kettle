@@ -5088,47 +5088,556 @@ fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: boo
     }
 }
 
-/// Whether a pane's paths may name files on another machine: it runs a
-/// detected remote session, was launched as a container client, or its
-/// foreground program is a multiplexer or remote client whose sessions Kettle
-/// cannot see. tmux and screen attach to servers outside the pane, so an ssh
-/// inside them leaves no trace in the pane's process tree.
-fn pane_paths_may_be_remote(pane: &crate::mux::Pane) -> bool {
-    pane.remote_context.is_some()
-        || argv_is_nonlocal_client(&pane.argv)
-        || argv_names_remote_or_multiplexer(&pane.argv)
-        || pane
-            .foreground_process
-            .as_ref()
-            .is_some_and(|process| argv_names_remote_or_multiplexer(&process.argv))
+/// Where a link handed to `App::open_url` came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkSource {
+    /// Kettle's own link (the release page).
+    Kettle,
+    /// A pane's output, with that pane's origin (`None`: it has gone).
+    Pane(Option<PathOrigin>),
 }
 
-/// Whether `argv` runs a terminal multiplexer, a remote shell client or a
-/// container client.
-fn argv_names_remote_or_multiplexer(argv: &[String]) -> bool {
-    let Some(argv0) = argv.first() else {
-        return false;
-    };
+/// What opening a link from a pane's output does (see `App::open_pane_link`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkGate {
+    Open,
+    /// A local file link from a remote pane, or one that has gone.
+    Refuse,
+    /// A local file link from behind this multiplexer: ask first.
+    Confirm(&'static str),
+}
+
+/// Whether a link from a pane with `origin` (`None`: the pane has gone) may
+/// open. Only a `file://` link names a local file; web and mail links open
+/// wherever they were printed.
+fn link_gate(uri: &str, origin: Option<PathOrigin>) -> LinkGate {
+    let file_link = uri
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file://"));
+    match (file_link, origin) {
+        (false, _) | (true, Some(PathOrigin::Local)) => LinkGate::Open,
+        (true, Some(PathOrigin::Multiplexer(program))) => LinkGate::Confirm(program),
+        (true, Some(PathOrigin::Remote) | None) => LinkGate::Refuse,
+    }
+}
+
+/// The name a prompt or notification shows for a file link: its file name,
+/// or the link itself when it names none. The text is untrusted, so
+/// characters that reorder or hide text (bidirectional controls, zero-width
+/// and other format characters) show as `\u{FFFD}`, and a name wider than
+/// `max_cols` columns keeps its start and end around an ellipsis, so the
+/// warning beside it stays readable.
+fn link_display_name(uri: &str, max_cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar as _;
+    let name = kettle_core::links::local_file_path(uri)
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| uri.to_string());
+    let shown = name
+        .chars()
+        .map(|c| {
+            let format = matches!(
+                c,
+                '\u{00AD}'
+                    | '\u{061C}'
+                    | '\u{180E}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{2028}'..='\u{202E}'
+                    | '\u{2060}'..='\u{206F}'
+                    | '\u{FEFF}'
+                    | '\u{FFF9}'..='\u{FFFB}'
+            );
+            if c.is_control() || format {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect::<Vec<_>>();
+    let width = |chars: &[char]| chars.iter().map(|c| c.width().unwrap_or(0)).sum::<usize>();
+    if width(&shown) <= max_cols {
+        return shown.into_iter().collect();
+    }
+    // Half the budget, less the ellipsis, from each end.
+    let side = max_cols.saturating_sub(1) / 2;
+    let mut head = 0;
+    let mut used = 0;
+    while let Some(c) = shown.get(head) {
+        let w = c.width().unwrap_or(0);
+        if used + w > side {
+            break;
+        }
+        used += w;
+        head += 1;
+    }
+    let mut tail = shown.len();
+    used = 0;
+    while tail > head {
+        let w = shown[tail - 1].width().unwrap_or(0);
+        if used + w > side {
+            break;
+        }
+        used += w;
+        tail -= 1;
+    }
+    shown[..head]
+        .iter()
+        .chain(['…'].iter())
+        .chain(&shown[tail..])
+        .collect()
+}
+
+/// How many columns the file name may take in the multiplexer confirmation
+/// so that the whole prompt fits beside its buttons in a bar of `max_cols`
+/// (see `kettle_render::confirm_bar_columns`); at least 5. The name is sized
+/// when the dialog opens.
+fn confirm_name_columns(
+    max_cols: usize,
+    buttons: &[ConfirmButton],
+    program: &str,
+    tr: &kettle_i18n::Translator,
+) -> usize {
+    let buttons_cols = buttons
+        .iter()
+        .map(|button| confirm_dialog_button_cells(button, tr))
+        .sum::<usize>()
+        + 2 * buttons.len().saturating_sub(1);
+    let prompt_cols = kettle_render::confirm_prompt_columns(max_cols, buttons_cols);
+    prompt_cols
+        .saturating_sub(tr.confirm_open_local_file("", program).width())
+        .max(5)
+}
+
+/// The pane `ws.links` were scanned from: the focused pane at the last scan.
+fn links_pane(ws: &WindowState) -> Option<u64> {
+    ws.links_scan_key.as_ref().and_then(|key| key.0.1)
+}
+
+/// Where the files a pane's output names live, as far as Kettle can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathOrigin {
+    /// This computer.
+    Local,
+    /// Behind a terminal multiplexer, which attaches to a server outside the
+    /// pane: often on this computer, but an ssh inside it leaves no trace in
+    /// the pane's process tree. Holds the multiplexer's name.
+    Multiplexer(&'static str),
+    /// Another machine or a container: a detected remote session, or a
+    /// remote shell or container client in the pane.
+    Remote,
+}
+
+/// Where a pane's printed paths live: remote when it runs a detected remote
+/// session or a remote or container client, behind a multiplexer when tmux,
+/// screen or zellij runs there, and local otherwise.
+///
+/// What runs now decides: the foreground program, shell scripts included
+/// (`sh -c 'tmux attach'`). The command the pane was launched with counts
+/// only when it is itself a client (`ssh host`, `env TERM=x ssh host`): a
+/// launch script that ran ssh and then `exec bash` must not mark the pane
+/// remote for good. Output a pane printed while it was remote stays on
+/// screen after it returns local; links are gated by what runs when they are
+/// opened.
+fn pane_path_origin(pane: &crate::mux::Pane) -> PathOrigin {
+    path_origin(
+        pane.remote_context.is_some() || argv_is_nonlocal_client(&pane.argv),
+        &pane.argv,
+        pane.foreground_process
+            .as_ref()
+            .map(|process| process.argv.as_slice()),
+    )
+}
+
+/// [`pane_path_origin`] from its parts: whether a remote session is known,
+/// the launch command and the foreground program's command line.
+fn path_origin(remote: bool, launch: &[String], foreground: Option<&[String]>) -> PathOrigin {
+    let launch_client = argv_client_with(launch, 0, false);
+    let foreground_client = foreground.and_then(|argv| argv_client(argv, 0));
+    match (
+        remote,
+        strongest([launch_client, foreground_client].into_iter()),
+    ) {
+        (true, _) | (false, Some(Client::Remote)) => PathOrigin::Remote,
+        (false, Some(Client::Multiplexer(name))) => PathOrigin::Multiplexer(name),
+        (false, None) => PathOrigin::Local,
+    }
+}
+
+/// What kind of client a command line runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Client {
+    Multiplexer(&'static str),
+    Remote,
+}
+
+/// The multiplexer or remote client `argv` runs, looking through a shell's
+/// `-c` script, every command in it (`sh -c 'cd ~ && "tmux" attach'`), and
+/// through wrappers that run another command (`env TERM=xterm ssh host`,
+/// `sudo -u me tmux`, `nice -n 5 mosh host`). A remote client outranks a
+/// multiplexer. Nesting deeper than four levels counts as remote: it fails
+/// closed rather than reading as local.
+fn argv_client(argv: &[String], depth: usize) -> Option<Client> {
+    argv_client_with(argv, depth, true)
+}
+
+/// [`argv_client`], reading shell `-c` scripts only when `scripts` is set: a
+/// pane's launch command counts only when it is itself a client, wrapped or
+/// not, since a launch script may long since have moved on.
+fn argv_client_with(argv: &[String], depth: usize, scripts: bool) -> Option<Client> {
+    if depth > 4 {
+        return Some(Client::Remote);
+    }
+    let argv0 = argv.first()?;
     let name = argv0
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0)
         .to_ascii_lowercase();
     let name = name.strip_suffix(".exe").unwrap_or(&name);
-    matches!(
-        name,
-        "tmux"
-            | "screen"
-            | "zellij"
-            | "ssh"
-            | "mosh"
-            | "mosh-client"
-            | "et"
-            | "docker"
-            | "podman"
-            | "kubectl"
-            | "lxc-attach"
-    )
+    let rest = &argv[1..];
+    match name {
+        "tmux" => Some(Client::Multiplexer("tmux")),
+        "screen" => Some(Client::Multiplexer("screen")),
+        "zellij" => Some(Client::Multiplexer("zellij")),
+        "ssh" | "autossh" | "mosh" | "mosh-client" | "et" | "telnet" | "docker" | "podman"
+        | "kubectl" | "lxc-attach" => Some(Client::Remote),
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "fish" if !scripts => None,
+        "sh" | "bash" | "zsh" | "dash" | "ksh" | "mksh" | "fish" => {
+            // The argument after a flag cluster holding `c` (`-c`, `-lc`).
+            let flag = rest.iter().position(|arg| {
+                arg.len() > 1
+                    && arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && arg[1..].contains('c')
+            })?;
+            // A script past the parser's bounds fails closed.
+            let Some(commands) = shell_commands(rest.get(flag + 1)?) else {
+                return Some(Client::Remote);
+            };
+            strongest(commands.iter().map(|words| {
+                let words = command_words(words);
+                // A command the parser cannot name (`$cmd`, `` `cmd` ``,
+                // `eval …`) fails closed.
+                match words.first() {
+                    Some(first) if first == "eval" || first.contains(['$', '`']) => {
+                        Some(Client::Remote)
+                    }
+                    _ => argv_client(words, depth + 1),
+                }
+            }))
+        }
+        "env" | "nohup" | "nice" | "caffeinate" | "sudo" | "doas" | "time" | "sshpass" => {
+            // Options that take a separate value, per wrapper.
+            let takes_value: &[&str] = match name {
+                "env" => &["-u", "-C", "--unset", "--chdir"],
+                "nice" => &["-n", "--adjustment"],
+                "caffeinate" => &["-t", "-w"],
+                "sudo" => &[
+                    "-u",
+                    "-g",
+                    "-h",
+                    "-p",
+                    "-C",
+                    "-D",
+                    "-r",
+                    "-t",
+                    "-U",
+                    "-T",
+                    "--user",
+                    "--group",
+                    "--host",
+                    "--prompt",
+                    "--close-from",
+                    "--chdir",
+                    "--role",
+                    "--type",
+                    "--other-user",
+                    "--command-timeout",
+                ],
+                "doas" => &["-u", "-C", "-a"],
+                "time" => &["-o", "-f", "--output", "--format"],
+                "sshpass" => &["-p", "-f", "-d", "-P"],
+                _ => &[],
+            };
+            let mut index = 0;
+            while let Some(arg) = rest.get(index) {
+                if arg == "--" {
+                    index += 1;
+                    break;
+                } else if arg.starts_with('-') {
+                    index += if takes_value.contains(&arg.as_str()) {
+                        2
+                    } else {
+                        1
+                    };
+                } else if name == "env" && arg.contains('=') {
+                    index += 1;
+                } else {
+                    break;
+                }
+            }
+            // An option this table does not know (`--preserve-env X`) may
+            // have taken the next word as its value: then the command starts
+            // one word later.
+            let uncertain = index
+                .checked_sub(1)
+                .and_then(|before| rest.get(before))
+                .is_some_and(|option| {
+                    option.starts_with('-')
+                        && option != "--"
+                        && !option.contains('=')
+                        && !takes_value.contains(&option.as_str())
+                });
+            argv_client_with(rest.get(index..)?, depth + 1, scripts).or_else(|| {
+                uncertain
+                    .then(|| argv_client_with(rest.get(index + 1..)?, depth + 1, scripts))
+                    .flatten()
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The strongest client among `clients`: remote over multiplexer.
+fn strongest(clients: impl Iterator<Item = Option<Client>>) -> Option<Client> {
+    clients
+        .flatten()
+        .max_by_key(|client| matches!(client, Client::Remote))
+}
+
+/// A command's words past leading redirections and assignments, the shell
+/// keywords before a
+/// command (`if`, `then`, `do`, `!`, `{`…), and the precommand words the shell
+/// runs it through (`exec`, `command`, `builtin`, `nohup`, `noglob`,
+/// `nocorrect`) with their options (`command -p`, `exec -a NAME`).
+fn command_words(words: &[String]) -> &[String] {
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        // A redirection (`2>/dev/null`, `>out`, `&>log`), and its target when
+        // it stands apart (`2> /dev/null`).
+        let redirection = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+        if redirection.starts_with(['<', '>']) {
+            let operator_only = redirection
+                .trim_start_matches(['<', '>', '&', '|'])
+                .is_empty();
+            index += if operator_only { 2 } else { 1 };
+        } else if word.contains('=') && !word.starts_with('=') && !word.starts_with('-') {
+            index += 1;
+        } else if matches!(
+            word.as_str(),
+            "if" | "then"
+                | "else"
+                | "elif"
+                | "do"
+                | "while"
+                | "until"
+                | "!"
+                | "{"
+                | "not"
+                | "and"
+                | "or"
+                | "begin"
+        ) {
+            // Shell keywords that come before a command, fish's included.
+            index += 1;
+        } else if matches!(
+            word.as_str(),
+            "exec" | "command" | "builtin" | "nohup" | "noglob" | "nocorrect"
+        ) {
+            let precommand = word.as_str();
+            index += 1;
+            while let Some(option) = words.get(index).filter(|option| option.starts_with('-')) {
+                // `command -v ssh` names a program without running it.
+                if precommand == "command" && option.contains(['v', 'V']) {
+                    return &[];
+                }
+                index += if precommand == "exec" && option == "-a" {
+                    2
+                } else {
+                    1
+                };
+                if option == "--" {
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    words.get(index..).unwrap_or_default()
+}
+
+/// The simple commands in a shell script, as words with their quotes
+/// removed: `;`, `&`, `|`, newlines and parentheses separate commands, and
+/// single quotes, double quotes and backslashes quote. Command substitutions
+/// (`$(…)`, `` `…` ``) are commands too, nested at most four deep; in command
+/// position one reads as `$SUBST`, which a caller cannot name. `None` for a
+/// script past the bounds (4 KiB, 16 commands, the nesting) or with a
+/// substitution left open, which a caller must not read as holding no
+/// client.
+fn shell_commands(script: &str) -> Option<Vec<Vec<String>>> {
+    shell_commands_at(script, 0)
+}
+
+fn shell_commands_at(script: &str, depth: usize) -> Option<Vec<Vec<String>>> {
+    if script.len() > 4096 || depth > 4 {
+        return None;
+    }
+    let (outer, substitutions) = split_substitutions(script)?;
+    let mut commands = split_commands(&outer)?;
+    for substitution in substitutions {
+        commands.extend(shell_commands_at(&substitution, depth + 1)?);
+        if commands.len() > 16 {
+            return None;
+        }
+    }
+    Some(commands)
+}
+
+/// `script` with each command substitution outside single quotes replaced by
+/// `$SUBST`, and the substitutions' own text. `None` for one left open.
+fn split_substitutions(script: &str) -> Option<(String, Vec<String>)> {
+    let mut outer = String::with_capacity(script.len());
+    let mut substitutions = Vec::new();
+    let mut chars = script.chars().peekable();
+    let (mut single, mut double) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if !single => {
+                outer.push(c);
+                outer.extend(chars.next());
+            }
+            '\'' if !double => {
+                single = !single;
+                outer.push(c);
+            }
+            '"' if !single => {
+                double = !double;
+                outer.push(c);
+            }
+            '$' if !single && chars.peek() == Some(&'(') => {
+                chars.next();
+                let mut depth = 1usize;
+                let mut body = String::new();
+                // Parentheses inside quotes do not count (`$(printf ')')`).
+                let (mut inner_single, mut inner_double) = (false, false);
+                loop {
+                    let c = chars.next()?;
+                    match c {
+                        '\\' if !inner_single => {
+                            body.push(c);
+                            body.extend(chars.next());
+                            continue;
+                        }
+                        '\'' if !inner_double => inner_single = !inner_single,
+                        '"' if !inner_single => inner_double = !inner_double,
+                        '(' if !inner_single && !inner_double => depth += 1,
+                        ')' if !inner_single && !inner_double => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    body.push(c);
+                }
+                substitutions.push(body);
+                outer.push_str("$SUBST");
+            }
+            '`' if !single => {
+                let mut body = String::new();
+                loop {
+                    match chars.next()? {
+                        '`' => break,
+                        '\\' => body.extend(chars.next()),
+                        c => body.push(c),
+                    }
+                }
+                substitutions.push(body);
+                outer.push_str("$SUBST");
+            }
+            c => outer.push(c),
+        }
+    }
+    Some((outer, substitutions))
+}
+
+/// The simple commands in a script with no substitutions left (see
+/// [`shell_commands`]).
+fn split_commands(script: &str) -> Option<Vec<Vec<String>>> {
+    let mut commands = vec![Vec::new()];
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = script.chars();
+    let end_word = |word: &mut String, in_word: &mut bool, commands: &mut Vec<Vec<String>>| {
+        if *in_word {
+            commands
+                .last_mut()
+                .expect("a command")
+                .push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                word.extend(chars.by_ref().take_while(|&c| c != '\''));
+            }
+            '"' => {
+                in_word = true;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        // A backslash-newline continues the line.
+                        '\\' => match chars.next() {
+                            Some('\n') | None => {}
+                            Some(c) => word.push(c),
+                        },
+                        c => word.push(c),
+                    }
+                }
+            }
+            '\\' => match chars.next() {
+                // A backslash-newline continues the word.
+                Some('\n') | None => {}
+                Some(c) => {
+                    in_word = true;
+                    word.push(c);
+                }
+            },
+            // A redirection starts a word of its own (`tmux</dev/tty`),
+            // keeping a file descriptor before it (`2>`).
+            '<' | '>' if in_word && !word.chars().all(|c| c.is_ascii_digit() || c == '&') => {
+                end_word(&mut word, &mut in_word, &mut commands);
+                in_word = true;
+                word.push(c);
+            }
+            // `2>&1` and `&>file` are redirections, not command separators.
+            '&' if word.ends_with(['>', '<']) || chars.clone().next() == Some('>') => {
+                in_word = true;
+                word.push(c);
+            }
+            ';' | '&' | '|' | '\n' | '(' | ')' => {
+                end_word(&mut word, &mut in_word, &mut commands);
+                if commands.last().is_some_and(|command| !command.is_empty()) {
+                    if commands.len() == 16 {
+                        return None;
+                    }
+                    commands.push(Vec::new());
+                }
+            }
+            c if c.is_whitespace() => end_word(&mut word, &mut in_word, &mut commands),
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    end_word(&mut word, &mut in_word, &mut commands);
+    commands.retain(|command| !command.is_empty());
+    Some(commands)
 }
 
 /// The local `file://` URL a path hint names: `~/` resolved from `home`, a
@@ -5210,6 +5719,9 @@ enum ContextMenuClick {
     Url {
         url: String,
         copy: bool,
+        /// The pane whose output held the link; `None` for Kettle's own
+        /// links (About).
+        pane: Option<u64>,
     },
 }
 
@@ -5290,6 +5802,8 @@ enum ContextMenuItem {
         label: &'static str,
         url: String,
         copy: bool,
+        /// The pane whose output held the link, captured with it.
+        pane: Option<u64>,
     },
     /// A static, non-dispatchable information line
     /// (the About panel's version/update rows). Rendered like a disabled row
@@ -5580,6 +6094,14 @@ pub enum ConfirmAction {
         trig: Trigger,
         act: Action,
         action_name: &'static str,
+    },
+    /// Open a local file link from a pane behind a terminal multiplexer, once
+    /// the user confirms the file is on this computer (see
+    /// `App::open_pane_link`). `program` is the multiplexer it was asked
+    /// about, which still gates a Lua handler's rewrite of the link.
+    OpenLocalFile {
+        uri: Box<str>,
+        program: &'static str,
     },
 }
 
@@ -6643,9 +7165,12 @@ fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<ContextMenuClick>
         ContextMenuItem::NewTabShell { argv, .. } => {
             Some(ContextMenuClick::NewTabWithArgv(argv.clone()))
         }
-        ContextMenuItem::UrlItem { url, copy, .. } => Some(ContextMenuClick::Url {
+        ContextMenuItem::UrlItem {
+            url, copy, pane, ..
+        } => Some(ContextMenuClick::Url {
             url: url.clone(),
             copy: *copy,
+            pane: *pane,
         }),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
@@ -10578,6 +11103,62 @@ impl App {
         n
     }
 
+    /// Open a link taken from pane `pane`'s output. A local file link from a
+    /// pane whose files may live elsewhere does not simply open: from a remote
+    /// pane it is refused with a notification, since the path names a file on
+    /// that machine, and behind a multiplexer Kettle asks first. A pane that
+    /// has gone counts as remote. Other links open through [`Self::open_url`].
+    fn open_pane_link(&mut self, ws: &mut WindowState, pane: Option<u64>, uri: &str) {
+        let origin = pane
+            .and_then(|id| ws.mux.panes.get(&id))
+            .map(pane_path_origin);
+        let tr = self.ui_text;
+        match link_gate(uri, origin) {
+            LinkGate::Open => self.open_url(ws, uri, LinkSource::Pane(origin)),
+            LinkGate::Refuse => fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleRemoteFileNotOpened),
+                &tr.notify_body_remote_file_not_opened(&link_display_name(uri, 48)),
+            ),
+            LinkGate::Confirm(program) => {
+                let buttons = vec![
+                    ConfirmButton::Cancel,
+                    ConfirmButton::Confirm {
+                        label: tr.text(kettle_i18n::Text::ConfirmButtonOpen).to_string(),
+                        destructive: false,
+                    },
+                ];
+                // Size the name to this window, so the prompt, warning
+                // included, fits on the bar.
+                let max_cols = ws.window.as_ref().map_or(79, |window| {
+                    let (cell_w, _) = self.cell_px(ws);
+                    kettle_render::confirm_bar_columns(
+                        window.inner_size().width as f32,
+                        cell_w as f32,
+                    )
+                });
+                let name_cols = confirm_name_columns(max_cols, &buttons, program, &tr);
+                self.install_confirm_dialog(
+                    ws,
+                    ConfirmDialogState {
+                        prompt: tr
+                            .confirm_open_local_file(&link_display_name(uri, name_cols), program),
+                        buttons,
+                        focus_idx: 0,
+                        on_confirm: ConfirmAction::OpenLocalFile {
+                            uri: uri.into(),
+                            program,
+                        },
+                    },
+                );
+                // A click can install this with no other event to come, so ask
+                // for the frame that shows it.
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
     /// Open a URL. Unsafe URLs are refused, and Lua URL handlers may claim or
     /// rewrite it first. Then, for Terminator parity
     /// (terminatorlib/config.py:86-87 `use_custom_url_handler` +
@@ -10587,7 +11168,7 @@ impl App {
     ///   <custom_url_handler> <uri>
     /// detached, so kettle doesn't block on the handler exiting.
     /// Errors log::warn.
-    fn open_url(&mut self, ws: &WindowState, uri: &str) {
+    fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {
         if !kettle_core::links::is_safe_url(uri) {
             warn_refused_terminal_url(uri, |message| log::warn!("{message}"));
             return;
@@ -10626,6 +11207,19 @@ impl App {
                 // way to turn that text into a URL kettle would have refused.
                 if !kettle_core::links::is_safe_url(target) {
                     log::warn!("lua url_handler returned an unsafe URL; refusing to open it");
+                    return;
+                }
+                // A handler may turn a web link from a remote pane into a local
+                // file link, or a confirmed file into another, so the pane's
+                // gate applies to any different link it returns.
+                if let LinkSource::Pane(origin) = source
+                    && target != uri
+                    && link_gate(target, origin) != LinkGate::Open
+                {
+                    log::warn!(
+                        "lua url_handler returned a local file link for a pane whose files \
+                         may be elsewhere; refusing to open it"
+                    );
                     return;
                 }
                 rewritten = target.clone();
@@ -15505,15 +16099,18 @@ impl App {
             .is_some_and(|(rx, ry, rw, rh)| px >= rx && px < rx + rw && py >= ry && py < ry + rh);
         let mut items = Vec::new();
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
+            let pane = links_pane(ws);
             items.push(ContextMenuItem::UrlItem {
                 label: tr.text(T::MenuOpenLink),
                 url: url.clone(),
                 copy: false,
+                pane,
             });
             items.push(ContextMenuItem::UrlItem {
                 label: tr.text(T::MenuCopyLink),
                 url,
                 copy: true,
+                pane,
             });
             items.push(ContextMenuItem::Separator);
         }
@@ -15972,11 +16569,13 @@ impl App {
                 label: tr.text(T::AboutCopyVersion),
                 url: format!("kettle {v}"),
                 copy: true,
+                pane: None,
             },
             ContextMenuItem::UrlItem {
                 label: tr.text(T::AboutOpenGithub),
                 url: "https://github.com/Reddimus/kettle".to_string(),
                 copy: false,
+                pane: None,
             },
         ];
         if let Some((_, url)) = &self.update_available {
@@ -15984,6 +16583,7 @@ impl App {
                 label: tr.text(T::AboutOpenRelease),
                 url: url.clone(),
                 copy: false,
+                pane: None,
             });
         }
         let (sw, sh) = ws
@@ -16244,7 +16844,7 @@ impl App {
             // Open routes through the `open_url` chain (Lua URL
             // handlers → custom_url_handler → system open, with the
             // `is_safe_url` guard); Copy puts the address on the clipboard.
-            ContextMenuClick::Url { url, copy } => {
+            ContextMenuClick::Url { url, copy, pane } => {
                 ws.context_menu = None;
                 if copy {
                     if let Some(cb) = &mut self.clipboard
@@ -16253,7 +16853,7 @@ impl App {
                         log::warn!("clipboard set_text failed (link address copy): {e}");
                     }
                 } else {
-                    self.open_url(ws, &url);
+                    self.open_pane_link(ws, pane, &url);
                 }
             }
         }
@@ -16808,7 +17408,7 @@ impl App {
             return false;
         };
         if open {
-            self.open_url(ws, &url);
+            self.open_url(ws, &url, LinkSource::Kettle);
         }
         crate::update_check::record_dismissed(&tag);
         self.update_available = None;
@@ -18128,9 +18728,11 @@ impl App {
                 {
                     // Refuse a non-local OSC 7 cwd before
                     // building/opening the URL (it's untrusted PTY input — a
-                    // UNC path would trigger an SMB/NTLM leak on Windows).
+                    // UNC path would trigger an SMB/NTLM leak on Windows). A
+                    // remote pane's directory is on another machine.
                     Some(cwd) if cwd_is_local(&cwd) => {
-                        self.open_url(ws, &format!("file://{cwd}"));
+                        let pane = ws.mux.active_focus();
+                        self.open_pane_link(ws, pane, &format!("file://{cwd}"));
                     }
                     Some(_) => {
                         log::warn!(
@@ -18904,6 +19506,13 @@ impl App {
             ConfirmAction::PasteText { text, target } => {
                 self.paste_text_confirmed(ws, target, &text);
             }
+            // The user confirmed this link; the pane's gate still applies to
+            // anything a Lua handler turns it into.
+            ConfirmAction::OpenLocalFile { uri, program } => self.open_url(
+                ws,
+                &uri,
+                LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),
+            ),
             ConfirmAction::PastePaths {
                 paths,
                 video,
@@ -20735,6 +21344,7 @@ impl App {
             };
             match modal {
                 TextModal::Confirm => self.confirm_dialog_key(ws, key, event_loop),
+                TextModal::Hint => self.hint_key(ws, key, text),
                 TextModal::Palette => self.palette_key(ws, key, text, event_loop),
                 TextModal::ThemePicker => self.theme_picker_key(ws, key, text),
                 TextModal::SettingsText => self.settings_text_key(ws, key, text),
@@ -22597,6 +23207,7 @@ impl App {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TextModal {
     Confirm,
+    Hint,
     Palette,
     ThemePicker,
     SettingsText,
@@ -22660,6 +23271,7 @@ impl TextModal {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Confirm => "confirm",
+            Self::Hint => "hint_mode",
             Self::Palette => "palette",
             Self::ThemePicker => "theme_picker",
             Self::SettingsText => "settings_text",
@@ -22680,6 +23292,8 @@ impl TextModal {
 fn open_text_modal(ws: &WindowState) -> Option<TextModal> {
     if ws.confirm_dialog.is_some() {
         Some(TextModal::Confirm)
+    } else if ws.hint_state.is_some() {
+        Some(TextModal::Hint)
     } else if ws.palette_input.is_some() {
         Some(TextModal::Palette)
     } else if ws.theme_picker_input.is_some() {
@@ -23733,9 +24347,11 @@ impl App {
     fn act_hint(&mut self, ws: &mut WindowState, h: &HintTarget, alternate: bool) {
         let pane = ws.mux.panes.get(&h.pane);
         // A pane that exited took its directory with it, so nothing local can
-        // be resolved for it.
-        let local = pane.is_some_and(|pane| !pane_paths_may_be_remote(pane));
-        let action = hint_action(h.kind, alternate, !local || !h.bounded);
+        // be resolved for it, and a remote pane's paths name files elsewhere.
+        // Behind a multiplexer the path opens once the user confirms (see
+        // `open_pane_link`).
+        let remote = matches!(pane.map(pane_path_origin), None | Some(PathOrigin::Remote));
+        let action = hint_action(h.kind, alternate, remote || !h.bounded);
         let path_url = match action {
             HintAction::OpenPath => hint_path_url(
                 &h.text,
@@ -23746,10 +24362,11 @@ impl App {
             _ => None,
         };
         match (action, path_url) {
-            // Route through open_url so a hint honors the URL safety check,
-            // Lua URL handlers and the custom URL handler, like a click.
-            (HintAction::OpenUrl, _) => self.open_url(ws, &h.text),
-            (HintAction::OpenPath, Some(url)) => self.open_url(ws, &url),
+            // Route through open_pane_link so a hint honors the pane's origin,
+            // the URL safety check, Lua URL handlers and the custom URL
+            // handler, like a click.
+            (HintAction::OpenUrl, _) => self.open_pane_link(ws, Some(h.pane), &h.text),
+            (HintAction::OpenPath, Some(url)) => self.open_pane_link(ws, Some(h.pane), &url),
             // A path Kettle will not open (a climb with `..`, an unknown base,
             // any path on Windows) is copied instead, as for a plain label.
             (HintAction::OpenPath, None) | (HintAction::Copy, _) => {
@@ -30554,9 +31171,9 @@ impl App {
                     && url_modifier
                     && let Some(uri) = self.link_at_cursor(ws).map(|l| l.uri.clone())
                 {
-                    // Route through helper so custom URL
-                    // handler config is honored.
-                    self.open_url(ws, &uri);
+                    // Route through helper so the pane's origin and the custom
+                    // URL handler config are honored.
+                    self.open_pane_link(ws, links_pane(ws), &uri);
                     return;
                 }
                 // As in Terminator, a left-click on a pane titlebar focuses the
@@ -34993,7 +35610,7 @@ mod tests {
             "all raw LuaEngine::fire_event calls must stay inside fire_lua_event"
         );
         let open_url = source
-            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
             .nth(1)
             .and_then(|rest| rest.split("fn paste_clipboard").next())
             .expect("open_url helper");
@@ -39256,6 +39873,7 @@ mod tests {
             .expect("open_text_modal present");
         let resolver_order: Vec<&str> = [
             ("ws.confirm_dialog.is_some()", "confirm"),
+            ("ws.hint_state.is_some()", "hint"),
             ("ws.palette_input.is_some()", "palette"),
             ("ws.theme_picker_input.is_some()", "theme_picker"),
             // The compound condition, not just the text-edit half: dropping
@@ -39292,6 +39910,7 @@ mod tests {
             .expect("KeyboardInput arm present");
         let handler_order: Vec<&str> = [
             ("if ws.confirm_dialog.is_some() {", "confirm"),
+            ("if ws.hint_state.is_some() {", "hint"),
             ("if ws.palette_input.is_some() {", "palette"),
             ("if ws.theme_picker_input.is_some() {", "theme_picker"),
             (
@@ -39337,6 +39956,7 @@ mod tests {
             .expect("ctl_dispatch_ui_key present");
         for (variant, handler) in [
             ("TextModal::Confirm", "self.confirm_dialog_key("),
+            ("TextModal::Hint", "self.hint_key("),
             ("TextModal::Palette", "self.palette_key("),
             ("TextModal::ThemePicker", "self.theme_picker_key("),
             ("TextModal::SettingsText", "self.settings_text_key("),
@@ -41990,6 +42610,7 @@ mod tests {
             label,
             url: "https://example.com".into(),
             copy,
+            pane: None,
         };
         let menu = vec![
             url("Open Link", false),
@@ -43086,8 +43707,9 @@ mod tests {
             normalized_src
                 .matches("self.install_confirm_dialog(")
                 .count(),
-            4,
-            "every confirmation path, including protected text and path paste, must use the shared transition"
+            5,
+            "every confirmation path, including protected text and path paste and a local file \
+             link behind a multiplexer, must use the shared transition"
         );
         assert_eq!(
             normalized_src.matches("ws.confirm_dialog = Some(").count(),
@@ -44672,18 +45294,25 @@ mod tests {
                 &ContextMenuItem::UrlItem {
                     label: "Open Link",
                     url: "https://example.com".into(),
-                    copy: false
+                    copy: false,
+                    pane: Some(7),
                 },
                 0
             ),
-            Some(ContextMenuClick::Url { copy: false, .. })
+            // The pane the link came from rides along to the click.
+            Some(ContextMenuClick::Url {
+                copy: false,
+                pane: Some(7),
+                ..
+            })
         ));
         assert!(matches!(
             item_to_click(
                 &ContextMenuItem::UrlItem {
                     label: "Copy Link Address",
                     url: "https://example.com".into(),
-                    copy: true
+                    copy: true,
+                    pane: Some(7),
                 },
                 0
             ),
@@ -46586,7 +47215,7 @@ mod tests {
     fn custom_url_handler_failure_falls_back_to_system_open() {
         let src = production_source();
         let open_url = src
-            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
             .nth(1)
             .and_then(|s| s.split("fn paste_clipboard").next())
             .expect("open_url helper present");
@@ -47697,7 +48326,8 @@ mod ui_text_drift_tests {
 #[cfg(test)]
 mod hint_action_tests {
     use super::{
-        HintAction, argv_names_remote_or_multiplexer, hint_action, hint_path_url, production_source,
+        Client, ConfirmButton, HintAction, LinkGate, PathOrigin, argv_client, confirm_name_columns,
+        hint_action, hint_path_url, link_display_name, link_gate, path_origin, production_source,
     };
     use kettle_core::hints::Kind;
 
@@ -47740,7 +48370,8 @@ mod hint_action_tests {
             .expect("act_hint");
         for needle in [
             "ws.mux.panes.get(&h.pane)",
-            "pane_paths_may_be_remote(pane)",
+            "pane.map(pane_path_origin)",
+            "hint_action(h.kind, alternate, remote || !h.bounded)",
             "!h.bounded",
             // A path it will not open falls back to the copy a plain label does.
             "(HintAction::OpenPath, None) | (HintAction::Copy, _) =>",
@@ -47749,30 +48380,415 @@ mod hint_action_tests {
         }
     }
 
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
     #[test]
     fn multiplexers_and_remote_clients_are_not_local() {
-        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
-        for program in [
-            "tmux",
-            "/usr/bin/screen",
-            "zellij",
-            "ssh",
-            "mosh-client",
-            "docker",
-            "kubectl",
+        for (words, client) in [
+            (&["tmux", "x"][..], Client::Multiplexer("tmux")),
+            (&["/usr/bin/screen", "-r"], Client::Multiplexer("screen")),
+            (&["zellij"], Client::Multiplexer("zellij")),
+            (&["ssh", "host"], Client::Remote),
+            (&["mosh-client", "x"], Client::Remote),
+            (&["docker", "exec", "-it", "c", "sh"], Client::Remote),
+            (&["kubectl", "exec", "p"], Client::Remote),
+            (
+                &["C:\\Windows\\System32\\OpenSSH\\ssh.exe", "h"],
+                Client::Remote,
+            ),
         ] {
+            assert_eq!(argv_client(&argv(words), 0), Some(client), "{words:?}");
+        }
+        for words in [
+            &["zsh"][..],
+            &["bash"],
+            &["vim", "ssh.txt"],
+            &["tmuxinator-notes"],
+            &[],
+        ] {
+            assert_eq!(argv_client(&argv(words), 0), None, "{words:?}");
+        }
+    }
+
+    /// A client run through a shell's `-c` or a wrapper is still found: the
+    /// shell-wrapped tmux B1 left open.
+    #[test]
+    fn wrapped_clients_are_found() {
+        for (words, client) in [
+            (
+                &["sh", "-c", "tmux attach -t work"][..],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["/bin/bash", "-lc", "exec ssh host"], Client::Remote),
+            (
+                &["zsh", "-c", "TERM=xterm-256color ssh host"],
+                Client::Remote,
+            ),
+            (&["env", "TERM=xterm", "ssh", "host"], Client::Remote),
+            (
+                &["env", "-u", "TMUX", "tmux", "new"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sudo", "-u", "me", "tmux"], Client::Multiplexer("tmux")),
+            (&["nice", "-n", "5", "mosh", "host"], Client::Remote),
+            (&["sshpass", "-p", "secret", "ssh", "host"], Client::Remote),
+            (
+                &["caffeinate", "-i", "sh", "-c", "screen -r"],
+                Client::Multiplexer("screen"),
+            ),
+            // Quotes, chained commands and pipelines.
+            (
+                &["sh", "-c", "\"tmux\" attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (
+                &["sh", "-c", "cd ~ && 'tmux' attach"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["bash", "-c", "echo hi | ssh host"], Client::Remote),
+            (&["sh", "-c", "tmux attach || ssh host"], Client::Remote),
+            (&["sh", "-c", "(exec env A=1 ssh host)"], Client::Remote),
+            // Flags that take no value do not swallow the client, and long
+            // or unknown options do not hide it.
+            (&["sudo", "-n", "tmux"], Client::Multiplexer("tmux")),
+            (&["time", "-p", "ssh", "host"], Client::Remote),
+            (&["env", "--", "ssh", "host"], Client::Remote),
+            (
+                &["sudo", "--user", "alice", "tmux"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sudo", "--preserve-env", "X", "ssh", "h"], Client::Remote),
+            (
+                &["sh", "-c", "sudo --user alice tmux attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (
+                &["sh", "-c", "command -p tmux attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (
+                &["sh", "-c", "exec -a work tmux attach"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["zsh", "-c", "noglob ssh host"], Client::Remote),
+            // Shell keywords before a command, and commands the parser
+            // cannot name, which fail closed.
+            (
+                &["sh", "-c", "if true; then tmux attach; fi; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sh", "-c", "while :; do ssh host; done"], Client::Remote),
+            (&["sh", "-c", "! { tmux; }"], Client::Multiplexer("tmux")),
+            (&["sh", "-c", "time -p ssh host"], Client::Remote),
+            (&["sh", "-c", "$EDITOR notes"], Client::Remote),
+            (&["sh", "-c", "eval tmux"], Client::Remote),
+            (&["sh", "-c", "`which tmux`"], Client::Remote),
+            // Command substitutions are commands too.
+            (
+                &[
+                    "bash",
+                    "-c",
+                    "printf '%s\\n' \"$(ssh host cat /tmp/links)\"; exec bash",
+                ],
+                Client::Remote,
+            ),
+            (&["sh", "-c", "echo `tmux ls`"], Client::Multiplexer("tmux")),
+            (&["sh", "-c", "echo $(echo $(ssh h))"], Client::Remote),
+            (&["sh", "-c", "echo $(unclosed"], Client::Remote),
+            (
+                &["sh", "-c", "echo \"$(printf ')'; ssh host)\"; :"],
+                Client::Remote,
+            ),
+            // Redirections before a command.
+            (
+                &["bash", "-c", "2>/dev/null tmux attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sh", "-c", "2> /dev/null ssh h"], Client::Remote),
+            (
+                &["sh", "-c", ">/tmp/log 2>&1 tmux"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sh", "-c", "&>/tmp/log ssh h; :"], Client::Remote),
+            (
+                &["sh", "-c", "tmux attach 2>&1; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (
+                &["sh", "-c", "tmux</dev/tty attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sh", "-c", "ssh>/dev/null host"], Client::Remote),
+            // A backslash-newline continues the word.
+            (
+                &["sh", "-c", "t\\\nmux attach; :"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["sh", "-c", "\"ss\\\nh\" host"], Client::Remote),
+            // Fish's keywords.
+            (
+                &["fish", "-c", "not tmux attach; true"],
+                Client::Multiplexer("tmux"),
+            ),
+            (&["fish", "-c", "true; and ssh host"], Client::Remote),
+            (
+                &["fish", "-c", "begin; tmux; end"],
+                Client::Multiplexer("tmux"),
+            ),
+        ] {
+            assert_eq!(argv_client(&argv(words), 0), Some(client), "{words:?}");
+        }
+        for words in [
+            &["sh", "-c", "echo tmux"][..],
+            &["sh", "-c", "echo \"ssh host\"; vim notes"],
+            // A wrapper's arguments are not commands, nor is a program a
+            // command query names, nor what a single-quoted `$(…)` holds.
+            &["env", "less", "/tmp/ssh"],
+            &["sh", "-c", "command -v ssh; exec sh"],
+            &["sh", "-c", "echo \"$(date)\" '$(ssh h)'"],
+            &["sudo", "-u", "me", "vim", "tmux.conf"],
+            &["bash", "script.sh"],
+            &["sh", "-c"],
+            &["env"],
+            &["env", "FOO=1"],
+        ] {
+            assert_eq!(argv_client(&argv(words), 0), None, "{words:?}");
+        }
+        // A script past the parser's bounds fails closed.
+        let many = format!("{}tmux attach", ": ; ".repeat(16));
+        assert_eq!(
+            argv_client(&argv(&["sh", "-c", &many]), 0),
+            Some(Client::Remote)
+        );
+        let long = format!("{} ; tmux", "x".repeat(5000));
+        assert_eq!(
+            argv_client(&argv(&["sh", "-c", &long]), 0),
+            Some(Client::Remote)
+        );
+        // Nesting is bounded, and too deep fails closed.
+        let mut deep = vec!["vim".to_string()];
+        for _ in 0..6 {
+            deep.insert(0, "nohup".to_string());
+        }
+        assert_eq!(argv_client(&deep, 0), Some(Client::Remote));
+    }
+
+    /// A remote session or client wins over a multiplexer; a multiplexer
+    /// alone asks; nothing of either is local. What runs now decides: a
+    /// launch script counts only while it is the foreground program.
+    #[test]
+    fn a_pane_path_origin_combines_its_command_lines() {
+        let shell = argv(&["zsh"]);
+        let tmux = argv(&["tmux"]);
+        let ssh = argv(&["ssh", "h"]);
+        let script = argv(&["sh", "-c", "ssh host; exec bash"]);
+        let bash = argv(&["bash"]);
+        let origin = |remote: bool, launch: &Vec<String>, foreground: Option<&Vec<String>>| {
+            path_origin(remote, launch, foreground.map(|argv| argv.as_slice()))
+        };
+        assert_eq!(origin(false, &shell, None), PathOrigin::Local);
+        assert_eq!(
+            origin(false, &shell, Some(&tmux)),
+            PathOrigin::Multiplexer("tmux")
+        );
+        assert_eq!(origin(false, &tmux, Some(&ssh)), PathOrigin::Remote);
+        assert_eq!(
+            origin(true, &shell, None),
+            PathOrigin::Remote,
+            "a detected session"
+        );
+        assert_eq!(
+            origin(false, &ssh, None),
+            PathOrigin::Remote,
+            "launched as a client"
+        );
+        assert_eq!(
+            origin(false, &script, Some(&script)),
+            PathOrigin::Remote,
+            "the launch script is running"
+        );
+        assert_eq!(
+            origin(false, &script, Some(&bash)),
+            PathOrigin::Local,
+            "the launch script has moved on"
+        );
+        let wrapped = argv(&["env", "FOO=1", "sh", "-c", "ssh host; exec bash"]);
+        assert_eq!(
+            origin(false, &wrapped, Some(&bash)),
+            PathOrigin::Local,
+            "a wrapped launch script has moved on too"
+        );
+        let wrapped_client = argv(&["env", "TERM=xterm", "ssh", "host"]);
+        assert_eq!(origin(false, &wrapped_client, None), PathOrigin::Remote);
+    }
+
+    /// Only a local file link is gated: from a local pane it opens, behind a
+    /// multiplexer it asks, and from a remote pane or one that has gone it is
+    /// refused. Web and mail links open wherever they were printed.
+    #[test]
+    fn file_links_are_gated_by_their_pane() {
+        let file = "file:///home/me/a.pdf";
+        assert_eq!(link_gate(file, Some(PathOrigin::Local)), LinkGate::Open);
+        assert_eq!(
+            link_gate(file, Some(PathOrigin::Multiplexer("tmux"))),
+            LinkGate::Confirm("tmux")
+        );
+        assert_eq!(link_gate(file, Some(PathOrigin::Remote)), LinkGate::Refuse);
+        assert_eq!(link_gate(file, None), LinkGate::Refuse);
+        assert_eq!(
+            link_gate("FILE://localhost/etc/hosts", Some(PathOrigin::Remote)),
+            LinkGate::Refuse
+        );
+        for web in [
+            "https://x.test/a",
+            "mailto:a@b.test",
+            "http://localhost:3000/",
+        ] {
+            assert_eq!(link_gate(web, Some(PathOrigin::Remote)), LinkGate::Open);
+            assert_eq!(link_gate(web, None), LinkGate::Open);
+        }
+        assert_eq!(
+            link_display_name("file:///home/me/a%20b.pdf", 48),
+            "a b.pdf"
+        );
+        assert_eq!(link_display_name("file:///home/me/proj/", 48), "proj");
+        // Untrusted names cannot reorder the prompt or push its warning away.
+        assert_eq!(
+            link_display_name("file:///home/me/invoice%E2%80%AEfdp.exe", 48),
+            "invoice\u{FFFD}fdp.exe"
+        );
+        assert_eq!(
+            link_display_name("file:///tmp/a%E2%80%8Bb.pdf", 48),
+            "a\u{FFFD}b.pdf"
+        );
+        let width = |text: &str| unicode_width::UnicodeWidthStr::width(text);
+        let long = link_display_name(&format!("file:///tmp/{}-end.pdf", "x".repeat(200)), 25);
+        assert_eq!(width(&long), 25);
+        assert!(long.starts_with("xxxx") && long.ends_with("x-end.pdf") && long.contains('…'));
+        // Wide characters count as two columns.
+        let wide = link_display_name(
+            "file:///tmp/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%81%AE%E5%A0%B1%E5%91%8A%E6%9B%B8%E3%81%A7%E3%81%99.pdf",
+            13,
+        );
+        assert!(width(&wide) <= 13, "{wide}");
+        let undecodable = link_display_name(&format!("file:///{}", "%zz".repeat(40)), 25);
+        assert_eq!(width(&undecodable), 25);
+        // The confirmation, sized to an 80-column window with the longest
+        // multiplexer name, fits beside its rendered buttons in every
+        // language, warning and file name included.
+        let max_cols = 79;
+        for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+            let tr = kettle_i18n::Translator::new(language);
+            let buttons = vec![
+                ConfirmButton::Cancel,
+                ConfirmButton::Confirm {
+                    label: tr.text(kettle_i18n::Text::ConfirmButtonOpen).to_string(),
+                    destructive: false,
+                },
+            ];
+            let name_cols = confirm_name_columns(max_cols, &buttons, "zellij", &tr);
+            let name = link_display_name(
+                &format!("file:///tmp/{}-end.pdf", "x".repeat(200)),
+                name_cols,
+            );
+            let prompt = tr.confirm_open_local_file(&name, "zellij");
+            let buttons_cols = buttons
+                .iter()
+                .map(|button| super::confirm_dialog_button_cells(button, &tr))
+                .sum::<usize>()
+                + 2;
             assert!(
-                argv_names_remote_or_multiplexer(&argv(&[program, "x"])),
-                "{program}"
+                width(&prompt) <= kettle_render::confirm_prompt_columns(max_cols, buttons_cols),
+                "{language:?}: {prompt}"
+            );
+            assert!(name_cols >= 12 && prompt.contains(&name) && prompt.ends_with('.'));
+            // A narrower window shrinks the name below twelve columns, as long
+            // as the rest of the prompt fits.
+            let template = width(&tr.confirm_open_local_file("", "zellij"));
+            let narrow_cols = max_cols
+                - kettle_render::confirm_prompt_columns(max_cols, buttons_cols)
+                + template
+                + 8;
+            assert_eq!(
+                confirm_name_columns(narrow_cols, &buttons, "zellij", &tr),
+                8
             );
         }
-        for program in ["zsh", "bash", "vim", "tmuxinator-notes"] {
+    }
+
+    /// Every link taken from terminal output goes through `open_pane_link`:
+    /// `open_url` is called only from there, from the confirmation it asks
+    /// for, and for Kettle's own release page.
+    #[test]
+    fn terminal_links_open_through_their_pane() {
+        let src = production_source();
+        let callers = src
+            .match_indices("self.open_url(ws, ")
+            .map(|(at, _)| {
+                let before = &src[..at];
+                let function = before.rfind("    fn ").expect("enclosing fn");
+                before[function + 7..]
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        for caller in &callers {
             assert!(
-                !argv_names_remote_or_multiplexer(&argv(&[program])),
-                "{program}"
+                [
+                    "open_pane_link",
+                    "act_on_update_banner",
+                    "dispatch_confirm_action_arms"
+                ]
+                .contains(&caller.as_str()),
+                "open_url called from {caller}"
             );
         }
-        assert!(!argv_names_remote_or_multiplexer(&[]));
+        // A confirmation installed from a click asks for the frame that shows it.
+        let pane_link = src
+            .split("fn open_pane_link(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("open_pane_link");
+        let installed = pane_link
+            .find("self.install_confirm_dialog(")
+            .expect("install");
+        let redraw = pane_link.find("window.request_redraw();").expect("redraw");
+        assert!(installed < redraw);
+        // A Lua handler's rewritten target meets the same pane gate.
+        let open_url = src
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    fn ").next())
+            .expect("open_url");
+        let safe = open_url
+            .find("if !kettle_core::links::is_safe_url(target)")
+            .expect("the rewrite safety check");
+        let gated = open_url
+            .find("&& target != uri\n                    && link_gate(target, origin) != LinkGate::Open")
+            .expect("the rewrite pane gate, for a link other than the one gated");
+        let opened = open_url
+            .find("rewritten = target.clone();")
+            .expect("the rewrite");
+        assert!(safe < gated && gated < opened);
+        // The right-click menu captures the link's pane with its address, and
+        // confirming the multiplexer prompt opens the link it was about.
+        assert!(src.contains("let pane = links_pane(ws);"));
+        assert!(src.contains(
+            "ConfirmAction::OpenLocalFile { uri, program } => self.open_url(\n                ws,\n                &uri,\n                LinkSource::Pane(Some(PathOrigin::Multiplexer(program))),"
+        ));
+        for site in [
+            "self.open_pane_link(ws, links_pane(ws), &uri);",
+            "self.open_pane_link(ws, pane, &url);",
+            "self.open_pane_link(ws, Some(h.pane), &h.text)",
+            "self.open_pane_link(ws, Some(h.pane), &url)",
+            "self.open_pane_link(ws, pane, &format!(\"file://{cwd}\"));",
+        ] {
+            assert!(src.contains(site), "missing {site}");
+        }
     }
 
     /// On Windows a path hint is copied, never opened: resolving it could
@@ -48030,7 +49046,7 @@ mod program_link_tests {
     fn file_links_are_checked_off_the_ui_thread_before_any_opener() {
         let src = production_source();
         let body = src
-            .split("fn open_url(&mut self, ws: &WindowState, uri: &str) {")
+            .split("fn open_url(&mut self, ws: &WindowState, uri: &str, source: LinkSource) {")
             .nth(1)
             .and_then(|rest| rest.split("\n    fn ").next())
             .expect("open_url");

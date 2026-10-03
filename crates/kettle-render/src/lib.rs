@@ -7506,7 +7506,7 @@ impl Renderer {
             // against the flat color is right.
             let bar_fg = confirm_bar_text_color(theme);
             search_text_color = Some(GColor::rgb(bar_fg.r, bar_fg.g, bar_fg.b));
-            let prompt = format!("  ⚠ {}", dlg.prompt);
+            let prompt = format!("{CONFIRM_PROMPT_PREFIX}{}", dlg.prompt);
             // `y`/`n` answer the question directly regardless of which button
             // has focus, while Enter fires the FOCUSED button (which is the
             // safe `Cancel` on every close prompt). A user who cannot tell
@@ -13520,6 +13520,20 @@ pub fn confirm_bar_text_color(theme: &kettle_config::Theme) -> Rgb {
     )
 }
 
+/// What the confirm bar puts before its prompt.
+pub const CONFIRM_PROMPT_PREFIX: &str = "  ⚠ ";
+
+/// The least space between the confirm bar's prompt and its buttons.
+const CONFIRM_BAR_MIN_GAP: usize = 2;
+
+/// The columns a confirmation's own prompt text has in a bar of `max_cols`
+/// (see [`confirm_bar_columns`]) beside a button row `buttons_cols` wide,
+/// past [`CONFIRM_PROMPT_PREFIX`]: a longer prompt is cut.
+pub fn confirm_prompt_columns(max_cols: usize, buttons_cols: usize) -> usize {
+    max_cols
+        .saturating_sub(buttons_cols + CONFIRM_BAR_MIN_GAP + display_width(CONFIRM_PROMPT_PREFIX))
+}
+
 /// Lay out the confirm bar: prompt (plus help text when it fits) on the left,
 /// the button row flush right, within exactly `max_cols` columns.
 ///
@@ -13539,7 +13553,7 @@ fn compose_confirm_bar_label(
         return String::new();
     }
 
-    let min_gap = 2usize;
+    let min_gap = CONFIRM_BAR_MIN_GAP;
     let full_left = format!("{prompt}{help}");
     let max_left = max_cols.saturating_sub(buttons_cols + min_gap);
     let left = if display_width(&full_left) <= max_left {

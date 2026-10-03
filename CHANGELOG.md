@@ -8,13 +8,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
+  the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a
   label opens a path in the default app and copies a URL. A plain label still
   opens a URL and copies everything else. A path resolves from that pane's
-  directory; it is copied instead when it may name another machine's file (an
-  ssh, mosh or container session, or tmux, screen or zellij as the pane's
-  foreground program), when the label covers only part of a name, or when it
-  climbs with `..`. On Windows path hints are copied.
+  directory; it is copied instead when it names another machine's file (an
+  ssh, mosh or container session), when the label covers only part of a name,
+  or when it climbs with `..`, and behind tmux, screen or zellij Kettle asks
+  first. On Windows path hints are copied.
 - `language` (`auto`, `en`, `es`; Settings → Behavior → Language) chooses the
   language of Kettle's own text: Settings, menus, the Dock menu, prompts,
   notifications and screen-reader names. `auto`, the default, follows the
@@ -30,6 +32,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- A clicked file link or path in a pane connected to another machine no
+  longer opens the local file of the same name: Kettle says it names a file
+  there instead. That covers a detected ssh, mosh or container session and a
+  remote client in the pane, also when run through `sh -c`, `env` or `sudo`.
+  Behind tmux, screen or zellij, which may or may not be on this computer,
+  Kettle asks before opening it. Web and mail links open as before.
 - Kettle no longer opens programs or shortcuts from terminal links: a
   clicked `file://` link, OSC 8 link or path to an `.exe`, `.app`, `.lnk`,
   `.desktop`, `.rdp`, script, executable file without a document extension
