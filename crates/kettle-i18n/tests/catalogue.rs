@@ -106,3 +106,67 @@ fn release_translator_contains_only_shipping_language() {
         std::mem::size_of::<Language>()
     );
 }
+
+/// Every Spanish message has a review status, and only a known one; every
+/// confirmation and screen-reader message is listed for the second pass.
+#[test]
+fn every_spanish_message_has_a_review_status() {
+    let review: toml::Table = include_str!("../locales/es.review.toml")
+        .parse()
+        .expect("es.review.toml parses");
+    let spanish: toml::Table = include_str!("../locales/es.toml")
+        .parse()
+        .expect("es.toml parses");
+    let status = review["status"].as_table().expect("a [status] table");
+    let keys = |table: &toml::Table| table.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        keys(status),
+        keys(&spanish),
+        "es.review.toml must list every message once"
+    );
+    for (key, value) in status {
+        assert!(
+            matches!(value.as_str(), Some("draft" | "accepted")),
+            "{key}: status must be \"draft\" or \"accepted\""
+        );
+    }
+    // The second-pass list is exactly the confirmations and screen-reader
+    // messages, each once.
+    let listed = review["second-pass"]["keys"]
+        .as_array()
+        .expect("a [second-pass] key list")
+        .iter()
+        .map(|key| key.as_str().expect("a key name").to_string())
+        .collect::<Vec<_>>();
+    let expected = spanish
+        .keys()
+        .filter(|key| key.starts_with("confirm_") || key.contains("a11y"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut sorted = listed.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        listed.len(),
+        "a second-pass key is listed twice"
+    );
+    assert_eq!(
+        sorted, expected,
+        "second-pass keys must be exactly the sensitive ones"
+    );
+}
+
+/// No Spanish message is left in English, formatted and plural ones included,
+/// except words Spanish shares.
+#[test]
+fn no_spanish_message_is_left_in_english() {
+    let english: toml::Table = include_str!("../locales/en.toml").parse().unwrap();
+    let spanish: toml::Table = include_str!("../locales/es.toml").parse().unwrap();
+    let cognates = ["settings_gpu_kind_software", "settings_gpu_kind_virtual"];
+    for (key, text) in &english {
+        if !cognates.contains(&key.as_str()) {
+            assert_ne!(Some(text), spanish.get(key), "{key} is untranslated");
+        }
+    }
+}

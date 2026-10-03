@@ -1,5 +1,6 @@
 # English reference text. Every key in schema.toml, nothing else.
 
+a11y_pane = "Terminal pane {id}"
 a11y_window = "Kettle terminal"
 about_copy_version = "Copy version info"
 about_open_github = "Open GitHub page"
@@ -427,6 +428,7 @@ settings_value_visual_flash = "Visual flash"
 settings_value_visual_flash_and_attention = "Visual flash and attention"
 settings_value_when_focused = "When focused"
 settings_value_white = "White"
+tab_fallback_label = "tab {number}"
 update_a11y_available = "Update available: {tag}"
 update_a11y_open = "Open the release page"
 update_banner = "kettle {tag} available — {url}    (click: open · right-click: dismiss)"

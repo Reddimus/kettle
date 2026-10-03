@@ -9,6 +9,9 @@ writes the catalogue into `OUT_DIR`:
 - `en.toml`: the English reference text;
 - `es.toml`: neutral Latin American Spanish.
 
+`es.review.toml` records each Spanish message's review status. Translators
+start with [`TRANSLATING.md`](../../TRANSLATING.md).
+
 ```rust
 use kettle_i18n::{Language, Text, Translator};
 let tr = Translator::new(Language::Es);

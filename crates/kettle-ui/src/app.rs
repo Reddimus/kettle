@@ -9471,7 +9471,7 @@ impl App {
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
             };
         }
-        let labels = ws.mux.tab_labels();
+        let labels = ws.mux.tab_labels(&self.ui_text);
         let n = labels.len().max(1);
         // Trailing "▾ +" button: a `▾` dropdown arrow (left) + the `+` (right),
         // each `height` wide. The strip must reserve the WHOLE
@@ -9641,7 +9641,7 @@ impl App {
             TabBarPos::Right => sw - strip_w,
             _ => 0.0, // unreachable in this branch
         };
-        let labels = ws.mux.tab_labels();
+        let labels = ws.mux.tab_labels(&self.ui_text);
         let active = ws.mux.active;
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
@@ -26714,7 +26714,7 @@ impl App {
             children.push(node_id);
             let mut node = Node::new(Role::Terminal);
             let label = if pane.title.trim().is_empty() {
-                format!("Terminal pane {pane_id}")
+                self.ui_text.a11y_pane(pane_id)
             } else {
                 pane.title.clone()
             };

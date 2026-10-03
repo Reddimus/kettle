@@ -1,6 +1,10 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.a11y_pane]
+context = "crates/kettle-ui/src/app.rs accessibility_tree: screen-reader name of a pane whose program set no title. id is the pane's number."
+args = [{ name = "id", type = "u64" }]
+
 [messages.a11y_window]
 context = "crates/kettle-ui/src/app.rs: screen-reader name of a Kettle window. Kettle is the product name."
 
@@ -1339,6 +1343,10 @@ context = "crates/kettle-ui/src/settings.rs read(): Settings value. Animation ru
 
 [messages.settings_value_white]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
+
+[messages.tab_fallback_label]
+context = "crates/kettle-ui/src/mux.rs tab_labels: tab bar label of a tab with no title and no known directory. number counts tabs from 1. Lowercase, like the English."
+args = [{ name = "number", type = "u64" }]
 
 [messages.update_a11y_available]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the update banner. tag is a version such as v5.0.0."
