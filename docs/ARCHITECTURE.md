@@ -42,10 +42,10 @@ graph TD
 results, the effective theme, caps, source authorization (an external request
 can only carry an attested path; a GUI user pull needs an explicit action
 witness), the build handshake and the binary frames between the GUI and a
-media worker. It opens no files and starts no process. Its `client` answers
-whether media previews are available, from a background check that never
-blocks the caller; the filesystem and signature work comes from a
-`WorkerPlatform` its caller supplies, so the crate keeps its unsafe-code ban.
+media worker. It opens no files and starts no process itself. Its `client`
+answers whether media previews are available, from a background check that
+never blocks the caller; the filesystem, signature and process work comes from
+a `WorkerPlatform` its caller supplies, so the crate keeps its unsafe-code ban.
 The `kettle` binary supplies one (`media_platform`): the worker beside the
 running executable, recorded at startup, never from `PATH` or the working
 directory, with its file checked and, on macOS, its code signature checked
@@ -55,7 +55,9 @@ every check still reads as unavailable. Kettle and every worker share one
 build identity, the source hash its build script computes
 (`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
 worker, a separate executable that serves one job per process; it renders
-nothing yet and nothing starts it or ships it. The byte layouts, digest
+nothing yet and nothing ships it. The client's `render` runs one job in a
+fresh worker under startup and job deadlines, with the worker in its own
+process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
 framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 

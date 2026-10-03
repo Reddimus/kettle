@@ -20,6 +20,10 @@ pub const MAX_WORKER_FRAME_BYTES: usize = HEADER_BYTES
     + MAX_UNCOVERED_SCRIPTS * (MAX_SCRIPT_BYTES + 4)
     + MAX_WARNINGS
     + 256;
+/// The largest Ready (or Hello) frame: the header, two length-prefixed bounded strings and
+/// the protocol version. A startup Failure is smaller still.
+pub const MAX_READY_FRAME_BYTES: usize =
+    HEADER_BYTES + 4 + MAX_VERSION_BYTES + 4 + MAX_SOURCE_HASH_BYTES + 2;
 /// Conservative owned-decoder budget including list element storage as well as payloads.
 pub const MAX_DECODE_ALLOCATION_BYTES: usize = MAX_WORKER_FRAME_BYTES
     + MAX_SOURCE_LINES * size_of::<String>()
@@ -288,6 +292,16 @@ pub fn read_frame(
     reader: &mut impl Read,
     direction: Direction,
 ) -> Result<Option<Frame>, WireError> {
+    read_frame_within(reader, direction, direction.max_frame_bytes())
+}
+/// [`read_frame`] for a stage that expects a small frame: a header claiming more than
+/// `max_frame_bytes` in all (header included) is refused before any payload buffer is
+/// allocated. Ready is about 150 bytes, so it is not read under the 74 MiB reply cap.
+pub fn read_frame_within(
+    reader: &mut impl Read,
+    direction: Direction,
+    max_frame_bytes: usize,
+) -> Result<Option<Frame>, WireError> {
     let mut head = [0; HEADER_BYTES];
     loop {
         match reader.read(&mut head[..1]) {
@@ -299,6 +313,7 @@ pub fn read_frame(
     }
     reader.read_exact(&mut head[1..]).map_err(read_error)?;
     let (_, len) = header_prefix(&head, direction)?;
+    cap(len, max_frame_bytes.saturating_sub(HEADER_BYTES))?;
     let total = len
         .checked_add(HEADER_BYTES)
         .ok_or(ValidationError::TooLarge)?;

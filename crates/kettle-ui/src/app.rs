@@ -45818,6 +45818,9 @@ mod tests {
             fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
                 Err(UnavailableCause::Unverified)
             }
+            fn spawn(&self, _: &Path) -> std::io::Result<kettle_media::client::SpawnedWorker> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
         }
 
         assert_eq!(

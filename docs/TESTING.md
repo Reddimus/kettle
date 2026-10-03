@@ -779,6 +779,24 @@ verification is not cached; and asking never waits on a held check and never
 starts a second one. `BuildId::from_embedded` refuses empty, non-hex and
 formatted (`<version> (<hash>)`) identities.
 
+`src/lifecycle.rs` drives `render` against scripted workers over real pipes,
+with short budgets: a Ready from another build is `RestartRequired` and never
+retried; a reply counts once the worker exits 0; a reply before a crash or a
+non-zero exit is discarded; more after the reply, an extra frame or a second
+Ready is refused; a Ready header claiming 50 MB is refused at once, from the
+header; worker refusals keep only worker codes, at startup and as the reply;
+a worker that never answers is tried twice, and a second one that answers is
+used; startup exits are never retried; silence after Ready is one
+`RenderTimeout`; a reply cut short is killed at the deadline; a worker that
+will not die is not retried, is left to a reaper and counted, and a second
+turns media off (`stuck_workers`) with nothing more started; and exit codes
+map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+stub worker as a real process, copied under a name that picks its behavior: a
+job rendered; a worker that never answers tried twice within bounds; a 4 MiB
+job to a worker that never reads it, ended by the deadline; a reply followed
+by an abort discarded as `RenderResource`; and the worker's watchdog exit read
+as `RenderTimeout`.
+
 ### kettle-media-worker
 
 Unit tests (`src/early_unix.rs`) run in a child of the test binary, so
@@ -1740,6 +1758,18 @@ deadline (`check_failed`); a child still running after its grace leaves the
 guard set, no run starts (a marker command never runs) until a reaper
 collects it, and then runs start again; and a finished one reports its exit
 status and stderr. In kettle-ui,
+`media_platform`'s process tests spawn stand-in workers: `/usr/bin/env` prints
+nothing (an empty environment), `/bin/pwd` prints `/`, and a script leads its
+own process group; a kill reaches a background child before anything is
+reaped; a worker that exits 0 by itself keeps that status while the child it
+left behind is killed before the reap; and asking whether a running worker
+has exited never reaps it. Red checks for the spawn client: no Ready cap, no
+cold retry, a retry after a stuck worker or after Ready, a reply accepted
+without a clean end or whatever the exit, skew accepted, any worker code
+kept, stuck workers not counted or not stopping `render`, no kill at the
+reply deadline, an inherited environment or working directory, no process
+group, no group kill before the reap, a leader-only kill, and an exit check
+that always says exited each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

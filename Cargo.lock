@@ -1978,6 +1978,7 @@ name = "kettle-media"
 version = "4.9.0"
 dependencies = [
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
