@@ -88,6 +88,7 @@ version = "3.3.0"
 
 [workspace.dependencies]
 kettle-state = { path = "crates/kettle-state", version = "3.3.0" }
+kettle-i18n = { path = "crates/kettle-i18n", version = "3.3.0" }
 """,
         )
         write(root / "Cargo.lock", "# fixture lockfile\n")
@@ -196,6 +197,18 @@ class ReleaseScriptTests(unittest.TestCase):
             )
 
             self.assertEqual(readme, README)
+            # Every internal pin moves with the workspace, including crate
+            # names with digits.
+            manifest = (root / "Cargo.toml").read_text(encoding="utf-8")
+            self.assertIn(
+                'kettle-state = { path = "crates/kettle-state", version = "4.0.0" }',
+                manifest,
+            )
+            self.assertIn(
+                'kettle-i18n = { path = "crates/kettle-i18n", version = "4.0.0" }',
+                manifest,
+            )
+            self.assertNotIn('version = "3.3.0"', manifest)
             self.assertIn("KETTLE_VERSION=v4.0.0", install)
             self.assertIn("current latest: v4.0.0", install)
             self.assertEqual(install.count("releases/download/v4.0.0/"), 2)

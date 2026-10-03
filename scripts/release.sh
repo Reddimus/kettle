@@ -198,8 +198,9 @@ replace_exact_line Cargo.toml "version = \"${PREV}\"" "version = \"${VERSION}\""
 # refresh. The crates are never published to crates.io, so the version is only
 # a resolver hint.
 echo "bumping inter-crate version pins → ${VERSION}"
-# The character class admits `-` because `kettle-test-support` has two hyphens.
-sed -i.bak -E "s|(path = \"crates/kettle-[a-z-]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
+# The character class admits `-` for `kettle-test-support` and digits for
+# `kettle-i18n`.
+sed -i.bak -E "s|(path = \"crates/kettle-[a-z0-9-]+\", version = \")[^\"]*|\1${VERSION}|" Cargo.toml
 rm -f Cargo.toml.bak
 
 # Fail loudly if any inter-crate pin did not reach ${VERSION}. A silent miss
