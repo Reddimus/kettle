@@ -2460,7 +2460,10 @@ mod tests {
                     .env(CHILD, "1")
                     .spawn()
                     .expect("layer test child");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            // A hang guard, not a speed budget: the child starts a whole
+            // headless renderer, which alone takes 15-25 s on a busy Mac and
+            // ran past 30 s beside the rest of the GPU suite.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -2474,7 +2477,7 @@ mod tests {
                         // Signal only the child recorded by this spawn, then reap it.
                         let _ = child.kill();
                         let _ = child.wait();
-                        panic!("layer test exceeded 30 seconds or wait failed: {result:?}");
+                        panic!("layer test exceeded 120 seconds or wait failed: {result:?}");
                     }
                 }
             }
