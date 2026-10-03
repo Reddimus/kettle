@@ -62,7 +62,8 @@ accepts it.
 
 The `language` config key (`auto`, `en`, `es`) is read once at startup.
 `auto` asks the operating system for its locale with `os_locale()`, which
-queries it at most once per process, and maps it with `language_for_locale()`: a well-formed Spanish tag of any region in Latin
+queries it at most once per process, and maps it with
+`language_for_locale()`: a well-formed Spanish tag of any region in Latin
 script (`es`, `es-MX`, `es_ES.UTF-8`, `es-419`) is Spanish; English, other
 languages, `C`, `POSIX` and malformed tags are English. Parsing is bounded and
 allocation-free. An explicit choice never queries the OS.
@@ -71,7 +72,14 @@ allocation-free. An explicit choice never queries the OS.
 
 `Translator::pseudo()` accents English vowels, adds visible delimiters and
 lengthens each message by about 38%, so a layout check can find text that does
-not fit. Arguments stay verbatim. It exists only in debug builds with the
+not fit. Arguments stay verbatim. kettle-ui and kettle-render enable it in
+their test builds (`dev-pseudo` as a dev-dependency feature) and run the
+text-sized layouts against English, Spanish and the pseudo-locale: the
+Settings panel and its hints fit a default window, the search bar keeps every
+label whole and its controls apart, a paste receipt's remote warning shows
+whole wherever the card has room (the compact card widens for it, up to the
+expanded card it shares a lane with and the pane), and Dock titles promise no
+dialog. It exists only in debug builds with the
 `dev-pseudo` feature, and in this crate's unit tests; a release build has no
 pseudo constructor or state, even with every feature enabled.
 

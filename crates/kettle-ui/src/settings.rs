@@ -1563,6 +1563,38 @@ mod tests {
         assert_eq!(openers, ["theme"]);
     }
 
+    /// Pseudo-locale layout check: in English, Spanish and the pseudo-locale
+    /// (text about 38% longer), the panel's columns and its category tabs fit
+    /// the 144 columns a default window has on a 1366 px laptop, so no label
+    /// or value is cut there.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn the_panel_fits_a_default_window_in_every_language() {
+        use unicode_width::UnicodeWidthStr as _;
+        let cats = categories(&[]);
+        let cfg = Config::default();
+        for tr in [
+            Translator::new(Language::En),
+            Translator::new(Language::Es),
+            Translator::pseudo(),
+        ] {
+            let (label_cols, value_cols) = column_widths(&cfg, &cats, &tr);
+            let columns = 2 + label_cols + 2 + value_cols;
+            let tabs = cats
+                .iter()
+                .map(|category| tr.text(category.name))
+                .collect::<Vec<_>>()
+                .join("  ")
+                .width();
+            assert!(
+                columns <= 144,
+                "{:?}: rows need {columns} columns",
+                tr.language()
+            );
+            assert!(tabs <= 144, "{:?}: tabs need {tabs} columns", tr.language());
+        }
+    }
+
     /// The Language row saves `auto`, `en` or `es`, and names each language
     /// in that language whatever the UI speaks.
     #[test]

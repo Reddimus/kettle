@@ -1861,7 +1861,22 @@ pub fn media_paste_receipt_geometry(
         });
     }
 
-    let card_w = (cw * 28.0).min(width - inset_x * 2.0);
+    let dismiss_size = 24.0;
+    let dismiss_inset = 5.0;
+    // 28 cells, or wider when the title needs it: in the remote case the
+    // title is a safety warning, so a longer language widens the card rather
+    // than cutting it. The sum mirrors `title_rect` below, plus a pixel so the
+    // column floor cannot lose the last one. Growth stops at the expanded
+    // card's width when they share a lane, so the whole chip stays inside the
+    // card it expands into, and at the pane; past that the title is cut.
+    let title_w =
+        display_width(&media_paste_receipt_compact_title(receipt)) as f32 * text_cell_width;
+    let title_card_w = cw + title_w + cw * 0.5 + dismiss_size + dismiss_inset + 1.0;
+    let max_card_w = expanded_corner.map_or(width - inset_x * 2.0, |(rect, _)| rect.2);
+    let card_w = (cw * 28.0)
+        .max(title_card_w)
+        .min(max_card_w)
+        .min(width - inset_x * 2.0);
     let card_h = (ch * 2.1).max(text_line_height + inset_y).max(34.0);
     // Compact and expanded states share a lane whenever the full card can be
     // placed. Otherwise moving onto the chip can make the card jump to the
@@ -1883,8 +1898,6 @@ pub fn media_paste_receipt_geometry(
     } else {
         choose_corner(card_w, card_h)?
     };
-    let dismiss_size = 24.0;
-    let dismiss_inset = 5.0;
     let dismiss_rect = (
         rect.0 + rect.2 - dismiss_inset - dismiss_size,
         if top_lane {
@@ -1928,6 +1941,19 @@ fn remote_warning_columns(tr: &Translator) -> f32 {
     (widest + 3).max(18) as f32
 }
 
+/// The compact card's title, which also sizes the card.
+fn media_paste_receipt_compact_title(receipt: &MediaPasteReceiptOverlay) -> String {
+    let tr = &receipt.tr;
+    match &receipt.kind {
+        _ if receipt.remote => tr.text(Text::ReceiptTitleRemote).to_string(),
+        MediaPasteReceiptKind::Video { count, .. } if *count > 1 => {
+            tr.receipt_title_videos(*count as u64)
+        }
+        MediaPasteReceiptKind::Image { .. } => tr.text(Text::ReceiptTitleImage).to_string(),
+        MediaPasteReceiptKind::Video { .. } => tr.text(Text::ReceiptTitleVideo).to_string(),
+    }
+}
+
 fn media_paste_receipt_text(
     receipt: &MediaPasteReceiptOverlay,
     geometry: &MediaPasteReceiptGeometry,
@@ -1935,13 +1961,10 @@ fn media_paste_receipt_text(
 ) -> (String, String) {
     let tr = &receipt.tr;
     let title_columns = (geometry.title_rect.2 / text_cell_width).floor().max(0.0) as usize;
-    let title = match (&receipt.kind, geometry.compact, receipt.remote) {
-        (_, true, true) => tr.text(Text::ReceiptTitleRemote).to_string(),
-        (MediaPasteReceiptKind::Video { count, .. }, true, false) if *count > 1 => {
-            tr.receipt_title_videos(*count as u64)
-        }
-        (MediaPasteReceiptKind::Image { .. }, _, _) => tr.text(Text::ReceiptTitleImage).to_string(),
-        (MediaPasteReceiptKind::Video { .. }, _, _) => tr.text(Text::ReceiptTitleVideo).to_string(),
+    let title = match &receipt.kind {
+        _ if geometry.compact => media_paste_receipt_compact_title(receipt),
+        MediaPasteReceiptKind::Image { .. } => tr.text(Text::ReceiptTitleImage).to_string(),
+        MediaPasteReceiptKind::Video { .. } => tr.text(Text::ReceiptTitleVideo).to_string(),
     };
     let title = fit_single_line_label(&title, title_columns);
 
@@ -15819,15 +15842,17 @@ pub fn capture_png_with_annotation(
             // selection (matches the more-common state a user opens the menu
             // in). Highlight starts on Paste (idx 1), the first enabled
             // non-separator row.
+            // English catalogue text: the capture must stay byte-identical.
+            let tr = Translator::default();
             let rows = vec![
                 ContextMenuRow {
-                    label: "Copy".into(),
+                    label: tr.text(Text::MenuCopy).into(),
                     separator: false,
                     enabled: false,
                     hint: String::new(),
                 },
                 ContextMenuRow {
-                    label: "Paste".into(),
+                    label: tr.text(Text::MenuPaste).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
@@ -15839,19 +15864,19 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
-                    label: "Split Right".into(),
+                    label: tr.text(Text::MenuSplitRight).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
-                    label: "Split Down".into(),
+                    label: tr.text(Text::MenuSplitDown).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
                 },
                 ContextMenuRow {
-                    label: "Close Pane".into(),
+                    label: tr.text(Text::MenuClosePane).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
@@ -15863,7 +15888,7 @@ pub fn capture_png_with_annotation(
                     hint: String::new(),
                 },
                 ContextMenuRow {
-                    label: "New Tab".into(),
+                    label: tr.text(Text::MenuNewTab).into(),
                     separator: false,
                     enabled: true,
                     hint: String::new(),
@@ -20598,6 +20623,60 @@ mod search_bar_tests {
         assert_eq!(es.next, 13);
     }
 
+    /// Pseudo-locale layout check: with text about 38% longer, a wide bar
+    /// still shows every control's label whole, and at any width the
+    /// controls never overlap each other or leave the bar.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_pseudo_bar_keeps_its_controls_whole_and_apart() {
+        use kettle_i18n::Translator;
+        let tr = Translator::pseudo();
+        let bar = search_bar_geometry(2400.0, 800.0, 10.0, 20.0, &tr);
+        assert_eq!(bar.rows, 1, "wide enough for the single-row layout");
+        let search = SearchOverlay {
+            tr,
+            ..SearchOverlay::default()
+        };
+        assert!(!search_bar_text(&search, bar, 10.0).contains('…'));
+        for width in (300..=2400).step_by(25) {
+            let bar = search_bar_geometry(width as f32, 800.0, 10.0, 20.0, &tr);
+            let controls = [
+                bar.previous,
+                bar.next,
+                bar.wrap,
+                bar.case_mode,
+                bar.invert,
+                bar.status,
+                bar.close,
+            ];
+            let inside = |r: super::Rect4| {
+                r.2 <= 0.0
+                    || (r.0 >= bar.rect.0 - 0.5
+                        && r.0 + r.2 <= bar.rect.0 + bar.rect.2 + 0.5
+                        && r.1 >= bar.rect.1 - 0.5
+                        && r.1 + r.3 <= bar.rect.1 + bar.rect.3 + 0.5)
+            };
+            let overlap = |a: super::Rect4, b: super::Rect4| {
+                a.2 > 0.0
+                    && b.2 > 0.0
+                    && a.0 < b.0 + b.2 - 0.5
+                    && b.0 < a.0 + a.2 - 0.5
+                    && a.1 < b.1 + b.3 - 0.5
+                    && b.1 < a.1 + a.3 - 0.5
+            };
+            for (i, a) in controls.iter().enumerate() {
+                assert!(
+                    inside(*a),
+                    "width {width}: {a:?} leaves the bar {:?}",
+                    bar.rect
+                );
+                for b in &controls[i + 1..] {
+                    assert!(!overlap(*a, *b), "width {width}: {a:?} overlaps {b:?}");
+                }
+            }
+        }
+    }
+
     /// A Spanish bar shows every word whole at a width that fits it, with no
     /// ellipsis, and its status lane fits every status.
     #[test]
@@ -20652,6 +20731,17 @@ mod completion_panel_tests {
     /// y = 70 + 320 = 390.
     const CELL: (f32, f32) = (8.0, 16.0);
     const PROMPT_TOP: f32 = 390.0;
+
+    /// English, Spanish, and in debug builds the pseudo-locale, whose text is
+    /// about 38% longer: the layouts that must hold in any language.
+    fn layout_translators() -> Vec<kettle_i18n::Translator> {
+        use kettle_i18n::{Language, Translator};
+        let shipping = [Translator::new(Language::En), Translator::new(Language::Es)];
+        #[cfg(debug_assertions)]
+        return shipping.into_iter().chain([Translator::pseudo()]).collect();
+        #[cfg(not(debug_assertions))]
+        shipping.to_vec()
+    }
     /// `max(4, round(16 * 0.5))`.
     const GAP: f32 = 8.0;
     /// `max(16 + 4, round(16 * 1.35))`.
@@ -21006,9 +21096,10 @@ mod completion_panel_tests {
             "3 videos pegados"
         );
 
-        // Every compact title shows whole, in each language: the remote one
-        // is a safety warning, and a clipped count misleads.
-        for tr in [kettle_i18n::Translator::default(), es] {
+        // Every compact title shows whole, in each language and the
+        // pseudo-locale: the remote one is a safety warning, and a clipped
+        // count misleads, so the card widens for a longer title.
+        for tr in layout_translators() {
             let mut cards = vec![receipt(false)];
             for count in [1, 2, 99] {
                 cards.push(video_receipt(false, false, count));
@@ -21039,7 +21130,7 @@ mod completion_panel_tests {
         assert!(detail.contains("1 de 3 · MP4 · 35.7 MB"), "{detail}");
         assert!(detail.contains("Preparando portada"), "{detail}");
 
-        for tr in [kettle_i18n::Translator::default(), es] {
+        for tr in layout_translators() {
             let widest = [
                 kettle_i18n::Text::ReceiptRemotePane,
                 kettle_i18n::Text::ReceiptLocalPathOnly,
@@ -21049,18 +21140,27 @@ mod completion_panel_tests {
             .max()
             .unwrap();
             assert!(super::remote_warning_columns(&tr) >= (widest + 3) as f32);
-            for pane_width in 140..=360 {
+            let mut expanded = 0;
+            for (cell_w, pane_width) in [6.0, CELL.0]
+                .into_iter()
+                .flat_map(|cell_w| (140..=600).map(move |width| (cell_w, width)))
+            {
                 let mut candidate = receipt(true);
                 candidate.tr = tr;
                 candidate.remote = true;
                 candidate.pane_rect.2 = pane_width as f32;
                 candidate.grid_rect.2 = pane_width as f32;
-                let Some(geometry) =
-                    media_paste_receipt_geometry(&candidate, None, (6.0, CELL.1), CELL.0, CELL.1)
-                else {
+                let Some(geometry) = media_paste_receipt_geometry(
+                    &candidate,
+                    None,
+                    (cell_w, CELL.1),
+                    CELL.0,
+                    CELL.1,
+                ) else {
                     continue;
                 };
                 if !geometry.compact {
+                    expanded += 1;
                     let (_, detail) = media_paste_receipt_text(&candidate, &geometry, CELL.0);
                     for line in [
                         kettle_i18n::Text::ReceiptRemotePane,
@@ -21074,11 +21174,76 @@ mod completion_panel_tests {
                     }
                 }
             }
+            // The shipping languages exercise the expanded card; text 38%
+            // longer never fits its detail box, so the pseudo-locale keeps
+            // the compact card, whose whole title is checked above.
+            if tr.language() == kettle_i18n::Language::Es
+                || tr == kettle_i18n::Translator::default()
+            {
+                assert!(
+                    expanded > 0,
+                    "{:?}: no width admitted the expanded card",
+                    tr.language()
+                );
+            }
         }
         assert_eq!(
             super::remote_warning_columns(&kettle_i18n::Translator::default()),
             18.0
         );
+    }
+
+    /// With chrome and terminal cells of different widths, a compact card
+    /// widened for its title stays inside the expanded card it shares a lane
+    /// with, and its title gets every column it was sized for.
+    #[test]
+    fn a_widened_compact_card_stays_inside_its_expanded_card() {
+        for (cw, text_cw) in [
+            (4.4, 8.0),
+            (8.0, 4.4),
+            (4.4, 4.0),
+            (4.0, 4.4),
+            (8.0, 8.0),
+            (10.0, 7.0),
+        ] {
+            for count in [1, 2, 100] {
+                for remote in [false, true] {
+                    for tr in layout_translators() {
+                        let mut compact = video_receipt(false, false, count);
+                        compact.tr = tr;
+                        compact.remote = remote;
+                        let mut open = compact.clone();
+                        open.expanded = true;
+                        let cell = (cw, CELL.1);
+                        let (Some(chip), Some(card)) = (
+                            media_paste_receipt_geometry(&compact, None, cell, text_cw, CELL.1),
+                            media_paste_receipt_geometry(&open, None, cell, text_cw, CELL.1),
+                        ) else {
+                            continue;
+                        };
+                        if !card.compact {
+                            assert!(
+                                chip.rect.0 >= card.rect.0 - 0.01
+                                    && chip.rect.0 + chip.rect.2
+                                        <= card.rect.0 + card.rect.2 + 0.01,
+                                "cells {cw}/{text_cw}, {count} videos, remote {remote}: \
+                                 chip {:?} leaves card {:?}",
+                                chip.rect,
+                                card.rect
+                            );
+                        }
+                        // The fixture's 900 px pane never bounds the chip, so
+                        // only the expanded card's width may cut its title.
+                        if !card.compact && chip.rect.2 >= card.rect.2 - 0.01 {
+                            continue;
+                        }
+                        let title = super::media_paste_receipt_compact_title(&compact);
+                        let (shown, _) = media_paste_receipt_text(&compact, &chip, text_cw);
+                        assert_eq!(shown, title, "cells {cw}/{text_cw}: a column was lost");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

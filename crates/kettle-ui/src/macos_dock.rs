@@ -348,7 +348,11 @@ mod tests {
                 "{title:?} must stay ASCII for the AX-driven smoke to match it"
             );
         }
-        for tr in [EN, ES] {
+        #[cfg(debug_assertions)]
+        let translators = [EN, ES, Translator::pseudo()];
+        #[cfg(not(debug_assertions))]
+        let translators = [EN, ES];
+        for tr in translators {
             for (title, _) in dock_menu_model(&tr) {
                 assert!(
                     !title.ends_with('…') && !title.ends_with("..."),

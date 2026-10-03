@@ -431,6 +431,7 @@ settings_value_white = "Blanco"
 update_a11y_available = "Actualización disponible: {tag}"
 update_a11y_open = "Abrir la página de la versión"
 update_banner = "kettle {tag} disponible — {url}    (clic: abrir · clic derecho: descartar)"
+window_title_gpu_lost = "kettle - se perdió el dispositivo GPU - recuperando"
 
 [completion_matches]
 one = "{count} coincidencia"
