@@ -12,6 +12,12 @@ description = "kettle: wgpu + glyphon GPU renderer — quads, images, text, over
 [lints]
 workspace = true
 
+[features]
+# `Default` for `Overlay` and `SearchOverlay`, for tests only. A default overlay
+# speaks English and carries no state, so production code must list every
+# field; without this feature it cannot build one from a default at all.
+test-defaults = []
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow.workspace = true

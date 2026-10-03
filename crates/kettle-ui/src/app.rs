@@ -13148,9 +13148,23 @@ impl App {
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = self.settings_overlay_projection(ws);
+        // Terminator parity: only a LIVE drag with a latched target paints a
+        // hint. An armed-but-unmoved press is still a click, and a live drag
+        // over a seam has no target to preview.
+        let pane_drop_hint = ws
+            .pane_drag
+            .as_ref()
+            .filter(|drag| drag.live)
+            .and_then(|drag| drag.target)
+            .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before));
         let s = &ws.search;
+        // Both literals list every field: a defaulted overlay would paint
+        // English and drop state such as the pane drop hint.
         if !s.open {
             return Overlay {
+                tr: self.ui_text,
+                search: None,
+                highlights: Vec::new(),
                 links,
                 ssh_query,
                 ssh_hint,
@@ -13171,7 +13185,7 @@ impl App {
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
                 update_available: self.update_available.clone(),
-                ..Overlay::default()
+                pane_drop_hint,
             };
         }
         let mut highlights = Vec::new();
@@ -13286,15 +13300,7 @@ impl App {
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
-            // Terminator parity: only a LIVE drag with a latched target paints
-            // a hint. An armed-but-unmoved press is still a click, and a live
-            // drag over a seam has no target to preview.
-            pane_drop_hint: ws
-                .pane_drag
-                .as_ref()
-                .filter(|drag| drag.live)
-                .and_then(|drag| drag.target)
-                .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before)),
+            pane_drop_hint,
         }
     }
 

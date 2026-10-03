@@ -769,7 +769,11 @@ new-tab dropdown, the About panel, the remote reconnect row, the confirmations
 the title editors, the search bar and the completion card. Counted messages are
 tested at 0, 1, 2, 1000, one million and `u64::MAX`; only 1 reads as singular.
 The search bar's control widths equal the old fixed widths in English, and a
-Spanish bar shows every word whole with no ellipsis. The context
+Spanish bar shows every word whole with no ellipsis. The renderer's `Overlay`
+and `SearchOverlay` implement `Default` only for tests (kettle-render's
+`test-defaults` feature, enabled by kettle-ui's dev-dependency): a default
+overlay speaks English, so a plain or release build, which CI runs, rejects
+production code that builds one from a default. The context
 menu's Terminator-row guard pairs each row's catalogue key with its action and
 checks the key's English is still Terminator's row name.
 

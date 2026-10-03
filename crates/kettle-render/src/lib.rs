@@ -984,6 +984,7 @@ pub struct MediaPasteReceiptOverlay {
     pub prefer_top: bool,
 }
 
+#[cfg(any(test, feature = "test-defaults"))]
 impl Default for SearchOverlay {
     fn default() -> Self {
         Self {
@@ -1056,7 +1057,12 @@ impl SearchBarGeometry {
 
 /// Overlay state projected by the UI, covering search, links, hints, pickers,
 /// menus, dialogs, and banners.
-#[derive(Default)]
+///
+/// There is no `Default` outside tests (the `test-defaults` feature): a
+/// default overlay speaks English and carries no state, so the UI lists every
+/// field. A production build, which never enables the feature, rejects any
+/// overlay built from a default.
+#[cfg_attr(any(test, feature = "test-defaults"), derive(Default))]
 pub struct Overlay {
     /// The UI's language. Text the renderer words itself (the search bar, the
     /// completion count, the layout picker prompt) goes through it.

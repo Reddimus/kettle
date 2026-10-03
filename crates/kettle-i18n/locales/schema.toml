@@ -661,7 +661,7 @@ context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar statu
 context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
 
 [messages.search_status_wrapped]
-context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest."
+context = "crates/kettle-render/src/lib.rs SearchStatus::label: search bar status. The bar widens its status slot to fit the longest. Wrapped means the match was found after the search crossed one end of the scrollback and continued from the other end; it does not mean a full cycle."
 
 [messages.search_wrap_off]
 context = "crates/kettle-render/src/lib.rs search_bar_segments: search bar control. Keep it short; the bar widens a control to fit its longest label. Toggle: the search stops at the ends."
