@@ -109,6 +109,7 @@ notify_title_image_preview_unavailable = "kettle: vista previa de imagen no disp
 notify_title_input_not_delivered = "kettle: entrada no entregada"
 notify_title_keybind_needs_modifier = "kettle: el atajo necesita una tecla modificadora"
 notify_title_keybind_not_saved = "kettle: atajo de teclado no guardado"
+notify_title_lua_callback_stopped = "kettle: callback de Lua detenido"
 notify_title_lua_not_delivered = "kettle: comando de Lua no entregado"
 notify_title_lua_not_queued = "kettle: comando de Lua no encolado"
 notify_title_recording_error = "kettle: error de grabación"
@@ -407,3 +408,7 @@ other = "¿Cerrar {count} paneles?"
 [confirm_paste]
 one = "¿Pegar {count} línea en un destino tipo shell?"
 other = "¿Pegar {count} líneas en un destino tipo shell?"
+
+[notify_body_lua_callback_stopped]
+one = "{count} callback `{event}` tardó demasiado y no se volverá a llamar. Revisar init.lua en busca de un bucle que nunca termina."
+other = "{count} callbacks `{event}` tardaron demasiado y no se volverán a llamar. Revisar init.lua en busca de un bucle que nunca termina."

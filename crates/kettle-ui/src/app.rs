@@ -6320,6 +6320,12 @@ enum PendingLuaCommand {
         title: String,
         body: String,
     },
+    /// Kettle's own notice that it retired runaway Lua callbacks.
+    CallbackStopped {
+        origin_window: u64,
+        event: String,
+        dropped: u64,
+    },
     SetTheme {
         origin_window: u64,
         name: String,
@@ -6332,6 +6338,7 @@ impl PendingLuaCommand {
             Self::SendText { origin_window, .. }
             | Self::ExecAction { origin_window, .. }
             | Self::Notify { origin_window, .. }
+            | Self::CallbackStopped { origin_window, .. }
             | Self::SetTheme { origin_window, .. } => *origin_window,
         }
     }
@@ -7629,6 +7636,13 @@ impl App {
                                     body,
                                 })
                             }
+                            crate::LuaCommand::CallbackStopped { event, dropped } => {
+                                pending_lua_commands.push(PendingLuaCommand::CallbackStopped {
+                                    origin_window: 1,
+                                    event,
+                                    dropped,
+                                })
+                            }
                             crate::LuaCommand::SetTheme(name) => {
                                 pending_lua_commands.push(PendingLuaCommand::SetTheme {
                                     origin_window: 1,
@@ -7865,6 +7879,13 @@ impl App {
                     title,
                     body,
                 },
+                crate::LuaCommand::CallbackStopped { event, dropped } => {
+                    PendingLuaCommand::CallbackStopped {
+                        origin_window: ws.seq,
+                        event,
+                        dropped,
+                    }
+                }
                 crate::LuaCommand::SetTheme(name) => PendingLuaCommand::SetTheme {
                     origin_window: ws.seq,
                     name,
@@ -8033,6 +8054,15 @@ impl App {
                 }
                 PendingLuaCommand::Notify { title, body, .. } => {
                     fire_notify(&title, &body);
+                }
+                PendingLuaCommand::CallbackStopped { event, dropped, .. } => {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleLuaCallbackStopped),
+                        &self
+                            .ui_text
+                            .notify_body_lua_callback_stopped(dropped, &event),
+                    );
                 }
                 PendingLuaCommand::SetTheme { name, .. } => {
                     if let Some(canonical) = kettle_config::Theme::find_name(&name) {

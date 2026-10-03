@@ -275,6 +275,11 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warnin
 [messages.notify_body_keybind_modifier]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. Keep the key names."
 
+[messages.notify_body_lua_callback_stopped]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. Kettle retired Lua callbacks that ran too long. event is a Lua event name such as bell, verbatim; keep init.lua."
+args = [{ name = "count", type = "u64" }, { name = "event", type = "str" }]
+plural = "count"
+
 [messages.notify_body_lua_not_delivered]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number. Keep send_text, an API name."
 args = [{ name = "pane", type = "u64" }]
@@ -364,6 +369,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
 [messages.notify_title_keybind_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_lua_callback_stopped]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
 [messages.notify_title_lua_not_delivered]

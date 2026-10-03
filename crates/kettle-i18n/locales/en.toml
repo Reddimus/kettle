@@ -108,6 +108,7 @@ notify_title_image_preview_unavailable = "kettle: image preview unavailable"
 notify_title_input_not_delivered = "kettle: input not delivered"
 notify_title_keybind_needs_modifier = "kettle: keybind needs a modifier"
 notify_title_keybind_not_saved = "kettle: keybind not saved"
+notify_title_lua_callback_stopped = "kettle: Lua callback stopped"
 notify_title_lua_not_delivered = "kettle: Lua command not delivered"
 notify_title_lua_not_queued = "kettle: Lua command not queued"
 notify_title_recording_error = "kettle: recording error"
@@ -406,3 +407,7 @@ other = "Close {count} panes?"
 [confirm_paste]
 one = "Paste {count} line into a shell-like target?"
 other = "Paste {count} lines into a shell-like target?"
+
+[notify_body_lua_callback_stopped]
+one = "{count} `{event}` callback ran too long and will not be called again. Check your init.lua for a loop that never finishes."
+other = "{count} `{event}` callbacks ran too long and will not be called again. Check your init.lua for a loop that never finishes."
