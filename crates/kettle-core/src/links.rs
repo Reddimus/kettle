@@ -90,7 +90,8 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
 
     // OSC 8 runs: consecutive cells sharing a hyperlink URI. Each row's runs
     // are kept so autodetection skips the cells they already cover.
-    let mut covered: Vec<Vec<(usize, usize)>> = vec![Vec::new(); rows];
+    // Columns already linked on each row, half-open.
+    let mut covered: Vec<crate::hints::Taken> = (0..rows).map(|_| Default::default()).collect();
     let mut group = 0usize;
     for (row, &gl) in lines.iter().enumerate() {
         let mut c = 0usize;
@@ -107,7 +108,7 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                     }
                 }
                 let end = c.saturating_sub(1);
-                covered[row].push((start, end));
+                covered[row].insert(start, end + 1);
                 out.push(Link {
                     row,
                     start_col: start,
@@ -143,17 +144,27 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             (read.cut_before && start == 0) || (read.cut_after && end == text_len)
         };
         let mut push =
-            |start: usize, len: usize, uri: String, covered: &mut Vec<Vec<(usize, usize)>>| {
-                let segments = row_segments(&pos_of_byte, start, len);
+            |start: usize, len: usize, uri: String, covered: &mut Vec<crate::hints::Taken>| {
+                let mut segments = row_segments(&pos_of_byte, start, len);
+                // A wide character's spacer cell is part of the link too.
+                for (row, _, end) in &mut segments {
+                    if *end + 1 < cols
+                        && grid[Point::new(Line(lines[*row]), Column(*end))]
+                            .flags
+                            .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR)
+                    {
+                        *end += 1;
+                    }
+                }
                 // Skip a match overlapping a link already found on any row it covers.
                 if segments
                     .iter()
-                    .any(|&(row, s, e)| covered[row].iter().any(|&(cs, ce)| !(e < cs || s > ce)))
+                    .any(|&(row, s, e)| covered[row].overlaps(s, e + 1))
                 {
                     return;
                 }
                 for (row, s, e) in segments {
-                    covered[row].push((s, e));
+                    covered[row].insert(s, e + 1);
                     out.push(Link {
                         row,
                         start_col: s,
@@ -175,6 +186,29 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 matched.to_string()
             };
             push(m.start(), matched.len(), uri, &mut covered);
+        }
+        // A quoted path goes before bare ones, so they cannot take a piece
+        // of it; its link covers a location suffix as a bare path's does.
+        for (start, _, close) in crate::hints::quoted_paths(&text) {
+            if fragment(start - 1, close + 1) {
+                continue;
+            }
+            match path_match_to_file_uri(&text[start..close], cwd) {
+                Some(uri) => push(start, close - start, uri, &mut covered),
+                // Refused (a climb, no directory to resolve against): no
+                // piece of it may link either.
+                None => {
+                    let segments = row_segments(&pos_of_byte, start, close - start);
+                    if segments
+                        .iter()
+                        .all(|&(row, s, e)| !covered[row].overlaps(s, e + 1))
+                    {
+                        for (row, s, e) in segments {
+                            covered[row].insert(s, e + 1);
+                        }
+                    }
+                }
+            }
         }
         for (start, end, matched) in path_candidates(&text) {
             if fragment(start, end) {
@@ -210,7 +244,13 @@ fn row_segments(
 
 fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
     let path = strip_location_suffix(raw);
-    if path.is_empty() || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    // Only a quoted path holds a space (see `hints::quoted_paths`); the
+    // URL encodes it.
+    if path.is_empty()
+        || path
+            .chars()
+            .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
+    {
         return None;
     }
     let normalized = path.replace('\\', "/");
@@ -913,6 +953,83 @@ mod tests {
         assert_eq!(file_url_for_path(Path::new("relative/a.pdf")), None);
         assert_eq!(file_url_for_path(Path::new("//host/share/a.pdf")), None);
         assert_eq!(file_url_for_path(Path::new("/a/../b.pdf")), None);
+    }
+
+    /// A quoted path with spaces is one link to the whole file, its spaces
+    /// encoded; quoted prose links only the path inside it.
+    #[test]
+    fn a_quoted_path_is_one_link() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/home/me/proj"))
+                .into_iter()
+                .map(|link| (link.start_col, link.end_col, link.uri))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found("open \"docs/annual report.pdf\" now"),
+            [(
+                6,
+                27,
+                "file:///home/me/proj/docs/annual%20report.pdf".to_string()
+            )]
+        );
+        assert_eq!(
+            found("File \"/my app/x.py:3\", line 3"),
+            [(6, 19, "file:///my%20app/x.py".to_string())]
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            found("`C:\\Program Files\\K\\a.toml`"),
+            [(1, 25, "file:///C:/Program%20Files/K/a.toml".to_string())]
+        );
+        // Off Windows a one-letter prefix is a remote host, not a drive.
+        #[cfg(not(windows))]
+        assert!(
+            found("scp \"h:/srv/my report.pdf\" .")
+                .iter()
+                .all(|(_, _, uri)| !uri.contains("%20")),
+            "{:?}",
+            found("scp \"h:/srv/my report.pdf\" .")
+        );
+        assert_eq!(
+            found("\"see src/main.rs\""),
+            [(5, 15, "file:///home/me/proj/src/main.rs".to_string())]
+        );
+        // A climb stays refused inside quotes too, and no piece of the
+        // refused path links on its own.
+        assert!(found("\"../up here/a.txt\"").is_empty());
+        assert!(found("\"../my dir/etc/hosts.txt\"").is_empty());
+    }
+
+    /// A link ending in a wide character covers both of its cells, so the
+    /// whole glyph underlines and clicks.
+    #[test]
+    fn a_link_ending_in_a_wide_character_covers_it() {
+        let term = term_fed(
+            40,
+            1,
+            "\"./my dir/\u{754c}\" https://x.test/\u{754c}".as_bytes(),
+        );
+        let found = links_with_cwd(&term, Some("/p"))
+            .into_iter()
+            .map(|link| (link.start_col, link.end_col))
+            .collect::<Vec<_>>();
+        assert_eq!(found, [(1, 11), (14, 30)]);
+    }
+
+    /// A quoted path the terminal wrapped is one link.
+    #[test]
+    fn a_soft_wrapped_quoted_path_is_one_link() {
+        let term = term_with(12, &["see \"docs/an", "nual a.pdf\""], &[0]);
+        let found = links_with_cwd(&term, Some("/p"));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].group, found[1].group);
+        assert!(
+            found
+                .iter()
+                .all(|link| link.uri == "file:///p/docs/annual%20a.pdf")
+        );
     }
 
     #[test]

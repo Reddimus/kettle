@@ -60,6 +60,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A path in quotes or backticks is one link and one quick-select target,
+  spaces included: `"docs/annual report.pdf"`, Python's `File "/my app/x.py"`
+  and `` `out/report #1.pdf` `` open the whole file. They used to stop at the
+  first space or `#`. Quoted prose such as `"see src/main.rs"` still links
+  only the path inside it.
 - A URL in Markdown code or emphasis (`` `https://…` ``, `**https://…**`) is
   linked and quick-selected without the trailing backtick or asterisks.
 - A URL or path the terminal wrapped onto the next row is one link and one
