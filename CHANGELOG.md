@@ -33,6 +33,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A key that closes or replaces a modal (the command palette, a picker, a
+  title editor, the Settings path prompt) ends an input-method composition in
+  progress there, so a late commit can no longer type into the terminal or the
+  next modal.
 - Dragging a pane onto another shows where it will land with the search bar
   closed. The drop preview appeared only while search was open.
 - In the window, tab, pane and group title editors, the input method's
