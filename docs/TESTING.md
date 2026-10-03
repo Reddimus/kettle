@@ -727,9 +727,11 @@ Night"; default keybinds and trigger parsing; the
 `defaults_has_no_shadow_collisions` audit (no
 HashMap-shadowed bindings); the palette-completeness drift
 guard (including `OpenContextMenu` / `UndoCloseTab` /
-`DuplicateTab` / `DuplicatePane`); palette ranking in English and
-Spanish, English names still matching a Spanish palette, stable empty-query
-order and distinct labels in each language; the
+`DuplicateTab` / `DuplicatePane`); theme look order (the dark and light orders
+split the bundle, stepping never crosses appearance and reverses cleanly, and
+neighbours are at least twice as similar as in name order); palette ranking in
+English and Spanish, English names still matching a Spanish palette, stable
+empty-query order and distinct labels in each language; the
 example-config drift guard; the README-keybind regression guard;
 persistence preserves encoding, newline convention, comments, permissions,
 first-write backups, and symlinked dotfile targets while refusing

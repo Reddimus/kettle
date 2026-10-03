@@ -683,6 +683,12 @@ pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
             // Any direction flips a toggle (Space, Left, Right all toggle).
             (!read_bool(cfg, field.key)).to_string()
         }
+        // The theme row steps through the popular themes of the current
+        // theme's appearance, in look order, so ←/→ never flips between a
+        // light and a dark palette.
+        FieldKind::Choice { .. } if field.key == "theme" => {
+            kettle_config::Theme::cycle_popular_by_look(&cfg.theme_name, dir >= 0).to_string()
+        }
         FieldKind::Choice { values, .. } => {
             let cur = read_choice(cfg, field.key);
             let idx = values.iter().position(|v| *v == cur).unwrap_or(0) as i32;
@@ -1518,6 +1524,35 @@ mod tests {
         let f = toggle(Text::SettingsFieldVimMenuNav, "vim-menu-nav");
         assert_eq!(read(&cfg, &f, &EN), "On");
         assert_eq!(next_value(&cfg, &f, 0), "false");
+    }
+
+    /// ←/→ on the theme row step through popular themes of the current
+    /// theme's appearance. The list's own order used to jump from
+    /// TokyoNight Moon to the light TokyoNight Day.
+    #[test]
+    fn the_theme_row_never_flips_between_light_and_dark() {
+        let row = categories(&[])
+            .into_iter()
+            .flat_map(|c| c.fields)
+            .find(|f| f.key == "theme")
+            .unwrap();
+        for name in kettle_config::Theme::POPULAR {
+            let mut cfg = Config::default();
+            cfg.theme_name = name.to_string();
+            let dark = kettle_config::Theme::by_name(name).is_dark();
+            for dir in [1, -1] {
+                let next = next_value(&cfg, &row, dir);
+                assert!(
+                    kettle_config::Theme::POPULAR.contains(&next.as_str()),
+                    "{next}"
+                );
+                assert_eq!(
+                    kettle_config::Theme::by_name(&next).is_dark(),
+                    dark,
+                    "{name} -> {next}"
+                );
+            }
+        }
     }
 
     #[test]

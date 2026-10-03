@@ -17080,7 +17080,9 @@ impl App {
             }
             Action::NextTheme | Action::PrevTheme => {
                 let fwd = matches!(action, Action::NextTheme);
-                let name = kettle_config::Theme::cycle(&self.cfg.theme_name, fwd);
+                // Stay with the current theme's appearance, one similar
+                // look at a time; switching light and dark is its own action.
+                let name = kettle_config::Theme::cycle_by_look(&self.cfg.theme_name, fwd);
                 self.set_runtime_theme_name(ws, name);
                 if !self.persist_pref("theme", name) {
                     // Config-governed; notify on failure.

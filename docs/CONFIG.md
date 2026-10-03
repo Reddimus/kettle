@@ -586,7 +586,10 @@ tab or window (prompting for the name), while `group_tab_toggle` and
 (`zoom_out`), `reset_font_size` (`zoom_normal`).
 
 **Themes**: `next_theme`, `prev_theme` (`previous_theme`), `toggle_light_dark`
-(swap between `light-theme` and `dark-theme`).
+(swap between `light-theme` and `dark-theme`). `next_theme` and `prev_theme`
+step through the bundled themes of the current theme's appearance, dark or
+light, each followed by the most similar one, so a step never flips between a
+light and a dark palette.
 
 **Titles**: `edit_window_title`, `edit_tab_title`, `edit_pane_title` (open the
 inline rename overlay for the OS window / active tab / focused pane).

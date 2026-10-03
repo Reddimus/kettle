@@ -48,7 +48,7 @@ have two spaces between them; an underline marks the selected category.
 
 | Option | Config key | Notes |
 |---|---|---|
-| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
+| Theme | `theme` | curated list of the most popular themes; ←/→ live-previews each, stepping through the popular themes of the current theme's appearance (dark or light) from one look to the most similar next. The full 500+-theme bundle is also reachable via the right-click **Theme** submenu (which **live-previews on hover** — see [the menu](#beyond-the-panel)), `NextTheme`/`PrevTheme`, or a `theme =` line in your config |
 | Font size | `font-size` | 6–72 pt |
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
 | Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window |
