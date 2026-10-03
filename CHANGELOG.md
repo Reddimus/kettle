@@ -85,6 +85,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, a video preview helper that exits before reading its request can
+  no longer close Kettle. A write to a pipe nobody reads raises SIGPIPE on the
+  whole process there, so blocking it on the writing thread did not help; the
+  pipe is now marked to fail the write quietly instead.
 - On Linux, a video poster that tumbler (Xfce's thumbnailer) cached is used:
   it records the file's modification time with a fraction of a second, which
   Kettle read as stale. A different time or file still does not match.
