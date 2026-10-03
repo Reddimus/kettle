@@ -1,6 +1,9 @@
 # Neutral Latin American Spanish. Model-drafted first drafts: a fluent
 # reviewer must accept them before Spanish can be selected.
 
+settings_a11y_dialog = "Configuración, {category}"
+settings_a11y_fields = "Campos de configuración"
+settings_a11y_title = "Configuración"
 settings_active_gpu = "GPU activa: {name} ({kind}, {backend})"
 settings_active_gpu_initializing = "GPU activa: iniciando"
 settings_category_appearance = "Apariencia"

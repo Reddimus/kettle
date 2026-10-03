@@ -758,6 +758,7 @@ fn push_picker_accessibility(
 fn modal_accessibility_projection(
     overlay: &Overlay,
     surface: (f32, f32),
+    tr: &kettle_i18n::Translator,
 ) -> ModalAccessibilityProjection {
     let full_bounds = accesskit::Rect::new(0.0, 0.0, f64::from(surface.0), f64::from(surface.1));
     let mut projection = ModalAccessibilityProjection {
@@ -878,16 +879,14 @@ fn modal_accessibility_projection(
             projection.nodes.push((id, node));
         }
         let mut list = Node::new(Role::ListBox);
-        list.set_label("Settings fields");
+        list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
         list.set_children(children.clone());
         projection.nodes.push((list_id, list));
-        let category = settings
-            .categories
-            .get(settings.active_category)
-            .map(String::as_str)
-            .unwrap_or("Settings");
         let mut dialog = Node::new(Role::Dialog);
-        dialog.set_label(format!("Settings, {category}"));
+        dialog.set_label(match settings.categories.get(settings.active_category) {
+            Some(category) => tr.settings_a11y_dialog(category),
+            None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
+        });
         dialog.set_children([list_id]);
         dialog.set_bounds(full_bounds);
         projection.roots.push(container_id);
@@ -19370,6 +19369,7 @@ impl App {
         let modal_projection = modal_accessibility_projection(
             &diagnostic_overlay,
             (surface.0 as f32, surface.1 as f32),
+            &self.ui_text,
         );
         let accessibility = modal_name.map(|modal| {
             let focused = modal_projection.focus.and_then(|focus| {
@@ -26390,7 +26390,7 @@ impl App {
                 })
             })
             .unwrap_or((800.0, 600.0));
-        let modal = modal_accessibility_projection(overlay, surface);
+        let modal = modal_accessibility_projection(overlay, surface, &self.ui_text);
         let modal_focus = modal.focus;
         children.extend(modal.roots);
         nodes.extend(modal.nodes);
@@ -34808,7 +34808,11 @@ mod tests {
             ..kettle_render::Overlay::default()
         };
 
-        let projection = super::modal_accessibility_projection(&overlay, (800.0, 600.0));
+        let projection = super::modal_accessibility_projection(
+            &overlay,
+            (800.0, 600.0),
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        );
         let dialog = projection
             .nodes
             .iter()
@@ -45564,7 +45568,9 @@ mod keyboard_selection_tests {
 
 #[cfg(test)]
 mod settings_footer_text_tests {
-    use super::{gpu_kind_text, settings_footer_note, settings_hints};
+    use super::{
+        gpu_kind_text, modal_accessibility_projection, settings_footer_note, settings_hints,
+    };
     use kettle_i18n::{Language, Translator};
 
     const EN: Translator = Translator::new(Language::En);
@@ -45583,6 +45589,48 @@ mod settings_footer_text_tests {
         assert_eq!(
             settings_hints(&ES, false),
             "↑↓ campo    ←→ cambiar    Tab categoría    Esc cerrar"
+        );
+    }
+
+    /// Screen readers name the Settings dialog and its field list in the UI's
+    /// language.
+    #[test]
+    fn settings_accessibility_names_follow_the_ui_language() {
+        let overlay = |categories: Vec<String>| kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories,
+                label_cols: 10,
+                value_cols: 10,
+                active_category: 0,
+                rows: Vec::new(),
+                focused_row: 0,
+                title: String::new(),
+                hints: String::new(),
+                footer_note: None,
+            }),
+            ..kettle_render::Overlay::default()
+        };
+        let labels = |overlay: &kettle_render::Overlay, tr: &Translator| {
+            let projection = modal_accessibility_projection(overlay, (800.0, 600.0), tr);
+            let mut labels: Vec<String> = projection
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| node.label().map(str::to_string))
+                .collect();
+            labels.sort();
+            labels
+        };
+        assert_eq!(
+            labels(&overlay(vec!["Tabs".into()]), &EN),
+            ["Settings fields", "Settings, Tabs"]
+        );
+        assert_eq!(
+            labels(&overlay(vec!["Pestañas".into()]), &ES),
+            ["Campos de configuración", "Configuración, Pestañas"]
+        );
+        assert_eq!(
+            labels(&overlay(Vec::new()), &ES),
+            ["Campos de configuración", "Configuración"]
         );
     }
 

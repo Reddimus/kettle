@@ -35,8 +35,9 @@ fn shipping_inputs_generate_every_api() {
         code.contains("pub fn settings_active_gpu(&self, name: &str, kind: &str, backend: &str)")
     );
     assert!(code.contains("pub fn settings_value_not_detected(&self, name: &str)"));
+    assert!(code.contains("pub fn settings_a11y_dialog(&self, category: &str)"));
     // `text` plus one method per message with arguments.
-    assert_eq!(code.matches("pub fn ").count(), 4);
+    assert_eq!(code.matches("pub fn ").count(), 5);
 }
 
 #[test]

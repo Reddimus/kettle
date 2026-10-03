@@ -1,6 +1,16 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.settings_a11y_dialog]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog. category is a translated category name."
+args = [{ name = "category", type = "str" }]
+
+[messages.settings_a11y_fields]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the list of Settings rows."
+
+[messages.settings_a11y_title]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known."
+
 [messages.settings_active_gpu]
 context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."
 args = [{ name = "name", type = "str" }, { name = "kind", type = "str" }, { name = "backend", type = "str" }]

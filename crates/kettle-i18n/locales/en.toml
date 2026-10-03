@@ -1,5 +1,8 @@
 # English reference text. Every key in schema.toml, nothing else.
 
+settings_a11y_dialog = "Settings, {category}"
+settings_a11y_fields = "Settings fields"
+settings_a11y_title = "Settings"
 settings_active_gpu = "Active GPU: {name} ({kind}, {backend})"
 settings_active_gpu_initializing = "Active GPU: Initializing"
 settings_category_appearance = "Appearance"
