@@ -51,6 +51,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A path that begins inside a longer token is no longer a link or a
+  quick-select target: `foo(1)/bar.png` held a clickable `/bar.png`, which
+  opened an unrelated file. Paths after a space, a bracket, `=`, or a list,
+  chain or redirect separator (`PATH=/a:/b`, `&&/usr/bin/x`, `>/tmp/out`) are
+  unchanged.
 - Quick-select hints and double-click selection take a relative path whole:
   `out/diagram.png`, not `/diagram.png`, which named a different file. A
   drive-letter path (`C:/out/diagram.png`) is taken whole too, and an IPv4

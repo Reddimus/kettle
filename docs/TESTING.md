@@ -1377,7 +1377,11 @@ restores the first, a typed name previews and Enter keeps it in the config
 file, the Settings Theme row opens it over a hidden panel that Esc brings
 back, and the right-click menu shows "Theme…".
 
-Quick-select hints (kettle-core `hints`) take a relative path whole from its
+A path cannot start inside a longer token, for links and hints alike
+(`path_may_start_after`): `foo(1)/bar.png` and `x]/etc/hosts` hold no path,
+while paths after a space, a bracket, `=`, or a list, chain or redirect
+separator (`PATH=/usr/bin:/bin`, `>/tmp/out.log`, `a|/usr/bin/sort`,
+`true&&/usr/bin/printf`) stay. Quick-select hints (kettle-core `hints`) take a relative path whole from its
 first segment (`out/diagram.png`, `./`, `../`, `~/`, `C:/`, Unicode segments),
 keep a URL's path inside the URL, trim trailing punctuation and leave
 `10.0.0.1/24` an address; double-click smart selection follows the same spans.

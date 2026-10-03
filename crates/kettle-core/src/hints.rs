@@ -95,6 +95,17 @@ fn is_cidr(text: &str) -> bool {
         && prefix.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Whether a path may start right after `before`: the line's start, a space,
+/// an opening delimiter, `=` (`--out=dir/x`), or the separators that list,
+/// chain or redirect paths (`:` in `PATH=/a:/b`, `,`, `;`, `&`, `<`, `>`,
+/// `|`). Anything
+/// else means the match begins inside a longer token, as `/bar.png` does in
+/// `foo(1)/bar.png`, and is not a path at all. Opening a path asks more of
+/// it (see [`HintSpan::bounded`]).
+pub(crate) fn path_may_start_after(before: Option<char>) -> bool {
+    before.is_none_or(|c| c.is_whitespace() || "\"'`*([{<=:,;&>|".contains(c))
+}
+
 /// Whether a match starting after `before` and followed by `rest` meets a
 /// boundary on both sides (see [`HintSpan::bounded`]).
 ///
@@ -184,10 +195,13 @@ fn detect_line(row: usize, line: &str, col_of_byte: &[usize], out: &mut Vec<Hint
         for m in re.find_iter(line) {
             let raw = m.as_str();
             let trimmed = trim_trailing(raw);
-            if trimmed.is_empty() || (*kind == Kind::Path && is_cidr(trimmed)) {
+            let before = line[..m.start()].chars().next_back();
+            if trimmed.is_empty()
+                || (*kind == Kind::Path && (is_cidr(trimmed) || !path_may_start_after(before)))
+            {
                 continue;
             }
-            let bounded = is_bounded(line[..m.start()].chars().next_back(), &line[m.end()..]);
+            let bounded = is_bounded(before, &line[m.end()..]);
             let (bs, be) = (m.start(), m.start() + trimmed.len());
             if taken.iter().any(|&(s, e)| bs < e && be > s) {
                 continue;
@@ -391,6 +405,37 @@ mod tests {
         assert_eq!(paths("note:/srv/x"), [(5, "/srv/x".to_string())]);
     }
 
+    /// A path cannot begin inside a longer token: `foo(1)/bar.png` holds no
+    /// `/bar.png`, which would name an unrelated absolute file. Ordinary paths
+    /// after a space, a delimiter, `=` or a list or redirect separator stay.
+    #[test]
+    fn a_path_cannot_start_inside_a_token() {
+        let paths = |line: &str| {
+            detect(&[line])
+                .into_iter()
+                .filter(|span| span.kind == Kind::Path)
+                .map(|span| span.text)
+                .collect::<Vec<_>>()
+        };
+        for line in ["foo(1)/bar.png", "x]/etc/hosts", "50%/tmp/x", "a#/b/c"] {
+            assert!(paths(line).is_empty(), "{line}: {:?}", paths(line));
+        }
+        for (line, path) in [
+            ("open /etc/hosts", "/etc/hosts"),
+            ("(/etc/hosts)", "/etc/hosts"),
+            ("--out=/tmp/x.png", "/tmp/x.png"),
+            ("cmd >/tmp/out.log", "/tmp/out.log"),
+            ("cmd </tmp/in.txt", "/tmp/in.txt"),
+            ("a|/usr/bin/sort", "/usr/bin/sort"),
+            ("true&&/usr/bin/printf", "/usr/bin/printf"),
+            ("sleep 1&/usr/bin/true", "/usr/bin/true"),
+            ("x,/srv/a", "/srv/a"),
+        ] {
+            assert_eq!(paths(line), [path], "{line}");
+        }
+        assert_eq!(paths("PATH=/usr/bin:/bin"), ["/usr/bin", "/bin"]);
+    }
+
     /// An address with a prefix length stays an address: before this pattern
     /// anchored at the first segment, `10.0.0.1/24` left the IP selectable.
     #[test]
@@ -467,7 +512,6 @@ mod tests {
         for (line, text) in [
             ("open out/report#1.pdf", "out/report"),
             ("open out/50%/a.png", "out/50"),
-            ("foo(1)/bar.png", "/bar.png"),
             ("user@host:dir/file.txt", "dir/file.txt"),
             ("out/a.png?raw=1", "out/a.png"),
             ("out/report,1.pdf", "out/report"),
