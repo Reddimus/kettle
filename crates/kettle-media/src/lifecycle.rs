@@ -429,6 +429,10 @@ impl<'a> Running<'a> {
         // replied must not hold more than its share on its way out.
         let until = Instant::now() + self.budgets.cleanup;
         loop {
+            // A measurement may have just seen it exit.
+            if let Some(exit) = self.own_exit() {
+                return Stopped::Exited(exit);
+            }
             let Some(process) = self.process.as_mut() else {
                 return Stopped::Killed;
             };
@@ -690,6 +694,9 @@ mod tests {
         footprint: Option<u64>,
         /// How long after closing stdout it exits.
         exit_delay: Duration,
+        /// Whether it exits just as its memory is measured, so the
+        /// measurement fails.
+        exits_when_measured: bool,
     }
 
     impl Script {
@@ -703,6 +710,7 @@ mod tests {
                 exits_at_kill: false,
                 footprint: Some(1024 * 1024),
                 exit_delay: Duration::ZERO,
+                exits_when_measured: false,
             }
         }
         fn silent() -> Self {
@@ -715,6 +723,7 @@ mod tests {
                 exits_at_kill: false,
                 footprint: Some(1024 * 1024),
                 exit_delay: Duration::ZERO,
+                exits_when_measured: false,
             }
         }
         /// Writes `output` and exits with `exit`, leaving stdout open.
@@ -738,6 +747,7 @@ mod tests {
         reaped: Arc<AtomicUsize>,
         exits_at_kill: bool,
         footprint: Option<u64>,
+        exits_when_measured: bool,
     }
 
     impl FakeProcess {
@@ -769,6 +779,10 @@ mod tests {
             Ok(exit)
         }
         fn footprint(&mut self) -> std::io::Result<u64> {
+            if self.exits_when_measured {
+                *self.done.lock().unwrap() = true;
+                return Err(std::io::Error::other("it exited as it was measured"));
+            }
             self.footprint
                 .ok_or_else(|| std::io::Error::other("cannot measure"))
         }
@@ -893,6 +907,7 @@ mod tests {
                     reaped: Arc::clone(&self.reaped),
                     exits_at_kill: script.exits_at_kill,
                     footprint: script.footprint,
+                    exits_when_measured: script.exits_when_measured,
                 }),
                 stdin: Box::new(CheckedStdin {
                     inner: stdin_writer,
@@ -1293,6 +1308,19 @@ mod tests {
             client(&fake).render(&job(1)),
             Err(FailureCode::RenderResource)
         );
+    }
+
+    #[test]
+    fn an_exit_seen_while_measuring_keeps_the_reply() {
+        // After a complete reply, the worker exits 0 just as a measurement
+        // runs, so the measurement fails but sees the exit: the reply stands.
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            exit_delay: Duration::from_secs(10),
+            exits_when_measured: true,
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        assert_eq!(client(&fake).render(&job(1)), Ok(rendered()));
     }
 
     #[test]
