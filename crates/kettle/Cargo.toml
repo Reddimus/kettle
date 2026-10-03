@@ -45,6 +45,9 @@ crossbeam-channel = "0.5.15"
 kettle-ctl.workspace = true
 # The startup update-recovery notice's title.
 kettle-i18n.workspace = true
+# The media worker client the GUI is started with; `media_platform` gives it
+# the worker's install path and checks.
+kettle-media.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
 kettle-update.workspace = true

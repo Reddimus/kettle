@@ -105,6 +105,7 @@ mod ctl_cli;
 // native agent tools (run a command, drive a running kettle).
 mod mcp;
 mod mcp_tools;
+mod media_platform;
 mod update_cli;
 
 /// Version string shown by `kettle --version`. Concatenates the
@@ -1805,7 +1806,30 @@ fn main() -> anyhow::Result<()> {
         // truthy value enables raw keystroke (password) capture; `=0`,
         // `=false`, and empty leave it off.
         record_raw_input,
+        media: media_client().map(std::sync::Arc::new),
     })
+}
+
+/// This build's identity as its media worker must report it: the crate
+/// version and the source hash, never the git commit.
+fn media_build_id() -> Result<kettle_media::BuildId, kettle_media::ValidationError> {
+    kettle_media::BuildId::from_embedded(env!("CARGO_PKG_VERSION"), env!("KETTLE_SOURCE_HASH"))
+}
+
+/// The GUI's media worker client: the worker installed beside this
+/// executable, recorded now, before anything can rename it. Nothing is
+/// checked until something asks.
+fn media_client() -> Option<kettle_media::client::WorkerClient> {
+    match media_build_id() {
+        Ok(build_id) => Some(kettle_media::client::WorkerClient::new(
+            build_id,
+            Box::new(media_platform::InstalledWorker::capture()),
+        )),
+        Err(error) => {
+            log::warn!("media previews unavailable: {error}");
+            None
+        }
+    }
 }
 
 /// Default remote-command file path. Lives under the
@@ -2615,9 +2639,25 @@ mod tests {
     use super::{
         Cli, DefaultConfigWrite, append_remote_command, append_remote_command_with_timeout,
         config_path_problem, encode_remote_send_command, extra_check_config_lines,
-        flag_value_problem, format_ssh_hosts, ignores_profile, queue_startup_update_recovery,
-        resolved_config_trust, write_default_config,
+        flag_value_problem, format_ssh_hosts, ignores_profile, media_build_id,
+        queue_startup_update_recovery, resolved_config_trust, write_default_config,
     };
+
+    #[test]
+    fn embedded_build_id_uses_source_hash_not_git_sha() {
+        let id = media_build_id().expect("this build's identity is valid");
+        assert_eq!(id.crate_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(id.source_hash, env!("KETTLE_SOURCE_HASH"));
+        assert_eq!(id.protocol_version, kettle_media::PROTOCOL_VERSION);
+        // The video-preview worker's identity names the same source.
+        assert_eq!(
+            env!("KETTLE_SOURCE_ID"),
+            format!("{} ({})", id.crate_version, id.source_hash)
+        );
+        assert_eq!(id.source_hash.len(), 16);
+        let git = env!("KETTLE_GIT_SHA");
+        assert!(git.is_empty() || !git.contains(id.source_hash.as_str()));
+    }
     use clap::Parser;
 
     #[test]

@@ -18,6 +18,9 @@
 //! `+dirty` marker. The git subprocesses take ~20ms, well under
 //! build-time noise.
 
+#[path = "build_support/source_id.rs"]
+mod source_id;
+
 use std::env;
 use std::path::PathBuf;
 use std::process::Command;
@@ -95,55 +98,13 @@ fn main() {
         None => println!("cargo:rustc-env=KETTLE_GIT_SHA="),
     }
 
-    // `KETTLE_SOURCE_ID` names the source this binary was built from. The
-    // video-preview worker must share it with the GUI that starts it (an
-    // update may have replaced the executable since), because the request
-    // frame between them is defined by the source. It hashes the Rust
-    // sources themselves rather than asking git, so it reads the same in a
-    // checkout, a tarball and a Nix sandbox, staged or not: two builds of
-    // different sources differ, and a rebuild or reinstall of the same
-    // source does not.
+    // `KETTLE_SOURCE_ID` names the source this binary was built from, and
+    // `KETTLE_SOURCE_HASH` is its hex hash alone. A worker built beside this
+    // binary must share it with the GUI that starts it (an update may have
+    // replaced an executable since), because the frames between them are
+    // defined by the source. See `build_support/source_id.rs`.
     let version = env::var("CARGO_PKG_VERSION").unwrap_or_default();
-    println!(
-        "cargo:rustc-env=KETTLE_SOURCE_ID={version} ({:016x})",
-        source_hash(&repo_root)
-    );
-}
-
-/// A hash of the workspace's Rust sources: every file under `crates/`
-/// (through symlinks), and the workspace `Cargo.toml` and `Cargo.lock`, by
-/// path and contents, in path order. About 9 MB, read in a few tens of
-/// milliseconds.
-fn source_hash(repo_root: &std::path::Path) -> u64 {
-    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-    // Symlinks are followed, so a linked source counts by what it holds;
-    // the depth bound stops a link loop.
-    fn collect(dir: &std::path::Path, depth: usize, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            match std::fs::metadata(&path) {
-                Ok(kind) if kind.is_dir() && depth < 32 => collect(&path, depth + 1, out),
-                Ok(kind) if kind.is_file() => out.push(path),
-                _ => {}
-            }
-        }
-    }
-    let mut files = Vec::new();
-    collect(&repo_root.join("crates"), 0, &mut files);
-    files.sort();
-    files.push(repo_root.join("Cargo.toml"));
-    files.push(repo_root.join("Cargo.lock"));
-    let mut hasher = DefaultHasher::new();
-    for file in &files {
-        if let Ok(bytes) = std::fs::read(file) {
-            file.strip_prefix(repo_root)
-                .unwrap_or(file)
-                .hash(&mut hasher);
-            bytes.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
+    let hash = format!("{:016x}", source_id::source_hash(&repo_root));
+    println!("cargo:rustc-env=KETTLE_SOURCE_ID={version} ({hash})");
+    println!("cargo:rustc-env=KETTLE_SOURCE_HASH={hash}");
 }

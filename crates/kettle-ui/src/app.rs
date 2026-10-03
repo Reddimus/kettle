@@ -1494,6 +1494,19 @@ fn ctl_page_values(
     ctl_page_values_with_page(req, key, values, page)
 }
 
+/// `get_state`'s `media` field: whether media previews are available, and a
+/// fixed reason code when they are not. Asking never waits on a check.
+fn ctl_media_state(media: Option<&kettle_media::client::WorkerClient>) -> serde_json::Value {
+    use kettle_media::client::MediaAvailability;
+    match media.map(kettle_media::client::WorkerClient::availability) {
+        None => serde_json::json!({ "availability": "unavailable", "reason": "not_configured" }),
+        Some(MediaAvailability::Checking) => serde_json::json!({ "availability": "checking" }),
+        Some(MediaAvailability::Unavailable(cause)) => {
+            serde_json::json!({ "availability": "unavailable", "reason": cause.code() })
+        }
+    }
+}
+
 fn ctl_page_values_with_page(
     req: &kettle_ctl::protocol::Request,
     key: &str,
@@ -20007,6 +20020,7 @@ impl App {
             "windows": 1 + self.windows.len(),
             "focused_window": self.focused_seq,
             "window_title": self.desired_window_title(ws),
+            "media": ctl_media_state(self.startup.media.as_deref()),
         })
     }
 
@@ -45776,6 +45790,67 @@ mod tests {
             body.contains("\"window_title\": self.desired_window_title(ws),"),
             "get_state must expose the same native title string that sync_window_title sets"
         );
+    }
+
+    #[test]
+    fn get_state_reports_media_availability_without_waiting() {
+        use kettle_media::client::{FileIdentity, UnavailableCause, WorkerClient, WorkerPlatform};
+        use std::path::Path;
+
+        let body = production_source()
+            .split("fn ctl_get_state")
+            .nth(1)
+            .and_then(|s| s.split("fn ctl_list_tabs").next())
+            .expect("ctl_get_state body present")
+            .to_owned();
+        assert!(body.contains("\"media\": ctl_media_state(self.startup.media.as_deref()),"));
+
+        /// No worker is installed. Checking it holds until the test lets go.
+        struct Missing(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
+        impl WorkerPlatform for Missing {
+            fn worker_path(&self) -> Result<&Path, UnavailableCause> {
+                Ok(Path::new("/install/kettle-media-worker"))
+            }
+            fn inspect(&self, _: &Path) -> Result<FileIdentity, UnavailableCause> {
+                let _ = self.0.lock().unwrap().recv();
+                Err(UnavailableCause::WorkerMissing)
+            }
+            fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
+                Err(UnavailableCause::Unverified)
+            }
+        }
+
+        assert_eq!(
+            super::ctl_media_state(None),
+            serde_json::json!({ "availability": "unavailable", "reason": "not_configured" })
+        );
+        let (release, held) = std::sync::mpsc::channel();
+        let client = WorkerClient::new(
+            kettle_media::BuildId::from_embedded("5.0.0", "0123456789abcdef").unwrap(),
+            Box::new(Missing(std::sync::Mutex::new(held))),
+        );
+        // The check is still held: the answer comes back at once.
+        assert_eq!(
+            super::ctl_media_state(Some(&client)),
+            serde_json::json!({ "availability": "checking" })
+        );
+        drop(release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let state = super::ctl_media_state(Some(&client));
+            if state["availability"] != "checking" {
+                assert_eq!(
+                    state,
+                    serde_json::json!({ "availability": "unavailable", "reason": "worker_missing" })
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the check never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     #[test]

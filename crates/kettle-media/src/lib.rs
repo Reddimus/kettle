@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
-//! Bounded media data and deterministic frames. This crate opens no files and spawns no workers.
+//! Bounded media data and deterministic frames. This crate opens no files and spawns no workers:
+//! the [`client`] reaches the filesystem only through a platform its caller supplies.
 //! External requests cannot express GUI-only path authorization. See [`GuiActionWitness`].
 
+pub mod client;
 mod digest;
 pub mod wire;
 pub use digest::content_digest;
@@ -411,6 +413,17 @@ pub struct BuildId {
     pub protocol_version: u16,
 }
 impl BuildId {
+    /// A binary's own identity: `version` is its `CARGO_PKG_VERSION` and
+    /// `source_hash` the `KETTLE_SOURCE_HASH` its build script embedded, never
+    /// a git commit.
+    pub fn from_embedded(version: &str, source_hash: &str) -> Result<Self, ValidationError> {
+        validate_build(version, source_hash)?;
+        Ok(Self {
+            crate_version: version.to_owned(),
+            source_hash: source_hash.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+    }
     pub fn validate(&self) -> Result<(), ValidationError> {
         validate_build(&self.crate_version, &self.source_hash)
     }

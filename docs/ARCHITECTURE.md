@@ -12,6 +12,7 @@ graph TD
     bin["kettle (bin)<br/>CLI · entry · exec/ctl/mcp subcommands"] --> ui
     bin --> ctl
     bin --> update
+    bin --> media
     ui["kettle-ui<br/>winit multi-window app · per-window tab/split mux · input<br/>regex search · SSH launcher · command palette · session<br/>context menu · Preferences submenu · settings overlay (Ctrl+,)"] --> render
     ui --> core
     ui --> cfg
@@ -20,6 +21,7 @@ graph TD
     ui --> state
     ui --> update
     ui --> i18n
+    ui --> media
     i18n["kettle-i18n<br/>typed UI text catalogue · English and Spanish<br/>generated at build time · no runtime parsing"]
     ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
@@ -32,16 +34,26 @@ graph TD
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
-    media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames"]
+    media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
 ```
 
 `kettle-media` defines the media protocol for agent visuals: bounded jobs and
 results, the effective theme, caps, source authorization (an external request
 can only carry an attested path; a GUI user pull needs an explicit action
 witness), the build handshake and the binary frames between the GUI and a
-media worker. It opens no files, starts no process and nothing depends on it
-yet; the worker, its spawn client and the UI join it later in the 5.0 plan.
-The byte layouts, digest framing and decisions are in
+media worker. It opens no files and starts no process. Its `client` answers
+whether media previews are available, from a background check that never
+blocks the caller; the filesystem and signature work comes from a
+`WorkerPlatform` its caller supplies, so the crate keeps its unsafe-code ban.
+The `kettle` binary supplies one (`media_platform`): the worker beside the
+running executable, recorded at startup, never from `PATH` or the working
+directory, with its file checked and, on macOS, its code signature checked
+against Kettle's own requirement. `kettle-ui` receives the configured client
+and reports it in `get_state`. No worker ships yet, so a worker that passes
+every check still reads as unavailable. Kettle and every worker share one
+build identity, the source hash its build script computes
+(`crates/kettle/build_support/source_id.rs`). The byte layouts, digest
+framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 
 `kettle-i18n` holds Kettle-owned UI text. Its build script reads

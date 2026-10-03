@@ -21,6 +21,12 @@ pub use install::{
     write_atomic_file,
 };
 
+/// The Apple Developer team that signs every official macOS build: the app
+/// bundle the updater installs, and the media worker inside it. The release
+/// workflow asserts the same team on the artifact it produces; if that account
+/// ever changes, this constant and `APPLE_TEAM_ID` move together.
+pub const APPLE_TEAM_IDENTIFIER: &str = "D49LMN8545";
+
 /// Stable release feed published as GitHub release assets.
 pub const MANIFEST_URL: &str =
     "https://github.com/Reddimus/kettle/releases/latest/download/kettle-update-manifest.json";

@@ -12,6 +12,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   coming agent visuals: jobs and results, caps, source authorization, the
   build handshake and the binary frames between Kettle and a media worker.
   Nothing uses it yet, so no behaviour changes.
+- `kettle ctl get_state` reports `media`: whether media previews are
+  available, and a fixed reason when not. Kettle looks for its media worker
+  only beside its own executable, never in `PATH` or the working directory,
+  and checks the file and, on macOS, its code signature before trusting it.
+  No worker ships yet, so it reads `worker_missing`. Kettle and its workers
+  now share one build identity, a hash of the source they were built from.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a
