@@ -6014,9 +6014,10 @@ fn theme_preview_change(ws: &mut WindowState, live_name: &str) -> Option<ThemeSt
     }
 }
 
-/// End an input-method composition when the modal that owned it closes. A
-/// late Commit no longer matches the focus generation, so it is dropped
-/// instead of typed into whatever the modal covered.
+/// End an input-method composition when the modal that owned it closes (see
+/// `remember_closing_key`). A late Commit no longer matches the focus
+/// generation, so it is dropped instead of typed into whatever the modal
+/// covered.
 fn end_modal_composition(ws: &mut WindowState) {
     ws.ime_focus_generation = ws.ime_focus_generation.wrapping_add(1);
     if ws.ime_preedit_owner.is_some() {
@@ -20319,6 +20320,7 @@ impl App {
             // Enter, or an action that replaced it). Continuing would type the
             // remaining keys into whatever took its place — including the PTY.
             if open_text_modal(ws) != Some(modal) {
+                end_modal_composition(ws);
                 break;
             }
         }
@@ -23943,7 +23945,6 @@ impl App {
         match key {
             Key::Named(NamedKey::Escape) => {
                 ws.theme_picker_input = None;
-                end_modal_composition(ws);
                 self.reset_blink_phase(ws);
             }
             Key::Named(NamedKey::Backspace) => {
@@ -23970,7 +23971,6 @@ impl App {
             Key::Named(NamedKey::Enter) => {
                 let pick = theme_picker_selection(state);
                 ws.theme_picker_input = None;
-                end_modal_composition(ws);
                 if let Some(name) = pick {
                     self.commit_theme(ws, name);
                 }
@@ -24856,9 +24856,11 @@ fn top_modal(ws: &WindowState) -> Option<KeyModal> {
 /// in, so its auto-repeats are dropped (`drop_closing_key_repeat`) instead of
 /// reaching whatever the modal uncovered: the terminal, the parent Settings
 /// under a closed text field, or the layout picker the palette just opened.
+/// The modal's input-method composition ends with it, for the same reason.
 fn remember_closing_key(ws: &mut WindowState, key_modal: Option<KeyModal>, key: PhysicalKey) {
     if top_modal(ws) != key_modal {
         ws.closing_keys.insert(key);
+        end_modal_composition(ws);
     }
 }
 
@@ -39591,15 +39593,30 @@ mod tests {
         let owner = top_modal(&ws);
         assert_eq!(owner, Some(KeyModal::Palette));
 
-        // Typing keeps the palette open: nothing to drop.
+        // An input-method composition is under way in the palette.
+        ws.ime_preedit = Some(("ka".into(), None));
+        ws.ime_preedit_owner = Some(crate::window_state::ImePreeditSession {
+            owner: crate::window_state::ImePreeditOwner::Other,
+            generation: ws.ime_focus_generation,
+        });
+        let generation = ws.ime_focus_generation;
+
+        // Typing keeps the palette open: nothing to drop, and the composition
+        // goes on.
         remember_closing_key(&mut ws, owner, enter);
         assert!(ws.closing_keys.is_empty());
+        assert_eq!(ws.ime_focus_generation, generation);
+        assert!(ws.ime_preedit.is_some());
 
-        // Enter runs "Open layout picker": the palette is replaced.
+        // Enter runs "Open layout picker": the palette is replaced, and its
+        // composition ends so a late Commit cannot type into the picker.
         ws.palette_input = None;
         ws.layout_picker_input = Some((String::new(), 0));
         remember_closing_key(&mut ws, owner, enter);
         assert!(ws.closing_keys.contains(&enter));
+        assert_ne!(ws.ime_focus_generation, generation);
+        assert!(ws.ime_preedit.is_none());
+        assert!(ws.ime_preedit_owner.is_some(), "the owner marker stays");
         assert!(
             drop_closing_key_repeat(&mut ws.closing_keys, enter, ElementState::Pressed, true),
             "the repeat must not reach the layout picker"
@@ -46670,10 +46687,10 @@ mod theme_picker_tests {
         assert!(theme_preview_change(&mut ws, &kept).is_none());
     }
 
-    /// A composition the picker owned ends when it closes, so a late Commit
-    /// cannot type into the terminal; the owner marker stays to recognise it.
+    /// A composition a closing modal owned ends, so a late Commit cannot type
+    /// into what it covered; the owner marker stays to recognise it.
     #[test]
-    fn closing_the_picker_ends_its_composition() {
+    fn closing_a_modal_ends_its_composition() {
         let mut ws = WindowState::new(0, false, Mux::new());
         ws.ime_preedit = Some(("ka".into(), None));
         ws.ime_preedit_owner = Some(ImePreeditSession {
@@ -46686,26 +46703,21 @@ mod theme_picker_tests {
         assert!(ws.ime_preedit.is_none());
         assert!(ws.ime_preedit_owner.is_some());
 
+        // Every key that closes a modal ends its composition there, on the
+        // real keyboard path and on the control plane's.
         let src = production_source();
-        let handler = src
-            .split("fn theme_picker_key(")
+        let remember = src
+            .split("fn remember_closing_key(")
             .nth(1)
-            .and_then(|body| body.split("\n    fn ").next())
-            .expect("theme picker key handler");
-        for arm in [
-            "Key::Named(NamedKey::Escape) =>",
-            "Key::Named(NamedKey::Enter) =>",
-        ] {
-            let body = handler
-                .split(arm)
-                .nth(1)
-                .and_then(|rest| rest.split("Key::").next())
-                .unwrap_or_else(|| panic!("{arm} arm"));
-            assert!(
-                body.contains("end_modal_composition(ws);"),
-                "{arm} closes the picker, so it must end its composition"
-            );
-        }
+            .and_then(|body| body.split("\n}").next())
+            .expect("remember_closing_key");
+        assert!(remember.contains("end_modal_composition(ws);"));
+        let dispatch = src
+            .split("if open_text_modal(ws) != Some(modal) {")
+            .nth(1)
+            .and_then(|body| body.split("break;").next())
+            .expect("the control plane stops when its modal closes");
+        assert!(dispatch.contains("end_modal_composition(ws);"));
         // Holding the Enter that opened the picker from Settings must not
         // pick a theme: its repeats are gated like the palette's.
         let branch = src

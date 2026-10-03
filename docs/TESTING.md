@@ -1337,13 +1337,14 @@ narrowed list. The preview lifecycle runs on a bare `WindowState`: a step
 previews the next theme, reopening over a running preview opens on and ticks
 the theme from before it, an unmatched query shows the opening theme and keeps
 it as the baseline even when something else changes the theme, Esc restores
-it once, and a kept theme stays. Closing the picker ends its input-method
-composition, and screen readers hear each row's appearance and the opening
-theme's tick in English and Spanish. Source guards keep the picker ahead of
-every Settings branch in the key handler and the control plane's modal order,
-gate its auto-repeat like the palette's, record its closing key, end its
-composition on Esc and Enter, suppress its bar under a confirm dialog, and
-close it with every other modal. Only the Settings Theme row opens it. `just theme-picker-smoke` drives the
+it once, and a kept theme stays. Screen readers hear each row's appearance
+and the opening theme's tick in English and Spanish. A key that closes or
+replaces any modal ends its input-method composition (the closing-key test
+drives it on a bare `WindowState`), on the keyboard path and, by source guard,
+on the control plane's. Source guards keep the picker ahead of every Settings
+branch in the key handler and the control plane's modal order, gate its
+auto-repeat like the palette's, record its closing key, suppress its bar under
+a confirm dialog, and close it with every other modal. Only the Settings Theme row opens it. `just theme-picker-smoke` drives the
 picker live: it opens on the current theme, Down previews the next theme, Esc
 restores the first, a typed name previews and Enter keeps it in the config
 file, the Settings Theme row opens it over a hidden panel that Esc brings
