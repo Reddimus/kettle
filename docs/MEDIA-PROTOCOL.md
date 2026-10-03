@@ -269,7 +269,8 @@ measured, so a pid reused in between is not counted and a remembered one that
 has exited is forgotten.
 The sum may count shared pages twice, which errs toward stopping the job. Above
 768 MiB the worker's group is killed: `RenderResource`, never retried, before
-Ready or after. A live worker that cannot be measured, or a tree of more than
+Ready, after it, or while a worker that has replied is exiting (a reply does
+not excuse memory held on the way out). A live worker that cannot be measured, or a tree of more than
 64 processes, fails the job closed (`WorkerUnavailable`) rather than count as
 nothing; one that exited as it was measured does not. Sampling is protection,
 not proof: an allocation can cross the limit briefly between samples.

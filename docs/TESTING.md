@@ -801,8 +801,9 @@ passes is `RestartRequired`, not retried; one that crashes as the reply
 deadline passes is `RenderResource`; the
 writer guards its pipe writes before the first one; a footprint over the
 limit kills the worker before Ready or after it, never retried, while one at
-the limit for a whole deadline does not; a footprint that cannot be measured
-fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
+the limit for a whole deadline does not; a worker over the limit while it
+exits after a complete reply is `RenderResource`, not a success; a footprint
+that cannot be measured fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -1808,7 +1809,8 @@ stuck-limit recheck in the start, a footprint never enforced or never
 sampled, the limit itself refused, an unmeasurable worker read as fine,
 descendants not walked, the group not listed (macOS) or scanned (Linux),
 reused pids counted, `stat` read as text, stale candidates counted or not
-forgotten, and a rescan that is never faster each fail a test above.
+forgotten, a rescan that is never faster, and no sampling while a replying
+worker exits each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

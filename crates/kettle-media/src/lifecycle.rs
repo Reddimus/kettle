@@ -92,6 +92,9 @@ enum Stopped {
     /// It was killed and would not exit: it is kept for later reaping and
     /// counted.
     Stuck,
+    /// It held more memory than allowed while it was meant to be exiting,
+    /// and was killed.
+    OverFootprint,
 }
 
 pub(crate) fn attempt(
@@ -138,7 +141,7 @@ pub(crate) fn attempt(
             return match worker.kill() {
                 Stopped::Exited(exit) => Ok(Err(exit_failure(exit))),
                 Stopped::Stuck => Ok(Err(FailureCode::RenderTimeout)),
-                Stopped::Killed => Err(NeverReady),
+                Stopped::Killed | Stopped::OverFootprint => Err(NeverReady),
             };
         }
         Ok(Event::First(Ok(Some(Frame::Ready(ready))), _)) => {
@@ -157,6 +160,7 @@ pub(crate) fn attempt(
             return Ok(Err(match worker.stop() {
                 Stopped::Exited(WorkerExit::Code(_)) => code,
                 Stopped::Exited(exit) => exit_failure(exit),
+                Stopped::OverFootprint => FailureCode::RenderResource,
                 Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
             }));
         }
@@ -185,6 +189,7 @@ pub(crate) fn attempt(
                 // It ended by itself just as the deadline passed: its exit
                 // says why.
                 Stopped::Exited(exit) => Err(exit_failure(exit)),
+                Stopped::OverFootprint => Err(FailureCode::RenderResource),
                 Stopped::Killed | Stopped::Stuck => Err(FailureCode::RenderTimeout),
             },
         },
@@ -192,11 +197,13 @@ pub(crate) fn attempt(
             Stopped::Exited(WorkerExit::Code(0)) if rendered.validate().is_ok() => Ok(rendered),
             Stopped::Exited(WorkerExit::Code(0)) => Err(FailureCode::WorkerUnavailable),
             Stopped::Exited(exit) => Err(exit_failure(exit)),
+            Stopped::OverFootprint => Err(FailureCode::RenderResource),
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
         Ok(Event::Reply(Ok(Some(Frame::Failure(failure))), true)) => match worker.stop() {
             Stopped::Exited(WorkerExit::Code(0)) => Err(refusal(failure.code)),
             Stopped::Exited(exit) => Err(exit_failure(exit)),
+            Stopped::OverFootprint => Err(FailureCode::RenderResource),
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
         Err(Wait::OverFootprint) => {
@@ -418,13 +425,38 @@ impl<'a> Running<'a> {
         if let Some(exit) = self.own_exit() {
             return Stopped::Exited(exit);
         }
-        let Some(process) = self.process.as_mut() else {
-            return Stopped::Killed;
-        };
-        if let Some(exit) = poll(process.as_mut(), self.budgets.cleanup) {
-            self.process = None;
-            self.exited = Some((exit, Instant::now()));
-            return Stopped::Exited(exit);
+        // Waiting for the exit, the memory limit still holds: a worker that
+        // replied must not hold more than its share on its way out.
+        let until = Instant::now() + self.budgets.cleanup;
+        loop {
+            let Some(process) = self.process.as_mut() else {
+                return Stopped::Killed;
+            };
+            match process.try_wait() {
+                Ok(Some(exit)) => {
+                    self.process = None;
+                    self.exited = Some((exit, Instant::now()));
+                    return Stopped::Exited(exit);
+                }
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            let now = Instant::now();
+            if now >= self.next_sample {
+                match self.measure() {
+                    Err(Wait::OverFootprint) => {
+                        self.kill();
+                        return Stopped::OverFootprint;
+                    }
+                    Err(_) => break,
+                    Ok(()) => {}
+                }
+                self.next_sample = Instant::now() + TICK;
+            }
+            if Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
         self.kill()
     }
@@ -434,6 +466,7 @@ impl<'a> Running<'a> {
     fn stop_failure(&mut self) -> FailureCode {
         match self.stop() {
             Stopped::Exited(exit) => exit_failure(exit),
+            Stopped::OverFootprint => FailureCode::RenderResource,
             Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
         }
     }
@@ -655,6 +688,8 @@ mod tests {
         exits_at_kill: bool,
         /// What measuring its memory says: bytes, or `None` for an error.
         footprint: Option<u64>,
+        /// How long after closing stdout it exits.
+        exit_delay: Duration,
     }
 
     impl Script {
@@ -667,6 +702,7 @@ mod tests {
                 exits_holding_stdout: false,
                 exits_at_kill: false,
                 footprint: Some(1024 * 1024),
+                exit_delay: Duration::ZERO,
             }
         }
         fn silent() -> Self {
@@ -678,6 +714,7 @@ mod tests {
                 exits_holding_stdout: false,
                 exits_at_kill: false,
                 footprint: Some(1024 * 1024),
+                exit_delay: Duration::ZERO,
             }
         }
         /// Writes `output` and exits with `exit`, leaving stdout open.
@@ -887,6 +924,7 @@ mod tests {
             });
             if script.closes {
                 drop(stdout);
+                std::thread::sleep(script.exit_delay);
                 *done.lock().unwrap() = true;
             } else {
                 if script.exits_holding_stdout {
@@ -1238,6 +1276,22 @@ mod tests {
         assert_eq!(
             client(&fake).render(&job(1)),
             Err(FailureCode::RenderTimeout)
+        );
+    }
+
+    #[test]
+    fn the_limit_holds_while_a_replying_worker_exits() {
+        // A full reply and a clean end, then over the limit on its way out
+        // before exiting 0 inside the cleanup budget: not a success.
+        let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
+        let fake = Fake::new(vec![Script {
+            footprint: Some(FAST.footprint_limit + 1),
+            exit_delay: FAST.cleanup * 4 / 5,
+            ..Script::replies(output, WorkerExit::Code(0))
+        }]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RenderResource)
         );
     }
 
