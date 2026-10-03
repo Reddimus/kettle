@@ -944,6 +944,12 @@ color-scheme-smoke:
 theme-picker-smoke:
     python3 scripts/check-live-ui-smoke.py --cargo-release theme-picker
 
+# Prove a Shift-picked path hint opens straight from a local pane but asks
+# first behind tmux (a private tmux server, killed afterwards). The path names
+# a missing file, so nothing opens either way.
+remote-links-smoke:
+    python3 scripts/check-live-ui-smoke.py --cargo-release remote-links
+
 # Prove a default chord a program also uses goes to the program while it owns
 # the keyboard: a byte recorder takes kitty flags and the alternate screen in a
 # split, Shift+Left reaches it as ESC [1;2D (a real key press on macOS) without

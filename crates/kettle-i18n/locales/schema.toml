@@ -45,6 +45,9 @@ context = "crates/kettle-ui/src/app.rs: Confirmation button that closes the dial
 [messages.confirm_button_close]
 context = "crates/kettle-ui/src/app.rs: Destructive confirmation button for closing panes."
 
+[messages.confirm_button_open]
+context = "crates/kettle-ui/src/app.rs open_pane_link: the confirm button that opens the file. An infinitive in Spanish."
+
 [messages.confirm_button_paste]
 context = "crates/kettle-ui/src/app.rs: Confirmation button for a paste."
 
@@ -63,6 +66,10 @@ plural = "count"
 context = "crates/kettle-ui/src/app.rs: confirmation before closing a window. count is the number of panes in that window."
 args = [{ name = "count", type = "u64" }]
 plural = "count"
+
+[messages.confirm_open_local_file]
+context = "crates/kettle-ui/src/app.rs open_pane_link: confirmation before opening a local file from a clicked terminal link in a pane running a terminal multiplexer, which may be connected to another machine. name is the file name (at most 25 characters), program is the multiplexer's name (tmux, screen, zellij), never translated. One line with the Cancel and Open buttons in an 80-column window: at most 58 columns with the longest name."
+args = [{ name = "name", type = "str" }, { name = "program", type = "str" }]
 
 [messages.confirm_paste]
 context = "crates/kettle-ui/src/app.rs paste_confirm_prompt: confirmation before pasting text that a shell would run line by line."
@@ -330,6 +337,10 @@ args = [{ name = "error", type = "str" }]
 [messages.notify_body_recording_write_failed]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
+[messages.notify_body_remote_file_not_opened]
+context = "crates/kettle-ui/src/app.rs open_pane_link: desktop notification body. name is the file name, shown verbatim."
+args = [{ name = "name", type = "str" }]
+
 [messages.notify_body_remote_not_delivered]
 context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
 args = [{ name = "pane", type = "u64" }]
@@ -415,6 +426,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 
 [messages.notify_title_recording_stopped]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_remote_file_not_opened]
+context = "crates/kettle-ui/src/app.rs open_pane_link: desktop notification title when a clicked terminal link names a file in a pane connected to another machine. kettle is the product name, kept lowercase."
 
 [messages.notify_title_remote_not_delivered]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."

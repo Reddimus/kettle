@@ -19186,6 +19186,131 @@ def run_theme_picker(kettle: str, root: Path) -> Path:
     return out
 
 
+def run_remote_links(kettle: str, root: Path) -> Path:
+    """A Shift-picked path hint opens straight from a local pane but asks first
+    behind tmux, whose server may be on another machine.
+
+    The path names a missing file, so nothing opens either way: what differs
+    is whether the confirmation comes up. tmux runs on a private server socket
+    that the smoke kills when it finishes, never the owner's server.
+    """
+    out = root / f"remote-links-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = out / "config"
+    cfg.write_text(
+        "\n".join(["agent-server = full", "restore-session = false", "update-check = false"])
+        + "\n"
+    )
+    missing = f"/tmp/kettle-links-smoke-{os.getpid()}/nothing.txt"
+    tmux = shutil.which("tmux")
+    # A bare shell with a fixed prompt, so the only path on screen is ours.
+    def plain_shell(term: str) -> str:
+        return f"env -i PATH=/usr/bin:/bin TERM={term} PS1='$ ' /bin/sh"
+
+    show = f"clear; printf '%s\\n' {missing}\n"
+
+    def screen(live: LiveKettle) -> str:
+        return screen_text(live.json_ctl("read_screen"))
+
+    def wait_screen(live: LiveKettle, needle: str, label: str) -> None:
+        deadline = time.monotonic() + 15.0
+        while needle not in screen(live):
+            if time.monotonic() > deadline:
+                (out / f"{label}.screen.txt").write_text(screen(live))
+                raise SystemExit(f"remote-links smoke: never saw {needle!r} ({label})")
+            time.sleep(0.1)
+
+    def geometry(live: LiveKettle, label: str) -> Dict[str, object]:
+        geo = live.json_ctl("ui_geometry")
+        (out / f"{label}.geometry.json").write_text(json.dumps(geo, indent=2) + "\n")
+        return geo
+
+    def shift_pick_path(live: LiveKettle, label: str) -> Dict[str, object]:
+        # Picking with Shift opens a whole path but copies anything else, so
+        # pick only once the missing path is the one target on screen (the
+        # typed command shows it too until `clear` runs); never touch the
+        # clipboard.
+        deadline = time.monotonic() + 15.0
+        while True:
+            lines = [line.strip() for line in screen(live).splitlines() if line.strip()]
+            targets = [line for line in lines if "/" in line]
+            if targets == [missing]:
+                break
+            if time.monotonic() > deadline:
+                (out / f"{label}.screen.txt").write_text(screen(live))
+                raise SystemExit(
+                    f"remote-links smoke: the screen holds other text ({label}): {targets}"
+                )
+            time.sleep(0.1)
+        live.json_ctl("perform_action", {"action": "hint_mode"})
+        time.sleep(0.3)
+        if not modal_open(geometry(live, f"{label}-hints"), "hint_mode"):
+            raise SystemExit(f"remote-links smoke: hint mode did not open ({label})")
+        # The path is the only target on screen, so it carries the first label.
+        live.json_ctl("dispatch_ui_key", {"keys": ["shift+a"]})
+        time.sleep(0.4)
+        return geometry(live, label)
+
+    checked = ["local"]
+    with LiveKettle(kettle, cfg, out / "kettle.log") as live:
+        time.sleep(1.0)
+        live.ctl("send_text", params={"text": plain_shell("xterm-256color") + "\n"})
+        time.sleep(0.5)
+        live.ctl("send_text", params={"text": show})
+        wait_screen(live, missing, "local")
+        geo = shift_pick_path(live, "local")
+        if modal_open(geo, "confirm_dialog") or modal_open(geo, "hint_mode"):
+            raise SystemExit(
+                "remote-links smoke: a local pane asked before opening a path, "
+                "or kept hint mode open"
+            )
+        if tmux is None:
+            print("remote-links smoke: tmux is not installed; checked the local pane only")
+        else:
+            # One explicit socket path for start and cleanup: the shell tmux
+            # starts under has no TMUX_TMPDIR, so a socket name could resolve
+            # to a different directory than the cleanup's.
+            socket_dir = Path(tempfile.mkdtemp(prefix="kettle-links-", dir="/tmp"))
+            socket = socket_dir / "s"
+            try:
+                live.ctl(
+                    "send_text",
+                    params={
+                        "text": f"{tmux} -S {socket} -f /dev/null "
+                        f"new-session -s smoke \"{plain_shell('screen')}\"\n"
+                    },
+                )
+                wait_screen(live, "[smoke]", "tmux")
+                # Kettle samples the foreground program a few times a second.
+                time.sleep(1.5)
+                live.ctl("send_text", params={"text": show})
+                wait_screen(live, missing, "tmux-path")
+                geo = shift_pick_path(live, "tmux")
+                if not modal_open(geo, "confirm_dialog"):
+                    raise SystemExit(
+                        "remote-links smoke: behind tmux, a Shift-picked path opened "
+                        "without asking"
+                    )
+                live.json_ctl("dispatch_ui_key", {"keys": ["escape"]})
+                time.sleep(0.3)
+                if modal_open(geometry(live, "tmux-cancelled"), "confirm_dialog"):
+                    raise SystemExit("remote-links smoke: Esc did not cancel the confirmation")
+                checked.append("tmux")
+            finally:
+                subprocess.run(
+                    [tmux, "-S", str(socket), "kill-server"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
+                # The server can leave its socket file behind; both are ours.
+                shutil.rmtree(socket_dir, ignore_errors=True)
+
+    (out / "analysis.json").write_text(json.dumps({"checked": checked}, indent=2) + "\n")
+    return out
+
+
 def run_program_keys(kettle: str, root: Path) -> Path:
     """A default chord a program also uses goes to a program that owns the
     keyboard, and stays Kettle's otherwise.
@@ -20077,6 +20202,7 @@ def main() -> int:
             "program-keys",
             "color-scheme",
             "theme-picker",
+            "remote-links",
             "steady-uploads",
             "text-presentation",
             "zoom-keybind",
@@ -20234,6 +20360,9 @@ def main() -> int:
     if args.case in ("theme-picker", "all"):
         out = run_theme_picker(args.kettle, root)
         print(f"theme-picker smoke: OK artifacts={out}")
+    if args.case in ("remote-links", "all"):
+        out = run_remote_links(args.kettle, root)
+        print(f"remote-links smoke: OK artifacts={out}")
     if args.case in ("zoom-keybind", "all"):
         out = run_zoom_keybind(args.kettle, root)
         print(f"zoom-keybind smoke: OK artifacts={out}")

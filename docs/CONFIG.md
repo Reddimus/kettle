@@ -607,10 +607,11 @@ inline rename overlay for the OS window / active tab / focused pane).
 spaces), git hashes and IP addresses on screen:
 type a label to open a URL or copy anything else, or hold Shift while typing it
 to copy a URL or open a path in the default app, resolved from that pane's
-directory. A path is copied instead when it may name another machine's file (a
-detected ssh, mosh or container session, or tmux, screen or zellij as the
-pane's foreground program), when the label marks only part of a name, such as
-`out/report` in `out/report#1.pdf`, or when it climbs with `..`. Kettle does
+directory. A path is copied instead when it names another machine's file (a
+detected ssh, mosh or container session), when the label marks only part of a
+name, such as `out/report` in `out/report#1.pdf`, or when it climbs with `..`;
+behind tmux, screen or zellij Kettle asks first, as it does for a clicked file
+link there. Kettle does
 not look the path up itself, so printed text cannot make it reach a network
 mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`
