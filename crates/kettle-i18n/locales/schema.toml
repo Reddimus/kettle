@@ -1,6 +1,363 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.palette_about]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the About action."
+
+[messages.palette_clear_history]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ClearHistory action."
+
+[messages.palette_close_pane]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ClosePane action."
+
+[messages.palette_close_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the CloseTab action."
+
+[messages.palette_close_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the CloseWindow action."
+
+[messages.palette_copy]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the Copy action."
+
+[messages.palette_create_group]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the CreateGroup action."
+
+[messages.palette_decrease_font_size]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the DecreaseFontSize action."
+
+[messages.palette_duplicate_pane]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the DuplicatePane action."
+
+[messages.palette_duplicate_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the DuplicateTab action."
+
+[messages.palette_edit_config]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the EditConfig action."
+
+[messages.palette_edit_pane_group]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the EditPaneGroup action."
+
+[messages.palette_equalize_splits]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the EqualizeSplits action."
+
+[messages.palette_focus_next]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the FocusNext action."
+
+[messages.palette_focus_prev]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the FocusPrev action."
+
+[messages.palette_group_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the GroupAll action. \"All\" is the name of a broadcast group; keep it as written."
+
+[messages.palette_group_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the GroupTab action."
+
+[messages.palette_group_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the GroupWindow action."
+
+[messages.palette_hint_mode]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the HintMode action."
+
+[messages.palette_increase_font_size]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the IncreaseFontSize action."
+
+[messages.palette_jump_next_prompt]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the JumpNextPrompt action."
+
+[messages.palette_jump_prev_prompt]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the JumpPrevPrompt action."
+
+[messages.palette_move_pane_down]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MovePaneDown action."
+
+[messages.palette_move_pane_left]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MovePaneLeft action."
+
+[messages.palette_move_pane_right]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MovePaneRight action."
+
+[messages.palette_move_pane_up]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MovePaneUp action."
+
+[messages.palette_move_tab_left]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MoveTabLeft action."
+
+[messages.palette_move_tab_right]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MoveTabRight action."
+
+[messages.palette_move_tab_to_new_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the MoveTabToNewWindow action."
+
+[messages.palette_new_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the NewTab action."
+
+[messages.palette_new_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the NewWindow action."
+
+[messages.palette_next_profile]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the NextProfile action."
+
+[messages.palette_next_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the NextTab action."
+
+[messages.palette_next_theme]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the NextTheme action."
+
+[messages.palette_open_layout_picker]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the OpenLayoutPicker action."
+
+[messages.palette_open_settings]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the OpenSettings action."
+
+[messages.palette_open_ssh]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the OpenSsh action."
+
+[messages.palette_paste]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the Paste action."
+
+[messages.palette_paste_primary]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the PastePrimary action."
+
+[messages.palette_prev_profile]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the PrevProfile action."
+
+[messages.palette_prev_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the PrevTab action."
+
+[messages.palette_prev_theme]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the PrevTheme action."
+
+[messages.palette_reload_config]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ReloadConfig action."
+
+[messages.palette_reset]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the Reset action."
+
+[messages.palette_reset_and_clear]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ResetAndClear action."
+
+[messages.palette_reset_font_size]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ResetFontSize action."
+
+[messages.palette_rotate_ccw]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the RotateCcw action."
+
+[messages.palette_rotate_cw]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the RotateCw action."
+
+[messages.palette_scaled_zoom]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScaledZoom action."
+
+[messages.palette_scroll_line_down]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollLineDown action."
+
+[messages.palette_scroll_line_up]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollLineUp action."
+
+[messages.palette_scroll_page_down]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollPageDown action."
+
+[messages.palette_scroll_page_down_half]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollPageDownHalf action."
+
+[messages.palette_scroll_page_up]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollPageUp action."
+
+[messages.palette_scroll_page_up_half]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollPageUpHalf action."
+
+[messages.palette_scroll_to_bottom]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollToBottom action."
+
+[messages.palette_scroll_to_top]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ScrollToTop action."
+
+[messages.palette_select_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SelectAll action."
+
+[messages.palette_select_to_bottom]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SelectToBottom action."
+
+[messages.palette_select_to_top]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SelectToTop action."
+
+[messages.palette_send_newline]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SendNewline action."
+
+[messages.palette_set_ask_before_closing_always]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingAlways action."
+
+[messages.palette_set_ask_before_closing_multiple]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingMultiple action."
+
+[messages.palette_set_ask_before_closing_never]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetAskBeforeClosingNever action."
+
+[messages.palette_set_bell_attention]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetBellAttention action."
+
+[messages.palette_set_bell_both]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetBellBoth action."
+
+[messages.palette_set_bell_off]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetBellOff action."
+
+[messages.palette_set_bell_visual]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetBellVisual action."
+
+[messages.palette_set_scrollbar_always]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetScrollbarAlways action."
+
+[messages.palette_set_scrollbar_auto]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetScrollbarAuto action."
+
+[messages.palette_set_scrollbar_never]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SetScrollbarNever action."
+
+[messages.palette_show_help]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ShowHelp action."
+
+[messages.palette_split_auto]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitAuto action."
+
+[messages.palette_split_down]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitDown action."
+
+[messages.palette_split_left]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitLeft action."
+
+[messages.palette_split_right]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitRight action."
+
+[messages.palette_split_up]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the SplitUp action."
+
+[messages.palette_start_search]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the StartSearch action."
+
+[messages.palette_take_screenshot]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the TakeScreenshot action."
+
+[messages.palette_toggle_broadcast_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastAll action."
+
+[messages.palette_toggle_broadcast_group]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastGroup action."
+
+[messages.palette_toggle_broadcast_off]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastOff action."
+
+[messages.palette_toggle_broadcast_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleBroadcastWindow action."
+
+[messages.palette_toggle_copy_on_select]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleCopyOnSelect action."
+
+[messages.palette_toggle_cursor_blink]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleCursorBlink action."
+
+[messages.palette_toggle_fullscreen]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleFullscreen action."
+
+[messages.palette_toggle_group_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleGroupAll action. \"All\" is the name of a broadcast group; keep it as written."
+
+[messages.palette_toggle_group_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleGroupTab action."
+
+[messages.palette_toggle_group_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleGroupWindow action."
+
+[messages.palette_toggle_light_dark]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleLightDark action."
+
+[messages.palette_toggle_mouse_hide]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleMouseHide action."
+
+[messages.palette_toggle_pane_read_only]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the TogglePaneReadOnly action."
+
+[messages.palette_toggle_scrollbar]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleScrollbar action."
+
+[messages.palette_toggle_session_log]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleSessionLog action."
+
+[messages.palette_toggle_vi_mode]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleViMode action."
+
+[messages.palette_toggle_window_visibility]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleWindowVisibility action."
+
+[messages.palette_toggle_zoom]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ToggleZoom action."
+
+[messages.palette_undo_close_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the UndoCloseTab action."
+
+[messages.palette_ungroup_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the UngroupAll action."
+
+[messages.palette_ungroup_tab]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the UngroupTab action."
+
+[messages.palette_ungroup_window]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the UngroupWindow action."
+
+[messages.palette_zoom_in_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ZoomInAll action."
+
+[messages.palette_zoom_normal_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ZoomNormalAll action."
+
+[messages.palette_zoom_out_all]
+context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the ZoomOutAll action."
+
+[messages.picker_a11y_layouts]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the layout picker dialog."
+
+[messages.picker_a11y_palette]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the command palette dialog."
+
+[messages.picker_a11y_ssh]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
+
+[messages.picker_hint_cancel]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after Esc: close the picker. Lowercase, one or two words."
+
+[messages.picker_hint_complete]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after Tab in the SSH launcher: complete the host name. Lowercase, one or two words."
+
+[messages.picker_hint_connect]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the SSH launcher: connect to the host. Lowercase, one or two words."
+
+[messages.picker_hint_run]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the command palette: run the command. Lowercase, one or two words."
+
+[messages.picker_hint_select]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after ↑↓ or Tab/↑↓: move the selection. Lowercase, one or two words."
+
+[messages.picker_hint_spawn]
+context = "crates/kettle-ui/src/app.rs: picker key hint, after Enter in the layout picker: open the layout. Lowercase, one or two words."
+
+[messages.picker_no_configured_hosts]
+context = "crates/kettle-ui/src/app.rs: SSH launcher row when no host is configured."
+
+[messages.picker_no_matching_command]
+context = "crates/kettle-ui/src/app.rs: Command palette row when nothing matches the query."
+
+[messages.picker_no_matching_host]
+context = "crates/kettle-ui/src/app.rs: SSH launcher row when no configured host matches the query."
+
+[messages.picker_no_matching_layout]
+context = "crates/kettle-ui/src/app.rs: Layout picker row when nothing matches the query."
+
+[messages.picker_no_saved_layouts]
+context = "crates/kettle-ui/src/app.rs: Layout picker row when no layout is saved. A layout is a saved arrangement of tabs and panes."
+
+[messages.picker_typed_target]
+context = "crates/kettle-ui/src/app.rs: SSH launcher hint: Enter connects to what was typed. Keep Enter."
+
 [messages.settings_a11y_dialog]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog. category is a translated category name."
 args = [{ name = "category", type = "str" }]
