@@ -1937,7 +1937,7 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
         return None;
     }
     if !percent_encoded {
-        return Some(normalize_drive_path(path.to_string()));
+        return plain_cwd(normalize_drive_path(path.to_string()));
     }
     // Decode into a *byte* buffer first. Shells percent-encode each UTF-8
     // byte of a non-ASCII path individually (zsh's `print -P %d` emits
@@ -1962,6 +1962,13 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
             && let Ok(hex) = std::str::from_utf8(&b[i + 1..i + 3])
             && let Ok(c) = u8::from_str_radix(hex, 16)
         {
+            // An encoded separator would join segments after decoding
+            // (`%2F%2Fhost/share`, `.%2F..`): not a path a shell reports. A
+            // backslash separates only on Windows; on POSIX it is part of a
+            // name (`cd 'a\b'` reports `a%5Cb`).
+            if c == b'/' || (cfg!(windows) && c == b'\\') {
+                return None;
+            }
             bytes.push(c);
             i += 3;
             continue;
@@ -1971,9 +1978,22 @@ fn parse_osc7_with(s: &str, is_local: impl FnOnce(&str) -> bool) -> Option<Strin
     }
     // Lossy → invalid byte sequences become U+FFFD instead of dropping the
     // whole report; a partly-corrupted path is more useful than no path.
-    Some(normalize_drive_path(
+    plain_cwd(normalize_drive_path(
         String::from_utf8_lossy(&bytes).into_owned(),
     ))
+}
+
+/// `path` as a reported cwd, checked once decoded: no control character
+/// (`%00`, `%0A`), no `..` segment (`%2e%2e`), and no network path (`//host`
+/// or `\\host`), which a local shell's working directory never is, except
+/// the WSL shares [`safe_reported_cwd`] allows (`//wsl.localhost/Ubuntu`). A
+/// backslash separates segments only on Windows.
+fn plain_cwd(path: String) -> Option<String> {
+    let is_separator = |c: char| c == '/' || (cfg!(windows) && c == '\\');
+    let network = path.starts_with("//") || (cfg!(windows) && path.starts_with("\\\\"));
+    let wsl_share = network && safe_reported_cwd(path.clone()).is_some();
+    let climbs = path.split(is_separator).any(|segment| segment == "..");
+    ((!network || wsl_share) && !climbs && !path.chars().any(char::is_control)).then_some(path)
 }
 
 /// A Windows drive path travels in URL form as `/C:/Users/x` (leading slash
@@ -3479,6 +3499,54 @@ mod tests {
                 passed(&ex.feed(b"\x1bcVISIBLE")),
                 b"\x1bcVISIBLE",
                 "{intro:?}: an ESC must recover immediately without waiting for the discard window"
+            );
+        }
+    }
+
+    /// A reported cwd is checked after decoding: an encoded separator, a
+    /// control character, a `..` segment or a network path rejects the
+    /// report, encoded or not, while ordinary escapes still decode.
+    #[test]
+    fn osc7_rejects_decoded_traversal_controls_and_shares() {
+        use super::parse_osc7_with_host;
+        let cwd = |report: &str| parse_osc7_with_host(report, Some("myhost"));
+        for report in [
+            "file:///home/u/%2e%2e/etc",
+            "file:///home/u/.%2E/etc",
+            "file:///home/u/../etc",
+            "file:///home/u%2F..%2Fetc",
+            "file:///home/u%2Fetc",
+            "file:///%2F%2Fhost/share",
+            "file:////host/share",
+            "file:///home/u%00x",
+            "file:///home/u%0Ax",
+            "file:///home/u%1B]0;title",
+            "kitty-shell-cwd://myhost/home/u/../etc",
+            "kitty-shell-cwd://myhost//host/share",
+            "kitty-shell-cwd://myhost/home/u\u{7}x",
+        ] {
+            assert_eq!(cwd(report), None, "{report}");
+        }
+        assert_eq!(
+            cwd("file:///home/u/a%2eb/..x"),
+            Some("/home/u/a.b/..x".to_string())
+        );
+        assert_eq!(cwd("file:///C:/Users/me"), Some("C:/Users/me".to_string()));
+        // A local WSL share stays a usable cwd.
+        assert_eq!(
+            cwd("file://myhost//wsl.localhost/Ubuntu/home/me"),
+            Some("//wsl.localhost/Ubuntu/home/me".to_string())
+        );
+        // A backslash separates only on Windows; on POSIX it is part of a
+        // name, encoded or not.
+        if cfg!(windows) {
+            assert_eq!(cwd("file:///C:/u%5C..%5Cetc"), None);
+            assert_eq!(cwd("file:///C:/u%5Cetc"), None);
+        } else {
+            assert_eq!(cwd("file:///tmp/a%5Cb"), Some("/tmp/a\\b".to_string()));
+            assert_eq!(
+                cwd("kitty-shell-cwd://myhost/tmp/a\\..\\b"),
+                Some("/tmp/a\\..\\b".to_string())
             );
         }
     }

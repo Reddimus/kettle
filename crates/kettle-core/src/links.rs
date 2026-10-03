@@ -380,6 +380,24 @@ pub fn local_file_path(uri: &str) -> Option<std::path::PathBuf> {
     if !is_safe_url(uri) {
         return None;
     }
+    let decoded = decoded_file_url_path(uri)?;
+    // `file:///C:/x` names `C:/x` on Windows.
+    let decoded = match decoded.as_bytes() {
+        [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => {
+            decoded[1..].to_string()
+        }
+        _ => decoded,
+    };
+    Some(std::path::PathBuf::from(decoded))
+}
+
+/// The path of a `file://` URI, decoded strictly: up to its `?` or `#`, as a
+/// URL parser reads it, with every escape valid hex (never decoded to
+/// U+FFFD), and checked after decoding: no encoded separator (`%2F`, `%5C`,
+/// which could join segments into `//host/share`), no control character,
+/// no `//` start and no `..` segment. `None` otherwise, or for another
+/// scheme or a URI without a path.
+fn decoded_file_url_path(uri: &str) -> Option<String> {
     let rest = uri.get(..7).filter(|p| p.eq_ignore_ascii_case("file://"))?;
     let rest = &uri[rest.len()..];
     let path = match rest.find('/') {
@@ -393,8 +411,10 @@ pub fn local_file_path(uri: &str) -> Option<std::path::PathBuf> {
     while let Some(byte) = iter.next() {
         if byte == b'%' {
             let hex = [iter.next()?, iter.next()?];
-            let hex = std::str::from_utf8(&hex).ok()?;
-            let decoded = u8::from_str_radix(hex, 16).ok()?;
+            if !hex.iter().all(u8::is_ascii_hexdigit) {
+                return None;
+            }
+            let decoded = u8::from_str_radix(std::str::from_utf8(&hex).ok()?, 16).ok()?;
             if matches!(decoded, b'/' | b'\\') {
                 return None;
             }
@@ -404,20 +424,10 @@ pub fn local_file_path(uri: &str) -> Option<std::path::PathBuf> {
         }
     }
     let decoded = String::from_utf8(bytes).ok()?;
-    if decoded.chars().any(char::is_control)
-        || decoded.starts_with("//")
-        || decoded.split(['/', '\\']).any(|segment| segment == "..")
-    {
-        return None;
-    }
-    // `file:///C:/x` names `C:/x` on Windows.
-    let decoded = match decoded.as_bytes() {
-        [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => {
-            decoded[1..].to_string()
-        }
-        _ => decoded,
-    };
-    Some(std::path::PathBuf::from(decoded))
+    let clean = !decoded.chars().any(char::is_control)
+        && !decoded.starts_with("//")
+        && !decoded.split(['/', '\\']).any(|segment| segment == "..");
+    clean.then_some(decoded)
 }
 
 /// A `file://` URL for an absolute local `path`, percent-encoded here so
@@ -649,6 +659,9 @@ fn is_local_file_url(uri: &str) -> bool {
         authority.to_ascii_lowercase().as_str(),
         "" | "localhost" | "127.0.0.1" | "[::1]"
     )
+        // What the escapes decode to is checked too: `.%2e`, `%2F%2Fhost`,
+        // `%00` and a bad escape spell traversal or garbage only once decoded.
+        && decoded_file_url_path(uri).is_some()
 }
 
 #[cfg(test)]
@@ -1075,6 +1088,37 @@ mod tests {
         // Percent-encoded / backslash traversal → rejected.
         assert!(!is_safe_url("file:///x/%2e%2e/etc/passwd"));
         assert!(!is_safe_url("file://\\\\evil\\share"));
+    }
+
+    /// A file URL is judged by what its escapes decode to: traversal,
+    /// separators that join into a share, controls and bad escapes are
+    /// refused however they are spelled, ordinary escapes are fine.
+    #[test]
+    fn file_urls_are_checked_after_decoding() {
+        for uri in [
+            "file:///home/me/.%2e/etc/passwd",
+            "file:///home/me/%2E./etc/passwd",
+            "file:///%2F%2Fattacker.example/share/x",
+            "file:///home/me%2F..%2Fetc",
+            "file:///home/me%2Fnotes.txt",
+            "file:///tmp/a%00b",
+            "file:///tmp/a%0Ab",
+            "file:///tmp/a%zz",
+            "file:///tmp/a%+5",
+            "file:///tmp/a%2",
+            "file://localhost//host/share",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+        for uri in [
+            "file:///tmp/a%20b.pdf",
+            "file:///tmp/caf%C3%A9",
+            "file:///tmp/50%25.txt",
+            "file:///tmp/a.b/c",
+            "file:///tmp/x.pdf#page=2",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
     }
 
     #[test]

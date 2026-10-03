@@ -18730,9 +18730,17 @@ impl App {
                     // building/opening the URL (it's untrusted PTY input — a
                     // UNC path would trigger an SMB/NTLM leak on Windows). A
                     // remote pane's directory is on another machine.
+                    // The URL is encoded from the path, so a directory with a
+                    // space or `#` in its name opens rather than failing the
+                    // URL check or naming another folder.
                     Some(cwd) if cwd_is_local(&cwd) => {
                         let pane = ws.mux.active_focus();
-                        self.open_pane_link(ws, pane, &format!("file://{cwd}"));
+                        match kettle_core::links::file_url_for_path(std::path::Path::new(&cwd)) {
+                            Some(url) => self.open_pane_link(ws, pane, &url),
+                            None => log::warn!(
+                                "Action::OpenCwdInFileManager: the cwd has no local file URL"
+                            ),
+                        }
                     }
                     Some(_) => {
                         log::warn!(
@@ -48774,6 +48782,10 @@ mod hint_action_tests {
             .find("rewritten = target.clone();")
             .expect("the rewrite");
         assert!(safe < gated && gated < opened);
+        // A cwd becomes a URL by encoding, never by formatting it into one: a
+        // space or `#` in the name would fail the check or name another folder.
+        assert!(!src.contains(&["format!(\"file://", "{cwd}\")"].concat()));
+        assert!(src.contains("kettle_core::links::file_url_for_path(std::path::Path::new(&cwd))"));
         // The right-click menu captures the link's pane with its address, and
         // confirming the multiplexer prompt opens the link it was about.
         assert!(src.contains("let pane = links_pane(ws);"));
@@ -48785,7 +48797,7 @@ mod hint_action_tests {
             "self.open_pane_link(ws, pane, &url);",
             "self.open_pane_link(ws, Some(h.pane), &h.text)",
             "self.open_pane_link(ws, Some(h.pane), &url)",
-            "self.open_pane_link(ws, pane, &format!(\"file://{cwd}\"));",
+            "Some(url) => self.open_pane_link(ws, pane, &url),",
         ] {
             assert!(src.contains(site), "missing {site}");
         }
