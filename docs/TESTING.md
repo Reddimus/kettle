@@ -3034,7 +3034,12 @@ production keeps the empty result as a valid generic receipt. Neither path
 retries malformed output, read errors, or trust failures. Windows validates
 the response when its shell thumbnail provider supports that fixture; set
 `KETTLE_REQUIRE_NATIVE_VIDEO_POSTER=1` on a capable Windows host to make a
-missing poster fail. Worker identity: the
+missing poster fail. `a_preview_child_that_exits_unread_cannot_end_kettle`
+runs, in a child process with SIGPIPE's default action and on a thread that
+blocks it as the queue workers do, a request larger than a pipe holds to a
+worker that exits unread: the process survives (on macOS that needs the
+pipe's `F_SETNOSIGPIPE`, since the signal goes to the whole process; red
+check: without it the child dies of SIGPIPE). Worker identity: the
 identity is `KETTLE_SOURCE_ID` (the version and a hash of the Rust sources),
 bounded; a request
 from another build, by frame version or identity, is skew, which the worker

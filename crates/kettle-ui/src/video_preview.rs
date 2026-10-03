@@ -532,6 +532,19 @@ fn worker_executable() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
+/// On macOS a write to a pipe with no reader raises SIGPIPE on the whole
+/// process, not on the writing thread, so the queue worker's blocked SIGPIPE
+/// does not cover it, and `main` restores the signal's default action, which
+/// ends Kettle. Mark the pipe so the write fails with `EPIPE` instead.
+#[cfg(target_os = "macos")]
+fn no_sigpipe(stdin: &std::process::ChildStdin) -> bool {
+    use std::os::fd::AsRawFd as _;
+    /// From `<sys/fcntl.h>`; the `libc` crate lacks it for Apple targets.
+    const F_SETNOSIGPIPE: libc::c_int = 73;
+    // SAFETY: plain integers on a descriptor `stdin` owns and keeps open.
+    unsafe { libc::fcntl(stdin.as_raw_fd(), F_SETNOSIGPIPE, 1) != -1 }
+}
+
 fn read_bounded_preview(reader: &mut impl std::io::Read) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     reader
@@ -581,6 +594,14 @@ fn run_preview_child_once(
             PreviewChildAttempt::WorkerLost
         };
     };
+    #[cfg(target_os = "macos")]
+    if !no_sigpipe(&stdin) {
+        return if stop_and_reap_child(&mut child) {
+            PreviewChildAttempt::Failed
+        } else {
+            PreviewChildAttempt::WorkerLost
+        };
+    }
     if stdin.write_all(&input).is_err() {
         return if stop_and_reap_child(&mut child) {
             PreviewChildAttempt::Failed
@@ -1519,6 +1540,48 @@ mod tests {
         })
         .join()
         .expect("SIGPIPE mask probe thread");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_preview_child_that_exits_unread_cannot_end_kettle() {
+        const CHILD: &str = "KETTLE_VIDEO_PREVIEW_SIGPIPE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "video_preview::tests::a_preview_child_that_exits_unread_cannot_end_kettle",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        // As Kettle's `main` leaves it.
+        // SAFETY: this child process runs this one test; plain integers.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        // On a queue worker's thread, as in production. The worker here is
+        // this test binary, which runs no test for the worker argument and
+        // exits without reading: a request larger than a pipe holds meets a
+        // closed pipe.
+        let attempt = std::thread::spawn(|| {
+            assert!(block_sigpipe_on_current_thread());
+            let path = PathBuf::from(format!("/{}", "a".repeat(MAX_PATH_BYTES - 1)));
+            matches!(
+                run_preview_child_once(&path),
+                PreviewChildAttempt::Failed | PreviewChildAttempt::WorkerLost
+            )
+        })
+        .join()
+        .expect("preview attempt thread");
+        assert!(attempt, "an unread request is a failed attempt");
     }
 
     #[cfg(unix)]
