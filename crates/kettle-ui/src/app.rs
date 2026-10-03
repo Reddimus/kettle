@@ -13303,7 +13303,8 @@ impl App {
             Some(preedit) => format!("{input}{preedit}"),
             None => input.to_string(),
         };
-        let hover = self.cursor_cell(ws);
+        // Hovering any segment of a link wrapped across rows lights them all.
+        let hovered_group = self.link_at_cursor(ws).map(|link| link.group);
         let links = ws
             .links
             .iter()
@@ -13311,9 +13312,7 @@ impl App {
                 col: l.start_col,
                 row: l.row,
                 width: (l.end_col + 1).saturating_sub(l.start_col).max(1),
-                hover: hover
-                    .map(|(r, c)| r == l.row && c >= l.start_col && c <= l.end_col)
-                    .unwrap_or(false),
+                hover: hovered_group == Some(l.group),
             })
             .collect();
 

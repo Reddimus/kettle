@@ -1377,7 +1377,16 @@ restores the first, a typed name previews and Enter keeps it in the config
 file, the Settings Theme row opens it over a hidden panel that Esc brings
 back, and the right-click menu shows "Theme…".
 
-A path cannot start inside a longer token, for links and hints alike
+Links and hints are found per soft-wrapped logical line (`grid_text::logical_line_into`):
+a URL wrapped onto the next row is one link with a segment per row, sharing
+its URI and hover group, and one hint labelled where it starts; a hard line
+break never joins; the join stops at a gap in the visible lines and at
+`MAX_LOGICAL_ROWS`, and a match touching an edge where the line was cut (it
+runs on below the viewport or the bound, or began above the first visible row)
+is no link and no hint, rather than a fragment. Parser-fed tests scroll a
+wrapped URL across both viewport edges (no link, not even a path link to its
+tail, until all of it shows) and wrap a wide character that did not fit on the
+last column (its spacer cell does not cut the URL). A path cannot start inside a longer token, for links and hints alike
 (`path_may_start_after`): `foo(1)/bar.png` and `x]/etc/hosts` hold no path,
 while paths after a space, a bracket, `=`, or a list, chain or redirect
 separator (`PATH=/usr/bin:/bin`, `>/tmp/out.log`, `a|/usr/bin/sort`,

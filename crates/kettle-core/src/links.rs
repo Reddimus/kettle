@@ -16,6 +16,9 @@ pub struct Link {
     pub start_col: usize,
     pub end_col: usize,
     pub uri: String,
+    /// Shared by the segments of one link: a URL wrapped across rows is one
+    /// link with a segment per row, and hovering any of them lights them all.
+    pub group: usize,
 }
 
 fn url_re() -> &'static Regex {
@@ -43,14 +46,17 @@ fn path_re() -> &'static Regex {
 use crate::url_trim::trim_trailing;
 
 /// The path matches in one row's text that can become links, as (start byte,
-/// text): trimmed of trailing punctuation, and not starting inside a longer
-/// token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
-fn path_candidates(text: &str) -> impl Iterator<Item = (usize, &str)> {
+/// end byte before trimming, text): trimmed of trailing punctuation, and not
+/// starting inside a longer token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
+fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     path_re().find_iter(text).filter_map(move |m| {
         let matched = trim_trailing(m.as_str());
         let before = text[..m.start()].chars().next_back();
-        (!matched.is_empty() && crate::hints::path_may_start_after(before))
-            .then_some((m.start(), matched))
+        (!matched.is_empty() && crate::hints::path_may_start_after(before)).then_some((
+            m.start(),
+            m.end(),
+            matched,
+        ))
     })
 }
 
@@ -62,6 +68,11 @@ pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
 
 /// All links visible in the current viewport, with `cwd` used to resolve
 /// relative file paths such as `crates/kettle-core/src/links.rs:42`.
+///
+/// Autodetected URLs and paths are found per soft-wrapped logical line, so a
+/// URL the terminal wrapped onto the next row is one link: it yields one
+/// [`Link`] segment per row it covers, each with the whole URI. A hard line
+/// break ends a line, so text a program wrapped itself is never joined.
 pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
     let grid = term.grid();
     let cols = grid.columns();
@@ -74,21 +85,14 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
     // This mirrors the grid-absolute-to-viewport conversion the renderer uses for
     // cell decorations and selection.
     let off = grid.display_offset() as i32;
+    let lines: Vec<i32> = (0..rows).map(|row| row as i32 - off).collect();
     let mut out: Vec<Link> = Vec::new();
-    // Reuse the URL-scan scratch buffers across every viewport row instead of
-    // allocating a String + Vec per row each time links are recomputed (every
-    // redraw). `.clear()` keeps the capacity.
-    let mut text = String::with_capacity(cols);
-    let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
 
-    for row in 0..rows {
-        let gl = row as i32 - off; // visible viewport row -> grid-absolute line
-        // This row's OSC 8 links occupy `out[osc8_start..osc8_end]`. The
-        // autodetect overlap checks below scan only this row's links, not all
-        // of `out`, which would be O(n²) on a link-dense viewport (e.g. a log
-        // full of URLs).
-        let osc8_start = out.len();
-        // OSC 8 runs: consecutive cells sharing a hyperlink URI.
+    // OSC 8 runs: consecutive cells sharing a hyperlink URI. Each row's runs
+    // are kept so autodetection skips the cells they already cover.
+    let mut covered: Vec<Vec<(usize, usize)>> = vec![Vec::new(); rows];
+    let mut group = 0usize;
+    for (row, &gl) in lines.iter().enumerate() {
         let mut c = 0usize;
         while c < cols {
             let cell = &grid[Point::new(Line(gl), Column(c))];
@@ -102,37 +106,67 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                         _ => break,
                     }
                 }
+                let end = c.saturating_sub(1);
+                covered[row].push((start, end));
                 out.push(Link {
                     row,
                     start_col: start,
-                    end_col: c.saturating_sub(1),
+                    end_col: end,
                     uri,
+                    group,
                 });
+                group += 1;
             } else {
                 c += 1;
             }
         }
-        let osc8_end = out.len();
+    }
 
-        // Autodetected URLs (skip cells already covered by an OSC 8 link on
-        // THIS row).
-        // Spacer-aware text + byte→column map via the shared helper, so an
-        // IRI/path with wide chars isn't truncated at the first CJK glyph.
-        crate::grid_text::row_text_into(grid, gl, cols, &mut text, &mut col_of_byte);
+    // Reuse the scan buffers across every logical line instead of allocating
+    // per line each time links are recomputed (every redraw).
+    let mut text = String::with_capacity(cols);
+    let mut pos_of_byte: Vec<(usize, usize)> = Vec::with_capacity(cols * 2);
+    let mut first = 0;
+    while first < rows {
+        let read = crate::grid_text::logical_line_into(
+            grid,
+            &lines,
+            first,
+            cols,
+            &mut text,
+            &mut pos_of_byte,
+        );
+        // A match touching an edge where the line was cut may be a fragment
+        // of a longer URL or path: no link rather than a wrong one.
+        let text_len = text.len();
+        let fragment = move |start: usize, end: usize| {
+            (read.cut_before && start == 0) || (read.cut_after && end == text_len)
+        };
+        let mut push =
+            |start: usize, len: usize, uri: String, covered: &mut Vec<Vec<(usize, usize)>>| {
+                let segments = row_segments(&pos_of_byte, start, len);
+                // Skip a match overlapping a link already found on any row it covers.
+                if segments
+                    .iter()
+                    .any(|&(row, s, e)| covered[row].iter().any(|&(cs, ce)| !(e < cs || s > ce)))
+                {
+                    return;
+                }
+                for (row, s, e) in segments {
+                    covered[row].push((s, e));
+                    out.push(Link {
+                        row,
+                        start_col: s,
+                        end_col: e,
+                        uri: uri.clone(),
+                        group,
+                    });
+                }
+                group += 1;
+            };
         for m in url_re().find_iter(&text) {
             let matched = trim_trailing(m.as_str());
-            if matched.is_empty() {
-                continue;
-            }
-            let s = col_of_byte.get(m.start()).copied().unwrap_or(0);
-            let e = col_of_byte
-                .get(m.start() + matched.len().saturating_sub(1))
-                .copied()
-                .unwrap_or(s);
-            if out[osc8_start..osc8_end]
-                .iter()
-                .any(|l| !(e < l.start_col || s > l.end_col))
-            {
+            if matched.is_empty() || fragment(m.start(), m.end()) {
                 continue;
             }
             let uri = if matched.starts_with("www.") {
@@ -140,38 +174,38 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             } else {
                 matched.to_string()
             };
-            out.push(Link {
-                row,
-                start_col: s,
-                end_col: e,
-                uri,
-            });
+            push(m.start(), matched.len(), uri, &mut covered);
         }
-        let row_links_end = out.len();
-        for (start, matched) in path_candidates(&text) {
-            let s = col_of_byte.get(start).copied().unwrap_or(0);
-            let e = col_of_byte
-                .get(start + matched.len().saturating_sub(1))
-                .copied()
-                .unwrap_or(s);
-            if out[osc8_start..row_links_end]
-                .iter()
-                .any(|l| !(e < l.start_col || s > l.end_col))
-            {
+        for (start, end, matched) in path_candidates(&text) {
+            if fragment(start, end) {
                 continue;
             }
-            let Some(uri) = path_match_to_file_uri(matched, cwd) else {
-                continue;
-            };
-            out.push(Link {
-                row,
-                start_col: s,
-                end_col: e,
-                uri,
-            });
+            if let Some(uri) = path_match_to_file_uri(matched, cwd) {
+                push(start, matched.len(), uri, &mut covered);
+            }
+        }
+        first = read.next;
+    }
+    // Reading order, as before: rows top to bottom, then columns.
+    out.sort_by_key(|link| (link.row, link.start_col));
+    out
+}
+
+/// The per-row pieces of the byte range `start..start + len` of a logical
+/// line, as (row, first column, last column).
+fn row_segments(
+    pos_of_byte: &[(usize, usize)],
+    start: usize,
+    len: usize,
+) -> Vec<(usize, usize, usize)> {
+    let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+    for &(row, col) in pos_of_byte.iter().skip(start).take(len) {
+        match segments.last_mut() {
+            Some((last_row, _, end)) if *last_row == row => *end = (*end).max(col),
+            _ => segments.push((row, col, col)),
         }
     }
-    out
+    segments
 }
 
 fn path_match_to_file_uri(raw: &str, cwd: Option<&str>) -> Option<String> {
@@ -335,14 +369,151 @@ fn is_local_file_url(uri: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_url, path_candidates, path_match_to_file_uri};
+    use super::{is_safe_url, links, links_with_cwd, path_candidates, path_match_to_file_uri};
+    use crate::event::EventProxy;
+    use crate::term::TermSize;
+    use alacritty_terminal::Term;
+    use alacritty_terminal::index::{Column, Line};
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::term::cell::Flags;
+
+    fn term_with(columns: usize, rows: &[&str], soft_wrapped: &[usize]) -> Term<EventProxy> {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize {
+                columns,
+                screen_lines: rows.len(),
+            },
+            EventProxy::new(tx, std::sync::Arc::new(|| {})),
+        );
+        for (line, text) in rows.iter().enumerate() {
+            for (column, c) in text.chars().enumerate() {
+                term.grid_mut()[Line(line as i32)][Column(column)].c = c;
+            }
+        }
+        for &line in soft_wrapped {
+            term.grid_mut()[Line(line as i32)][Column(columns - 1)]
+                .flags
+                .insert(Flags::WRAPLINE);
+        }
+        term
+    }
+
+    /// A URL the terminal wrapped onto the next row is one link: a segment on
+    /// each row, both opening the whole URL.
+    #[test]
+    fn a_soft_wrapped_url_is_one_link() {
+        let term = term_with(12, &["see https://", "x.test/a/b c", "next"], &[0]);
+        let found = links(&term);
+        let segments = found
+            .iter()
+            .map(|link| (link.row, link.start_col, link.end_col, link.uri.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(found[0].group, found[1].group, "one link, two segments");
+        assert_eq!(
+            segments,
+            [
+                (0, 4, 11, "https://x.test/a/b"),
+                (1, 0, 9, "https://x.test/a/b"),
+            ]
+        );
+    }
+
+    /// A URL running past the last visible row is cut there: no link rather
+    /// than one opening a fragment. One that ends before the cut stays.
+    #[test]
+    fn a_url_cut_at_the_viewport_edge_is_no_link() {
+        let term = term_with(14, &["ok", "see https://a/"], &[1]);
+        assert!(links(&term).is_empty(), "{:?}", links(&term));
+        let term = term_with(14, &["ok", "https://a/b cd"], &[1]);
+        let found = links(&term);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].uri, "https://a/b");
+    }
+
+    /// A terminal fed `bytes` as a program's output, so wraps, wide-character
+    /// spacers and scrollback come from the parser itself.
+    fn term_fed(columns: usize, lines: usize, bytes: &[u8]) -> Term<EventProxy> {
+        let mut term = term_with(columns, &vec![""; lines], &[]);
+        let mut processor: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        processor.advance(&mut term, bytes);
+        term
+    }
+
+    /// A URL wrapped in from above the first visible row, or running past the
+    /// last, is cut: no link, not even a path link to its tail. Scrolled back
+    /// to show all of it, it is one link.
+    #[test]
+    fn a_url_wrapped_across_the_viewport_edges_links_only_when_whole() {
+        use alacritty_terminal::grid::Scroll;
+        let url = "https://x.test/aaaa/bbbb";
+        let mut term = term_fed(10, 3, format!("a\r\nb\r\nc\r\n{url}\r\nok").as_bytes());
+        // Showing `test/aaaa/`, `bbbb`, `ok`: the URL began above.
+        assert!(
+            links_with_cwd(&term, Some("/p")).is_empty(),
+            "{:?}",
+            links_with_cwd(&term, Some("/p"))
+        );
+        term.scroll_display(Scroll::Delta(1));
+        let found = links_with_cwd(&term, Some("/p"));
+        assert_eq!(
+            found
+                .iter()
+                .map(|link| (link.row, link.start_col, link.end_col))
+                .collect::<Vec<_>>(),
+            [(0, 0, 9), (1, 0, 9), (2, 0, 3)]
+        );
+        assert!(
+            found
+                .iter()
+                .all(|link| link.uri == url && link.group == found[0].group)
+        );
+        // Showing `b`, `c`, `https://x.`: the URL runs on below.
+        term.scroll_display(Scroll::Delta(2));
+        assert!(links(&term).is_empty(), "{:?}", links(&term));
+    }
+
+    /// A wide character that did not fit on the last column wraps whole,
+    /// leaving a spacer cell that is not part of the text: the URL is not cut
+    /// at it.
+    #[test]
+    fn a_wide_character_wrapped_to_the_next_row_stays_in_the_url() {
+        let term = term_fed(10, 2, "https://a\u{754c}/b".as_bytes());
+        let found = links(&term);
+        assert_eq!(
+            found
+                .iter()
+                .map(|link| (link.row, link.start_col, link.end_col, link.uri.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0, 0, 8, "https://a\u{754c}/b"),
+                (1, 0, 3, "https://a\u{754c}/b"),
+            ]
+        );
+    }
+
+    /// A hard line break ends the line: text a program wrapped itself is not
+    /// joined into a different URL.
+    #[test]
+    fn a_hard_line_break_does_not_join_a_url() {
+        let term = term_with(12, &["see https://", "x.test/a/b c"], &[]);
+        assert!(
+            links(&term)
+                .iter()
+                .all(|link| link.uri != "https://x.test/a/b"),
+            "{:?}",
+            links(&term)
+        );
+    }
 
     /// A link cannot begin inside a longer token; ordinary paths after a
     /// space, a delimiter, `=` or a list or redirect separator stay links.
     #[test]
     fn a_path_link_cannot_start_inside_a_token() {
         fn found(line: &str) -> Vec<&str> {
-            path_candidates(line).map(|(_, text)| text).collect()
+            path_candidates(line).map(|(_, _, text)| text).collect()
         }
         assert!(
             found("foo(1)/bar.png").is_empty(),
