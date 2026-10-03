@@ -329,6 +329,250 @@ pub fn is_safe_url(uri: &str) -> bool {
     }
 }
 
+/// The local path a `file://` URI names, decoded: `file:///a%20b` is `/a b`.
+/// The path ends at a `?` or `#`, as a URL parser reads it, so
+/// `file:///x/Calculator.app#note` names `Calculator.app`. `None` for
+/// anything [`is_safe_url`] would refuse, another scheme, an invalid percent
+/// escape (never decoded to U+FFFD), an encoded separator (`%2F`, `%5C`,
+/// which could join segments into `//host/share`), or a decoded path holding
+/// a control character or a `..` segment.
+pub fn local_file_path(uri: &str) -> Option<std::path::PathBuf> {
+    if !is_safe_url(uri) {
+        return None;
+    }
+    let rest = uri.get(..7).filter(|p| p.eq_ignore_ascii_case("file://"))?;
+    let rest = &uri[rest.len()..];
+    let path = match rest.find('/') {
+        Some(0) => rest,
+        Some(at) => &rest[at..], // `localhost` or a loopback authority
+        None => return None,
+    };
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let mut bytes = Vec::with_capacity(path.len());
+    let mut iter = path.bytes();
+    while let Some(byte) = iter.next() {
+        if byte == b'%' {
+            let hex = [iter.next()?, iter.next()?];
+            let hex = std::str::from_utf8(&hex).ok()?;
+            let decoded = u8::from_str_radix(hex, 16).ok()?;
+            if matches!(decoded, b'/' | b'\\') {
+                return None;
+            }
+            bytes.push(decoded);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    let decoded = String::from_utf8(bytes).ok()?;
+    if decoded.chars().any(char::is_control)
+        || decoded.starts_with("//")
+        || decoded.split(['/', '\\']).any(|segment| segment == "..")
+    {
+        return None;
+    }
+    // `file:///C:/x` names `C:/x` on Windows.
+    let decoded = match decoded.as_bytes() {
+        [b'/', drive, b':', ..] if cfg!(windows) && drive.is_ascii_alphabetic() => {
+            decoded[1..].to_string()
+        }
+        _ => decoded,
+    };
+    Some(std::path::PathBuf::from(decoded))
+}
+
+/// A `file://` URL for an absolute local `path`, percent-encoded here so
+/// whatever receives it reads the same path back: no query or fragment, and
+/// a Windows drive path as `file:///C:/…`. `None` for a relative path or one
+/// [`is_safe_url`] would refuse.
+pub fn file_url_for_path(path: &std::path::Path) -> Option<String> {
+    let text = path.to_str()?;
+    // A backslash separates only on Windows; elsewhere it is part of a name,
+    // which a local file URL cannot carry (`is_safe_url` refuses `%5C`).
+    let text = if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_string()
+    };
+    let absolute = if is_windows_drive_path(&text) {
+        format!("/{text}")
+    } else if text.starts_with('/') && !text.starts_with("//") {
+        text
+    } else {
+        return None;
+    };
+    let url = format!("file://{}", encode_file_path(&absolute));
+    is_safe_url(&url).then_some(url)
+}
+
+/// Extensions of programs and shortcuts that are folders on disk: macOS
+/// applications, installers and plug-ins that run or install when opened.
+const PROGRAM_BUNDLES: &[&str] = &[
+    "app",
+    "pkg",
+    "mpkg",
+    "workflow",
+    "action",
+    "scptd",
+    "prefpane",
+    "saver",
+    "wdgt",
+    "kext",
+    "qlgenerator",
+    "mdimporter",
+    "appex",
+    "xpc",
+    "plugin",
+];
+
+/// Extensions of programs, scripts, installers and shortcuts that are files:
+/// opening one runs something or follows a link elsewhere.
+const PROGRAM_FILES: &[&str] = &[
+    // Windows programs, scripts, installers and shortcuts
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "psd1",
+    "ps1xml",
+    "ps2",
+    "ps2xml",
+    "psc1",
+    "psc2",
+    "msh",
+    "msh1",
+    "msh2",
+    "mshxml",
+    "msh1xml",
+    "msh2xml",
+    "vb",
+    "vbs",
+    "vbe",
+    "vbp",
+    "js",
+    "jse",
+    "ws",
+    "wsc",
+    "wsf",
+    "wsh",
+    "sct",
+    "shb",
+    "shs",
+    "msi",
+    "msp",
+    "mst",
+    "msu",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "appinstaller",
+    "scr",
+    "pif",
+    "cpl",
+    "hta",
+    "chm",
+    "hlp",
+    "jar",
+    "jnlp",
+    "reg",
+    "msc",
+    "scf",
+    "inf",
+    "ins",
+    "isp",
+    "xll",
+    "xbap",
+    "ade",
+    "adp",
+    "mde",
+    "grp",
+    "diagcab",
+    "application",
+    "appref-ms",
+    "gadget",
+    "lnk",
+    "url",
+    "website",
+    "rdp",
+    "ica",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+    "searchconnector-ms",
+    // macOS scripts, terminal settings and location files
+    "command",
+    "tool",
+    "terminal",
+    "term",
+    "scpt",
+    "applescript",
+    "osax",
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "ftploc",
+    "afploc",
+    "vncloc",
+    "mailloc",
+    "newsloc",
+    "telnetloc",
+    "mobileconfig",
+    "shortcut",
+    // Linux and Unix launchers and scripts
+    "desktop",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "csh",
+    "tcsh",
+    "ksh",
+    "run",
+    "bin",
+    "appimage",
+    "flatpakref",
+    "py",
+    "pyw",
+    "pyz",
+    "pyzw",
+    "pyc",
+    "pyo",
+    "pl",
+    "rb",
+];
+
+/// Whether `path` names a program or a shortcut by its extension: opening it
+/// would run something or follow a link elsewhere, not show a document. A
+/// folder (`is_dir`) is one only with a bundle extension (`.app`): a folder
+/// named `archive.sh` opens as a folder.
+///
+/// The name is read as Windows reads it, whatever the platform: trailing
+/// dots and spaces are dropped (`payload.exe.` runs `payload.exe`), and an
+/// alternate data stream (`a.exe::$DATA`, `a.txt:b.exe`) is checked both
+/// before and after its colon.
+pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let known = |part: &str| {
+        let Some((_, extension)) = part.trim_end_matches(['.', ' ']).rsplit_once('.') else {
+            return false;
+        };
+        let listed = |list: &[&str]| {
+            list.iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        };
+        listed(PROGRAM_BUNDLES) || (!is_dir && listed(PROGRAM_FILES))
+    };
+    known(&name)
+        || name
+            .split_once(':')
+            .is_some_and(|(stream_of, _)| known(stream_of))
+}
+
 /// Whether a `file://` URI points at the local machine with no traversal.
 ///
 /// Blocking `..` alone is not enough. On Windows a remote authority such as
@@ -369,7 +613,10 @@ fn is_local_file_url(uri: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_url, links, links_with_cwd, path_candidates, path_match_to_file_uri};
+    use super::{
+        is_safe_url, links, links_with_cwd, names_program_or_shortcut, path_candidates,
+        path_match_to_file_uri,
+    };
     use crate::event::EventProxy;
     use crate::term::TermSize;
     use alacritty_terminal::Term;
@@ -526,6 +773,146 @@ mod tests {
         assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
         assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_uri_decodes_to_its_local_path() {
+        use super::local_file_path;
+        use std::path::PathBuf;
+        assert_eq!(
+            local_file_path("file:///tmp/a%20b.png"),
+            Some(PathBuf::from("/tmp/a b.png"))
+        );
+        assert_eq!(
+            local_file_path("file://localhost/etc/hosts"),
+            Some(PathBuf::from("/etc/hosts"))
+        );
+        assert_eq!(
+            local_file_path("file:///caf%C3%A9"),
+            Some(PathBuf::from("/café"))
+        );
+        // Refused: another scheme, a remote authority, traversal, a bad escape.
+        assert_eq!(local_file_path("https://x.test/a"), None);
+        assert_eq!(local_file_path("file://evil.example/share/x"), None);
+        assert_eq!(local_file_path("file:///a/../etc/passwd"), None);
+        assert_eq!(local_file_path("file:///a%zz"), None);
+        assert_eq!(local_file_path("file:///a%2"), None);
+    }
+
+    #[test]
+    fn programs_and_shortcuts_are_known_by_extension() {
+        use std::path::Path;
+        let program = |name: &str| names_program_or_shortcut(Path::new(name), false);
+        for name in [
+            "setup.exe",
+            "run.BAT",
+            "x.ps1",
+            "Calculator.app",
+            "go.command",
+            "a.lnk",
+            "site.url",
+            "page.webloc",
+            "kettle.desktop",
+            "build.sh",
+            "tool.AppImage",
+            "x.settingcontent-ms",
+            "help.chm",
+            "profile.mobileconfig",
+            "office.rdp",
+            "screen.vncloc",
+            // Read as Windows reads a name.
+            "payload.exe.",
+            "payload.exe ",
+            "payload.exe. . ",
+            "payload.exe::$DATA",
+            "notes.txt:payload.exe",
+            ".exe",
+        ] {
+            assert!(program(name), "{name}");
+        }
+        for name in [
+            "diagram.png",
+            "notes.md",
+            "report.pdf",
+            "movie.mp4",
+            "README",
+            "a.svg",
+            "archive.tar.gz",
+            "exe",
+            "notes:2.txt",
+        ] {
+            assert!(!program(name), "{name}");
+        }
+        // A folder is a program only as a bundle.
+        let folder = |name: &str| names_program_or_shortcut(Path::new(name), true);
+        assert!(folder("Calculator.app"));
+        assert!(folder("Installer.pkg"));
+        assert!(folder("Calculator.app/"));
+        assert!(!folder("archive.sh"));
+        assert!(!folder("tools.exe"));
+        assert!(!folder("photos"));
+    }
+
+    /// A file URL decodes to the path a URL parser reads: up to a `?` or `#`,
+    /// with no control character or decoded `..` segment.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_uri_path_ends_at_its_query_or_fragment() {
+        use super::local_file_path;
+        use std::path::PathBuf;
+        assert_eq!(
+            local_file_path("file:///Applications/Calculator.app#note"),
+            Some(PathBuf::from("/Applications/Calculator.app"))
+        );
+        assert_eq!(
+            local_file_path("file:///tmp/a.pdf?page=2"),
+            Some(PathBuf::from("/tmp/a.pdf"))
+        );
+        assert_eq!(
+            local_file_path("file:///tmp/50%25%23.pdf"),
+            Some(PathBuf::from("/tmp/50%#.pdf"))
+        );
+        assert_eq!(local_file_path("file:///tmp/a%00.pdf"), None);
+        assert_eq!(local_file_path("file:///tmp/a%0A.pdf"), None);
+        assert_eq!(local_file_path("file:///home/me/.%2e/etc/passwd"), None);
+        assert_eq!(local_file_path("file:///home/me/%2e./etc/passwd"), None);
+        // An encoded separator could join segments into a share's path.
+        assert_eq!(
+            local_file_path("file:///%2Fattacker.example/share/x.pdf"),
+            None
+        );
+        assert_eq!(local_file_path("file:///tmp/a%2Fb.pdf"), None);
+        assert_eq!(local_file_path("file:///tmp/a%5cb.pdf"), None);
+        assert_eq!(local_file_path("file://localhost//host/share/x.pdf"), None);
+    }
+
+    /// The URL a custom handler gets for a checked file reads back as that
+    /// file: encoded here, with nothing after the path.
+    #[test]
+    fn a_checked_path_becomes_its_own_file_url() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        assert_eq!(
+            file_url_for_path(Path::new("/tmp/a b#1?.pdf")).as_deref(),
+            Some("file:///tmp/a%20b%231%3F.pdf")
+        );
+        assert_eq!(
+            file_url_for_path(Path::new("C:/Users/me/a b.pdf")).as_deref(),
+            Some("file:///C:/Users/me/a%20b.pdf")
+        );
+        // A backslash separates on Windows; elsewhere it is part of a name a
+        // file URL cannot carry, so no URL rather than a different path.
+        #[cfg(windows)]
+        assert_eq!(
+            file_url_for_path(Path::new(r"C:\Users\me\a b.pdf")).as_deref(),
+            Some("file:///C:/Users/me/a%20b.pdf")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(file_url_for_path(Path::new(r"/tmp/docs\run")), None);
+        assert_eq!(file_url_for_path(Path::new("relative/a.pdf")), None);
+        assert_eq!(file_url_for_path(Path::new("//host/share/a.pdf")), None);
+        assert_eq!(file_url_for_path(Path::new("/a/../b.pdf")), None);
     }
 
     #[test]

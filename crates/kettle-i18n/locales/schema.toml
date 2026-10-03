@@ -313,6 +313,10 @@ context = "crates/kettle-ui/src/app.rs: desktop notification body."
 [messages.notify_body_padding_partial]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
+[messages.notify_body_program_not_opened]
+context = "crates/kettle-ui/src/app.rs open_url: desktop notification body. name is the file name, shown verbatim."
+args = [{ name = "name", type = "str" }]
+
 [messages.notify_body_recording_flush_failed]
 context = "crates/kettle-ui/src/app.rs: desktop notification body."
 
@@ -402,6 +406,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 
 [messages.notify_title_lua_not_queued]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_program_not_opened]
+context = "crates/kettle-ui/src/app.rs open_url: desktop notification title when a clicked terminal link names a program or shortcut. kettle is the product name, kept lowercase."
 
 [messages.notify_title_recording_error]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
