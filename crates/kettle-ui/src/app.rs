@@ -7459,9 +7459,6 @@ impl App {
         // Enumerate the system fonts while the event loop starts (AppKit's
         // launch, on macOS) instead of after it.
         let mut font_preload = crate::font_preload::FontPreload::start();
-        // The process's UI language, fixed for its lifetime. English until the
-        // `language` setting lands with the rest of the catalogue.
-        let ui_text = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
@@ -7471,9 +7468,6 @@ impl App {
         crate::startup_trace::mark(crate::startup_trace::Phase::EventLoopBuilt);
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
-        // `build` is what registers and installs winit's application delegate,
-        // so the Dock menu can only be grafted on once it has returned.
-        crate::macos_dock::install(proxy.clone());
         let activation = startup.activation.take().and_then(|primary| {
             match crate::activation_server::ActivationInbox::start(primary, proxy.clone()) {
                 Ok(inbox) => Some(inbox),
@@ -7650,9 +7644,13 @@ impl App {
                 }
                 Err(error) => {
                     log::warn!("config {} ignored: {error}", path.display());
+                    // No `language` to read, so the notice follows the OS.
+                    let tr = kettle_i18n::Translator::new(
+                        kettle_config::LanguagePreference::Auto.resolve(kettle_i18n::os_locale),
+                    );
                     fire_notify(
-                        ui_text.text(kettle_i18n::Text::NotifyTitleConfigIgnored),
-                        &ui_text.notify_body_config_ignored(
+                        tr.text(kettle_i18n::Text::NotifyTitleConfigIgnored),
+                        &tr.notify_body_config_ignored(
                             &path.display().to_string(),
                             &error.to_string(),
                         ),
@@ -7662,6 +7660,14 @@ impl App {
             },
             None => Config::default(),
         };
+        // The process's UI language, fixed for its lifetime: a config reload
+        // keeps it, and Settings says a change applies on restart.
+        let ui_text =
+            kettle_i18n::Translator::new(initial_cfg.language.resolve(kettle_i18n::os_locale));
+        // `EventLoop::build` registers and installs winit's application
+        // delegate, so the Dock menu can only be grafted on after it; its rows
+        // need the UI language, so after the config is read too.
+        crate::macos_dock::install(proxy.clone(), &ui_text);
         // Peacock parity: the --accent CLI flag wins over the config
         // `accent-color` key. Applied here at startup and again on every
         // config reload, since CLI flags are launch-time intent.
@@ -15353,6 +15359,7 @@ impl App {
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
                     ws.settings_restart_pending,
+                    self.language_change_pending(),
                 )
             },
         })
@@ -23917,6 +23924,16 @@ impl App {
         }
     }
 
+    /// Whether the saved `language` would show Kettle in another language than
+    /// this process's, which keeps the one it started with.
+    fn language_change_pending(&self) -> bool {
+        language_change_pending(
+            self.cfg.language,
+            self.ui_text.language(),
+            kettle_i18n::os_locale,
+        )
+    }
+
     /// Open the theme picker on the current theme. Opened from Settings, the
     /// picker sits over the panel, which comes back when the picker closes.
     fn open_theme_picker(&mut self, ws: &mut WindowState) {
@@ -25474,11 +25491,22 @@ fn to_mods(m: ModifiersState) -> Mods {
 }
 
 /// A row hint adds dependencies or timing, rather than repeating the control.
+/// Whether `saved` would show Kettle in another language than `running`.
+/// `os_locale` runs only for `auto`.
+fn language_change_pending(
+    saved: kettle_config::LanguagePreference,
+    running: kettle_i18n::Language,
+    os_locale: impl FnOnce() -> Option<String>,
+) -> bool {
+    saved.resolve(os_locale) != running
+}
+
 fn settings_footer_note(
     tr: &kettle_i18n::Translator,
     active_gpu: Option<&str>,
     focused_key: Option<&str>,
     restart_pending: bool,
+    language_pending: bool,
 ) -> Option<String> {
     use kettle_i18n::Text;
     let mut notes = Vec::new();
@@ -25490,7 +25518,15 @@ fn settings_footer_note(
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
         Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
+        // A new window keeps the process's language, unlike the changes the
+        // general restart note covers.
+        Some("language") if !language_pending => {
+            notes.push(tr.text(Text::SettingsNoteLanguage));
+        }
         _ => {}
+    }
+    if language_pending {
+        notes.push(tr.text(Text::SettingsNoteLanguagePending));
     }
     if restart_pending {
         // The pending flag records no cause, even when Graphics is selected.
@@ -46993,7 +47029,7 @@ mod settings_footer_text_tests {
     #[test]
     fn notes_follow_the_ui_language() {
         assert_eq!(
-            settings_footer_note(&ES, None, Some("completion-overlay"), false).as_deref(),
+            settings_footer_note(&ES, None, Some("completion-overlay"), false, false).as_deref(),
             Some("Se aplica a las shells nuevas.")
         );
     }
@@ -47001,15 +47037,15 @@ mod settings_footer_text_tests {
     #[test]
     fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
         assert_eq!(
-            settings_footer_note(&EN, None, Some("font-size"), false),
+            settings_footer_note(&EN, None, Some("font-size"), false, false),
             None
         );
         assert_eq!(
-            settings_footer_note(&EN, None, Some("completion-overlay"), false).as_deref(),
+            settings_footer_note(&EN, None, Some("completion-overlay"), false, false).as_deref(),
             Some("Applies to new shells.")
         );
         assert_eq!(
-            settings_footer_note(&EN, None, Some("window-blur"), false).as_deref(),
+            settings_footer_note(&EN, None, Some("window-blur"), false, false).as_deref(),
             Some("Blur requires background opacity below 100%. Applies to new windows.")
         );
     }
@@ -47018,7 +47054,7 @@ mod settings_footer_text_tests {
     fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
         let pending = "Restart Kettle or open a new window to apply pending changes.";
         for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
-            let note = settings_footer_note(&EN, None, Some(key), true).unwrap();
+            let note = settings_footer_note(&EN, None, Some(key), true, false).unwrap();
             assert_eq!(note.lines().last(), Some(pending));
             // A blur/opacity edit followed by a switch to Graphics has the
             // same pending flag; an active adapter does not identify its cause.
@@ -47027,20 +47063,22 @@ mod settings_footer_text_tests {
                 Some("Active GPU: Test (Integrated, Vulkan)"),
                 Some(key),
                 true,
+                false,
             )
             .unwrap();
             assert_eq!(gpu_note.lines().last(), Some(pending));
             assert!(!gpu_note.contains("GPU changes"));
         }
         assert_eq!(
-            settings_footer_note(&EN, Some("Active GPU: Test"), Some("gpu"), false).as_deref(),
+            settings_footer_note(&EN, Some("Active GPU: Test"), Some("gpu"), false, false)
+                .as_deref(),
             Some("Active GPU: Test")
         );
     }
 
     #[test]
     fn pending_changes_are_never_hidden_by_an_appearance_hint() {
-        let note = settings_footer_note(&EN, None, Some("window-blur"), true).unwrap();
+        let note = settings_footer_note(&EN, None, Some("window-blur"), true, false).unwrap();
         assert!(note.contains("below 100%"));
         assert!(note.contains("pending changes"));
         let note = settings_footer_note(
@@ -47048,8 +47086,63 @@ mod settings_footer_text_tests {
             Some("Active GPU: Test (Integrated, Vulkan)"),
             Some("gpu"),
             true,
+            false,
         )
         .unwrap();
         assert!(note.contains("Restart Kettle or open a new window to apply pending changes."));
+    }
+
+    /// The Language row says a change waits for a restart; once the saved
+    /// language differs from the running one, every row says so, ahead of the
+    /// general restart note, which a new window would satisfy.
+    #[test]
+    fn a_language_change_waits_for_a_restart() {
+        assert_eq!(
+            settings_footer_note(&EN, None, Some("language"), false, false).as_deref(),
+            Some("Applies when Kettle restarts.")
+        );
+        assert_eq!(
+            settings_footer_note(&ES, None, Some("language"), false, true).as_deref(),
+            Some("Reiniciar Kettle para cambiar el idioma.")
+        );
+        let note = settings_footer_note(&EN, None, Some("font-size"), true, true).unwrap();
+        assert_eq!(
+            note.lines().collect::<Vec<_>>(),
+            [
+                "Restart Kettle to change the language.",
+                "Restart Kettle or open a new window to apply pending changes."
+            ]
+        );
+    }
+
+    #[test]
+    fn a_saved_language_is_pending_only_when_it_would_change_the_language() {
+        use super::language_change_pending;
+        use kettle_config::LanguagePreference as Pref;
+        use kettle_i18n::Language;
+        let spanish_os = || Some("es_MX.UTF-8".to_string());
+        // Started on auto in a Spanish OS: picking Spanish changes nothing.
+        assert!(!language_change_pending(
+            Pref::Auto,
+            Language::Es,
+            spanish_os
+        ));
+        assert!(!language_change_pending(
+            Pref::Spanish,
+            Language::Es,
+            spanish_os
+        ));
+        assert!(language_change_pending(
+            Pref::English,
+            Language::Es,
+            spanish_os
+        ));
+        // Started in English with an explicit choice: auto follows the OS.
+        assert!(language_change_pending(
+            Pref::Auto,
+            Language::En,
+            spanish_os
+        ));
+        assert!(!language_change_pending(Pref::Auto, Language::En, || None));
     }
 }

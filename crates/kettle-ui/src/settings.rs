@@ -40,6 +40,14 @@ const fn name(name: &'static str) -> Label {
     Label::Name(Cow::Borrowed(name))
 }
 
+/// Language names are shown in their own language, so a reader can find
+/// theirs whatever the UI speaks.
+const LANGUAGE_LABELS: &[Label] = &[
+    Label::Text(Text::SettingsValueAutomatic),
+    name("English"),
+    name("Español"),
+];
+
 /// Graphics API names are proper names.
 const GPU_BACKEND_LABELS: &[Label] = &[
     Label::Text(Text::SettingsValueAutomatic),
@@ -342,6 +350,12 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         Category {
             name: T::SettingsCategoryBehavior,
             fields: vec![
+                choice(
+                    T::SettingsFieldLanguage,
+                    "language",
+                    &["auto", "en", "es"],
+                    LANGUAGE_LABELS,
+                ),
                 choice(
                     T::SettingsFieldScrollbar,
                     "scrollbar",
@@ -824,6 +838,7 @@ fn read_bool(cfg: &Config, key: &str) -> bool {
 
 fn read_choice(cfg: &Config, key: &str) -> String {
     match key {
+        "language" => cfg.language.token().to_string(),
         "scrollbar" => match cfg.scrollbar {
             ScrollbarMode::Never => "never",
             ScrollbarMode::Auto => "auto",
@@ -1546,6 +1561,48 @@ mod tests {
             .map(|field| field.key)
             .collect();
         assert_eq!(openers, ["theme"]);
+    }
+
+    /// The Language row saves `auto`, `en` or `es`, and names each language
+    /// in that language whatever the UI speaks.
+    #[test]
+    fn the_language_row_saves_a_token_and_names_languages_natively() {
+        let field = categories(&[])
+            .into_iter()
+            .flat_map(|category| category.fields)
+            .find(|field| field.key == "language")
+            .expect("a Language row");
+        let mut cfg = Config::default();
+        assert_eq!(read_choice(&cfg, "language"), "auto");
+        assert_eq!(next_value(&cfg, &field, 1), "en");
+        cfg.language = kettle_config::LanguagePreference::Spanish;
+        assert_eq!(read_choice(&cfg, "language"), "es");
+        assert_eq!(next_value(&cfg, &field, 1), "auto");
+        let FieldKind::Choice {
+            labels: Some(labels),
+            values,
+        } = &field.kind
+        else {
+            panic!("the Language row is a choice");
+        };
+        for value in values.iter() {
+            assert!(kettle_config::LanguagePreference::parse(value).is_some());
+        }
+        let shown = |tr: Translator| {
+            labels
+                .iter()
+                .map(|label| label.show(&tr).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shown(Translator::new(Language::En)),
+            ["Automatic", "English", "Español"]
+        );
+        assert_eq!(
+            shown(Translator::new(Language::Es)),
+            ["Automático", "English", "Español"]
+        );
+        assert_eq!(Translator::new(Language::Es).text(field.label), "Idioma");
     }
 
     #[test]

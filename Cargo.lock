@@ -1968,6 +1968,7 @@ name = "kettle-i18n"
 version = "4.9.0"
 dependencies = [
  "serde",
+ "sys-locale",
  "toml",
 ]
 

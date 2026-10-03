@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- `language` (`auto`, `en`, `es`; Settings → Behavior → Language) chooses the
+  language of Kettle's own text: Settings, menus, the Dock menu, prompts,
+  notifications and screen-reader names. `auto`, the default, follows the
+  operating system's locale. A change applies when Kettle restarts. The
+  Spanish text is a first draft awaiting review.
 - A theme picker: type to filter the 500+ bundled themes by name, or move
   through them with the arrows, and the window previews the selected theme.
   Enter keeps it and Esc puts back the theme you started with. With nothing

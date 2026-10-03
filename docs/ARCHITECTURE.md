@@ -39,8 +39,9 @@ graph TD
 Rust: a `Text` enum for fixed messages and one typed method per message with
 named arguments. A missing key, a placeholder mismatch, or a wrong argument
 fails the build; nothing is parsed at run time. Each process picks one language
-and passes an immutable `Translator` to the code that shows text, so there is no
-global locale. Terminal content, user and shell names, config values and
+at startup from the `language` key (`auto` reads the OS locale once) and passes
+an immutable `Translator` to the code that shows text, so there is no global
+locale; a config reload keeps it, and Settings says a change needs a restart. Terminal content, user and shell names, config values and
 protocol text never pass through it. Settings, the command palette, the theme,
 layout and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the

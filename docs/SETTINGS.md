@@ -73,6 +73,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 
 | Option | Config key | Notes |
 |---|---|---|
+| Language | `language` | Automatic · English · Español; each language is named in itself. Applies when Kettle restarts, and the footer says so once the choice differs from the running language |
 | Scrollbar | `scrollbar` | Hidden · Automatic · Always |
 | Completion overlay | `completion-overlay` | Automatic · Off; applies to new shells |
 | Scrollbar width | `scrollbar-width` | 2–40 px — the overlay scrollbar's thumb/track width |

@@ -40,13 +40,14 @@ impl DockCommand {
     }
 }
 
-/// The rows kettle contributes, top to bottom, above the system section.
-/// Matches Ghostty's Dock menu, which is the closest peer.
+/// The rows kettle contributes, top to bottom, above the system section, in
+/// the UI's language. Matches Ghostty's Dock menu, which is the closest peer.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn dock_menu_model() -> [(&'static str, DockCommand); 2] {
+pub(crate) fn dock_menu_model(tr: &kettle_i18n::Translator) -> [(&'static str, DockCommand); 2] {
+    use kettle_i18n::Text;
     [
-        ("New Window", DockCommand::NewWindow),
-        ("New Tab", DockCommand::NewTab),
+        (tr.text(Text::DockNewWindow), DockCommand::NewWindow),
+        (tr.text(Text::DockNewTab), DockCommand::NewTab),
     ]
 }
 
@@ -54,8 +55,8 @@ pub(crate) fn dock_menu_model() -> [(&'static str, DockCommand); 2] {
 ///
 /// Call once, after the event loop is built (winit registers and installs its
 /// delegate inside `EventLoop::build`) and before `run_app`. A no-op off macOS.
-pub(crate) fn install(proxy: EventLoopProxy<UserEvent>) {
-    imp::install(proxy);
+pub(crate) fn install(proxy: EventLoopProxy<UserEvent>, tr: &kettle_i18n::Translator) {
+    imp::install(proxy, tr);
 }
 
 #[cfg(target_os = "macos")]
@@ -176,10 +177,14 @@ mod imp {
         })
     }
 
-    fn build_menu(mtm: MainThreadMarker, target: &DockTarget) -> Retained<NSMenu> {
+    fn build_menu(
+        mtm: MainThreadMarker,
+        target: &DockTarget,
+        tr: &kettle_i18n::Translator,
+    ) -> Retained<NSMenu> {
         let menu = NSMenu::new(mtm);
         let target_obj: *const AnyObject = (target as *const DockTarget).cast();
-        for (title, command) in dock_menu_model() {
+        for (title, command) in dock_menu_model(tr) {
             let item = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     mtm.alloc(),
@@ -198,7 +203,7 @@ mod imp {
         menu
     }
 
-    pub(super) fn install(proxy: EventLoopProxy<UserEvent>) {
+    pub(super) fn install(proxy: EventLoopProxy<UserEvent>, tr: &kettle_i18n::Translator) {
         let Some(mtm) = MainThreadMarker::new() else {
             log::warn!("dock menu: install called off the main thread");
             return;
@@ -238,7 +243,7 @@ mod imp {
         }
 
         let target = DockTarget::new(mtm);
-        let menu = build_menu(mtm, &target);
+        let menu = build_menu(mtm, &target, tr);
         STATE.with(|state| {
             *state.borrow_mut() = Some(DockState {
                 menu,
@@ -304,38 +309,52 @@ mod imp {
 
     /// No Dock outside macOS. Windows taskbar jump lists and the freedesktop
     /// `Actions=` desktop-entry equivalent are separate surfaces.
-    pub(super) fn install(_proxy: EventLoopProxy<UserEvent>) {}
+    pub(super) fn install(_proxy: EventLoopProxy<UserEvent>, _tr: &kettle_i18n::Translator) {}
 }
 
 #[cfg(test)]
 mod tests {
     use super::{DockCommand, dock_menu_model};
+    use kettle_i18n::{Language, Translator};
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
 
     #[test]
     fn dock_menu_offers_new_window_then_new_tab() {
-        let model = dock_menu_model();
+        let titles = |tr: &Translator| {
+            dock_menu_model(tr)
+                .iter()
+                .map(|(title, _)| *title)
+                .collect::<Vec<&str>>()
+        };
         assert_eq!(
-            model.iter().map(|(title, _)| *title).collect::<Vec<&str>>(),
+            titles(&EN),
             vec!["New Window", "New Tab"],
             "the Dock rows and their order are user-visible"
         );
+        assert_eq!(titles(&ES), vec!["Nueva ventana", "Nueva pestaña"]);
         assert_eq!(
-            model.map(|(_, command)| command),
+            dock_menu_model(&EN).map(|(_, command)| command),
             [DockCommand::NewWindow, DockCommand::NewTab]
         );
     }
 
     #[test]
-    fn dock_titles_are_plain_ascii_without_ellipsis() {
-        for (title, _) in dock_menu_model() {
+    fn dock_titles_are_plain_without_ellipsis() {
+        for (title, _) in dock_menu_model(&EN) {
             assert!(
                 title.is_ascii(),
                 "{title:?} must stay ASCII for the AX-driven smoke to match it"
             );
-            assert!(
-                !title.ends_with('…') && !title.ends_with("..."),
-                "{title:?} acts immediately, so it must not promise a dialog"
-            );
+        }
+        for tr in [EN, ES] {
+            for (title, _) in dock_menu_model(&tr) {
+                assert!(
+                    !title.ends_with('…') && !title.ends_with("..."),
+                    "{title:?} acts immediately, so it must not promise a dialog"
+                );
+            }
         }
     }
 
@@ -358,7 +377,7 @@ mod tests {
     #[test]
     fn install_is_called_unconditionally_from_run_with() {
         let source = kettle_test_support::production_source(include_str!("app.rs"));
-        let needle = "crate::macos_dock::install(proxy.clone());";
+        let needle = "crate::macos_dock::install(proxy.clone(), &ui_text);";
         assert_eq!(
             source.matches(needle).count(),
             1,

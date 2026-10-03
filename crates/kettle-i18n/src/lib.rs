@@ -36,6 +36,10 @@
 
 #![forbid(unsafe_code)]
 
+mod locale;
+
+pub use locale::{language_for_locale, os_locale};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Language {
     En,
