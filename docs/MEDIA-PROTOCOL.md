@@ -1,8 +1,9 @@
-# Bounded media protocol, P1
+# Bounded media protocol
 
 ## Ownership
 
-`kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no processes.
+`kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no processes;
+its availability client reaches the filesystem only through a platform its caller supplies.
 The public model uses six job kinds. Input limits apply when validating or encoding a job
 and when decoding its frame. For paths, the worker later checks the opened object's size and
 permissions using the job kind's input cap. External attestations are declarations from the
@@ -98,10 +99,90 @@ names and hashes are refused; hex letter case is preserved, and exact build equa
 intentional. Changing tags, layouts or acceptance rules requires a protocol version decision
 and updated golden fixtures.
 
+## Build identity and worker availability
+
+Every Kettle binary takes its identity from one build helper,
+`crates/kettle/build_support/source_id.rs`: a hash of every file under `crates/`
+(through links) and the workspace `Cargo.toml` and `Cargo.lock`, by relative
+path and contents, read without git. A checkout and an exported source tree of
+the same files agree; any source edit changes it; a rebuild, or the same source
+built elsewhere, keeps it. The helper is under `crates/`, so it hashes itself.
+`kettle`'s build script emits it as `KETTLE_SOURCE_HASH` (16 hex digits) and,
+unchanged for the video-preview worker, as `KETTLE_SOURCE_ID`
+(`<version> (<hash>)`). `BuildId::from_embedded(version, source_hash)` builds
+the handshake identity from `CARGO_PKG_VERSION` and `KETTLE_SOURCE_HASH`, never
+from the git commit. It is a compatibility token, not an attestation: a
+worker's authenticity comes from the checks below and the signed release.
+
+`client::WorkerClient` answers whether media previews are available.
+`availability()` returns the last answer at once (`Checking` before the first
+check finishes) and, when no check is running, starts one in the background, so
+a replaced or removed worker shows on the next ask. A check inspects the worker
+file, verifies its signature unless this exact file already passed, and
+inspects it again, refusing a file that changed meanwhile. The file identity is
+device, inode, size, modification time and status time, so an in-place rewrite
+that keeps the modification time is still noticed. Failures are not cached.
+
+The platform comes from the caller through `client::WorkerPlatform`. The
+`kettle` binary's `media_platform` records the worker's path at startup:
+`kettle-media-worker` beside the running executable, with links in the
+executable's path resolved, so a renamed or deleted executable does not move it
+and a Homebrew link finds its install. On macOS that is
+`kettle.app/Contents/MacOS/kettle-media-worker`. `PATH`, the working directory,
+`argv[0]`, the environment and the configuration are never consulted, and no
+other directory is searched. Windows and other platforms report
+`unsupported_platform`.
+
+The worker must be a regular executable file, not a link, without set-id bits,
+owned by the user or root, and neither it nor its directory may be writable by
+group or others. On macOS `/usr/bin/codesign --verify --strict` must pass every
+architecture against this requirement, and the signature must carry the
+hardened runtime flag:
+
+```
+anchor apple generic and identifier "org.kettle.terminal.media-worker"
+and certificate 1[field.1.2.840.113635.100.6.2.6] exists
+and certificate leaf[field.1.2.840.113635.100.6.1.13] exists
+and certificate leaf[subject.OU] = "<kettle_update::APPLE_TEAM_IDENTIFIER>"
+```
+
+That is Apple's chain to a Developer ID Application certificate issued to
+Kettle's team, under the worker's own identifier; the app's identifier is
+`org.kettle.terminal`, so the app's requirement is not reused. Each `codesign`
+run has a 30 second deadline; one that outlasts it is killed and reported as
+`check_failed`, so a stuck tool cannot hold the answer at `checking`. Unsigned,
+ad-hoc and other teams' workers fail it; there is no flag, variable or
+fallback that accepts them. A local or Nix build on macOS therefore reports
+`unverified_worker` until a development signing policy is chosen. On Linux the
+package install checked the worker's bytes against the signed release; there
+is no signature to check at run time.
+
+These checks keep a stray, half-installed or foreign file from running as the
+worker. A program running as the same user can rewrite a user-owned install,
+including Kettle itself, so it is outside what they can stop.
+
+`kettle ctl get_state` reports the answer as `media`:
+`{"availability": "checking"}` or `{"availability": "unavailable", "reason":
+<code>}`. Codes are fixed, never a path or tool output:
+
+| Code | Meaning |
+| --- | --- |
+| `unsupported_platform` | This platform has no media worker |
+| `no_install_location` | The running executable's directory could not be established |
+| `worker_missing` | No worker beside the executable |
+| `unsafe_worker_file` | The worker or its directory failed the file checks, or could not be read |
+| `unverified_worker` | The signature check failed, or the file changed while it ran |
+| `check_failed` | The check could not run |
+| `incomplete` | The worker passed every check, but this build cannot render yet |
+| `not_configured` | The GUI was started without a media client |
+
+No build renders yet, so `incomplete` is the best answer there is. Nothing
+here spawns a worker.
+
 ## P2 boundary and separate worker decision
 
 Production uses a separate O3 `kettle-media-worker` executable. The parent resolves it only
-from its installation, verifies its identity, and validates build equality after startup.
+from its installation and verifies it as above, and validates build equality after startup.
 No search through PATH or cwd, and no re-exec of the terminal for the new worker.
 
 P2 adds the spawn/deadline/footprint/reap client, the heavy safe renderer and the actual worker

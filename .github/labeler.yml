@@ -44,6 +44,8 @@ media:
   - changed-files:
       - any-glob-to-any-file:
           - "crates/kettle-media/**"
+          - "crates/kettle/src/media_platform.rs"
+          - "crates/kettle/build_support/**"
 
 # CLI binary crate — separate from `ui` so a clap / startup change
 # gets its own scan.

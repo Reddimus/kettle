@@ -83,6 +83,18 @@ Reports that fit any of these are welcome:
   allocates, caps each direction, keeps external requests from expressing a
   GUI user pull, and never echoes input in a failure. A frame that gets past
   those checks with oversized or hostile content is in scope.
+- **Media worker selection** — Kettle looks for its media worker only beside
+  its own executable, at the path recorded at startup, never in `PATH`, the
+  working directory or the environment. The worker must be a regular
+  executable file, not a link, without set-id bits, owned by the user or
+  root, with neither it nor its directory writable by anyone else; on macOS
+  its signature must also pass a strict check against Kettle's own
+  requirement (Apple's chain to a Developer ID Application certificate of
+  Kettle's team, under the worker's own identifier, with the hardened
+  runtime). A file that changes during the check is refused. Getting Kettle
+  to accept a worker that fails any of these is in scope. A program running
+  as the same user that rewrites a user-owned install is not: it can replace
+  Kettle itself.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

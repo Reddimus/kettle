@@ -43,11 +43,9 @@ use crate::{UPDATE_PUBLIC_KEY, current_target};
 /// Signing identity every official build carries.
 ///
 /// Both are read back out of the signature rather than out of `Info.plist`,
-/// because a plist is just a file in the bundle and the signature is not. The
-/// release workflow asserts the same team on the artifact it produces; if that
-/// account ever changes, this constant and `APPLE_TEAM_ID` move together.
+/// because a plist is just a file in the bundle and the signature is not.
 const BUNDLE_IDENTIFIER: &str = "org.kettle.terminal";
-const TEAM_IDENTIFIER: &str = "D49LMN8545";
+const TEAM_IDENTIFIER: &str = crate::APPLE_TEAM_IDENTIFIER;
 
 /// Both ship with macOS. `stapler` deliberately does not appear here: it
 /// arrives with the Xcode command line tools, which an ordinary user has no

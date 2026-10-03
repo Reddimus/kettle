@@ -770,6 +770,15 @@ trailing payload bytes, a fence index out of range and truncation. The
 workspace commands do not build the stub, so `just media-protocol-test` (also
 in `just gauntlet` and ci.yml) runs it with `--features test-worker`.
 
+The availability client's unit tests (`src/client.rs`) run it against a
+scripted platform: a missing worker is typed and never verified; an
+unsupported platform is never inspected; a worker that passes every check
+still reads `incomplete`; verification is cached by file identity and repeated
+for a replaced file; a file replaced during verification is refused; a failed
+verification is not cached; and asking never waits on a held check and never
+starts a second one. `BuildId::from_embedded` refuses empty, non-hex and
+formatted (`<version> (<hash>)`) identities.
+
 ### kettle-i18n
 
 The build script validates the catalogue, and `tests/build_gates.rs` runs it
@@ -1651,6 +1660,47 @@ guard; the
 `cli_help_preserves_indented_code_examples` drift guard that
 pins `verbatim_doc_comment` on every flag with an indented
 example block (without it, clap flattens the example into prose).
+
+`tests/source_id.rs` includes the shared build helper
+(`build_support/source_id.rs`) and checks the source hash on scratch
+workspaces: a checkout with git files, build output and docs matches an
+exported tree; an edit to a source, the shared helper, `Cargo.lock` or
+`Cargo.toml`, or a rename, changes it; rewriting identical bytes or building
+in another directory keeps it; a linked source counts by its contents; and
+this build's `KETTLE_SOURCE_ID` is its version and `KETTLE_SOURCE_HASH`.
+`embedded_build_id_uses_source_hash_not_git_sha` pins the media build
+identity to that hash. `media_platform`'s tests resolve the worker beside the
+executable (a later rename does not move it, a linked executable finds its
+install, a deleted or unreadable one has none), and in a child process whose
+`PATH` or working directory holds a decoy worker, still beside the test
+binary, where none is installed. Its file checks refuse a missing worker as
+missing, and a non-executable, group- or world-writable or set-id worker, a
+directory writable by others, a directory in its place and a link to a real
+worker as unsafe; a same-size rewrite that restores the modification time
+still changes the identity. On macOS a copy of `/usr/bin/true` signed ad hoc
+as the worker, with the hardened runtime, passes a requirement pinned to each
+architecture's cdhash (the control), and fails Kettle's official requirement,
+as the unchanged Apple-signed copy does; with its signature removed, one byte
+of its code flipped or the hardened runtime left out, it fails the pinned
+requirement too. `csreq` compiles the official requirement, and the
+CodeDirectory flags parser reads only the CodeDirectory line. A `codesign`
+run is bounded: a stuck command is killed and reaped at its deadline
+(`check_failed`), and a finished one reports its exit status and stderr. In kettle-ui,
+`get_state_reports_media_availability_without_waiting` checks that
+`get_state` carries `media`, that an unconfigured GUI reports
+`not_configured`, that a held check answers `checking` at once, and that a
+missing worker then reads `worker_missing`.
+
+Red checks for this slice: ignoring the file identity in the cache, dropping
+the cache, skipping the re-inspection after verification, reporting a
+verified worker as anything but `incomplete`, each file-mode, owner, link and
+directory check, dropping the status time from the identity, leaving the
+executable's links unresolved, resolving from the working directory, dropping
+the requirement or the hardened-runtime check, a requirement without the
+team, no deadline or no kill at it, ignoring `codesign`'s exit status, a
+build identity from the git commit, `get_state` without `media`, an
+unconfigured client read as checking, hashing absolute paths, not following
+links and leaving `Cargo.lock` out each fail a test above.
 
 ## End-to-end harness: selection, copy & `.cast` replay
 

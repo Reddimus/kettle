@@ -186,6 +186,11 @@ pub struct Options {
     /// (`--record-raw-input`). Off by default — keystrokes are redacted tokens,
     /// not literal characters, so typed secrets aren't written to the trace.
     pub record_raw_input: bool,
+    /// The media worker client, configured by the `kettle` binary with the
+    /// worker's install path and this build's identity. Nothing is checked
+    /// and no worker starts until something asks. `None` reports media as
+    /// not configured.
+    pub media: Option<std::sync::Arc<kettle_media::client::WorkerClient>>,
 }
 
 /// Launch kettle with default startup (blocks until all windows close).
