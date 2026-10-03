@@ -799,8 +799,10 @@ hangs is bounded the same way; a start refuses once the stuck limit is
 reached, whatever its caller read earlier; a worker that exits 9 as the startup deadline
 passes is `RestartRequired`, not retried; one that crashes as the reply
 deadline passes is `RenderResource`; the
-writer guards its pipe writes before the first one; and exit codes map as
-documented. `tests/client.rs` (with `--features test-worker`) runs the
+writer guards its pipe writes before the first one; a footprint over the
+limit kills the worker before Ready or after it, never retried, while one at
+the limit for a whole deadline does not; a footprint that cannot be measured
+fails closed; and exit codes map as documented. `tests/client.rs` (with `--features test-worker`) runs the
 stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
@@ -1777,7 +1779,13 @@ exited never reaps it; in a child process with SIGPIPE's default action, a
 worker that answers Ready and exits before reading a 4 MiB job cannot end the
 process, and it can render again; and in a child process with SIGCHLD
 ignored, no worker starts, and one started anyway reads as lost and is never
-signalled, whether it is asked about or killed first. Red checks for the spawn client: no Ready cap, no
+signalled, whether it is asked about or killed first. The footprint tests find
+a worker's whole tree (the worker and two children), count 32 MiB a child
+holds while the worker alone holds little, measure a reaped worker as 0, and,
+through the client with a 16 MiB limit, stop a worker whose child holds 64 MiB
+as `RenderResource`; on Linux the process-group fallback finds the same tree,
+and the `stat` parser reads the group past a command name with spaces and
+parentheses. Red checks for the spawn client: no Ready cap, no
 cold retry, a retry after a stuck worker or after Ready, a reply accepted
 without a clean end or whatever the exit, skew accepted, any worker code
 kept, stuck workers not counted or not stopping `render`, no kill at the
@@ -1789,8 +1797,10 @@ startup refusal with its end unchecked or masking a crash, any code kept at
 startup, abandoned workers never reaped, `ECHILD` not read as lost, a late
 self-exit read as killed, hung starts piling up, workers started while
 SIGCHLD is ignored, a kill that signals a lost worker, a self-exit at the
-reply deadline read as a timeout, a file check outside the deadline, and no
-stuck-limit recheck in the start each fail a test above.
+reply deadline read as a timeout, a file check outside the deadline, no
+stuck-limit recheck in the start, a footprint never enforced or never
+sampled, the limit itself refused, an unmeasurable worker read as fine, and
+descendants not walked each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

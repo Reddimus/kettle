@@ -254,8 +254,21 @@ thread, it is blocked there; on macOS, where it goes to the whole process,
 the platform marks the worker's stdin pipe `F_SETNOSIGPIPE` when it starts
 the worker. Either way the write fails with `EPIPE` instead.
 
-Not yet: footprint polling and the 768 MiB aggregate limit, the GUI's
-preview account and admission, and cancellation follow in later slices.
+**Memory.** While it waits, the caller's thread also measures the worker and
+everything it started every 25 ms: on macOS the physical footprint
+(`proc_pid_rusage`, as Activity Monitor reports it) of the worker and its
+descendants (`proc_listchildpids`); on Linux resident pages from each
+process's `statm`, finding descendants through each thread's `children` list,
+or through the worker's process group where the kernel has no such lists. The
+sum may count shared pages twice, which errs toward stopping the job. Above
+768 MiB the worker's group is killed: `RenderResource`, never retried, before
+Ready or after. A live worker that cannot be measured, or a tree of more than
+64 processes, fails the job closed (`WorkerUnavailable`) rather than count as
+nothing; one that exited as it was measured does not. Sampling is protection,
+not proof: an allocation can cross the limit briefly between samples.
+
+Not yet: the GUI's preview account and admission, and cancellation follow in
+later slices.
 
 ## The worker executable
 

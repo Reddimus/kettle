@@ -38,6 +38,8 @@ pub(crate) struct Budgets {
     /// again after it is killed; and how long the reader gets to pass on
     /// what the pipe held once the worker has exited.
     pub(crate) cleanup: Duration,
+    /// The most memory the worker and everything it started may hold.
+    pub(crate) footprint_limit: u64,
 }
 
 impl Budgets {
@@ -45,6 +47,7 @@ impl Budgets {
         ready: Duration::from_secs(5),
         render: None,
         cleanup: Duration::from_millis(250),
+        footprint_limit: 768 * 1024 * 1024,
     };
 
     fn render_deadline(&self, kind: JobKind) -> Duration {
@@ -74,6 +77,10 @@ enum Wait {
     Timeout,
     /// The reader thread is gone without a word.
     ReaderGone,
+    /// The worker and what it started held more memory than allowed.
+    OverFootprint,
+    /// A live worker could not be measured.
+    Unmeasured,
 }
 
 /// How a stopped worker ended.
@@ -153,6 +160,14 @@ pub(crate) fn attempt(
                 Stopped::Killed | Stopped::Stuck => FailureCode::WorkerUnavailable,
             }));
         }
+        Err(Wait::OverFootprint) => {
+            worker.kill();
+            return Ok(Err(FailureCode::RenderResource));
+        }
+        Err(Wait::Unmeasured) => {
+            worker.kill();
+            return Ok(Err(FailureCode::WorkerUnavailable));
+        }
         // Another frame, a refusal with more after it, one that did not
         // decode, end of file, or a reader that is gone: the exit says why.
         Ok(_) | Err(Wait::ReaderGone) => return Ok(Err(worker.stop_failure())),
@@ -184,6 +199,14 @@ pub(crate) fn attempt(
             Stopped::Exited(exit) => Err(exit_failure(exit)),
             Stopped::Killed | Stopped::Stuck => Err(FailureCode::WorkerUnavailable),
         },
+        Err(Wait::OverFootprint) => {
+            worker.kill();
+            Err(FailureCode::RenderResource)
+        }
+        Err(Wait::Unmeasured) => {
+            worker.kill();
+            Err(FailureCode::WorkerUnavailable)
+        }
         // A second Ready, more after the reply, a reply cut short or that
         // did not decode, or end of file.
         Ok(_) | Err(Wait::ReaderGone) => Err(worker.stop_failure()),
@@ -318,8 +341,8 @@ impl<'a> Running<'a> {
     }
 
     /// The next thing the reader says before `until`, looking at the worker
-    /// meanwhile. Once it has exited, the reader gets the cleanup budget to
-    /// pass on what the pipe still held.
+    /// and measuring its memory meanwhile. Once it has exited, the reader
+    /// gets the cleanup budget to pass on what the pipe still held.
     fn next(&mut self, received: &Receiver<Event>, until: Instant) -> Result<Event, Wait> {
         loop {
             let limit = match self.exited {
@@ -333,7 +356,10 @@ impl<'a> Running<'a> {
             match received.recv_timeout((limit - now).min(TICK)) {
                 Ok(event) => return Ok(event),
                 Err(RecvTimeoutError::Disconnected) => return Err(Wait::ReaderGone),
-                Err(RecvTimeoutError::Timeout) => self.look(),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.look();
+                    self.measure()?;
+                }
             }
         }
     }
@@ -349,6 +375,28 @@ impl<'a> Running<'a> {
         {
             self.process = None;
             self.exited = Some((exit, Instant::now()));
+        }
+    }
+
+    /// Measure the worker and what it started, unless it has exited.
+    /// Sampling every tick is protection, not proof: an allocation can cross
+    /// the limit briefly between samples.
+    fn measure(&mut self) -> Result<(), Wait> {
+        let Some(process) = self.process.as_mut() else {
+            return Ok(());
+        };
+        match process.footprint() {
+            Ok(bytes) if bytes > self.budgets.footprint_limit => Err(Wait::OverFootprint),
+            Ok(_) => Ok(()),
+            // A worker that exited as it was measured is not unmeasurable.
+            Err(_) => {
+                self.look();
+                if self.exited.is_some() {
+                    Ok(())
+                } else {
+                    Err(Wait::Unmeasured)
+                }
+            }
         }
     }
 
@@ -521,6 +569,7 @@ mod tests {
         ready: Duration::from_millis(300),
         render: Some(Duration::from_millis(300)),
         cleanup: Duration::from_millis(50),
+        footprint_limit: 64 * 1024 * 1024,
     };
 
     fn build_id() -> BuildId {
@@ -592,6 +641,8 @@ mod tests {
         exits_holding_stdout: bool,
         /// Whether it exits by itself, with `exits`, just as a kill is sent.
         exits_at_kill: bool,
+        /// What measuring its memory says: bytes, or `None` for an error.
+        footprint: Option<u64>,
     }
 
     impl Script {
@@ -603,6 +654,7 @@ mod tests {
                 killable: true,
                 exits_holding_stdout: false,
                 exits_at_kill: false,
+                footprint: Some(1024 * 1024),
             }
         }
         fn silent() -> Self {
@@ -613,6 +665,7 @@ mod tests {
                 killable: true,
                 exits_holding_stdout: false,
                 exits_at_kill: false,
+                footprint: Some(1024 * 1024),
             }
         }
         /// Writes `output` and exits with `exit`, leaving stdout open.
@@ -635,6 +688,7 @@ mod tests {
         released: Arc<std::sync::atomic::AtomicBool>,
         reaped: Arc<AtomicUsize>,
         exits_at_kill: bool,
+        footprint: Option<u64>,
     }
 
     impl FakeProcess {
@@ -664,6 +718,10 @@ mod tests {
                 self.reaped.fetch_add(1, Ordering::SeqCst);
             }
             Ok(exit)
+        }
+        fn footprint(&mut self) -> std::io::Result<u64> {
+            self.footprint
+                .ok_or_else(|| std::io::Error::other("cannot measure"))
         }
         fn kill(&mut self) {
             if self.exits_at_kill {
@@ -785,6 +843,7 @@ mod tests {
                     released: Arc::clone(&self.released),
                     reaped: Arc::clone(&self.reaped),
                     exits_at_kill: script.exits_at_kill,
+                    footprint: script.footprint,
                 }),
                 stdin: Box::new(CheckedStdin {
                     inner: stdin_writer,
@@ -1135,6 +1194,56 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_footprint_kills_group() {
+        let over = Some(FAST.footprint_limit + 1);
+        // Before Ready, and while rendering after it: killed, never retried.
+        for script in [
+            Script {
+                footprint: over,
+                ..Script::silent()
+            },
+            Script {
+                footprint: over,
+                ..Script::silent_with(ready(build_id()))
+            },
+        ] {
+            let fake = Fake::new(vec![script]);
+            let started = Instant::now();
+            assert_eq!(
+                client(&fake).render(&job(1)),
+                Err(FailureCode::RenderResource)
+            );
+            assert!(started.elapsed() < FAST.ready, "{:?}", started.elapsed());
+            assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+            assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        }
+        // At the limit is allowed: sampled at it for a whole deadline, the
+        // worker ends by the deadline, not the limit.
+        let fake = Fake::new(vec![Script {
+            footprint: Some(FAST.footprint_limit),
+            ..Script::silent_with(ready(build_id()))
+        }]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::RenderTimeout)
+        );
+    }
+
+    #[test]
+    fn footprint_probe_failure_fails_closed() {
+        let fake = Fake::new(vec![Script {
+            footprint: None,
+            ..Script::silent_with(ready(build_id()))
+        }]);
+        assert_eq!(
+            client(&fake).render(&job(1)),
+            Err(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(fake.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn pipe_writes_are_guarded_before_the_first_write() {
         let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
         let fake = Fake::new(vec![Script::replies(output, WorkerExit::Code(0))]);
@@ -1286,6 +1395,7 @@ mod tests {
             Duration::from_secs(3)
         );
         assert_eq!(budgets.cleanup, Duration::from_millis(250));
+        assert_eq!(budgets.footprint_limit, 768 * 1024 * 1024);
         let _ = PROTOCOL_VERSION;
     }
 

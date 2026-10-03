@@ -55,6 +55,10 @@ impl WorkerProcess for Plain {
     fn kill(&mut self) {
         let _ = self.0.kill();
     }
+    fn footprint(&mut self) -> std::io::Result<u64> {
+        // Measured for real by the kettle platform's own tests.
+        Ok(0)
+    }
 }
 
 impl WorkerPlatform for Stub {
@@ -92,7 +96,13 @@ impl WorkerPlatform for Stub {
 }
 
 fn client(mode: &str) -> WorkerClient {
-    WorkerClient::with_test_budgets(common::build(), Box::new(Stub::new(mode)), READY, RENDER)
+    WorkerClient::with_test_budgets(
+        common::build(),
+        Box::new(Stub::new(mode)),
+        READY,
+        RENDER,
+        u64::MAX,
+    )
 }
 
 #[test]

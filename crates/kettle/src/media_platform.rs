@@ -214,6 +214,13 @@ impl WorkerProcess for GroupProcess {
         }
         self.kill_group();
     }
+
+    fn footprint(&mut self) -> std::io::Result<u64> {
+        if self.reaped {
+            return Ok(0);
+        }
+        footprint::of_tree(self.pid()?)
+    }
 }
 
 #[cfg(unix)]
@@ -276,6 +283,201 @@ impl GroupProcess {
             // process_group(0)), and no one else's.
             unsafe { libc::killpg(pid, libc::SIGKILL) };
         }
+    }
+}
+
+/// The memory a worker and everything it started hold.
+#[cfg(unix)]
+mod footprint {
+    use std::io;
+
+    use libc::pid_t;
+
+    /// More processes than a worker's tree may hold; past this, measuring
+    /// fails, and the job with it.
+    const MAX_TRACKED: usize = 64;
+
+    /// The worker's memory plus its descendants', summed. Shared pages may be
+    /// counted twice, which errs on the side of stopping the job.
+    pub(super) fn of_tree(leader: pid_t) -> io::Result<u64> {
+        let mut total: u64 = 0;
+        for pid in tree(leader)? {
+            match of_process(pid) {
+                Ok(bytes) => {
+                    total = total
+                        .checked_add(bytes)
+                        .ok_or_else(|| io::Error::other("footprint overflow"))?;
+                }
+                // A descendant that exited as it was measured holds nothing.
+                Err(error) if pid != leader && gone(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(total)
+    }
+
+    fn gone(error: &io::Error) -> bool {
+        error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// The leader and every process below it, the leader first.
+    pub(super) fn tree(leader: pid_t) -> io::Result<Vec<pid_t>> {
+        let mut found = vec![leader];
+        let mut next = 0;
+        while let Some(&pid) = found.get(next) {
+            next += 1;
+            let children = match children(leader, pid) {
+                Ok(children) => children,
+                Err(error) if pid != leader && gone(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            for child in children {
+                if !found.contains(&child) {
+                    found.push(child);
+                    if found.len() > MAX_TRACKED {
+                        return Err(io::Error::other("too many processes to measure"));
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// The children of `pid`: each of its threads lists those it started.
+    /// A kernel without those lists is asked for `leader`'s process group
+    /// instead, which holds the whole tree at once.
+    #[cfg(target_os = "linux")]
+    fn children(leader: pid_t, pid: pid_t) -> io::Result<Vec<pid_t>> {
+        if !children_listed() {
+            return if pid == leader {
+                group_members(leader)
+            } else {
+                Ok(Vec::new())
+            };
+        }
+        let mut found = Vec::new();
+        for task in std::fs::read_dir(format!("/proc/{pid}/task"))? {
+            let task = task?.file_name();
+            let listed = read_capped(
+                &format!("/proc/{pid}/task/{}/children", task.to_string_lossy()),
+                64 * 1024,
+            )?;
+            for field in listed.split_ascii_whitespace() {
+                found.push(field.parse().map_err(io::Error::other)?);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether this kernel lists each thread's children
+    /// (`CONFIG_PROC_CHILDREN`).
+    #[cfg(target_os = "linux")]
+    fn children_listed() -> bool {
+        static LISTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *LISTED.get_or_init(|| {
+            std::path::Path::new(&format!("/proc/self/task/{}/children", std::process::id()))
+                .exists()
+        })
+    }
+
+    /// The processes in `leader`'s process group other than itself, from
+    /// each process's `stat`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn group_members(leader: pid_t) -> io::Result<Vec<pid_t>> {
+        let mut members = Vec::new();
+        for entry in std::fs::read_dir("/proc")? {
+            let Ok(pid) = entry?.file_name().to_string_lossy().parse::<pid_t>() else {
+                continue;
+            };
+            if pid == leader {
+                continue;
+            }
+            match read_capped(&format!("/proc/{pid}/stat"), 4096) {
+                Ok(stat) if process_group(&stat) == Some(leader) => members.push(pid),
+                Ok(_) => {}
+                Err(error) if gone(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(members)
+    }
+
+    /// The process group in a `/proc/<pid>/stat` line. The command name is in
+    /// parentheses and may hold spaces or parentheses itself, so the fields
+    /// are counted from the last `)`: state, parent, then group.
+    #[cfg(target_os = "linux")]
+    pub(super) fn process_group(stat: &str) -> Option<pid_t> {
+        let (_, rest) = stat.rsplit_once(')')?;
+        rest.split_ascii_whitespace().nth(2)?.parse().ok()
+    }
+
+    /// Resident pages times the page size, from `statm`.
+    #[cfg(target_os = "linux")]
+    pub(super) fn of_process(pid: pid_t) -> io::Result<u64> {
+        let statm = read_capped(&format!("/proc/{pid}/statm"), 256)?;
+        let pages: u64 = statm
+            .split_ascii_whitespace()
+            .nth(1)
+            .and_then(|field| field.parse().ok())
+            .ok_or_else(|| io::Error::other("unreadable statm"))?;
+        // SAFETY: sysconf reads a constant.
+        let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+            .map_err(io::Error::other)?;
+        pages
+            .checked_mul(page)
+            .ok_or_else(|| io::Error::other("footprint overflow"))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_capped(path: &str, cap: u64) -> io::Result<String> {
+        use std::io::Read as _;
+        let mut text = String::new();
+        std::fs::File::open(path)?
+            .take(cap)
+            .read_to_string(&mut text)?;
+        Ok(text)
+    }
+
+    /// The children of `pid`, from the kernel's process list. A list that
+    /// fills its buffer may be cut short, so that fails rather than guesses.
+    #[cfg(target_os = "macos")]
+    fn children(_leader: pid_t, pid: pid_t) -> io::Result<Vec<pid_t>> {
+        // SAFETY: with a null buffer the call only reports how many there are.
+        let count = unsafe { libc::proc_listchildpids(pid, std::ptr::null_mut(), 0) };
+        let capacity = usize::try_from(count).map_err(|_| io::Error::last_os_error())? + 16;
+        let mut pids: Vec<pid_t> = vec![0; capacity];
+        let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<pid_t>())
+            .map_err(io::Error::other)?;
+        // SAFETY: `pids` is writable for `bytes` bytes of pids.
+        let filled = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
+        let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
+        if filled >= capacity {
+            return Err(io::Error::other("child list did not fit"));
+        }
+        pids.truncate(filled);
+        Ok(pids)
+    }
+
+    /// The physical footprint the kernel accounts to `pid`, as Activity
+    /// Monitor reports it.
+    #[cfg(target_os = "macos")]
+    pub(super) fn of_process(pid: pid_t) -> io::Result<u64> {
+        // SAFETY: an all-zero rusage_info_v2 is a valid value for the call to
+        // fill.
+        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is writable storage of the size RUSAGE_INFO_V2 fills;
+        // the call takes it through the `rusage_info_t *` the header declares.
+        let read = unsafe {
+            libc::proc_pid_rusage(
+                pid,
+                libc::RUSAGE_INFO_V2,
+                (&raw mut info).cast::<libc::rusage_info_t>(),
+            )
+        };
+        if read != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(info.ri_phys_footprint)
     }
 }
 
@@ -974,6 +1176,29 @@ mod tests {
             }
         }
 
+        /// A one-pixel raster job.
+        fn small_job() -> kettle_media::Job {
+            kettle_media::Job {
+                kind: kettle_media::JobKind::Raster,
+                source: kettle_media::Source::Bytes(vec![7]),
+                theme: kettle_media::Theme {
+                    background: [0; 4],
+                    foreground: [255; 4],
+                    palette: [[0; 4]; 16],
+                    accent: [0; 4],
+                    is_dark: true,
+                },
+                canvas: kettle_media::Canvas::Theme,
+                target: kettle_media::Target {
+                    width: 1,
+                    height: 1,
+                    scale: 1.0,
+                    crop: None,
+                },
+                fallback_fonts: vec![],
+            }
+        }
+
         #[test]
         fn a_dead_worker_cannot_end_kettle_with_sigpipe() {
             if !in_child(
@@ -1007,25 +1232,8 @@ mod tests {
                 &format!("/bin/cat '{}'\nexit 0", ready.display()),
             );
             let client = kettle_media::client::WorkerClient::new(build_id, Box::new(Stand(path)));
-            let mut job = kettle_media::Job {
-                kind: kettle_media::JobKind::Raster,
-                source: kettle_media::Source::Bytes(vec![7; 4 * 1024 * 1024]),
-                theme: kettle_media::Theme {
-                    background: [0; 4],
-                    foreground: [255; 4],
-                    palette: [[0; 4]; 16],
-                    accent: [0; 4],
-                    is_dark: true,
-                },
-                canvas: kettle_media::Canvas::Theme,
-                target: kettle_media::Target {
-                    width: 1,
-                    height: 1,
-                    scale: 1.0,
-                    crop: None,
-                },
-                fallback_fonts: vec![],
-            };
+            let mut job = small_job();
+            job.source = kettle_media::Source::Bytes(vec![7; 4 * 1024 * 1024]);
             assert!(client.render(&job).is_err());
             job.source = kettle_media::Source::Bytes(vec![7]);
             // Still alive, and still able to try again.
@@ -1065,6 +1273,120 @@ mod tests {
             }
             killed.kill();
             assert!(killed.reaped, "a lost worker's group must not be signalled");
+        }
+
+        #[test]
+        fn a_worker_tree_is_found_whole() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "/bin/sleep 30 &\n/bin/sleep 30 &\necho $$\nwait",
+            );
+            let mut worker = spawn(&path).unwrap();
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let tree = footprint::tree(leader).unwrap();
+            assert_eq!(tree[0], leader);
+            assert_eq!(tree.len(), 3, "{tree:?}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn without_child_lists_the_process_group_holds_the_tree() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "/bin/sleep 30 &\n/bin/sleep 30 &\necho $$\nwait",
+            );
+            let mut worker = spawn(&path).unwrap();
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let members = footprint::group_members(leader).unwrap();
+            assert_eq!(members.len(), 2, "{members:?}");
+            assert!(!members.contains(&leader));
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_process_group_is_read_past_the_command_name() {
+            for (stat, group) in [
+                ("42 (sleep) S 1 42 42 0 -1", Some(42)),
+                ("43 (a) b) (c) R 42 77 42 0", Some(77)),
+                ("44 (sp ace) S 1 9 9", Some(9)),
+                ("garbage", None),
+            ] {
+                assert_eq!(footprint::process_group(stat), group, "{stat}");
+            }
+        }
+
+        #[test]
+        fn footprint_counts_what_descendants_hold() {
+            // A child holds 32 MiB; the worker itself holds little. (The `:`
+            // keeps the child shell alive: dash would replace it with its last
+            // command, freeing the memory.)
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "( x=$(head -c 33554432 /dev/zero | tr '\\0' a); echo $$; /bin/sleep 30; : ) &\nwait",
+            );
+            let mut worker = spawn(&path).unwrap();
+            // A subshell's `$$` is still the worker's own pid.
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let own = footprint::of_process(leader).unwrap();
+            let tree = worker.process.footprint().unwrap();
+            assert!(own < 16 << 20, "the worker alone holds {own}");
+            assert!(tree >= 32 << 20, "the tree holds {tree}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+            // Reaped, it holds nothing.
+            assert_eq!(worker.process.footprint().unwrap(), 0);
+        }
+
+        #[test]
+        fn aggregate_footprint_kills_group_through_the_client() {
+            // Ready, then a child holding 64 MiB against a 16 MiB limit.
+            let build_id = kettle_media::BuildId::from_embedded("5.0.0", "ab12").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let ready = directory.path().join("ready.bin");
+            std::fs::write(
+                &ready,
+                kettle_media::wire::encode(
+                    &kettle_media::wire::Frame::Ready(kettle_media::Ready {
+                        build_id: build_id.clone(),
+                    }),
+                    kettle_media::wire::Direction::WorkerToParent,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let path = script(
+                directory.path(),
+                &format!(
+                    "/bin/cat '{}'\n( x=$(head -c 67108864 /dev/zero | tr '\\0' a); /bin/sleep 30; : ) &\nwait",
+                    ready.display()
+                ),
+            );
+            let client = kettle_media::client::WorkerClient::with_test_budgets(
+                build_id,
+                Box::new(Stand(path)),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                16 << 20,
+            );
+            let started = Instant::now();
+            assert_eq!(
+                client.render(&small_job()),
+                Err(kettle_media::FailureCode::RenderResource)
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "{:?}",
+                started.elapsed()
+            );
         }
 
         #[test]
