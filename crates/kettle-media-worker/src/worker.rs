@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use kettle_media::wire::{Direction, Frame, WireError, read_frame, write_frame};
 use kettle_media::{
-    BuildId, Failure, FailureCode, HandshakeOutcome, Job, Ready, ValidationError, check_ready,
+    BuildId, Failure, FailureCode, HandshakeOutcome, Job, Ready, Rendered, ValidationError,
+    check_ready,
 };
 
 /// Exit codes. 4, 8 and 9 mean what they mean for the video-preview worker.
@@ -23,6 +24,7 @@ pub(crate) const READY_DEADLINE: Duration = Duration::from_secs(5);
 /// From Ready until the job has arrived.
 const JOB_ARRIVAL_DEADLINE: Duration = Duration::from_secs(5);
 /// From the job's arrival until its reply is written, blocked output included.
+/// The client's own deadline is shorter for most kinds.
 const JOB_DEADLINE: Duration = Duration::from_secs(3);
 
 /// The panic report: one fixed line, never the message, its payload, a
@@ -100,15 +102,23 @@ pub(crate) fn serve(input: &mut impl Read, output: &mut impl Write, watchdog: &W
         other => return refuse(output, other),
     };
     watchdog.arm(JOB_DEADLINE);
-    reply(output, answer(&job), 0)
+    match answer(&job) {
+        Ok(rendered) => {
+            let frame = Frame::Rendered(rendered);
+            match write_frame(output, &frame, Direction::WorkerToParent) {
+                Ok(()) => 0,
+                Err(_) => EXIT_PROTOCOL,
+            }
+        }
+        Err(code) => reply(output, code, 0),
+    }
 }
 
-/// What this build answers a job: it has no renderer yet.
-fn answer(job: &Job) -> FailureCode {
+/// Render the job, or say why not.
+fn answer(job: &Job) -> Result<Rendered, FailureCode> {
     #[cfg(feature = "test-faults")]
     faults::inject(job);
-    let _ = job;
-    FailureCode::WorkerUnavailable
+    kettle_media_render::render(job)
 }
 
 /// Answer a frame other than the one expected, or one that could not be read.

@@ -314,12 +314,67 @@ both binaries of one source answer with one `BuildId`. On Linux and macOS:
    answered `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin
    between frames ends the worker quietly with 0. stdout carries frames only, through one writer.
 
-This build answers every job `WorkerUnavailable`: no renderer is linked in.
-Exit codes 4, 8 and 9 mean what they mean for the video-preview worker. On
+The reply is the job rendered by `kettle-media-render` (below), or its fixed
+failure. Exit codes 4, 8 and 9 mean what they mean for the video-preview worker. On
 other platforms the binary exits 8 at once, and nothing starts it there. The
 worker is built with the workspace but not packaged or started yet; the
 release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
 test job make it panic, for the panic test; no shipped build enables it.
+
+## Rendering a job
+
+`crates/kettle-media-render` is what the worker renders with, in safe code
+(`forbid(unsafe_code)`). It reads its source and writes nothing: no file is
+created, written, renamed or removed, and it starts no process and opens no
+socket; a source guard test holds it to that, and the worker's file-size limit
+of 0 backs it up. Every size is checked before the work it would cost, so the
+worker's limits and the client's deadlines and memory limit are a second
+bound, not the only one. An empty target box, one over 4096 pixels on an
+edge, a scale that is not a positive finite number, or a crop that is empty or
+leaves the box, is `BadParams`. Raster jobs are rendered; every other kind is
+`UnsupportedMedia` until its renderer lands. On Windows, where no worker
+runs, every job is `UnsupportedPlatform`.
+
+**The source.** Inline bytes over the job kind's input cap (32 MiB for a
+raster) are `TooLarge`. A path is opened once, read-only, non-blocking and
+without becoming a controlling terminal, and everything after that is decided
+from the open descriptor, never the path:
+
+| The file at the path | Answer |
+|---|---|
+| missing, or any open failure but permission | `FileNotFound` |
+| not readable | `FilePermission` |
+| a directory, FIFO, socket or device (a FIFO with no writer does not block) | `FileNotRegular` |
+| an external request's attested device and inode differ from the open file | `Changed` |
+| larger than the cap when opened, or more than the cap read | `FileTooLarge` |
+| a different identity or size after the read than when opened | `Changed` |
+| a symbolic link at the leaf, or group-writable | followed, accepted |
+
+The descriptor reads at most the cap plus one byte, so an oversized file is
+never read whole. Renaming another file over the path after the open changes
+nothing: the open file is read. The source is not a snapshot: a same-size
+rewrite that restores its modification time between the two checks is not
+seen. The digest is taken over the bytes read and that file's identity
+(device, inode, size and modification time), as [Digest](#digest) frames it.
+
+**Raster decoding.** The format comes from the content's signature, never the
+name or extension. PNG, JPEG, WebP, BMP and GIF are decoded; any other format,
+TIFF included, is `UnsupportedMedia`. Before a pixel is decoded, the decoder
+reports the image's dimensions and its native decoded size, and both are
+checked: an edge over 8192 pixels, RGBA over 64 MiB, or a native size over
+64 MiB (a 16-bit image needs more) is `RenderResource`. The codec's own limits
+are set to the same values, but they are best effort. A GIF yields its first
+frame only. Content that does not decode is `RenderParse`.
+
+**Fitting.** The image is scaled to fit inside the target box, keeping its
+aspect ratio, each edge rounded and kept between 1 pixel and the box. It is
+resampled (triangle filter) with premultiplied alpha, so a transparent pixel's
+hidden color does not bleed into its neighbours, and returned as straight
+RGBA in which every fully transparent pixel is all zero. A crop is in target
+box coordinates, with the fitted image centered in the box: it returns just
+that region, transparent wherever the image does not reach. The canvas color
+is the GUI's to draw behind the result, and the scale is for vector content: a
+raster target is already in device pixels.
 
 ## P2 boundary and separate worker decision
 

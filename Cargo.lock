@@ -1982,10 +1982,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "kettle-media-render"
+version = "4.9.0"
+dependencies = [
+ "image",
+ "kettle-media",
+ "kettle-test-support",
+ "libc",
+ "tempfile",
+]
+
+[[package]]
 name = "kettle-media-worker"
 version = "4.9.0"
 dependencies = [
+ "image",
  "kettle-media",
+ "kettle-media-render",
  "kettle-test-support",
  "libc",
 ]

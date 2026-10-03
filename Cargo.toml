@@ -7,6 +7,7 @@ members = [
     "crates/kettle-i18n",
     "crates/kettle-media",
     "crates/kettle-media-worker",
+    "crates/kettle-media-render",
     "crates/kettle-config",
     "crates/kettle-core",
     "crates/kettle-vt",
@@ -84,9 +85,14 @@ kettle-ctl = { path = "crates/kettle-ctl", version = "4.9.0" }
 kettle-ui = { path = "crates/kettle-ui", version = "4.9.0" }
 kettle-i18n = { path = "crates/kettle-i18n", version = "4.9.0" }
 kettle-media = { path = "crates/kettle-media", version = "4.9.0" }
+kettle-media-render = { path = "crates/kettle-media-render", version = "4.9.0" }
 
 anyhow = "1"
 thiserror = "2"
+# One declaration for every crate that decodes images: defaults off, and each
+# consumer names the codecs it needs. Features unify within one build, so a
+# crate must not rely on a codec being absent (arboard adds TIFF on macOS).
+image = { version = "0.25.10", default-features = false }
 log = "0.4"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
@@ -173,9 +179,13 @@ panic = "abort"
 # `split-debuginfo = "packed"` and archive the sidecar.
 strip = "symbols"
 
-# The media worker renders untrusted media against deadlines, so it is
-# optimized for speed like the rest of the release build, never for size.
+# The media worker renders untrusted media against deadlines, so it and its
+# renderer are optimized for speed like the rest of the release build, never
+# for size.
 [profile.release.package.kettle-media-worker]
+opt-level = 3
+
+[profile.release.package.kettle-media-render]
 opt-level = 3
 
 [profile.dev]

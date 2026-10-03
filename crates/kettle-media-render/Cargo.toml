@@ -1,0 +1,28 @@
+[package]
+name = "kettle-media-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The media worker's renderer for kettle: bounded, safe-code decoding of one job"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+kettle-media.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# The raster codecs a job may hold. A build that links in more (arboard adds
+# TIFF to a workspace build) changes nothing: the renderer names the formats
+# it decodes and refuses the rest.
+image = { workspace = true, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+# O_NONBLOCK and O_NOCTTY for the source open; no unsafe call is made.
+libc = "0.2"
+
+[dev-dependencies]
+kettle-test-support.workspace = true
+tempfile = "3"

@@ -109,6 +109,18 @@ Reports that fit any of these are welcome:
   a tree that cannot be measured fails the job. A worker process or a child
   of one that outlives its job, or a reply accepted from a worker that then
   crashed, is in scope.
+- **Media rendering** — the worker renders with `kettle-media-render`, safe
+  code that writes nothing. A source path is opened once, read-only and
+  non-blocking, and decided from that open file: it must be a regular file
+  (a FIFO, device or directory is refused without blocking), an external
+  request's attested device and inode must match it, at most its cap plus
+  one byte is read, and a file that changes while it is read is refused. An
+  image's format comes from its content; only PNG, JPEG, WebP, BMP and the
+  first frame of a GIF are decoded, and the dimensions and decoded size the
+  decoder reports are checked against 8192 pixels an edge and 64 MiB before
+  any pixel is decoded. Reading a file other than the one opened or
+  attested, a decode that allocates past those caps, or rendered output that
+  carries a transparent pixel's hidden color is in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

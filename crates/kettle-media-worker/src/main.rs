@@ -10,7 +10,8 @@
 //! that ends the process when the parent stalls or a phase overruns. stdout
 //! carries frames only, through one writer.
 //!
-//! This build renders nothing yet: every job is answered `WorkerUnavailable`.
+//! `kettle-media-render` renders each job: raster images so far, with every
+//! other kind refused as `UnsupportedMedia`.
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod early_unix;
