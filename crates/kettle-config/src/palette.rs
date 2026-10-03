@@ -3,147 +3,151 @@
 //! overlay; this just answers "given this query, which commands, in what
 //! order?". Reuses [`crate::fuzzy`].
 
+use kettle_i18n::{Language, Text, Translator};
+
 use crate::fuzzy;
 use crate::keybinds::Action;
 
-/// The palette command registry: a friendly label plus the [`Action`] it
+/// The palette command registry: a catalogue label plus the [`Action`] it
 /// dispatches. Ordered roughly by how often it is reached for; this order
 /// is also the tie-break and the empty-query order.
-pub fn commands() -> Vec<(&'static str, Action)> {
+pub fn commands() -> Vec<(Text, Action)> {
     use Action::*;
+    use Text as T;
     vec![
-        ("New tab", NewTab),
-        ("Close tab", CloseTab),
-        ("Undo close tab", UndoCloseTab),
-        ("Duplicate tab", DuplicateTab),
-        ("Duplicate pane", DuplicatePane),
-        ("Next tab", NextTab),
-        ("Previous tab", PrevTab),
-        ("Move tab left", MoveTabLeft),
-        ("Move tab right", MoveTabRight),
-        ("Split right (vertical divider)", SplitRight),
-        ("Split down (horizontal divider)", SplitDown),
-        ("Split automatically", SplitAuto),
-        ("Split left (new pane on the left)", SplitLeft),
-        ("Split up (new pane above)", SplitUp),
-        ("Close pane", ClosePane),
-        ("Equalize splits (equal pane areas)", EqualizeSplits),
-        ("Zoom / unzoom pane", ToggleZoom),
-        ("Scaled zoom (zoom + 1.5x font)", ScaledZoom),
-        ("Open kettle help / README", ShowHelp),
-        ("Send literal newline to focused pane", SendNewline),
-        ("Open layout picker", OpenLayoutPicker),
-        ("Open settings", OpenSettings),
-        ("About kettle", About),
-        ("Open config file with default app", EditConfig),
-        ("Preferences: scrollbar always-on", SetScrollbarAlways),
-        ("Preferences: scrollbar auto-hide", SetScrollbarAuto),
-        ("Preferences: scrollbar hidden", SetScrollbarNever),
+        (T::PaletteNewTab, NewTab),
+        (T::PaletteCloseTab, CloseTab),
+        (T::PaletteUndoCloseTab, UndoCloseTab),
+        (T::PaletteDuplicateTab, DuplicateTab),
+        (T::PaletteDuplicatePane, DuplicatePane),
+        (T::PaletteNextTab, NextTab),
+        (T::PalettePrevTab, PrevTab),
+        (T::PaletteMoveTabLeft, MoveTabLeft),
+        (T::PaletteMoveTabRight, MoveTabRight),
+        (T::PaletteSplitRight, SplitRight),
+        (T::PaletteSplitDown, SplitDown),
+        (T::PaletteSplitAuto, SplitAuto),
+        (T::PaletteSplitLeft, SplitLeft),
+        (T::PaletteSplitUp, SplitUp),
+        (T::PaletteClosePane, ClosePane),
+        (T::PaletteEqualizeSplits, EqualizeSplits),
+        (T::PaletteToggleZoom, ToggleZoom),
+        (T::PaletteScaledZoom, ScaledZoom),
+        (T::PaletteShowHelp, ShowHelp),
+        (T::PaletteSendNewline, SendNewline),
+        (T::PaletteOpenLayoutPicker, OpenLayoutPicker),
+        (T::PaletteOpenSettings, OpenSettings),
+        (T::PaletteAbout, About),
+        (T::PaletteEditConfig, EditConfig),
+        (T::PaletteSetScrollbarAlways, SetScrollbarAlways),
+        (T::PaletteSetScrollbarAuto, SetScrollbarAuto),
+        (T::PaletteSetScrollbarNever, SetScrollbarNever),
         (
-            "Preferences: confirm close always",
+            T::PaletteSetAskBeforeClosingAlways,
             SetAskBeforeClosingAlways,
         ),
         (
-            "Preferences: confirm close for multiple terminals",
+            T::PaletteSetAskBeforeClosingMultiple,
             SetAskBeforeClosingMultiple,
         ),
-        ("Preferences: confirm close never", SetAskBeforeClosingNever),
-        ("Preferences: toggle cursor blink", ToggleCursorBlink),
-        ("Preferences: toggle copy-on-select", ToggleCopyOnSelect),
-        ("Preferences: bell off", SetBellOff),
-        ("Preferences: bell visual flash", SetBellVisual),
-        ("Preferences: bell attention (urgency)", SetBellAttention),
-        ("Preferences: bell visual + attention", SetBellBoth),
-        (
-            "Preferences: toggle mouse-hide while typing",
-            ToggleMouseHide,
-        ),
-        ("Focus next pane", FocusNext),
-        ("Focus previous pane", FocusPrev),
-        ("New window", NewWindow),
-        ("Close window", CloseWindow),
-        ("Search scrollback", StartSearch),
-        ("Quick-select hints", HintMode),
-        ("SSH launcher", OpenSsh),
-        ("Copy", Copy),
-        ("Paste", Paste),
-        ("Select all", SelectAll),
-        ("Select to top of buffer", SelectToTop),
-        ("Select to bottom of buffer", SelectToBottom),
-        ("Increase font size", IncreaseFontSize),
-        ("Decrease font size", DecreaseFontSize),
-        ("Reset font size", ResetFontSize),
-        ("Toggle fullscreen", ToggleFullscreen),
-        ("Broadcast input to all panes in tab", ToggleBroadcastAll),
-        (
-            "Broadcast input to focused pane's group",
-            ToggleBroadcastGroup,
-        ),
-        (
-            "Broadcast input to every pane in window",
-            ToggleBroadcastWindow,
-        ),
-        ("Stop broadcasting input", ToggleBroadcastOff),
-        ("Scroll up one line", ScrollLineUp),
-        ("Scroll down one line", ScrollLineDown),
-        ("Scroll page up", ScrollPageUp),
-        ("Scroll page down", ScrollPageDown),
-        ("Scroll to top", ScrollToTop),
-        ("Scroll to bottom", ScrollToBottom),
-        ("Jump to previous prompt", JumpPrevPrompt),
-        ("Jump to next prompt", JumpNextPrompt),
-        ("Toggle vi-mode (scrollback)", ToggleViMode),
+        (T::PaletteSetAskBeforeClosingNever, SetAskBeforeClosingNever),
+        (T::PaletteToggleCursorBlink, ToggleCursorBlink),
+        (T::PaletteToggleCopyOnSelect, ToggleCopyOnSelect),
+        (T::PaletteSetBellOff, SetBellOff),
+        (T::PaletteSetBellVisual, SetBellVisual),
+        (T::PaletteSetBellAttention, SetBellAttention),
+        (T::PaletteSetBellBoth, SetBellBoth),
+        (T::PaletteToggleMouseHide, ToggleMouseHide),
+        (T::PaletteFocusNext, FocusNext),
+        (T::PaletteFocusPrev, FocusPrev),
+        (T::PaletteNewWindow, NewWindow),
+        (T::PaletteCloseWindow, CloseWindow),
+        (T::PaletteStartSearch, StartSearch),
+        (T::PaletteHintMode, HintMode),
+        (T::PaletteOpenSsh, OpenSsh),
+        (T::PaletteCopy, Copy),
+        (T::PalettePaste, Paste),
+        (T::PaletteSelectAll, SelectAll),
+        (T::PaletteSelectToTop, SelectToTop),
+        (T::PaletteSelectToBottom, SelectToBottom),
+        (T::PaletteIncreaseFontSize, IncreaseFontSize),
+        (T::PaletteDecreaseFontSize, DecreaseFontSize),
+        (T::PaletteResetFontSize, ResetFontSize),
+        (T::PaletteToggleFullscreen, ToggleFullscreen),
+        (T::PaletteToggleBroadcastAll, ToggleBroadcastAll),
+        (T::PaletteToggleBroadcastGroup, ToggleBroadcastGroup),
+        (T::PaletteToggleBroadcastWindow, ToggleBroadcastWindow),
+        (T::PaletteToggleBroadcastOff, ToggleBroadcastOff),
+        (T::PaletteScrollLineUp, ScrollLineUp),
+        (T::PaletteScrollLineDown, ScrollLineDown),
+        (T::PaletteScrollPageUp, ScrollPageUp),
+        (T::PaletteScrollPageDown, ScrollPageDown),
+        (T::PaletteScrollToTop, ScrollToTop),
+        (T::PaletteScrollToBottom, ScrollToBottom),
+        (T::PaletteJumpPrevPrompt, JumpPrevPrompt),
+        (T::PaletteJumpNextPrompt, JumpNextPrompt),
+        (T::PaletteToggleViMode, ToggleViMode),
         // Terminator-parity entries.
-        ("Rotate panes clockwise", RotateCw),
-        ("Rotate panes counter-clockwise", RotateCcw),
-        ("Move pane left", MovePaneLeft),
-        ("Move pane right", MovePaneRight),
-        ("Move pane up", MovePaneUp),
-        ("Move pane down", MovePaneDown),
-        ("Toggle scrollbar visibility", ToggleScrollbar),
-        ("Next profile", NextProfile),
-        ("Previous profile", PrevProfile),
-        ("Zoom in (all panes)", ZoomInAll),
-        ("Zoom out (all panes)", ZoomOutAll),
-        ("Reset zoom (all panes)", ZoomNormalAll),
-        ("Reset terminal + clear scrollback", ResetAndClear),
-        ("Scroll half page up", ScrollPageUpHalf),
-        ("Scroll half page down", ScrollPageDownHalf),
-        ("Paste primary selection (X11)", PastePrimary),
-        ("Toggle window visibility", ToggleWindowVisibility),
-        ("Move tab to new window", MoveTabToNewWindow),
-        ("Edit pane broadcast group", EditPaneGroup),
-        ("Next theme", NextTheme),
-        ("Previous theme", PrevTheme),
-        ("Toggle light/dark theme", ToggleLightDark),
-        ("Toggle session log (pane → file)", ToggleSessionLog),
+        (T::PaletteRotateCw, RotateCw),
+        (T::PaletteRotateCcw, RotateCcw),
+        (T::PaletteMovePaneLeft, MovePaneLeft),
+        (T::PaletteMovePaneRight, MovePaneRight),
+        (T::PaletteMovePaneUp, MovePaneUp),
+        (T::PaletteMovePaneDown, MovePaneDown),
+        (T::PaletteToggleScrollbar, ToggleScrollbar),
+        (T::PaletteNextProfile, NextProfile),
+        (T::PalettePrevProfile, PrevProfile),
+        (T::PaletteZoomInAll, ZoomInAll),
+        (T::PaletteZoomOutAll, ZoomOutAll),
+        (T::PaletteZoomNormalAll, ZoomNormalAll),
+        (T::PaletteResetAndClear, ResetAndClear),
+        (T::PaletteScrollPageUpHalf, ScrollPageUpHalf),
+        (T::PaletteScrollPageDownHalf, ScrollPageDownHalf),
+        (T::PalettePastePrimary, PastePrimary),
+        (T::PaletteToggleWindowVisibility, ToggleWindowVisibility),
+        (T::PaletteMoveTabToNewWindow, MoveTabToNewWindow),
+        (T::PaletteEditPaneGroup, EditPaneGroup),
+        (T::PaletteNextTheme, NextTheme),
+        (T::PalettePrevTheme, PrevTheme),
+        (T::PaletteToggleLightDark, ToggleLightDark),
+        (T::PaletteToggleSessionLog, ToggleSessionLog),
         // Terminator parity ("Read only"): drop user input to the
         // focused pane while letting its output keep flowing.
-        ("Toggle read-only (focused pane)", TogglePaneReadOnly),
-        ("Take screenshot (focused pane)", TakeScreenshot),
-        ("Create / edit broadcast group", CreateGroup),
-        ("Group every pane in this tab", GroupTab),
-        ("Group every pane in this window", GroupWindow),
-        ("Ungroup every pane in this tab", UngroupTab),
-        ("Ungroup every pane in this window", UngroupWindow),
-        ("Group every pane as \"All\"", GroupAll),
-        ("Ungroup every pane", UngroupAll),
-        ("Toggle grouping every pane as \"All\"", ToggleGroupAll),
-        ("Toggle grouping this tab", ToggleGroupTab),
-        ("Toggle grouping this window", ToggleGroupWindow),
-        ("Reset terminal", Reset),
-        ("Clear scrollback", ClearHistory),
-        ("Reload config", ReloadConfig),
+        (T::PaletteTogglePaneReadOnly, TogglePaneReadOnly),
+        (T::PaletteTakeScreenshot, TakeScreenshot),
+        (T::PaletteCreateGroup, CreateGroup),
+        (T::PaletteGroupTab, GroupTab),
+        (T::PaletteGroupWindow, GroupWindow),
+        (T::PaletteUngroupTab, UngroupTab),
+        (T::PaletteUngroupWindow, UngroupWindow),
+        (T::PaletteGroupAll, GroupAll),
+        (T::PaletteUngroupAll, UngroupAll),
+        (T::PaletteToggleGroupAll, ToggleGroupAll),
+        (T::PaletteToggleGroupTab, ToggleGroupTab),
+        (T::PaletteToggleGroupWindow, ToggleGroupWindow),
+        (T::PaletteReset, Reset),
+        (T::PaletteClearHistory, ClearHistory),
+        (T::PaletteReloadConfig, ReloadConfig),
     ]
 }
 
-/// Indices into `cmds` that match `query`, best first. Ties (and an empty
+/// Indices into `cmds` that match `query` against their labels in `tr`'s
+/// language, best first. Outside English, the English label matches too, so a
+/// command name from the docs still finds its command. Ties (and an empty
 /// query) preserve registry order, so the palette is stable as you type.
-pub fn rank(query: &str, cmds: &[(&'static str, Action)]) -> Vec<usize> {
+pub fn rank(query: &str, cmds: &[(Text, Action)], tr: &Translator) -> Vec<usize> {
+    let english = Translator::new(Language::En);
+    let alias = tr.language() != Language::En;
     let mut scored: Vec<(usize, i32)> = cmds
         .iter()
         .enumerate()
-        .filter_map(|(i, (label, _))| fuzzy::score(query, label).map(|s| (i, s)))
+        .filter_map(|(i, (label, _))| {
+            let shown = fuzzy::score(query, tr.text(*label));
+            let english = alias
+                .then(|| fuzzy::score(query, english.text(*label)))
+                .flatten();
+            shown.max(english).map(|s| (i, s))
+        })
         .collect();
     // Sort by score desc, then original index asc (stable tie-break).
     scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
@@ -498,38 +502,75 @@ mod tests {
         );
     }
 
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
     #[test]
     fn empty_query_returns_all_in_registry_order() {
         let cmds = commands();
-        let r = rank("", &cmds);
-        assert_eq!(r.len(), cmds.len());
-        assert!(r.iter().enumerate().all(|(i, &idx)| i == idx), "stable");
+        for tr in [EN, ES] {
+            let r = rank("", &cmds, &tr);
+            assert_eq!(r.len(), cmds.len());
+            assert!(r.iter().enumerate().all(|(i, &idx)| i == idx), "stable");
+        }
     }
 
     #[test]
     fn query_filters_and_ranks() {
         let cmds = commands();
-        let r = rank("split", &cmds);
+        let r = rank("split", &cmds, &EN);
         assert!(!r.is_empty());
         // Every result actually contains the subsequence.
         assert!(
             r.iter()
-                .all(|&i| fuzzy::score("split", cmds[i].0).is_some())
+                .all(|&i| fuzzy::score("split", EN.text(cmds[i].0)).is_some())
         );
         // The top hit for "split" is a split command.
-        assert!(cmds[r[0]].0.to_lowercase().contains("split"));
+        assert!(EN.text(cmds[r[0]].0).to_lowercase().contains("split"));
         // Non-matching query → empty.
-        assert!(rank("zzzqqq", &cmds).is_empty());
+        assert!(rank("zzzqqq", &cmds, &EN).is_empty());
     }
 
     #[test]
     fn abbreviation_finds_the_expected_action() {
         let cmds = commands();
         // "nt" → "New tab" should rank first (word-initials).
-        let r = rank("nt", &cmds);
+        let r = rank("nt", &cmds, &EN);
         assert_eq!(cmds[r[0]].1, Action::NewTab, "nt → New tab");
         // "fullscreen" resolves to the toggle.
-        let r2 = rank("fullscreen", &cmds);
+        let r2 = rank("fullscreen", &cmds, &EN);
         assert_eq!(cmds[r2[0]].1, Action::ToggleFullscreen);
+    }
+
+    /// A Spanish palette ranks its Spanish labels, and an English name from
+    /// the docs still finds its command.
+    #[test]
+    fn spanish_labels_rank_and_english_names_still_match() {
+        let cmds = commands();
+        let r = rank("nueva pestaña", &cmds, &ES);
+        assert_eq!(cmds[r[0]].1, Action::NewTab);
+        let r = rank("pantalla completa", &cmds, &ES);
+        assert_eq!(cmds[r[0]].1, Action::ToggleFullscreen);
+        let r = rank("fullscreen", &cmds, &ES);
+        assert_eq!(cmds[r[0]].1, Action::ToggleFullscreen);
+        // English does not match Spanish words.
+        assert!(rank("pantalla completa", &cmds, &EN).is_empty());
+    }
+
+    /// Every entry has its own label in both languages, so no two commands
+    /// read the same.
+    #[test]
+    fn labels_are_distinct_in_each_language() {
+        let cmds = commands();
+        for tr in [EN, ES] {
+            let mut seen = std::collections::BTreeSet::new();
+            for (label, action) in &cmds {
+                assert!(
+                    seen.insert(tr.text(*label)),
+                    "{action:?}: {}",
+                    tr.text(*label)
+                );
+            }
+        }
     }
 }

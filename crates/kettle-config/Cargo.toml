@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 bitflags = "2.11.1"
+kettle-i18n.workspace = true
 kettle-state.workspace = true
 log.workspace = true
 # `detect_malformed_values` validates `trigger = REGEX`

@@ -1918,6 +1918,7 @@ name = "kettle-config"
 version = "4.9.0"
 dependencies = [
  "bitflags 2.13.2",
+ "kettle-i18n",
  "kettle-state",
  "kettle-test-support",
  "libc",

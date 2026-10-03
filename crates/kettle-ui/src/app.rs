@@ -856,7 +856,7 @@ fn modal_accessibility_projection(
             &mut projection,
             overlay.context_menu.as_ref(),
             4,
-            "Command palette",
+            tr.text(kettle_i18n::Text::PickerA11yPalette),
             query,
             full_bounds,
         );
@@ -904,7 +904,7 @@ fn modal_accessibility_projection(
             &mut projection,
             overlay.context_menu.as_ref(),
             6,
-            "Layout picker",
+            tr.text(kettle_i18n::Text::PickerA11yLayouts),
             query,
             full_bounds,
         );
@@ -914,7 +914,7 @@ fn modal_accessibility_projection(
             &mut projection,
             overlay.context_menu.as_ref(),
             7,
-            "SSH launcher",
+            tr.text(kettle_i18n::Text::PickerA11ySsh),
             query,
             full_bounds,
         );
@@ -5775,17 +5775,32 @@ struct PickerList {
     selected: usize,
 }
 
+/// A picker's key hint: each key followed by what it does. The keys are the
+/// same in every language.
+fn picker_hint(tr: &kettle_i18n::Translator, hints: &[(&str, kettle_i18n::Text)]) -> String {
+    let parts: Vec<String> = hints
+        .iter()
+        .map(|(keys, what)| format!("{keys} {}", tr.text(*what)))
+        .collect();
+    format!("({})", parts.join(" · "))
+}
+
 const PICKER_MAX_VISIBLE_ROWS: usize = 8;
 
-fn command_picker_list(query: &str, selected: usize, bindings: &Bindings) -> PickerList {
+fn command_picker_list(
+    query: &str,
+    selected: usize,
+    bindings: &Bindings,
+    tr: &kettle_i18n::Translator,
+) -> PickerList {
     let commands = kettle_config::palette::commands();
-    let ranked = kettle_config::palette::rank(query, &commands);
+    let ranked = kettle_config::palette::rank(query, &commands, tr);
     let rows = ranked
         .iter()
         .map(|&index| {
             let (label, action) = &commands[index];
             ContextMenuRow {
-                label: (*label).to_string(),
+                label: tr.text(*label).to_string(),
                 separator: false,
                 enabled: true,
                 hint: kettle_config::keybinds::hint_label(bindings, action).unwrap_or_default(),
@@ -5795,7 +5810,9 @@ fn command_picker_list(query: &str, selected: usize, bindings: &Bindings) -> Pic
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
-                label: "No matching command".to_string(),
+                label: tr
+                    .text(kettle_i18n::Text::PickerNoMatchingCommand)
+                    .to_string(),
                 separator: false,
                 enabled: false,
                 hint: String::new(),
@@ -5810,7 +5827,12 @@ fn command_picker_list(query: &str, selected: usize, bindings: &Bindings) -> Pic
     }
 }
 
-fn layout_picker_list(query: &str, selected: usize, layouts: &[String]) -> PickerList {
+fn layout_picker_list(
+    query: &str,
+    selected: usize,
+    layouts: &[String],
+    tr: &kettle_i18n::Translator,
+) -> PickerList {
     let ranked = rank_layouts(query, layouts);
     let rows = ranked
         .iter()
@@ -5823,13 +5845,13 @@ fn layout_picker_list(query: &str, selected: usize, layouts: &[String]) -> Picke
         .collect::<Vec<_>>();
     if rows.is_empty() {
         let label = if layouts.is_empty() {
-            "No saved layouts"
+            kettle_i18n::Text::PickerNoSavedLayouts
         } else {
-            "No matching layout"
+            kettle_i18n::Text::PickerNoMatchingLayout
         };
         PickerList {
             rows: vec![ContextMenuRow {
-                label: label.to_string(),
+                label: tr.text(label).to_string(),
                 separator: false,
                 enabled: false,
                 hint: if layouts.is_empty() {
@@ -5848,7 +5870,12 @@ fn layout_picker_list(query: &str, selected: usize, layouts: &[String]) -> Picke
     }
 }
 
-fn ssh_picker_list(query: &str, selected: usize, hosts: &[(String, String)]) -> PickerList {
+fn ssh_picker_list(
+    query: &str,
+    selected: usize,
+    hosts: &[(String, String)],
+    tr: &kettle_i18n::Translator,
+) -> PickerList {
     let ranked = rank_ssh_hosts(query, hosts);
     let rows = ranked
         .iter()
@@ -5862,14 +5889,16 @@ fn ssh_picker_list(query: &str, selected: usize, hosts: &[(String, String)]) -> 
     if rows.is_empty() {
         PickerList {
             rows: vec![ContextMenuRow {
-                label: if hosts.is_empty() {
-                    "No configured hosts".to_string()
-                } else {
-                    "No configured host matches".to_string()
-                },
+                label: tr
+                    .text(if hosts.is_empty() {
+                        kettle_i18n::Text::PickerNoConfiguredHosts
+                    } else {
+                        kettle_i18n::Text::PickerNoMatchingHost
+                    })
+                    .to_string(),
                 separator: false,
                 enabled: false,
-                hint: "Enter uses typed target".to_string(),
+                hint: tr.text(kettle_i18n::Text::PickerTypedTarget).to_string(),
             }],
             selected: 0,
         }
@@ -12893,11 +12922,21 @@ impl App {
             })
             .collect();
 
+        use kettle_i18n::Text as T;
+        let tr = &self.ui_text;
         let (ssh_query, ssh_hint, ssh_picker) = match &ws.ssh_input {
             Some((query, selected)) => (
                 Some(with_preedit(query)),
-                "(Enter connect · Tab complete · ↑↓ select · Esc cancel)".to_string(),
-                Some(ssh_picker_list(query, *selected, &self.cfg.ssh_hosts)),
+                picker_hint(
+                    tr,
+                    &[
+                        ("Enter", T::PickerHintConnect),
+                        ("Tab", T::PickerHintComplete),
+                        ("↑↓", T::PickerHintSelect),
+                        ("Esc", T::PickerHintCancel),
+                    ],
+                ),
+                Some(ssh_picker_list(query, *selected, &self.cfg.ssh_hosts, tr)),
             ),
             None => (None, String::new(), None),
         };
@@ -12905,8 +12944,20 @@ impl App {
         let (palette_query, palette_hint, palette_picker) = match &ws.palette_input {
             Some((query, selected)) => (
                 Some(with_preedit(query)),
-                "(Enter run · Tab/↑↓ select · Esc cancel)".to_string(),
-                Some(command_picker_list(query, *selected, &self.cfg.keybinds)),
+                picker_hint(
+                    tr,
+                    &[
+                        ("Enter", T::PickerHintRun),
+                        ("Tab/↑↓", T::PickerHintSelect),
+                        ("Esc", T::PickerHintCancel),
+                    ],
+                ),
+                Some(command_picker_list(
+                    query,
+                    *selected,
+                    &self.cfg.keybinds,
+                    tr,
+                )),
             ),
             None => (None, String::new(), None),
         };
@@ -12919,11 +12970,19 @@ impl App {
         {
             Some((query, selected)) => (
                 Some(with_preedit(query)),
-                "(Enter spawn · Tab/↑↓ select · Esc cancel)".to_string(),
+                picker_hint(
+                    tr,
+                    &[
+                        ("Enter", T::PickerHintSpawn),
+                        ("Tab/↑↓", T::PickerHintSelect),
+                        ("Esc", T::PickerHintCancel),
+                    ],
+                ),
                 Some(layout_picker_list(
                     query,
                     *selected,
                     &ws.layout_picker_entries,
+                    tr,
                 )),
             ),
             None => (None, String::new(), None),
@@ -22941,19 +23000,19 @@ impl App {
                 *sel = 0;
             }
             Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::Tab) => {
-                let n = kettle_config::palette::rank(q, &cmds).len();
+                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = (*sel + 1) % n;
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
-                let n = kettle_config::palette::rank(q, &cmds).len();
+                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = (*sel + n - 1) % n;
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let ranked = kettle_config::palette::rank(q, &cmds);
+                let ranked = kettle_config::palette::rank(q, &cmds, &self.ui_text);
                 let action = ranked.get(*sel).map(|&i| cmds[i].1.clone());
                 ws.palette_input = None;
                 if let Some(a) = action {
@@ -22970,7 +23029,7 @@ impl App {
                     && !ws.mods.alt_key()
                     && matches!(s.as_str(), "j" | "k" | "n" | "p") =>
             {
-                let n = kettle_config::palette::rank(q, &cmds).len();
+                let n = kettle_config::palette::rank(q, &cmds, &self.ui_text).len();
                 if n > 0 {
                     *sel = match s.as_str() {
                         "j" | "n" => (*sel + 1) % n,
@@ -41212,7 +41271,12 @@ mod tests {
 
     #[test]
     fn picker_candidates_are_vertical_rows_and_selection_scrolls_into_view() {
-        let list = command_picker_list("", 20, &kettle_config::keybinds::defaults());
+        let list = command_picker_list(
+            "",
+            20,
+            &kettle_config::keybinds::defaults(),
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        );
         let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0))
             .expect("a 320x160 surface fits a picker row above its input lane");
 
@@ -41244,7 +41308,12 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
-        let layout = layout_picker_list("dev", 1, &layouts);
+        let layout = layout_picker_list(
+            "dev",
+            1,
+            &layouts,
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        );
         assert_eq!(
             layout
                 .rows
@@ -41261,7 +41330,12 @@ mod tests {
             ("gpu".to_string(), "dev@gpu-short".to_string()),
         ];
         assert_eq!(rank_ssh_hosts("gp", &hosts), vec![2, 1, 0]);
-        let ssh = ssh_picker_list("gp", 1, &hosts);
+        let ssh = ssh_picker_list(
+            "gp",
+            1,
+            &hosts,
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        );
         assert_eq!(
             ssh.rows
                 .iter()
@@ -41294,6 +41368,7 @@ mod tests {
                 "",
                 3,
                 &kettle_config::keybinds::defaults(),
+                &kettle_i18n::Translator::new(kettle_i18n::Language::En),
             )),
             None,
             None,
@@ -45562,6 +45637,126 @@ mod keyboard_selection_tests {
         assert!(
             src.contains("self.extend_selection_to_cursor(ws, area, bcode)"),
             "Shift+right-click must record the right button as gesture owner"
+        );
+    }
+}
+
+#[cfg(test)]
+mod picker_text_tests {
+    use super::{
+        command_picker_list, layout_picker_list, modal_accessibility_projection, picker_hint,
+        ssh_picker_list,
+    };
+    use kettle_i18n::{Language, Text, Translator};
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn picker_hints_keep_their_keys_and_translate_their_actions() {
+        let palette = [
+            ("Enter", Text::PickerHintRun),
+            ("Tab/↑↓", Text::PickerHintSelect),
+            ("Esc", Text::PickerHintCancel),
+        ];
+        assert_eq!(
+            picker_hint(&EN, &palette),
+            "(Enter run · Tab/↑↓ select · Esc cancel)"
+        );
+        assert_eq!(
+            picker_hint(&ES, &palette),
+            "(Enter ejecutar · Tab/↑↓ seleccionar · Esc cancelar)"
+        );
+        let ssh = [
+            ("Enter", Text::PickerHintConnect),
+            ("Tab", Text::PickerHintComplete),
+            ("↑↓", Text::PickerHintSelect),
+            ("Esc", Text::PickerHintCancel),
+        ];
+        assert_eq!(
+            picker_hint(&EN, &ssh),
+            "(Enter connect · Tab complete · ↑↓ select · Esc cancel)"
+        );
+        let layouts = [
+            ("Enter", Text::PickerHintSpawn),
+            ("Tab/↑↓", Text::PickerHintSelect),
+            ("Esc", Text::PickerHintCancel),
+        ];
+        assert_eq!(
+            picker_hint(&EN, &layouts),
+            "(Enter spawn · Tab/↑↓ select · Esc cancel)"
+        );
+    }
+
+    /// Screen readers name each picker dialog in the UI's language.
+    #[test]
+    fn picker_accessibility_names_follow_the_ui_language() {
+        let names = |overlay: kettle_render::Overlay, tr: &Translator| {
+            let projection = modal_accessibility_projection(&overlay, (800.0, 600.0), tr);
+            projection
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| node.label().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        let palette = || kettle_render::Overlay {
+            palette_query: Some("x".into()),
+            ..kettle_render::Overlay::default()
+        };
+        assert!(names(palette(), &EN).iter().any(|n| n == "Command palette"));
+        assert!(
+            names(palette(), &ES)
+                .iter()
+                .any(|n| n == "Paleta de comandos")
+        );
+        let layouts = kettle_render::Overlay {
+            layout_picker_query: Some(String::new()),
+            ..kettle_render::Overlay::default()
+        };
+        assert!(
+            names(layouts, &ES)
+                .iter()
+                .any(|n| n == "Selector de diseños")
+        );
+        let ssh = kettle_render::Overlay {
+            ssh_query: Some(String::new()),
+            ..kettle_render::Overlay::default()
+        };
+        assert!(names(ssh, &ES).iter().any(|n| n == "Lanzador SSH"));
+    }
+
+    #[test]
+    fn picker_rows_and_empty_states_follow_the_ui_language() {
+        let bindings = kettle_config::keybinds::defaults();
+        assert_eq!(
+            command_picker_list("", 0, &bindings, &ES).rows[0].label,
+            "Nueva pestaña"
+        );
+        let none = command_picker_list("zzzqqq", 0, &bindings, &ES);
+        assert_eq!(none.rows[0].label, "Ningún comando coincide");
+        assert!(!none.rows[0].enabled);
+        assert_eq!(
+            command_picker_list("zzzqqq", 0, &bindings, &EN).rows[0].label,
+            "No matching command"
+        );
+
+        let empty = layout_picker_list("", 0, &[], &ES);
+        assert_eq!(empty.rows[0].label, "No hay diseños guardados");
+        // The command is the same in every language.
+        assert_eq!(empty.rows[0].hint, "kettle --save-layout NAME");
+        let layouts = ["dev".to_string()];
+        assert_eq!(
+            layout_picker_list("zzz", 0, &layouts, &ES).rows[0].label,
+            "Ningún diseño coincide"
+        );
+
+        let ssh = ssh_picker_list("", 0, &[], &ES);
+        assert_eq!(ssh.rows[0].label, "No hay hosts configurados");
+        assert_eq!(ssh.rows[0].hint, "Enter usa el destino escrito");
+        let hosts = [("prod".to_string(), "me@prod".to_string())];
+        assert_eq!(
+            ssh_picker_list("zzz", 0, &hosts, &EN).rows[0].label,
+            "No configured host matches"
         );
     }
 }

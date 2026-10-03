@@ -25,6 +25,7 @@ graph TD
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
+    cfg --> i18n
     cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
     vt["kettle-vt<br/>Extractor: Sixel · iTerm2 · OSC 7/133<br/>kitty: store/place/delete/z · Unicode placeholders<br/>animation (frames/control/compositing) · relative placements"]
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
@@ -39,8 +40,11 @@ named arguments. A missing key, a placeholder mismatch, or a wrong argument
 fails the build; nothing is parsed at run time. Each process picks one language
 and passes an immutable `Translator` to the code that shows text, so there is no
 global locale. Terminal content, user and shell names, config values and
-protocol text never pass through it. Settings is the first surface on it; the
-other surfaces move in the 5.0 localization track.
+protocol text never pass through it. Settings, the command palette and the
+layout and SSH pickers are on it so far; the other surfaces move in the 5.0
+localization track. The palette ranks a query against the label shown and,
+outside English, against the English label too, so a command name from the
+docs still finds its command.
 
 `kettle-state` is the leaf persistence boundary shared by configuration,
 sessions, and the updater. It stages with `create_new` beside the destination,
