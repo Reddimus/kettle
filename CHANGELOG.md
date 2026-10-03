@@ -51,6 +51,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A URL in Markdown code or emphasis (`` `https://…` ``, `**https://…**`) is
+  linked and quick-selected without the trailing backtick or asterisks.
 - A URL or path the terminal wrapped onto the next row is one link and one
   quick-select target: clicking either row opens the whole URL, and hovering
   lights both. It used to be two broken links. A program's own line breaks

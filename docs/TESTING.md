@@ -1416,6 +1416,11 @@ Windows no path hint opens. Red checks: the old pattern detects
 `/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
 a comma treated as a boundary in every position lets `out/report,1.pdf` open.
 
+URL tails (kettle-core `url_trim`, shared by links and hints) drop trailing
+prose punctuation, Markdown backticks and `*` emphasis, and closing brackets
+only when unbalanced, while the same characters inside a URL stay; a backtick-
+or asterisk-wrapped URL is detected without its marks.
+
 ### kettle-remote (50+ tests)
 
 Injected process-tree fixtures cover SSH and

@@ -628,6 +628,20 @@ mod tests {
         assert!(h.iter().all(|s| s.kind == Kind::Url));
     }
 
+    /// A URL in Markdown code or emphasis is detected without the marks.
+    #[test]
+    fn markdown_marks_around_a_url_are_not_part_of_it() {
+        for line in [
+            "see `https://x.test/a/b` here",
+            "**https://x.test/a/b** is the page",
+            "*https://x.test/a/b*.",
+        ] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(spans[0].text, "https://x.test/a/b", "{line}");
+        }
+    }
+
     #[test]
     fn reading_order_and_empty() {
         let h = detect(&["/a/b", "x", "/c/d /e/f"]);
