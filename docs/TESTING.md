@@ -1414,6 +1414,20 @@ from the UI thread. A climb with `..`, a base that is unknown or not local
 Windows no path hint opens. Red checks: the old pattern detects
 `/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
 a comma treated as a boundary in every position lets `out/report,1.pdf` open.
+File URLs and reported working directories are checked after decoding
+(kettle-core `decoded_file_url_path`, used by `is_safe_url` and
+`local_file_path`; kettle-vt `plain_cwd` for OSC 7): `.%2e`, `%2E.`,
+`%2F%2Fhost/share`, `%2F..%2F`, an encoded `/` (and `\` on Windows),
+`%00`, `%0A`, `%1B`, `file:////host` and `kitty-shell-cwd` reports with `..`,
+`//` or a control character are refused, while `%20`, `%C3%A9`, `%25` and
+`a%2eb` decode as before, a POSIX name may hold a backslash (`a%5Cb`), and a
+local WSL share (`//wsl.localhost/Ubuntu/…`) stays a cwd. A link's escapes must be valid hex; an OSC 7 report keeps a stray `%`
+as literal text, as shells that do not encode it send. Red checks: dropping
+the decoded check in `is_safe_url`, the OSC 7 cwd check, or the OSC 7
+separator rule each fail a test. "Open cwd in file manager" builds its URL
+with `file_url_for_path`, so a folder named `a b` or `x#1` opens; a source
+guard keeps the cwd from being formatted into a URL.
+
 Links from terminal output open through `open_pane_link`, which gates a
 `file://` link by its pane (`link_gate`, `pane_path_origin`): from a local pane
 it opens, behind tmux, screen or zellij it asks with a confirmation naming the

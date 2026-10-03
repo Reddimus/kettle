@@ -68,6 +68,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Opening the current directory in the file manager works for a folder whose
+  name holds a space or `#`. The link was refused, or named another folder.
+- A `file://` link or a reported working directory (OSC 7) is checked after
+  its escapes are decoded: `.%2e`, `%2F%2Fhost`, `%00` and other spellings of
+  a climb, a network share or a control character are refused, as are a bad
+  escape in a link and an encoded `/` (or `\` on Windows). They could slip
+  past checks that only looked at the encoded text. A local WSL share is
+  still accepted as a working directory.
 - A path in quotes or backticks is one link and one quick-select target,
   spaces included: `"docs/annual report.pdf"`, Python's `File "/my app/x.py"`
   and `` `out/report #1.pdf` `` open the whole file. They used to stop at the

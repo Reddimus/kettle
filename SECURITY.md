@@ -49,6 +49,12 @@ Reports that fit any of these are welcome:
   first (`link_gate`, `pane_path_origin`). What runs in the pane when the
   link is opened decides, so output printed while a session was remote can
   still open locally after the pane returns to a local shell.
+  Every `file://` link and OSC 7 working directory is checked after
+  decoding (`decoded_file_url_path`, `plain_cwd`): no `..` segment, network
+  path, control character or encoded separator, however it is spelled. Two
+  exceptions are deliberate for OSC 7: a local WSL share
+  (`//wsl.localhost/Ubuntu/…`) stays a working directory, and on POSIX a
+  backslash (`%5C`) is part of a name, not a separator.
 - **Bracketed-paste injection** — a paste payload that escapes the
   `\e[200~ … \e[201~` wrapper and runs as input.
 - **Resource exhaustion via a single PTY frame** — a parser path that
