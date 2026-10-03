@@ -36,6 +36,8 @@ graph TD
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
     worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
+    worker --> mrender
+    mrender["kettle-media-render<br/>held-handle source loads · raster decode under caps<br/>aspect fit · straight RGBA · no unsafe code"] --> media
 ```
 
 `kettle-media` defines the media protocol for agent visuals: bounded jobs and
@@ -54,8 +56,12 @@ and reports it in `get_state`. No worker ships yet, so a worker that passes
 every check still reads as unavailable. Kettle and every worker share one
 build identity, the source hash its build script computes
 (`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
-worker, a separate executable that serves one job per process; it renders
-nothing yet and nothing ships it. The client's `render` runs one job in a
+worker, a separate executable that serves one job per process; nothing ships
+it yet. It renders through `kettle-media-render`: the source is read once
+through one held descriptor, the format comes from the content, the decoded
+size is checked before any pixel is decoded, and the image is fitted into the
+job's target box as straight RGBA. Raster images are rendered; every other
+kind is refused as unsupported until its renderer lands. The client's `render` runs one job in a
 fresh worker under startup and job deadlines, with the worker in its own
 process group, killed before it is reaped; nothing in the GUI calls it yet. The byte layouts, digest
 framing, availability codes and decisions are in

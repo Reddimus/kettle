@@ -810,7 +810,10 @@ stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
 by an abort discarded as `RenderResource`; and the worker's watchdog exit read
-as `RenderTimeout`.
+as `RenderTimeout`. Tests that need the worker to start and answer allow it
+10 s: each copies the stub afresh, and a new executable's first launch on a
+loaded macOS machine can take longer than the short deadlines the timeout
+tests use.
 
 ### kettle-media-worker
 
@@ -830,8 +833,9 @@ prints, reads arguments, the environment or files (only the Linux fallback
 lists `/proc/self/fd`), or touches stderr outside the fixed panic line.
 
 `tests/process_boundary.rs` drives the built binary: Ready carries this
-build's identity and a job is answered `WorkerUnavailable`, with nothing else
-on stdout or stderr; a Hello from another source hash or version, and a
+build's identity and a 1x1 PNG raster job comes back rendered, pixel for
+pixel, while bytes no decoder recognizes are `UnsupportedMedia`, each with
+nothing else on stdout or stderr; a Hello from another source hash or version, and a
 header of another protocol version, are `RestartRequired` with exit 9;
 garbage, a job before Hello, a second Hello and a frame cut short in its
 header or payload (with stdin closed and stdout still read) are `BadParams`
@@ -854,7 +858,63 @@ limit, limits that raise past a hard or soft limit, a cut-short descriptor
 list, a fallback sweep bounded by the descriptor limit, a watchdog that never
 fires, phases sharing one deadline, a panic line with the payload, an
 uncompared build, frame skew read as garbage, a second frame accepted and a
-truncated frame left unanswered each fail a test above.
+truncated frame left unanswered each fail a test above, and so does a
+worker that answers without rendering.
+
+### kettle-media-render
+
+`tests/raster.rs` renders through the crate's one entry point. Each supported
+format (PNG, JPEG, WebP, BMP, GIF) renders; a PNG named `.jpg` renders, while
+text named `.png` and TIFF bytes are `UnsupportedMedia`. Hand-built PNG
+headers (IHDR, a minimal IDAT, IEND) of 9000x10, 10x9000, 8192x8192 and
+u32::MAX x1 are `RenderResource` in under a second, before any pixel buffer
+exists. A two-frame GIF returns its first frame. A fully transparent pixel
+whose hidden color is white comes back all zero beside a half-transparent one
+kept as it was, and downscaling an opaque blue edge next to transparent white
+keeps it pure blue. An 8x8 box fits a 4x2 image at 8x4; a crop in box
+coordinates is transparent where the centered image does not reach; a box
+over the rendered edge or a crop outside it is `BadParams`. A file's digest
+covers its bytes and the open file's identity, the same bytes inline carry
+none, and kinds other than raster are `UnsupportedMedia` for now.
+
+`tests/hostile.rs` renders under a global allocator that records the largest
+single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
+declaring 4096x4096, and a 1x1 animation frame holding one, are `RenderParse`
+with no allocation near that size; a real 2x2 lossy frame behind an alpha
+plane in a 1x1 animation frame, which the decoder would otherwise write past
+its buffer for (a panic), is `RenderParse`, and so is a chunk other than VP8
+after an alpha plane. Well-formed extended WebP still renders: still and
+animated, with and without alpha. BMP headers of 70000x1, 1x-70000 and
+9000x1, and WebP canvases of 70000x70000 and 9000x1, are `RenderResource`
+whichever decoder would have refused them. Halving a 2048x2048 image
+allocates nothing larger than the decoded image itself. The lossy fixture is
+a 2x2 VP8 frame from `cwebp`, with its size fields rewritten per case.
+
+`tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
+and a symbolic link at the leaf are accepted; a FIFO with no writer is
+`FileNotRegular` on a thread whose hang would fail the test instead of
+stalling it; a directory and `/dev/null` are `FileNotRegular`; exactly the cap
+is accepted and one byte more is `TooLarge` inline or `FileTooLarge` on disk;
+and a missing or unreadable file has its fixed failure. Unit tests in
+`src/source.rs` change the file between the open and the read: a file renamed
+over the path does not change what is read, one appended to is `Changed`, one
+shrunk below the cap after an oversized open is still `FileTooLarge` without
+a read, and an external request's attested inode must match the open file.
+`media_loader_never_writes` reads the production source as code alone and
+refuses any file creation, write, rename, removal or permission change, and
+any use of `std::process`, `std::net` or `std::env`.
+
+Red checks: no size pre-check and no codec limit, transparent pixels left
+colored, resampling without premultiplied alpha, an uncentered crop, a fit
+that ignores the aspect ratio, a non-regular file accepted, an ignored
+attestation, no identity check after the read, a digest without the file's
+identity, a blocking open and no size check at open each fail a test above,
+and so does a format allowlist that lets TIFF through when the TIFF codec is
+linked in (as a workspace build links it, for the clipboard). Removing all
+container checks, the BMP size, the WebP canvas cap, the still or animation
+bitstream check, the check behind an alpha plane or the VP8 requirement after
+one, or resizing through a full-size float intermediate, each fails a test in
+`tests/hostile.rs`.
 
 ### kettle-i18n
 

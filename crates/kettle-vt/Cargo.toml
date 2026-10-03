@@ -24,7 +24,7 @@ flate2 = "1.1.9"
 # `rav1e` (~1.6 MB!), exr, webp, tiff, hdr, qoi, dds, ico, etc. —
 # none of which kettle's inline-image path ever decodes. Cuts ~3 MB
 # off the release binary.
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
+image = { workspace = true, features = ["png", "jpeg", "gif"] }
 # SIMD scan for the next ESC / ST / BEL so the extractor
 # bulk-copies plain runs instead of walking the PTY stream byte-by-byte.
 # Already in the dependency tree via `vte` — this adds no new build cost.

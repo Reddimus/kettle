@@ -23,9 +23,15 @@ kettle-media.workspace = true
 # The early setup: closing inherited descriptors, the dumpable flag and the
 # resource limits, before the worker reads anything.
 libc = "0.2"
+# What renders each job, in safe code.
+kettle-media-render.workspace = true
 
 [dev-dependencies]
 kettle-test-support.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dev-dependencies]
+# Encodes the raster fixtures the end-to-end tests send.
+image = { workspace = true, features = ["png"] }
 
 [features]
 # Test fixture only: a job can make the worker panic, to prove the panic

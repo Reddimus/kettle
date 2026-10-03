@@ -37,7 +37,7 @@ crossbeam-channel = "0.5.15"
 # winresource step embeds the same art as an .exe resource, which covers
 # Explorer / the file glyph / a pinned shortcut but NOT the live window's
 # WM_SETICON — hence this runtime path.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { workspace = true, features = ["png"] }
 kettle-config.workspace = true
 kettle-i18n.workspace = true
 # The media worker client; `get_state` reports whether previews are available.
