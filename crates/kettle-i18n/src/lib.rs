@@ -42,13 +42,21 @@ pub enum Language {
     Es,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Translator {
     language: Language,
     #[cfg(all(debug_assertions, any(feature = "dev-pseudo", test)))]
     pseudo: bool,
     #[cfg(test)]
     omit_spanish: bool,
+}
+
+/// English, the reference language. Code that shows text should be handed the
+/// process's translator; this default serves tests and empty projections.
+impl Default for Translator {
+    fn default() -> Self {
+        Self::new(Language::En)
+    }
 }
 
 impl Translator {

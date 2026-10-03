@@ -8938,6 +8938,7 @@ impl App {
             height as f32,
             renderer.cell_w,
             renderer.cell_h,
+            &self.ui_text,
         )
         .reserved_height
     }
@@ -12797,11 +12798,12 @@ impl App {
             self.cfg.title_at_bottom,
         );
         let renderer = ws.renderer.as_ref()?;
-        let kind = match list.kind {
-            kettle_core::CompletionKind::Completion => "Completions",
-            kettle_core::CompletionKind::Prediction => "Prediction",
-        };
+        let kind = self.ui_text.text(match list.kind {
+            kettle_core::CompletionKind::Completion => kettle_i18n::Text::CompletionKindCompletions,
+            kettle_core::CompletionKind::Prediction => kettle_i18n::Text::CompletionKindPrediction,
+        });
         Some(kettle_render::CompletionOverlay {
+            tr: self.ui_text,
             pane_rect,
             grid_rect: (
                 grid_origin.0,
@@ -13146,9 +13148,23 @@ impl App {
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
         let settings_overlay = self.settings_overlay_projection(ws);
+        // Terminator parity: only a LIVE drag with a latched target paints a
+        // hint. An armed-but-unmoved press is still a click, and a live drag
+        // over a seam has no target to preview.
+        let pane_drop_hint = ws
+            .pane_drag
+            .as_ref()
+            .filter(|drag| drag.live)
+            .and_then(|drag| drag.target)
+            .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before));
         let s = &ws.search;
+        // Both literals list every field: a defaulted overlay would paint
+        // English and drop state such as the pane drop hint.
         if !s.open {
             return Overlay {
+                tr: self.ui_text,
+                search: None,
+                highlights: Vec::new(),
                 links,
                 ssh_query,
                 ssh_hint,
@@ -13169,7 +13185,7 @@ impl App {
                 confirm_dialog: confirm_dialog_early,
                 settings: settings_overlay,
                 update_available: self.update_available.clone(),
-                ..Overlay::default()
+                pane_drop_hint,
             };
         }
         let mut highlights = Vec::new();
@@ -13247,7 +13263,9 @@ impl App {
             })
             .unwrap_or_else(|| s.editor.horizontal_scroll());
         Overlay {
+            tr: self.ui_text,
             search: Some(kettle_render::SearchOverlay {
+                tr: self.ui_text,
                 target_pane: s.target_pane,
                 query: search_query,
                 cursor_byte: search_cursor,
@@ -13261,9 +13279,6 @@ impl App {
                 hovered: s.hovered_control,
                 pressed: s.pressed_control,
             }),
-            search_query: None,
-            search_count: 0,
-            search_index: 0,
             highlights,
             links,
             ssh_query,
@@ -13285,15 +13300,7 @@ impl App {
             confirm_dialog,
             settings: settings_overlay,
             update_available: self.update_available.clone(),
-            // Terminator parity: only a LIVE drag with a latched target paints
-            // a hint. An armed-but-unmoved press is still a click, and a live
-            // drag over a seam has no target to preview.
-            pane_drop_hint: ws
-                .pane_drag
-                .as_ref()
-                .filter(|drag| drag.live)
-                .and_then(|drag| drag.target)
-                .map(|(_, rect, dir, before)| crate::mux::pane_drop_preview(rect, dir, before)),
+            pane_drop_hint,
         }
     }
 
@@ -19394,12 +19401,17 @@ impl App {
             })
         });
         let search = target.search.open.then(|| {
+            // The geometry is what is on screen, in the UI's language. The
+            // labels below are control-protocol fields and stay English in
+            // every language, like the rest of this JSON.
             let geometry = kettle_render::search_bar_geometry(
                 surface.0 as f32,
                 surface.1 as f32,
                 cell_w,
                 cell_h,
+                &self.ui_text,
             );
+            let english = kettle_i18n::Translator::new(kettle_i18n::Language::En);
             let controls = kettle_render::SearchControl::ALL.map(|control| {
                 serde_json::json!({
                     "name": match control {
@@ -19411,7 +19423,7 @@ impl App {
                         kettle_render::SearchControl::Invert => "invert",
                         kettle_render::SearchControl::Close => "close",
                     },
-                    "label": control.accessible_label(),
+                    "label": control.accessible_label(&english),
                     "rect": rect_json(geometry.control_rect(control)),
                     "focused": control == target.search.focused_control,
                 })
@@ -19423,12 +19435,12 @@ impl App {
                 "rect": rect_json(geometry.rect),
                 "reserved_height": geometry.reserved_height,
                 "rows": geometry.rows,
-                "status": effective_search_status(&target.search).label(),
+                "status": effective_search_status(&target.search).label(&english),
                 "has_match": target.search.focused.is_some(),
                 "match_rects": active_search_match_rects,
                 "visible_truncated": target.search.visible_truncated,
                 "wrap": target.search.wrap,
-                "case": map_search_case_mode(target.search.case_mode).label(),
+                "case": map_search_case_mode(target.search.case_mode).label(&english),
                 "invert": target.search.invert,
                 "status_rect": rect_json(geometry.status),
                 "controls": controls,
@@ -22714,6 +22726,7 @@ impl App {
             height as f32,
             renderer.cell_w,
             renderer.cell_h,
+            &self.ui_text,
         );
         let columns = kettle_render::search_bar_columns(geometry.editor.2, renderer.cell_w).max(1);
         ws.search
@@ -22732,6 +22745,7 @@ impl App {
             height as f32,
             renderer.cell_w,
             renderer.cell_h,
+            &self.ui_text,
         ))
     }
 
@@ -26372,7 +26386,7 @@ impl App {
                     }
                     _ => Role::Button,
                 });
-                node.set_label(control.accessible_label());
+                node.set_label(control.accessible_label(&self.ui_text));
                 node.set_bounds(bounds(geometry.control_rect(control)));
                 node.add_action(AccessibilityAction::Focus);
                 node.add_action(AccessibilityAction::Click);
@@ -26418,7 +26432,9 @@ impl App {
                     }
                     kettle_render::SearchControl::Wrap => node.set_toggled(ws.search.wrap.into()),
                     kettle_render::SearchControl::Case => {
-                        node.set_value(map_search_case_mode(ws.search.case_mode).label());
+                        node.set_value(
+                            map_search_case_mode(ws.search.case_mode).label(&self.ui_text),
+                        );
                     }
                     kettle_render::SearchControl::Invert => {
                         node.set_toggled(ws.search.invert.into());
@@ -26429,7 +26445,7 @@ impl App {
             }
             search_children.push(ACCESSIBILITY_SEARCH_STATUS_ID);
             let mut status = Node::new(Role::Status);
-            status.set_label(effective_search_status(&ws.search).label());
+            status.set_label(effective_search_status(&ws.search).label(&self.ui_text));
             status.set_live(accesskit::Live::Polite);
             status.set_bounds(bounds(geometry.status));
             nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
@@ -26594,11 +26610,11 @@ impl App {
             ws.search.editor.selection().hash(&mut hasher);
             ws.search.wrap.hash(&mut hasher);
             map_search_case_mode(ws.search.case_mode)
-                .label()
+                .label(&self.ui_text)
                 .hash(&mut hasher);
             ws.search.invert.hash(&mut hasher);
             effective_search_status(&ws.search)
-                .label()
+                .label(&self.ui_text)
                 .hash(&mut hasher);
             ws.search.focused_control.hash(&mut hasher);
         }
@@ -33278,7 +33294,6 @@ mod tests {
             kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         for guarded_arm in [
             "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
-            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.search_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.palette_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.layout_picker_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.ssh_query",
@@ -40413,6 +40428,7 @@ mod tests {
     #[test]
     fn completion_accessibility_geometry_key_tracks_layout_and_cell_metrics() {
         let completion = kettle_render::CompletionOverlay {
+            tr: kettle_i18n::Translator::default(),
             pane_rect: (20.0, 30.0, 800.0, 500.0),
             grid_rect: (28.0, 46.0, 784.0, 468.0),
             command_rows: (20, 21),
@@ -40475,6 +40491,7 @@ mod tests {
     #[test]
     fn completion_rows_start_below_the_header_band() {
         let completion = kettle_render::CompletionOverlay {
+            tr: kettle_i18n::Translator::default(),
             pane_rect: (20.0, 30.0, 800.0, 500.0),
             grid_rect: (28.0, 46.0, 784.0, 468.0),
             command_rows: (20, 21),

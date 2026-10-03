@@ -18,6 +18,9 @@ EXPECTED = [
     "kettle",
     "kettle-ui",
     "kettle",
+    # kettle-ui's test-only edge to kettle-render (its `test-defaults`
+    # feature), shown deduplicated. It adds no crate to the path above.
+    "kettle-ui",
 ]
 FORBIDDEN = ("owned_ttf_parser", "sctk-adwaita", "ab_glyph")
 

@@ -24,6 +24,7 @@ graph TD
     ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
+    render --> i18n
     core["kettle-core<br/>portable-pty · alacritty_terminal+vte · pump + parser workers<br/>regex/smart-case search · links · image/virtual/anim/relative registries"] --> vt
     cfg --> i18n
     cfg["kettle-config<br/>key=value config · 500+ themes · Nerd Font · keybinds<br/>bell · ssh-host · fuzzy matcher · command palette<br/>atomic persist_config_toggle"] --> state
@@ -42,13 +43,16 @@ and passes an immutable `Translator` to the code that shows text, so there is no
 global locale. Terminal content, user and shell names, config values and
 protocol text never pass through it. Settings, the command palette, the layout
 and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
-dropdown, the About panel, the close, paste and key-rebind confirmations and the
-title editors are on it so far; the other surfaces move in the
+dropdown, the About panel, the close, paste and key-rebind confirmations, the
+title editors, the search bar and the completion card are on it so far; the other surfaces move in the
 5.0 localization track. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,
 outside English, against the English label too, so a command name from the
-docs still finds its command.
+docs still finds its command. The search bar sizes each control from its
+longest label in the UI's language, never narrower than in English, and paint
+and hit testing share that geometry. Control-protocol JSON (`ui_geometry`)
+keeps English labels in every language.
 
 `kettle-state` is the leaf persistence boundary shared by configuration,
 sessions, and the updater. It stages with `create_new` beside the destination,

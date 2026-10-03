@@ -47,6 +47,7 @@ use glyphon::{
 // `kettle_config::TextRenderer` (the grid|legacy mode enum) is aliased so it
 // doesn't collide with glyphon's `TextRenderer` (the renderer) imported above.
 use kettle_config::{Config, Rgb, ScrollbarMode, TextRenderer as TextRendererMode};
+use kettle_i18n::{Language, Text, Translator};
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle};
 
 pub use color::{
@@ -639,7 +640,6 @@ fn completion_text_damage_key(
 /// keys catch each meaningful edge without reshaping on a cursor blink.
 fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
     overlay.search.is_some()
-        || overlay.search_query.is_some()
         || !overlay.hint_labels.is_empty()
         || overlay.ime_preedit.is_some()
         || overlay.ssh_query.is_some()
@@ -776,12 +776,15 @@ pub enum SearchCaseMode {
 }
 
 impl SearchCaseMode {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Smart => "Smart",
-            Self::Match => "Match",
-            Self::Ignore => "Ignore",
-        }
+    pub const ALL: [Self; 3] = [Self::Smart, Self::Match, Self::Ignore];
+
+    /// The mode's name in `tr`'s language, as the Settings row shows it.
+    pub fn label(self, tr: &Translator) -> &'static str {
+        tr.text(match self {
+            Self::Smart => Text::SettingsValueSmart,
+            Self::Match => Text::SettingsValueMatchCase,
+            Self::Ignore => Text::SettingsValueIgnoreCase,
+        })
     }
 }
 
@@ -805,20 +808,34 @@ pub enum SearchStatus {
 }
 
 impl SearchStatus {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Typing => "Type to search",
-            Self::Searching => "Searching…",
-            Self::Match => "Match",
-            Self::Wrapped => "Wrapped",
-            Self::Start => "Start reached",
-            Self::End => "End reached",
-            Self::NoMatch => "No match",
-            Self::Limited => "Results limited",
-            Self::Invalid => "Invalid pattern",
-            Self::TooComplex => "Pattern too complex",
-            Self::TooLong => "Query too long",
-        }
+    pub const ALL: [Self; 11] = [
+        Self::Typing,
+        Self::Searching,
+        Self::Match,
+        Self::Wrapped,
+        Self::Start,
+        Self::End,
+        Self::NoMatch,
+        Self::Limited,
+        Self::Invalid,
+        Self::TooComplex,
+        Self::TooLong,
+    ];
+
+    pub fn label(self, tr: &Translator) -> &'static str {
+        tr.text(match self {
+            Self::Typing => Text::SearchStatusTyping,
+            Self::Searching => Text::SearchStatusSearching,
+            Self::Match => Text::SearchStatusMatch,
+            Self::Wrapped => Text::SearchStatusWrapped,
+            Self::Start => Text::SearchStatusStart,
+            Self::End => Text::SearchStatusEnd,
+            Self::NoMatch => Text::SearchStatusNoMatch,
+            Self::Limited => Text::SearchStatusLimited,
+            Self::Invalid => Text::SearchStatusInvalid,
+            Self::TooComplex => Text::SearchStatusTooComplex,
+            Self::TooLong => Text::SearchStatusTooLong,
+        })
     }
 }
 
@@ -847,22 +864,24 @@ impl SearchControl {
         Self::Close,
     ];
 
-    pub const fn accessible_label(self) -> &'static str {
-        match self {
-            Self::Editor => "Search expression",
-            Self::Previous => "Previous match",
-            Self::Next => "Next match",
-            Self::Wrap => "Wrap search",
-            Self::Case => "Search case mode",
-            Self::Invert => "Invert default search direction",
-            Self::Close => "Close search",
-        }
+    pub fn accessible_label(self, tr: &Translator) -> &'static str {
+        tr.text(match self {
+            Self::Editor => Text::SearchA11yEditor,
+            Self::Previous => Text::SearchA11yPrevious,
+            Self::Next => Text::SearchA11yNext,
+            Self::Wrap => Text::SearchA11yWrap,
+            Self::Case => Text::SearchA11yCase,
+            Self::Invert => Text::SearchA11yInvert,
+            Self::Close => Text::SearchA11yClose,
+        })
     }
 }
 
 /// Full renderer projection for the in-window search lane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchOverlay {
+    /// The UI's language. The bar's words and widths follow it.
+    pub tr: Translator,
     /// Stable pane identity owning the terminal-coordinate highlight spans.
     /// Chrome remains window-local, but a focus change must never project one
     /// pane's signed grid coordinates onto another pane.
@@ -891,6 +910,8 @@ pub struct SearchOverlay {
 /// job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompletionOverlay {
+    /// The UI's language, for the card's header count.
+    pub tr: Translator,
     pub pane_rect: (f32, f32, f32, f32),
     /// Exact terminal grid bounds inside `pane_rect`, excluding padding and a
     /// pane title bar. The completion card stays inside this grid whether it
@@ -963,9 +984,11 @@ pub struct MediaPasteReceiptOverlay {
     pub prefer_top: bool,
 }
 
+#[cfg(any(test, feature = "test-defaults"))]
 impl Default for SearchOverlay {
     fn default() -> Self {
         Self {
+            tr: Translator::default(),
             target_pane: None,
             query: String::new(),
             cursor_byte: 0,
@@ -1034,16 +1057,18 @@ impl SearchBarGeometry {
 
 /// Overlay state projected by the UI, covering search, links, hints, pickers,
 /// menus, dialogs, and banners.
-#[derive(Default)]
+///
+/// There is no `Default` outside tests (the `test-defaults` feature): a
+/// default overlay speaks English and carries no state, so the UI lists every
+/// field. A production build, which never enables the feature, rejects any
+/// overlay built from a default.
+#[cfg_attr(any(test, feature = "test-defaults"), derive(Default))]
 pub struct Overlay {
-    /// Rich search-lane projection. When present it takes precedence over the
-    /// legacy `search_query` fields below.
+    /// The UI's language. Text the renderer words itself (the search bar, the
+    /// completion count, the layout picker prompt) goes through it.
+    pub tr: Translator,
+    /// Search-lane projection.
     pub search: Option<SearchOverlay>,
-    /// Compatibility shim for callers predating [`SearchOverlay`]. New callers
-    /// should leave these three fields at their defaults.
-    pub search_query: Option<String>,
-    pub search_count: usize,
-    pub search_index: usize,
     /// Visible, non-overlapping match spans in `(row, col)` order. Keeping this
     /// list viewport-bounded lets both quad paint and glyph recoloring stay
     /// linear in visible work.
@@ -1271,11 +1296,7 @@ fn completion_header_count(overlay: &CompletionOverlay) -> String {
     {
         return format!("{}/{}", selected.position.saturating_add(1), overlay.total);
     }
-    if overlay.total == 1 {
-        "1 match".to_string()
-    } else {
-        format!("{} matches", overlay.total)
-    }
+    overlay.tr.completion_matches(overlay.total as u64)
 }
 
 fn completion_panel_geometry(
@@ -7031,7 +7052,7 @@ impl Renderer {
         if overlay.confirm_dialog.is_none()
             && let Some(search) = overlay.search.as_ref()
         {
-            let geometry = search_bar_geometry(sw, sh, cw, ch);
+            let geometry = search_bar_geometry(sw, sh, cw, ch, &search.tr);
             search_rect = geometry.rect;
             let row_h = geometry.reserved_height / geometry.rows.max(1) as f32;
             let accent = cfg.search_background.unwrap_or(theme.palette[3]);
@@ -7229,47 +7250,6 @@ impl Renderer {
                 ));
             }
         } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.search_query
-        {
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
-            // Advertise the Ctrl+j/k match stepping when `vim-menu-nav` is on
-            // (the keys themselves live app-side). ^j/^k are LITERAL directions
-            // while `invert-search` flips Enter's default, so the hint pairs
-            // them accordingly and never claims an equivalence the keys don't
-            // have.
-            let nav_hint = match (cfg.vim_menu_nav, cfg.invert_search) {
-                (true, false) => "(Enter/^j next · Shift+Enter/^k prev · Esc close)",
-                (true, true) => "(Shift+Enter/^j next · Enter/^k prev · Esc close)",
-                (false, false) => "(Enter next · Shift+Enter prev · Esc close)",
-                (false, true) => "(Enter prev · Shift+Enter next · Esc close)",
-            };
-            let status = if overlay.search_count == 0 {
-                SearchStatus::NoMatch.label()
-            } else {
-                SearchStatus::Match.label()
-            };
-            let label = format!("  search: {q}_    {status}   {nav_hint}");
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-        } else if overlay.confirm_dialog.is_none()
             && let Some(q) = &overlay.palette_query
         {
             have_search = true;
@@ -7304,7 +7284,11 @@ impl Renderer {
             let bar_h = ch + 10.0;
             search_rect = (0.0, sh - bar_h, sw, bar_h);
             quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[6], 0.96));
-            let label = format!("  ▤ layout: {q}_   {}", overlay.layout_picker_hint);
+            let label = format!(
+                "  ▤ {} {q}_   {}",
+                overlay.tr.text(Text::PickerLayoutPrompt),
+                overlay.layout_picker_hint
+            );
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -7510,7 +7494,7 @@ impl Renderer {
             let bottom_search_h = overlay
                 .search
                 .as_ref()
-                .map(|_| search_bar_geometry(sw, sh, cw, ch).reserved_height)
+                .map(|search| search_bar_geometry(sw, sh, cw, ch, &search.tr).reserved_height)
                 .unwrap_or(0.0);
             let bar_y = update_banner_top_with_reserved(
                 sh,
@@ -12582,6 +12566,125 @@ pub fn settings_hit_test(
     SettingsHit::Inert
 }
 
+/// Column widths of the search bar's fixed controls, from their labels in a
+/// language. Each control keeps the fill it has around its longest English
+/// label and is never narrower than in English, so English lays out exactly as
+/// it always has and a longer translation gets room instead of an ellipsis.
+/// Status is text, not a button, and has no fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchBarWidths {
+    label: usize,
+    previous: usize,
+    next: usize,
+    wrap: usize,
+    case: usize,
+    invert: usize,
+    status: usize,
+    close: usize,
+}
+
+impl SearchBarWidths {
+    /// The English widths: each control's longest label plus its fill.
+    const ENGLISH: Self = Self {
+        label: 7,
+        previous: 8,
+        next: 8,
+        wrap: 10,
+        case: 15,
+        invert: 12,
+        status: 19,
+        close: 8,
+    };
+
+    fn new(tr: &Translator) -> Self {
+        let en = Translator::new(Language::En);
+        let longest = |tr: &Translator| SearchBarLabels::new(tr).widest();
+        let (english, here) = (longest(&en), longest(tr));
+        let fit = |width: usize, english: usize, here: usize| {
+            width.max(here + width.saturating_sub(english))
+        };
+        let w = Self::ENGLISH;
+        Self {
+            label: fit(w.label, english.label, here.label),
+            previous: fit(w.previous, english.previous, here.previous),
+            next: fit(w.next, english.next, here.next),
+            wrap: fit(w.wrap, english.wrap, here.wrap),
+            case: fit(w.case, english.case, here.case),
+            invert: fit(w.invert, english.invert, here.invert),
+            status: fit(w.status, english.status, here.status),
+            close: fit(w.close, english.close, here.close),
+        }
+    }
+}
+
+/// The search bar's words in one language.
+struct SearchBarLabels {
+    label: &'static str,
+    previous: &'static str,
+    next: &'static str,
+    wrap: [&'static str; 2],
+    case: Vec<String>,
+    invert: [&'static str; 2],
+    close: &'static str,
+    tr: Translator,
+}
+
+impl SearchBarLabels {
+    fn new(tr: &Translator) -> Self {
+        Self {
+            label: tr.text(Text::SearchLabel),
+            previous: tr.text(Text::SearchPrev),
+            next: tr.text(Text::SearchNext),
+            wrap: [tr.text(Text::SearchWrapOn), tr.text(Text::SearchWrapOff)],
+            case: SearchCaseMode::ALL
+                .iter()
+                .map(|mode| search_case_text(tr, *mode))
+                .collect(),
+            invert: [
+                tr.text(Text::SearchEnterNext),
+                tr.text(Text::SearchEnterPrev),
+            ],
+            close: tr.text(Text::SearchClose),
+            tr: *tr,
+        }
+    }
+
+    /// Each control's widest label, in display columns.
+    fn widest(&self) -> SearchBarWidths {
+        let widest = |labels: &[&str]| labels.iter().map(|l| display_width(l)).max().unwrap_or(0);
+        SearchBarWidths {
+            label: display_width(self.label),
+            previous: display_width(self.previous),
+            next: display_width(self.next),
+            wrap: widest(&self.wrap),
+            case: self
+                .case
+                .iter()
+                .map(|l| display_width(l))
+                .max()
+                .unwrap_or(0),
+            invert: widest(&self.invert),
+            status: SearchStatus::ALL
+                .iter()
+                .map(|status| display_width(status.label(&self.tr)))
+                .max()
+                .unwrap_or(0),
+            close: display_width(self.close),
+        }
+    }
+}
+
+/// The Case button's text. The mode name is padded to the longest mode in the
+/// same language, so the chevron stays put as the mode cycles.
+fn search_case_text(tr: &Translator, mode: SearchCaseMode) -> String {
+    let width = SearchCaseMode::ALL
+        .iter()
+        .map(|mode| mode.label(tr).chars().count())
+        .max()
+        .unwrap_or(0);
+    tr.search_case(&format!("{:<width$}", mode.label(tr)))
+}
+
 /// Compute the responsive, bottom-reserved search lane.
 ///
 /// Wide surfaces use one row. Narrow surfaces keep the editor and Close on the
@@ -12593,6 +12696,7 @@ pub fn search_bar_geometry(
     surface_height: f32,
     cell_width: f32,
     cell_height: f32,
+    tr: &Translator,
 ) -> SearchBarGeometry {
     let zero = (0.0, 0.0, 0.0, 0.0);
     if !surface_width.is_finite()
@@ -12620,23 +12724,23 @@ pub fn search_bar_geometry(
         };
     }
 
-    const LABEL: usize = 7;
-    const PREVIOUS: usize = 8;
-    const NEXT: usize = 8;
-    const WRAP: usize = 10;
-    // Each button is at least one column wider than its longest label, so the
-    // centered label keeps half a cell of fill on both sides.
-    const CASE: usize = 15;
-    const INVERT: usize = 12;
-    // Wide mode must fit every bounded status label without ellipsis. Narrow mode may shrink and
-    // wrap the status lane along with the other secondary controls.
-    const STATUS: usize = 19;
-    const CLOSE: usize = 8;
+    // The widths read as the layout's column constants they used to be.
+    #[allow(non_snake_case)]
+    let SearchBarWidths {
+        label: LABEL,
+        previous: PREVIOUS,
+        next: NEXT,
+        wrap: WRAP,
+        case: CASE,
+        invert: INVERT,
+        status: STATUS,
+        close: CLOSE,
+    } = SearchBarWidths::new(tr);
     const EDITOR_MIN: usize = 12;
     // 8 single-column gaps between the nine controls, plus one extra column
     // for each of the four gaps that separate groups rather than siblings
     // (after the editor, after Next, after Invert, after Status).
-    const WIDE_MIN: usize =
+    let wide_min =
         2 + LABEL + PREVIOUS + NEXT + WRAP + CASE + INVERT + STATUS + CLOSE + EDITOR_MIN + 8 + 4;
 
     let columns = (surface_width / cell_width).floor().max(1.0) as usize;
@@ -12653,7 +12757,7 @@ pub fn search_bar_geometry(
         status_pos,
         close_pos,
         rows,
-    ) = if columns >= WIDE_MIN {
+    ) = if columns >= wide_min {
         let mut col = pad;
         // `gap` is the run of blank columns AFTER a control. One column
         // separates controls inside a group; two separate the groups
@@ -12671,7 +12775,7 @@ pub fn search_bar_geometry(
         let label_pos = place(LABEL, IN_GROUP);
         // All fixed controls plus their inter-control gaps have already been
         // budgeted by WIDE_MIN; the editor gets every surplus column.
-        let editor_width = EDITOR_MIN + (columns - WIDE_MIN);
+        let editor_width = EDITOR_MIN + (columns - wide_min);
         let editor_pos = place(editor_width, BETWEEN_GROUPS);
         let previous_pos = place(PREVIOUS, IN_GROUP);
         let next_pos = place(NEXT, BETWEEN_GROUPS);
@@ -13099,11 +13203,17 @@ fn search_bar_segments(
         (fitted, centered(rect, block))
     };
 
+    let labels = SearchBarLabels::new(&search.tr);
     let label_cols = cols(geometry.label);
     push(
         None,
         geometry.label,
-        if label_cols >= 6 { "Search" } else { "?" }.to_string(),
+        if label_cols >= display_width(labels.label) {
+            labels.label
+        } else {
+            "?"
+        }
+        .to_string(),
         geometry.label.0,
     );
     let editor_cols = search_bar_columns(geometry.editor.2, cell_width).max(1);
@@ -13113,9 +13223,13 @@ fn search_bar_segments(
         search_editor_body(search, editor_cols).0,
         geometry.editor.0 + cell_width,
     );
-    let (text, left) = button(geometry.previous, "‹ Prev".to_string(), &["‹ Prev"]);
+    let (text, left) = button(
+        geometry.previous,
+        labels.previous.to_string(),
+        &[labels.previous],
+    );
     push(Some(SearchControl::Previous), geometry.previous, text, left);
-    let (text, left) = button(geometry.next, "Next ›".to_string(), &["Next ›"]);
+    let (text, left) = button(geometry.next, labels.next.to_string(), &[labels.next]);
     push(Some(SearchControl::Next), geometry.next, text, left);
     // Say the state, not a checkbox. `[x] Wrap` makes someone decode a TUI
     // idiom to learn whether wrapping is on; `Wrap: On` just tells them. The
@@ -13123,24 +13237,25 @@ fn search_bar_segments(
     // which nothing else in the bar communicated.
     let (text, left) = button(
         geometry.wrap,
-        format!("Wrap: {}", if search.wrap { "On" } else { "Off" }),
-        &["Wrap: On", "Wrap: Off"],
+        labels.wrap[usize::from(!search.wrap)].to_string(),
+        &labels.wrap,
     );
     push(Some(SearchControl::Wrap), geometry.wrap, text, left);
     // The mode name is padded to the longest one, so the chevron stays put as
     // the mode cycles.
+    let case_variants: Vec<&str> = labels.case.iter().map(String::as_str).collect();
     let (text, left) = button(
         geometry.case_mode,
-        format!("Case: {:<6} ›", search.case_mode.label()),
-        &["Case: Ignore ›"],
+        search_case_text(&search.tr, search.case_mode),
+        &case_variants,
     );
     push(Some(SearchControl::Case), geometry.case_mode, text, left);
     // The invert toggle flips which direction Enter searches, so its label
     // names that direction. It also reminds users of the Enter keybinding.
     let (text, left) = button(
         geometry.invert,
-        format!("Enter: {}", if search.invert { "Prev" } else { "Next" }),
-        &["Enter: Next", "Enter: Prev"],
+        labels.invert[usize::from(search.invert)].to_string(),
+        &labels.invert,
     );
     push(Some(SearchControl::Invert), geometry.invert, text, left);
     // `Match` is the one status the user can already see: the hit is
@@ -13153,10 +13268,13 @@ fn search_bar_segments(
     let status = if search.status == SearchStatus::Match {
         String::new()
     } else {
-        fit_single_line_label(search.status.label(), cols(geometry.status).max(1))
+        fit_single_line_label(
+            search.status.label(&search.tr),
+            cols(geometry.status).max(1),
+        )
     };
     push(None, geometry.status, status, geometry.status.0);
-    let (text, left) = button(geometry.close, "× Close".to_string(), &["× Close"]);
+    let (text, left) = button(geometry.close, labels.close.to_string(), &[labels.close]);
     push(Some(SearchControl::Close), geometry.close, text, left);
     segments
 }
@@ -19621,7 +19739,13 @@ mod search_bar_tests {
 
     #[test]
     fn wide_geometry_is_one_row_and_hit_testing_reuses_paint_rects() {
-        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        let bar = search_bar_geometry(
+            1200.0,
+            800.0,
+            10.0,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
         assert_eq!(bar.rows, 1);
         assert_eq!(bar.reserved_height, 30.0);
         for control in SearchControl::ALL {
@@ -19635,14 +19759,14 @@ mod search_bar_tests {
 
     #[test]
     fn narrow_geometry_wraps_without_hiding_editor_or_close() {
-        let bar = search_bar_geometry(320.0, 800.0, 8.0, 18.0);
+        let bar = search_bar_geometry(320.0, 800.0, 8.0, 18.0, &kettle_i18n::Translator::default());
         assert!(bar.rows >= 2);
         for control in SearchControl::ALL {
             assert_inside(bar, bar.control_rect(control));
         }
         // The invariant also holds at a deliberately pathological one-cell
         // surface; Close moves to another row instead of covering the editor.
-        let tiny = search_bar_geometry(8.0, 800.0, 8.0, 18.0);
+        let tiny = search_bar_geometry(8.0, 800.0, 8.0, 18.0, &kettle_i18n::Translator::default());
         assert_inside(tiny, tiny.editor);
         assert_inside(tiny, tiny.close);
         assert_ne!(tiny.editor.1, tiny.close.1);
@@ -19660,7 +19784,13 @@ mod search_bar_tests {
             focused: SearchControl::Editor,
             ..SearchOverlay::default()
         };
-        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 20.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            10.0,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
 
         let matched = SearchOverlay {
             status: SearchStatus::Match,
@@ -19668,7 +19798,7 @@ mod search_bar_tests {
         };
         let text = search_bar_text(&matched, bar, 10.0);
         assert!(
-            !text.contains(SearchStatus::Match.label()),
+            !text.contains(SearchStatus::Match.label(&kettle_i18n::Translator::default())),
             "a plain match is shown by the highlight, not by the bar: {text}"
         );
 
@@ -19685,7 +19815,7 @@ mod search_bar_tests {
             };
             let text = search_bar_text(&overlay, bar, 10.0);
             assert!(
-                text.contains(status.label()),
+                text.contains(status.label(&kettle_i18n::Translator::default())),
                 "{status:?} must still be reported: {text}"
             );
         }
@@ -19715,7 +19845,13 @@ mod search_bar_tests {
         let mut saw_next = false;
         for width in [2400.0_f32, 1400.0, 1000.0, 820.0, 700.0, 600.0] {
             let cell_width = 7.8_f32;
-            let bar = search_bar_geometry(width, 800.0, cell_width, 20.0);
+            let bar = search_bar_geometry(
+                width,
+                800.0,
+                cell_width,
+                20.0,
+                &kettle_i18n::Translator::default(),
+            );
             for invert in [false, true] {
                 for status in statuses {
                     let overlay = SearchOverlay {
@@ -19730,7 +19866,10 @@ mod search_bar_tests {
                     let control = if invert { "Enter: Prev" } else { "Enter: Next" };
                     saw_prev |= invert && text.contains(control);
                     saw_next |= !invert && text.contains(control);
-                    let abutting = format!("{control} {}", status.label());
+                    let abutting = format!(
+                        "{control} {}",
+                        status.label(&kettle_i18n::Translator::default())
+                    );
                     for line in text.lines() {
                         assert!(
                             !line.contains(&abutting),
@@ -19769,7 +19908,13 @@ mod search_bar_tests {
         // fine enough to land on the values that previously lost a column.
         for step in 0..=2000 {
             let cell_width = 6.0 + step as f32 * 0.005;
-            let bar = search_bar_geometry(2400.0, 800.0, cell_width, 20.0);
+            let bar = search_bar_geometry(
+                2400.0,
+                800.0,
+                cell_width,
+                20.0,
+                &kettle_i18n::Translator::default(),
+            );
             if bar.rows != 1 {
                 continue;
             }
@@ -19807,7 +19952,13 @@ mod search_bar_tests {
             focused: SearchControl::Editor,
             ..SearchOverlay::default()
         };
-        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        let bar = search_bar_geometry(
+            1200.0,
+            800.0,
+            10.0,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
         let text = search_bar_text(&search, bar, 10.0);
         assert!(text.contains("needle"));
         assert!(text.contains("Case: Ignore"));
@@ -19856,7 +20007,13 @@ mod search_bar_tests {
     /// the editor, never shifts the query's characters.
     #[test]
     fn caret_and_focus_never_shift_the_query_text() {
-        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 20.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            10.0,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
         let base = SearchOverlay {
             query: "abcdef".to_string(),
             cursor_byte: 6,
@@ -19883,7 +20040,13 @@ mod search_bar_tests {
     #[test]
     fn button_labels_are_centered_and_toggles_do_not_move() {
         let cell = 10.0;
-        let bar = search_bar_geometry(1400.0, 800.0, cell, 20.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            cell,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
         let variants = |index: usize| -> Vec<SearchOverlay> {
             let base = SearchOverlay::default();
             match index {
@@ -19989,7 +20152,13 @@ mod search_bar_tests {
     /// clusters in window x.
     fn shaped_lane(search: &SearchOverlay) -> Vec<Vec<super::SearchEditorCluster>> {
         let (cell, row) = (10.0, 26.0);
-        let bar = search_bar_geometry(1400.0, 800.0, cell, 16.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            cell,
+            16.0,
+            &kettle_i18n::Translator::default(),
+        );
         let mut font_system = glyphon::FontSystem::new();
         for face in kettle_config::font::all() {
             super::load_bundled_font(&mut font_system, face);
@@ -20077,7 +20246,13 @@ mod search_bar_tests {
             query: "שלום".to_string(),
             ..SearchOverlay::default()
         };
-        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 16.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            10.0,
+            16.0,
+            &kettle_i18n::Translator::default(),
+        );
         let editor_left = search_bar_segments(&search, bar, 10.0)[1].left;
         let clusters = &shaped_lane(&search)[1];
         assert_eq!(clusters.len(), 4);
@@ -20111,7 +20286,13 @@ mod search_bar_tests {
             cursor_byte: usize::MAX,
             ..SearchOverlay::default()
         };
-        let bar = search_bar_geometry(1400.0, 800.0, 10.0, 16.0);
+        let bar = search_bar_geometry(
+            1400.0,
+            800.0,
+            10.0,
+            16.0,
+            &kettle_i18n::Translator::default(),
+        );
         let editor_left = search_bar_segments(&search, bar, 10.0)[1].left;
         let clusters = &shaped_lane(&search)[1];
         let leftmost = clusters.iter().map(|c| c.left).fold(f32::MAX, f32::min);
@@ -20246,19 +20427,58 @@ mod search_bar_tests {
 
     #[test]
     fn status_vocabulary_is_bounded_and_semantic() {
-        assert_eq!(SearchStatus::Typing.label(), "Type to search");
-        assert_eq!(SearchStatus::Searching.label(), "Searching…");
-        assert_eq!(SearchStatus::Match.label(), "Match");
-        assert_eq!(SearchStatus::Wrapped.label(), "Wrapped");
-        assert_eq!(SearchStatus::Start.label(), "Start reached");
-        assert_eq!(SearchStatus::End.label(), "End reached");
-        assert_eq!(SearchStatus::NoMatch.label(), "No match");
-        assert_eq!(SearchStatus::Limited.label(), "Results limited");
-        assert_eq!(SearchStatus::Invalid.label(), "Invalid pattern");
-        assert_eq!(SearchStatus::TooComplex.label(), "Pattern too complex");
-        assert_eq!(SearchStatus::TooLong.label(), "Query too long");
+        assert_eq!(
+            SearchStatus::Typing.label(&kettle_i18n::Translator::default()),
+            "Type to search"
+        );
+        assert_eq!(
+            SearchStatus::Searching.label(&kettle_i18n::Translator::default()),
+            "Searching…"
+        );
+        assert_eq!(
+            SearchStatus::Match.label(&kettle_i18n::Translator::default()),
+            "Match"
+        );
+        assert_eq!(
+            SearchStatus::Wrapped.label(&kettle_i18n::Translator::default()),
+            "Wrapped"
+        );
+        assert_eq!(
+            SearchStatus::Start.label(&kettle_i18n::Translator::default()),
+            "Start reached"
+        );
+        assert_eq!(
+            SearchStatus::End.label(&kettle_i18n::Translator::default()),
+            "End reached"
+        );
+        assert_eq!(
+            SearchStatus::NoMatch.label(&kettle_i18n::Translator::default()),
+            "No match"
+        );
+        assert_eq!(
+            SearchStatus::Limited.label(&kettle_i18n::Translator::default()),
+            "Results limited"
+        );
+        assert_eq!(
+            SearchStatus::Invalid.label(&kettle_i18n::Translator::default()),
+            "Invalid pattern"
+        );
+        assert_eq!(
+            SearchStatus::TooComplex.label(&kettle_i18n::Translator::default()),
+            "Pattern too complex"
+        );
+        assert_eq!(
+            SearchStatus::TooLong.label(&kettle_i18n::Translator::default()),
+            "Query too long"
+        );
 
-        let bar = search_bar_geometry(1200.0, 800.0, 10.0, 20.0);
+        let bar = search_bar_geometry(
+            1200.0,
+            800.0,
+            10.0,
+            20.0,
+            &kettle_i18n::Translator::default(),
+        );
         let status_columns = (bar.status.2 / 10.0).floor() as usize;
         for status in [
             SearchStatus::Typing,
@@ -20274,10 +20494,69 @@ mod search_bar_tests {
             SearchStatus::TooLong,
         ] {
             assert!(
-                super::display_width(status.label()) <= status_columns,
+                super::display_width(status.label(&kettle_i18n::Translator::default()))
+                    <= status_columns,
                 "wide status lane clipped {}",
-                status.label()
+                status.label(&kettle_i18n::Translator::default())
             );
+        }
+    }
+
+    /// English lays out exactly as it did with fixed widths; a translation
+    /// gets each control as wide as its longest label plus the same fill.
+    #[test]
+    fn control_widths_follow_the_labels_language() {
+        use super::SearchBarWidths;
+        use kettle_i18n::{Language, Translator};
+        let en = SearchBarWidths::new(&Translator::new(Language::En));
+        assert_eq!(en, SearchBarWidths::ENGLISH);
+        let es = SearchBarWidths::new(&Translator::new(Language::Es));
+        for (english, spanish) in [
+            (en.label, es.label),
+            (en.previous, es.previous),
+            (en.next, es.next),
+            (en.wrap, es.wrap),
+            (en.case, es.case),
+            (en.invert, es.invert),
+            (en.status, es.status),
+            (en.close, es.close),
+        ] {
+            assert!(spanish >= english);
+        }
+        // "Siguiente ›" is 11 columns; Next keeps its two columns of fill.
+        assert_eq!(es.next, 13);
+    }
+
+    /// A Spanish bar shows every word whole at a width that fits it, with no
+    /// ellipsis, and its status lane fits every status.
+    #[test]
+    fn a_spanish_bar_shows_its_words_whole() {
+        use kettle_i18n::{Language, Translator};
+        let tr = Translator::new(Language::Es);
+        let bar = search_bar_geometry(2000.0, 800.0, 10.0, 20.0, &tr);
+        assert_eq!(bar.rows, 1, "wide enough for the single-row layout");
+        let search = SearchOverlay {
+            tr,
+            status: SearchStatus::TooComplex,
+            ..SearchOverlay::default()
+        };
+        let text = search_bar_text(&search, bar, 10.0);
+        for word in [
+            "Buscar",
+            "‹ Anterior",
+            "Siguiente ›",
+            "Circular: sí",
+            "Mayús.: Inteligente ›",
+            "Enter: siguiente",
+            "Patrón demasiado complejo",
+            "× Cerrar",
+        ] {
+            assert!(text.contains(word), "{word:?} missing from {text:?}");
+        }
+        assert!(!text.contains('…'), "{text:?}");
+        let status_columns = (bar.status.2 / 10.0).floor() as usize;
+        for status in SearchStatus::ALL {
+            assert!(super::display_width(status.label(&tr)) <= status_columns);
         }
     }
 }
@@ -20311,6 +20590,7 @@ mod completion_panel_tests {
 
     fn overlay(selected: Option<usize>, count: usize) -> CompletionOverlay {
         CompletionOverlay {
+            tr: kettle_i18n::Translator::default(),
             pane_rect: (100.0, 40.0, 900.0, 700.0),
             grid_rect: (108.0, 70.0, 884.0, 656.0),
             command_rows: (20, 20),
@@ -20911,6 +21191,9 @@ mod completion_panel_tests {
         card.total = 1;
         card.candidates.truncate(1);
         assert_eq!(completion_header_count(&card), "1 match");
+        card.tr = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        assert_eq!(completion_header_count(&card), "1 coincidencia");
+        card.tr = kettle_i18n::Translator::default();
 
         let card = overlay(None, 2);
         let geometry = completion_panel_geometry(&card, CELL).unwrap();
@@ -21161,7 +21444,7 @@ mod completion_panel_tests {
         };
         assert!(!text_overlay_requires_continuous_prepare(&frame));
 
-        frame.search_query = Some(String::new());
+        frame.ssh_query = Some(String::new());
         assert!(text_overlay_requires_continuous_prepare(&frame));
     }
 }

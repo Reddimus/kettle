@@ -14,6 +14,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Dragging a pane onto another shows where it will land with the search bar
+  closed. The drop preview appeared only while search was open.
 - In the window, tab, pane and group title editors, the input method's
   candidate window opens at the caret. It opened two or three columns to the
   caret's left.
