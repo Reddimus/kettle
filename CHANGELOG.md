@@ -8,6 +8,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- Stepping through themes (`next_theme`, `prev_theme`, and ←/→ on the Settings
+  Theme row) stays with the current theme's appearance and moves to the most
+  similar theme each time, judged by background, foreground and accent. It used
+  to follow the themes' names or the popular list's order, flipping between
+  light and dark palettes. `toggle_light_dark` still switches appearance.
 - Close confirmations count in words that match the number: "Close tab with 1
   pane?", "Close 3 panes?". The paste prompt says "1 line" or "2 lines". They
   used to say "pane(s)" and "lines" whatever the count.
