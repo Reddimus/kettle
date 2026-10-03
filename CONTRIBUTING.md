@@ -138,6 +138,7 @@ crates/
   kettle-update/   Signed update feeds · bounded extraction · transactions
   kettle-config/   Config parsing · 500+ themes · keybinds · ssh-host · fuzzy
   kettle-i18n/     Typed UI text catalogue (English · Spanish), generated at build time
+  kettle-media/    Bounded media jobs/results · source authorization · caps · worker frames
   kettle-vt/       Image-protocol extractor (Sixel · kitty · iTerm2 · OSC 7/133)
   kettle-core/     PTY reader · alacritty_terminal+vte · bounded grid search · hints · links
   kettle-render/   wgpu pipelines · glyphon text · search/chrome geometry · screenshots · GPU self-test

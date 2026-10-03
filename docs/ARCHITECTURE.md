@@ -32,7 +32,17 @@ graph TD
     remote["kettle-remote<br/>SSH / Docker / Podman / kubectl / lxc detection<br/>pane-rooted process-tree walk · format_remote_title<br/>kitty-@ control protocol surface"]
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
+    media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames"]
 ```
+
+`kettle-media` defines the media protocol for agent visuals: bounded jobs and
+results, the effective theme, caps, source authorization (an external request
+can only carry an attested path; a GUI user pull needs an explicit action
+witness), the build handshake and the binary frames between the GUI and a
+media worker. It opens no files, starts no process and nothing depends on it
+yet; the worker, its spawn client and the UI join it later in the 5.0 plan.
+The byte layouts, digest framing and decisions are in
+[MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 
 `kettle-i18n` holds Kettle-owned UI text. Its build script reads
 `locales/schema.toml`, `en.toml` and `es.toml`, validates them, and generates

@@ -8,6 +8,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- `kettle-media`, a new crate, defines the bounded media protocol for the
+  coming agent visuals: jobs and results, caps, source authorization, the
+  build handshake and the binary frames between Kettle and a media worker.
+  Nothing uses it yet, so no behaviour changes.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a
