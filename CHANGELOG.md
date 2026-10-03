@@ -23,6 +23,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- `TRANSLATING.md` explains how Kettle's text is translated and reviewed, and
+  each Spanish message's review status is recorded by key. The Spanish
+  catalogue is a draft until a fluent reviewer accepts it.
+- The tab bar's numbered fallback label (`tab 2`) and an untitled pane's
+  screen-reader name follow the UI language. `kettle ctl` tab titles keep the
+  English `tab 2`.
 - The right-click menu's Theme submenu, a list of every bundled theme, is now
   a Theme… row that opens the theme picker.
 - Screen readers read a picker row's hint after its name, such as a

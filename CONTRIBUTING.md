@@ -229,6 +229,9 @@ Done.
   intentional. If real, that's your change.
 - **Or look at `docs/ROADMAP.md`.** Current priorities are small enough to
   review in one change; larger projects have their own design records.
+- **Translating or reviewing Kettle's text?** Start with
+  [`TRANSLATING.md`](TRANSLATING.md). Any new UI text goes into
+  `crates/kettle-i18n` in English and Spanish in the same change.
 
 ## Style
 

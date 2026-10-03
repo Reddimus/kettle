@@ -3937,7 +3937,7 @@ impl Mux {
     /// whose label comes from the working directory, the home-abbreviated full
     /// path so the renderer can tier the label (full path → leaf dir name →
     /// truncated tail) to the available tab width.
-    pub fn tab_labels(&self) -> Vec<TabLabel> {
+    pub fn tab_labels(&self, tr: &kettle_i18n::Translator) -> Vec<TabLabel> {
         let home = home_dir_string();
         self.tabs
             .iter()
@@ -3949,14 +3949,18 @@ impl Mux {
                 // cwd/`tab N` fallback applies rather than an empty verbatim label.
                 let placeholder = pane.map(|p| p.title_is_placeholder).unwrap_or(true);
                 let cwd = pane.and_then(|p| p.term.current_dir_or_native());
-                resolve_tab_label(
+                let mut label = resolve_tab_label(
                     t.title_override.as_deref(),
                     title,
                     placeholder,
                     cwd.as_deref(),
                     home.as_deref(),
                     i,
-                )
+                );
+                if label.numbered {
+                    label.text = tr.tab_fallback_label(i as u64 + 1);
+                }
+                label
             })
             .collect()
     }
@@ -3995,6 +3999,9 @@ fn resolve_tab_title(
 pub(crate) struct TabLabel {
     pub(crate) text: String,
     pub(crate) path: Option<String>,
+    /// `text` is the numbered `tab N` fallback, which the tab bar shows in
+    /// the UI's language; protocol output keeps the English form.
+    pub(crate) numbered: bool,
 }
 
 /// The pure core of tab-label resolution (precedence: override → real pane title
@@ -4015,6 +4022,7 @@ fn resolve_tab_label(
         return TabLabel {
             text: ov.to_string(),
             path: None,
+            numbered: false,
         };
     }
     // Branch on the authoritative `Pane::title_is_placeholder` flag, NOT a
@@ -4034,17 +4042,20 @@ fn resolve_tab_label(
                 return TabLabel {
                     text: name.to_string(),
                     path: Some(full),
+                    numbered: false,
                 };
             }
             // Only separators (e.g. "/") — show the (abbreviated) full path.
             return TabLabel {
                 text: full.clone(),
                 path: Some(full),
+                numbered: false,
             };
         }
         return TabLabel {
             text: format!("tab {}", idx + 1),
             path: None,
+            numbered: true,
         };
     }
     if let Some(cwd) = cwd.filter(|c| !c.is_empty())
@@ -4055,6 +4066,7 @@ fn resolve_tab_label(
     TabLabel {
         text: pane_title.to_string(),
         path: None,
+        numbered: false,
     }
 }
 
@@ -4075,6 +4087,7 @@ pub(crate) fn cwd_label_for_shell_title(
     Some(TabLabel {
         text: leaf.to_string(),
         path: Some(abbreviate_home(cwd, home)),
+        numbered: false,
     })
 }
 
@@ -5872,6 +5885,15 @@ mod node_tests {
         let l = resolve_tab_label(None, "kettle", true, Some("/srv/app"), Some("/home/u"), 0);
         assert_eq!(l.text, "app");
         assert_eq!(l.path.as_deref(), Some("/srv/app"));
+        assert!(!l.numbered);
+        // No title and no directory: the numbered fallback, marked so the tab
+        // bar can show it in the UI's language while protocol output keeps
+        // `tab N`.
+        let l = resolve_tab_label(None, "kettle", true, None, Some("/home/u"), 2);
+        assert_eq!((l.text.as_str(), l.numbered), ("tab 3", true));
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        assert_eq!(es.tab_fallback_label(3), "pestaña 3");
+        assert_eq!(es.a11y_pane(7), "Panel de terminal 7");
         // A REAL title equal to the seed string "kettle" (placeholder = false)
         // is shown verbatim and carries NO cwd path. The flag, not a string
         // compare, decides placeholder-ness.
