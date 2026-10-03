@@ -1,0 +1,29 @@
+[package]
+name = "kettle-i18n"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "kettle: typed English and Spanish UI catalogue"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Development-only pseudo-locale for layout checks. It exists only in debug
+# builds; release builds have no pseudo constructor even with this feature.
+dev-pseudo = []
+
+# The catalogue is generated at build time; TOML and serde never reach the
+# shipped binary.
+[build-dependencies]
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+toml.workspace = true

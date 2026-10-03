@@ -746,6 +746,21 @@ session load/save atomic + corruption-backup contracts;
 empty-value resets for every string-config key;
 `clamp_font_size` bounds.
 
+### kettle-i18n
+
+The build script validates the catalogue, and `tests/build_gates.rs` runs it
+against broken inputs: a key missing from or extra in one language, duplicate
+TOML keys, a wrong entry shape, a missing plural branch, placeholder sets that
+differ between languages, invalid placeholder syntax and unescaped literals.
+`compile_fail` doctests prove an unknown key and a missing, extra or wrongly
+typed argument do not compile. `tests/catalogue.rs` checks that every message
+has clean text in both languages, that Spanish is never left as English except
+for listed cognates, and that arguments pass through verbatim. Unit tests prove
+a missing Spanish entry falls back to English for every message and that the
+pseudo-locale lengthens text by 35–40% while keeping arguments intact; a release
+build has no pseudo state at all. Run it in debug, `--release` and
+`--features dev-pseudo`.
+
 ### kettle-state
 
 Creates and replaces private state without leaving staging

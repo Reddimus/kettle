@@ -1962,6 +1962,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kettle-i18n"
+version = "4.9.0"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "kettle-remote"
 version = "4.9.0"
 dependencies = [
@@ -2031,6 +2039,7 @@ dependencies = [
  "kettle-config",
  "kettle-core",
  "kettle-ctl",
+ "kettle-i18n",
  "kettle-remote",
  "kettle-render",
  "kettle-state",

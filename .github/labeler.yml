@@ -35,6 +35,11 @@ ui:
       - any-glob-to-any-file:
           - "crates/kettle-ui/**"
 
+i18n:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "crates/kettle-i18n/**"
+
 # CLI binary crate — separate from `ui` so a clap / startup change
 # gets its own scan.
 cli:
