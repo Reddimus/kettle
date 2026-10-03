@@ -3000,6 +3000,32 @@ fn confirm_button_label<'a>(button: &'a ConfirmButton, tr: &kettle_i18n::Transla
     }
 }
 
+/// The title editor's label for `scope`. The overlay paints it and the
+/// input-method placement measures it, so both use this.
+fn title_edit_label(scope: TitleEditScope, tr: &kettle_i18n::Translator) -> &'static str {
+    use kettle_i18n::Text;
+    tr.text(match scope {
+        TitleEditScope::Window => Text::EditTitleWindow,
+        TitleEditScope::Tab => Text::EditTitleTab,
+        TitleEditScope::Pane => Text::EditTitlePane,
+        TitleEditScope::Group => Text::EditTitleGroup,
+    })
+}
+
+/// The column of the title editor's caret: the painted prefix in the UI's
+/// language, the input, then any composition before the focus point.
+fn title_edit_caret_cols(
+    scope: TitleEditScope,
+    input: &str,
+    preedit_before_focus: &str,
+    tr: &kettle_i18n::Translator,
+) -> usize {
+    use unicode_width::UnicodeWidthStr as _;
+    kettle_render::title_edit_prefix(title_edit_label(scope, tr)).width()
+        + input.width()
+        + preedit_before_focus.width()
+}
+
 /// Where the title-edit overlay is painted.
 ///
 /// Pure so the geometry can be tested.
@@ -12500,18 +12526,11 @@ impl App {
                 (size.height as f32 - ch - 5.0).max(0.0),
             )
         } else if let Some(edit) = &ws.editing_title {
-            use unicode_width::UnicodeWidthStr as _;
-
             let rect = self.title_edit_rect(ws);
-            let label_cols = match edit.scope {
-                TitleEditScope::Window => 20,
-                TitleEditScope::Tab => 17,
-                TitleEditScope::Pane => 18,
-                TitleEditScope::Group => 19,
-            };
+            let caret =
+                title_edit_caret_cols(edit.scope, &edit.input, preedit_before_focus, &self.ui_text);
             (
-                rect.0
-                    + (label_cols + edit.input.width() + preedit_before_focus.width()) as f32 * cw,
+                rect.0 + caret as f32 * cw,
                 rect.1 + ((rect.3 - ch) * 0.5).max(0.0),
             )
         } else if ws.settings_text_edit.is_some() {
@@ -13083,12 +13102,7 @@ impl App {
         // rows.
         let edit_title: Option<kettle_render::TitleEditOverlay> =
             ws.editing_title.as_ref().map(|s| {
-                let label = match s.scope {
-                    TitleEditScope::Window => self.ui_text.text(kettle_i18n::Text::EditTitleWindow),
-                    TitleEditScope::Tab => self.ui_text.text(kettle_i18n::Text::EditTitleTab),
-                    TitleEditScope::Pane => self.ui_text.text(kettle_i18n::Text::EditTitlePane),
-                    TitleEditScope::Group => self.ui_text.text(kettle_i18n::Text::EditTitleGroup),
-                };
+                let label = title_edit_label(s.scope, &self.ui_text);
                 kettle_render::TitleEditOverlay {
                     label: label.to_string(),
                     input: with_preedit(&s.input),
@@ -45991,6 +46005,36 @@ mod picker_text_tests {
         ];
         assert_eq!(picker_hint(&EN, &hint), "(Enter apply · Esc cancel)");
         assert_eq!(picker_hint(&ES, &hint), "(Enter aplicar · Esc cancelar)");
+    }
+
+    /// The input-method window opens at the painted caret, whatever the
+    /// label's language: the caret follows the prefix the renderer paints.
+    #[test]
+    fn the_title_editor_caret_follows_the_painted_prefix() {
+        use super::{TitleEditScope, title_edit_caret_cols};
+        use unicode_width::UnicodeWidthStr as _;
+        for tr in [EN, ES] {
+            for (scope, text) in [
+                (TitleEditScope::Window, Text::EditTitleWindow),
+                (TitleEditScope::Tab, Text::EditTitleTab),
+                (TitleEditScope::Pane, Text::EditTitlePane),
+                (TitleEditScope::Group, Text::EditTitleGroup),
+            ] {
+                let painted = format!("  ✎ {} 界x", tr.text(text));
+                assert_eq!(
+                    title_edit_caret_cols(scope, "界x", "", &tr),
+                    painted.width()
+                );
+            }
+        }
+        assert_eq!(
+            title_edit_caret_cols(TitleEditScope::Window, "", "", &EN),
+            23
+        );
+        assert_eq!(
+            title_edit_caret_cols(TitleEditScope::Window, "", "", &ES),
+            36
+        );
     }
 
     #[test]

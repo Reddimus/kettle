@@ -749,6 +749,13 @@ pub struct TitleEditOverlay {
     pub rect: Rect4,
 }
 
+/// The title editor's text before its input: the pencil and the label. The
+/// line is this prefix, the input with its caret, then the hint. The UI places
+/// the input-method window after it, so both measure the same text.
+pub fn title_edit_prefix(label: &str) -> String {
+    format!("  ✎ {label} ")
+}
+
 /// Active input-method composition projected over the focused terminal cursor.
 pub struct ImePreedit {
     pub text: String,
@@ -7358,7 +7365,12 @@ impl Renderer {
                 theme.palette[3],
                 0.96,
             ));
-            let label = format!("  ✎ {} {}_   {}", edit.label, edit.input, edit.hint);
+            let label = format!(
+                "{}{}_   {}",
+                title_edit_prefix(&edit.label),
+                edit.input,
+                edit.hint
+            );
             let label = fit_single_line_label(&label, overlay_label_cols(edit.rect.2, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer
