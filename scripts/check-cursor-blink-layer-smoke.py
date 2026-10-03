@@ -344,7 +344,12 @@ def capture_phases(helpers, live, out: Path, name: str, renderer: str) -> Dict[b
         path = out / f"{name}-{'on' if phase else 'off'}.png"
         path.touch(mode=0o600, exist_ok=False)
         capture_start = time.monotonic()
-        subprocess.run(["screencapture", f"-l{wid}", "-o", "-x", str(path)], check=True, timeout=max(0.001, deadline - capture_start), umask=0o077)
+        try:
+            subprocess.run(["screencapture", f"-l{wid}", "-o", "-x", str(path)], check=True, timeout=max(0.001, deadline - capture_start), umask=0o077)
+        except subprocess.TimeoutExpired:
+            # The capture outlasted the budget; the deadline check reports it.
+            path.unlink(missing_ok=True)
+            continue
         capture_end = time.monotonic()
         path.chmod(0o600)
         if not (safe_start <= capture_start <= capture_end <= min(safe_end, deadline)):

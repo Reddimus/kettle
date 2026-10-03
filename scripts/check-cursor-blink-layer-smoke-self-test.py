@@ -52,7 +52,14 @@ class CaptureClock:
         assert kwargs.get("umask") == 0o077
         assert path.stat().st_mode & 0o777 == 0o600
         self.captures.append((path, self.now, self.queries))
-        self.now += next(self.capture_delays, 0.005)
+        delay = next(self.capture_delays, 0.005)
+        timeout = kwargs.get("timeout")
+        if timeout is not None and delay > timeout:
+            # As subprocess.run does: the child is killed at the timeout, and
+            # reaping it takes a moment more.
+            self.now += timeout + 0.001
+            raise smoke.subprocess.TimeoutExpired(argv, timeout)
+        self.now += delay
         path.write_text(str(self.phase()))
 
     def patches(self):
@@ -130,6 +137,16 @@ class CursorSmoke(unittest.TestCase):
             with clock.patches(), self.assertRaisesRegex(SystemExit, "could not capture both phases"):
                 smoke.capture_phases(clock, clock, Path(directory), "slow", "layer")
             self.assertLess(clock.now, 11.0)
+            self.assertEqual(list(Path(directory).glob("*.png")), [])
+
+    def test_pixel_capture_cut_off_by_the_deadline_reports_the_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            # A capture still running when the budget ends is killed, and the
+            # smoke says it could not capture rather than raising a timeout.
+            clock = CaptureClock(capture_delays=[30.0])
+            with clock.patches(), self.assertRaisesRegex(SystemExit, "could not capture both phases"):
+                smoke.capture_phases(clock, clock, Path(directory), "cut-off", "layer")
+            self.assertEqual(len(clock.captures), 1)
             self.assertEqual(list(Path(directory).glob("*.png")), [])
 
     def test_pixel_capture_requires_the_expected_renderer_throughout(self):
