@@ -186,6 +186,49 @@ including Kettle itself, so it is outside what they can stop.
 No build renders yet, so `incomplete` is the best answer there is. Nothing
 here spawns a worker.
 
+## The worker executable
+
+`crates/kettle-media-worker` builds `kettle-media-worker`, a separate
+executable with no command-line interface, logging or UI. Its build script
+embeds the same `KETTLE_SOURCE_HASH` as `kettle`'s, from the same helper, so
+both binaries of one source answer with one `BuildId`. On Linux and macOS:
+
+1. **Early setup, the first statement of `main`.** Before any argument,
+   environment variable or input is read, and before any thread, hook or
+   library starts, it closes every descriptor above stderr and sets the core
+   size limit to 0. Linux uses `close_range(3, ~0, 0)`; where the kernel or a
+   seccomp policy refuses that, it closes each number below the hard
+   descriptor limit, and refuses to start if that limit is unlimited or above
+   2^20. macOS has no `close_range`; it closes each descriptor the kernel lists
+   for the process (`proc_pidinfo(PROC_PIDLISTFDS)`), refusing a list that
+   fills its buffer. Linux also clears the dumpable flag
+   (`PR_SET_DUMPABLE`). Only `EBADF` is tolerated; any other failure exits 8.
+2. **A panic hook** that writes `media worker panic` to stderr and nothing
+   else: no message, payload, location, backtrace or crash file. The GUI will
+   discard the worker's stderr anyway.
+3. **Resource limits**, each lowered to its value or to an inherited hard
+   limit that is already lower, never raised: CPU 5 s, regular-file size 0,
+   descriptors 32, and on Linux address space 1 GiB (macOS does not enforce
+   one). Failure exits 8.
+4. **A watchdog thread** that exits 4 when the current phase's deadline
+   passes, whatever the main thread is blocked on: 5 s from start until Ready
+   is written, 5 s from Ready until the job arrives, and 3 s from the job until
+   its reply is written. A parent that stalls or dies cannot keep the worker
+   alive. A watchdog that cannot start exits 8.
+5. **One job.** Hello must carry this build's identity. A different build, or
+   a frame header of another protocol version, is answered
+   `RestartRequired` and exits 9. Ready follows, then one Job and one reply,
+   then exit 0. A frame out of order or that does not decode is answered
+   `BadParams` (or `TooLarge`) and exits 2; a parent that closes stdin ends the
+   worker quietly with 0. stdout carries frames only, through one writer.
+
+This build answers every job `WorkerUnavailable`: no renderer is linked in.
+Exit codes 4, 8 and 9 mean what they mean for the video-preview worker. On
+other platforms the binary exits 8 at once, and nothing starts it there. The
+worker is built with the workspace but not packaged or started yet; the
+release profile pins it at `opt-level = 3`. The feature `test-faults` lets a
+test job make it panic, for the panic test; no shipped build enables it.
+
 ## P2 boundary and separate worker decision
 
 Production uses a separate O3 `kettle-media-worker` executable. The parent resolves it only

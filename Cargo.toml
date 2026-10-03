@@ -6,6 +6,7 @@ members = [
     "crates/kettle-update",
     "crates/kettle-i18n",
     "crates/kettle-media",
+    "crates/kettle-media-worker",
     "crates/kettle-config",
     "crates/kettle-core",
     "crates/kettle-vt",
@@ -171,6 +172,11 @@ panic = "abort"
 # post-mortem symbolication is ever wanted, switch to `strip = "debuginfo"` +
 # `split-debuginfo = "packed"` and archive the sidecar.
 strip = "symbols"
+
+# The media worker renders untrusted media against deadlines, so it is
+# optimized for speed like the rest of the release build, never for size.
+[profile.release.package.kettle-media-worker]
+opt-level = 3
 
 [profile.dev]
 opt-level = 1

@@ -35,6 +35,7 @@ graph TD
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
     media["kettle-media<br/>bounded jobs and results · theme · caps<br/>source authorization · build handshake · binary frames<br/>worker availability client"]
+    worker["kettle-media-worker (bin)<br/>early fd sweep · non-dumpable · rlimits<br/>watchdog · one job per process"] --> media
 ```
 
 `kettle-media` defines the media protocol for agent visuals: bounded jobs and
@@ -52,7 +53,9 @@ against Kettle's own requirement. `kettle-ui` receives the configured client
 and reports it in `get_state`. No worker ships yet, so a worker that passes
 every check still reads as unavailable. Kettle and every worker share one
 build identity, the source hash its build script computes
-(`crates/kettle/build_support/source_id.rs`). The byte layouts, digest
+(`crates/kettle/build_support/source_id.rs`). `kettle-media-worker` is that
+worker, a separate executable that serves one job per process; it renders
+nothing yet and nothing starts it or ships it. The byte layouts, digest
 framing, availability codes and decisions are in
 [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md).
 

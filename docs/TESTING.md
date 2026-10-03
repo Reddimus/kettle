@@ -779,6 +779,44 @@ verification is not cached; and asking never waits on a held check and never
 starts a second one. `BuildId::from_embedded` refuses empty, non-hex and
 formatted (`<version> (<hash>)`) identities.
 
+### kettle-media-worker
+
+Unit tests (`src/early_unix.rs`) run in a child of the test binary, so
+changing limits and descriptors disturbs nothing else: the early sweep closes
+inherited pipe ends at 3, 17 and 200 and keeps stdio, sets the core limit to
+0 and, on Linux, clears the dumpable flag; the Linux fallback sweep closes
+below the hard descriptor limit, and an unlimited or over-2^20 limit refuses
+it; and the resource limits land at their values while an inherited hard
+limit below one stays (never raised). `worker_early_setup_precedes_all_reads`
+reads `main`'s production source: the sweep is its first statement, then the
+panic hook, the limits, the watchdog, the one stdout writer and `serve`, and
+no source prints, reads arguments, the environment or files, or touches
+stderr outside the fixed panic line.
+
+`tests/process_boundary.rs` drives the built binary: Ready carries this
+build's identity and a job is answered `WorkerUnavailable`, with nothing else
+on stdout or stderr; a Hello from another source hash or version, and a
+header of another protocol version, are `RestartRequired` with exit 9;
+garbage, a job before Hello and a second Hello are `BadParams` with exit 2; a
+parent that closes stdin before Hello or after Ready ends the worker quietly;
+the watchdog exits 4 after five silent seconds before Hello and after Ready;
+a slow parent within each phase still gets its answer, so Ready starts a new
+deadline; and a pipe left open at fd 40 by the parent is closed by the time
+Ready arrives. On Linux, `/proc/<pid>/limits` shows the CPU, file-size, core,
+address-space and descriptor limits, and the worker's `/proc` entries are
+owned by root, so it is not dumpable (checked when not running as root). With
+`--features test-faults`, a job that panics leaves exactly
+`media worker panic` on stderr and no reply. The workspace commands do not
+enable that feature, so `just media-protocol-test` and ci.yml run it.
+
+Red checks: no sweep, a sweep after the hook, a sweep that closes nothing,
+core dumps left on, a non-dumpable flag left set, no CPU or address-space
+limit, limits that raise, a cut-short descriptor list, a fallback sweep that
+closes nothing, an unlimited ceiling accepted, a watchdog that never fires,
+phases sharing one deadline, a panic line with the payload, an uncompared
+build, frame skew read as garbage, and a second frame accepted each fail a
+test above.
+
 ### kettle-i18n
 
 The build script validates the catalogue, and `tests/build_gates.rs` runs it

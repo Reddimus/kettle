@@ -1,0 +1,33 @@
+[package]
+name = "kettle-media-worker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Kettle's media worker: one bounded media job per process"
+publish = false
+
+[[bin]]
+name = "kettle-media-worker"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+kettle-media.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# The early setup: closing inherited descriptors, the dumpable flag and the
+# resource limits, before the worker reads anything.
+libc = "0.2"
+
+[dev-dependencies]
+kettle-test-support.workspace = true
+
+[features]
+# Test fixture only: a job can make the worker panic, to prove the panic
+# report carries none of its input. Never enabled in a shipped build.
+test-faults = []
