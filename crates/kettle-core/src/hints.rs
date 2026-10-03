@@ -189,14 +189,26 @@ fn ends_a_match(rest: &str) -> bool {
 /// Detect hint targets in one row's `line`, using `col_of_byte` to map byte
 /// offsets to columns. Earlier kinds win on overlap (a URL is not also matched
 /// as a path). Callers sort `out` into reading order (row, then column).
-fn detect_line(row: usize, line: &str, col_of_byte: &[usize], out: &mut Vec<HintSpan>) {
+///
+/// `cut` says whether `line` was cut before its start and after its end (see
+/// `grid_text::LogicalLine`); a match touching a cut edge may be a fragment
+/// and is skipped.
+fn detect_line(
+    row: usize,
+    line: &str,
+    col_of_byte: &[usize],
+    cut: (bool, bool),
+    out: &mut Vec<HintSpan>,
+) {
     let mut taken: Vec<(usize, usize)> = Vec::new();
     for (kind, re) in res() {
         for m in re.find_iter(line) {
             let raw = m.as_str();
             let trimmed = trim_trailing(raw);
             let before = line[..m.start()].chars().next_back();
+            let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
             if trimmed.is_empty()
+                || fragment
                 || (*kind == Kind::Path && (is_cidr(trimmed) || !path_may_start_after(before)))
             {
                 continue;
@@ -239,21 +251,58 @@ pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
             v.push(line.chars().count()); // sentinel for the end-exclusive byte
             v
         };
-        detect_line(row, line, &col_of_byte, &mut out);
+        detect_line(row, line, &col_of_byte, (false, false), &mut out);
     }
     out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
     out
 }
 
 /// Detect quick-select targets from terminal grid rows while preserving the
-/// original grid columns of wide glyphs and combining marks.
+/// original grid columns of wide glyphs and combining marks. Targets are found
+/// per soft-wrapped logical line, so a URL the terminal wrapped onto the next
+/// row is one target with its whole text, labelled where it starts; its
+/// `end` is the last column on that first row. A hard line break ends a line.
 pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpan> {
     let mut out = Vec::new();
     let mut text = String::new();
+    let mut pos_of_byte = Vec::new();
     let mut col_of_byte = Vec::new();
-    for (row, &line) in lines.iter().enumerate() {
-        crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
-        detect_line(row, &text, &col_of_byte, &mut out);
+    let mut spans = Vec::new();
+    let mut first = 0;
+    while first < lines.len() {
+        let read = crate::grid_text::logical_line_into(
+            grid,
+            lines,
+            first,
+            cols,
+            &mut text,
+            &mut pos_of_byte,
+        );
+        // Detect over the joined text with byte offsets standing in for
+        // columns, then map each span back to its first row and columns.
+        col_of_byte.clear();
+        col_of_byte.extend(0..=text.len());
+        spans.clear();
+        detect_line(
+            first,
+            &text,
+            &col_of_byte,
+            (read.cut_before, read.cut_after),
+            &mut spans,
+        );
+        for mut span in spans.drain(..) {
+            let (row, start) = pos_of_byte[span.start];
+            let end = pos_of_byte[..=span.end]
+                .iter()
+                .rev()
+                .find(|(r, _)| *r == row)
+                .map_or(start, |&(_, col)| col);
+            span.row = row;
+            span.start = start;
+            span.end = end;
+            out.push(span);
+        }
+        first = read.next;
     }
     out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
     out
@@ -525,6 +574,48 @@ mod tests {
         ] {
             assert_eq!(span(line), Some((text.to_string(), false)), "{line:?}");
         }
+    }
+
+    /// A URL the terminal wrapped onto the next row is one hint, labelled
+    /// where it starts, with its whole text; a hard break does not join.
+    #[test]
+    fn a_soft_wrapped_url_is_one_hint() {
+        use alacritty_terminal::grid::Grid;
+        use alacritty_terminal::index::{Column, Line, Point};
+        use alacritty_terminal::term::cell::{Cell, Flags};
+
+        let grid_with = |wrapped: bool| {
+            let mut grid: Grid<Cell> = Grid::new(2, 12, 0);
+            for (line, text) in ["see https://", "x.test/a/b c"].iter().enumerate() {
+                for (column, c) in text.chars().enumerate() {
+                    grid[Point::new(Line(line as i32), Column(column))].c = c;
+                }
+            }
+            if wrapped {
+                grid[Point::new(Line(0), Column(11))]
+                    .flags
+                    .insert(Flags::WRAPLINE);
+            }
+            grid
+        };
+        let hints = detect_rows(&grid_with(true), &[0, 1], 12);
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert_eq!(hints[0].text, "https://x.test/a/b");
+        assert_eq!((hints[0].row, hints[0].start, hints[0].end), (0, 4, 11));
+        assert!(
+            detect_rows(&grid_with(false), &[0, 1], 12)
+                .iter()
+                .all(|span| span.text != "https://x.test/a/b")
+        );
+        // Reading from row 1 alone, the line was cut before it: the
+        // `x.test/a/b` that starts there is the tail of a longer URL.
+        assert!(
+            detect_rows(&grid_with(true), &[1], 12)
+                .iter()
+                .all(|span| span.start != 0),
+            "{:?}",
+            detect_rows(&grid_with(true), &[1], 12)
+        );
     }
 
     #[test]

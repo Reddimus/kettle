@@ -51,6 +51,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A URL or path the terminal wrapped onto the next row is one link and one
+  quick-select target: clicking either row opens the whole URL, and hovering
+  lights both. It used to be two broken links. A program's own line breaks
+  are never joined, and a URL running off the visible rows is not linked until
+  all of it is in view.
 - A path that begins inside a longer token is no longer a link or a
   quick-select target: `foo(1)/bar.png` held a clickable `/bar.png`, which
   opened an unrelated file. Paths after a space, a bracket, `=`, or a list,
