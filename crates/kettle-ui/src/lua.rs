@@ -167,6 +167,10 @@ pub enum LuaCommand {
     /// running before the first paint doesn't race the notification
     /// daemon.
     Notify { title: String, body: String },
+    /// Kettle retired `dropped` callbacks for `event` that ran too long. The
+    /// App words the notice in the UI's language; plugin notices stay as
+    /// written.
+    CallbackStopped { event: String, dropped: u64 },
     /// `kettle.set_theme(name)` → switch the active theme
     /// at runtime. Looked up case-insensitively against the ~500
     /// bundled themes via Theme::find_name; falls through with
@@ -1054,19 +1058,14 @@ impl LuaEngine {
         if dropped == 0 {
             return;
         }
-        let plural = if dropped == 1 { "" } else { "s" };
         // A full queue means the user already has more pending notices than
         // they can act on; dropping this one is the right call and the log
         // above still records it.
         let _ = bounded_push(
             &self.pending,
-            LuaCommand::Notify {
-                title: "kettle: Lua callback stopped".to_string(),
-                body: format!(
-                    "{dropped} `{event}` callback{plural} ran too long and \
-                     will not be called again. Check your init.lua for a loop \
-                     that never finishes."
-                ),
+            LuaCommand::CallbackStopped {
+                event: event.to_string(),
+                dropped: dropped as u64,
             },
         );
     }
@@ -1817,15 +1816,19 @@ mod tests {
             "1",
             "a runaway must not swallow the callbacks registered after it"
         );
-        // The user hears about it once, through the ordinary notify channel.
-        let notices = eng
+        // The user hears about it once, as Kettle's own notice, which the App
+        // words in the UI's language.
+        let notices: Vec<_> = eng
             .drain_commands()
             .into_iter()
-            .filter(|c| matches!(c, LuaCommand::Notify { .. }))
-            .count();
-        assert_eq!(
-            notices, 1,
-            "retiring a callback must be visible, not silent"
+            .filter(|c| matches!(c, LuaCommand::CallbackStopped { .. }))
+            .collect();
+        assert!(
+            matches!(
+                notices.as_slice(),
+                [LuaCommand::CallbackStopped { event, dropped: 1 }] if event == "bell"
+            ),
+            "retiring a callback must be visible, not silent: {notices:?}"
         );
 
         // The real assertion: a second event must not pay the stall again.
@@ -1838,7 +1841,7 @@ mod tests {
         assert_eq!(
             eng.drain_commands()
                 .into_iter()
-                .filter(|c| matches!(c, LuaCommand::Notify { .. }))
+                .filter(|c| matches!(c, LuaCommand::CallbackStopped { .. }))
                 .count(),
             0,
             "the retired callback must not run again, so there is nothing new \

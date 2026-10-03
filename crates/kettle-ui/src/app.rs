@@ -6320,6 +6320,12 @@ enum PendingLuaCommand {
         title: String,
         body: String,
     },
+    /// Kettle's own notice that it retired runaway Lua callbacks.
+    CallbackStopped {
+        origin_window: u64,
+        event: String,
+        dropped: u64,
+    },
     SetTheme {
         origin_window: u64,
         name: String,
@@ -6332,6 +6338,7 @@ impl PendingLuaCommand {
             Self::SendText { origin_window, .. }
             | Self::ExecAction { origin_window, .. }
             | Self::Notify { origin_window, .. }
+            | Self::CallbackStopped { origin_window, .. }
             | Self::SetTheme { origin_window, .. } => *origin_window,
         }
     }
@@ -6616,6 +6623,21 @@ fn input_rejection_message(result: PaneInputResult) -> Option<&'static str> {
             Some("The pane's input transport failed. Kettle will close the failed pane.")
         }
     }
+}
+
+/// The notification for a rejected input, in the UI's language. Logs keep
+/// [`input_rejection_message`]'s English.
+fn input_rejection_text(
+    result: PaneInputResult,
+    tr: &kettle_i18n::Translator,
+) -> Option<&'static str> {
+    use kettle_i18n::Text;
+    input_rejection_message(result)?;
+    Some(tr.text(match result {
+        PaneInputResult::Backpressured => Text::NotifyBodyInputBackpressured,
+        PaneInputResult::Oversize => Text::NotifyBodyInputOversize,
+        _ => Text::NotifyBodyInputFailed,
+    }))
 }
 
 fn should_notify_input_rejection(
@@ -7048,9 +7070,16 @@ pub(crate) fn fire_notify(title: &str, body: &str) {
 /// split that appeared and never drew, and a `warn!` line is invisible at the
 /// default log level, so the two reports arrive looking identical. Say it out
 /// loud instead, the way a failed preference write already does.
-pub(crate) fn report_split_failure(direction: &str, error: &dyn std::fmt::Display) {
+pub(crate) fn report_split_failure(
+    direction: &str,
+    error: &dyn std::fmt::Display,
+    tr: &kettle_i18n::Translator,
+) {
     log::error!("could not split pane ({direction}): {error}");
-    fire_notify("kettle could not split the pane", &error.to_string());
+    fire_notify(
+        tr.text(kettle_i18n::Text::NotifyTitleSplitFailed),
+        &error.to_string(),
+    );
 }
 
 fn persist_keybind_rebind(
@@ -7291,6 +7320,9 @@ impl App {
         // Enumerate the system fonts while the event loop starts (AppKit's
         // launch, on macOS) instead of after it.
         let mut font_preload = crate::font_preload::FontPreload::start();
+        // The process's UI language, fixed for its lifetime. English until the
+        // `language` setting lands with the rest of the catalogue.
+        let ui_text = kettle_i18n::Translator::new(kettle_i18n::Language::En);
         // Reclaim pasted-image directories from a run that died before its own
         // cleanup. Age-gated, so a sibling instance mid-session is untouched.
         crate::paste_image::sweep_stale();
@@ -7480,10 +7512,10 @@ impl App {
                 Err(error) => {
                     log::warn!("config {} ignored: {error}", path.display());
                     fire_notify(
-                        "kettle: config ignored",
-                        &format!(
-                            "Could not safely read {}. Kettle is using defaults.\n{error}",
-                            path.display()
+                        ui_text.text(kettle_i18n::Text::NotifyTitleConfigIgnored),
+                        &ui_text.notify_body_config_ignored(
+                            &path.display().to_string(),
+                            &error.to_string(),
                         ),
                     );
                     Config::default()
@@ -7604,6 +7636,13 @@ impl App {
                                     body,
                                 })
                             }
+                            crate::LuaCommand::CallbackStopped { event, dropped } => {
+                                pending_lua_commands.push(PendingLuaCommand::CallbackStopped {
+                                    origin_window: 1,
+                                    event,
+                                    dropped,
+                                })
+                            }
                             crate::LuaCommand::SetTheme(name) => {
                                 pending_lua_commands.push(PendingLuaCommand::SetTheme {
                                     origin_window: 1,
@@ -7616,7 +7655,10 @@ impl App {
                             && let Some(message) = input_rejection_message(result)
                         {
                             log::warn!("lua startup command rejected ({result:?}): {message}");
-                            fire_notify("kettle: Lua command not queued", message);
+                            fire_notify(
+                                ui_text.text(kettle_i18n::Text::NotifyTitleLuaNotQueued),
+                                input_rejection_text(result, &ui_text).unwrap_or(message),
+                            );
                             initial_lua_queue_rejection_reported = true;
                         }
                     }
@@ -7712,9 +7754,7 @@ impl App {
             launch_override: plan.launch_override,
             pre_launch_eligible: plan.pre_launch && !plan.may_restore,
             gpu_choices: Vec::new(),
-            // English until the `language` setting lands with the rest of
-            // the catalogue; only migrated surfaces read it so far.
-            ui_text: kettle_i18n::Translator::new(kettle_i18n::Language::En),
+            ui_text,
             gpu_recovery: RecoveryState::default(),
             gpu_incident: None,
             gpu_incident_started_for_loss: false,
@@ -7839,6 +7879,13 @@ impl App {
                     title,
                     body,
                 },
+                crate::LuaCommand::CallbackStopped { event, dropped } => {
+                    PendingLuaCommand::CallbackStopped {
+                        origin_window: ws.seq,
+                        event,
+                        dropped,
+                    }
+                }
                 crate::LuaCommand::SetTheme(name) => PendingLuaCommand::SetTheme {
                     origin_window: ws.seq,
                     name,
@@ -7875,7 +7922,11 @@ impl App {
                 "A queued Lua send_text target pane ({pane_id}) closed before the command could be delivered. The command was dropped and was not rerouted."
             );
             log::warn!("{message}");
-            fire_notify("kettle: Lua command not delivered", &message);
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleLuaNotDelivered),
+                &self.ui_text.notify_body_lua_not_delivered(pane_id),
+            );
             self.last_input_rejection_notice = Some((PaneInputResult::Failed, now));
         }
     }
@@ -8003,6 +8054,15 @@ impl App {
                 }
                 PendingLuaCommand::Notify { title, body, .. } => {
                     fire_notify(&title, &body);
+                }
+                PendingLuaCommand::CallbackStopped { event, dropped, .. } => {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleLuaCallbackStopped),
+                        &self
+                            .ui_text
+                            .notify_body_lua_callback_stopped(dropped, &event),
+                    );
                 }
                 PendingLuaCommand::SetTheme { name, .. } => {
                     if let Some(canonical) = kettle_config::Theme::find_name(&name) {
@@ -8566,8 +8626,9 @@ impl App {
             ws.media_paste_receipt = None;
             ws.accessibility_pending = true;
             fire_notify(
-                "kettle: image preview unavailable",
-                "The pasted image file is no longer available.",
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleImagePreviewUnavailable),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyImageGone),
             );
             if let Some(window) = &ws.window {
                 window.request_redraw();
@@ -8687,7 +8748,11 @@ impl App {
         let now = std::time::Instant::now();
         if should_notify_input_rejection(self.last_input_rejection_notice, result, now) {
             log::warn!("terminal input rejected ({result:?}): {message}");
-            fire_notify("kettle: input not delivered", message);
+            let tr = &self.ui_text;
+            fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleInputNotDelivered),
+                input_rejection_text(result, tr).unwrap_or(message),
+            );
             self.last_input_rejection_notice = Some((result, now));
         }
     }
@@ -10827,10 +10892,10 @@ impl App {
             }
             self.fire_lua_event(_ws, crate::LuaEvent::Output(pane_id, bytes), "output hook");
         }
-        self.sync_recording_state(
-            _ws,
-            "Session recording stopped because the recording file could not be written.",
-        );
+        let body = self
+            .ui_text
+            .text(kettle_i18n::Text::NotifyBodyRecordingWriteFailed);
+        self.sync_recording_state(_ws, body);
     }
 
     fn sync_session_log_failures(&self, ws: &WindowState) {
@@ -10838,15 +10903,17 @@ impl App {
             let Some(failure) = pane.term.take_session_log_failure() else {
                 continue;
             };
+            let tr = &self.ui_text;
             let body = match failure {
-                kettle_core::SessionLogFailure::Overloaded => format!(
-                    "Pane {pane_id} logging stopped because its bounded persistence queue filled; the log is incomplete."
-                ),
-                kettle_core::SessionLogFailure::IoError => format!(
-                    "Pane {pane_id} logging stopped because its file could not be written or flushed."
-                ),
+                kettle_core::SessionLogFailure::Overloaded => {
+                    tr.notify_body_session_log_overloaded(pane_id)
+                }
+                kettle_core::SessionLogFailure::IoError => tr.notify_body_session_log_io(pane_id),
             };
-            fire_notify("kettle: session log stopped", &body);
+            fire_notify(
+                tr.text(kettle_i18n::Text::NotifyTitleSessionLogStopped),
+                &body,
+            );
         }
     }
 
@@ -11206,17 +11273,21 @@ impl App {
                 let elapsed_ms = ev.duration.as_millis() as u64;
                 if !ws.window_focused && elapsed_ms >= self.cfg.command_notify_threshold_ms {
                     let secs = ev.duration.as_secs();
+                    let tr = &self.ui_text;
                     let exit_text = match ev.exit_code {
-                        Some(0) => "✓ ok".to_string(),
-                        Some(code) => format!("✗ exit {code}"),
+                        Some(0) => tr.text(kettle_i18n::Text::NotifyBodyCommandOk).to_string(),
+                        Some(code) => tr.notify_body_command_exit(&code.to_string()),
                         None => String::new(),
                     };
                     let body = if exit_text.is_empty() {
-                        format!("pane {pane_id} command ran for {secs}s")
+                        tr.notify_body_command_ran(pane_id, secs)
                     } else {
-                        format!("pane {pane_id} • {secs}s • {exit_text}")
+                        tr.notify_body_command_result(pane_id, secs, &exit_text)
                     };
-                    fire_notify("kettle: command finished", &body);
+                    fire_notify(
+                        tr.text(kettle_i18n::Text::NotifyTitleCommandFinished),
+                        &body,
+                    );
                 }
             }
             // (b) Resolve a pending run_command for this pane.
@@ -11367,13 +11438,17 @@ impl App {
         ) && !self.recording_error_reported
         {
             self.recording_error_reported = true;
+            let tr = &self.ui_text;
             let (title, body) = if status == Some(crate::dev_record::RecordStatus::Overloaded) {
                 (
-                    "kettle: recording stopped",
-                    "The bounded persistence queue filled. Capture stopped and the trace is incomplete.",
+                    tr.text(kettle_i18n::Text::NotifyTitleRecordingStopped),
+                    tr.text(kettle_i18n::Text::NotifyBodyRecordingOverloaded),
                 )
             } else {
-                ("kettle: recording error", io_error_body)
+                (
+                    tr.text(kettle_i18n::Text::NotifyTitleRecordingError),
+                    io_error_body,
+                )
             };
             fire_notify(title, body);
         }
@@ -15594,8 +15669,9 @@ impl App {
                 // launch.
                 if !self.persist_pref("theme", &name) {
                     fire_notify(
-                        "kettle: theme not saved",
-                        "Applied for this session — couldn't write it to your config file.",
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
+                        self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
                     );
                 }
             }
@@ -16167,8 +16243,9 @@ impl App {
     fn persist_search_pref(&self, key: &str, value: &str) {
         if !self.persist_pref(key, value) {
             fire_notify(
-                "kettle: search setting not saved",
-                "Applied for this session — couldn't write it to your config file.",
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSearchNotSaved),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
             );
         }
     }
@@ -16270,7 +16347,11 @@ impl App {
                     ),
                 };
                 if let Err(e) = res {
-                    report_split_failure(if new_first { "left" } else { "right" }, &e);
+                    report_split_failure(
+                        if new_first { "left" } else { "right" },
+                        &e,
+                        &self.ui_text,
+                    );
                 }
             }
             Action::SplitDown | Action::SplitUp | Action::SplitAuto => {
@@ -16300,7 +16381,7 @@ impl App {
                         .split_geometry(dir, new_first, &self.cfg, geometry, waker),
                 };
                 if let Err(e) = res {
-                    report_split_failure(if new_first { "up" } else { "down" }, &e);
+                    report_split_failure(if new_first { "up" } else { "down" }, &e, &self.ui_text);
                 }
             }
             Action::ClosePane => {
@@ -16632,8 +16713,10 @@ impl App {
                     if let Err(e) = open::that_detached(&path) {
                         log::warn!("Action::EditConfig: failed to open {}: {e}", path.display());
                         fire_notify(
-                            "kettle: config not opened",
-                            "The operating system could not open the config file.",
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyBodyConfigOpenFailed),
                         );
                     }
                 } else {
@@ -16642,8 +16725,9 @@ impl App {
                          (set $XDG_CONFIG_HOME or pass --config)"
                     );
                     fire_notify(
-                        "kettle: config not opened",
-                        "No config file path could be resolved.",
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleConfigNotOpened),
+                        self.ui_text.text(kettle_i18n::Text::NotifyBodyConfigNoPath),
                     );
                 }
             }
@@ -17001,8 +17085,9 @@ impl App {
                 if !self.persist_pref("theme", name) {
                     // Config-governed; notify on failure.
                     fire_notify(
-                        "kettle: theme not saved",
-                        "Applied for this session — couldn't write it to your config file.",
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
+                        self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
                     );
                 }
             }
@@ -17016,8 +17101,9 @@ impl App {
                     if !self.persist_pref("theme", &next) {
                         // Config-governed; notify on failure.
                         fire_notify(
-                            "kettle: theme not saved",
-                            "Applied for this session — couldn't write it to your config file.",
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyTitleThemeNotSaved),
+                            self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
                         );
                     }
                 } else {
@@ -17042,8 +17128,10 @@ impl App {
                             Err(error) => {
                                 log::warn!("toggle-session-log: stop failed: {error}");
                                 fire_notify(
-                                    "kettle: session log error",
-                                    "The pane log could not be stopped cleanly.",
+                                    self.ui_text
+                                        .text(kettle_i18n::Text::NotifyTitleSessionLogError),
+                                    self.ui_text
+                                        .text(kettle_i18n::Text::NotifyBodySessionLogStopFailed),
                                 );
                             }
                         }
@@ -17070,8 +17158,10 @@ impl App {
                                     path.display()
                                 );
                                 fire_notify(
-                                    "kettle: session log error",
-                                    "The pane log writer could not be started.",
+                                    self.ui_text
+                                        .text(kettle_i18n::Text::NotifyTitleSessionLogError),
+                                    self.ui_text
+                                        .text(kettle_i18n::Text::NotifyBodySessionLogStartFailed),
                                 );
                             }
                         }
@@ -17118,12 +17208,18 @@ impl App {
                     };
                     if renderer.set_pending_screenshot(request).is_ok() {
                         log::info!("take_screenshot: queued -> {path_str}");
-                        fire_notify("kettle: screenshot queued", &path_str);
+                        fire_notify(
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyTitleScreenshotQueued),
+                            &path_str,
+                        );
                     } else {
                         log::warn!("take_screenshot: another capture is in progress");
                         fire_notify(
-                            "kettle: screenshot busy",
-                            "Wait for the current capture to finish, then try again.",
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyTitleScreenshotBusy),
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyBodyScreenshotWait),
                         );
                     }
                 }
@@ -18391,10 +18487,11 @@ impl App {
                 Err(error) => {
                     log::warn!("config reload refused for {}: {error}", path.display());
                     fire_notify(
-                        "kettle: config reload refused",
-                        &format!(
-                            "The last known good settings remain active.\n{}: {error}",
-                            path.display()
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleConfigReloadRefused),
+                        &self.ui_text.notify_body_config_reload_refused(
+                            &path.display().to_string(),
+                            &error.to_string(),
                         ),
                     );
                     return false;
@@ -18409,11 +18506,11 @@ impl App {
         // own settings-persistence writes don't spam an unchanged warning.
         if should_notify_malformed(&malformed, &self.config_malformed_last) {
             fire_notify(
-                "kettle: config values ignored",
-                &format!(
-                    "These lines have invalid values and were skipped:\n{}",
-                    malformed.join("\n")
-                ),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleConfigValuesIgnored),
+                &self
+                    .ui_text
+                    .notify_body_config_values_ignored(&malformed.join("\n")),
             );
         }
         self.config_malformed_last = malformed;
@@ -21663,7 +21760,11 @@ impl App {
                 "A queued remote-file send target pane ({pane_id}) closed before delivery. The command was dropped and was not rerouted."
             );
             log::warn!("{message}");
-            fire_notify("kettle: remote command not delivered", &message);
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleRemoteNotDelivered),
+                &self.ui_text.notify_body_remote_not_delivered(pane_id),
+            );
             self.last_input_rejection_notice = Some((PaneInputResult::Failed, now));
         }
     }
@@ -23198,8 +23299,9 @@ impl App {
         let saved = persist_keybind_rebind(path.as_deref(), &stale, &label, action_name);
         if !saved {
             fire_notify(
-                "kettle: keybind not saved",
-                "Applied for this session — couldn't write it to your config file.",
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleKeybindNotSaved),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
             );
         }
         saved
@@ -23249,8 +23351,10 @@ impl App {
                 // capture mode and tell the user instead of soft-bricking.
                 if !keybind_chord_is_safe(mods, kk) {
                     fire_notify(
-                        "kettle: keybind needs a modifier",
-                        "Hold Ctrl, Alt, or Shift with the key (or bind an F-key).",
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleKeybindNeedsModifier),
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyBodyKeybindModifier),
                     );
                     return;
                 }
@@ -23466,8 +23570,9 @@ impl App {
                 ws.settings_restart_pending = true;
             } else {
                 fire_notify(
-                    "kettle: setting not saved",
-                    "Applied for this session — couldn't write it to your config file.",
+                    self.ui_text
+                        .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                    self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
                 );
             }
             self.reload_config(ws);
@@ -23478,8 +23583,9 @@ impl App {
         let saved = self.persist_pref(key_str, &new_val);
         if !saved {
             fire_notify(
-                "kettle: setting not saved",
-                "Applied for this session — couldn't write it to your config file.",
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
             );
         }
         // The single "Window padding" control sets *uniform* padding, so
@@ -23492,9 +23598,10 @@ impl App {
         // leave lopsided padding after restart with no error shown.
         if key_str == "window-padding-x" && !self.persist_pref("window-padding-y", &new_val) {
             fire_notify(
-                "kettle: setting not saved",
-                "Window padding applied for this session, but the vertical axis \
-                 couldn't be written — padding may end up lopsided after restart.",
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodyPaddingPartial),
             );
         }
         // The remaining GPU policy keys (power preference / backend /
@@ -23561,8 +23668,9 @@ impl App {
                     let val = e.buf.trim().to_string();
                     if !self.persist_pref(e.key, &val) {
                         fire_notify(
-                            "kettle: setting not saved",
-                            "Applied for this session — couldn't write it to your config file.",
+                            self.ui_text
+                                .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                            self.ui_text.text(kettle_i18n::Text::NotifyBodyNotSaved),
                         );
                     }
                     self.reload_config(ws);
@@ -28441,7 +28549,9 @@ impl App {
                 Err(e) => {
                     log::warn!("dev-record: could not start recorder for {target:?}: {e}");
                     self.recording_start_failed = true;
-                    let body = format!("The requested session recording could not be started: {e}");
+                    let body = self
+                        .ui_text
+                        .notify_body_recording_start_failed(&e.to_string());
                     self.sync_recording_state(ws, &body);
                 }
             }
@@ -28771,8 +28881,9 @@ impl App {
                 // taskbar/dock so the user notices even if kettle is unfocused.
                 // The background thread already filtered out dismissed versions.
                 fire_notify(
-                    "kettle update available",
-                    &format!("{tag} — click the banner in kettle to open the release page"),
+                    self.ui_text
+                        .text(kettle_i18n::Text::NotifyTitleUpdateAvailable),
+                    &self.ui_text.notify_body_update_available(&tag),
                 );
                 self.update_available = Some((tag, url));
                 self.resize_all(ws);
@@ -28795,31 +28906,29 @@ impl App {
                 staged,
                 first_time,
             } => {
-                let when = if staged {
-                    "will install after every Kettle window is closed"
+                let tr = &self.ui_text;
+                let title = tr.text(if staged {
+                    kettle_i18n::Text::NotifyTitleUpdateStaged
                 } else {
-                    "is ready and will be used the next time kettle starts"
-                };
-                let title = if staged {
-                    "kettle update staged"
-                } else {
-                    "kettle update installed"
-                };
+                    kettle_i18n::Text::NotifyTitleUpdateInstalled
+                });
                 // On the first automatic install, tell the user auto-update is
                 // on and how to opt out (oh-my-zsh style, one time only).
-                let body = if first_time {
-                    format!(
-                        "{tag} {when}. kettle keeps itself up to date automatically; \
-                         set `update-policy = off` in your config to disable this."
-                    )
-                } else {
-                    format!("{tag} {when}")
+                let body = match (staged, first_time) {
+                    (true, true) => tr.notify_body_update_staged_first(&tag),
+                    (true, false) => tr.notify_body_update_staged(&tag),
+                    (false, true) => tr.notify_body_update_installed_first(&tag),
+                    (false, false) => tr.notify_body_update_installed(&tag),
                 };
                 fire_notify(title, &body);
             }
             UserEvent::UpdateFailed { message } => {
                 log::warn!("automatic update failed: {message}");
-                fire_notify("kettle update failed", &message);
+                fire_notify(
+                    self.ui_text
+                        .text(kettle_i18n::Text::NotifyTitleUpdateFailed),
+                    &message,
+                );
             }
             UserEvent::UpdateCheckTick => {
                 crate::update_check::maybe_spawn_check(
@@ -31362,10 +31471,10 @@ impl App {
         // so comparing status only within this turn would miss the edge. The
         // notifier is edge-triggered; this unconditional state sync is cheap.
         if self.recorder.is_some() {
-            self.sync_recording_state(
-                ws,
-                "Session recording stopped because buffered data could not be written or flushed.",
-            );
+            let body = self
+                .ui_text
+                .text(kettle_i18n::Text::NotifyBodyRecordingFlushFailed);
+            self.sync_recording_state(ws, body);
         }
         wait.map(|remaining| now + remaining)
     }
@@ -32788,7 +32897,7 @@ mod tests {
                 && open.contains("MediaPasteReceiptKind::Image")
                 && open.contains("self.pasted_images.path_still_matches(&path)")
                 && open.contains("ws.media_paste_receipt = None;")
-                && open.contains("preview unavailable"),
+                && open.contains("NotifyTitleImagePreviewUnavailable"),
             "only a retained image may open, after rechecking pane and file identity"
         );
         let accessibility = source
@@ -45838,6 +45947,41 @@ mod keyboard_selection_tests {
             src.contains("self.extend_selection_to_cursor(ws, area, bcode)"),
             "Shift+right-click must record the right button as gesture owner"
         );
+    }
+}
+
+#[cfg(test)]
+mod notification_text_tests {
+    use super::{PaneInputResult, input_rejection_message, input_rejection_text};
+    use kettle_i18n::{Language, Translator};
+
+    /// A rejected input notifies in the UI's language while the log keeps the
+    /// English text; accepted input says nothing in either.
+    #[test]
+    fn rejected_input_notifies_in_the_ui_language() {
+        let en = Translator::new(Language::En);
+        let es = Translator::new(Language::Es);
+        for result in [
+            PaneInputResult::Backpressured,
+            PaneInputResult::Oversize,
+            PaneInputResult::Failed,
+        ] {
+            assert_eq!(
+                input_rejection_text(result, &en),
+                input_rejection_message(result)
+            );
+            let spanish = input_rejection_text(result, &es).unwrap();
+            assert_ne!(Some(spanish), input_rejection_message(result));
+        }
+        // The broadcast safety warning survives translation.
+        assert!(
+            input_rejection_text(PaneInputResult::Backpressured, &es)
+                .unwrap()
+                .contains("algunos ya la hayan recibido")
+        );
+        for result in [PaneInputResult::Queued, PaneInputResult::ReadOnly] {
+            assert_eq!(input_rejection_text(result, &es), None);
+        }
     }
 }
 

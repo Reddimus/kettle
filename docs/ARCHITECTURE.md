@@ -44,7 +44,8 @@ global locale. Terminal content, user and shell names, config values and
 protocol text never pass through it. Settings, the command palette, the layout
 and SSH pickers, the right-click menu with its Preferences submenu, the new-tab
 dropdown, the About panel, the close, paste and key-rebind confirmations, the
-title editors, the search bar and the completion card are on it so far; the other surfaces move in the
+title editors, the search bar, the completion card and Kettle's desktop
+notifications are on it so far; the other surfaces move in the
 5.0 localization track. Crates below the UI keep returning data: the
 reconnect row for a detected remote session is worded in `kettle-ui` from
 `kettle-remote`'s typed context. The palette ranks a query against the label shown and,
@@ -52,7 +53,10 @@ outside English, against the English label too, so a command name from the
 docs still finds its command. The search bar sizes each control from its
 longest label in the UI's language, never narrower than in English, and paint
 and hit testing share that geometry. Control-protocol JSON (`ui_geometry`)
-keeps English labels in every language.
+keeps English labels in every language, and so do logs: where a notification
+repeats a log line, the log keeps English and only the notification is
+translated. Notifications from Lua plugins and terminal programs are shown as
+they arrive.
 
 `kettle-state` is the leaf persistence boundary shared by configuration,
 sessions, and the updater. It stages with `create_new` beside the destination,

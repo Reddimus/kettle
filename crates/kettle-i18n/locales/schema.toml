@@ -227,6 +227,204 @@ context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row.
 [messages.menu_zoom]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Shows the pane alone in its tab."
 
+[messages.notify_body_command_exit]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. A command's non-zero exit status. Keep the ✗."
+args = [{ name = "code", type = "str" }]
+
+[messages.notify_body_command_ok]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. A command that exited with status 0. Keep the ✓."
+
+[messages.notify_body_command_ran]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. A finished command without an exit status. pane is a pane number, secs whole seconds."
+args = [{ name = "pane", type = "u64" }, { name = "secs", type = "u64" }]
+
+[messages.notify_body_command_result]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number, secs whole seconds, result is ✓ ok or ✗ exit N in the UI language."
+args = [{ name = "pane", type = "u64" }, { name = "secs", type = "u64" }, { name = "result", type = "str" }]
+
+[messages.notify_body_config_ignored]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. path is a file path and error a system error, both verbatim; keep the line break."
+args = [{ name = "path", type = "str" }, { name = "error", type = "str" }]
+
+[messages.notify_body_config_no_path]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_config_open_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_config_reload_refused]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. path and error verbatim; keep the line break."
+args = [{ name = "path", type = "str" }, { name = "error", type = "str" }]
+
+[messages.notify_body_config_values_ignored]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. lines are config lines, verbatim, one per line."
+args = [{ name = "lines", type = "str" }]
+
+[messages.notify_body_image_gone]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_input_backpressured]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warning: keep that some panes may already have received the input."
+
+[messages.notify_body_input_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_input_oversize]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. Safety warning."
+
+[messages.notify_body_keybind_modifier]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. Keep the key names."
+
+[messages.notify_body_lua_callback_stopped]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. Kettle retired Lua callbacks that ran too long. event is a Lua event name such as bell, verbatim; keep init.lua."
+args = [{ name = "count", type = "u64" }, { name = "event", type = "str" }]
+plural = "count"
+
+[messages.notify_body_lua_not_delivered]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number. Keep send_text, an API name."
+args = [{ name = "pane", type = "u64" }]
+
+[messages.notify_body_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_padding_partial]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_recording_flush_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_recording_overloaded]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_recording_start_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. error is a system error, verbatim."
+args = [{ name = "error", type = "str" }]
+
+[messages.notify_body_recording_write_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_remote_not_delivered]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
+args = [{ name = "pane", type = "u64" }]
+
+[messages.notify_body_screenshot_wait]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_session_log_io]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
+args = [{ name = "pane", type = "u64" }]
+
+[messages.notify_body_session_log_overloaded]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. pane is a pane number."
+args = [{ name = "pane", type = "u64" }]
+
+[messages.notify_body_session_log_start_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_session_log_stop_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body."
+
+[messages.notify_body_update_available]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. tag is a release tag such as v5.0.0."
+args = [{ name = "tag", type = "str" }]
+
+[messages.notify_body_update_installed]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. tag is a release tag; 'versión' is feminine."
+args = [{ name = "tag", type = "str" }]
+
+[messages.notify_body_update_installed_first]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. The first automatic update. Keep `update-policy = off` exactly."
+args = [{ name = "tag", type = "str" }]
+
+[messages.notify_body_update_staged]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. tag is a release tag."
+args = [{ name = "tag", type = "str" }]
+
+[messages.notify_body_update_staged_first]
+context = "crates/kettle-ui/src/app.rs: desktop notification body. The first automatic update. Keep `update-policy = off` exactly; it is a config line."
+args = [{ name = "tag", type = "str" }]
+
+[messages.notify_title_command_finished]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_config_ignored]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_config_not_opened]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_config_reload_refused]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_config_values_ignored]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_image_preview_unavailable]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_input_not_delivered]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_keybind_needs_modifier]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_keybind_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_lua_callback_stopped]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_lua_not_delivered]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_lua_not_queued]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_recording_error]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_recording_stopped]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_remote_not_delivered]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_screenshot_busy]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_screenshot_queued]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_search_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_session_log_error]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_session_log_stopped]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_setting_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_split_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_theme_not_saved]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_update_available]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_update_failed]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_update_installed]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
+[messages.notify_title_update_staged]
+context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
+
 [messages.palette_about]
 context = "crates/kettle-config/src/palette.rs commands(): command palette entry for the About action."
 

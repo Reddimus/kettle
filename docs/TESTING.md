@@ -766,7 +766,10 @@ build has no pseudo state at all. Run it in debug, `--release` and
 Each surface on the catalogue tests its English text against the old strings
 and its Spanish text: Settings, the palette and pickers, the context menu, the
 new-tab dropdown, the About panel, the remote reconnect row, the confirmations
-the title editors, the search bar and the completion card. Counted messages are
+the title editors, the search bar, the completion card and the notifications;
+a rejected input's notification follows the UI's language while its log line
+stays English, and config lines, paths and line breaks pass through
+notifications unchanged. Counted messages are
 tested at 0, 1, 2, 1000, one million and `u64::MAX`; only 1 reads as singular.
 The search bar's control widths equal the old fixed widths in English, and a
 Spanish bar shows every word whole with no ellipsis. The renderer's `Overlay`

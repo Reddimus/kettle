@@ -78,6 +78,26 @@ fn integer_plural_boundaries() {
     assert_eq!(es.confirm_close_window(1), "¿Cerrar 1 panel?");
 }
 
+/// Config lines, paths and line breaks pass through every language unchanged.
+#[test]
+fn notifications_keep_config_lines_paths_and_line_breaks() {
+    for tr in [Translator::new(Language::En), Translator::new(Language::Es)] {
+        assert!(
+            tr.notify_body_update_staged_first("v5.0.0")
+                .contains("`update-policy = off`")
+        );
+        assert!(
+            tr.notify_body_update_installed_first("v5.0.0")
+                .starts_with("v5.0.0 ")
+        );
+        let ignored = tr.notify_body_config_ignored("/tmp/k {x}.config", "denied");
+        assert!(ignored.contains("/tmp/k {x}.config") && ignored.ends_with("\ndenied"));
+        let lines = tr.notify_body_config_values_ignored("a = 1\nb = 2");
+        assert!(lines.ends_with(":\na = 1\nb = 2"));
+        assert!(tr.notify_body_command_result(3, 12, "✓ ok").contains("12"));
+    }
+}
+
 #[cfg(not(debug_assertions))]
 #[test]
 fn release_translator_contains_only_shipping_language() {
