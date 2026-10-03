@@ -2915,8 +2915,11 @@ version and attachment outcomes.
 
 ## Settings text and column layout
 
-Run `cargo test -p kettle-ui settings` and
-`cargo test -p kettle-render settings` in a normal checkout. The regressions
+Settings text comes from the `kettle-i18n` catalogue. Run
+`cargo test -p kettle-ui settings` and `cargo test -p kettle-render settings`
+in a normal checkout. Column widths are measured in the panel's language, and
+the footer hints, notes and GPU kinds are tested in English and Spanish. The
+regressions
 cover sentence case, unchanged config serialization, all-category column widths,
 long GPU names, a two-cell label/value gap, separate ellipsizing with wide
 characters, stable category text, and hit testing of clipped category names.

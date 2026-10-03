@@ -6636,6 +6636,9 @@ pub struct App {
     /// frame) and cached for the session; `categories()` reads it. Empty until
     /// the overlay is first opened (the picker then shows just "Automatic").
     gpu_choices: Vec<(String, String)>,
+    /// The UI's language, fixed for the process. Kettle-owned text goes
+    /// through it; terminal content, user names and config values do not.
+    ui_text: kettle_i18n::Translator,
     /// Pure settle/backoff state after a GPU device loss.
     gpu_recovery: RecoveryState,
     /// Fault-only local record for the current device-loss incident.
@@ -7638,6 +7641,9 @@ impl App {
             launch_override: plan.launch_override,
             pre_launch_eligible: plan.pre_launch && !plan.may_restore,
             gpu_choices: Vec::new(),
+            // English until the `language` setting lands with the rest of
+            // the catalogue; only migrated surfaces read it so far.
+            ui_text: kettle_i18n::Translator::new(kettle_i18n::Language::En),
             gpu_recovery: RecoveryState::default(),
             gpu_incident: None,
             gpu_incident_started_for_loss: false,
@@ -14926,10 +14932,11 @@ impl App {
         let cats = crate::settings::categories(&self.gpu_choices);
         let cat = nav.category.min(cats.len().saturating_sub(1));
         let active = &cats[cat];
-        let (label_cols, value_cols) = crate::settings::column_widths(&self.cfg, &cats);
+        let tr = &self.ui_text;
+        let (label_cols, value_cols) = crate::settings::column_widths(&self.cfg, &cats, tr);
         let fld = nav.field.min(active.fields.len().saturating_sub(1));
         Some(kettle_render::SettingsOverlay {
-            categories: cats.iter().map(|c| c.name.to_string()).collect(),
+            categories: cats.iter().map(|c| tr.text(c.name).to_string()).collect(),
             label_cols,
             value_cols,
             active_category: cat,
@@ -14949,21 +14956,23 @@ impl App {
                         format!("{input}\u{258f}")
                     } else if i == fld && nav.capturing {
                         // Capture prompt on the focused keybind row.
-                        "Press a chord, Esc to cancel".to_string()
+                        tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
                     } else {
-                        crate::settings::read(&self.cfg, f)
+                        crate::settings::read(&self.cfg, f, tr)
                     };
                     kettle_render::SettingsRow {
-                        label: f.label.to_string(),
+                        label: tr.text(f.label).to_string(),
                         value,
                         disabled: crate::settings::field_disabled(&self.cfg, f.key),
                     }
                 })
                 .collect(),
             focused_row: fld,
-            vim_nav: self.cfg.vim_menu_nav,
+            title: tr.settings_heading(tr.text(active.name)),
+            hints: settings_hints(tr, self.cfg.vim_menu_nav),
             footer_note: {
-                let active_gpu = (active.name == "Graphics").then(|| {
+                let graphics = active.name == kettle_i18n::Text::SettingsCategoryGraphics;
+                let active_gpu = graphics.then(|| {
                     self.gpu
                         .as_ref()
                         .map(|g| {
@@ -14973,11 +14982,15 @@ impl App {
                                 "GL" => "OpenGL",
                                 backend => backend,
                             };
-                            format!("Active GPU: {} ({}, {})", i.name, i.kind, backend)
+                            tr.settings_active_gpu(&i.name, gpu_kind_text(tr, i.kind), backend)
                         })
-                        .unwrap_or_else(|| "Active GPU: Initializing".to_string())
+                        .unwrap_or_else(|| {
+                            tr.text(kettle_i18n::Text::SettingsActiveGpuInitializing)
+                                .to_string()
+                        })
                 });
                 settings_footer_note(
+                    tr,
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
                     ws.settings_restart_pending,
@@ -24946,26 +24959,69 @@ fn to_mods(m: ModifiersState) -> Mods {
 
 /// A row hint adds dependencies or timing, rather than repeating the control.
 fn settings_footer_note(
+    tr: &kettle_i18n::Translator,
     active_gpu: Option<&str>,
     focused_key: Option<&str>,
     restart_pending: bool,
 ) -> Option<String> {
+    use kettle_i18n::Text;
     let mut notes = Vec::new();
     if let Some(gpu) = active_gpu {
         notes.push(gpu);
     }
     match focused_key {
         Some("window-blur" | "background-opacity") => {
-            notes.push("Blur requires background opacity below 100%. Applies to new windows.");
+            notes.push(tr.text(Text::SettingsNoteBlur));
         }
-        Some("completion-overlay") => notes.push("Applies to new shells."),
+        Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
         _ => {}
     }
     if restart_pending {
         // The pending flag records no cause, even when Graphics is selected.
-        notes.push("Restart Kettle or open a new window to apply pending changes.");
+        notes.push(tr.text(Text::SettingsNoteRestart));
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
+}
+
+/// The Settings footer: each key followed by what it does. The keys are the
+/// same in every language; the vim keys show when `vim-menu-nav` is on.
+fn settings_hints(tr: &kettle_i18n::Translator, vim_nav: bool) -> String {
+    use kettle_i18n::Text;
+    let hints: &[(&str, Text)] = if vim_nav {
+        &[
+            ("↑↓/jk", Text::SettingsHintField),
+            ("←→/hl", Text::SettingsHintChange),
+            ("g/G", Text::SettingsHintEnds),
+            ("Tab", Text::SettingsHintCategory),
+            ("Esc", Text::SettingsHintClose),
+        ]
+    } else {
+        &[
+            ("↑↓", Text::SettingsHintField),
+            ("←→", Text::SettingsHintChange),
+            ("Tab", Text::SettingsHintCategory),
+            ("Esc", Text::SettingsHintClose),
+        ]
+    };
+    hints
+        .iter()
+        .map(|(keys, what)| format!("{keys} {}", tr.text(*what)))
+        .collect::<Vec<_>>()
+        .join("    ")
+}
+
+/// A GPU kind from the renderer's adapter info, in the UI's language. An
+/// unknown kind shows as the renderer gave it.
+fn gpu_kind_text<'a>(tr: &kettle_i18n::Translator, kind: &'a str) -> &'a str {
+    use kettle_i18n::Text;
+    match kind {
+        "Discrete" => tr.text(Text::SettingsGpuKindDiscrete),
+        "Integrated" => tr.text(Text::SettingsGpuKindIntegrated),
+        "Virtual" => tr.text(Text::SettingsGpuKindVirtual),
+        "Software" => tr.text(Text::SettingsGpuKindSoftware),
+        "Other" => tr.text(Text::SettingsGpuKindOther),
+        kind => kind,
+    }
 }
 
 /// How the in-settings text-edit buffer is shown in the value column. A short
@@ -45508,17 +45564,56 @@ mod keyboard_selection_tests {
 
 #[cfg(test)]
 mod settings_footer_text_tests {
-    use super::settings_footer_note;
+    use super::{gpu_kind_text, settings_footer_note, settings_hints};
+    use kettle_i18n::{Language, Translator};
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
+    #[test]
+    fn hints_name_the_keys_and_translate_only_their_actions() {
+        assert_eq!(
+            settings_hints(&EN, true),
+            "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close"
+        );
+        assert_eq!(
+            settings_hints(&EN, false),
+            "↑↓ field    ←→ change    Tab category    Esc close"
+        );
+        assert_eq!(
+            settings_hints(&ES, false),
+            "↑↓ campo    ←→ cambiar    Tab categoría    Esc cerrar"
+        );
+    }
+
+    #[test]
+    fn gpu_kinds_translate_and_unknown_kinds_pass_through() {
+        assert_eq!(gpu_kind_text(&EN, "Integrated"), "Integrated");
+        assert_eq!(gpu_kind_text(&ES, "Integrated"), "Integrada");
+        assert_eq!(gpu_kind_text(&ES, "Discrete"), "Dedicada");
+        assert_eq!(gpu_kind_text(&ES, "Quantum"), "Quantum");
+    }
+
+    #[test]
+    fn notes_follow_the_ui_language() {
+        assert_eq!(
+            settings_footer_note(&ES, None, Some("completion-overlay"), false).as_deref(),
+            Some("Se aplica a las shells nuevas.")
+        );
+    }
 
     #[test]
     fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
-        assert_eq!(settings_footer_note(None, Some("font-size"), false), None);
         assert_eq!(
-            settings_footer_note(None, Some("completion-overlay"), false).as_deref(),
+            settings_footer_note(&EN, None, Some("font-size"), false),
+            None
+        );
+        assert_eq!(
+            settings_footer_note(&EN, None, Some("completion-overlay"), false).as_deref(),
             Some("Applies to new shells.")
         );
         assert_eq!(
-            settings_footer_note(None, Some("window-blur"), false).as_deref(),
+            settings_footer_note(&EN, None, Some("window-blur"), false).as_deref(),
             Some("Blur requires background opacity below 100%. Applies to new windows.")
         );
     }
@@ -45527,11 +45622,12 @@ mod settings_footer_text_tests {
     fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
         let pending = "Restart Kettle or open a new window to apply pending changes.";
         for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
-            let note = settings_footer_note(None, Some(key), true).unwrap();
+            let note = settings_footer_note(&EN, None, Some(key), true).unwrap();
             assert_eq!(note.lines().last(), Some(pending));
             // A blur/opacity edit followed by a switch to Graphics has the
             // same pending flag; an active adapter does not identify its cause.
             let gpu_note = settings_footer_note(
+                &EN,
                 Some("Active GPU: Test (Integrated, Vulkan)"),
                 Some(key),
                 true,
@@ -45541,17 +45637,18 @@ mod settings_footer_text_tests {
             assert!(!gpu_note.contains("GPU changes"));
         }
         assert_eq!(
-            settings_footer_note(Some("Active GPU: Test"), Some("gpu"), false).as_deref(),
+            settings_footer_note(&EN, Some("Active GPU: Test"), Some("gpu"), false).as_deref(),
             Some("Active GPU: Test")
         );
     }
 
     #[test]
     fn pending_changes_are_never_hidden_by_an_appearance_hint() {
-        let note = settings_footer_note(None, Some("window-blur"), true).unwrap();
+        let note = settings_footer_note(&EN, None, Some("window-blur"), true).unwrap();
         assert!(note.contains("below 100%"));
         assert!(note.contains("pending changes"));
         let note = settings_footer_note(
+            &EN,
             Some("Active GPU: Test (Integrated, Vulkan)"),
             Some("gpu"),
             true,

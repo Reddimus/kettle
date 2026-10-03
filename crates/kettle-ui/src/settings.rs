@@ -8,8 +8,46 @@
 //! overlay state, input routing, and persistence; `kettle-render` owns drawing.
 //! Keeping the catalogue here (free functions over `&Config`) makes it unit
 //! testable without a window or renderer.
+//!
+//! Every word a user reads is a [`Text`] catalogue key, shown through the
+//! caller's [`Translator`]; only proper names ([`Label::Name`]) and config
+//! values stay verbatim.
+
+use std::borrow::Cow;
 
 use kettle_config::{BellMode, Config, CursorStyle, FocusMode, ScrollbarMode, UpdatePolicy};
+use kettle_i18n::{Text, Translator};
+
+/// What a choice shows: catalogue text, or a proper name (a theme, a GPU, a
+/// graphics API) that reads the same in every language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Label {
+    Text(Text),
+    Name(Cow<'static, str>),
+}
+
+impl Label {
+    pub fn show<'a>(&'a self, tr: &Translator) -> &'a str {
+        match self {
+            Label::Text(text) => tr.text(*text),
+            Label::Name(name) => name,
+        }
+    }
+}
+
+/// A verbatim proper name, for the static choice tables.
+const fn name(name: &'static str) -> Label {
+    Label::Name(Cow::Borrowed(name))
+}
+
+/// Graphics API names are proper names.
+const GPU_BACKEND_LABELS: &[Label] = &[
+    Label::Text(Text::SettingsValueAutomatic),
+    name("DirectX 12"),
+    name("Vulkan"),
+    name("Metal"),
+    name("OpenGL"),
+];
 
 /// How a setting is edited. The overlay maps ←/→ (or Space/Enter) onto these.
 #[derive(Debug, Clone)]
@@ -17,10 +55,11 @@ pub enum FieldKind {
     /// A boolean. Left/Right/Space flip it. Persisted as `true` / `false`.
     Toggle,
     /// One of a fixed set of choices. Left/Right cycle. `values[i]` is what's
-    /// written to config; `labels[i]` is shown to the user (often the same).
+    /// written to config; `labels[i]` is shown to the user. `None` labels mean
+    /// the values are proper names (the theme list) and show verbatim.
     Choice {
         values: &'static [&'static str],
-        labels: &'static [&'static str],
+        labels: Option<&'static [Label]>,
     },
     /// Like [`FieldKind::Choice`] but the options are computed at runtime
     /// (owned `Vec<String>`) rather than `&'static`. Used by the GPU picker,
@@ -29,10 +68,11 @@ pub enum FieldKind {
     /// `labels[i]` is shown. The rest of the catalogue stays `&'static`.
     ChoiceOwned {
         values: Vec<String>,
-        labels: Vec<String>,
+        labels: Vec<Label>,
     },
     /// An integer in `[min, max]` stepped by `step`. Optional `suffix` for
-    /// display (e.g. "%", "px"). Some keys store a different on-disk form than
+    /// display (e.g. "%", "px"): a unit symbol, the same in every language.
+    /// Some keys store a different on-disk form than
     /// the displayed integer (e.g. opacity is a 0.0–1.0 float shown as a
     /// percent); `read_number` and `write_number` convert it.
     Number {
@@ -54,14 +94,14 @@ pub enum FieldKind {
     /// text prompt pre-filled with the current value, and the typed string is
     /// persisted on submit. The displayed value is the current string (or a
     /// placeholder when empty).
-    Text { placeholder: &'static str },
+    Text { placeholder: Text },
 }
 
 /// One editable setting: a human label, the config key it persists to, and how
 /// it's edited.
 #[derive(Debug, Clone)]
 pub struct Field {
-    pub label: &'static str,
+    pub label: Text,
     pub key: &'static str,
     pub kind: FieldKind,
 }
@@ -69,7 +109,7 @@ pub struct Field {
 /// A named group of fields, shown as one tab/page in the overlay.
 #[derive(Debug, Clone)]
 pub struct Category {
-    pub name: &'static str,
+    pub name: Text,
     pub fields: Vec<Field>,
 }
 
@@ -97,7 +137,7 @@ pub struct SettingsTextEdit {
     pub buf: String,
 }
 
-fn toggle(label: &'static str, key: &'static str) -> Field {
+fn toggle(label: Text, key: &'static str) -> Field {
     Field {
         label,
         key,
@@ -106,25 +146,23 @@ fn toggle(label: &'static str, key: &'static str) -> Field {
 }
 
 fn choice(
-    label: &'static str,
+    label: Text,
     key: &'static str,
     values: &'static [&'static str],
-    labels: &'static [&'static str],
+    labels: &'static [Label],
 ) -> Field {
     Field {
         label,
         key,
-        kind: FieldKind::Choice { values, labels },
+        kind: FieldKind::Choice {
+            values,
+            labels: Some(labels),
+        },
     }
 }
 
 /// A runtime-options Choice (see [`FieldKind::ChoiceOwned`]).
-fn choice_owned(
-    label: &'static str,
-    key: &'static str,
-    values: Vec<String>,
-    labels: Vec<String>,
-) -> Field {
+fn choice_owned(label: Text, key: &'static str, values: Vec<String>, labels: Vec<Label>) -> Field {
     Field {
         label,
         key,
@@ -133,7 +171,7 @@ fn choice_owned(
 }
 
 fn number(
-    label: &'static str,
+    label: Text,
     key: &'static str,
     min: i64,
     max: i64,
@@ -154,7 +192,7 @@ fn number(
 
 /// A rebindable-keybinding field. `action` is the canonical action
 /// token; `label` is the human row label.
-fn keybind(label: &'static str, action: &'static str) -> Field {
+fn keybind(label: Text, action: &'static str) -> Field {
     Field {
         label,
         key: action,
@@ -163,7 +201,7 @@ fn keybind(label: &'static str, action: &'static str) -> Field {
 }
 
 /// A free-text field (the in-settings image-path entry).
-fn text(label: &'static str, key: &'static str, placeholder: &'static str) -> Field {
+fn text(label: Text, key: &'static str, placeholder: Text) -> Field {
     Field {
         label,
         key,
@@ -180,32 +218,50 @@ fn text(label: &'static str, key: &'static str, placeholder: &'static str) -> Fi
 /// `"<vendor-hex>:<device-hex>:<name>"`). They populate the Graphics category's
 /// device picker; pass `&[]` (e.g. in tests) for just the "Automatic" option.
 pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
-    // GPU device options: Automatic first, then each detected GPU.
+    use Text as T;
+    // GPU device options: Automatic first, then each detected GPU by name.
     let mut gpu_values = vec!["auto".to_string()];
-    let mut gpu_labels = vec!["Automatic".to_string()];
+    let mut gpu_labels = vec![Label::Text(T::SettingsValueAutomatic)];
     for (val, label) in gpus {
         gpu_values.push(val.clone());
-        gpu_labels.push(label.clone());
+        gpu_labels.push(Label::Name(Cow::Owned(label.clone())));
     }
     vec![
         Category {
-            name: "Appearance",
+            name: T::SettingsCategoryAppearance,
             fields: vec![
                 // The most popular themes as a cyclable list of
                 // options; ←/→ live-previews each (the settings handler persists
                 // + reloads on every step, so the theme applies instantly). The
                 // full 500+ bundle stays reachable via the right-click Theme
-                // submenu / NextTheme / the `theme =` config line.
-                choice(
-                    "Theme",
-                    "theme",
-                    kettle_config::Theme::POPULAR,
-                    kettle_config::Theme::POPULAR,
+                // submenu / NextTheme / the `theme =` config line. Theme names
+                // are proper names, shown verbatim.
+                Field {
+                    label: T::SettingsFieldTheme,
+                    key: "theme",
+                    kind: FieldKind::Choice {
+                        values: kettle_config::Theme::POPULAR,
+                        labels: None,
+                    },
+                },
+                number(T::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt"),
+                number(
+                    T::SettingsFieldBackgroundOpacity,
+                    "background-opacity",
+                    20,
+                    100,
+                    1,
+                    "%",
                 ),
-                number("Font size", "font-size", 6, 72, 1, "pt"),
-                number("Background opacity", "background-opacity", 20, 100, 1, "%"),
-                toggle("Window blur", "window-blur"),
-                number("Window padding", "window-padding-x", 0, 40, 2, "px"),
+                toggle(T::SettingsFieldWindowBlur, "window-blur"),
+                number(
+                    T::SettingsFieldWindowPadding,
+                    "window-padding-x",
+                    0,
+                    40,
+                    2,
+                    "px",
+                ),
                 choice(
                     // Use the canonical `cursor-style`
                     // key (CONFIG.md's authoritative spelling) rather than the
@@ -213,23 +269,27 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     // the canonical line and SETTINGS.md ↔ CONFIG.md ↔ catalogue
                     // agree. Persist `beam`, the legacy alias for `bar`, while
                     // the display label is `Bar`.
-                    "Cursor shape",
+                    T::SettingsFieldCursorShape,
                     "cursor-style",
                     &["block", "beam", "underline"],
-                    &["Block", "Bar", "Underline"],
+                    &[
+                        Label::Text(T::SettingsValueBlock),
+                        Label::Text(T::SettingsValueBar),
+                        Label::Text(T::SettingsValueUnderline),
+                    ],
                 ),
-                toggle("Cursor blink", "cursor-blink"),
+                toggle(T::SettingsFieldCursorBlink, "cursor-blink"),
                 // Seconds without typing before the blink rests on a visible
                 // cursor; 0 blinks indefinitely.
                 number(
-                    "Stop blinking after",
+                    T::SettingsFieldCursorBlinkTimeout,
                     "cursor-blink-timeout",
                     0,
                     3600,
                     5,
                     "s",
                 ),
-                toggle("Show pane titlebars", "show-titlebar"),
+                toggle(T::SettingsFieldShowTitlebar, "show-titlebar"),
             ],
         },
         // The Background page. `starfield` is a zero-config animated
@@ -237,75 +297,123 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
         // Sub-options below the type are dimmed and skipped when they don't
         // apply to the selected type (see `field_disabled`).
         Category {
-            name: "Background",
+            name: T::SettingsCategoryBackground,
             fields: vec![
                 choice(
-                    "Background",
+                    T::SettingsFieldBackgroundType,
                     "background-type",
                     &["solid", "image", "starfield", "transparent"],
                     &[
-                        "Solid color",
-                        "Image",
-                        "Starfield (animated)",
-                        "Transparent",
+                        Label::Text(T::SettingsValueSolidColor),
+                        Label::Text(T::SettingsValueImage),
+                        Label::Text(T::SettingsValueStarfield),
+                        Label::Text(T::SettingsValueTransparent),
                     ],
                 ),
-                text("Image file", "background-image", "Enter an image path"),
-                choice(
-                    // `always` is listed first because it is the default.
-                    "Animation",
-                    "background-animation",
-                    &["always", "when-focused", "off"],
-                    &["Always", "When focused", "Off"],
+                text(
+                    T::SettingsFieldBackgroundImage,
+                    "background-image",
+                    T::SettingsValueImagePlaceholder,
                 ),
                 choice(
-                    "Interface bar color",
+                    // `always` is listed first because it is the default.
+                    T::SettingsFieldBackgroundAnimation,
+                    "background-animation",
+                    &["always", "when-focused", "off"],
+                    &[
+                        Label::Text(T::SettingsValueAlways),
+                        Label::Text(T::SettingsValueWhenFocused),
+                        Label::Text(T::SettingsValueOff),
+                    ],
+                ),
+                choice(
+                    T::SettingsFieldChromeBackground,
                     "chrome-background",
                     &["theme", "auto", "black", "white"],
-                    &["Theme", "Automatic (from wallpaper)", "Black", "White"],
+                    &[
+                        Label::Text(T::SettingsValueTheme),
+                        Label::Text(T::SettingsValueAutomaticFromWallpaper),
+                        Label::Text(T::SettingsValueBlack),
+                        Label::Text(T::SettingsValueWhite),
+                    ],
                 ),
             ],
         },
         Category {
-            name: "Behavior",
+            name: T::SettingsCategoryBehavior,
             fields: vec![
                 choice(
-                    "Scrollbar",
+                    T::SettingsFieldScrollbar,
                     "scrollbar",
                     &["never", "auto", "always"],
-                    &["Hidden", "Automatic", "Always"],
+                    &[
+                        Label::Text(T::SettingsValueHidden),
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueAlways),
+                    ],
                 ),
                 choice(
-                    "Completion overlay",
+                    T::SettingsFieldCompletionOverlay,
                     "completion-overlay",
                     &["auto", "off"],
-                    &["Automatic", "Off"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueOff),
+                    ],
                 ),
                 // Width of the pronounced overlay scrollbar.
-                number("Scrollbar width", "scrollbar-width", 2, 40, 2, "px"),
+                number(
+                    T::SettingsFieldScrollbarWidth,
+                    "scrollbar-width",
+                    2,
+                    40,
+                    2,
+                    "px",
+                ),
                 choice(
-                    "Bell",
+                    T::SettingsFieldBell,
                     "bell",
                     &["off", "visual", "attention", "both"],
                     &[
-                        "Off",
-                        "Visual flash",
-                        "Attention",
-                        "Visual flash and attention",
+                        Label::Text(T::SettingsValueOff),
+                        Label::Text(T::SettingsValueVisualFlash),
+                        Label::Text(T::SettingsValueAttention),
+                        Label::Text(T::SettingsValueVisualFlashAndAttention),
                     ],
                 ),
-                number("Scrollback lines", "scrollback", 0, 100_000, 1_000, ""),
-                number("Scrollback memory", "scrollback-bytes", 0, 1024, 10, "MB"),
-                toggle("Copy on selection", "copy-on-select"),
-                toggle("Hide mouse while typing", "mouse-hide-while-typing"),
-                choice(
-                    "Updates",
-                    "update-policy",
-                    &["off", "notify", "auto"],
-                    &["Off", "Notify", "Install automatically"],
+                number(
+                    T::SettingsFieldScrollbackLines,
+                    "scrollback",
+                    0,
+                    100_000,
+                    1_000,
+                    "",
                 ),
                 number(
-                    "Update check interval",
+                    T::SettingsFieldScrollbackMemory,
+                    "scrollback-bytes",
+                    0,
+                    1024,
+                    10,
+                    "MB",
+                ),
+                toggle(T::SettingsFieldCopyOnSelect, "copy-on-select"),
+                toggle(
+                    T::SettingsFieldMouseHideWhileTyping,
+                    "mouse-hide-while-typing",
+                ),
+                choice(
+                    T::SettingsFieldUpdatePolicy,
+                    "update-policy",
+                    &["off", "notify", "auto"],
+                    &[
+                        Label::Text(T::SettingsValueOff),
+                        Label::Text(T::SettingsValueNotify),
+                        Label::Text(T::SettingsValueInstallAutomatically),
+                    ],
+                ),
+                number(
+                    T::SettingsFieldUpdateCheckInterval,
                     "update-check-interval-hours",
                     1,
                     720,
@@ -313,122 +421,155 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
                     "h",
                 ),
                 // hjkl navigation in menus/overlays (default ON).
-                toggle("Vim menu navigation", "vim-menu-nav"),
+                toggle(T::SettingsFieldVimMenuNav, "vim-menu-nav"),
                 choice(
-                    "Focus mode",
+                    T::SettingsFieldFocus,
                     "focus",
                     &["click", "sloppy", "system"],
-                    &["Click to focus", "Follows mouse", "System default"],
+                    &[
+                        Label::Text(T::SettingsValueClickToFocus),
+                        Label::Text(T::SettingsValueFollowsMouse),
+                        Label::Text(T::SettingsValueSystemDefault),
+                    ],
                 ),
             ],
         },
         Category {
-            name: "Search",
+            name: T::SettingsCategorySearch,
             fields: vec![
-                toggle("Wrap at boundaries", "search-wrap"),
+                toggle(T::SettingsFieldSearchWrap, "search-wrap"),
                 choice(
-                    "Case mode",
+                    T::SettingsFieldSearchCase,
                     "search-case-sensitive",
                     &["smart", "always", "never"],
-                    &["Smart", "Match", "Ignore"],
+                    &[
+                        Label::Text(T::SettingsValueSmart),
+                        Label::Text(T::SettingsValueMatchCase),
+                        Label::Text(T::SettingsValueIgnoreCase),
+                    ],
                 ),
-                toggle("Invert default direction", "invert-search"),
+                toggle(T::SettingsFieldInvertSearch, "invert-search"),
             ],
         },
         // `tab-bar-position` offers only top/bottom; left/right (vertical bars)
         // stay config-only, as docs/SETTINGS.md says.
         Category {
-            name: "Tabs",
+            name: T::SettingsCategoryTabs,
             fields: vec![
                 choice(
-                    "Tab bar",
+                    T::SettingsFieldTabBar,
                     "tab-bar",
                     &["off", "auto", "always"],
-                    &["Hidden", "Automatic (multiple tabs)", "Always"],
+                    &[
+                        Label::Text(T::SettingsValueHidden),
+                        Label::Text(T::SettingsValueAutomaticMultipleTabs),
+                        Label::Text(T::SettingsValueAlways),
+                    ],
                 ),
                 choice(
-                    "Tab bar position",
+                    T::SettingsFieldTabBarPosition,
                     "tab-bar-position",
                     &["top", "bottom"],
-                    &["Top", "Bottom"],
+                    &[
+                        Label::Text(T::SettingsValueTop),
+                        Label::Text(T::SettingsValueBottom),
+                    ],
                 ),
-                number("Minimum tab width", "tab-min-width", 40, 600, 10, "px"),
-                toggle("Scrollable tab bar", "scroll-tabbar"),
-                toggle("Close button on tabs", "close-button-on-tab"),
-                toggle("Detachable tabs", "detachable-tabs"),
+                number(
+                    T::SettingsFieldTabMinWidth,
+                    "tab-min-width",
+                    40,
+                    600,
+                    10,
+                    "px",
+                ),
+                toggle(T::SettingsFieldScrollTabbar, "scroll-tabbar"),
+                toggle(T::SettingsFieldCloseButtonOnTab, "close-button-on-tab"),
+                toggle(T::SettingsFieldDetachableTabs, "detachable-tabs"),
             ],
         },
         Category {
-            name: "Graphics",
+            name: T::SettingsCategoryGraphics,
             fields: vec![
                 // Tier A: the power-preference policy (integrated vs discrete).
                 // Applies on restart — the renderer/device graph can't hot-swap.
                 choice(
-                    "GPU preference",
+                    T::SettingsFieldGpuPowerPreference,
                     "gpu-power-preference",
                     &["auto", "low", "high"],
-                    &["Automatic", "Low power (integrated)", "High performance"],
+                    &[
+                        Label::Text(T::SettingsValueAutomatic),
+                        Label::Text(T::SettingsValueLowPower),
+                        Label::Text(T::SettingsValueHighPerformance),
+                    ],
                 ),
                 // Tier B: pin a specific detected GPU (or Automatic).
-                choice_owned("GPU device", "gpu", gpu_values, gpu_labels),
+                choice_owned(T::SettingsFieldGpuDevice, "gpu", gpu_values, gpu_labels),
                 // Advanced: backend + software fallback.
                 choice(
-                    "GPU backend",
+                    T::SettingsFieldGpuBackend,
                     "gpu-backend",
                     &["auto", "dx12", "vulkan", "metal", "gl"],
-                    &["Automatic", "DirectX 12", "Vulkan", "Metal", "OpenGL"],
+                    GPU_BACKEND_LABELS,
                 ),
-                toggle("Force software rendering", "gpu-force-software"),
+                toggle(T::SettingsFieldGpuForceSoftware, "gpu-force-software"),
             ],
         },
         Category {
-            name: "Keybinds",
+            name: T::SettingsCategoryKeybinds,
             fields: vec![
-                keybind("Split right", "split_right"),
-                keybind("Split down", "split_down"),
-                keybind("Close pane", "close_pane"),
-                keybind("New tab", "new_tab"),
-                keybind("Next tab", "next_tab"),
-                keybind("Previous tab", "previous_tab"),
-                keybind("Search", "start_search"),
-                keybind("Command palette", "command_palette"),
-                keybind("Open settings", "open_settings"),
-                keybind("Zoom pane", "toggle_zoom"),
-                keybind("Copy", "copy"),
-                keybind("Paste", "paste"),
+                keybind(T::SettingsKeybindSplitRight, "split_right"),
+                keybind(T::SettingsKeybindSplitDown, "split_down"),
+                keybind(T::SettingsKeybindClosePane, "close_pane"),
+                keybind(T::SettingsKeybindNewTab, "new_tab"),
+                keybind(T::SettingsKeybindNextTab, "next_tab"),
+                keybind(T::SettingsKeybindPreviousTab, "previous_tab"),
+                keybind(T::SettingsKeybindStartSearch, "start_search"),
+                keybind(T::SettingsKeybindCommandPalette, "command_palette"),
+                keybind(T::SettingsKeybindOpenSettings, "open_settings"),
+                keybind(T::SettingsKeybindToggleZoom, "toggle_zoom"),
+                keybind(T::SettingsKeybindCopy, "copy"),
+                keybind(T::SettingsKeybindPaste, "paste"),
             ],
         },
     ]
 }
 
 /// Read a field's current value from `cfg`, formatted for display next to its
-/// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`). Returns a best-effort string; an
-/// unknown key (catalogue/Config drift) yields a fallback such as `"Off"`, `""`,
-/// or `"—"` rather than panicking.
-pub fn read(cfg: &Config, field: &Field) -> String {
+/// label (e.g. `"14 pt"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
+/// best-effort string; an unknown key (catalogue/Config drift) yields a
+/// fallback such as `"Off"`, `""`, or `"—"` rather than panicking.
+pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
+    use Text as T;
     match &field.kind {
         FieldKind::Toggle => {
-            if read_bool(cfg, field.key) {
-                "On".to_string()
+            let state = if read_bool(cfg, field.key) {
+                T::SettingsValueOn
             } else {
-                "Off".to_string()
-            }
+                T::SettingsValueOff
+            };
+            tr.text(state).to_string()
         }
         FieldKind::Choice { values, labels } => {
             let cur = read_choice(cfg, field.key);
             // `labels.get(i)` (not `labels[i]`) so a catalogue entry
             // with mismatched values/labels lengths degrades to the raw value
             // instead of panicking on an out-of-bounds index.
-            values
+            let shown = values
                 .iter()
                 .position(|v| *v == cur)
-                .and_then(|i| labels.get(i))
-                .map(|label| label.to_string())
-                .unwrap_or_else(|| match (field.key, cur.as_str()) {
-                    ("tab-bar-position", "left") => "Left".to_string(),
-                    ("tab-bar-position", "right") => "Right".to_string(),
+                .and_then(|i| match labels {
+                    Some(labels) => labels.get(i).map(|label| label.show(tr)),
+                    None => Some(values[i]),
+                });
+            match shown {
+                Some(label) => label.to_string(),
+                None => match (field.key, cur.as_str()) {
+                    ("tab-bar-position", "left") => tr.text(T::SettingsValueLeft).to_string(),
+                    ("tab-bar-position", "right") => tr.text(T::SettingsValueRight).to_string(),
                     _ => cur.clone(),
-                })
+                },
+            }
         }
         FieldKind::ChoiceOwned { values, labels } => {
             let cur = read_choice(cfg, field.key);
@@ -436,14 +577,14 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                 .iter()
                 .position(|v| *v == cur)
                 .and_then(|i| labels.get(i))
-                .map(|label| label.to_string())
+                .map(|label| label.show(tr).to_string())
                 // No match (e.g. a pinned GPU that no longer enumerates) →
                 // show the saved name if any, else "Automatic".
                 .unwrap_or_else(|| {
                     if cfg.gpu_name.trim().is_empty() {
-                        "Automatic".to_string()
+                        tr.text(T::SettingsValueAutomatic).to_string()
                     } else {
-                        format!("{} (not detected)", cfg.gpu_name)
+                        tr.settings_value_not_detected(&cfg.gpu_name)
                     }
                 })
         }
@@ -453,12 +594,13 @@ pub fn read(cfg: &Config, field: &Field) -> String {
             // quantity invites users to impose a finite cap without realising
             // what they give up.
             if field.key == "scrollback" && value == 0 {
-                "Infinite".to_string()
+                tr.text(T::SettingsValueInfinite).to_string()
             } else if field.key == "cursor-blink-timeout" && value == 0 {
-                "Never".to_string()
+                tr.text(T::SettingsValueNever).to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes == 0 {
-                "No cap".to_string()
+                tr.text(T::SettingsValueNoCap).to_string()
             } else if field.key == "scrollback-bytes" && cfg.scrollback_bytes < 1_000_000 {
+                // A comparison and a unit symbol: the same in every language.
                 "<1 MB".to_string()
             } else {
                 format_number(value, suffix)
@@ -474,14 +616,14 @@ pub fn read(cfg: &Config, field: &Field) -> String {
                     .iter()
                     .find(|(_, v)| **v == a)
                     .map(|(t, _)| t.label())
-                    .unwrap_or_else(|| "Unbound".to_string()),
+                    .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
                 None => "—".to_string(),
             }
         }
         FieldKind::Text { placeholder } => {
             let v = read_string(cfg, field.key);
             if v.trim().is_empty() {
-                placeholder.to_string()
+                tr.text(*placeholder).to_string()
             } else {
                 v
             }
@@ -489,6 +631,8 @@ pub fn read(cfg: &Config, field: &Field) -> String {
     }
 }
 
+/// A number and its unit symbol. Symbols are not translated, and both
+/// supported languages separate them the same way.
 fn format_number(value: i64, suffix: &str) -> String {
     if suffix.is_empty() || suffix == "%" {
         format!("{value}{suffix}")
@@ -497,24 +641,32 @@ fn format_number(value: i64, suffix: &str) -> String {
     }
 }
 
-/// Stable column widths from every category, including unselected choices.
-pub fn column_widths(cfg: &Config, cats: &[Category]) -> (usize, usize) {
+/// Stable column widths from every category, including unselected choices,
+/// measured in `tr`'s language.
+pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize, usize) {
     use unicode_width::UnicodeWidthChar;
     let width = |text: &str| text.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>();
     let mut label_cols = 0;
-    let mut value_cols = width("Press a chord, Esc to cancel");
+    let mut value_cols = width(tr.text(Text::SettingsPressChord));
     for field in cats.iter().flat_map(|cat| &cat.fields) {
-        label_cols = label_cols.max(width(field.label));
-        value_cols = value_cols.max(width(&read(cfg, field)));
+        label_cols = label_cols.max(width(tr.text(field.label)));
+        value_cols = value_cols.max(width(&read(cfg, field, tr)));
         match &field.kind {
-            FieldKind::Choice { labels, .. } => {
-                for label in *labels {
-                    value_cols = value_cols.max(width(label));
+            FieldKind::Choice { values, labels } => match labels {
+                Some(labels) => {
+                    for label in *labels {
+                        value_cols = value_cols.max(width(label.show(tr)));
+                    }
                 }
-            }
+                None => {
+                    for value in *values {
+                        value_cols = value_cols.max(width(value));
+                    }
+                }
+            },
             FieldKind::ChoiceOwned { labels, .. } => {
                 for label in labels {
-                    value_cols = value_cols.max(width(label));
+                    value_cols = value_cols.max(width(label.show(tr)));
                 }
             }
             FieldKind::Number { max, suffix, .. } => {
@@ -831,6 +983,10 @@ fn write_number(key: &str, value: i64, _suffix: &str) -> String {
 )]
 mod tests {
     use super::*;
+    use kettle_i18n::Language;
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
 
     #[test]
     fn display_choices_use_sentence_case_without_changing_tokens() {
@@ -839,26 +995,39 @@ mod tests {
         for cat in categories(&[]) {
             for field in &cat.fields {
                 if let FieldKind::Choice { values, labels } = &field.kind {
+                    // Only the theme list shows its values verbatim.
+                    let Some(labels) = labels else {
+                        assert_eq!(field.key, "theme");
+                        continue;
+                    };
                     assert_eq!(values.len(), labels.len());
-                    for label in labels.iter().filter(|_| field.key != "theme") {
+                    for (token, label) in values.iter().zip(*labels) {
+                        let label = label.show(&EN);
                         assert!(
                             label.chars().next().is_some_and(char::is_uppercase),
                             "{label}"
                         );
-                    }
-                    if field.key != "theme" {
-                        for (token, label) in values.iter().zip(*labels) {
-                            if *token == "auto" && field.key != "update-policy" {
-                                assert!(label.starts_with("Automatic"), "{}: {label}", field.key);
-                            }
+                        if *token == "auto" && field.key != "update-policy" {
+                            assert!(label.starts_with("Automatic"), "{}: {label}", field.key);
                         }
                     }
                 }
             }
         }
-        assert_eq!(read(&cfg, &toggle("Window blur", "window-blur")), "Off");
         assert_eq!(
-            next_value(&cfg, &toggle("Window blur", "window-blur"), 0),
+            read(
+                &cfg,
+                &toggle(Text::SettingsFieldWindowBlur, "window-blur"),
+                &EN
+            ),
+            "Off"
+        );
+        assert_eq!(
+            next_value(
+                &cfg,
+                &toggle(Text::SettingsFieldWindowBlur, "window-blur"),
+                0
+            ),
             "true"
         );
     }
@@ -887,23 +1056,25 @@ mod tests {
             "An unusually long detected GPU name (Integrated)".into(),
         )];
         let cats = categories(&gpus);
-        let (labels, values) = column_widths(&Config::default(), &cats);
         use unicode_width::UnicodeWidthStr;
-        assert_eq!(
-            labels,
-            cats.iter()
-                .flat_map(|c| &c.fields)
-                .map(|f| f.label.width())
-                .max()
-                .unwrap()
+        // Columns are measured in the language the panel is drawn in.
+        for tr in [EN, ES] {
+            let (labels, values) = column_widths(&Config::default(), &cats, &tr);
+            assert_eq!(
+                labels,
+                cats.iter()
+                    .flat_map(|c| &c.fields)
+                    .map(|f| tr.text(f.label).width())
+                    .max()
+                    .unwrap()
+            );
+            assert!(values >= gpus[0].1.width());
+            assert!(values >= tr.text(Text::SettingsPressChord).width());
+        }
+        assert_ne!(
+            column_widths(&Config::default(), &cats, &EN).0,
+            column_widths(&Config::default(), &cats, &ES).0
         );
-        assert!(values >= gpus[0].1.width());
-        let mut cats = cats;
-        cats[0].fields.push(toggle(
-            "A future label longer than every existing label",
-            "window-blur",
-        ));
-        assert!(column_widths(&Config::default(), &cats).0 > labels);
     }
 
     #[test]
@@ -921,31 +1092,34 @@ mod tests {
         cfg.scrollback_bytes = 120_000_000;
         cfg.cursor_blink_timeout = 10;
         cfg.update_check_interval_hours = 24;
-        assert_eq!(read(&cfg, field("font-size")), "13 pt");
-        assert_eq!(read(&cfg, field("background-opacity")), "99%");
-        assert_eq!(read(&cfg, field("scrollback-bytes")), "120 MB");
-        assert_eq!(read(&cfg, field("cursor-blink-timeout")), "10 s");
-        assert_eq!(read(&cfg, field("update-check-interval-hours")), "24 h");
+        assert_eq!(read(&cfg, field("font-size"), &EN), "13 pt");
+        assert_eq!(read(&cfg, field("background-opacity"), &EN), "99%");
+        assert_eq!(read(&cfg, field("scrollback-bytes"), &EN), "120 MB");
+        assert_eq!(read(&cfg, field("cursor-blink-timeout"), &EN), "10 s");
+        assert_eq!(
+            read(&cfg, field("update-check-interval-hours"), &EN),
+            "24 h"
+        );
         cfg.scrollback = kettle_config::INFINITE_SCROLLBACK;
         cfg.scrollback_bytes = 0;
         cfg.cursor_blink_timeout = 0;
-        assert_eq!(read(&cfg, field("scrollback")), "Infinite");
-        assert_eq!(read(&cfg, field("scrollback-bytes")), "No cap");
-        assert_eq!(read(&cfg, field("cursor-blink-timeout")), "Never");
+        assert_eq!(read(&cfg, field("scrollback"), &EN), "Infinite");
+        assert_eq!(read(&cfg, field("scrollback-bytes"), &EN), "No cap");
+        assert_eq!(read(&cfg, field("cursor-blink-timeout"), &EN), "Never");
         cfg.scrollback_bytes = 500_000;
-        assert_eq!(read(&cfg, field("scrollback-bytes")), "<1 MB");
+        assert_eq!(read(&cfg, field("scrollback-bytes"), &EN), "<1 MB");
         cfg.gpu_name = "llvmpipe (LLVM 19.1.7)".into();
         assert_eq!(
-            read(&cfg, field("gpu")),
+            read(&cfg, field("gpu"), &EN),
             "llvmpipe (LLVM 19.1.7) (not detected)"
         );
         cfg.tab_bar = kettle_config::TabBarMode::Off;
         cfg.scrollbar = ScrollbarMode::Never;
-        assert_eq!(read(&cfg, field("tab-bar")), "Hidden");
-        assert_eq!(read(&cfg, field("scrollbar")), "Hidden");
+        assert_eq!(read(&cfg, field("tab-bar"), &EN), "Hidden");
+        assert_eq!(read(&cfg, field("scrollbar"), &EN), "Hidden");
         assert_eq!(next_value(&cfg, field("tab-bar"), 1), "auto");
         cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
-        assert_eq!(read(&cfg, field("tab-bar-position")), "Left");
+        assert_eq!(read(&cfg, field("tab-bar-position"), &EN), "Left");
     }
 
     /// The Scrollback row edits a value stored RESOLVED, so infinite reads back
@@ -956,7 +1130,14 @@ mod tests {
     fn stepping_the_scrollback_row_cannot_silently_discard_infinite_history() {
         let mut cfg = Config::default();
         cfg.scrollback = kettle_config::INFINITE_SCROLLBACK;
-        let field = number("Scrollback lines", "scrollback", 0, 100_000, 1_000, "");
+        let field = number(
+            Text::SettingsFieldScrollbackLines,
+            "scrollback",
+            0,
+            100_000,
+            1_000,
+            "",
+        );
 
         assert_eq!(
             read_number(&cfg, "scrollback"),
@@ -965,7 +1146,7 @@ mod tests {
              resolved line count"
         );
         assert_eq!(
-            read(&cfg, &field),
+            read(&cfg, &field, &EN),
             "Infinite",
             "a bare 0 would invite stepping off infinite without realising it"
         );
@@ -979,17 +1160,24 @@ mod tests {
         // A finite value is unaffected.
         cfg.scrollback = 5_000;
         assert_eq!(read_number(&cfg, "scrollback"), 5_000);
-        assert_eq!(read(&cfg, &field), "5000");
+        assert_eq!(read(&cfg, &field, &EN), "5000");
         assert_eq!(next_value(&cfg, &field, 1), "6000");
 
-        let bytes = number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB");
+        let bytes = number(
+            Text::SettingsFieldScrollbackMemory,
+            "scrollback-bytes",
+            0,
+            1024,
+            10,
+            "MB",
+        );
         cfg.scrollback_bytes = 0;
-        assert_eq!(read(&cfg, &bytes), "No cap");
+        assert_eq!(read(&cfg, &bytes, &EN), "No cap");
         assert_eq!(next_value(&cfg, &bytes, -1), "0MB");
         assert_eq!(next_value(&cfg, &bytes, 1), "10MB");
 
         cfg.scrollback_bytes = 500_000;
-        assert_eq!(read(&cfg, &bytes), "<1 MB");
+        assert_eq!(read(&cfg, &bytes, &EN), "<1 MB");
     }
 
     #[test]
@@ -1007,11 +1195,11 @@ mod tests {
         )];
         for cat in categories(&gpus) {
             for field in &cat.fields {
-                let shown = read(&cfg, field);
+                let shown = read(&cfg, field, &EN);
                 assert!(
                     !shown.is_empty() && shown != "—",
                     "field '{}' (key {}) read blank/unknown",
-                    field.label,
+                    EN.text(field.label),
                     field.key
                 );
             }
@@ -1039,7 +1227,7 @@ mod tests {
         let cats = categories(&gpus);
         let graphics = cats
             .iter()
-            .find(|c| c.name == "Graphics")
+            .find(|c| c.name == Text::SettingsCategoryGraphics)
             .expect("Graphics");
         let gpu_field = graphics
             .fields
@@ -1049,7 +1237,7 @@ mod tests {
 
         // Default cfg → "auto" token → shows "Automatic".
         let mut cfg = Config::default();
-        assert_eq!(read(&cfg, gpu_field), "Automatic");
+        assert_eq!(read(&cfg, gpu_field, &EN), "Automatic");
         // Cycling forward from auto lands on the first detected GPU's token.
         let next = next_value(&cfg, gpu_field, 1);
         assert_eq!(next, "10de:2191:NVIDIA GeForce GTX 1660 Ti");
@@ -1059,7 +1247,7 @@ mod tests {
         cfg.gpu_device_id = 0x2191;
         cfg.gpu_name = "NVIDIA GeForce GTX 1660 Ti".to_string();
         assert_eq!(
-            read(&cfg, gpu_field),
+            read(&cfg, gpu_field, &EN),
             "NVIDIA GeForce GTX 1660 Ti (Discrete)"
         );
         // Cycling forward from NVIDIA → Intel's token.
@@ -1072,7 +1260,10 @@ mod tests {
         cfg.gpu_name = "Phantom GPU 9000".to_string();
         cfg.gpu_vendor_id = 0xdead;
         cfg.gpu_device_id = 0xbeef;
-        assert_eq!(read(&cfg, gpu_field), "Phantom GPU 9000 (not detected)");
+        assert_eq!(
+            read(&cfg, gpu_field, &EN),
+            "Phantom GPU 9000 (not detected)"
+        );
 
         // Software adapters commonly expose zero PCI ids. Their name remains
         // the pin identity, so Settings must not relabel an active software pin
@@ -1080,7 +1271,10 @@ mod tests {
         cfg.gpu_vendor_id = 0;
         cfg.gpu_device_id = 0;
         cfg.gpu_name = "llvmpipe (LLVM 19.1.7)".to_string();
-        assert_eq!(read(&cfg, gpu_field), "llvmpipe (LLVM 19.1.7) (Software)");
+        assert_eq!(
+            read(&cfg, gpu_field, &EN),
+            "llvmpipe (LLVM 19.1.7) (Software)"
+        );
         assert_eq!(next_value(&cfg, gpu_field, 1), "auto");
     }
 
@@ -1089,7 +1283,7 @@ mod tests {
         let cats = categories(&[]);
         let graphics = cats
             .iter()
-            .find(|c| c.name == "Graphics")
+            .find(|c| c.name == Text::SettingsCategoryGraphics)
             .expect("Graphics");
         let pref = graphics
             .fields
@@ -1097,11 +1291,12 @@ mod tests {
             .find(|f| f.key == "gpu-power-preference")
             .expect("gpu-power-preference field");
 
-        assert_eq!(read(&Config::default(), pref), "Automatic");
+        assert_eq!(read(&Config::default(), pref, &EN), "Automatic");
         match &pref.kind {
             FieldKind::Choice { values, labels, .. } => {
                 assert_eq!(values.first().copied(), Some("auto"));
-                assert_eq!(labels.first().copied(), Some("Automatic"));
+                let first = labels.and_then(|labels| labels.first());
+                assert_eq!(first.map(|label| label.show(&EN)), Some("Automatic"));
             }
             other => panic!("expected GPU preference choice field, got {other:?}"),
         }
@@ -1113,7 +1308,7 @@ mod tests {
         let cats = categories(&[]);
         let bg = cats
             .iter()
-            .find(|c| c.name == "Background")
+            .find(|c| c.name == Text::SettingsCategoryBackground)
             .expect("Background category exists");
         // The type choice offers the new zero-config starfield.
         let typef = bg
@@ -1156,7 +1351,7 @@ mod tests {
     fn blink_timeout_row_reads_its_seconds_and_dims_without_blink() {
         let appearance = categories(&[])
             .into_iter()
-            .find(|c| c.name == "Appearance")
+            .find(|c| c.name == Text::SettingsCategoryAppearance)
             .expect("Appearance category");
         assert!(
             appearance
@@ -1175,11 +1370,11 @@ mod tests {
             .find(|f| f.key == "cursor-blink-timeout")
             .expect("timeout row");
         assert_eq!(
-            read(&Config::parse_text("cursor-blink-timeout = 10"), row),
+            read(&Config::parse_text("cursor-blink-timeout = 10"), row, &EN),
             "10 s"
         );
         assert_eq!(
-            read(&Config::parse_text("cursor-blink-timeout = 0"), row),
+            read(&Config::parse_text("cursor-blink-timeout = 0"), row, &EN),
             "Never"
         );
     }
@@ -1188,7 +1383,10 @@ mod tests {
     fn next_enabled_field_skips_gated_rows() {
         use kettle_config::BackgroundType as BT;
         let cats = categories(&[]);
-        let bg = cats.iter().find(|c| c.name == "Background").unwrap();
+        let bg = cats
+            .iter()
+            .find(|c| c.name == Text::SettingsCategoryBackground)
+            .unwrap();
         let n = bg.fields.len();
         let mut cfg = Config::default();
         // Starfield: fields = [type(0), image(1 DISABLED), animation(2), chrome(3)].
@@ -1213,13 +1411,15 @@ mod tests {
         let mut cfg = Config::default();
         cfg.background_type = kettle_config::BackgroundType::Image;
         cfg.chrome_background = kettle_config::ChromeBackground::Auto;
-        let f = choice(
-            "Chrome bar color",
-            "chrome-background",
-            &["theme", "auto", "black", "white"],
-            &["theme", "auto", "black", "white"],
-        );
-        assert_eq!(read(&cfg, &f), "auto");
+        let f = Field {
+            label: Text::SettingsFieldChromeBackground,
+            key: "chrome-background",
+            kind: FieldKind::Choice {
+                values: &["theme", "auto", "black", "white"],
+                labels: None,
+            },
+        };
+        assert_eq!(read(&cfg, &f, &EN), "auto");
     }
 
     /// Drift guard: `keybind_action` extracts the canonical action token the
@@ -1230,34 +1430,52 @@ mod tests {
     #[test]
     fn keybind_action_extracts_token_for_keybind_fields_only() {
         assert_eq!(
-            keybind_action(&keybind("Split right", "split_right")),
+            keybind_action(&keybind(Text::SettingsKeybindSplitRight, "split_right")),
             Some("split_right")
         );
         // Empty-token boundary: still Some, just empty (the catalogue never
         // ships one, but the accessor must not special-case it to None).
-        assert_eq!(keybind_action(&keybind("Weird", "")), Some(""));
+        assert_eq!(
+            keybind_action(&keybind(Text::SettingsKeybindCopy, "")),
+            Some("")
+        );
         // Non-keybind kinds yield None.
         assert_eq!(
-            keybind_action(&toggle("Cursor blink", "cursor-blink")),
+            keybind_action(&toggle(Text::SettingsFieldCursorBlink, "cursor-blink")),
             None
         );
         assert_eq!(
-            keybind_action(&choice("Scrollbar", "scrollbar", &["auto"], &["auto"])),
+            keybind_action(&choice(
+                Text::SettingsFieldScrollbar,
+                "scrollbar",
+                &["auto"],
+                &[Label::Text(Text::SettingsValueAutomatic)],
+            )),
             None
         );
         assert_eq!(
-            keybind_action(&number("Font size", "font-size", 6, 72, 1, "pt")),
+            keybind_action(&number(
+                Text::SettingsFieldFontSize,
+                "font-size",
+                6,
+                72,
+                1,
+                "pt"
+            )),
             None
         );
         // is_keybind agrees with keybind_action on the discriminant.
-        assert!(is_keybind(&keybind("X", "copy")));
-        assert!(!is_keybind(&toggle("Y", "cursor-blink")));
+        assert!(is_keybind(&keybind(Text::SettingsKeybindCopy, "copy")));
+        assert!(!is_keybind(&toggle(
+            Text::SettingsFieldCursorBlink,
+            "cursor-blink"
+        )));
     }
 
     #[test]
     fn toggle_flips() {
         let cfg = Config::default();
-        let f = toggle("Cursor blink", "cursor-blink");
+        let f = toggle(Text::SettingsFieldCursorBlink, "cursor-blink");
         let before = read_bool(&cfg, "cursor-blink");
         let next = next_value(&cfg, &f, 0);
         assert_eq!(next, (!before).to_string());
@@ -1274,8 +1492,8 @@ mod tests {
             read_bool(&cfg, "vim-menu-nav"),
             "vim-menu-nav defaults ON; the settings row must show it"
         );
-        let f = toggle("Vim menu navigation", "vim-menu-nav");
-        assert_eq!(read(&cfg, &f), "On");
+        let f = toggle(Text::SettingsFieldVimMenuNav, "vim-menu-nav");
+        assert_eq!(read(&cfg, &f, &EN), "On");
         assert_eq!(next_value(&cfg, &f, 0), "false");
     }
 
@@ -1283,10 +1501,14 @@ mod tests {
     fn choice_cycles_both_directions_and_wraps() {
         let cfg = Config::default(); // scrollbar default = auto
         let f = choice(
-            "Scrollbar",
+            Text::SettingsFieldScrollbar,
             "scrollbar",
             &["never", "auto", "always"],
-            &["hidden", "auto", "always"],
+            &[
+                Label::Text(Text::SettingsValueHidden),
+                Label::Text(Text::SettingsValueAutomatic),
+                Label::Text(Text::SettingsValueAlways),
+            ],
         );
         // forward from auto -> always
         assert_eq!(next_value(&cfg, &f, 1), "always");
@@ -1298,10 +1520,10 @@ mod tests {
     fn number_steps_and_clamps() {
         let mut cfg = Config::default();
         cfg.font_size = 14.0;
-        let f = number("Font size", "font-size", 6, 72, 1, "pt");
+        let f = number(Text::SettingsFieldFontSize, "font-size", 6, 72, 1, "pt");
         assert_eq!(next_value(&cfg, &f, 1), "15");
         assert_eq!(next_value(&cfg, &f, -1), "13");
-        assert_eq!(read(&cfg, &f), "14 pt");
+        assert_eq!(read(&cfg, &f, &EN), "14 pt");
         // clamp at ceiling
         cfg.font_size = 72.0;
         assert_eq!(next_value(&cfg, &f, 1), "72");
@@ -1312,23 +1534,44 @@ mod tests {
         // Config-valid values outside the catalogue's convenient range step
         // normally; neither arrow may snap them to the nearest boundary.
         cfg.background_opacity = 0.10;
-        let opacity = number("Background opacity", "background-opacity", 20, 100, 1, "%");
+        let opacity = number(
+            Text::SettingsFieldBackgroundOpacity,
+            "background-opacity",
+            20,
+            100,
+            1,
+            "%",
+        );
         assert_eq!(next_value(&cfg, &opacity, -1), "0.09");
         assert_eq!(next_value(&cfg, &opacity, 1), "0.11");
 
         cfg.scrollback = 500_000;
-        let scrollback = number("Scrollback lines", "scrollback", 0, 100_000, 1_000, "");
+        let scrollback = number(
+            Text::SettingsFieldScrollbackLines,
+            "scrollback",
+            0,
+            100_000,
+            1_000,
+            "",
+        );
         assert_eq!(next_value(&cfg, &scrollback, -1), "499000");
         assert_eq!(next_value(&cfg, &scrollback, 1), "501000");
 
         cfg.scrollback_bytes = 4_000_000_000;
-        let bytes = number("Scrollback MB", "scrollback-bytes", 0, 1024, 10, "MB");
+        let bytes = number(
+            Text::SettingsFieldScrollbackMemory,
+            "scrollback-bytes",
+            0,
+            1024,
+            10,
+            "MB",
+        );
         assert_eq!(next_value(&cfg, &bytes, -1), "3990MB");
         assert_eq!(next_value(&cfg, &bytes, 1), "4010MB");
 
         cfg.update_check_interval_hours = 8_760;
         let updates = number(
-            "Update check (hours)",
+            Text::SettingsFieldUpdateCheckInterval,
             "update-check-interval-hours",
             1,
             720,
@@ -1343,8 +1586,15 @@ mod tests {
     fn opacity_round_trips_percent_to_float() {
         let mut cfg = Config::default();
         cfg.background_opacity = 0.99;
-        let f = number("Background opacity", "background-opacity", 20, 100, 1, "%");
-        assert_eq!(read(&cfg, &f), "99%");
+        let f = number(
+            Text::SettingsFieldBackgroundOpacity,
+            "background-opacity",
+            20,
+            100,
+            1,
+            "%",
+        );
+        assert_eq!(read(&cfg, &f, &EN), "99%");
         assert_eq!(next_value(&cfg, &f, -1), "0.98");
         assert_eq!(next_value(&cfg, &f, 1), "1.00");
 
