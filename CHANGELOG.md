@@ -21,7 +21,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - `kettle-media-worker`, the media worker executable, is built with the
   workspace. Before reading anything it closes inherited descriptors, turns
   off core dumps and lowers its resource limits, and a watchdog ends it if
-  its parent stalls. It renders nothing yet, and nothing starts or ships it.
+  its parent stalls. It renders nothing yet, and nothing ships it. The media
+  client can run a job in a fresh worker under startup and job deadlines,
+  killing the worker's whole process group before reaping it; nothing calls
+  it yet.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

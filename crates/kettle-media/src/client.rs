@@ -1,13 +1,23 @@
-//! The GUI's view of its media worker: where the worker is installed and
-//! whether it may run. The platform work (paths, file checks, signatures) is
-//! injected through [`WorkerPlatform`], so this crate stays free of unsafe code
-//! and opens nothing itself. This version renders nothing: a worker that
-//! passes every check is still reported as [`UnavailableCause::Incomplete`].
+//! The GUI's view of its media worker: where the worker is installed, whether
+//! it may run, and running one job in a fresh worker (see `lifecycle`). The
+//! platform work (paths, file checks, signatures, starting and killing the
+//! process) is injected through [`WorkerPlatform`], so this crate stays free
+//! of unsafe code and opens nothing itself. No shipped worker renders yet, so
+//! a worker that passes every check is still reported as
+//! [`UnavailableCause::Incomplete`].
 
+use std::io::{Read, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::BuildId;
+use crate::lifecycle::{self, Budgets};
+use crate::{BuildId, FailureCode, Job, Rendered};
+
+/// After this many workers that would not die, media stays off for the life
+/// of this process: whatever stops them dying would stop the next one too.
+pub const MAX_STUCK_WORKERS: usize = 2;
 
 /// Why media previews are unavailable. Fixed codes only: never a path, a file
 /// name or a tool's output.
@@ -29,6 +39,9 @@ pub enum UnavailableCause {
     CheckFailed,
     /// The worker passed its checks, but this build cannot render yet.
     Incomplete,
+    /// Workers that were killed would not exit, so media is off until Kettle
+    /// restarts.
+    StuckWorkers,
 }
 
 impl UnavailableCause {
@@ -42,6 +55,7 @@ impl UnavailableCause {
             Self::Unverified => "unverified_worker",
             Self::CheckFailed => "check_failed",
             Self::Incomplete => "incomplete",
+            Self::StuckWorkers => "stuck_workers",
         }
     }
 }
@@ -67,6 +81,51 @@ pub struct FileIdentity {
     pub ctime_nanos: i64,
 }
 
+/// How a worker process ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerExit {
+    Code(i32),
+    Signal(i32),
+    /// Something else reaped it (an inherited ignored `SIGCHLD` does that),
+    /// so how it ended is unknown and its process group is no longer ours.
+    Lost,
+}
+
+/// A running worker as the platform started it, in a process group of its
+/// own. Implementations must not block or panic.
+pub trait WorkerProcess: Send {
+    /// Whether it has exited, reaping it if so. Before reaping a worker that
+    /// exited by itself, kill its process group: nothing it started outlives
+    /// it, and the group id is never signalled once it could be reused.
+    fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>>;
+    /// Kill its whole process group, if it is not reaped yet. Safe to repeat.
+    fn kill(&mut self);
+}
+
+/// A worker just started: the process, and the two pipes to it.
+pub struct SpawnedWorker {
+    pub process: Box<dyn WorkerProcess>,
+    pub stdin: Box<dyn Write + Send>,
+    pub stdout: Box<dyn Read + Send>,
+}
+
+/// The command every platform starts the worker with: no arguments, an empty
+/// environment, `/` as the working directory, stdin and stdout piped, stderr
+/// discarded, and on Unix a process group of its own, so killing the group
+/// reaches anything it starts.
+pub fn worker_command(path: &Path) -> Command {
+    let mut command = Command::new(path);
+    command
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command
+}
+
 /// The platform services the client needs. Implementations must not panic:
 /// release builds abort on panic, which would take the GUI with them.
 pub trait WorkerPlatform: Send + Sync {
@@ -78,18 +137,35 @@ pub trait WorkerPlatform: Send + Sync {
     fn inspect(&self, path: &Path) -> Result<FileIdentity, UnavailableCause>;
     /// Check the worker's signature against this platform's requirement.
     fn verify(&self, path: &Path) -> Result<(), UnavailableCause>;
+    /// Start the worker at `path` with [`worker_command`].
+    fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker>;
+    /// Called first on the thread that writes to the worker's stdin: make a
+    /// write to a pipe whose worker has died fail with an error instead of
+    /// raising `SIGPIPE`, which ends a process that keeps its default action
+    /// (`kettle` restores it for its command line).
+    fn guard_pipe_writes(&self) -> std::io::Result<()>;
 }
 
 /// Answers whether media previews are available, without blocking the caller
-/// on the filesystem or a signature check.
+/// on the filesystem or a signature check, and renders one job at a time.
 pub struct WorkerClient {
     build_id: BuildId,
-    shared: Arc<Shared>,
+    pub(crate) shared: Arc<Shared>,
+    budgets: Budgets,
+    /// One job at a time.
+    rendering: Mutex<()>,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     platform: Box<dyn WorkerPlatform>,
     state: Mutex<State>,
+    /// How many killed workers would not exit.
+    pub(crate) stuck: AtomicUsize,
+    /// Those of them not reaped yet, kept so they are reaped once they do
+    /// exit, at the next check or render.
+    abandoned: Mutex<Vec<Box<dyn WorkerProcess>>>,
+    /// Starts still running after their attempt stopped waiting.
+    pub(crate) late_spawns: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -109,12 +185,45 @@ impl std::fmt::Debug for WorkerClient {
 impl WorkerClient {
     /// Nothing is checked until [`Self::availability`] is first asked.
     pub fn new(build_id: BuildId, platform: Box<dyn WorkerPlatform>) -> Self {
+        Self::with(build_id, platform, Budgets::PRODUCTION)
+    }
+
+    /// A client with shorter deadlines, so tests of each bound finish in
+    /// seconds. Test fixture only.
+    #[cfg(feature = "test-worker")]
+    pub fn with_test_budgets(
+        build_id: BuildId,
+        platform: Box<dyn WorkerPlatform>,
+        ready: std::time::Duration,
+        render: std::time::Duration,
+    ) -> Self {
+        Self::with(
+            build_id,
+            platform,
+            Budgets {
+                ready,
+                render: Some(render),
+                ..Budgets::PRODUCTION
+            },
+        )
+    }
+
+    pub(crate) fn with(
+        build_id: BuildId,
+        platform: Box<dyn WorkerPlatform>,
+        budgets: Budgets,
+    ) -> Self {
         Self {
             build_id,
             shared: Arc::new(Shared {
                 platform,
                 state: Mutex::new(State::default()),
+                stuck: AtomicUsize::new(0),
+                abandoned: Mutex::new(Vec::new()),
+                late_spawns: AtomicUsize::new(0),
             }),
+            budgets,
+            rendering: Mutex::new(()),
         }
     }
 
@@ -127,6 +236,10 @@ impl WorkerClient {
     /// running, so a replaced or removed worker shows on the next call. The
     /// first call answers [`MediaAvailability::Checking`].
     pub fn availability(&self) -> MediaAvailability {
+        self.shared.reap_abandoned();
+        if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
+            return MediaAvailability::Unavailable(UnavailableCause::StuckWorkers);
+        }
         let mut state = self.shared.lock();
         if !state.checking {
             let verified = state.last.and_then(Result::ok);
@@ -150,11 +263,75 @@ impl WorkerClient {
             Some(Err(cause)) => MediaAvailability::Unavailable(cause),
         }
     }
+
+    /// Render `job` in a fresh worker, checked again first (inside the startup
+    /// deadline, so a stalled filesystem cannot hold it). Blocks the calling
+    /// thread, which must not be the UI's, for at most the startup deadline
+    /// (twice, when the first worker never answers), the job's deadline and
+    /// cleanup; jobs run one at a time. A worker that never becomes ready is
+    /// retried once; after Ready nothing is retried.
+    pub fn render(&self, job: &Job) -> Result<Rendered, FailureCode> {
+        let _one_at_a_time = self
+            .rendering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.shared.reap_abandoned();
+        for attempt in 0..2 {
+            if self.shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
+                return Err(FailureCode::WorkerUnavailable);
+            }
+            match lifecycle::attempt(&self.shared, &self.build_id, job, self.budgets) {
+                Err(lifecycle::NeverReady) if attempt == 0 => {}
+                Err(lifecycle::NeverReady) => return Err(FailureCode::RenderTimeout),
+                Ok(result) => return result,
+            }
+        }
+        Err(FailureCode::RenderTimeout)
+    }
 }
 
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn platform(&self) -> &dyn WorkerPlatform {
+        self.platform.as_ref()
+    }
+
+    /// The worker's path, after the same check [`WorkerClient::availability`]
+    /// runs, done here and now, and recorded for it.
+    pub(crate) fn checked_path(&self) -> Result<&Path, UnavailableCause> {
+        let verified = self.lock().last.and_then(Result::ok);
+        let result = check(self.platform.as_ref(), verified);
+        self.lock().last = Some(result);
+        result?;
+        self.platform.worker_path()
+    }
+
+    /// Count a killed worker that would not exit, and keep it to reap later.
+    pub(crate) fn abandon(&self, process: Box<dyn WorkerProcess>) {
+        self.stuck.fetch_add(1, Ordering::AcqRel);
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(process);
+    }
+
+    /// Reap the abandoned workers that have exited since; never waits.
+    fn reap_abandoned(&self) {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain_mut(|process| !matches!(process.try_wait(), Ok(Some(_))));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abandoned_count(&self) -> usize {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -242,6 +419,12 @@ mod tests {
         fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
             self.verifies
+        }
+        fn spawn(&self, _: &Path) -> std::io::Result<SpawnedWorker> {
+            Err(std::io::ErrorKind::Unsupported.into())
+        }
+        fn guard_pipe_writes(&self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

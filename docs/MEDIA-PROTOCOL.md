@@ -2,8 +2,8 @@
 
 ## Ownership
 
-`kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no processes;
-its availability client reaches the filesystem only through a platform its caller supplies.
+`kettle-media` is a leaf crate whose only dependency is `sha2`. It opens no files and starts no process
+itself: its client reaches the filesystem and the worker only through a platform its caller supplies.
 The public model uses six job kinds. Input limits apply when validating or encoding a job
 and when decoding its frame. For paths, the worker later checks the opened object's size and
 permissions using the job kind's input cap. External attestations are declarations from the
@@ -181,10 +181,81 @@ including Kettle itself, so it is outside what they can stop.
 | `unverified_worker` | The signature check failed, or the file changed while it ran |
 | `check_failed` | The check could not run |
 | `incomplete` | The worker passed every check, but this build cannot render yet |
+| `stuck_workers` | Two killed workers would not exit, so media is off until Kettle restarts |
 | `not_configured` | The GUI was started without a media client |
 
 No build renders yet, so `incomplete` is the best answer there is. Nothing
 here spawns a worker.
+
+## Running a job
+
+`WorkerClient::render(job)` runs one job in a fresh worker, one job at a time,
+on the caller's thread (never the UI's). It checks the worker again first, the
+same check availability runs, inside the startup deadline, and refuses without
+starting anything once two workers have been stuck. Nothing in the GUI calls it yet.
+
+The platform starts the worker with `client::worker_command`: no arguments, an
+empty environment, `/` as the working directory, stdin and stdout piped,
+stderr discarded, and on Unix a process group of its own. Two threads move the
+bytes, so no blocked read or write can hold a deadline: one writes Hello, then
+the job once Ready has matched, then closes stdin; the other reads the first
+frame under Ready's own cap (`wire::read_frame_within`, 149 bytes, checked
+from the header before any payload is allocated), then the reply, then end of
+file. The caller's thread watches the clock:
+
+- **Ready within 5 s of the start, the check and the start included.** The
+  worker is checked and started on a helper thread, so a check or a start that
+  blocks (an executable on a stalled network filesystem) cannot hold the
+  caller; a worker that starts
+  too late is killed by the helper, and while such a start is still running
+  no other begins. A worker that never answers is killed
+  and, once reaped, retried once; total startup is at most 10 s. A Ready from
+  another build is `RestartRequired`, never retried. Before a job, only a
+  handshake refusal (`RestartRequired`, `UnknownMethod`) counts, and only with
+  end of file after it and an exit rather than a crash.
+- **The reply within the job's deadline**, 2 s for a raster and 3 s for other
+  kinds, counted from before the job is written. A missed deadline kills the
+  worker: `RenderTimeout`, unless it ended by itself as the deadline passed,
+  when its exit says why. Nothing is retried after Ready.
+- **A reply counts only** when end of file follows it with nothing between,
+  and the worker then exits 0 by itself. A reply followed by more bytes, a
+  second frame, a crash or a non-zero exit is discarded.
+- **A refusal** keeps the worker's code only when a worker can mean it (input,
+  file, render, skew and unavailability codes); a code naming GUI or agent
+  state becomes `WorkerUnavailable`.
+- **An exit without a usable reply** says why: 4 (the worker's watchdog) is
+  `RenderTimeout`, 9 is `RestartRequired`, a signal (a CPU, file-size or memory
+  limit, or a crash) is `RenderResource`, and anything else, including a
+  protocol violation, is `WorkerUnavailable`. While it waits, the caller's
+  thread also looks at the worker every 25 ms, so an exit is seen even when
+  something the worker started still holds its stdout and no frame comes.
+
+Stopping a worker gives it 250 ms to exit by itself, then kills its process
+group and gives it 250 ms more. A worker reaped after the kill with any status
+but `SIGKILL` ended by itself first, and that exit is its answer, so one that
+exits 9 just as the startup deadline passes is `RestartRequired`, not a cold
+start to retry. The platform kills the group before it reaps
+the worker, even one that exited by itself (it checks with `waitid(WNOWAIT)`
+first), so nothing the worker started outlives it and a process group id that
+could already be someone else's is never signalled. No worker starts while
+exited children reap themselves (an inherited ignored `SIGCHLD`, or
+`SA_NOCLDWAIT`), since one could vanish and its group id be reused before
+Kettle sees it exit; a worker something else reaped anyway reads as lost and
+is never signalled again, by a kill or otherwise. A worker that will not exit after the kill, as one
+stuck in uninterruptible I/O on a network filesystem can, is kept and
+counted, and reaped at a later check once it does exit; after two, media is
+off for the life of the process (`stuck_workers`). The pipe threads end when
+the worker's pipes close; nothing joins them, so none can hang the caller.
+
+`kettle` restores SIGPIPE's default action for its command line, so a write
+to a worker that has died must not raise it. The writer thread first asks the
+platform to guard its writes: on Linux, where the signal goes to the writing
+thread, it is blocked there; on macOS, where it goes to the whole process,
+the platform marks the worker's stdin pipe `F_SETNOSIGPIPE` when it starts
+the worker. Either way the write fails with `EPIPE` instead.
+
+Not yet: footprint polling and the 768 MiB aggregate limit, the GUI's
+preview account and admission, and cancellation follow in later slices.
 
 ## The worker executable
 

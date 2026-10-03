@@ -101,6 +101,12 @@ Reports that fit any of these are welcome:
   file-size, descriptor and (Linux) address-space limits and starts a
   watchdog. A descriptor that survives into the worker, a payload that
   reaches its stderr, or a worker that outlives its watchdog is in scope.
+  The client starts it with no arguments, an empty environment, `/` as its
+  working directory and stderr discarded, in a process group of its own that
+  is killed before the worker is reaped, and accepts a reply only after the
+  worker exits 0 with nothing after the reply. A worker process or a child
+  of one that outlives its job, or a reply accepted from a worker that then
+  crashed, is in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

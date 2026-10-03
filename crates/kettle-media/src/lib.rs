@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
-//! Bounded media data and deterministic frames. This crate opens no files and spawns no workers:
-//! the [`client`] reaches the filesystem only through a platform its caller supplies.
+//! Bounded media data and deterministic frames. This crate opens no files and starts no process
+//! itself: the [`client`] reaches the filesystem and the worker only through a platform its
+//! caller supplies.
 //! External requests cannot express GUI-only path authorization. See [`GuiActionWitness`].
 
 pub mod client;
 mod digest;
+mod lifecycle;
 pub mod wire;
 pub use digest::content_digest;
 

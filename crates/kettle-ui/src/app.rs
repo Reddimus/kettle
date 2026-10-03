@@ -45818,6 +45818,12 @@ mod tests {
             fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
                 Err(UnavailableCause::Unverified)
             }
+            fn spawn(&self, _: &Path) -> std::io::Result<kettle_media::client::SpawnedWorker> {
+                Err(std::io::ErrorKind::Unsupported.into())
+            }
+            fn guard_pipe_writes(&self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
 
         assert_eq!(

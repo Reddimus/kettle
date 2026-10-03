@@ -4,8 +4,9 @@
 //! cannot. It reads the running executable's directory once, at startup,
 //! checks the worker file beside it, and on macOS checks the worker's code
 //! signature against Kettle's own requirement. It never looks in `PATH`, the
-//! working directory, the environment or the configuration, and it starts no
-//! process except `codesign`.
+//! working directory, the environment or the configuration. Besides
+//! `codesign`, the only process it starts is the worker, in a process group of
+//! its own that it kills before reaping.
 //!
 //! These checks keep a stray, half-installed or foreign file from running as
 //! the worker. They cannot stop a program running as the same user, which can
@@ -14,7 +15,9 @@
 
 use std::path::{Path, PathBuf};
 
-use kettle_media::client::{FileIdentity, UnavailableCause, WorkerPlatform};
+use kettle_media::client::{FileIdentity, SpawnedWorker, UnavailableCause, WorkerPlatform};
+#[cfg(unix)]
+use kettle_media::client::{WorkerExit, WorkerProcess};
 
 /// The worker's file name, beside the `kettle` executable.
 const WORKER_NAME: &str = "kettle-media-worker";
@@ -79,6 +82,209 @@ impl WorkerPlatform for InstalledWorker {
             let _ = path;
             Ok(())
         }
+    }
+
+    fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker> {
+        spawn(path)
+    }
+
+    fn guard_pipe_writes(&self) -> std::io::Result<()> {
+        guard_pipe_writes()
+    }
+}
+
+/// `main` restores SIGPIPE's default action for the command line, so a write
+/// to a dead worker would end Kettle. On Linux the signal goes to the writing
+/// thread, so blocking it there turns the write into `EPIPE` and the pending
+/// signal goes with the thread. (On macOS it goes to the process, and `spawn`
+/// marks the pipe instead.)
+fn guard_pipe_writes() -> std::io::Result<()> {
+    crate::exec::block_sigpipe_for_current_thread()
+}
+
+/// Start the worker with `kettle_media`'s command, leading a process group of
+/// its own.
+#[cfg(unix)]
+fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
+    if children_reap_themselves()? {
+        return Err(std::io::Error::other(
+            "SIGCHLD is ignored, so a worker could be reaped before its group is killed",
+        ));
+    }
+    let mut child = kettle_media::client::worker_command(path).spawn()?;
+    let pipes = (child.stdin.take(), child.stdout.take());
+    let mut process = GroupProcess {
+        child,
+        reaped: false,
+    };
+    let (Some(stdin), Some(stdout)) = pipes else {
+        process.kill();
+        return Err(std::io::Error::other("the worker's pipes are missing"));
+    };
+    #[cfg(target_os = "macos")]
+    if let Err(error) = no_sigpipe(&stdin) {
+        process.kill();
+        return Err(error);
+    }
+    Ok(SpawnedWorker {
+        process: Box::new(process),
+        stdin: Box::new(stdin),
+        stdout: Box::new(stdout),
+    })
+}
+
+/// Whether exited children reap themselves here (SIGCHLD ignored, or
+/// `SA_NOCLDWAIT`), as a parent can arrange before starting Kettle. A worker
+/// could then vanish and its process group id be reused before Kettle sees it
+/// exit, so no worker is started.
+#[cfg(unix)]
+fn children_reap_themselves() -> std::io::Result<bool> {
+    // SAFETY: an all-zero sigaction is a valid value for the query to fill,
+    // and a null new action changes nothing.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: as above.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(current.sa_sigaction == libc::SIG_IGN || current.sa_flags & libc::SA_NOCLDWAIT != 0)
+}
+
+/// `F_SETNOSIGPIPE` from `<sys/fcntl.h>`, which the `libc` crate lacks for
+/// Apple targets.
+#[cfg(target_os = "macos")]
+const F_SETNOSIGPIPE: libc::c_int = 73;
+
+/// On macOS a write to a pipe with no reader raises SIGPIPE on the whole
+/// process, not the writing thread, so blocking it there does not help: mark
+/// the pipe so the write fails with `EPIPE` and raises nothing.
+#[cfg(target_os = "macos")]
+fn no_sigpipe(stdin: &std::process::ChildStdin) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: plain integers on a descriptor `stdin` owns and keeps open.
+    if unsafe { libc::fcntl(stdin.as_raw_fd(), F_SETNOSIGPIPE, 1) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn spawn(_: &Path) -> std::io::Result<SpawnedWorker> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+/// A worker leading its own process group. The group is killed before the
+/// worker is reaped: nothing it started outlives it, and a group id that may
+/// already belong to someone else is never signalled.
+#[cfg(unix)]
+struct GroupProcess {
+    child: std::process::Child,
+    reaped: bool,
+}
+
+#[cfg(unix)]
+impl WorkerProcess for GroupProcess {
+    fn try_wait(&mut self) -> std::io::Result<Option<WorkerExit>> {
+        if !self.reaped {
+            match self.exited() {
+                Ok(false) => return Ok(None),
+                // Exited, not yet reaped: the group id is still its own.
+                Ok(true) => self.kill_group(),
+                Err(error) => return self.lost_or(error),
+            }
+        }
+        match self.child.try_wait() {
+            Ok(status) => {
+                self.reaped |= status.is_some();
+                Ok(status.map(exit_of))
+            }
+            Err(error) => self.lost_or(error),
+        }
+    }
+
+    fn kill(&mut self) {
+        if self.reaped {
+            return;
+        }
+        // Something else reaped it: its group id is no longer ours.
+        if let Err(error) = self.exited()
+            && error.raw_os_error() == Some(libc::ECHILD)
+        {
+            self.reaped = true;
+            return;
+        }
+        self.kill_group();
+    }
+}
+
+#[cfg(unix)]
+impl GroupProcess {
+    /// `ECHILD`: something else reaped the worker (an inherited ignored
+    /// SIGCHLD does that). Its group id may already be someone else's, so it
+    /// is never signalled again.
+    fn lost_or(&mut self, error: std::io::Error) -> std::io::Result<Option<WorkerExit>> {
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            self.reaped = true;
+            return Ok(Some(WorkerExit::Lost));
+        }
+        Err(error)
+    }
+
+    fn pid(&self) -> std::io::Result<libc::pid_t> {
+        libc::pid_t::try_from(self.child.id()).map_err(std::io::Error::other)
+    }
+
+    /// Whether the worker has exited, leaving it unreaped.
+    fn exited(&self) -> std::io::Result<bool> {
+        let pid = self.pid()?;
+        // SAFETY: an all-zero siginfo_t is a valid value for waitid to fill.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let id = libc::id_t::try_from(pid).map_err(std::io::Error::other)?;
+        loop {
+            // SAFETY: `info` is valid writable storage. WNOHANG never blocks
+            // and WNOWAIT leaves the child waitable, so `self.child` still
+            // reaps it.
+            let waited = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    id,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if waited == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        // With WNOHANG a child that has not exited leaves si_pid zero.
+        #[cfg(target_os = "linux")]
+        // SAFETY: waitid filled `info` for a child state change, or left it
+        // zeroed.
+        let waited_pid = unsafe { info.si_pid() };
+        #[cfg(not(target_os = "linux"))]
+        let waited_pid = info.si_pid;
+        Ok(waited_pid != 0)
+    }
+
+    fn kill_group(&self) {
+        if let Ok(pid) = self.pid() {
+            // SAFETY: plain integers. The worker is not reaped yet, so `pid`
+            // still names the process group it leads (it was started with
+            // process_group(0)), and no one else's.
+            unsafe { libc::killpg(pid, libc::SIGKILL) };
+        }
+    }
+}
+
+#[cfg(unix)]
+fn exit_of(status: std::process::ExitStatus) -> WorkerExit {
+    use std::os::unix::process::ExitStatusExt as _;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => WorkerExit::Code(code),
+        (None, signal) => WorkerExit::Signal(signal.unwrap_or(0)),
     }
 }
 
@@ -605,6 +811,273 @@ mod tests {
                 );
                 chmod(install.path(), 0o755);
             }
+        }
+    }
+
+    #[cfg(unix)]
+    mod processes {
+        use super::*;
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::time::{Duration, Instant};
+
+        /// A shell script standing in for the worker.
+        fn script(directory: &Path, body: &str) -> PathBuf {
+            let path = directory.join(WORKER_NAME);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+
+        fn wait_exit(process: &mut dyn WorkerProcess) -> WorkerExit {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(exit) = process.try_wait().unwrap() {
+                    return exit;
+                }
+                assert!(Instant::now() < deadline, "the worker never exited");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// The first line the worker writes.
+        fn first_line(worker: &mut SpawnedWorker) -> String {
+            let mut line = Vec::new();
+            let mut byte = [0];
+            while worker.stdout.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+                line.push(byte[0]);
+            }
+            String::from_utf8(line).unwrap()
+        }
+
+        /// Whether `pid` is running; a zombie no one has reaped yet is not.
+        fn running(pid: &str) -> bool {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            !state.is_empty() && !state.starts_with('Z')
+        }
+
+        /// Whether `pid` stops running within a few seconds.
+        fn gone(pid: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while running(pid) {
+                if Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            true
+        }
+
+        /// Everything the worker writes before it exits.
+        fn all_output(worker: &mut SpawnedWorker) -> String {
+            let mut output = String::new();
+            worker.stdout.read_to_string(&mut output).unwrap();
+            output
+        }
+
+        #[test]
+        fn the_worker_starts_with_nothing_inherited() {
+            // `env` itself as the worker: an empty environment prints nothing.
+            let mut worker = spawn(Path::new("/usr/bin/env")).unwrap();
+            assert_eq!(all_output(&mut worker), "");
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
+            // `pwd`: the working directory is the root.
+            let mut worker = spawn(Path::new("/bin/pwd")).unwrap();
+            assert_eq!(all_output(&mut worker), "/\n");
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
+            // And it leads its own process group.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "echo \"$$ $(ps -o pgid= -p $$ | tr -d ' ')\"",
+            );
+            let mut worker = spawn(&path).unwrap();
+            let line = first_line(&mut worker);
+            let ids: Vec<&str> = line.split(' ').collect();
+            assert_eq!(ids[0], ids[1], "not its own process group: {line}");
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
+        }
+
+        #[test]
+        fn killing_the_worker_kills_its_group() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "/bin/sleep 30 &\necho $!\nwait");
+            let mut worker = spawn(&path).unwrap();
+            let grandchild = first_line(&mut worker);
+            assert!(running(&grandchild), "{grandchild} never started");
+            worker.process.kill();
+            // The kill itself reaches the child, before anything is reaped.
+            assert!(gone(&grandchild), "{grandchild} outlived the kill");
+            assert_eq!(
+                wait_exit(worker.process.as_mut()),
+                WorkerExit::Signal(libc::SIGKILL)
+            );
+        }
+
+        #[test]
+        fn an_exited_worker_s_group_is_killed_before_it_is_reaped() {
+            // The worker exits 0 by itself, leaving a child in its group: its
+            // own exit status is kept, and the child does not survive it.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "/bin/sleep 30 &\necho $!\nexit 0");
+            let mut worker = spawn(&path).unwrap();
+            let grandchild = first_line(&mut worker);
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(0));
+            assert!(gone(&grandchild), "{grandchild} outlived the worker");
+            // Killing after the reap signals nothing.
+            worker.process.kill();
+        }
+
+        /// Run `test` in a child of this test binary, where changing a signal
+        /// disposition disturbs nothing else. True in the child.
+        fn in_child(test: &str) -> bool {
+            const CHILD_ENV: &str = "KETTLE_MEDIA_PLATFORM_SIGNAL_CHILD";
+            if std::env::var_os(CHILD_ENV).is_some() {
+                return true;
+            }
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            false
+        }
+
+        /// The real spawn and pipe guard, without the install checks.
+        struct Stand(PathBuf);
+
+        impl WorkerPlatform for Stand {
+            fn worker_path(&self) -> Result<&Path, UnavailableCause> {
+                Ok(&self.0)
+            }
+            fn inspect(&self, path: &Path) -> Result<FileIdentity, UnavailableCause> {
+                inspect(path)
+            }
+            fn verify(&self, _: &Path) -> Result<(), UnavailableCause> {
+                Ok(())
+            }
+            fn spawn(&self, path: &Path) -> std::io::Result<SpawnedWorker> {
+                spawn(path)
+            }
+            fn guard_pipe_writes(&self) -> std::io::Result<()> {
+                guard_pipe_writes()
+            }
+        }
+
+        #[test]
+        fn a_dead_worker_cannot_end_kettle_with_sigpipe() {
+            if !in_child(
+                "media_platform::tests::processes::a_dead_worker_cannot_end_kettle_with_sigpipe",
+            ) {
+                return;
+            }
+            // As Kettle's `main` leaves it.
+            // SAFETY: the child runs this one test; plain integers.
+            unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+            // A worker that answers Ready and exits without reading its job,
+            // so the job's write meets a closed pipe.
+            let build_id = kettle_media::BuildId::from_embedded("5.0.0", "ab12").unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let ready = directory.path().join("ready.bin");
+            std::fs::write(
+                &ready,
+                kettle_media::wire::encode(
+                    &kettle_media::wire::Frame::Ready(kettle_media::Ready {
+                        build_id: build_id.clone(),
+                    }),
+                    kettle_media::wire::Direction::WorkerToParent,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let path = script(
+                directory.path(),
+                &format!("/bin/cat '{}'\nexit 0", ready.display()),
+            );
+            let client = kettle_media::client::WorkerClient::new(build_id, Box::new(Stand(path)));
+            let mut job = kettle_media::Job {
+                kind: kettle_media::JobKind::Raster,
+                source: kettle_media::Source::Bytes(vec![7; 4 * 1024 * 1024]),
+                theme: kettle_media::Theme {
+                    background: [0; 4],
+                    foreground: [255; 4],
+                    palette: [[0; 4]; 16],
+                    accent: [0; 4],
+                    is_dark: true,
+                },
+                canvas: kettle_media::Canvas::Theme,
+                target: kettle_media::Target {
+                    width: 1,
+                    height: 1,
+                    scale: 1.0,
+                    crop: None,
+                },
+                fallback_fonts: vec![],
+            };
+            assert!(client.render(&job).is_err());
+            job.source = kettle_media::Source::Bytes(vec![7]);
+            // Still alive, and still able to try again.
+            assert!(client.render(&job).is_err());
+        }
+
+        #[test]
+        fn a_worker_reaped_elsewhere_is_never_signalled() {
+            if !in_child(
+                "media_platform::tests::processes::a_worker_reaped_elsewhere_is_never_signalled",
+            ) {
+                return;
+            }
+            // An inherited ignored SIGCHLD: exited children reap themselves.
+            // SAFETY: the child runs this one test; plain integers.
+            unsafe { libc::signal(libc::SIGCHLD, libc::SIG_IGN) };
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "exit 0");
+            // No worker is started while children reap themselves.
+            assert!(spawn(&path).is_err());
+            // One started anyway is lost once reaped, and never signalled:
+            // neither asking first nor killing first touches its group.
+            let mut asked = GroupProcess {
+                child: kettle_media::client::worker_command(&path).spawn().unwrap(),
+                reaped: false,
+            };
+            assert_eq!(wait_exit(&mut asked), WorkerExit::Lost);
+            assert!(asked.reaped, "a lost worker's group must not be signalled");
+            let mut killed = GroupProcess {
+                child: kettle_media::client::worker_command(&path).spawn().unwrap(),
+                reaped: false,
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while killed.exited().is_ok() {
+                assert!(Instant::now() < deadline, "never reaped elsewhere");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            killed.kill();
+            assert!(killed.reaped, "a lost worker's group must not be signalled");
+        }
+
+        #[test]
+        fn a_running_worker_is_not_reaped_by_asking() {
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "read line\nexit 3");
+            let mut worker = spawn(&path).unwrap();
+            for _ in 0..5 {
+                assert_eq!(worker.process.try_wait().unwrap(), None);
+            }
+            worker.stdin.write_all(b"go\n").unwrap();
+            drop(worker.stdin);
+            assert_eq!(wait_exit(worker.process.as_mut()), WorkerExit::Code(3));
         }
     }
 
