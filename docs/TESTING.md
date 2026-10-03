@@ -1786,8 +1786,12 @@ holds (its parent exited; it stays in the group), leave out a process in
 another group (as a reused pid would be), measure a reaped worker as 0, and,
 through the client with a 16 MiB limit, stop a worker whose child holds 64 MiB
 as `RenderResource`; on Linux the process-group fallback finds the same tree,
-and the `stat` parser reads the group past a command name with spaces and
-parentheses. Red checks for the spawn client: no Ready cap, no
+the `stat` parser reads the group past a command name with spaces, parentheses
+or bytes that are not UTF-8, 100 remembered processes that have exited
+neither count toward the cap nor stay remembered, and the group is rescanned
+every 100 ms where the kernel has no children lists. Scripts are spawned with
+a retry on `ETXTBSY`, since a parallel test's fork can hold a just-written
+script open for a moment on Linux. Red checks for the spawn client: no Ready cap, no
 cold retry, a retry after a stuck worker or after Ready, a reply accepted
 without a clean end or whatever the exit, skew accepted, any worker code
 kept, stuck workers not counted or not stopping `render`, no kill at the
@@ -1802,8 +1806,9 @@ SIGCHLD is ignored, a kill that signals a lost worker, a self-exit at the
 reply deadline read as a timeout, a file check outside the deadline, no
 stuck-limit recheck in the start, a footprint never enforced or never
 sampled, the limit itself refused, an unmeasurable worker read as fine,
-descendants not walked, the group not listed (macOS) or scanned (Linux), and
-reused pids counted each fail a test above.
+descendants not walked, the group not listed (macOS) or scanned (Linux),
+reused pids counted, `stat` read as text, stale candidates counted or not
+forgotten, and a rescan that is never faster each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

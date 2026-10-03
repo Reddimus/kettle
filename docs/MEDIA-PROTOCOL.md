@@ -260,9 +260,13 @@ ticks rather than shifting them): that is everything a group kill reaches,
 including a grandchild whose parent has exited. On macOS the group comes from
 `proc_listpgrppids` and each member's physical footprint from
 `proc_pid_rusage`, as Activity Monitor reports it; on Linux from each thread's
-`children` list plus a scan of `/proc` for the group at most once a second,
-and each member's resident pages from `statm`. A member counts only if it is
-still in the group once measured, so a pid reused in between is not counted.
+`children` list plus a scan of `/proc` for the group at most once a second
+(every 100 ms on a kernel without those lists, where the scan is the only way
+to find a new child), and each member's resident pages from `statm`, read as
+bytes since a command name need not be UTF-8. A member counts, toward the sum
+and toward the 64-process cap, only if it is still in the group once
+measured, so a pid reused in between is not counted and a remembered one that
+has exited is forgotten.
 The sum may count shared pages twice, which errs toward stopping the job. Above
 768 MiB the worker's group is killed: `RenderResource`, never retried, before
 Ready or after. A live worker that cannot be measured, or a tree of more than
