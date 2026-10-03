@@ -1299,16 +1299,20 @@ mod tests {
     fn the_limit_holds_while_a_replying_worker_exits() {
         // A full reply and a clean end, then over the limit on its way out
         // before exiting 0 inside the cleanup budget: not a success.
+        // Several sampling ticks fit inside its exit, however the earlier
+        // samples fell.
+        let budgets = Budgets {
+            cleanup: Duration::from_millis(500),
+            ..FAST
+        };
         let output = reply(&[ready(build_id()), frame(&Frame::Rendered(rendered()))]);
         let fake = Fake::new(vec![Script {
             footprint: Some(FAST.footprint_limit + 1),
-            exit_delay: FAST.cleanup * 4 / 5,
+            exit_delay: Duration::from_millis(300),
             ..Script::replies(output, WorkerExit::Code(0))
         }]);
-        assert_eq!(
-            client(&fake).render(&job(1)),
-            Err(FailureCode::RenderResource)
-        );
+        let client = WorkerClient::with(build_id(), Box::new(Arc::clone(&fake)), budgets);
+        assert_eq!(client.render(&job(1)), Err(FailureCode::RenderResource));
     }
 
     #[test]
