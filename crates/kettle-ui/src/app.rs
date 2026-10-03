@@ -13261,9 +13261,6 @@ impl App {
                 hovered: s.hovered_control,
                 pressed: s.pressed_control,
             }),
-            search_query: None,
-            search_count: 0,
-            search_index: 0,
             highlights,
             links,
             ssh_query,
@@ -33278,7 +33275,6 @@ mod tests {
             kettle_test_support::production_source(include_str!("../../kettle-render/src/lib.rs"));
         for guarded_arm in [
             "overlay.confirm_dialog.is_none()\n            && let Some(search) = overlay.search.as_ref()",
-            "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.search_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.palette_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.layout_picker_query",
             "overlay.confirm_dialog.is_none()\n            && let Some(q) = &overlay.ssh_query",

@@ -639,7 +639,6 @@ fn completion_text_damage_key(
 /// keys catch each meaningful edge without reshaping on a cursor blink.
 fn text_overlay_requires_continuous_prepare(overlay: &Overlay) -> bool {
     overlay.search.is_some()
-        || overlay.search_query.is_some()
         || !overlay.hint_labels.is_empty()
         || overlay.ime_preedit.is_some()
         || overlay.ssh_query.is_some()
@@ -1036,14 +1035,8 @@ impl SearchBarGeometry {
 /// menus, dialogs, and banners.
 #[derive(Default)]
 pub struct Overlay {
-    /// Rich search-lane projection. When present it takes precedence over the
-    /// legacy `search_query` fields below.
+    /// Search-lane projection.
     pub search: Option<SearchOverlay>,
-    /// Compatibility shim for callers predating [`SearchOverlay`]. New callers
-    /// should leave these three fields at their defaults.
-    pub search_query: Option<String>,
-    pub search_count: usize,
-    pub search_index: usize,
     /// Visible, non-overlapping match spans in `(row, col)` order. Keeping this
     /// list viewport-bounded lets both quad paint and glyph recoloring stay
     /// linear in visible work.
@@ -7228,47 +7221,6 @@ impl Renderer {
                     1.0,
                 ));
             }
-        } else if overlay.confirm_dialog.is_none()
-            && let Some(q) = &overlay.search_query
-        {
-            have_search = true;
-            let bar_h = ch + 10.0;
-            search_rect = (0.0, sh - bar_h, sw, bar_h);
-            quads.push(rect(0.0, sh - bar_h, sw, bar_h, theme.palette[8], 0.96));
-            // Advertise the Ctrl+j/k match stepping when `vim-menu-nav` is on
-            // (the keys themselves live app-side). ^j/^k are LITERAL directions
-            // while `invert-search` flips Enter's default, so the hint pairs
-            // them accordingly and never claims an equivalence the keys don't
-            // have.
-            let nav_hint = match (cfg.vim_menu_nav, cfg.invert_search) {
-                (true, false) => "(Enter/^j next · Shift+Enter/^k prev · Esc close)",
-                (true, true) => "(Shift+Enter/^j next · Enter/^k prev · Esc close)",
-                (false, false) => "(Enter next · Shift+Enter prev · Esc close)",
-                (false, true) => "(Enter prev · Shift+Enter next · Esc close)",
-            };
-            let status = if overlay.search_count == 0 {
-                SearchStatus::NoMatch.label()
-            } else {
-                SearchStatus::Match.label()
-            };
-            let label = format!("  search: {q}_    {status}   {nav_hint}");
-            let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
-            self.search_buffer.set_metrics(metrics);
-            self.search_buffer.set_size(Some(sw), Some(bar_h));
-            // Same equality gate as the other chrome buffers. Only one arm of
-            // this `if`/`else if` chain runs per frame, so a single cache is
-            // enough (see `search_buffer_text`'s doc comment).
-            if self.search_buffer_text != label {
-                self.search_buffer.set_text(
-                    &label,
-                    &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
-                );
-                self.search_buffer_text = label;
-            }
-            self.search_buffer
-                .shape_until_scroll(&mut self.font_system, false);
         } else if overlay.confirm_dialog.is_none()
             && let Some(q) = &overlay.palette_query
         {
@@ -21161,7 +21113,7 @@ mod completion_panel_tests {
         };
         assert!(!text_overlay_requires_continuous_prepare(&frame));
 
-        frame.search_query = Some(String::new());
+        frame.ssh_query = Some(String::new());
         assert!(text_overlay_requires_continuous_prepare(&frame));
     }
 }
