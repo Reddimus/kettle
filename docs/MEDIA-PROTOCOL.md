@@ -359,18 +359,29 @@ seen. The digest is taken over the bytes read and that file's identity
 
 **Raster decoding.** The format comes from the content's signature, never the
 name or extension. PNG, JPEG, WebP, BMP and GIF are decoded; any other format,
-TIFF included, is `UnsupportedMedia`. Before a pixel is decoded, the decoder
-reports the image's dimensions and its native decoded size, and both are
-checked: an edge over 8192 pixels, RGBA over 64 MiB, or a native size over
-64 MiB (a 16-bit image needs more) is `RenderResource`. The codec's own limits
-are set to the same values, but they are best effort. A GIF yields its first
+TIFF included, is `UnsupportedMedia`. Two containers are read before their
+decoder sees them. A BMP header, or a WebP extended header's canvas, that
+declares an image past the caps below is `RenderResource` (their decoders
+would refuse some of these with a parse error instead). In a WebP, every lossy
+bitstream must declare the size it fills: a still image's must match the
+canvas, and an animation frame's must match that frame, with the chunk after
+a frame's alpha plane being that bitstream. A mismatch is `RenderParse`,
+before the decoder can allocate for the larger size or write past a smaller
+buffer. Then, before a pixel is decoded, the decoder reports the image's
+dimensions and its native decoded size, and both are checked: an edge over
+8192 pixels, RGBA over 64 MiB, or a native size over 64 MiB (a 16-bit image
+needs more) is `RenderResource`. The codec's own limits are set to the same
+values, but they are best effort. A GIF or an animated WebP yields its first
 frame only. Content that does not decode is `RenderParse`.
 
 **Fitting.** The image is scaled to fit inside the target box, keeping its
 aspect ratio, each edge rounded and kept between 1 pixel and the box. It is
 resampled (triangle filter) with premultiplied alpha, so a transparent pixel's
 hidden color does not bleed into its neighbours, and returned as straight
-RGBA in which every fully transparent pixel is all zero. A crop is in target
+RGBA in which every fully transparent pixel is all zero. Resampling filters
+each input row once and keeps it only while an output row needs it, so beside
+the decoded image and the result it holds a few rows, never a full-size
+working copy. A crop is in target
 box coordinates, with the fitted image centered in the box: it returns just
 that region, transparent wherever the image does not reach. The canvas color
 is the GUI's to draw behind the result, and the scale is for vector content: a

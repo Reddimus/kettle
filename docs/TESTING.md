@@ -810,7 +810,10 @@ stub worker as a real process, copied under a name that picks its behavior: a
 job rendered; a worker that never answers tried twice within bounds; a 4 MiB
 job to a worker that never reads it, ended by the deadline; a reply followed
 by an abort discarded as `RenderResource`; and the worker's watchdog exit read
-as `RenderTimeout`.
+as `RenderTimeout`. Tests that need the worker to start and answer allow it
+10 s: each copies the stub afresh, and a new executable's first launch on a
+loaded macOS machine can take longer than the short deadlines the timeout
+tests use.
 
 ### kettle-media-worker
 
@@ -874,6 +877,19 @@ over the rendered edge or a crop outside it is `BadParams`. A file's digest
 covers its bytes and the open file's identity, the same bytes inline carry
 none, and kinds other than raster are `UnsupportedMedia` for now.
 
+`tests/hostile.rs` renders under a global allocator that records the largest
+single allocation each thread makes. A WebP whose 1x1 canvas holds a bitstream
+declaring 4096x4096, and a 1x1 animation frame holding one, are `RenderParse`
+with no allocation near that size; a real 2x2 lossy frame behind an alpha
+plane in a 1x1 animation frame, which the decoder would otherwise write past
+its buffer for (a panic), is `RenderParse`, and so is a chunk other than VP8
+after an alpha plane. Well-formed extended WebP still renders: still and
+animated, with and without alpha. BMP headers of 70000x1, 1x-70000 and
+9000x1, and WebP canvases of 70000x70000 and 9000x1, are `RenderResource`
+whichever decoder would have refused them. Halving a 2048x2048 image
+allocates nothing larger than the decoded image itself. The lossy fixture is
+a 2x2 VP8 frame from `cwebp`, with its size fields rewritten per case.
+
 `tests/source.rs` loads paths: a group-writable file (as umask 002 leaves it)
 and a symbolic link at the leaf are accepted; a FIFO with no writer is
 `FileNotRegular` on a thread whose hang would fail the test instead of
@@ -894,7 +910,11 @@ that ignores the aspect ratio, a non-regular file accepted, an ignored
 attestation, no identity check after the read, a digest without the file's
 identity, a blocking open and no size check at open each fail a test above,
 and so does a format allowlist that lets TIFF through when the TIFF codec is
-linked in (as a workspace build links it, for the clipboard).
+linked in (as a workspace build links it, for the clipboard). Removing all
+container checks, the BMP size, the WebP canvas cap, the still or animation
+bitstream check, the check behind an alpha plane or the VP8 requirement after
+one, or resizing through a full-size float intermediate, each fails a test in
+`tests/hostile.rs`.
 
 ### kettle-i18n
 

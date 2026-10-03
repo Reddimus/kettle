@@ -12,6 +12,8 @@
 use kettle_media::{FailureCode, Job, Rendered};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod container;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod raster;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod source;
@@ -44,6 +46,7 @@ mod tests {
         for (name, source) in [
             ("lib", include_str!("lib.rs")),
             ("source", include_str!("source.rs")),
+            ("container", include_str!("container.rs")),
             ("raster", include_str!("raster.rs")),
         ] {
             let code = code_only(&production_source(source));

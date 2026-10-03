@@ -15,6 +15,10 @@ use kettle_media::{FailureCode, Source, content_digest};
 
 const READY: Duration = Duration::from_millis(500);
 const RENDER: Duration = Duration::from_millis(500);
+/// For tests whose worker must start and answer: each copies the stub fresh,
+/// and a new executable's first launch on a loaded macOS machine can take
+/// longer than `READY`.
+const STARTUP: Duration = Duration::from_secs(10);
 
 /// The stub worker, copied as `media-test-worker[-mode]` in its own
 /// directory, which the directory keeps alive.
@@ -109,7 +113,14 @@ fn client(mode: &str) -> WorkerClient {
 fn a_real_worker_renders_a_job() {
     let mut expected = common::rendered();
     expected.digest = content_digest(&[7], None).unwrap();
-    assert_eq!(client("").render(&common::job()), Ok(expected));
+    let client = WorkerClient::with_test_budgets(
+        common::build(),
+        Box::new(Stub::new("")),
+        STARTUP,
+        STARTUP,
+        u64::MAX,
+    );
+    assert_eq!(client.render(&common::job()), Ok(expected));
 }
 
 #[test]
@@ -145,7 +156,7 @@ fn complete_reply_before_crash_is_discarded() {
     let client = WorkerClient::with_test_budgets(
         common::build(),
         Box::new(Stub::new("crash-after-reply")),
-        READY,
+        STARTUP,
         Duration::from_secs(60),
         u64::MAX,
     );
