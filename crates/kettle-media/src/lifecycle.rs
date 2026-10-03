@@ -12,7 +12,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::client::{Shared, SpawnedWorker, UnavailableCause, WorkerExit, WorkerProcess};
+use crate::client::{
+    MAX_STUCK_WORKERS, Shared, SpawnedWorker, UnavailableCause, WorkerExit, WorkerProcess,
+};
 use crate::wire::{self, Direction, Frame, MAX_READY_FRAME_BYTES, WireError};
 use crate::{BuildId, FailureCode, HandshakeOutcome, Hello, Job, JobKind, Rendered, check_ready};
 
@@ -208,6 +210,12 @@ fn spawn_within(
     // A start that hung once would hang again: while one is outstanding, no
     // other begins, so hung starts cannot pile up.
     if shared.late_spawns.load(Ordering::Acquire) > 0 {
+        return Err(FailureCode::WorkerUnavailable);
+    }
+    // A late start's cleanup may have just left one more stuck worker. It
+    // counts that worker before it clears its late start, so read after the
+    // line above, the count includes it.
+    if shared.stuck.load(Ordering::Acquire) >= MAX_STUCK_WORKERS {
         return Err(FailureCode::WorkerUnavailable);
     }
     let slot = Arc::new((Mutex::new(SpawnSlot::Waiting), Condvar::new()));
@@ -1106,6 +1114,24 @@ mod tests {
             client(&fake).render(&job(1)),
             Err(FailureCode::RenderResource)
         );
+    }
+
+    #[test]
+    fn no_start_once_the_stuck_limit_is_reached() {
+        // As a late start's cleanup leaves it: the limit reached, and no late
+        // start outstanding. The start itself refuses, whatever the caller
+        // read earlier.
+        let fake = Fake::new(vec![Script::silent()]);
+        let client = client(&fake);
+        client
+            .shared
+            .stuck
+            .store(MAX_STUCK_WORKERS, Ordering::SeqCst);
+        assert_eq!(
+            spawn_within(&client.shared, Instant::now() + FAST.ready, FAST).err(),
+            Some(FailureCode::WorkerUnavailable)
+        );
+        assert_eq!(fake.spawn_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

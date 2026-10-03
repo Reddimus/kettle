@@ -795,7 +795,8 @@ rather than crash, and only handshake codes count before a job; an exit is
 seen at once while something holds the worker's stdout, before Ready and
 after it; a start that hangs returns at the startup deadline and the late
 worker is killed, and while it hangs no second start begins; a file check that
-hangs is bounded the same way; a worker that exits 9 as the startup deadline
+hangs is bounded the same way; a start refuses once the stuck limit is
+reached, whatever its caller read earlier; a worker that exits 9 as the startup deadline
 passes is `RestartRequired`, not retried; one that crashes as the reply
 deadline passes is `RenderResource`; the
 writer guards its pipe writes before the first one; and exit codes map as
@@ -1788,8 +1789,8 @@ startup refusal with its end unchecked or masking a crash, any code kept at
 startup, abandoned workers never reaped, `ECHILD` not read as lost, a late
 self-exit read as killed, hung starts piling up, workers started while
 SIGCHLD is ignored, a kill that signals a lost worker, a self-exit at the
-reply deadline read as a timeout, and a file check outside the deadline each
-fail a test above.
+reply deadline read as a timeout, a file check outside the deadline, and no
+stuck-limit recheck in the start each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a
