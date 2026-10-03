@@ -42,6 +42,18 @@ fn path_re() -> &'static Regex {
 
 use crate::url_trim::trim_trailing;
 
+/// The path matches in one row's text that can become links, as (start byte,
+/// text): trimmed of trailing punctuation, and not starting inside a longer
+/// token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
+fn path_candidates(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    path_re().find_iter(text).filter_map(move |m| {
+        let matched = trim_trailing(m.as_str());
+        let before = text[..m.start()].chars().next_back();
+        (!matched.is_empty() && crate::hints::path_may_start_after(before))
+            .then_some((m.start(), matched))
+    })
+}
+
 /// All links visible in the current viewport. Explicit OSC 8 links take
 /// precedence over autodetected URLs and file paths on the same cells.
 pub fn links(term: &Term<EventProxy>) -> Vec<Link> {
@@ -136,14 +148,10 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             });
         }
         let row_links_end = out.len();
-        for m in path_re().find_iter(&text) {
-            let matched = trim_trailing(m.as_str());
-            if matched.is_empty() {
-                continue;
-            }
-            let s = col_of_byte.get(m.start()).copied().unwrap_or(0);
+        for (start, matched) in path_candidates(&text) {
+            let s = col_of_byte.get(start).copied().unwrap_or(0);
             let e = col_of_byte
-                .get(m.start() + matched.len().saturating_sub(1))
+                .get(start + matched.len().saturating_sub(1))
                 .copied()
                 .unwrap_or(s);
             if out[osc8_start..row_links_end]
@@ -327,7 +335,27 @@ fn is_local_file_url(uri: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_safe_url, path_match_to_file_uri};
+    use super::{is_safe_url, path_candidates, path_match_to_file_uri};
+
+    /// A link cannot begin inside a longer token; ordinary paths after a
+    /// space, a delimiter, `=` or a list or redirect separator stay links.
+    #[test]
+    fn a_path_link_cannot_start_inside_a_token() {
+        fn found(line: &str) -> Vec<&str> {
+            path_candidates(line).map(|(_, text)| text).collect()
+        }
+        assert!(
+            found("foo(1)/bar.png").is_empty(),
+            "{:?}",
+            found("foo(1)/bar.png")
+        );
+        assert!(found("x]/etc/hosts").is_empty());
+        assert_eq!(found("open /etc/hosts"), ["/etc/hosts"]);
+        assert_eq!(found("(/etc/hosts)."), ["/etc/hosts"]);
+        assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
+        assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
+        assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
 
     #[test]
     fn allows_web_and_mail_rejects_custom_schemes() {
