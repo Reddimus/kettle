@@ -751,6 +751,25 @@ session load/save atomic + corruption-backup contracts;
 empty-value resets for every string-config key;
 `clamp_font_size` bounds.
 
+### kettle-media
+
+`tests/protocol.rs` pins the protocol in [MEDIA-PROTOCOL.md](MEDIA-PROTOCOL.md):
+golden bytes for every frame kind; round trips of every job, source, theme,
+target and result; an external request can never decode as a GUI user pull;
+handshake mismatch and reverse skew stay distinct; path guards; checked RGBA
+and crop products; an RGBA mismatch, an oversize frame header, hostile counts
+and unknown nested enums are refused before any payload allocation; fence
+indices and every metadata bound; input caps, fonts and video options; the
+content digest changes with the content and each identity field (its framing
+is pinned against a value computed independently); build ID bounds and wire
+direction; the largest reply and its allocation budget; and streaming at exact
+boundaries and through interrupted reads. `tests/worker.rs` drives a
+feature-gated stub worker (`media-test-worker`, a fixture, never shipped)
+through exact replies and reaping, handshake mismatch, an oversize frame,
+trailing payload bytes, a fence index out of range and truncation. The
+workspace commands do not build the stub, so `just media-protocol-test` (also
+in `just gauntlet` and ci.yml) runs it with `--features test-worker`.
+
 ### kettle-i18n
 
 The build script validates the catalogue, and `tests/build_gates.rs` runs it

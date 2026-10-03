@@ -77,6 +77,12 @@ Reports that fit any of these are welcome:
   so a swap-attack with filesystem access can't OOM kettle on launch
   via these paths. Tampering that bypasses the cap (config that parses
   cleanly but escalates) remains in scope.
+- **Media protocol** — `kettle-media` defines the frames a future media
+  worker and the GUI exchange (no worker ships yet). Its decoder checks a
+  whole frame, every length, count, enum and trailing byte, before it
+  allocates, caps each direction, keeps external requests from expressing a
+  GUI user pull, and never echoes input in a failure. A frame that gets past
+  those checks with oversized or hostile content is in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

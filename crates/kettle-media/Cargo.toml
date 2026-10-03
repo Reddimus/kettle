@@ -1,0 +1,24 @@
+[package]
+name = "kettle-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Bounded media jobs and strict parent-worker frames for kettle"
+
+[dependencies]
+sha2 = "0.11"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "media-test-worker"
+path = "tests/support/worker.rs"
+required-features = ["test-worker"]
+
+[features]
+# Test fixture only. No production worker or spawn client lives in P1.
+test-worker = []

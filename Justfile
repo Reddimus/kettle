@@ -87,6 +87,12 @@ core-default-features-check:
 test:
     cargo test --workspace
 
+# The media protocol against its feature-gated stub worker, which the
+# workspace test and clippy commands do not build. ci.yml runs the same pair.
+media-protocol-test:
+    cargo clippy --locked -p kettle-media --all-targets --features test-worker -- -D warnings
+    cargo test --locked -p kettle-media --features test-worker
+
 # `cargo doc` with `-D warnings` — rustdoc has its own warning class
 # (broken intra-doc-links, missing docs on public items) that
 # `clippy -D warnings` doesn't catch. CI runs this on Linux only
@@ -336,6 +342,7 @@ gauntlet: live-ui-helper-selftest shell-integration-check vm-launcher-test
     cargo clippy --locked -p kettle-core --all-targets -- -D warnings
     cargo build --locked --workspace --all-targets
     cargo test --locked --workspace
+    just media-protocol-test
     cargo doc --locked --workspace --no-deps
     @echo ""
     @echo "GAUNTLET PASSED — core Rust gate green. Run 'just gauntlet-full' for required current-OS native gates."

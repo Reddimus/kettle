@@ -106,6 +106,14 @@ jobs:
       - run: cargo build --locked --workspace --all-targets
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      # The media protocol's stub worker is a feature-gated test fixture, so
+      # the workspace commands above neither build nor exercise it. One
+      # command per step: Windows runs steps in PowerShell, where a failing
+      # first command would not fail a multi-line step.
+      - name: Media protocol stub worker — clippy
+        run: cargo clippy --locked -p kettle-media --all-targets --features test-worker -- -D warnings
+      - name: Media protocol stub worker — tests
+        run: cargo test --locked -p kettle-media --features test-worker
       - name: Vendored parser patches — unit, doctest, clippy
         # vte and alacritty_terminal are excluded from the product workspace,
         # so the root commands above compile their public dependency surfaces
