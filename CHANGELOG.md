@@ -6,6 +6,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Fixed
+
+- A Settings keybind row for an action with more than one shortcut shows the
+  same shortcut on every launch, the one the command palette and menus show.
+  It used to show any of them, and could change between launches.
+
 ## [4.9.0] — 2026-10-02
 
 ### Added

@@ -607,15 +607,12 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
             }
         }
         FieldKind::Keybind { action } => {
-            // Reverse-look-up the chord currently bound to this action in the
-            // effective keymap. Shows the first match (an action may have
-            // several bindings); "Unbound" if none.
+            // The chord bound to this action in the effective keymap, chosen
+            // as the palette and menus choose it; "Unbound" if none. The
+            // keymap's order changes between launches, so a first match would
+            // not be stable for an action with several chords.
             match kettle_config::Action::from_name(action) {
-                Some(a) => cfg
-                    .keybinds
-                    .iter()
-                    .find(|(_, v)| **v == a)
-                    .map(|(t, _)| t.label())
+                Some(a) => kettle_config::keybinds::hint_label(&cfg.keybinds, &a)
                     .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
                 None => "—".to_string(),
             }
@@ -1427,6 +1424,32 @@ mod tests {
     /// Returning the token for the wrong variant would silently break keybind
     /// editing. Pin Some(action) for keybind fields and None for every other
     /// field kind.
+    /// An action with several chords shows the same one on every launch, the
+    /// one the palette and menus show. The keymap is a `HashMap`, whose order
+    /// differs between instances, so a first-match lookup changed from run to
+    /// run.
+    #[test]
+    fn a_keybind_row_shows_one_stable_chord() {
+        let row = keybind(Text::SettingsKeybindClosePane, "close_pane");
+        let close = kettle_config::Action::from_name("close_pane").unwrap();
+        let mut shown = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let mut cfg = Config::default();
+            cfg.keybinds.retain(|_, action| *action != close);
+            for chord in ["ctrl+shift+w", "super+shift+d", "ctrl+alt+shift+q"] {
+                let trigger = kettle_config::keybinds::parse_trigger(chord).unwrap();
+                cfg.keybinds.insert(trigger, close.clone());
+            }
+            let label = read(&cfg, &row, &EN);
+            assert_eq!(
+                Some(&label),
+                kettle_config::keybinds::hint_label(&cfg.keybinds, &close).as_ref()
+            );
+            shown.insert(label);
+        }
+        assert_eq!(shown.into_iter().collect::<Vec<_>>(), ["Ctrl+Shift+W"]);
+    }
+
     #[test]
     fn keybind_action_extracts_token_for_keybind_fields_only() {
         assert_eq!(
