@@ -43,6 +43,8 @@ crossbeam-channel = "0.5.15"
 # The `kettle ctl` client + `kettle mcp` bridge connect
 # to a running kettle's control server over this crate's protocol + transport.
 kettle-ctl.workspace = true
+# The startup update-recovery notice's title.
+kettle-i18n.workspace = true
 kettle-render.workspace = true
 kettle-state.workspace = true
 kettle-update.workspace = true

@@ -33,6 +33,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A compact paste receipt in a remote pane shows its whole warning, "Remote ·
+  local path". It was cut to "Remote · local path o…".
 - A key that closes or replaces a modal (the command palette, a picker, a
   title editor, the Settings path prompt) ends an input-method composition in
   progress there, so a late commit can no longer type into the terminal or the

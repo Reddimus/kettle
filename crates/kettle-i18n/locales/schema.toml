@@ -1,6 +1,9 @@
 # Stable message identifiers, argument types and translator context.
 # Context names the code that shows the message. Edit TOML, never generated Rust.
 
+[messages.a11y_window]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of a Kettle window. Kettle is the product name."
+
 [messages.about_copy_version]
 context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row."
 
@@ -16,6 +19,10 @@ args = [{ name = "tag", type = "str" }]
 
 [messages.about_update_unknown]
 context = "crates/kettle-ui/src/app.rs open_about_panel: About panel row. No update check has finished."
+
+[messages.completion_a11y_list]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of the completion list. kind is the translated list kind (for example Completions); source is a shell name such as fish, kept verbatim."
+args = [{ name = "kind", type = "str" }, { name = "source", type = "str" }]
 
 [messages.completion_kind_completions]
 context = "crates/kettle-ui/src/app.rs: completion card header, before the source shell's name: what the rows are."
@@ -76,6 +83,12 @@ context = "crates/kettle-ui/src/app.rs: label before the text being edited, for 
 
 [messages.edit_title_window]
 context = "crates/kettle-ui/src/app.rs: label before the text being edited, for the window. Ends with a colon."
+
+[messages.hint_a11y_list]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of quick-select hint mode, which labels links and paths with short letter codes."
+
+[messages.menu_a11y_terminal]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 
 [messages.menu_about]
 context = "crates/kettle-ui/src/app.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
@@ -422,6 +435,9 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 [messages.notify_title_update_installed]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
+[messages.notify_title_update_recovery]
+context = "crates/kettle/src/main.rs queue_startup_update_recovery: desktop notification title at startup when an interrupted update was recovered. The body comes from the updater."
+
 [messages.notify_title_update_staged]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
@@ -746,6 +762,10 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 [messages.picker_a11y_palette]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the command palette dialog."
 
+[messages.picker_a11y_results]
+context = "crates/kettle-ui/src/app.rs push_picker_accessibility: screen-reader name of a picker's result list. label is the picker's translated name, such as Theme picker."
+args = [{ name = "label", type = "str" }]
+
 [messages.picker_a11y_ssh]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
 
@@ -809,6 +829,59 @@ context = "crates/kettle-render/src/lib.rs theme_picker_prefix: prompt before th
 [messages.picker_typed_target]
 context = "crates/kettle-ui/src/app.rs: SSH launcher hint: Enter connects to what was typed. Keep Enter."
 
+[messages.receipt_a11y_dismiss]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of the paste receipt's close button."
+
+[messages.receipt_a11y_hide_video]
+context = "crates/kettle-ui/src/app.rs: screen-reader description of the video paste receipt, which hides itself when activated."
+
+[messages.receipt_a11y_image]
+context = "crates/kettle-ui/src/app.rs media_receipt_accessibility_label: screen-reader name of the paste receipt card. width and height are pixels."
+args = [{ name = "width", type = "u64" }, { name = "height", type = "u64" }]
+
+[messages.receipt_a11y_open_image]
+context = "crates/kettle-ui/src/app.rs: screen-reader description of the image paste receipt, which opens Kettle's private copy of the image when activated."
+
+[messages.receipt_a11y_remote]
+context = "crates/kettle-ui/src/app.rs media_receipt_accessibility_label: screen-reader name of the paste receipt card. Appended after a comma in a remote (SSH) pane. Starts lowercase."
+
+[messages.receipt_a11y_video]
+context = "crates/kettle-ui/src/app.rs media_receipt_accessibility_label: screen-reader name of the paste receipt card. extension is a file type such as MP4; size is formatted, e.g. 1.5 MB."
+args = [{ name = "extension", type = "str" }, { name = "size", type = "str" }]
+
+[messages.receipt_a11y_videos]
+context = "crates/kettle-ui/src/app.rs media_receipt_accessibility_label: screen-reader name of the paste receipt card. count is 2 or more; extension and size describe the first video."
+args = [{ name = "count", type = "u64" }, { name = "extension", type = "str" }, { name = "size", type = "str" }]
+
+[messages.receipt_first_of]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Detail line prefix when several videos were pasted: the card describes the first. count is 2 or more."
+args = [{ name = "count", type = "u64" }]
+
+[messages.receipt_local_path_only]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Detail line: the path names a file on this machine, not on the remote host."
+
+[messages.receipt_path_on_command_line]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Detail line."
+
+[messages.receipt_preparing_poster]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Detail line while a still frame (poster) of the video is extracted."
+
+[messages.receipt_remote_pane]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Detail line: the pane runs a remote (SSH) session."
+
+[messages.receipt_title_image]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Card title."
+
+[messages.receipt_title_remote]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Compact card title in a remote (SSH) pane, where the pasted path names a file on this machine only."
+
+[messages.receipt_title_video]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Card title."
+
+[messages.receipt_title_videos]
+context = "crates/kettle-render/src/lib.rs media_paste_receipt_text: line on the card shown after an image or video file path is pasted. The path itself was typed onto the shell's command line; the card only reports it. Titles fit 19 columns and detail lines 22; longer text is cut with an ellipsis. Compact card title; count is always 2 or more."
+args = [{ name = "count", type = "u64" }]
+
 [messages.search_a11y_case]
 context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
 
@@ -826,6 +899,9 @@ context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: scre
 
 [messages.search_a11y_previous]
 context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
+
+[messages.search_a11y_region]
+context = "crates/kettle-ui/src/app.rs: screen-reader name of the search bar region."
 
 [messages.search_a11y_wrap]
 context = "crates/kettle-render/src/lib.rs SearchControl::accessible_label: screen-reader name of a search bar control."
@@ -1248,3 +1324,14 @@ context = "crates/kettle-ui/src/settings.rs read(): Settings value. Animation ru
 
 [messages.settings_value_white]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
+
+[messages.update_a11y_available]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the update banner. tag is a version such as v5.0.0."
+args = [{ name = "tag", type = "str" }]
+
+[messages.update_a11y_open]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader description of the update banner, which opens the release page in a browser."
+
+[messages.update_banner]
+context = "crates/kettle-render/src/lib.rs: passive banner at the bottom of the window when a newer release exists. kettle is the product name, kept lowercase; tag is a version; url is the release page. Keep the four spaces before the parenthesis."
+args = [{ name = "tag", type = "str" }, { name = "url", type = "str" }]

@@ -972,6 +972,9 @@ pub enum MediaPasteReceiptKind {
 /// The renderer receives bounded pixels and display metadata, never a path.
 #[derive(Clone, Debug)]
 pub struct MediaPasteReceiptOverlay {
+    /// The UI language of the card's text, its accessible name, and the
+    /// width its safety warning needs.
+    pub tr: Translator,
     pub pane_rect: Rect4,
     pub grid_rect: Rect4,
     /// Physical pixels reserved for the focused pane's live scrollbar grab
@@ -1788,7 +1791,11 @@ pub fn media_paste_receipt_geometry(
     // the six-pixel padding floor and terminal `cell-width` scaling mean a
     // budget based on terminal columns is not the width the chrome glyphs use.
     let min_expanded_columns = if receipt.remote { 28.0 } else { 22.0 };
-    let min_detail_columns = if receipt.remote { 18.0 } else { 5.0 };
+    let min_detail_columns = if receipt.remote {
+        remote_warning_columns(&receipt.tr)
+    } else {
+        5.0
+    };
     let expanded_corner = (expanded_w >= text_cell_width * min_expanded_columns
         && detail_w >= text_cell_width * min_detail_columns
         && expanded_h + inset_y * 2.0 <= height)
@@ -1904,21 +1911,37 @@ pub fn media_paste_receipt_geometry(
     })
 }
 
+/// The passive update banner's text before it is fitted to the window.
+fn update_banner_label(tr: &Translator, tag: &str, url: &str) -> String {
+    format!("  ⬆ {}", tr.update_banner(tag, url))
+}
+
+/// Detail columns an expanded remote card needs: its widest warning line in
+/// the UI's language, plus the dismiss column the bottom lane reserves. In
+/// English that is the 18 columns the card has always required.
+fn remote_warning_columns(tr: &Translator) -> f32 {
+    let widest = [Text::ReceiptRemotePane, Text::ReceiptLocalPathOnly]
+        .into_iter()
+        .map(|line| display_width(tr.text(line)))
+        .max()
+        .unwrap_or(0);
+    (widest + 3).max(18) as f32
+}
+
 fn media_paste_receipt_text(
     receipt: &MediaPasteReceiptOverlay,
     geometry: &MediaPasteReceiptGeometry,
     text_cell_width: f32,
 ) -> (String, String) {
+    let tr = &receipt.tr;
     let title_columns = (geometry.title_rect.2 / text_cell_width).floor().max(0.0) as usize;
     let title = match (&receipt.kind, geometry.compact, receipt.remote) {
-        (_, true, true) => "Remote · local path only".to_string(),
-        (MediaPasteReceiptKind::Image { .. }, true, false) => "Image path pasted".to_string(),
+        (_, true, true) => tr.text(Text::ReceiptTitleRemote).to_string(),
         (MediaPasteReceiptKind::Video { count, .. }, true, false) if *count > 1 => {
-            format!("{count} video paths pasted")
+            tr.receipt_title_videos(*count as u64)
         }
-        (MediaPasteReceiptKind::Video { .. }, true, false) => "Video path pasted".to_string(),
-        (MediaPasteReceiptKind::Image { .. }, false, _) => "Image path pasted".to_string(),
-        (MediaPasteReceiptKind::Video { .. }, false, _) => "Video path pasted".to_string(),
+        (MediaPasteReceiptKind::Image { .. }, _, _) => tr.text(Text::ReceiptTitleImage).to_string(),
+        (MediaPasteReceiptKind::Video { .. }, _, _) => tr.text(Text::ReceiptTitleVideo).to_string(),
     };
     let title = fit_single_line_label(&title, title_columns);
 
@@ -1930,7 +1953,7 @@ fn media_paste_receipt_text(
                 original_height,
             } => vec![
                 format!("{original_width} × {original_height}"),
-                "Path on command line".to_string(),
+                tr.text(Text::ReceiptPathOnCommandLine).to_string(),
             ],
             MediaPasteReceiptKind::Video {
                 extension,
@@ -1940,21 +1963,28 @@ fn media_paste_receipt_text(
             } => {
                 let mut lines = Vec::with_capacity(4);
                 lines.push(if *count > 1 {
-                    format!("1 of {count} · {extension} · {}", format_media_size(*size))
+                    format!(
+                        "{} · {extension} · {}",
+                        tr.receipt_first_of(*count as u64),
+                        format_media_size(*size)
+                    )
                 } else {
                     format!("{extension} · {}", format_media_size(*size))
                 });
-                lines.push(if *preview_pending {
-                    "Preparing poster".to_string()
-                } else {
-                    "Path on command line".to_string()
-                });
+                lines.push(
+                    tr.text(if *preview_pending {
+                        Text::ReceiptPreparingPoster
+                    } else {
+                        Text::ReceiptPathOnCommandLine
+                    })
+                    .to_string(),
+                );
                 lines
             }
         };
         if receipt.remote {
-            lines.push("Remote pane".to_string());
-            lines.push("Local path only".to_string());
+            lines.push(tr.text(Text::ReceiptRemotePane).to_string());
+            lines.push(tr.text(Text::ReceiptLocalPathOnly).to_string());
         }
         lines
             .into_iter()
@@ -7551,9 +7581,7 @@ impl Renderer {
             quads.push(rect(0.0, bar_y, sw, bar_h, banner_bg, 0.96));
             quads.push(rect(0.0, bar_y, sw, 2.0, banner_accent, 1.0));
             quads.push(rect(0.0, bar_y, 4.0, bar_h, banner_accent, 1.0));
-            let label = format!(
-                "  ⬆ kettle {tag} available — {url}    (click: open · right-click: dismiss)"
-            );
+            let label = update_banner_label(&overlay.tr, tag, url);
             let label = fit_single_line_label(&label, overlay_label_cols(sw, cw));
             self.search_buffer.set_metrics(metrics);
             self.search_buffer.set_size(Some(sw), Some(bar_h));
@@ -20659,6 +20687,7 @@ mod completion_panel_tests {
 
     fn receipt(expanded: bool) -> MediaPasteReceiptOverlay {
         MediaPasteReceiptOverlay {
+            tr: kettle_i18n::Translator::default(),
             pane_rect: (100.0, 40.0, 900.0, 700.0),
             grid_rect: (108.0, 70.0, 884.0, 656.0),
             right_gutter: 0.0,
@@ -20948,6 +20977,157 @@ mod completion_panel_tests {
         assert!((preview.2 / preview.3 - 16.0 / 9.0).abs() < 0.001);
         let (_, detail) = media_paste_receipt_text(&ready, &ready_geometry, CELL.0);
         assert!(detail.contains("Path on command line"));
+    }
+
+    /// The card speaks the UI's language, and an expanded remote card is
+    /// admitted only when its translated warning fits whole.
+    #[test]
+    fn media_receipt_text_follows_the_ui_language() {
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        let mut compact = receipt(false);
+        compact.tr = es;
+        let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
+        assert_eq!(
+            media_paste_receipt_text(&compact, &geometry, CELL.0).0,
+            "Imagen pegada"
+        );
+        compact.remote = true;
+        let geometry = media_paste_receipt_geometry(&compact, None, CELL, CELL.0, CELL.1).unwrap();
+        assert_eq!(
+            media_paste_receipt_text(&compact, &geometry, CELL.0).0,
+            "Remoto · ruta local",
+            "the compact remote warning must show whole"
+        );
+        let mut batch = video_receipt(false, false, 3);
+        batch.tr = es;
+        let geometry = media_paste_receipt_geometry(&batch, None, CELL, CELL.0, CELL.1).unwrap();
+        assert_eq!(
+            media_paste_receipt_text(&batch, &geometry, CELL.0).0,
+            "3 videos pegados"
+        );
+
+        // Every compact title shows whole, in each language: the remote one
+        // is a safety warning, and a clipped count misleads.
+        for tr in [kettle_i18n::Translator::default(), es] {
+            let mut cards = vec![receipt(false)];
+            for count in [1, 2, 99] {
+                cards.push(video_receipt(false, false, count));
+            }
+            let remote: Vec<_> = cards
+                .iter()
+                .cloned()
+                .map(|mut card| {
+                    card.remote = true;
+                    card
+                })
+                .collect();
+            for mut card in cards.into_iter().chain(remote) {
+                card.tr = tr;
+                let geometry =
+                    media_paste_receipt_geometry(&card, None, CELL, CELL.0, CELL.1).unwrap();
+                assert!(geometry.compact);
+                let (title, _) = media_paste_receipt_text(&card, &geometry, CELL.0);
+                assert!(!title.ends_with('…'), "{title:?} was clipped");
+            }
+        }
+
+        let mut pending = video_receipt(true, false, 3);
+        pending.tr = es;
+        let geometry = media_paste_receipt_geometry(&pending, None, CELL, CELL.0, CELL.1).unwrap();
+        let (title, detail) = media_paste_receipt_text(&pending, &geometry, CELL.0);
+        assert_eq!(title, "Video pegado");
+        assert!(detail.contains("1 de 3 · MP4 · 35.7 MB"), "{detail}");
+        assert!(detail.contains("Preparando portada"), "{detail}");
+
+        for tr in [kettle_i18n::Translator::default(), es] {
+            let widest = [
+                kettle_i18n::Text::ReceiptRemotePane,
+                kettle_i18n::Text::ReceiptLocalPathOnly,
+            ]
+            .into_iter()
+            .map(|line| display_width(tr.text(line)))
+            .max()
+            .unwrap();
+            assert!(super::remote_warning_columns(&tr) >= (widest + 3) as f32);
+            for pane_width in 140..=360 {
+                let mut candidate = receipt(true);
+                candidate.tr = tr;
+                candidate.remote = true;
+                candidate.pane_rect.2 = pane_width as f32;
+                candidate.grid_rect.2 = pane_width as f32;
+                let Some(geometry) =
+                    media_paste_receipt_geometry(&candidate, None, (6.0, CELL.1), CELL.0, CELL.1)
+                else {
+                    continue;
+                };
+                if !geometry.compact {
+                    let (_, detail) = media_paste_receipt_text(&candidate, &geometry, CELL.0);
+                    for line in [
+                        kettle_i18n::Text::ReceiptRemotePane,
+                        kettle_i18n::Text::ReceiptLocalPathOnly,
+                    ] {
+                        assert!(
+                            detail.lines().any(|shown| shown == tr.text(line)),
+                            "an admitted expanded card must show {:?} whole at width {pane_width}",
+                            tr.text(line)
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            super::remote_warning_columns(&kettle_i18n::Translator::default()),
+            18.0
+        );
+    }
+
+    #[test]
+    fn the_update_banner_follows_the_ui_language() {
+        let url = "https://github.com/Reddimus/kettle/releases/tag/v5.0.0";
+        assert_eq!(
+            super::update_banner_label(&kettle_i18n::Translator::default(), "v5.0.0", url),
+            format!("  ⬆ kettle v5.0.0 available — {url}    (click: open · right-click: dismiss)")
+        );
+        assert_eq!(
+            super::update_banner_label(
+                &kettle_i18n::Translator::new(kettle_i18n::Language::Es),
+                "v5.0.0",
+                url
+            ),
+            format!(
+                "  ⬆ kettle v5.0.0 disponible — {url}    (clic: abrir · clic derecho: descartar)"
+            )
+        );
+    }
+
+    /// At the standard size every line of the card shows whole in each
+    /// language: the title, the size line, the path or poster line, and the
+    /// remote warning.
+    #[test]
+    fn media_receipt_lines_fit_in_each_language() {
+        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        for tr in [kettle_i18n::Translator::default(), es] {
+            let cards = [
+                receipt(true),
+                receipt(false),
+                video_receipt(true, false, 1),
+                video_receipt(true, true, 3),
+                video_receipt(false, false, 99),
+            ];
+            for card in cards {
+                for remote in [false, true] {
+                    let mut card = card.clone();
+                    card.tr = tr;
+                    card.remote = remote;
+                    let geometry =
+                        media_paste_receipt_geometry(&card, None, CELL, CELL.0, CELL.1).unwrap();
+                    let (title, detail) = media_paste_receipt_text(&card, &geometry, CELL.0);
+                    for line in std::iter::once(title.as_str()).chain(detail.lines()) {
+                        assert!(!line.ends_with('…'), "{line:?} was clipped");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
