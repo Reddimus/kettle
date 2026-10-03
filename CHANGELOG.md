@@ -8,6 +8,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Added
 
+- In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a
+  label opens a path in the default app and copies a URL. A plain label still
+  opens a URL and copies everything else. A path resolves from that pane's
+  directory; it is copied instead when it may name another machine's file (an
+  ssh, mosh or container session, or tmux, screen or zellij as the pane's
+  foreground program), when the label covers only part of a name, or when it
+  climbs with `..`. On Windows path hints are copied.
 - `language` (`auto`, `en`, `es`; Settings → Behavior → Language) chooses the
   language of Kettle's own text: Settings, menus, the Dock menu, prompts,
   notifications and screen-reader names. `auto`, the default, follows the
@@ -44,6 +51,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Quick-select hints and double-click selection take a relative path whole:
+  `out/diagram.png`, not `/diagram.png`, which named a different file. A
+  drive-letter path (`C:/out/diagram.png`) is taken whole too, and an IPv4
+  network such as `10.0.0.1/24` stays an address rather than a path.
 - A compact paste receipt in a remote pane shows its whole warning, "Remote ·
   local path". It was cut to "Remote · local path o…".
 - A key that closes or replaces a modal (the command palette, a picker, a

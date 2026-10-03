@@ -4782,6 +4782,124 @@ pub(crate) struct HintTarget {
     label: String,
     kind: kettle_core::hints::Kind,
     text: String,
+    /// The pane the target was read from, whose directory a relative path
+    /// resolves against, even if focus moved or that pane exited since.
+    pane: u64,
+    /// The target meets a boundary on both sides (see `HintSpan::bounded`).
+    bounded: bool,
+}
+
+/// What picking a quick-select hint does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HintAction {
+    OpenUrl,
+    OpenPath,
+    Copy,
+}
+
+/// A URL opens and anything else is copied; a label typed with Shift
+/// (`alternate`) copies a URL and opens a path. A path that may not name a
+/// whole local file (`unsafe_path`: from a pane that may be remote, or cut
+/// short by a character the pattern does not take) is copied, never opened.
+fn hint_action(kind: kettle_core::hints::Kind, alternate: bool, unsafe_path: bool) -> HintAction {
+    use kettle_core::hints::Kind;
+    match (kind, alternate) {
+        (Kind::Url, false) => HintAction::OpenUrl,
+        (Kind::Path, true) if !unsafe_path => HintAction::OpenPath,
+        _ => HintAction::Copy,
+    }
+}
+
+/// Whether a pane's paths may name files on another machine: it runs a
+/// detected remote session, was launched as a container client, or its
+/// foreground program is a multiplexer or remote client whose sessions Kettle
+/// cannot see. tmux and screen attach to servers outside the pane, so an ssh
+/// inside them leaves no trace in the pane's process tree.
+fn pane_paths_may_be_remote(pane: &crate::mux::Pane) -> bool {
+    pane.remote_context.is_some()
+        || argv_is_nonlocal_client(&pane.argv)
+        || argv_names_remote_or_multiplexer(&pane.argv)
+        || pane
+            .foreground_process
+            .as_ref()
+            .is_some_and(|process| argv_names_remote_or_multiplexer(&process.argv))
+}
+
+/// Whether `argv` runs a terminal multiplexer, a remote shell client or a
+/// container client.
+fn argv_names_remote_or_multiplexer(argv: &[String]) -> bool {
+    let Some(argv0) = argv.first() else {
+        return false;
+    };
+    let name = argv0
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(argv0)
+        .to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    matches!(
+        name,
+        "tmux"
+            | "screen"
+            | "zellij"
+            | "ssh"
+            | "mosh"
+            | "mosh-client"
+            | "et"
+            | "docker"
+            | "podman"
+            | "kubectl"
+            | "lxc-attach"
+    )
+}
+
+/// The local `file://` URL a path hint names: `~/` resolved from `home`, a
+/// relative path from the pane's `cwd`, `.` segments dropped. This touches no
+/// filesystem: the path and an OSC 7 `cwd` are untrusted terminal text, and a
+/// stat would let them reach a network share or an automount (`/net/host`),
+/// leaking the user's address and stalling the UI thread. The OS opener, run
+/// detached, resolves symlinks. `None`, so the hint is copied instead, when
+/// the base is unknown or not local, or the path climbs with `..`, whose
+/// meaning after a symlink only the filesystem knows; always on Windows,
+/// where a link to a `\\host\share` would contact that host.
+fn hint_path_url(text: &str, cwd: Option<&str>, home: Option<&str>) -> Option<String> {
+    use std::path::{Component, Path, PathBuf};
+    if cfg!(windows) {
+        return None;
+    }
+    let local = |base: &str| cwd_is_local(base).then(|| Path::new(base).to_path_buf());
+    let joined = if let Some(rest) = text.strip_prefix("~/") {
+        local(home?)?.join(rest)
+    } else if text.starts_with('/') {
+        PathBuf::from(text)
+    } else if text.as_bytes().get(1) == Some(&b':') {
+        // A drive-letter path names nothing local off Windows.
+        return None;
+    } else {
+        local(cwd?)?.join(text)
+    };
+    let mut resolved = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+            other => resolved.push(other),
+        }
+    }
+    let text = resolved.to_str()?;
+    if !cwd_is_local(text) || !resolved.is_absolute() {
+        return None;
+    }
+    // Percent-encode everything but the characters a file URL's path keeps.
+    let mut url = String::from("file://");
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~:".contains(&byte) {
+            url.push(char::from(byte));
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Some(url)
 }
 
 /// What a context-menu click dispatches, such as a kettle Action (built-in
@@ -12833,6 +12951,9 @@ impl App {
     fn collect_hints(&mut self, ws: &mut WindowState) -> Vec<HintTarget> {
         use kettle_core::hints;
         use kettle_core::{Column, Dimensions, Line, Point};
+        let Some(pane) = ws.mux.active_focus() else {
+            return Vec::new();
+        };
         let Some(p) = ws.mux.focused() else {
             return Vec::new();
         };
@@ -12864,6 +12985,8 @@ impl App {
                 label,
                 kind: s.kind,
                 text: s.text,
+                pane,
+                bounded: s.bounded,
             })
             .collect()
     }
@@ -23301,22 +23424,44 @@ impl App {
                 };
                 if let Some(h) = chosen {
                     ws.hint_state = None;
-                    self.act_hint(ws, &h);
+                    // A label typed with Shift picks the other action. The
+                    // modifier, not the letter's case, so Caps Lock is not Shift.
+                    let alternate = ws.mods.shift_key();
+                    self.act_hint(ws, &h, alternate);
                 }
             }
         }
     }
 
-    fn act_hint(&mut self, ws: &WindowState, h: &HintTarget) {
-        if h.kind == kettle_core::hints::Kind::Url {
-            // Route through open_url helper so the
-            // hint-mode URL-open path also honors the custom URL
-            // handler config.
-            self.open_url(ws, &h.text);
-        } else if let Some(cb) = self.clipboard.as_mut() {
-            // Log instead of silently swallowing.
-            if let Err(e) = cb.set_text(h.text.clone()) {
-                log::warn!("clipboard set_text failed (hint copy): {e}");
+    fn act_hint(&mut self, ws: &mut WindowState, h: &HintTarget, alternate: bool) {
+        let pane = ws.mux.panes.get(&h.pane);
+        // A pane that exited took its directory with it, so nothing local can
+        // be resolved for it.
+        let local = pane.is_some_and(|pane| !pane_paths_may_be_remote(pane));
+        let action = hint_action(h.kind, alternate, !local || !h.bounded);
+        let path_url = match action {
+            HintAction::OpenPath => hint_path_url(
+                &h.text,
+                pane.and_then(|pane| pane.term.current_dir_or_native())
+                    .as_deref(),
+                crate::mux::home_dir_string().as_deref(),
+            ),
+            _ => None,
+        };
+        match (action, path_url) {
+            // Route through open_url so a hint honors the URL safety check,
+            // Lua URL handlers and the custom URL handler, like a click.
+            (HintAction::OpenUrl, _) => self.open_url(ws, &h.text),
+            (HintAction::OpenPath, Some(url)) => self.open_url(ws, &url),
+            // A path Kettle will not open (a climb with `..`, an unknown base,
+            // any path on Windows) is copied instead, as for a plain label.
+            (HintAction::OpenPath, None) | (HintAction::Copy, _) => {
+                if let Some(cb) = self.clipboard.as_mut()
+                    && let Err(e) = cb.set_text(h.text.clone())
+                {
+                    // Log instead of silently swallowing.
+                    log::warn!("clipboard set_text failed (hint copy): {e}");
+                }
             }
         }
     }
@@ -44872,6 +45017,14 @@ mod tests {
         let (s, e) = smart_selection_at(sha_line, 10).unwrap();
         assert_eq!(&sha_line[s..=e], "a1b2c3d4e5f6");
 
+        // A relative path, from its first segment: double-clicking `out`
+        // selects the whole path, as does double-clicking the file name.
+        let path_line = "wrote out/diagram.png ok";
+        for col in [7, 15] {
+            let (s, e) = smart_selection_at(path_line, col).unwrap();
+            assert_eq!(&path_line[s..=e], "out/diagram.png");
+        }
+
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
     }
@@ -47240,6 +47393,173 @@ mod ui_text_drift_tests {
                 "probe.rs:13: label:…",
             ],
             "{found:#?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hint_action_tests {
+    use super::{
+        HintAction, argv_names_remote_or_multiplexer, hint_action, hint_path_url, production_source,
+    };
+    use kettle_core::hints::Kind;
+
+    /// Picking a label acts as before; with Shift a URL is copied and a path
+    /// opens, unless the path may not be a whole local file.
+    #[test]
+    fn shift_swaps_open_and_copy() {
+        for unsafe_path in [false, true] {
+            assert_eq!(
+                hint_action(Kind::Url, false, unsafe_path),
+                HintAction::OpenUrl
+            );
+            assert_eq!(hint_action(Kind::Url, true, unsafe_path), HintAction::Copy);
+            assert_eq!(
+                hint_action(Kind::Path, false, unsafe_path),
+                HintAction::Copy
+            );
+            for kind in [Kind::Hash, Kind::Ip] {
+                assert_eq!(hint_action(kind, false, unsafe_path), HintAction::Copy);
+                assert_eq!(hint_action(kind, true, unsafe_path), HintAction::Copy);
+            }
+        }
+        assert_eq!(hint_action(Kind::Path, true, false), HintAction::OpenPath);
+        assert_eq!(hint_action(Kind::Path, true, true), HintAction::Copy);
+
+        // Shift is the modifier, not the letter's case, so Caps Lock is not
+        // Shift; the target's own pane, boundary and remoteness decide.
+        let src = production_source();
+        let handler = src
+            .split("fn hint_key(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("hint key handler");
+        assert!(handler.contains("let alternate = ws.mods.shift_key();"));
+        assert!(!handler.contains("is_ascii_uppercase"));
+        let act = src
+            .split("fn act_hint(")
+            .nth(1)
+            .and_then(|body| body.split("\n    fn ").next())
+            .expect("act_hint");
+        for needle in [
+            "ws.mux.panes.get(&h.pane)",
+            "pane_paths_may_be_remote(pane)",
+            "!h.bounded",
+            // A path it will not open falls back to the copy a plain label does.
+            "(HintAction::OpenPath, None) | (HintAction::Copy, _) =>",
+        ] {
+            assert!(act.contains(needle), "act_hint must use {needle}");
+        }
+    }
+
+    #[test]
+    fn multiplexers_and_remote_clients_are_not_local() {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        for program in [
+            "tmux",
+            "/usr/bin/screen",
+            "zellij",
+            "ssh",
+            "mosh-client",
+            "docker",
+            "kubectl",
+        ] {
+            assert!(
+                argv_names_remote_or_multiplexer(&argv(&[program, "x"])),
+                "{program}"
+            );
+        }
+        for program in ["zsh", "bash", "vim", "tmuxinator-notes"] {
+            assert!(
+                !argv_names_remote_or_multiplexer(&argv(&[program])),
+                "{program}"
+            );
+        }
+        assert!(!argv_names_remote_or_multiplexer(&[]));
+    }
+
+    /// On Windows a path hint is copied, never opened: resolving it could
+    /// follow a link to a network share and authenticate to that host.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_hint_never_opens() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("out").join("diagram.png");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+        let text = file.to_str().unwrap().replace('\\', "/");
+        assert_eq!(hint_path_url(&text, None, None), None);
+        assert_eq!(
+            hint_path_url("out/diagram.png", root.path().to_str(), None),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_hint_resolves_to_a_safe_local_file_url() {
+        let url = |text: &str| hint_path_url(text, Some("/home/me/proj"), Some("/home/me"));
+        for (text, expected) in [
+            ("out/diagram.png", "file:///home/me/proj/out/diagram.png"),
+            ("./out/diagram.png", "file:///home/me/proj/out/diagram.png"),
+            ("~/notes/today.md", "file:///home/me/notes/today.md"),
+            ("/etc/hosts", "file:///etc/hosts"),
+            (
+                "out/my diagram#1.png",
+                "file:///home/me/proj/out/my%20diagram%231.png",
+            ),
+            (
+                "café/menú.png",
+                "file:///home/me/proj/caf%C3%A9/men%C3%BA.png",
+            ),
+        ] {
+            assert_eq!(url(text).as_deref(), Some(expected), "{text}");
+            assert!(
+                kettle_core::links::is_safe_url(expected),
+                "{expected} must pass the open check"
+            );
+        }
+        // Copied, not opened: a climb whose target only the filesystem knows,
+        // a base that is unknown or not local, a drive path off Windows.
+        assert_eq!(url("../shared/report.pdf"), None);
+        assert_eq!(url("assets/../report.pdf"), None);
+        assert_eq!(hint_path_url("out/a.png", None, Some("/home/me")), None);
+        assert_eq!(hint_path_url("~/a.png", Some("/x"), None), None);
+        assert_eq!(
+            hint_path_url("out/a.png", Some("//evil.example/share"), None),
+            None
+        );
+        assert_eq!(hint_path_url("out/a.png", Some("relative/cwd"), None), None);
+        assert_eq!(url("C:/out/diagram.png"), None);
+    }
+
+    /// The path and an OSC 7 directory are untrusted terminal text: turning
+    /// them into a URL must not stat anything, or a `/net/host/…` path would
+    /// mount a share chosen by whatever printed it, from the UI thread.
+    #[test]
+    fn resolving_a_path_hint_touches_no_filesystem() {
+        let src = production_source();
+        let body = src
+            .split("fn hint_path_url(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("hint_path_url");
+        for call in [
+            "fs::",
+            "canonicalize",
+            ".exists(",
+            ".is_file(",
+            ".is_dir(",
+            "metadata",
+        ] {
+            assert!(!body.contains(call), "hint_path_url must not call {call}");
+        }
+        // Off Windows, where no path hint opens, an absolute path becomes a
+        // URL without being looked at.
+        #[cfg(unix)]
+        assert_eq!(
+            hint_path_url("/net/evil.example/share/x.pdf", None, None).as_deref(),
+            Some("file:///net/evil.example/share/x.pdf")
         );
     }
 }

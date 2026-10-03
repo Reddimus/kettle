@@ -1377,6 +1377,32 @@ restores the first, a typed name previews and Enter keeps it in the config
 file, the Settings Theme row opens it over a hidden panel that Esc brings
 back, and the right-click menu shows "Theme…".
 
+Quick-select hints (kettle-core `hints`) take a relative path whole from its
+first segment (`out/diagram.png`, `./`, `../`, `~/`, `C:/`, Unicode segments),
+keep a URL's path inside the URL, trim trailing punctuation and leave
+`10.0.0.1/24` an address; double-click smart selection follows the same spans.
+Each span says whether it meets a boundary on both sides. `out/report#1.pdf`,
+`out/report,1.pdf`, `out/report(1).pdf`, `foo(1)/bar.png`,
+`user@host:dir/file.txt`, `out/a.png?raw=1`, `"docs/annual report.pdf"`,
+`./docs/it's.md`, and every name in `out/report,dir/file.txt` or
+`./user's/report.pdf` give partial matches. Whole: `out/a.png, b`,
+`"src/main.rs:12"`, `[src/main.rs:12]`, `See src/main.rs:12.`,
+`src/main.cpp(12,5):`, grep's `src/main.rs:12:text`, `**docs/README.md**`,
+`'out/a.png'`, `out/a.png? yes` and `"inspect out/a.png," she said`. A quote
+or `*` before a path must close right after it. In kettle-ui, a plain label opens a URL and copies
+anything else, and Shift (the modifier, not Caps Lock) copies a URL and opens
+a path, only when the span is bounded and its own pane, looked up by id, is
+local: no detected remote session, container client, or tmux, screen, zellij,
+ssh or mosh in front. A path hint resolves against that pane's directory or
+home into a percent-encoded `file://` URL that passes the same open check as
+a clicked link, without touching the filesystem: a source guard keeps stats
+and `canonicalize` out, so a printed `/net/host/…` path cannot mount a share
+from the UI thread. A climb with `..`, a base that is unknown or not local
+(`//host/share` from OSC 7), or a drive path off Windows opens nothing, and on
+Windows no path hint opens. Red checks: the old pattern detects
+`/diagram.png`, dropping the CIDR rule makes `10.0.0.1/24` a path, and
+a comma treated as a boundary in every position lets `out/report,1.pdf` open.
+
 ### kettle-remote (50+ tests)
 
 Injected process-tree fixtures cover SSH and

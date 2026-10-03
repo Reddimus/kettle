@@ -603,7 +603,16 @@ menu as "Theme…", and Enter or a click on the Settings Theme row opens it.
 inline rename overlay for the OS window / active tab / focused pane).
 
 **Modals + UI**: `command_palette` (`palette`), `hint_mode` (`hints` /
-`quick_select`), `new_ssh` (`ssh`), `context_menu`
+`quick_select`; labels the URLs, paths, git hashes and IP addresses on screen:
+type a label to open a URL or copy anything else, or hold Shift while typing it
+to copy a URL or open a path in the default app, resolved from that pane's
+directory. A path is copied instead when it may name another machine's file (a
+detected ssh, mosh or container session, or tmux, screen or zellij as the
+pane's foreground program), when the label marks only part of a name, such as
+`out/report` in `out/report#1.pdf`, or when it climbs with `..`. Kettle does
+not look the path up itself, so printed text cannot make it reach a network
+mount. On Windows path hints are always copied),
+`new_ssh` (`ssh`), `context_menu`
 (`open_context_menu` — the right-click menu — mouse-only by default
 but bindable to a keyboard trigger if you want the menu opened at the
 cursor position).
