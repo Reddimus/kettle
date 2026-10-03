@@ -5,8 +5,12 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-const INPUT_MAGIC: &[u8; 8] = b"KTLVPIN1";
+const INPUT_MAGIC: &[u8; 8] = b"KTLVPIN2";
+/// The shipped binary's build identity, as `main` records it.
+fn build_identity() -> String {
+    env!("KETTLE_SOURCE_ID").to_string()
+}
+const WORKER_SKEW_EXIT: i32 = 9;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const OUTPUT_MAGIC: &[u8; 8] = b"KTLVPOU1";
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -17,8 +21,7 @@ const WORKER_TIMEOUT_EXIT: i32 = 4;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const VIDEO_FIXTURE: &[u8] = include_bytes!("../../kettle-ui/testdata/video-preview.mp4");
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn worker_input(path: &Path) -> Vec<u8> {
+fn worker_input(path: &std::path::Path, identity: &str) -> Vec<u8> {
     #[cfg(unix)]
     let bytes = {
         use std::os::unix::ffi::OsStrExt as _;
@@ -32,11 +35,47 @@ fn worker_input(path: &Path) -> Vec<u8> {
             .flat_map(u16::to_le_bytes)
             .collect::<Vec<_>>()
     };
-    let mut input = Vec::with_capacity(12 + bytes.len());
+    let mut input = Vec::with_capacity(13 + identity.len() + bytes.len());
     input.extend_from_slice(INPUT_MAGIC);
+    input.push(identity.len() as u8);
+    input.extend_from_slice(identity.as_bytes());
     input.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     input.extend_from_slice(&bytes);
     input
+}
+
+/// Send `input` to the shipped worker and wait for it.
+fn run_worker_with(input: &[u8]) -> std::process::Output {
+    use std::io::Write as _;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_kettle"))
+        .arg("__media-preview-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch media preview worker");
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+/// The shipped worker refuses a request from another build, by identity or
+/// by frame version, with its skew exit code, before touching the path.
+#[test]
+fn shipped_worker_refuses_another_build_s_request() {
+    let path = std::path::Path::new("/nonexistent/kettle-skew.mp4");
+    let other = run_worker_with(&worker_input(path, "0.0.0 (000000000000)"));
+    assert_eq!(other.status.code(), Some(WORKER_SKEW_EXIT), "{other:?}");
+    assert!(other.stdout.is_empty());
+
+    let mut old = b"KTLVPIN1".to_vec();
+    old.extend_from_slice(&5u32.to_le_bytes());
+    old.extend_from_slice(b"/a.mp");
+    let old = run_worker_with(&old);
+    assert_eq!(old.status.code(), Some(WORKER_SKEW_EXIT), "{old:?}");
+
+    // The same build reads the request: the path is missing, not skew.
+    let same = run_worker_with(&worker_input(path, &build_identity()));
+    assert_ne!(same.status.code(), Some(WORKER_SKEW_EXIT), "{same:?}");
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -52,7 +91,7 @@ fn run_native_worker(video: &Path) -> std::process::Output {
         .stdin
         .take()
         .unwrap()
-        .write_all(&worker_input(video))
+        .write_all(&worker_input(video, &build_identity()))
         .unwrap();
     child.wait_with_output().unwrap()
 }

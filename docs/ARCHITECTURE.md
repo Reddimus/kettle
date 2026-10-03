@@ -213,6 +213,21 @@ indefinitely. The hidden worker dispatches before update recovery and
 application startup, so poster work never takes install locks or launches an
 update helper.
 
+The worker must be the same build as the GUI that starts it, and an update can
+replace Kettle's executable while it runs. On Linux the GUI starts
+`/proc/self/exe`, which names the running image even after its file was
+renamed or deleted. Elsewhere it starts the path it was launched from, so
+every request carries the GUI's source identity in a versioned frame
+(`KTLVPIN2`), which `main` records before the worker dispatch: the version and
+a hash of the Rust sources (every file under `crates/`, the workspace
+`Cargo.toml` and `Cargo.lock`), computed by kettle's build script without git
+(`KETTLE_SOURCE_ID`), so builds of different sources differ while a rebuild or
+reinstall of the same source, in a checkout, a tarball or a Nix sandbox, does
+not. A worker of another
+build, or one that sees an older frame, exits with its own skew code; the GUI
+does not retry it, logs once that previews wait for a restart, and shows no
+video card.
+
 The child delegates thumbnail extraction instead of bundling a video decoder:
 [Quick Look Thumbnailing](https://developer.apple.com/documentation/quicklookthumbnailing)
 on macOS, [IShellItemImageFactory](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nn-shobjidl_core-ishellitemimagefactory)
