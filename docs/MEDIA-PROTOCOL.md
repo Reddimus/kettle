@@ -135,9 +135,13 @@ other directory is searched. Windows and other platforms report
 
 The worker must be a regular executable file, not a link, without set-id bits,
 owned by the user or root, and neither it nor its directory may be writable by
-group or others. On macOS `/usr/bin/codesign --verify --strict` must pass every
-architecture against this requirement, and the signature must carry the
-hardened runtime flag:
+group or others. On macOS neither may carry an ACL entry that allows anyone
+more than reading (deny entries are fine); on Linux an entry that grants write
+shows in the group mode bits, which are already refused. On macOS
+`/usr/bin/codesign --verify --strict` must pass every architecture against this
+requirement, and every architecture's signature must carry the hardened
+runtime flag (`codesign --display` is asked about each one the universal
+header lists):
 
 ```
 anchor apple generic and identifier "org.kettle.terminal.media-worker"
@@ -150,7 +154,10 @@ That is Apple's chain to a Developer ID Application certificate issued to
 Kettle's team, under the worker's own identifier; the app's identifier is
 `org.kettle.terminal`, so the app's requirement is not reused. Each `codesign`
 run has a 30 second deadline; one that outlasts it is killed and reported as
-`check_failed`, so a stuck tool cannot hold the answer at `checking`. Unsigned,
+`check_failed`, so a stuck tool cannot hold the answer at `checking`. A killed
+run that has not exited a second later, as uninterruptible I/O can cause, is
+left to a reaper, and no `codesign` run starts until it exits, so at most one
+is ever left behind. Unsigned,
 ad-hoc and other teams' workers fail it; there is no flag, variable or
 fallback that accepts them. A local or Nix build on macOS therefore reports
 `unverified_worker` until a development signing policy is chosen. On Linux the

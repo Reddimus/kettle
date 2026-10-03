@@ -1682,10 +1682,20 @@ as the worker, with the hardened runtime, passes a requirement pinned to each
 architecture's cdhash (the control), and fails Kettle's official requirement,
 as the unchanged Apple-signed copy does; with its signature removed, one byte
 of its code flipped or the hardened runtime left out, it fails the pinned
-requirement too. `csreq` compiles the official requirement, and the
-CodeDirectory flags parser reads only the CodeDirectory line. A `codesign`
-run is bounded: a stuck command is killed and reaped at its deadline
-(`check_failed`), and a finished one reports its exit status and stderr. In kettle-ui,
+requirement too. A universal copy rebuilt from separately signed
+architectures fails when either one lacks the hardened runtime, and passes
+when both have it; architectures are read from the universal header (thin
+files, masked subtypes, refusing empty, oversized, repeated or truncated
+lists). An ACL entry that lets anyone write, append or change the security
+of the worker, or add or delete files in its directory, makes it unsafe;
+read-only and deny entries do not, and the ACL text parser counts any entry
+in another shape as allowing. `csreq` compiles the official requirement,
+and the CodeDirectory flags parser reads only the CodeDirectory line. A
+`codesign` run is bounded: a stuck command is killed and reaped at its
+deadline (`check_failed`); a child still running after its grace leaves the
+guard set, no run starts (a marker command never runs) until a reaper
+collects it, and then runs start again; and a finished one reports its exit
+status and stderr. In kettle-ui,
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a
@@ -1697,8 +1707,11 @@ verified worker as anything but `incomplete`, each file-mode, owner, link and
 directory check, dropping the status time from the identity, leaving the
 executable's links unresolved, resolving from the working directory, dropping
 the requirement or the hardened-runtime check, a requirement without the
-team, no deadline or no kill at it, ignoring `codesign`'s exit status, a
-build identity from the git commit, `get_state` without `media`, an
+team, no deadline or no kill at it, ignoring `codesign`'s exit status,
+checking the runtime on the host architecture only, either ACL check, deny
+entries with flags or any allow entry read as safe, an unbounded reap,
+ignoring the reap guard, unmasked subtypes, repeated architectures, a build
+identity from the git commit, `get_state` without `media`, an
 unconfigured client read as checking, hashing absolute paths, not following
 links and leaving `Cargo.lock` out each fail a test above.
 

@@ -83,7 +83,8 @@ impl WorkerPlatform for InstalledWorker {
 }
 
 /// A regular executable file, not a link, owned by this user or root, with
-/// neither it nor its directory writable by anyone else, and no set-id bits.
+/// neither it nor its directory writable by anyone else, by mode or (on macOS)
+/// by ACL, and no set-id bits.
 #[cfg(unix)]
 fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
     use std::os::unix::fs::MetadataExt as _;
@@ -109,6 +110,12 @@ fn inspect(path: &Path) -> Result<FileIdentity, UnavailableCause> {
         && directory.is_dir()
         && directory.mode() & 0o022 == 0
         && owned(directory.uid());
+    #[cfg(target_os = "macos")]
+    let safe = safe
+        && !acl::grants_write(path)
+        && path
+            .parent()
+            .is_some_and(|directory| !acl::grants_write(directory));
     if !safe {
         return Err(UnavailableCause::UnsafeWorkerFile);
     }
@@ -128,28 +135,124 @@ fn inspect(_: &Path) -> Result<FileIdentity, UnavailableCause> {
     Err(UnavailableCause::UnsupportedPlatform)
 }
 
+/// Extended ACLs, which on macOS can let another user write a file whose mode
+/// says otherwise. On Linux an entry that grants write shows in the group mode
+/// bits, which the mode check already refuses.
+#[cfg(target_os = "macos")]
+mod acl {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    use libc::{c_char, c_int, c_void, ssize_t};
+
+    const ACL_TYPE_EXTENDED: c_int = 0x0000_0100;
+    /// Permissions that only read. An entry that allows any other counts as
+    /// letting someone write.
+    const READ_ONLY: [&[u8]; 5] = [
+        b"read",
+        b"execute",
+        b"readattr",
+        b"readextattr",
+        b"readsecurity",
+    ];
+
+    unsafe extern "C" {
+        fn acl_get_link_np(path: *const c_char, kind: c_int) -> *mut c_void;
+        fn acl_to_text(acl: *mut c_void, length: *mut ssize_t) -> *mut c_char;
+        fn acl_free(object: *mut c_void) -> c_int;
+    }
+
+    /// Whether the ACL on `path` itself, not through a link, allows anyone
+    /// more than reading. Deny entries only take rights away. An ACL that
+    /// cannot be read counts as allowing.
+    pub(super) fn grants_write(path: &Path) -> bool {
+        let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+            return true;
+        };
+        // SAFETY: `path` is NUL-terminated and outlives the call.
+        let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
+        if acl.is_null() {
+            // A file without an extended ACL reads as ENOENT.
+            return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+        }
+        let mut length: ssize_t = 0;
+        // SAFETY: `acl` is the live ACL just returned, and `length` a valid
+        // place for its text length.
+        let text = unsafe { acl_to_text(acl, &mut length) };
+        let grants = text.is_null() || {
+            // SAFETY: acl_to_text returns a NUL-terminated string, valid
+            // until it is freed below.
+            let grants = text_grants_write(unsafe { CStr::from_ptr(text) }.to_bytes());
+            // SAFETY: `text` came from acl_to_text and is freed once.
+            unsafe { acl_free(text.cast()) };
+            grants
+        };
+        // SAFETY: `acl` came from acl_get_link_np and is freed once.
+        unsafe { acl_free(acl) };
+        grants
+    }
+
+    /// Whether an `acl_to_text` listing has an entry that allows more than
+    /// reading. Entries read `tag:uuid:name:id:allow[,flags]:permissions`; an
+    /// entry in any other shape counts as allowing.
+    pub(super) fn text_grants_write(text: &[u8]) -> bool {
+        text.split(|&byte| byte == b'\n')
+            .filter(|entry| !entry.is_empty() && !entry.starts_with(b"!#"))
+            .any(|entry| {
+                let fields: Vec<&[u8]> = entry.split(|&byte| byte == b':').collect();
+                let [_, _, _, _, kind, permissions] = fields.as_slice() else {
+                    return true;
+                };
+                let deny = kind.split(|&byte| byte == b',').next() == Some(b"deny");
+                !deny
+                    && permissions
+                        .split(|&byte| byte == b',')
+                        .any(|permission| !READ_ONLY.contains(&permission))
+            })
+    }
+}
+
 /// The worker's code signature, checked with the `codesign` macOS ships, as
 /// the updater checks the app bundle.
 #[cfg(target_os = "macos")]
 mod signature {
     use std::io::Read as _;
     use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::process::{Child, Command, ExitStatus, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use kettle_media::client::UnavailableCause;
 
     const CODESIGN: &str = "/usr/bin/codesign";
-    /// How long one `codesign` run may take. A run that outlasts it is
-    /// `check_failed`, so a stuck tool cannot hold the answer at `checking`.
-    const CODESIGN_DEADLINE: Duration = Duration::from_secs(30);
+    /// How long one `codesign` run may take, and how long a run killed at that
+    /// deadline gets to exit. A run past its deadline is `check_failed`, so a
+    /// stuck tool cannot hold the answer at `checking`.
+    const CODESIGN_BOUNDS: Bounds = Bounds {
+        run: Duration::from_secs(30),
+        reap: Duration::from_secs(1),
+    };
+    /// Set while a `codesign` run killed at its deadline has not exited, as a
+    /// filesystem stuck in uninterruptible I/O can make it. No run starts
+    /// meanwhile, because it would hang the same way, so at most one is left
+    /// behind.
+    static CODESIGN_UNREAPED: AtomicBool = AtomicBool::new(false);
     /// More than `codesign --display` ever reports; the rest is not read.
     const MAX_REPORT_BYTES: u64 = 64 * 1024;
+    /// More architectures than any worker has.
+    const MAX_ARCHITECTURES: usize = 8;
     /// The worker's signing identifier. The app's is `org.kettle.terminal`, so
     /// the app's own requirement cannot be reused for the worker.
     pub(super) const WORKER_IDENTIFIER: &str = "org.kettle.terminal.media-worker";
     /// The CodeDirectory flag for the hardened runtime.
     const CS_RUNTIME: u32 = 0x1_0000;
+
+    #[derive(Clone, Copy)]
+    pub(super) struct Bounds {
+        pub(super) run: Duration,
+        pub(super) reap: Duration,
+    }
 
     /// Apple's chain to a Developer ID Application certificate issued to
     /// Kettle's team, under the worker's own identifier.
@@ -164,7 +267,7 @@ mod signature {
     }
 
     /// A strict signature check of every architecture against `requirement`,
-    /// then the hardened runtime, which a requirement cannot express.
+    /// then the hardened runtime on each, which a requirement cannot express.
     pub(super) fn verify(path: &Path, requirement: &str) -> Result<(), UnavailableCause> {
         let mut verify = Command::new(CODESIGN);
         verify
@@ -172,44 +275,92 @@ mod signature {
             .arg(format!("={requirement}"))
             .arg("--")
             .arg(path);
-        let (verified, _) = run_bounded(verify, CODESIGN_DEADLINE)?;
+        let (verified, _) = run_bounded(verify, CODESIGN_BOUNDS, &CODESIGN_UNREAPED)?;
         if !verified {
             return Err(UnavailableCause::Unverified);
         }
-        // `codesign --display` reports on stderr.
-        let mut display = Command::new(CODESIGN);
-        display.args(["--display", "--verbose=1", "--"]).arg(path);
-        let (described, report) = run_bounded(display, CODESIGN_DEADLINE)?;
-        if !described || !hardened_runtime(&String::from_utf8_lossy(&report)) {
-            return Err(UnavailableCause::Unverified);
+        // `codesign --display` reports one architecture, on stderr.
+        for architecture in architectures(path)? {
+            let mut display = Command::new(CODESIGN);
+            display.args(["--display", "--verbose=1"]);
+            if let Some(architecture) = &architecture {
+                display.args(["--arch", architecture]);
+            }
+            display.arg("--").arg(path);
+            let (described, report) = run_bounded(display, CODESIGN_BOUNDS, &CODESIGN_UNREAPED)?;
+            if !described || !hardened_runtime(&String::from_utf8_lossy(&report)) {
+                return Err(UnavailableCause::Unverified);
+            }
         }
         Ok(())
     }
 
+    /// The architectures in the Mach-O file at `path`, read from its header.
+    fn architectures(path: &Path) -> Result<Vec<Option<String>>, UnavailableCause> {
+        let mut header = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|file| file.take(4096).read_to_end(&mut header))
+            .map_err(|_| UnavailableCause::Unverified)?;
+        parse_architectures(&header).ok_or(UnavailableCause::Unverified)
+    }
+
+    /// The architectures a Mach-O header lists, each as `codesign --arch`
+    /// takes it by number (`cputype,cpusubtype`), or one `None` for a
+    /// single-architecture file. `None` for anything else, including a
+    /// universal header with no, too many or repeated architectures.
+    pub(super) fn parse_architectures(header: &[u8]) -> Option<Vec<Option<String>>> {
+        let word = |at: usize| {
+            header
+                .get(at..at.checked_add(4)?)
+                .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                .map(u32::from_be_bytes)
+        };
+        let entry_bytes = match word(0)? {
+            0xcafe_babe => 20,
+            0xcafe_babf => 32,
+            0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe => return Some(vec![None]),
+            _ => return None,
+        };
+        let count = usize::try_from(word(4)?).ok()?;
+        if count == 0 || count > MAX_ARCHITECTURES {
+            return None;
+        }
+        let mut architectures = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = 8 + index * entry_bytes;
+            // The top byte of a subtype holds capability bits, not the subtype.
+            let architecture = format!("{},{}", word(at)?, word(at + 4)? & 0x00ff_ffff);
+            if architectures.contains(&Some(architecture.clone())) {
+                return None;
+            }
+            architectures.push(Some(architecture));
+        }
+        Some(architectures)
+    }
+
     /// Run `command` with no input or standard output, and report whether it
-    /// succeeded and the start of what it wrote to stderr. One that runs past
-    /// `deadline` is killed and reaped.
+    /// succeeded and the start of what it wrote to stderr. A run past
+    /// `bounds.run` is killed and given `bounds.reap` to exit; one that does
+    /// not is left to a reaper with `unreaped` set, and while it is set no run
+    /// starts.
     pub(super) fn run_bounded(
         mut command: Command,
-        deadline: Duration,
+        bounds: Bounds,
+        unreaped: &'static AtomicBool,
     ) -> Result<(bool, Vec<u8>), UnavailableCause> {
+        if unreaped.load(Ordering::Acquire) {
+            return Err(UnavailableCause::CheckFailed);
+        }
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|_| UnavailableCause::CheckFailed)?;
-        let until = Instant::now() + deadline;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(UnavailableCause::CheckFailed);
-                }
-            }
+        let Some(status) = wait_until(&mut child, Instant::now() + bounds.run) else {
+            let _ = child.kill();
+            reap(child, bounds.reap, unreaped);
+            return Err(UnavailableCause::CheckFailed);
         };
         // The report is small enough to sit in the pipe until the tool exits.
         let mut report = Vec::new();
@@ -217,6 +368,33 @@ mod signature {
             let _ = stderr.take(MAX_REPORT_BYTES).read_to_end(&mut report);
         }
         Ok((status.success(), report))
+    }
+
+    /// `child`'s exit status, if it exits by `until`.
+    fn wait_until(child: &mut Child, until: Instant) -> Option<ExitStatus> {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
+                _ => return None,
+            }
+        }
+    }
+
+    /// Give `child` `grace` to exit. One that does not is reaped by a thread
+    /// whenever it does, with `unreaped` set until then. Without that thread
+    /// it stays set, and no `codesign` runs again in this process.
+    pub(super) fn reap(mut child: Child, grace: Duration, unreaped: &'static AtomicBool) {
+        if wait_until(&mut child, Instant::now() + grace).is_some() {
+            return;
+        }
+        unreaped.store(true, Ordering::Release);
+        let _ = std::thread::Builder::new()
+            .name("kettle-codesign-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+                unreaped.store(false, Ordering::Release);
+            });
     }
 
     /// Whether `codesign --display` reports a CodeDirectory with the hardened
@@ -338,7 +516,7 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt as _;
 
-        fn install() -> (tempfile::TempDir, PathBuf) {
+        pub(super) fn install() -> (tempfile::TempDir, PathBuf) {
             let directory = tempfile::tempdir().unwrap();
             std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755))
                 .unwrap();
@@ -432,9 +610,28 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     mod macos {
-        use super::super::signature::{WORKER_IDENTIFIER, hardened_runtime, run_bounded, verify};
+        use super::super::acl::text_grants_write;
+        use super::super::signature::{
+            Bounds, WORKER_IDENTIFIER, hardened_runtime, parse_architectures, reap, run_bounded,
+            verify,
+        };
         use super::*;
         use std::process::Command;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        /// A guard of its own for each test, as production has one for
+        /// `codesign`.
+        fn unreaped() -> &'static AtomicBool {
+            Box::leak(Box::new(AtomicBool::new(false)))
+        }
+
+        fn bounds(run: Duration) -> Bounds {
+            Bounds {
+                run,
+                reap: Duration::from_secs(10),
+            }
+        }
 
         fn run(program: &str, args: &[&str], path: &Path) -> String {
             let output = Command::new(program).args(args).arg(path).output().unwrap();
@@ -461,6 +658,48 @@ mod tests {
             }
             args.push("--");
             run("/usr/bin/codesign", &args, path);
+        }
+
+        /// A universal copy of `/usr/bin/true` whose architectures are signed
+        /// ad hoc as the worker one at a time, each with the hardened runtime
+        /// as `runtime` says, then laid out again behind a new header.
+        /// (`codesign` will not re-sign one architecture of a universal file.)
+        fn universal(directory: &Path, runtime: &[bool]) -> PathBuf {
+            let original = std::fs::read("/usr/bin/true").unwrap();
+            let word = |at: usize| u32::from_be_bytes(original[at..at + 4].try_into().unwrap());
+            let size = |value: u32| usize::try_from(value).unwrap();
+            assert_eq!(word(0), 0xcafe_babe, "/usr/bin/true is universal");
+            assert_eq!(size(word(4)), runtime.len());
+            let mut out = vec![0; 8 + 20 * runtime.len()];
+            out[..4].copy_from_slice(&0xcafe_babe_u32.to_be_bytes());
+            out[4..8].copy_from_slice(&word(4).to_be_bytes());
+            for (index, &runtime) in runtime.iter().enumerate() {
+                let entry = 8 + 20 * index;
+                let (offset, length, align) = (
+                    size(word(entry + 8)),
+                    size(word(entry + 12)),
+                    word(entry + 16),
+                );
+                let thin = directory.join(format!("architecture-{index}"));
+                std::fs::write(&thin, &original[offset..offset + length]).unwrap();
+                sign_ad_hoc(&thin, runtime);
+                let signed = std::fs::read(&thin).unwrap();
+                let alignment = 1 << align;
+                let start = out.len().div_ceil(alignment) * alignment;
+                out.resize(start, 0);
+                // cputype and cpusubtype stay; offset, size and alignment are
+                // the new layout's.
+                out[entry..entry + 8].copy_from_slice(&original[entry..entry + 8]);
+                out[entry + 8..entry + 12]
+                    .copy_from_slice(&u32::try_from(start).unwrap().to_be_bytes());
+                out[entry + 12..entry + 16]
+                    .copy_from_slice(&u32::try_from(signed.len()).unwrap().to_be_bytes());
+                out[entry + 16..entry + 20].copy_from_slice(&align.to_be_bytes());
+                out.extend_from_slice(&signed);
+            }
+            let path = directory.join(WORKER_NAME);
+            std::fs::write(&path, out).unwrap();
+            path
         }
 
         /// A requirement only this exact signed file meets, standing in for
@@ -506,6 +745,7 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(output.status.success(), "csreq refused the requirement");
+            // csreq prints the requirement back in its canonical form.
             let text = String::from_utf8_lossy(&output.stdout);
             assert!(text.contains(WORKER_IDENTIFIER), "{text}");
             assert!(
@@ -592,15 +832,117 @@ mod tests {
         }
 
         #[test]
+        fn every_architecture_needs_the_hardened_runtime() {
+            for runtime in [[true, false], [false, true]] {
+                let directory = tempfile::tempdir().unwrap();
+                let worker = universal(directory.path(), &runtime);
+                assert_eq!(
+                    verify(&worker, &pinned_requirement(&worker)),
+                    Err(UnavailableCause::Unverified),
+                    "{runtime:?}"
+                );
+            }
+            // The control: the same layout with the runtime on both passes.
+            let directory = tempfile::tempdir().unwrap();
+            let worker = universal(directory.path(), &[true, true]);
+            assert_eq!(verify(&worker, &pinned_requirement(&worker)), Ok(()));
+        }
+
+        #[test]
+        fn architectures_are_read_from_the_header() {
+            let universal = |entries: &[(u32, u32)]| {
+                let mut header = 0xcafe_babe_u32.to_be_bytes().to_vec();
+                header.extend(u32::try_from(entries.len()).unwrap().to_be_bytes());
+                for &(cputype, subtype) in entries {
+                    for word in [cputype, subtype, 0x4000, 0x100, 14] {
+                        header.extend(word.to_be_bytes());
+                    }
+                }
+                header
+            };
+            let both = universal(&[(0x0100_0007, 3), (0x0100_000c, 0x8000_0002)]);
+            assert_eq!(
+                parse_architectures(&both),
+                Some(vec![
+                    Some("16777223,3".to_string()),
+                    Some("16777228,2".to_string())
+                ])
+            );
+            for magic in [0xfeed_facf_u32, 0xcffa_edfe, 0xfeed_face, 0xcefa_edfe] {
+                assert_eq!(parse_architectures(&magic.to_be_bytes()), Some(vec![None]));
+            }
+            let repeated = universal(&[(0x0100_000c, 0), (0x0100_000c, 0)]);
+            let nine = universal(&[
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (4, 0),
+                (5, 0),
+                (6, 0),
+                (7, 0),
+                (8, 0),
+                (9, 0),
+            ]);
+            for header in [
+                universal(&[]),
+                nine,
+                repeated,
+                both[..30].to_vec(),
+                b"#!/bin/sh\n".to_vec(),
+                Vec::new(),
+            ] {
+                assert_eq!(parse_architectures(&header), None, "{header:?}");
+            }
+        }
+
+        #[test]
         fn a_stuck_check_is_stopped_at_its_deadline() {
             let mut sleep = Command::new("/bin/sleep");
             sleep.arg("30");
+            let unreaped = unreaped();
             let started = std::time::Instant::now();
             assert_eq!(
-                run_bounded(sleep, std::time::Duration::from_millis(100)),
+                run_bounded(sleep, bounds(Duration::from_millis(100)), unreaped),
                 Err(UnavailableCause::CheckFailed)
             );
-            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            assert!(started.elapsed() < Duration::from_secs(10));
+            // Killed and reaped within its grace: nothing is left behind.
+            assert!(!unreaped.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn a_check_that_outlives_its_kill_blocks_new_runs_until_reaped() {
+            // A child still running when its grace ends, as one stuck in
+            // uninterruptible I/O would be after the kill.
+            let mut slow = Command::new("/bin/sleep");
+            slow.arg("1");
+            let child = slow.spawn().unwrap();
+            let unreaped = unreaped();
+            reap(child, Duration::ZERO, unreaped);
+            assert!(unreaped.load(Ordering::Acquire));
+            // Meanwhile no run starts: this one would leave a marker.
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("ran");
+            let mut touch = Command::new("/usr/bin/touch");
+            touch.arg(&marker);
+            assert_eq!(
+                run_bounded(touch, bounds(Duration::from_secs(10)), unreaped),
+                Err(UnavailableCause::CheckFailed)
+            );
+            assert!(!marker.exists());
+            // Once the child exits the reaper clears the guard.
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while unreaped.load(Ordering::Acquire) {
+                assert!(std::time::Instant::now() < deadline, "never reaped");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let mut touch = Command::new("/usr/bin/touch");
+            touch.arg(&marker);
+            assert_eq!(
+                run_bounded(touch, bounds(Duration::from_secs(10)), unreaped),
+                Ok((true, Vec::new()))
+            );
+            assert!(marker.exists());
         }
 
         #[test]
@@ -608,15 +950,76 @@ mod tests {
             let mut report = Command::new("/bin/sh");
             report.args(["-c", "echo report >&2; exit 3"]);
             assert_eq!(
-                run_bounded(report, std::time::Duration::from_secs(10)),
+                run_bounded(report, bounds(Duration::from_secs(10)), unreaped()),
                 Ok((false, b"report\n".to_vec()))
             );
             let mut quiet = Command::new("/bin/sh");
             quiet.args(["-c", "exit 0"]);
             assert_eq!(
-                run_bounded(quiet, std::time::Duration::from_secs(10)),
+                run_bounded(quiet, bounds(Duration::from_secs(10)), unreaped()),
                 Ok((true, Vec::new()))
             );
+        }
+
+        #[test]
+        fn an_acl_that_lets_others_write_is_refused() {
+            // (what the ACL is on, the entry, whether the worker is refused)
+            for (on_directory, entry, refused) in [
+                (false, "everyone allow write", true),
+                (false, "everyone allow append", true),
+                (false, "everyone allow writesecurity", true),
+                (true, "everyone allow add_file,delete_child", true),
+                (false, "everyone allow read,execute", false),
+                (false, "everyone deny delete", false),
+                (true, "everyone deny delete_child", false),
+            ] {
+                let (install, worker) = files::install();
+                let target = if on_directory {
+                    install.path()
+                } else {
+                    worker.as_path()
+                };
+                run("/bin/chmod", &["+a", entry], target);
+                let inspected = inspect(&worker);
+                // Clear it again: a deny entry would stop the cleanup.
+                run("/bin/chmod", &["-N"], target);
+                if refused {
+                    assert_eq!(
+                        inspected,
+                        Err(UnavailableCause::UnsafeWorkerFile),
+                        "{entry}"
+                    );
+                } else {
+                    assert!(inspected.is_ok(), "{entry}: {inspected:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn acl_text_counts_only_read_and_deny_entries_as_safe() {
+            let everyone = "group:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:everyone:12";
+            for (text, grants) in [
+                ("!#acl 1\n".to_string(), false),
+                (format!("!#acl 1\n{everyone}:deny:delete\n"), false),
+                (
+                    format!("!#acl 1\n{everyone}:deny,file_inherit:write,delete\n"),
+                    false,
+                ),
+                (format!("!#acl 1\n{everyone}:allow:read,readattr\n"), false),
+                (format!("!#acl 1\n{everyone}:allow:write\n"), true),
+                (
+                    format!("!#acl 1\n{everyone}:allow,file_inherit:read,chown\n"),
+                    true,
+                ),
+                (
+                    format!("!#acl 1\n{everyone}:deny:delete\n{everyone}:allow:append\n"),
+                    true,
+                ),
+                // An entry in another shape counts as allowing.
+                ("!#acl 1\nuser:allow:read\n".to_string(), true),
+            ] {
+                assert_eq!(text_grants_write(text.as_bytes()), grants, "{text}");
+            }
         }
 
         #[test]
