@@ -255,12 +255,15 @@ the platform marks the worker's stdin pipe `F_SETNOSIGPIPE` when it starts
 the worker. Either way the write fails with `EPIPE` instead.
 
 **Memory.** While it waits, the caller's thread also measures the worker and
-everything it started every 25 ms: on macOS the physical footprint
-(`proc_pid_rusage`, as Activity Monitor reports it) of the worker and its
-descendants (`proc_listchildpids`); on Linux resident pages from each
-process's `statm`, finding descendants through each thread's `children` list,
-or through the worker's process group where the kernel has no such lists. The
-sum may count shared pages twice, which errs toward stopping the job. Above
+everything in its process group on a fixed 25 ms schedule (a slow probe skips
+ticks rather than shifting them): that is everything a group kill reaches,
+including a grandchild whose parent has exited. On macOS the group comes from
+`proc_listpgrppids` and each member's physical footprint from
+`proc_pid_rusage`, as Activity Monitor reports it; on Linux from each thread's
+`children` list plus a scan of `/proc` for the group at most once a second,
+and each member's resident pages from `statm`. A member counts only if it is
+still in the group once measured, so a pid reused in between is not counted.
+The sum may count shared pages twice, which errs toward stopping the job. Above
 768 MiB the worker's group is killed: `RenderResource`, never retried, before
 Ready or after. A live worker that cannot be measured, or a tree of more than
 64 processes, fails the job closed (`WorkerUnavailable`) rather than count as

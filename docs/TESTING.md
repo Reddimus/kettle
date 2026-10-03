@@ -1781,7 +1781,9 @@ process, and it can render again; and in a child process with SIGCHLD
 ignored, no worker starts, and one started anyway reads as lost and is never
 signalled, whether it is asked about or killed first. The footprint tests find
 a worker's whole tree (the worker and two children), count 32 MiB a child
-holds while the worker alone holds little, measure a reaped worker as 0, and,
+holds while the worker alone holds little, count 32 MiB an orphaned grandchild
+holds (its parent exited; it stays in the group), leave out a process in
+another group (as a reused pid would be), measure a reaped worker as 0, and,
 through the client with a 16 MiB limit, stop a worker whose child holds 64 MiB
 as `RenderResource`; on Linux the process-group fallback finds the same tree,
 and the `stat` parser reads the group past a command name with spaces and
@@ -1799,8 +1801,9 @@ self-exit read as killed, hung starts piling up, workers started while
 SIGCHLD is ignored, a kill that signals a lost worker, a self-exit at the
 reply deadline read as a timeout, a file check outside the deadline, no
 stuck-limit recheck in the start, a footprint never enforced or never
-sampled, the limit itself refused, an unmeasurable worker read as fine, and
-descendants not walked each fail a test above.
+sampled, the limit itself refused, an unmeasurable worker read as fine,
+descendants not walked, the group not listed (macOS) or scanned (Linux), and
+reused pids counted each fail a test above.
 `get_state_reports_media_availability_without_waiting` checks that
 `get_state` carries `media`, that an unconfigured GUI reports
 `not_configured`, that a held check answers `checking` at once, and that a

@@ -322,6 +322,8 @@ struct Running<'a> {
     process: Option<Box<dyn WorkerProcess>>,
     /// The worker's own exit, seen before any kill, and when.
     exited: Option<(WorkerExit, Instant)>,
+    /// When the worker is next looked at and measured, on a fixed schedule.
+    next_sample: Instant,
     shared: &'a Arc<Shared>,
     budgets: Budgets,
 }
@@ -331,6 +333,7 @@ impl<'a> Running<'a> {
         Self {
             process: Some(process),
             exited: None,
+            next_sample: Instant::now() + TICK,
             shared,
             budgets,
         }
@@ -353,13 +356,22 @@ impl<'a> Running<'a> {
             if now >= limit {
                 return Err(Wait::Timeout);
             }
-            match received.recv_timeout((limit - now).min(TICK)) {
+            if now >= self.next_sample {
+                self.look();
+                self.measure()?;
+                // The next tick on the schedule, not a tick after this probe;
+                // ticks a slow probe overran are skipped, not made up.
+                self.next_sample += TICK;
+                let now = Instant::now();
+                if self.next_sample <= now {
+                    self.next_sample = now + TICK;
+                }
+                continue;
+            }
+            match received.recv_timeout(limit.min(self.next_sample) - now) {
                 Ok(event) => return Ok(event),
                 Err(RecvTimeoutError::Disconnected) => return Err(Wait::ReaderGone),
-                Err(RecvTimeoutError::Timeout) => {
-                    self.look();
-                    self.measure()?;
-                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
     }

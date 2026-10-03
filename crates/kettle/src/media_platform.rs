@@ -116,6 +116,7 @@ fn spawn(path: &Path) -> std::io::Result<SpawnedWorker> {
     let mut process = GroupProcess {
         child,
         reaped: false,
+        probe: footprint::Probe::default(),
     };
     let (Some(stdin), Some(stdout)) = pipes else {
         process.kill();
@@ -179,6 +180,7 @@ fn spawn(_: &Path) -> std::io::Result<SpawnedWorker> {
 struct GroupProcess {
     child: std::process::Child,
     reaped: bool,
+    probe: footprint::Probe,
 }
 
 #[cfg(unix)]
@@ -219,7 +221,8 @@ impl WorkerProcess for GroupProcess {
         if self.reaped {
             return Ok(0);
         }
-        footprint::of_tree(self.pid()?)
+        let pid = self.pid()?;
+        self.probe.measure(pid)
     }
 }
 
@@ -293,40 +296,102 @@ mod footprint {
 
     use libc::pid_t;
 
-    /// More processes than a worker's tree may hold; past this, measuring
+    /// More processes than a worker's group may hold; past this, measuring
     /// fails, and the job with it.
     const MAX_TRACKED: usize = 64;
 
-    /// The worker's memory plus its descendants', summed. Shared pages may be
-    /// counted twice, which errs on the side of stopping the job.
-    pub(super) fn of_tree(leader: pid_t) -> io::Result<u64> {
-        let mut total: u64 = 0;
-        for pid in tree(leader)? {
-            match of_process(pid) {
-                Ok(bytes) => {
-                    total = total
-                        .checked_add(bytes)
-                        .ok_or_else(|| io::Error::other("footprint overflow"))?;
+    /// How a worker's group is measured from one sample to the next.
+    #[derive(Default)]
+    pub(super) struct Probe {
+        /// Linux has no cheap list of a process group, so the group is found
+        /// by scanning `/proc` now and then, and its members kept meanwhile.
+        #[cfg(target_os = "linux")]
+        group: Vec<pid_t>,
+        #[cfg(target_os = "linux")]
+        scanned: Option<std::time::Instant>,
+    }
+
+    impl Probe {
+        /// The memory held by the worker (`leader`) and every process in its
+        /// process group, summed. Shared pages may be counted twice, which
+        /// errs on the side of stopping the job.
+        pub(super) fn measure(&mut self, leader: pid_t) -> io::Result<u64> {
+            let mut total: u64 = 0;
+            for pid in self.members(leader)? {
+                match of_member(leader, pid) {
+                    Ok(Some(bytes)) => {
+                        total = total
+                            .checked_add(bytes)
+                            .ok_or_else(|| io::Error::other("footprint overflow"))?;
+                    }
+                    // Gone, or a reused pid now outside the group.
+                    Ok(None) => {}
+                    Err(error) if pid != leader && gone(&error) => {}
+                    Err(error) => return Err(error),
                 }
-                // A descendant that exited as it was measured holds nothing.
-                Err(error) if pid != leader && gone(&error) => {}
-                Err(error) => return Err(error),
             }
+            Ok(total)
         }
-        Ok(total)
+
+        /// The worker and its group, the worker first: everything a group
+        /// kill reaches, including a grandchild whose parent has exited.
+        #[cfg(target_os = "macos")]
+        pub(super) fn members(&mut self, leader: pid_t) -> io::Result<Vec<pid_t>> {
+            let mut members = vec![leader];
+            for pid in listed(leader, libc::proc_listpgrppids)? {
+                if !members.contains(&pid) {
+                    members.push(pid);
+                }
+            }
+            capped(members)
+        }
+
+        /// The worker and its group, the worker first. Its descendants come
+        /// from each thread's list of the children it started; the process
+        /// group (which also holds a grandchild whose parent has exited) from
+        /// a scan of `/proc` at most once a second, since that reads every
+        /// process.
+        #[cfg(target_os = "linux")]
+        pub(super) fn members(&mut self, leader: pid_t) -> io::Result<Vec<pid_t>> {
+            const RESCAN: std::time::Duration = std::time::Duration::from_secs(1);
+            if self.scanned.is_none_or(|at| at.elapsed() >= RESCAN) {
+                self.group = group_members(leader)?;
+                self.scanned = Some(std::time::Instant::now());
+            }
+            let mut members = if children_listed() {
+                descendants(leader)?
+            } else {
+                vec![leader]
+            };
+            for &pid in &self.group {
+                if !members.contains(&pid) {
+                    members.push(pid);
+                }
+            }
+            capped(members)
+        }
+    }
+
+    fn capped(members: Vec<pid_t>) -> io::Result<Vec<pid_t>> {
+        if members.len() > MAX_TRACKED {
+            return Err(io::Error::other("too many processes to measure"));
+        }
+        Ok(members)
     }
 
     fn gone(error: &io::Error) -> bool {
         error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
     }
 
-    /// The leader and every process below it, the leader first.
-    pub(super) fn tree(leader: pid_t) -> io::Result<Vec<pid_t>> {
+    /// The leader and every process below it, through each thread's
+    /// children list, the leader first.
+    #[cfg(target_os = "linux")]
+    pub(super) fn descendants(leader: pid_t) -> io::Result<Vec<pid_t>> {
         let mut found = vec![leader];
         let mut next = 0;
         while let Some(&pid) = found.get(next) {
             next += 1;
-            let children = match children(leader, pid) {
+            let children = match children(pid) {
                 Ok(children) => children,
                 Err(error) if pid != leader && gone(&error) => continue,
                 Err(error) => return Err(error),
@@ -343,25 +408,21 @@ mod footprint {
         Ok(found)
     }
 
-    /// The children of `pid`: each of its threads lists those it started.
-    /// A kernel without those lists is asked for `leader`'s process group
-    /// instead, which holds the whole tree at once.
+    /// The children `pid`'s threads started. A thread that exits while it is
+    /// read has none left; only the process itself being gone is an error.
     #[cfg(target_os = "linux")]
-    fn children(leader: pid_t, pid: pid_t) -> io::Result<Vec<pid_t>> {
-        if !children_listed() {
-            return if pid == leader {
-                group_members(leader)
-            } else {
-                Ok(Vec::new())
-            };
-        }
+    fn children(pid: pid_t) -> io::Result<Vec<pid_t>> {
         let mut found = Vec::new();
         for task in std::fs::read_dir(format!("/proc/{pid}/task"))? {
             let task = task?.file_name();
-            let listed = read_capped(
+            let listed = match read_capped(
                 &format!("/proc/{pid}/task/{}/children", task.to_string_lossy()),
                 64 * 1024,
-            )?;
+            ) {
+                Ok(listed) => listed,
+                Err(error) if gone(&error) => continue,
+                Err(error) => return Err(error),
+            };
             for field in listed.split_ascii_whitespace() {
                 found.push(field.parse().map_err(io::Error::other)?);
             }
@@ -411,20 +472,27 @@ mod footprint {
         rest.split_ascii_whitespace().nth(2)?.parse().ok()
     }
 
-    /// Resident pages times the page size, from `statm`.
+    /// The memory `pid` holds, if it is still in `leader`'s process group
+    /// once measured: a pid that exited and was reused by someone else in
+    /// the meantime is not counted. Resident pages times the page size.
     #[cfg(target_os = "linux")]
-    pub(super) fn of_process(pid: pid_t) -> io::Result<u64> {
+    pub(super) fn of_member(leader: pid_t, pid: pid_t) -> io::Result<Option<u64>> {
         let statm = read_capped(&format!("/proc/{pid}/statm"), 256)?;
         let pages: u64 = statm
             .split_ascii_whitespace()
             .nth(1)
             .and_then(|field| field.parse().ok())
             .ok_or_else(|| io::Error::other("unreadable statm"))?;
+        let stat = read_capped(&format!("/proc/{pid}/stat"), 4096)?;
+        if process_group(&stat) != Some(leader) {
+            return Ok(None);
+        }
         // SAFETY: sysconf reads a constant.
         let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
             .map_err(io::Error::other)?;
         pages
             .checked_mul(page)
+            .map(Some)
             .ok_or_else(|| io::Error::other("footprint overflow"))
     }
 
@@ -438,46 +506,66 @@ mod footprint {
         Ok(text)
     }
 
-    /// The children of `pid`, from the kernel's process list. A list that
-    /// fills its buffer may be cut short, so that fails rather than guesses.
+    /// A libproc pid list (`proc_listpgrppids`, `proc_listchildpids`) for
+    /// `id`. A list that fills its buffer may be cut short, so that fails
+    /// rather than guesses.
     #[cfg(target_os = "macos")]
-    fn children(_leader: pid_t, pid: pid_t) -> io::Result<Vec<pid_t>> {
+    pub(super) fn listed(
+        id: pid_t,
+        list: unsafe extern "C" fn(pid_t, *mut libc::c_void, libc::c_int) -> libc::c_int,
+    ) -> io::Result<Vec<pid_t>> {
         // SAFETY: with a null buffer the call only reports how many there are.
-        let count = unsafe { libc::proc_listchildpids(pid, std::ptr::null_mut(), 0) };
+        let count = unsafe { list(id, std::ptr::null_mut(), 0) };
         let capacity = usize::try_from(count).map_err(|_| io::Error::last_os_error())? + 16;
         let mut pids: Vec<pid_t> = vec![0; capacity];
         let bytes = libc::c_int::try_from(capacity * std::mem::size_of::<pid_t>())
             .map_err(io::Error::other)?;
         // SAFETY: `pids` is writable for `bytes` bytes of pids.
-        let filled = unsafe { libc::proc_listchildpids(pid, pids.as_mut_ptr().cast(), bytes) };
+        let filled = unsafe { list(id, pids.as_mut_ptr().cast(), bytes) };
         let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
         if filled >= capacity {
-            return Err(io::Error::other("child list did not fit"));
+            return Err(io::Error::other("process list did not fit"));
         }
         pids.truncate(filled);
         Ok(pids)
     }
 
     /// The physical footprint the kernel accounts to `pid`, as Activity
-    /// Monitor reports it.
+    /// Monitor reports it, if `pid` is still in `leader`'s process group once
+    /// measured: a pid that exited and was reused meanwhile is not counted.
     #[cfg(target_os = "macos")]
-    pub(super) fn of_process(pid: pid_t) -> io::Result<u64> {
+    pub(super) fn of_member(leader: pid_t, pid: pid_t) -> io::Result<Option<u64>> {
         // SAFETY: an all-zero rusage_info_v2 is a valid value for the call to
         // fill.
-        let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-        // SAFETY: `info` is writable storage of the size RUSAGE_INFO_V2 fills;
-        // the call takes it through the `rusage_info_t *` the header declares.
+        let mut usage: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: `usage` is writable storage of the size RUSAGE_INFO_V2
+        // fills; the call takes it through the `rusage_info_t *` the header
+        // declares.
         let read = unsafe {
             libc::proc_pid_rusage(
                 pid,
                 libc::RUSAGE_INFO_V2,
-                (&raw mut info).cast::<libc::rusage_info_t>(),
+                (&raw mut usage).cast::<libc::rusage_info_t>(),
             )
         };
         if read != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(info.ri_phys_footprint)
+        // SAFETY: an all-zero proc_bsdinfo is a valid value for the call to
+        // fill.
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>())
+            .map_err(io::Error::other)?;
+        // SAFETY: `info` is writable for `size` bytes, the size this flavor
+        // fills.
+        let filled = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
+        };
+        if filled != size {
+            return Err(io::Error::last_os_error());
+        }
+        let group = pid_t::try_from(info.pbi_pgid).map_err(io::Error::other)?;
+        Ok((group == leader).then_some(usage.ri_phys_footprint))
     }
 }
 
@@ -1259,12 +1347,14 @@ mod tests {
             let mut asked = GroupProcess {
                 child: kettle_media::client::worker_command(&path).spawn().unwrap(),
                 reaped: false,
+                probe: footprint::Probe::default(),
             };
             assert_eq!(wait_exit(&mut asked), WorkerExit::Lost);
             assert!(asked.reaped, "a lost worker's group must not be signalled");
             let mut killed = GroupProcess {
                 child: kettle_media::client::worker_command(&path).spawn().unwrap(),
                 reaped: false,
+                probe: footprint::Probe::default(),
             };
             let deadline = Instant::now() + Duration::from_secs(10);
             while killed.exited().is_ok() {
@@ -1284,9 +1374,9 @@ mod tests {
             );
             let mut worker = spawn(&path).unwrap();
             let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
-            let tree = footprint::tree(leader).unwrap();
-            assert_eq!(tree[0], leader);
-            assert_eq!(tree.len(), 3, "{tree:?}");
+            let members = footprint::Probe::default().members(leader).unwrap();
+            assert_eq!(members[0], leader);
+            assert_eq!(members.len(), 3, "{members:?}");
             worker.process.kill();
             wait_exit(worker.process.as_mut());
         }
@@ -1322,6 +1412,39 @@ mod tests {
         }
 
         #[test]
+        fn an_orphaned_grandchild_still_counts() {
+            // A child starts a grandchild holding 32 MiB, then exits: the
+            // grandchild is no longer below the worker, but still in its
+            // process group, which a kill reaches.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(
+                directory.path(),
+                "( ( x=$(head -c 33554432 /dev/zero | tr '\\0' a); echo $$; /bin/sleep 30; : ) & )\n/bin/sleep 30",
+            );
+            let mut worker = spawn(&path).unwrap();
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let held = worker.process.footprint().unwrap();
+            assert!(held >= 32 << 20, "the group holds {held}");
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+            let _ = leader;
+        }
+
+        #[test]
+        fn a_process_outside_the_group_is_not_counted() {
+            // As a reused pid would be: this test process is in another group.
+            let directory = tempfile::tempdir().unwrap();
+            let path = script(directory.path(), "echo $$\n/bin/sleep 30");
+            let mut worker = spawn(&path).unwrap();
+            let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
+            let outsider = libc::pid_t::try_from(std::process::id()).unwrap();
+            assert_eq!(footprint::of_member(leader, outsider).unwrap(), None);
+            assert!(footprint::of_member(leader, leader).unwrap().is_some());
+            worker.process.kill();
+            wait_exit(worker.process.as_mut());
+        }
+
+        #[test]
         fn footprint_counts_what_descendants_hold() {
             // A child holds 32 MiB; the worker itself holds little. (The `:`
             // keeps the child shell alive: dash would replace it with its last
@@ -1334,7 +1457,7 @@ mod tests {
             let mut worker = spawn(&path).unwrap();
             // A subshell's `$$` is still the worker's own pid.
             let leader: libc::pid_t = first_line(&mut worker).parse().unwrap();
-            let own = footprint::of_process(leader).unwrap();
+            let own = footprint::of_member(leader, leader).unwrap().unwrap();
             let tree = worker.process.footprint().unwrap();
             assert!(own < 16 << 20, "the worker alone holds {own}");
             assert!(tree >= 32 << 20, "the tree holds {tree}");
