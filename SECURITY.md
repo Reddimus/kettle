@@ -91,10 +91,16 @@ Reports that fit any of these are welcome:
   or by ACL; on macOS its signature must also pass a strict check against
   Kettle's own requirement (Apple's chain to a Developer ID Application
   certificate of Kettle's team, under the worker's own identifier, with the
-  hardened runtime on every architecture). A file that changes during the check is refused. Getting Kettle
-  to accept a worker that fails any of these is in scope. A program running
-  as the same user that rewrites a user-owned install is not: it can replace
-  Kettle itself.
+  hardened runtime on every architecture). A file that changes during the
+  check is refused. Getting Kettle to accept a worker that fails any of
+  these is in scope. A program running as the same user that rewrites a
+  user-owned install is not: it can replace Kettle itself.
+- **Media worker setup** — `kettle-media-worker` (not shipped yet) closes
+  every inherited descriptor above stderr, turns off core dumps and, on
+  Linux, becomes non-dumpable before it reads anything, then lowers its CPU,
+  file-size, descriptor and (Linux) address-space limits and starts a
+  watchdog. A descriptor that survives into the worker, a payload that
+  reaches its stderr, or a worker that outlives its watchdog is in scope.
 - **Lua plugin sandbox escape** — `lua-sandbox = safe` (the default)
   nils `os.execute`, `os.exit`, `io.open`, `io.popen`,
   `package.loadlib`, `loadfile`, `dofile`, etc. A bypass that lets a

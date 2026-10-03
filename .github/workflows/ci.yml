@@ -114,6 +114,12 @@ jobs:
         run: cargo clippy --locked -p kettle-media --all-targets --features test-worker -- -D warnings
       - name: Media protocol stub worker — tests
         run: cargo test --locked -p kettle-media --features test-worker
+      # The media worker's panic test needs its feature-gated fault, which no
+      # shipped build carries.
+      - name: Media worker faults — clippy
+        run: cargo clippy --locked -p kettle-media-worker --all-targets --features test-faults -- -D warnings
+      - name: Media worker faults — tests
+        run: cargo test --locked -p kettle-media-worker --features test-faults
       - name: Vendored parser patches — unit, doctest, clippy
         # vte and alacritty_terminal are excluded from the product workspace,
         # so the root commands above compile their public dependency surfaces

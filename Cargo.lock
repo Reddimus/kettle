@@ -1981,6 +1981,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kettle-media-worker"
+version = "4.9.0"
+dependencies = [
+ "kettle-media",
+ "kettle-test-support",
+ "libc",
+]
+
+[[package]]
 name = "kettle-remote"
 version = "4.9.0"
 dependencies = [

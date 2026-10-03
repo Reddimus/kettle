@@ -87,11 +87,14 @@ core-default-features-check:
 test:
     cargo test --workspace
 
-# The media protocol against its feature-gated stub worker, which the
-# workspace test and clippy commands do not build. ci.yml runs the same pair.
+# The media protocol against its feature-gated stub worker, and the media
+# worker with its feature-gated panic fault, which the workspace test and
+# clippy commands do not build. ci.yml runs the same commands.
 media-protocol-test:
     cargo clippy --locked -p kettle-media --all-targets --features test-worker -- -D warnings
     cargo test --locked -p kettle-media --features test-worker
+    cargo clippy --locked -p kettle-media-worker --all-targets --features test-faults -- -D warnings
+    cargo test --locked -p kettle-media-worker --features test-faults
 
 # `cargo doc` with `-D warnings` — rustdoc has its own warning class
 # (broken intra-doc-links, missing docs on public items) that

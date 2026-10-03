@@ -18,6 +18,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and checks the file and, on macOS, its code signature before trusting it.
   No worker ships yet, so it reads `worker_missing`. Kettle and its workers
   now share one build identity, a hash of the source they were built from.
+- `kettle-media-worker`, the media worker executable, is built with the
+  workspace. Before reading anything it closes inherited descriptors, turns
+  off core dumps and lowers its resource limits, and a watchdog ends it if
+  its parent stalls. It renders nothing yet, and nothing starts or ships it.
 - `kettle ctl dispatch_ui_key` drives quick-select hint mode too, in the order
   the keyboard reaches it: right after a confirmation.
 - In quick-select hint mode (`Ctrl+Shift+H`), holding Shift while typing a

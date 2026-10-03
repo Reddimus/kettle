@@ -44,6 +44,7 @@ media:
   - changed-files:
       - any-glob-to-any-file:
           - "crates/kettle-media/**"
+          - "crates/kettle-media-worker/**"
           - "crates/kettle/src/media_platform.rs"
           - "crates/kettle/build_support/**"
 
