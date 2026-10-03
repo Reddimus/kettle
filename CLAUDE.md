@@ -3,7 +3,7 @@
 Follow [`AGENTS.md`](AGENTS.md) for repository-wide engineering, validation,
 documentation, and version-control rules.
 
-Kettle is a Rust workspace of eleven crates. Start with `Cargo.toml`, the owning
+Kettle is a Rust workspace of twelve crates. Start with `Cargo.toml`, the owning
 crate, and its nearby tests. Use the existing `just` recipes for validation.
 
 Keep the crate boundaries intact:
@@ -15,6 +15,7 @@ Keep the crate boundaries intact:
 | `kettle-render` | GPU rendering |
 | `kettle-ui` | window, mux, and modal state |
 | `kettle-config` | config files, keybinds, themes |
+| `kettle-i18n` | Kettle-owned UI text, typed, in English and Spanish |
 | `kettle-ctl` | control IPC |
 | `kettle-remote` | the remote command spool |
 | `kettle-state` | durable writes and advisory locking |

@@ -39,6 +39,7 @@ crossbeam-channel = "0.5.15"
 # WM_SETICON — hence this runtime path.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 kettle-config.workspace = true
+kettle-i18n.workspace = true
 # `asciicast` is enabled unconditionally: the GUI session recorder is a
 # runtime toggle (config `record = on` / `--record`) present in every build,
 # not a compile-time feature. The recorder engine lives in kettle-core

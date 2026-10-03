@@ -1155,9 +1155,11 @@ pub struct SettingsOverlay {
     pub rows: Vec<SettingsRow>,
     /// Index into `rows` of the focused field (gets the accent highlight).
     pub focused_row: usize,
-    /// Mirrors `cfg.vim_menu_nav`; the footer hint advertises the vim keys
-    /// when the setting is on.
-    pub vim_nav: bool,
+    /// The panel title, already in the UI's language ("Settings — Tabs").
+    pub title: String,
+    /// The key-hint footer, already in the UI's language. It names the vim
+    /// keys when `vim-menu-nav` is on.
+    pub hints: String,
     /// An optional contextual note shown below the keybind footer, e.g. the
     /// Graphics category's active GPU and pending restart. `None`
     /// on categories that don't need it.
@@ -12291,12 +12293,7 @@ const SETTINGS_FIELD_START: usize = 3;
 /// quad/area pass so they stay in lockstep (same row count + ordering).
 fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
     let mut lines = Vec::with_capacity(set.rows.len() + SETTINGS_FIELD_START + 2);
-    let cat = set
-        .categories
-        .get(set.active_category)
-        .map(|s| s.as_str())
-        .unwrap_or("");
-    lines.push(format!("⚙  Settings — {cat}"));
+    lines.push(format!("⚙  {}", set.title));
     lines.push(set.categories.join("  "));
     lines.push(String::new());
     for (i, row) in set.rows.iter().enumerate() {
@@ -12304,12 +12301,7 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
         lines.push(settings_row_line(set, row, mark, usize::MAX));
     }
     lines.push(String::new());
-    // Advertise the vim keys when `vim-menu-nav` is on.
-    lines.push(if set.vim_nav {
-        "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close".to_string()
-    } else {
-        "↑↓ field    ←→ change    Tab category    Esc close".to_string()
-    });
+    lines.push(set.hints.clone());
     // Notes follow navigation in the buffer list. The vertical layout pins
     // them below the scrolling content, keeping pending changes visible.
     if let Some(note) = &set.footer_note {
@@ -12323,12 +12315,7 @@ fn settings_display_lines(set: &SettingsOverlay) -> Vec<String> {
 fn settings_panel_cols(set: &SettingsOverlay, lines: &[String]) -> f32 {
     let columns = 2 + set.label_cols + SETTINGS_COLUMN_GAP + set.value_cols;
     let tabs = lines.get(1).map_or(0, |line| display_width(line));
-    let footer = if set.vim_nav {
-        "↑↓/jk field    ←→/hl change    g/G ends    Tab category    Esc close"
-    } else {
-        "↑↓ field    ←→ change    Tab category    Esc close"
-    };
-    columns.max(tabs).max(display_width(footer)).max(44) as f32
+    columns.max(tabs).max(display_width(&set.hints)).max(44) as f32
 }
 
 fn settings_fit_line(line: &str, panel_w: f32, cell_w: f32) -> String {
@@ -21856,7 +21843,8 @@ mod settings_hit_test_tests {
                 },
             ],
             focused_row: 0,
-            vim_nav: false,
+            title: "Settings — Appearance".into(),
+            hints: "↑↓ field    ←→ change    Tab category    Esc close".into(),
             footer_note: None,
         }
     }
@@ -23196,7 +23184,8 @@ mod settings_panel_cols_tests {
             active_category: 0,
             rows: vec![],
             focused_row: 0,
-            vim_nav: false,
+            title: "Settings — Appearance".into(),
+            hints: "↑↓ field    ←→ change    Tab category    Esc close".into(),
             footer_note: None,
         };
         let cols = settings_panel_cols(&set, &settings_display_lines(&set));

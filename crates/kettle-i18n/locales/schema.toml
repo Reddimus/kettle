@@ -1,0 +1,360 @@
+# Stable message identifiers, argument types and translator context.
+# Context names the code that shows the message. Edit TOML, never generated Rust.
+
+[messages.settings_a11y_dialog]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog. category is a translated category name."
+args = [{ name = "category", type = "str" }]
+
+[messages.settings_a11y_fields]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the list of Settings rows."
+
+[messages.settings_a11y_title]
+context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the Settings dialog when no category is known."
+
+[messages.settings_active_gpu]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note. name, kind and backend are the adapter's own words, verbatim."
+args = [{ name = "name", type = "str" }, { name = "kind", type = "str" }, { name = "backend", type = "str" }]
+
+[messages.settings_active_gpu_initializing]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: Graphics note before the GPU is ready."
+
+[messages.settings_category_appearance]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_background]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_behavior]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_graphics]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_keybinds]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_search]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_category_tabs]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name."
+
+[messages.settings_field_background_animation]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. When the animated background moves."
+
+[messages.settings_field_background_image]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Path of the background image."
+
+[messages.settings_field_background_opacity]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_background_type]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Field in the Background category choosing solid color, image, starfield or transparent."
+
+[messages.settings_field_bell]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Terminal bell (BEL) behavior."
+
+[messages.settings_field_chrome_background]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Color of the tab bar and other interface bars."
+
+[messages.settings_field_close_button_on_tab]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_completion_overlay]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Shell completion suggestions drawn over the terminal."
+
+[messages.settings_field_copy_on_select]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_cursor_blink]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_cursor_blink_timeout]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Followed by a duration such as 10 s, or Never."
+
+[messages.settings_field_cursor_shape]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_detachable_tabs]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Tabs can be dragged out into their own window."
+
+[messages.settings_field_focus]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. How a pane receives keyboard focus."
+
+[messages.settings_field_font_size]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_gpu_backend]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Graphics API: Metal, Vulkan, DirectX 12 or OpenGL."
+
+[messages.settings_field_gpu_device]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_gpu_force_software]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_gpu_power_preference]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Integrated versus discrete GPU."
+
+[messages.settings_field_invert_search]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Search direction."
+
+[messages.settings_field_mouse_hide_while_typing]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_scroll_tabbar]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_scrollback_lines]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Saved terminal output, not shell command history."
+
+[messages.settings_field_scrollback_memory]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Memory cap for saved terminal output."
+
+[messages.settings_field_scrollbar]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_scrollbar_width]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_search_case]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Whether search matches letter case."
+
+[messages.settings_field_search_wrap]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Search continues from the other end of the scrollback."
+
+[messages.settings_field_show_titlebar]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_tab_bar]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_tab_bar_position]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_tab_min_width]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_theme]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Color theme picker."
+
+[messages.settings_field_update_check_interval]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Followed by a duration in hours."
+
+[messages.settings_field_update_policy]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Whether Kettle checks for and installs updates."
+
+[messages.settings_field_vim_menu_nav]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. hjkl keys move through menus."
+
+[messages.settings_field_window_blur]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Blurs the desktop behind a translucent window."
+
+[messages.settings_field_window_padding]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Space between the window edge and the terminal text."
+
+[messages.settings_gpu_kind_discrete]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+
+[messages.settings_gpu_kind_integrated]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+
+[messages.settings_gpu_kind_other]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+
+[messages.settings_gpu_kind_software]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+
+[messages.settings_gpu_kind_virtual]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: GPU kind inside the Active GPU note (feminine: la GPU)."
+
+[messages.settings_heading]
+context = "crates/kettle-render/src/lib.rs settings_display_lines: panel title. category is a translated category name."
+args = [{ name = "category", type = "str" }]
+
+[messages.settings_hint_category]
+context = "crates/kettle-ui/src/app.rs settings_hints: footer key hint, after Tab: next category. Lowercase, one or two words."
+
+[messages.settings_hint_change]
+context = "crates/kettle-ui/src/app.rs settings_hints: footer key hint, after ←→: change the value. Lowercase, one or two words."
+
+[messages.settings_hint_close]
+context = "crates/kettle-ui/src/app.rs settings_hints: footer key hint, after Esc: close Settings. Lowercase, one or two words."
+
+[messages.settings_hint_ends]
+context = "crates/kettle-ui/src/app.rs settings_hints: footer key hint, after g/G: jump to the first or last row. Lowercase, one or two words."
+
+[messages.settings_hint_field]
+context = "crates/kettle-ui/src/app.rs settings_hints: footer key hint, after ↑↓: move between rows. Lowercase, one or two words."
+
+[messages.settings_keybind_close_pane]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `close_pane` action."
+
+[messages.settings_keybind_command_palette]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `command_palette` action."
+
+[messages.settings_keybind_copy]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `copy` action."
+
+[messages.settings_keybind_new_tab]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `new_tab` action."
+
+[messages.settings_keybind_next_tab]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `next_tab` action."
+
+[messages.settings_keybind_open_settings]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `open_settings` action."
+
+[messages.settings_keybind_paste]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `paste` action."
+
+[messages.settings_keybind_previous_tab]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `previous_tab` action."
+
+[messages.settings_keybind_split_down]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `split_down` action."
+
+[messages.settings_keybind_split_right]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `split_right` action."
+
+[messages.settings_keybind_start_search]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `start_search` action."
+
+[messages.settings_keybind_toggle_zoom]
+context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `toggle_zoom` action."
+
+[messages.settings_note_blur]
+context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
+
+[messages.settings_note_new_shells]
+context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Completion overlay row."
+
+[messages.settings_note_restart]
+context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a new renderer."
+
+[messages.settings_press_chord]
+context = "crates/kettle-ui/src/app.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
+
+[messages.settings_value_always]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value."
+
+[messages.settings_value_attention]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Bell behavior: requests the user's attention, for example by bouncing the Dock icon."
+
+[messages.settings_value_automatic]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Kettle or the system decides."
+
+[messages.settings_value_automatic_from_wallpaper]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Interface bar color."
+
+[messages.settings_value_automatic_multiple_tabs]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar shows only with more than one tab."
+
+[messages.settings_value_bar]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Cursor shape: a thin vertical bar."
+
+[messages.settings_value_black]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value."
+
+[messages.settings_value_block]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Cursor shape."
+
+[messages.settings_value_bottom]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position."
+
+[messages.settings_value_click_to_focus]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Focus mode."
+
+[messages.settings_value_follows_mouse]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Focus mode."
+
+[messages.settings_value_hidden]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. A hidden scrollbar or tab bar (both feminine 'barra' in Spanish)."
+
+[messages.settings_value_high_performance]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. GPU preference."
+
+[messages.settings_value_ignore_case]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Search case mode: never match letter case."
+
+[messages.settings_value_image]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Background type."
+
+[messages.settings_value_image_placeholder]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Shown in place of an empty background image path."
+
+[messages.settings_value_infinite]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Scrollback lines with no limit."
+
+[messages.settings_value_install_automatically]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Update policy."
+
+[messages.settings_value_left]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position set in the config file."
+
+[messages.settings_value_low_power]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. GPU preference."
+
+[messages.settings_value_match_case]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Search case mode: always match letter case."
+
+[messages.settings_value_never]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. The cursor never stops blinking."
+
+[messages.settings_value_no_cap]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Scrollback memory with no limit."
+
+[messages.settings_value_not_detected]
+context = "crates/kettle-ui/src/settings.rs read(): a saved GPU that no longer enumerates. name is the GPU's name, verbatim."
+args = [{ name = "name", type = "str" }]
+
+[messages.settings_value_notify]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Update policy: tell the user about an update."
+
+[messages.settings_value_off]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-off toggle or a disabled choice."
+
+[messages.settings_value_on]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. A switched-on toggle."
+
+[messages.settings_value_right]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position set in the config file."
+
+[messages.settings_value_smart]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Search case mode: match case only when the query has a capital letter."
+
+[messages.settings_value_solid_color]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Background type."
+
+[messages.settings_value_starfield]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Background type."
+
+[messages.settings_value_system_default]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Focus mode."
+
+[messages.settings_value_theme]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Interface bar color follows the color theme."
+
+[messages.settings_value_top]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position."
+
+[messages.settings_value_transparent]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Background type."
+
+[messages.settings_value_unbound]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. No key combination is bound to the action."
+
+[messages.settings_value_underline]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Cursor shape."
+
+[messages.settings_value_visual_flash]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Bell behavior."
+
+[messages.settings_value_visual_flash_and_attention]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Bell behavior."
+
+[messages.settings_value_when_focused]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value. Animation runs only while the window has focus."
+
+[messages.settings_value_white]
+context = "crates/kettle-ui/src/settings.rs read(): Settings value."

@@ -4,6 +4,7 @@ members = [
     "crates/kettle-test-support",
     "crates/kettle-state",
     "crates/kettle-update",
+    "crates/kettle-i18n",
     "crates/kettle-config",
     "crates/kettle-core",
     "crates/kettle-vt",
@@ -79,13 +80,14 @@ kettle-render = { path = "crates/kettle-render", version = "4.9.0" }
 kettle-remote = { path = "crates/kettle-remote", version = "4.9.0" }
 kettle-ctl = { path = "crates/kettle-ctl", version = "4.9.0" }
 kettle-ui = { path = "crates/kettle-ui", version = "4.9.0" }
+kettle-i18n = { path = "crates/kettle-i18n", version = "4.9.0" }
 
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1.2"
 regex = "1"
 regex-automata = "0.4"
 getrandom = "0.4"

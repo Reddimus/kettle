@@ -19,6 +19,8 @@ graph TD
     ui --> ctl
     ui --> state
     ui --> update
+    ui --> i18n
+    i18n["kettle-i18n<br/>typed UI text catalogue · English and Spanish<br/>generated at build time · no runtime parsing"]
     ctl["kettle-ctl<br/>agent control-plane: NDJSON protocol · local-IPC transport<br/>(Unix socket / Windows named pipe) · discovery + presence registries · blocking client"]
     render["kettle-render<br/>wgpu · glyphon text · quad &<br/>image/overlay pipelines · --screenshot · offscreen self-test"] --> core
     render --> cfg
@@ -29,6 +31,16 @@ graph TD
     update["kettle-update<br/>signed feed verification · bounded archive extraction<br/>transactional managed-install updates"] --> state
     state["kettle-state<br/>durable atomic replacement · private state files<br/>cross-platform advisory file locks"]
 ```
+
+`kettle-i18n` holds Kettle-owned UI text. Its build script reads
+`locales/schema.toml`, `en.toml` and `es.toml`, validates them, and generates
+Rust: a `Text` enum for fixed messages and one typed method per message with
+named arguments. A missing key, a placeholder mismatch, or a wrong argument
+fails the build; nothing is parsed at run time. Each process picks one language
+and passes an immutable `Translator` to the code that shows text, so there is no
+global locale. Terminal content, user and shell names, config values and
+protocol text never pass through it. Settings is the first surface on it; the
+other surfaces move in the 5.0 localization track.
 
 `kettle-state` is the leaf persistence boundary shared by configuration,
 sessions, and the updater. It stages with `create_new` beside the destination,
