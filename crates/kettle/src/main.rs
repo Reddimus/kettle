@@ -967,19 +967,35 @@ fn attach_parent_console_if_needed() {
 #[cfg(not(windows))]
 fn attach_parent_console_if_needed() {}
 
+/// Queue the notice that an interrupted update was recovered, if there is
+/// one. `tr` runs only then: the UI language needs the config file, which a
+/// launch does not otherwise read this early.
 fn queue_startup_update_recovery(
     warning: Option<&str>,
-    tr: &kettle_i18n::Translator,
+    tr: impl FnOnce() -> kettle_i18n::Translator,
     queue: impl FnOnce(&str, &str),
 ) -> bool {
     let Some(warning) = warning else {
         return false;
     };
     queue(
-        tr.text(kettle_i18n::Text::NotifyTitleUpdateRecovery),
+        tr().text(kettle_i18n::Text::NotifyTitleUpdateRecovery),
         warning,
     );
     true
+}
+
+/// The UI language the GUI will use: the config's `language`, or the OS
+/// locale for `auto` and for a missing or unreadable config.
+fn startup_translator(
+    config: Option<&std::path::Path>,
+    trust: kettle_config::ConfigTrust,
+) -> kettle_i18n::Translator {
+    let preference = config
+        .filter(|path| path.exists())
+        .map(|path| kettle_config::Config::load_from_with_trust(path, trust).language)
+        .unwrap_or_default();
+    kettle_i18n::Translator::new(preference.resolve(kettle_i18n::os_locale))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -1723,10 +1739,14 @@ fn main() -> anyhow::Result<()> {
         recording_key: record.as_ref().map(recording_activation_key),
         record_raw_input: record.is_some() && record_raw_input,
     };
-    // English until the UI language setting exists.
     let startup_notification_queued = queue_startup_update_recovery(
         startup_update_warning.as_deref(),
-        &kettle_i18n::Translator::default(),
+        || {
+            let path = config_path
+                .clone()
+                .or_else(kettle_config::Config::default_path);
+            startup_translator(path.as_deref(), config_trust)
+        },
         kettle_ui::queue_desktop_notification,
     );
     let activation = if bare_gui_launch && !cli.new_process {
@@ -2594,10 +2614,10 @@ mod tests {
     #[test]
     fn update_recovery_notification_is_flushed_before_activated_handoff() {
         let mut observed = None;
-        let en = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+        let en = || kettle_i18n::Translator::new(kettle_i18n::Language::En);
         assert!(queue_startup_update_recovery(
             Some("pending transaction recovered"),
-            &en,
+            en,
             |title, body| observed = Some((title.to_string(), body.to_string())),
         ));
         assert_eq!(
@@ -2608,10 +2628,10 @@ mod tests {
             ))
         );
         // The title follows the UI language; the updater's message does not.
-        let es = kettle_i18n::Translator::new(kettle_i18n::Language::Es);
+        let es = || kettle_i18n::Translator::new(kettle_i18n::Language::Es);
         assert!(queue_startup_update_recovery(
             Some("pending transaction recovered"),
-            &es,
+            es,
             |title, body| observed = Some((title.to_string(), body.to_string())),
         ));
         assert_eq!(
@@ -2621,11 +2641,9 @@ mod tests {
                 "pending transaction recovered".to_string()
             ))
         );
-        assert!(!queue_startup_update_recovery(
-            None,
-            &en,
-            |_title, _body| { panic!("an absent warning must not queue a notification") }
-        ));
+        assert!(!queue_startup_update_recovery(None, en, |_title, _body| {
+            panic!("an absent warning must not queue a notification")
+        }));
 
         let src = super::production_source();
         let activated_arm = src

@@ -69,6 +69,12 @@ plural = "count"
 context = "crates/kettle-ui/src/app.rs: confirmation before moving a key combination to another action. chord is a key combination such as Ctrl+Shift+T; taken and action are config action names such as split_right, all verbatim."
 args = [{ name = "chord", type = "str" }, { name = "taken", type = "str" }, { name = "action", type = "str" }]
 
+[messages.dock_new_tab]
+context = "crates/kettle-ui/src/macos_dock.rs dock_menu_model: row in the macOS Dock icon's menu. macOS title case in English; acts immediately, so no ellipsis."
+
+[messages.dock_new_window]
+context = "crates/kettle-ui/src/macos_dock.rs dock_menu_model: row in the macOS Dock icon's menu. macOS title case in English; acts immediately, so no ellipsis."
+
 [messages.edit_hint_apply]
 context = "crates/kettle-ui/src/app.rs: title editor key hint, after Enter: apply the edit. Lowercase, one or two words."
 
@@ -1065,6 +1071,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. In
 [messages.settings_field_invert_search]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Search direction."
 
+[messages.settings_field_language]
+context = "crates/kettle-ui/src/settings.rs categories: Settings row label for the language of Kettle's own text."
+
 [messages.settings_field_mouse_hide_while_typing]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
 
@@ -1191,6 +1200,12 @@ context = "crates/kettle-ui/src/settings.rs categories(): Keybinds row for the `
 
 [messages.settings_note_blur]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Window blur and Background opacity rows."
+
+[messages.settings_note_language]
+context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."
+
+[messages.settings_note_language_pending]
+context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note after the saved language differs from the one Kettle is running in. Infinitive in Spanish, like the other notes."
 
 [messages.settings_note_new_shells]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Completion overlay row."

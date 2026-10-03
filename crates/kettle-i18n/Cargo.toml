@@ -18,6 +18,11 @@ default = []
 # builds; release builds have no pseudo constructor even with this feature.
 dev-pseudo = []
 
+[dependencies]
+# The OS locale for `language = auto`. Already in the tree through cosmic-text;
+# pinned to the locked version.
+sys-locale = "=0.3.2"
+
 # The catalogue is generated at build time; TOML and serde never reach the
 # shipped binary.
 [build-dependencies]

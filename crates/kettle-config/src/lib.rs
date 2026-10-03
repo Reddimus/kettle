@@ -201,6 +201,50 @@ pub enum ThemeMode {
     Auto,
 }
 
+/// The `language` key: which language Kettle's own text uses. `Auto`, the
+/// default, follows the operating system's locale, read once at startup. A
+/// change applies on restart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LanguagePreference {
+    #[default]
+    Auto,
+    English,
+    Spanish,
+}
+
+impl LanguagePreference {
+    /// Every preference, in the order Settings lists them.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::English, Self::Spanish];
+
+    /// The value written to the config file.
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::English => "en",
+            Self::Spanish => "es",
+        }
+    }
+
+    /// A config value: `auto`, `en` or `es`, in any case.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preference| value.trim().eq_ignore_ascii_case(preference.token()))
+    }
+
+    /// The language this preference selects. `os_locale` runs only for
+    /// `Auto`; no locale, or one Kettle has no catalogue for, is English.
+    pub fn resolve(self, os_locale: impl FnOnce() -> Option<String>) -> kettle_i18n::Language {
+        match self {
+            Self::English => kettle_i18n::Language::En,
+            Self::Spanish => kettle_i18n::Language::Es,
+            Self::Auto => os_locale()
+                .map(|locale| kettle_i18n::language_for_locale(&locale))
+                .unwrap_or(kettle_i18n::Language::En),
+        }
+    }
+}
+
 /// Terminator parity (terminatorlib/config.py:117
 /// `case_sensitive`): scrollback-search case-sensitivity mode.
 ///
@@ -1522,6 +1566,9 @@ pub struct Config {
     /// follows the OS light/dark preference when winit reports one; an
     /// explicit `theme-schedule` overrides OS following.
     pub theme_mode: ThemeMode,
+    /// The language of Kettle's own text (`language = auto | en | es`).
+    /// Read at startup only; a reload keeps the running process's language.
+    pub language: LanguagePreference,
     /// Wall-clock schedule for switching between `light_theme` and
     /// `dark_theme`. `None` means no schedule (the default; user's
     /// `theme_mode` alone governs the choice). When `Some(Clock { dark_at,
@@ -2739,6 +2786,7 @@ impl Default for Config {
             force_no_bell: false,
             log_strip_ansi: false,
             theme_mode: ThemeMode::Explicit,
+            language: LanguagePreference::Auto,
             theme_schedule: None,
             theme_schedule_lat: None,
             theme_schedule_long: None,
@@ -3623,6 +3671,7 @@ impl Config {
                 "broadcast-default" | "broadcast_default" => {
                     matches!(v.to_ascii_lowercase().as_str(), "all" | "off" | "none" | "group")
                 }
+                "language" => LanguagePreference::parse(v).is_some(),
                 "theme-mode" | "theme_mode" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "light" | "dark" | "auto" | "system" | "follow-system" | "follow_system"
@@ -4804,6 +4853,13 @@ impl Config {
                     // Terminator parity (config.py:216).
                     if let Some(b) = parse_bool(&e.value) {
                         terminator_urgent_bell = Some(b);
+                    }
+                }
+                "language" => {
+                    // An unknown value keeps the default and is reported by
+                    // `detect_malformed_values`.
+                    if let Some(preference) = LanguagePreference::parse(&e.value) {
+                        cfg.language = preference;
                     }
                 }
                 "theme-mode" | "theme_mode" => {
@@ -10369,6 +10425,52 @@ split_horiz = <Control><Shift>j
     /// ../../../docs/TERMINATOR-AUTO-THEME-DESIGN.md)). Default
     /// is `Explicit`; the 3 Terminator modes parse cleanly; aliases for
     /// `Auto` accommodate user muscle memory.
+    #[test]
+    fn language_parses_its_three_values_and_reports_others() {
+        assert_eq!(Config::default().language, LanguagePreference::Auto);
+        for (value, want) in [
+            ("auto", LanguagePreference::Auto),
+            ("en", LanguagePreference::English),
+            ("ES", LanguagePreference::Spanish),
+            (" es ", LanguagePreference::Spanish),
+        ] {
+            let cfg = Config::parse_text(&format!("language = {value}\n"));
+            assert_eq!(cfg.language, want, "{value:?}");
+            assert!(Config::detect_malformed_values(&format!("language = {value}\n")).is_empty());
+        }
+        for value in ["spanish", "es-MX", "pseudo", "english"] {
+            let line = format!("language = {value}\n");
+            assert_eq!(Config::parse_text(&line).language, LanguagePreference::Auto);
+            assert!(
+                !Config::detect_malformed_values(&line).is_empty(),
+                "{value:?} must be reported, not silently ignored"
+            );
+        }
+        for preference in LanguagePreference::ALL {
+            assert_eq!(
+                LanguagePreference::parse(preference.token()),
+                Some(preference)
+            );
+        }
+    }
+
+    #[test]
+    fn a_language_preference_reads_the_os_locale_only_for_auto() {
+        use kettle_i18n::Language;
+        let unread = || -> Option<String> { panic!("an explicit language must not query the OS") };
+        assert_eq!(LanguagePreference::English.resolve(unread), Language::En);
+        assert_eq!(LanguagePreference::Spanish.resolve(unread), Language::Es);
+        assert_eq!(
+            LanguagePreference::Auto.resolve(|| Some("es_MX.UTF-8".into())),
+            Language::Es
+        );
+        assert_eq!(
+            LanguagePreference::Auto.resolve(|| Some("fr-FR".into())),
+            Language::En
+        );
+        assert_eq!(LanguagePreference::Auto.resolve(|| None), Language::En);
+    }
+
     #[test]
     fn theme_mode_parses_terminator_values() {
         use ThemeMode::*;

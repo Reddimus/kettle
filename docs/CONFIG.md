@@ -72,6 +72,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `theme` | string | `TokyoNight Night` | Any bundled theme (`kettle --list-themes`). Runtime theme changes — the theme picker, the Settings Theme row, `next_theme`/`prev_theme`, light/dark toggle — are written back to this line, so a picked theme persists across launches |
+| `language` | `auto`\|`en`\|`es` | `auto` | The language of Kettle's own text: Settings, menus, prompts, notifications and screen-reader names. `auto` follows the operating system's locale; a Spanish locale of any region selects Spanish, anything else English. Read at startup, so a change applies when Kettle restarts; a config reload keeps the running language. Config keys and values, logs, the CLI and control-protocol JSON stay English. The Spanish text is a first draft awaiting review |
 | `font-family` | string | `JetBrainsMono Nerd Font` | Bundled; falls back to system fonts |
 | `font-family-bold` / `-italic` / `-bold-italic` | string | — | Per-style family overrides (fall back to `font-family`) |
 | `font-size` | float | `13` | |

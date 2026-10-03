@@ -56,8 +56,16 @@ its key; a unit test exercises the fallback for every message.
 Use neutral Latin American Spanish and the working glossary in the 5.0 plan:
 `panel` for pane, `pestaña` for tab, `configuración` for settings, infinitives
 for actions. Model-drafted Spanish is a first draft until a fluent reviewer
-accepts it. Spanish cannot be selected yet; the UI is English until the
-`language` setting lands with the rest of the catalogue.
+accepts it.
+
+## Choosing the language
+
+The `language` config key (`auto`, `en`, `es`) is read once at startup.
+`auto` asks the operating system for its locale with `os_locale()`, which
+queries it at most once per process, and maps it with `language_for_locale()`: a well-formed Spanish tag of any region in Latin
+script (`es`, `es-MX`, `es_ES.UTF-8`, `es-419`) is Spanish; English, other
+languages, `C`, `POSIX` and malformed tags are English. Parsing is bounded and
+allocation-free. An explicit choice never queries the OS.
 
 ## Pseudo-locale
 
