@@ -6857,11 +6857,28 @@ pub struct App {
 /// sweep over an unchanged workspace costs one serialization and no I/O.
 const SESSION_SWEEP: std::time::Duration = std::time::Duration::from_secs(2);
 
-fn about_update_status_label(available_tag: Option<&str>) -> String {
+fn about_update_status_label(available_tag: Option<&str>, tr: &kettle_i18n::Translator) -> String {
     available_tag.map_or_else(
-        || "Update status unknown".to_string(),
-        |tag| format!("Update available: {tag}"),
+        || tr.text(kettle_i18n::Text::AboutUpdateUnknown).to_string(),
+        |tag| tr.about_update_available(tag),
     )
+}
+
+/// The right-click row that reopens a detected remote session. Users, hosts,
+/// runtimes and containers are shown as detected.
+fn remote_reconnect_label(
+    ctx: &kettle_remote::RemoteContext,
+    tr: &kettle_i18n::Translator,
+) -> String {
+    match ctx {
+        kettle_remote::RemoteContext::Ssh { host, user, .. } => match user {
+            Some(user) => tr.menu_reconnect_ssh_user(user, host),
+            None => tr.menu_reconnect_ssh(host),
+        },
+        kettle_remote::RemoteContext::Container {
+            runtime, container, ..
+        } => tr.menu_reattach(runtime.name(), container),
+    }
 }
 
 /// Which broadcast scope the group chord turns on, from `broadcast-default`.
@@ -14372,14 +14389,16 @@ impl App {
             .get(ws.mux.active)
             .map(|t| t.zoomed)
             .unwrap_or(false);
+        use kettle_i18n::Text as T;
+        let tr = self.ui_text;
         vec![
             ContextMenuItem::Item {
-                label: "Copy",
+                label: tr.text(T::MenuCopy),
                 action: Action::Copy,
                 enabled: has_selection,
             },
             ContextMenuItem::Item {
-                label: "Paste",
+                label: tr.text(T::MenuPaste),
                 action: Action::Paste,
                 enabled: true,
             },
@@ -14387,84 +14406,86 @@ impl App {
             // `Split Auto` splits along the pane's longer axis — Terminator
             // offers it first because it is the one that needs no decision.
             ContextMenuItem::Item {
-                label: "Split Auto",
+                label: tr.text(T::MenuSplitAuto),
                 action: Action::SplitAuto,
                 enabled: !zoomed,
             },
             // Ghostty's four sides, in its order: Right, Left, Down, Up.
             ContextMenuItem::Item {
-                label: "Split Right",
+                label: tr.text(T::MenuSplitRight),
                 action: Action::SplitRight,
                 enabled: !zoomed,
             },
             ContextMenuItem::Item {
-                label: "Split Left",
+                label: tr.text(T::MenuSplitLeft),
                 action: Action::SplitLeft,
                 enabled: !zoomed,
             },
             ContextMenuItem::Item {
-                label: "Split Down",
+                label: tr.text(T::MenuSplitDown),
                 action: Action::SplitDown,
                 enabled: !zoomed,
             },
             ContextMenuItem::Item {
-                label: "Split Up",
+                label: tr.text(T::MenuSplitUp),
                 action: Action::SplitUp,
                 enabled: !zoomed,
             },
             ContextMenuItem::DynamicItem {
-                label: if zoomed { "Restore" } else { "Zoom" }.to_string(),
+                label: tr
+                    .text(if zoomed { T::MenuRestore } else { T::MenuZoom })
+                    .to_string(),
                 action: Action::ToggleZoom,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "Close Pane",
+                label: tr.text(T::MenuClosePane),
                 action: Action::ClosePane,
                 enabled: true,
             },
             ContextMenuItem::Separator,
             ContextMenuItem::Item {
-                label: "New Tab",
+                label: tr.text(T::MenuNewTab),
                 action: Action::NewTab,
                 enabled: true,
             },
             // Ghostty's Tab and Window submenu rows, flattened.
             ContextMenuItem::Item {
-                label: "Close Tab",
+                label: tr.text(T::MenuCloseTab),
                 action: Action::CloseTab,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "New Window",
+                label: tr.text(T::MenuNewWindow),
                 action: Action::NewWindow,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "Close Window",
+                label: tr.text(T::MenuCloseWindow),
                 action: Action::CloseWindow,
                 enabled: true,
             },
             // Terminator parity, terminal_popup_menu.py "Set Window Title".
             ContextMenuItem::Item {
-                label: "Set Window Title…",
+                label: tr.text(T::MenuSetWindowTitle),
                 action: Action::EditWindowTitle,
                 enabled: true,
             },
             // The same editors as a double-click on a tab or a pane titlebar.
             ContextMenuItem::Item {
-                label: "Set Tab Title…",
+                label: tr.text(T::MenuSetTabTitle),
                 action: Action::EditTabTitle,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "Set Pane Title…",
+                label: tr.text(T::MenuSetPaneTitle),
                 action: Action::EditPaneTitle,
                 enabled: true,
             },
             ContextMenuItem::Separator,
             // Ghostty's "Reset Terminal": RIS on this pane's terminal.
             ContextMenuItem::Item {
-                label: "Reset Terminal",
+                label: tr.text(T::MenuResetTerminal),
                 action: Action::Reset,
                 enabled: true,
             },
@@ -14473,7 +14494,11 @@ impl App {
             // ("✓ on / off"); dispatch goes through the same
             // `Action::TogglePaneReadOnly` the keybind uses.
             ContextMenuItem::DynamicItem {
-                label: format!("{}Read only", if read_only { "✓ " } else { "  " }),
+                label: format!(
+                    "{}{}",
+                    if read_only { "✓ " } else { "  " },
+                    tr.text(T::MenuReadOnly)
+                ),
                 action: Action::TogglePaneReadOnly,
                 enabled: true,
             },
@@ -14483,17 +14508,17 @@ impl App {
             // see them at the bottom and can ignore.
             ContextMenuItem::Separator,
             ContextMenuItem::Item {
-                label: "Set Group…",
+                label: tr.text(T::MenuSetGroup),
                 action: Action::CreateGroup,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "Group This Tab…",
+                label: tr.text(T::MenuGroupTab),
                 action: Action::GroupTab,
                 enabled: true,
             },
             ContextMenuItem::Item {
-                label: "Ungroup This Tab",
+                label: tr.text(T::MenuUngroupTab),
                 action: Action::UngroupTab,
                 enabled: has_group,
             },
@@ -14523,6 +14548,8 @@ impl App {
     /// the live config and persists through `persist_config_toggle`; radio and
     /// check marks are labels rather than separate state.
     fn append_preferences_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
+        use kettle_i18n::Text as T;
+        let tr = &self.ui_text;
         items.push(ContextMenuItem::Separator);
         let mut inner: Vec<ContextMenuItem> = Vec::new();
         let r = |sel: bool| if sel { "● " } else { "○ " };
@@ -14536,39 +14563,51 @@ impl App {
         let sb = self.cfg.scrollbar;
         inner.push(dyn_item(
             format!(
-                "{}Scrollbar always",
-                r(sb == kettle_config::ScrollbarMode::Always)
+                "{}{}",
+                r(sb == kettle_config::ScrollbarMode::Always),
+                tr.text(T::MenuPrefScrollbarAlways)
             ),
             Action::SetScrollbarAlways,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Scrollbar auto",
-                r(sb == kettle_config::ScrollbarMode::Auto)
+                "{}{}",
+                r(sb == kettle_config::ScrollbarMode::Auto),
+                tr.text(T::MenuPrefScrollbarAuto)
             ),
             Action::SetScrollbarAuto,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Scrollbar hidden",
-                r(sb == kettle_config::ScrollbarMode::Never)
+                "{}{}",
+                r(sb == kettle_config::ScrollbarMode::Never),
+                tr.text(T::MenuPrefScrollbarHidden)
             ),
             Action::SetScrollbarNever,
         ));
         inner.push(ContextMenuItem::Separator);
         // Boolean toggles.
         inner.push(dyn_item(
-            format!("{}Cursor blink", c(self.cfg.cursor_blink)),
+            format!(
+                "{}{}",
+                c(self.cfg.cursor_blink),
+                tr.text(T::MenuPrefCursorBlink)
+            ),
             Action::ToggleCursorBlink,
         ));
         inner.push(dyn_item(
-            format!("{}Copy on select", c(self.cfg.copy_on_select)),
+            format!(
+                "{}{}",
+                c(self.cfg.copy_on_select),
+                tr.text(T::MenuPrefCopyOnSelect)
+            ),
             Action::ToggleCopyOnSelect,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Mouse-hide while typing",
-                c(self.cfg.mouse_hide_while_typing)
+                "{}{}",
+                c(self.cfg.mouse_hide_while_typing),
+                tr.text(T::MenuPrefMouseHide)
             ),
             Action::ToggleMouseHide,
         ));
@@ -14579,22 +14618,25 @@ impl App {
         let ask_before_closing = self.cfg.ask_before_closing;
         inner.push(dyn_item(
             format!(
-                "{}Confirm close: always, including titlebar",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::Always)
+                "{}{}",
+                r(ask_before_closing == kettle_config::AskBeforeClosing::Always),
+                tr.text(T::MenuPrefConfirmAlways)
             ),
             Action::SetAskBeforeClosingAlways,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Confirm close: multiple terminals",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals)
+                "{}{}",
+                r(ask_before_closing == kettle_config::AskBeforeClosing::MultipleTerminals),
+                tr.text(T::MenuPrefConfirmMultiple)
             ),
             Action::SetAskBeforeClosingMultiple,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Confirm close: never",
-                r(ask_before_closing == kettle_config::AskBeforeClosing::Never)
+                "{}{}",
+                r(ask_before_closing == kettle_config::AskBeforeClosing::Never),
+                tr.text(T::MenuPrefConfirmNever)
             ),
             Action::SetAskBeforeClosingNever,
         ));
@@ -14602,51 +14644,58 @@ impl App {
         // Bell radio.
         let bell = self.cfg.bell;
         inner.push(dyn_item(
-            format!("{}Bell off", r(bell == kettle_config::BellMode::Off)),
+            format!(
+                "{}{}",
+                r(bell == kettle_config::BellMode::Off),
+                tr.text(T::MenuPrefBellOff)
+            ),
             Action::SetBellOff,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Bell visual flash",
-                r(bell == kettle_config::BellMode::Visual)
+                "{}{}",
+                r(bell == kettle_config::BellMode::Visual),
+                tr.text(T::MenuPrefBellVisual)
             ),
             Action::SetBellVisual,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Bell attention",
-                r(bell == kettle_config::BellMode::Attention)
+                "{}{}",
+                r(bell == kettle_config::BellMode::Attention),
+                tr.text(T::MenuPrefBellAttention)
             ),
             Action::SetBellAttention,
         ));
         inner.push(dyn_item(
             format!(
-                "{}Bell visual + attention",
-                r(bell == kettle_config::BellMode::Both)
+                "{}{}",
+                r(bell == kettle_config::BellMode::Both),
+                tr.text(T::MenuPrefBellBoth)
             ),
             Action::SetBellBoth,
         ));
         inner.push(ContextMenuItem::Separator);
         // Font size +/- (reuse existing actions).
         inner.push(ContextMenuItem::Item {
-            label: "Font size +",
+            label: tr.text(T::MenuPrefFontBigger),
             action: kettle_config::Action::IncreaseFontSize,
             enabled: true,
         });
         inner.push(ContextMenuItem::Item {
-            label: "Font size −",
+            label: tr.text(T::MenuPrefFontSmaller),
             action: kettle_config::Action::DecreaseFontSize,
             enabled: true,
         });
         inner.push(ContextMenuItem::Separator);
         // The Advanced… escape hatch for everything not exposed as a toggle.
         inner.push(ContextMenuItem::Item {
-            label: "Advanced… (open config with default app)",
+            label: tr.text(T::MenuPrefAdvanced),
             action: kettle_config::Action::EditConfig,
             enabled: true,
         });
         items.push(ContextMenuItem::Submenu {
-            label: "Preferences".to_string(),
+            label: tr.text(T::MenuPreferences).to_string(),
             items: inner,
         });
     }
@@ -14665,7 +14714,10 @@ impl App {
             })
             .collect();
         items.push(ContextMenuItem::Submenu {
-            label: "Profile".to_string(),
+            label: self
+                .ui_text
+                .text(kettle_i18n::Text::MenuProfile)
+                .to_string(),
             items: inner,
         });
     }
@@ -14688,7 +14740,7 @@ impl App {
             })
             .collect();
         items.push(ContextMenuItem::Submenu {
-            label: "Theme".to_string(),
+            label: self.ui_text.text(kettle_i18n::Text::MenuTheme).to_string(),
             items: inner,
         });
     }
@@ -14707,7 +14759,7 @@ impl App {
         if let Some(command) = kettle_remote::clone_session_command(ctx) {
             items.push(ContextMenuItem::Separator);
             items.push(ContextMenuItem::ConfigItem {
-                label: kettle_remote::clone_session_label(ctx),
+                label: remote_reconnect_label(ctx, &self.ui_text),
                 command,
             });
         }
@@ -14747,6 +14799,8 @@ impl App {
         // the action. `update_links` is keyed so this is a no-op
         // when the viewport hasn't changed since the last scan.
         self.update_links(ws);
+        use kettle_i18n::Text as T;
+        let tr = self.ui_text;
         // Only offer the rows when the click is INSIDE the
         // focused pane's rect. `cursor_cell` clamps out-of-rect coordinates to
         // the nearest cell (xterm parity — right for mouse reports), which
@@ -14758,12 +14812,12 @@ impl App {
         let mut items = Vec::new();
         if in_focused_pane && let Some(url) = self.link_at_cursor(ws).map(|l| l.uri.clone()) {
             items.push(ContextMenuItem::UrlItem {
-                label: "Open Link",
+                label: tr.text(T::MenuOpenLink),
                 url: url.clone(),
                 copy: false,
             });
             items.push(ContextMenuItem::UrlItem {
-                label: "Copy Link Address",
+                label: tr.text(T::MenuCopyLink),
                 url,
                 copy: true,
             });
@@ -14784,7 +14838,7 @@ impl App {
         // Preferences ▸ submenu below stays as the quick-toggle surface.
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Item {
-            label: "Settings…",
+            label: tr.text(T::MenuSettings),
             action: kettle_config::Action::OpenSettings,
             enabled: true,
         });
@@ -15187,7 +15241,11 @@ impl App {
     /// shells, then Windows Terminal's bottom section (Settings / Command
     /// palette / About) behind a separator. Pure over the shell list so the
     /// menu shape is unit-testable.
-    fn new_tab_menu_items(shells: &[kettle_core::term::ShellChoice]) -> Vec<ContextMenuItem> {
+    fn new_tab_menu_items(
+        shells: &[kettle_core::term::ShellChoice],
+        tr: &kettle_i18n::Translator,
+    ) -> Vec<ContextMenuItem> {
+        use kettle_i18n::Text as T;
         let mut items: Vec<ContextMenuItem> = shells
             .iter()
             .cloned()
@@ -15195,17 +15253,17 @@ impl App {
             .collect();
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Item {
-            label: "Settings…",
+            label: tr.text(T::MenuSettings),
             action: Action::OpenSettings,
             enabled: true,
         });
         items.push(ContextMenuItem::Item {
-            label: "Command palette",
+            label: tr.text(T::MenuCommandPalette),
             action: Action::CommandPalette,
             enabled: true,
         });
         items.push(ContextMenuItem::Item {
-            label: "About kettle",
+            label: tr.text(T::MenuAbout),
             action: Action::About,
             enabled: true,
         });
@@ -15217,6 +15275,8 @@ impl App {
     /// render dimmed and are not clickable; UrlItem rows copy/open).
     fn open_about_panel(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
+        use kettle_i18n::Text as T;
+        let tr = self.ui_text;
         let v = &self.version_line;
         let mut items = vec![
             ContextMenuItem::Info {
@@ -15225,23 +15285,24 @@ impl App {
             ContextMenuItem::Info {
                 label: about_update_status_label(
                     self.update_available.as_ref().map(|(tag, _)| tag.as_str()),
+                    &tr,
                 ),
             },
             ContextMenuItem::Separator,
             ContextMenuItem::UrlItem {
-                label: "Copy version info",
+                label: tr.text(T::AboutCopyVersion),
                 url: format!("kettle {v}"),
                 copy: true,
             },
             ContextMenuItem::UrlItem {
-                label: "Open GitHub page",
+                label: tr.text(T::AboutOpenGithub),
                 url: "https://github.com/Reddimus/kettle".to_string(),
                 copy: false,
             },
         ];
         if let Some((_, url)) = &self.update_available {
             items.push(ContextMenuItem::UrlItem {
-                label: "Open release page",
+                label: tr.text(T::AboutOpenRelease),
                 url: url.clone(),
                 copy: false,
             });
@@ -15263,7 +15324,7 @@ impl App {
     fn open_new_tab_menu(&mut self, ws: &mut WindowState, px: f32, py: f32) {
         self.close_all_modals(ws);
         let shells = kettle_core::term::detect_shells();
-        let items = Self::new_tab_menu_items(&shells);
+        let items = Self::new_tab_menu_items(&shells, &self.ui_text);
         self.show_context_menu(ws, items, px, py);
     }
 
@@ -34973,12 +35034,25 @@ mod tests {
     #[test]
     fn about_never_claims_current_without_a_verified_result() {
         assert_eq!(
-            super::about_update_status_label(None),
+            super::about_update_status_label(
+                None,
+                &kettle_i18n::Translator::new(kettle_i18n::Language::En)
+            ),
             "Update status unknown"
         );
         assert_eq!(
-            super::about_update_status_label(Some("v9.9.9")),
+            super::about_update_status_label(
+                Some("v9.9.9"),
+                &kettle_i18n::Translator::new(kettle_i18n::Language::En)
+            ),
             "Update available: v9.9.9"
+        );
+        assert_eq!(
+            super::about_update_status_label(
+                Some("v9.9.9"),
+                &kettle_i18n::Translator::new(kettle_i18n::Language::Es)
+            ),
+            "Actualización disponible: v9.9.9"
         );
     }
 
@@ -40446,7 +40520,10 @@ mod tests {
             ("PowerShell".to_string(), vec!["pwsh.exe".to_string()]),
             ("Git Bash".to_string(), vec!["bash.exe".to_string()]),
         ];
-        let items = App::new_tab_menu_items(&shells);
+        let items = App::new_tab_menu_items(
+            &shells,
+            &kettle_i18n::Translator::new(kettle_i18n::Language::En),
+        );
         assert_eq!(items.len(), 6, "2 shells + separator + 3 bottom rows");
         assert!(matches!(
             &items[0],
@@ -41600,40 +41677,53 @@ mod tests {
             .nth(1)
             .and_then(|b| b.split("\n    /// ").next())
             .expect("context_menu_items body");
-        for (row, action) in [
-            ("Copy", "Action::Copy"),
-            ("Paste", "Action::Paste"),
-            ("Set Window Title…", "Action::EditWindowTitle"),
-            ("Split Auto", "Action::SplitAuto"),
-            ("Split Right", "Action::SplitRight"),
-            ("Split Down", "Action::SplitDown"),
-            ("Close Pane", "Action::ClosePane"),
-            ("New Tab", "Action::NewTab"),
-            ("Read only", "Action::TogglePaneReadOnly"),
-            ("Set Group…", "Action::CreateGroup"),
+        use kettle_i18n::{Language, Text as T, Translator};
+        let en = Translator::new(Language::En);
+        for (key, row, action) in [
+            (T::MenuCopy, "Copy", "Action::Copy"),
+            (T::MenuPaste, "Paste", "Action::Paste"),
+            (
+                T::MenuSetWindowTitle,
+                "Set Window Title…",
+                "Action::EditWindowTitle",
+            ),
+            (T::MenuSplitAuto, "Split Auto", "Action::SplitAuto"),
+            (T::MenuSplitRight, "Split Right", "Action::SplitRight"),
+            (T::MenuSplitDown, "Split Down", "Action::SplitDown"),
+            (T::MenuClosePane, "Close Pane", "Action::ClosePane"),
+            (T::MenuNewTab, "New Tab", "Action::NewTab"),
+            (T::MenuReadOnly, "Read only", "Action::TogglePaneReadOnly"),
+            (T::MenuSetGroup, "Set Group…", "Action::CreateGroup"),
             // Rows Ghostty adds to Terminator's set.
-            ("Split Left", "Action::SplitLeft"),
-            ("Split Up", "Action::SplitUp"),
-            ("Close Tab", "Action::CloseTab"),
-            ("New Window", "Action::NewWindow"),
-            ("Close Window", "Action::CloseWindow"),
-            ("Set Tab Title…", "Action::EditTabTitle"),
-            ("Set Pane Title…", "Action::EditPaneTitle"),
-            ("Reset Terminal", "Action::Reset"),
+            (T::MenuSplitLeft, "Split Left", "Action::SplitLeft"),
+            (T::MenuSplitUp, "Split Up", "Action::SplitUp"),
+            (T::MenuCloseTab, "Close Tab", "Action::CloseTab"),
+            (T::MenuNewWindow, "New Window", "Action::NewWindow"),
+            (T::MenuCloseWindow, "Close Window", "Action::CloseWindow"),
+            (T::MenuSetTabTitle, "Set Tab Title…", "Action::EditTabTitle"),
+            (
+                T::MenuSetPaneTitle,
+                "Set Pane Title…",
+                "Action::EditPaneTitle",
+            ),
+            (T::MenuResetTerminal, "Reset Terminal", "Action::Reset"),
         ] {
+            // The row reads as Terminator's in English.
+            assert_eq!(en.text(key), row);
             // Checked as a PAIR, not as two independent tokens: "row present"
             // and "action present" both still hold if two rows swap actions,
             // which is exactly the bug that sends a click somewhere else.
-            // Matching per menu ENTRY also stops a row name that appears in a
+            // Matching per menu ENTRY also stops a key that appears in a
             // nearby comment from standing in for the row itself.
+            let needle = format!("T::{key:?})");
             let entry = body
                 .split("ContextMenuItem::")
                 .find(|chunk| {
                     chunk
                         .split("label:")
                         .nth(1)
-                        .and_then(|rest| rest.split_once('\n'))
-                        .is_some_and(|(line, _)| line.contains(row))
+                        .and_then(|rest| rest.split("action:").next())
+                        .is_some_and(|label| label.contains(&needle))
                 })
                 .unwrap_or_else(|| panic!("the context menu is missing Terminator's {row:?} row"));
             assert!(
@@ -41644,8 +41734,10 @@ mod tests {
         }
         // Zoom swaps label with the state rather than sitting on one word,
         // matching Terminator's Zoom/Restore pair.
+        assert_eq!(en.text(T::MenuZoom), "Zoom");
+        assert_eq!(en.text(T::MenuRestore), "Restore");
         assert!(
-            body.contains(r#"if zoomed { "Restore" } else { "Zoom" }"#)
+            body.contains("if zoomed { T::MenuRestore } else { T::MenuZoom }")
                 && body.contains("Action::ToggleZoom"),
             "the zoom row must show Restore while zoomed and Zoom otherwise"
         );
@@ -45637,6 +45729,93 @@ mod keyboard_selection_tests {
         assert!(
             src.contains("self.extend_selection_to_cursor(ws, area, bcode)"),
             "Shift+right-click must record the right button as gesture owner"
+        );
+    }
+}
+
+#[cfg(test)]
+mod menu_text_tests {
+    use super::{App, ContextMenuItem, remote_reconnect_label};
+    use kettle_i18n::{Language, Translator};
+    use kettle_remote::{ContainerOptions, ContainerRuntime, RemoteContext, SshOptions};
+
+    const EN: Translator = Translator::new(Language::En);
+    const ES: Translator = Translator::new(Language::Es);
+
+    fn ssh(host: &str, user: Option<&str>) -> RemoteContext {
+        RemoteContext::Ssh {
+            host: host.to_string(),
+            user: user.map(str::to_string),
+            options: SshOptions::default(),
+        }
+    }
+
+    fn container(runtime: ContainerRuntime, name: &str) -> RemoteContext {
+        RemoteContext::Container {
+            runtime,
+            container: name.to_string(),
+            options: ContainerOptions::default(),
+        }
+    }
+
+    /// The reconnect row names the session as detected, in every language.
+    #[test]
+    fn the_reconnect_row_names_every_session_shape() {
+        let me_box = ssh("box", Some("me"));
+        let pod = container(ContainerRuntime::Kubectl, "my-pod");
+        assert_eq!(remote_reconnect_label(&me_box, &EN), "Reconnect ssh me@box");
+        assert_eq!(
+            remote_reconnect_label(&ssh("box", None), &EN),
+            "Reconnect ssh box"
+        );
+        assert_eq!(
+            remote_reconnect_label(&container(ContainerRuntime::Docker, "foo"), &EN),
+            "Re-attach docker foo"
+        );
+        assert_eq!(
+            remote_reconnect_label(&pod, &EN),
+            "Re-attach kubectl my-pod"
+        );
+        assert_eq!(
+            remote_reconnect_label(&container(ContainerRuntime::Lxc, "c1"), &EN),
+            "Re-attach lxc c1"
+        );
+        assert_eq!(
+            remote_reconnect_label(&me_box, &ES),
+            "Volver a conectar por ssh a me@box"
+        );
+        assert_eq!(
+            remote_reconnect_label(&pod, &ES),
+            "Volver a conectar a my-pod en kubectl"
+        );
+    }
+
+    #[test]
+    fn the_new_tab_dropdown_follows_the_ui_language() {
+        let shells = vec![("zsh".to_string(), vec!["zsh".to_string()])];
+        let labels = |tr: &Translator| {
+            App::new_tab_menu_items(&shells, tr)
+                .into_iter()
+                .filter_map(|item| match item {
+                    ContextMenuItem::Item { label, .. } => Some(label.to_string()),
+                    ContextMenuItem::NewTabShell { label, .. } => Some(label),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&EN),
+            ["zsh", "Settings…", "Command palette", "About kettle"]
+        );
+        // Shell names are shown as detected.
+        assert_eq!(
+            labels(&ES),
+            [
+                "zsh",
+                "Configuración…",
+                "Paleta de comandos",
+                "Acerca de kettle"
+            ]
         );
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! [`detect_ssh`] and [`detect_container`] read one process's argv,
 //! [`detect_remote_with`] and [`RemoteScanner`] walk a pane's process tree for
-//! them, and [`clone_session_command`] / [`clone_session_label`] build the
-//! menu item that reconnects to a detected session. See
+//! them, and [`clone_session_command`] builds the command of the menu item
+//! that reconnects to a detected session; the UI words that item. See
 //! [`TERMINATOR-REMOTE-DESIGN.md`](../../../docs/TERMINATOR-REMOTE-DESIGN.md)
 //! for the design.
 
@@ -26,8 +26,8 @@ pub use sysinfo::System as SysinfoSystem;
 /// contains a recognized remote-client process (`ssh`, `docker
 /// exec`, `podman exec`, `kubectl exec`, `lxc-attach`).
 ///
-/// Drives the `clone_session_command`/`clone_session_label` right-click
-/// "Clone session" menu item and the pane-title update.
+/// Drives the `clone_session_command` right-click "Clone session" menu item
+/// and the pane-title update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteContext {
     /// SSH session. `host` is the target host (e.g. `box.example.com`);
@@ -126,6 +126,18 @@ pub enum ContainerRuntime {
     Podman,
     Kubectl,
     Lxc,
+}
+
+impl ContainerRuntime {
+    /// The runtime's name as a user knows it, the same in every language.
+    pub const fn name(self) -> &'static str {
+        match self {
+            ContainerRuntime::Docker => "docker",
+            ContainerRuntime::Podman => "podman",
+            ContainerRuntime::Kubectl => "kubectl",
+            ContainerRuntime::Lxc => "lxc",
+        }
+    }
 }
 
 /// Process-tree abstraction so the BFS body of
@@ -2758,30 +2770,6 @@ fn push_quoted_option(cmd: &mut String, flag: &str, value: &str) -> Option<()> {
     Some(())
 }
 
-/// Short user-friendly label for the right-click menu
-/// entry that reconnects to a detected remote session. The
-/// `ContextMenuItem::ConfigItem { label, command }` variant consumes
-/// the pair `(clone_session_label(ctx), clone_session_command(ctx))`.
-pub fn clone_session_label(ctx: &RemoteContext) -> String {
-    match ctx {
-        RemoteContext::Ssh { host, user, .. } => match user {
-            Some(u) => format!("Reconnect ssh {u}@{host}"),
-            None => format!("Reconnect ssh {host}"),
-        },
-        RemoteContext::Container {
-            runtime, container, ..
-        } => {
-            let runtime_name = match runtime {
-                ContainerRuntime::Docker => "docker",
-                ContainerRuntime::Podman => "podman",
-                ContainerRuntime::Kubectl => "kubectl",
-                ContainerRuntime::Lxc => "lxc",
-            };
-            format!("Re-attach {runtime_name} {container}")
-        }
-    }
-}
-
 /// Format a `RemoteContext` as a one-line title string
 /// for use in the pane-title surface (Terminator's pattern).
 ///
@@ -2799,15 +2787,7 @@ pub fn format_remote_title(ctx: &RemoteContext) -> String {
         },
         RemoteContext::Container {
             runtime, container, ..
-        } => {
-            let runtime_name = match runtime {
-                ContainerRuntime::Docker => "docker",
-                ContainerRuntime::Podman => "podman",
-                ContainerRuntime::Kubectl => "kubectl",
-                ContainerRuntime::Lxc => "lxc",
-            };
-            format!("{runtime_name}: {container}")
-        }
+        } => format!("{}: {container}", runtime.name()),
     }
 }
 
@@ -3480,34 +3460,11 @@ mod tests {
             clone_session_command(&ctx),
             Some("ssh 'bob'@'h'".to_string())
         );
-        assert_eq!(clone_session_label(&ctx), "Reconnect ssh bob@h");
 
         // The earlier -l wins over the later target's user@ component.
         let ctx = detect_ssh(&argv(&["ssh", "-l", "bob", "alice@h"])).unwrap();
         assert_eq!(ctx, ssh_ctx("h", Some("bob")));
         assert_eq!(format_remote_title(&ctx), "ssh bob@h");
-    }
-
-    /// Drift guard: `clone_session_label` is the menu
-    /// label paired with `clone_session_command`.
-    #[test]
-    fn clone_session_label_for_all_shapes() {
-        assert_eq!(
-            clone_session_label(&ssh_ctx("box", Some("me"))),
-            "Reconnect ssh me@box"
-        );
-        assert_eq!(
-            clone_session_label(&ssh_ctx("box", None)),
-            "Reconnect ssh box"
-        );
-        assert_eq!(
-            clone_session_label(&container_ctx(ContainerRuntime::Docker, "foo")),
-            "Re-attach docker foo"
-        );
-        assert_eq!(
-            clone_session_label(&container_ctx(ContainerRuntime::Kubectl, "my-pod")),
-            "Re-attach kubectl my-pod"
-        );
     }
 
     /// Drift guard: `detect_remote` returns None for pids that aren't real (or

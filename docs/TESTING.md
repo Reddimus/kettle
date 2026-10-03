@@ -763,6 +763,12 @@ pseudo-locale lengthens text by 35–40% while keeping arguments intact; a relea
 build has no pseudo state at all. Run it in debug, `--release` and
 `--features dev-pseudo`.
 
+Each surface on the catalogue tests its English text against the old strings
+and its Spanish text: Settings, the palette and pickers, the context menu, the
+new-tab dropdown, the About panel and the remote reconnect row. The context
+menu's Terminator-row guard pairs each row's catalogue key with its action and
+checks the key's English is still Terminator's row name.
+
 ### kettle-state
 
 Creates and replaces private state without leaving staging
