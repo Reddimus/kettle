@@ -146,6 +146,52 @@ script requires Xcode 26.x. The macOS 26 CI icon job covers it.
 `package-templates` skipped its release-asset check because v4.8.0 is not
 published yet; the post-release check runs it with `--require-release`.
 
+## 4.9.0 cut - 2026-10-02
+
+macOS 26.6.2 (25G83), M5 Max. Release build of the cut commit `e69245d1`.
+
+Window chrome, material and icon sources are unchanged since 4.5.0, so the
+4.5.0 visual results still apply. This release changes how frames reach the
+screen: mapped uploads, shared pipelines, the shaping of trailing blanks, and
+on macOS a Core Animation layer that blinks the cursor. The cut was therefore
+compared with the published 4.8.0 pixel for pixel. Both builds rendered one
+fixed screen of text: the 16, 256 and truecolor palettes, every underline
+style, bold, italic, reverse and padded rows, wide, emoji, combining and
+right-to-left text, box drawing, braille and ligatures. Their `kettle ctl
+screenshot` frames were identical opaque, at 86% opacity with blur, and split
+in two.
+
+The visible changes were captured from the cut's release build:
+
+- Settings shows values in one case and with spaced units (`On`, `Block`,
+  `13 pt`, `10 s`), underlines the open category, and spaces the category
+  names evenly. In a 64-column window the categories and the key hints end in
+  an ellipsis instead of running past the panel.
+- With `macos-cursor-blink-layer` on, the window server blinks the cursor once
+  the window is idle. `just cursor-blink-layer-smoke --pixels` matched the
+  layer's on and off phases to Kettle's own frames for block, bar and
+  underline cursors, opaque and at 86% opacity with blur, at `09ceae2d`; the
+  cut changes no crate source since then. Its wakeup and CPU budgets were
+  relaxed, because the host carried a sustained load of 7 to 14 from
+  long-running jobs, and 4.9.0 makes no new measured performance claim. On the
+  cut itself the pixel comparison did not finish under that load. One attempt
+  timed out starting its control server, and two ran out of the smoke's
+  10-second budget for fitting each capture inside one blink phase.
+
+`just gauntlet-strict` passed on the cut, and so did 16 of the 17 macOS native
+gates: `icons-check-required`, `package-templates`, `update-manifest-test`,
+`release-assets-test`, `package-manifest-test`, `online-installer-test`,
+`gpu-render-smoke`, `cli-smoke`, `touchpad-scroll-smoke`,
+`split-exit-resize-smoke`, `text-presentation-smoke`,
+`line-edit-chords-smoke`, `dock-menu-smoke`, `macos-compare-score-self-test`,
+`macos-standing-self-test` and `agent-cli-smoke`. `just macos-update-smoke`
+passed against published v4.8.0.
+
+`icns-smoke` was skipped again: this host has Xcode 27, and the release icon
+script requires Xcode 26.x. The macOS 26 CI icon job covers it.
+`package-templates` skipped its release-asset check because v4.9.0 is not
+published yet; the post-release check runs it with `--require-release`.
+
 ## 4.3.0 cut — 2026-09-04
 
 Host: macOS 26.6.2 (25G83), Apple silicon, system appearance **Dark**. Bundle: a
